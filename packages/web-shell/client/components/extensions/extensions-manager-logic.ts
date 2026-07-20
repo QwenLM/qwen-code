@@ -9,10 +9,10 @@ export function preserveSelectedExtensionName(
     : null;
 }
 
-export function filterExtensions(
-  extensions: readonly DaemonExtensionEntry[],
+export function filterExtensions<T extends DaemonExtensionEntry>(
+  extensions: readonly T[],
   query: string,
-): DaemonExtensionEntry[] {
+): T[] {
   const normalized = query.trim().toLowerCase();
   if (!normalized) return [...extensions];
   return extensions.filter((extension) =>

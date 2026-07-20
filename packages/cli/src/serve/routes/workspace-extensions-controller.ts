@@ -27,6 +27,11 @@ import {
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import type { WorkspaceRuntime } from '../workspace-registry.js';
 import {
+  getWorkspaceRuntimeCoordinator,
+  isWorkspaceRuntimeDrainingError,
+  type ExtensionsReconciliationAttempt,
+} from '../workspace-runtime-coordinator.js';
+import {
   createFifoTaskQueue,
   type FifoTaskQueue,
 } from '../extension-operation-scheduler.js';
@@ -119,12 +124,14 @@ export type ExtensionOperationStatus = {
   phase?: 'preparing' | 'committing' | 'reconciling';
   createdAt: number;
   updatedAt: number;
+  deadlineAt?: number;
   source?: string;
   name?: string;
   result?: ExtensionMutationEvent & {
     refreshed?: number;
     failed?: number;
     error?: string;
+    activation?: 'applied' | 'deferred' | 'partial';
   };
   interaction?: ExtensionPendingInteraction;
   error?: string;
@@ -161,10 +168,29 @@ export interface CreateExtensionsControllerDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
+  acquireManagementOperation?: () => () => void;
+  isWorkspaceTrusted?: boolean;
   maxExtensionOperationHistory?: number;
+  coordination?: ExtensionsControllerCoordination;
 }
 
-/** Shared coordinator for the legacy adapter and V2 global operations. */
+export interface ExtensionsControllerCoordination {
+  preparationQueue: FifoTaskQueue;
+  commitQueue: FifoTaskQueue;
+  extensionOperations: Map<string, ExtensionOperationStatus>;
+  operationAdmission: { unfinishedCount: number };
+}
+
+export function createExtensionsControllerCoordination(): ExtensionsControllerCoordination {
+  return {
+    preparationQueue: createFifoTaskQueue(EXTENSION_PREPARATION_CONCURRENCY),
+    commitQueue: createFifoTaskQueue(1),
+    extensionOperations: new Map(),
+    operationAdmission: { unfinishedCount: 0 },
+  };
+}
+
+/** Owner-scoped controller with injectable scheduler and admission state. */
 export interface ExtensionsController {
   readonly boundWorkspace: string;
   readonly workspace: DaemonWorkspaceService;
@@ -175,6 +201,10 @@ export interface ExtensionsController {
   ): ExtensionManager;
   buildLocalExtensionsStatus(): Promise<ServeWorkspaceExtensionsStatus>;
   refreshExtensionsForAllSessions(): Promise<{
+    refreshed: number;
+    failed: number;
+  }>;
+  refreshWorkspaceExtensions(): Promise<{
     refreshed: number;
     failed: number;
   }>;
@@ -207,6 +237,7 @@ export interface ExtensionsController {
     options?: {
       manager?: ExtensionManager;
       createManager?: (operationId: string) => ExtensionManager;
+      acquireManagementOperation?: () => () => void;
       onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -214,11 +245,24 @@ export interface ExtensionsController {
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      refreshWorkspaceRuntime?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
         generation: number,
+        attempt: ExtensionsReconciliationAttempt | undefined,
       ) => void;
+      onRuntimeReconciliationStarted?: (
+        runtime: WorkspaceRuntime,
+        generation: number,
+      ) => ExtensionsReconciliationAttempt | undefined;
+      onRuntimeReconciliationFailed?: (
+        runtime: WorkspaceRuntime,
+        generation: number,
+        attempt: ExtensionsReconciliationAttempt | undefined,
+        error: unknown,
+      ) => void;
+      onGenerationCommitted?: (generation: number) => void;
     },
   ): void;
 }
@@ -229,26 +273,27 @@ export function createExtensionsController(
   const { boundWorkspace, bridge, workspace } = deps;
   const maxExtensionOperationHistory = deps.maxExtensionOperationHistory ?? 100;
 
-  const preparationQueue = createFifoTaskQueue(
-    EXTENSION_PREPARATION_CONCURRENCY,
-  );
-  const commitQueue = createFifoTaskQueue(1);
-  let unfinishedOperationCount = 0;
+  const coordination =
+    deps.coordination ?? createExtensionsControllerCoordination();
+  const { preparationQueue, commitQueue, extensionOperations } = coordination;
 
   const acquireOperationSlot = (res: Response): (() => void) | undefined => {
-    if (unfinishedOperationCount >= MAX_UNFINISHED_EXTENSION_OPERATIONS) {
+    if (
+      coordination.operationAdmission.unfinishedCount >=
+      MAX_UNFINISHED_EXTENSION_OPERATIONS
+    ) {
       res.status(429).json({
         error: EXTENSION_QUEUE_FULL_MESSAGE,
         code: 'extension_queue_full',
       });
       return undefined;
     }
-    unfinishedOperationCount += 1;
+    coordination.operationAdmission.unfinishedCount += 1;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      unfinishedOperationCount -= 1;
+      coordination.operationAdmission.unfinishedCount -= 1;
     };
   };
 
@@ -261,6 +306,7 @@ export function createExtensionsController(
       workspaceDir,
       isWorkspaceTrusted:
         trustedOverride ??
+        deps.isWorkspaceTrusted ??
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
@@ -305,7 +351,6 @@ export function createExtensionsController(
     return true;
   };
 
-  const extensionOperations = new Map<string, ExtensionOperationStatus>();
   const isTerminalExtensionOperation = (
     operation: ExtensionOperationStatus,
   ): boolean =>
@@ -367,20 +412,26 @@ export function createExtensionsController(
     | { expiresAt: number; value: ServeWorkspaceExtensionsStatus }
     | undefined;
 
-  const refreshExtensionsForAllSessions = async (): Promise<{
+  const refreshExtensions = async (
+    run: () => Promise<{ refreshed: number; failed: number }>,
+  ): Promise<{
     refreshed: number;
     failed: number;
   }> => {
+    const releaseManagementOperation =
+      deps.acquireManagementOperation?.() ?? (() => undefined);
     const queueAbort = new AbortController();
     let releaseCommitLane: (() => void) | undefined;
-    const refresh = commitQueue.runUntilReleased(
-      async (release) => {
-        releaseCommitLane = release;
-        extensionsStatusCache = undefined;
-        return await workspace.refreshExtensionsForAllSessions();
-      },
-      { signal: queueAbort.signal },
-    );
+    const refresh = commitQueue
+      .runUntilReleased(
+        async (release) => {
+          releaseCommitLane = release;
+          extensionsStatusCache = undefined;
+          return await run();
+        },
+        { signal: queueAbort.signal },
+      )
+      .finally(releaseManagementOperation);
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
       return await Promise.race([
@@ -401,6 +452,16 @@ export function createExtensionsController(
       if (timer) clearTimeout(timer);
     }
   };
+  const refreshExtensionsForAllSessions = () =>
+    refreshExtensions(
+      async () => await workspace.refreshExtensionsForAllSessions(),
+    );
+  const refreshWorkspaceExtensions = () =>
+    refreshExtensions(async () =>
+      bridge.refreshWorkspaceExtensions
+        ? await bridge.refreshWorkspaceExtensions()
+        : await bridge.refreshExtensionsForAllSessions(),
+    );
 
   const runQueuedExtensionMutation = (
     operation: string,
@@ -415,6 +476,7 @@ export function createExtensionsController(
     options: {
       manager?: ExtensionManager;
       createManager?: (operationId: string) => ExtensionManager;
+      acquireManagementOperation?: () => () => void;
       onSettled?: (operationId: string) => void;
       refreshRuntimes?:
         | readonly WorkspaceRuntime[]
@@ -422,17 +484,42 @@ export function createExtensionsController(
       reserveRuntimeReconciliation?: ReserveRuntimeReconciliation;
       operationBasePath?: string;
       skipRefresh?: boolean;
+      refreshWorkspaceRuntime?: boolean;
       deadlineMs?: number;
       onRuntimeReconciled?: (
         runtime: WorkspaceRuntime,
         generation: number,
+        attempt: ExtensionsReconciliationAttempt | undefined,
       ) => void;
+      onRuntimeReconciliationStarted?: (
+        runtime: WorkspaceRuntime,
+        generation: number,
+      ) => ExtensionsReconciliationAttempt | undefined;
+      onRuntimeReconciliationFailed?: (
+        runtime: WorkspaceRuntime,
+        generation: number,
+        attempt: ExtensionsReconciliationAttempt | undefined,
+        error: unknown,
+      ) => void;
+      onGenerationCommitted?: (generation: number) => void;
     } = {},
   ): void => {
     const releaseOperationSlot = acquireOperationSlot(res);
     if (!releaseOperationSlot) return;
+    let releaseManagementOperation: (() => void) | undefined;
+    try {
+      releaseManagementOperation =
+        options.acquireManagementOperation?.() ??
+        deps.acquireManagementOperation?.();
+    } catch (error) {
+      releaseOperationSlot();
+      throw error;
+    }
     const operationId = crypto.randomUUID();
     const now = Date.now();
+    const deadlineAt = options.deadlineMs
+      ? now + options.deadlineMs
+      : undefined;
     rememberExtensionOperation({
       v: 1,
       operationId,
@@ -440,6 +527,7 @@ export function createExtensionsController(
       status: 'queued',
       createdAt: now,
       updatedAt: now,
+      ...(deadlineAt === undefined ? {} : { deadlineAt }),
       ...(failureContext.source
         ? { source: redactExtensionDisplaySource(failureContext.source) }
         : {}),
@@ -452,9 +540,14 @@ export function createExtensionsController(
         .status(202)
         .location(`${operationBasePath}/${operationId}`)
         .set('Retry-After', '1')
-        .json({ accepted: true, operationId });
+        .json({
+          accepted: true,
+          operationId,
+          ...(deadlineAt === undefined ? {} : { deadlineAt }),
+        });
     } catch {
       extensionOperations.delete(operationId);
+      releaseManagementOperation?.();
       releaseOperationSlot();
       return;
     }
@@ -484,21 +577,22 @@ export function createExtensionsController(
           options.createManager?.(operationId) ??
           createExtensionManager();
         const deadlineController = new AbortController();
-        let deadlineStarted = false;
-        const startDeadline = () => {
-          if (deadlineStarted) return;
-          deadlineStarted = true;
-          if (options.deadlineMs) {
-            deadline = setTimeout(() => {
-              const error = new Error(
-                `Extension ${operation} exceeded its ${options.deadlineMs}ms preparation deadline.`,
-              ) as Error & { code: string };
-              error.code = 'extension_prepare_timeout';
-              deadlineController.abort(error);
-            }, options.deadlineMs);
+        const abortForDeadline = () => {
+          const error = new Error(
+            `Extension ${operation} exceeded its ${options.deadlineMs}ms operation deadline.`,
+          ) as Error & { code: string };
+          error.code = 'extension_prepare_timeout';
+          deadlineController.abort(error);
+        };
+        if (deadlineAt !== undefined) {
+          const remainingMs = deadlineAt - Date.now();
+          if (remainingMs <= 0) {
+            abortForDeadline();
+          } else {
+            deadline = setTimeout(abortForDeadline, remainingMs);
             deadline.unref?.();
           }
-        };
+        }
         let pendingPreparations = 0;
         let activePreparations = 0;
         const updatePreparationState = () => {
@@ -534,7 +628,6 @@ export function createExtensionsController(
                 {
                   signal: deadlineController.signal,
                   onStart: () => {
-                    startDeadline();
                     started = true;
                     pendingPreparations -= 1;
                     activePreparations += 1;
@@ -573,6 +666,7 @@ export function createExtensionsController(
                   reconciliationReservation ??=
                     options.reserveRuntimeReconciliation?.();
                   committedGeneration = generation;
+                  options.onGenerationCommitted?.(generation);
                   release();
                 }),
             );
@@ -580,6 +674,7 @@ export function createExtensionsController(
               reconciliationReservation ??=
                 options.reserveRuntimeReconciliation?.();
               committedGeneration = result.generation;
+              options.onGenerationCommitted?.(result.generation);
             }
             for (const warning of result.warnings ?? []) {
               commitWarnings.push({
@@ -599,7 +694,6 @@ export function createExtensionsController(
           operationId,
         );
         mutationEvent = event;
-        if (deadline) clearTimeout(deadline);
         extensionsStatusCache = undefined;
         if (options.skipRefresh || event.updated === false) {
           reconciliationReservation?.release();
@@ -619,6 +713,7 @@ export function createExtensionsController(
           committedGeneration = (
             await extensionManager.getExtensionStoreSnapshot()
           ).generation;
+          options.onGenerationCommitted?.(committedGeneration);
           reconciliationReservation ??=
             options.reserveRuntimeReconciliation?.();
         }
@@ -631,53 +726,189 @@ export function createExtensionsController(
             ? options.refreshRuntimes()
             : options.refreshRuntimes;
         if (refreshTargets) {
+          const generation = committedGeneration;
           const results = await runReconciliation(
             async () =>
               await Promise.all(
                 refreshTargets.map(async (runtime) => {
                   const startedAt = Date.now();
+                  let attempt: ExtensionsReconciliationAttempt | undefined;
                   try {
-                    runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                    return {
-                      status: 'fulfilled' as const,
-                      result:
-                        await runtime.bridge.refreshExtensionsForAllSessions(
-                          bridgeMutationEvent(event),
-                        ),
-                      elapsedMs: Date.now() - startedAt,
-                    };
+                    return await getWorkspaceRuntimeCoordinator(
+                      runtime,
+                    ).runExtensionsPhysicalReconciliation(async () => {
+                      attempt = options.onRuntimeReconciliationStarted?.(
+                        runtime,
+                        generation,
+                      );
+                      if (options.onRuntimeReconciliationStarted && !attempt) {
+                        return {
+                          status: 'superseded' as const,
+                          attempt,
+                          elapsedMs: Date.now() - startedAt,
+                        };
+                      }
+                      try {
+                        runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                        const refresh = options.refreshWorkspaceRuntime
+                          ? (runtime.bridge.refreshWorkspaceExtensions?.bind(
+                              runtime.bridge,
+                            ) ??
+                            runtime.bridge.refreshExtensionsForAllSessions.bind(
+                              runtime.bridge,
+                            ))
+                          : runtime.bridge.refreshExtensionsForAllSessions.bind(
+                              runtime.bridge,
+                            );
+                        return {
+                          status: 'fulfilled' as const,
+                          result: await refresh(bridgeMutationEvent(event)),
+                          attempt,
+                          elapsedMs: Date.now() - startedAt,
+                        };
+                      } catch (reason) {
+                        return {
+                          status: 'rejected' as const,
+                          reason,
+                          attempt,
+                          elapsedMs: Date.now() - startedAt,
+                        };
+                      }
+                    });
                   } catch (reason) {
-                    return {
-                      status: 'rejected' as const,
-                      reason,
-                      elapsedMs: Date.now() - startedAt,
-                    };
+                    return isWorkspaceRuntimeDrainingError(reason)
+                      ? {
+                          status: 'superseded' as const,
+                          attempt,
+                          elapsedMs: Date.now() - startedAt,
+                        }
+                      : {
+                          status: 'rejected' as const,
+                          reason,
+                          attempt,
+                          elapsedMs: Date.now() - startedAt,
+                        };
                   }
                 }),
               ),
           );
           let refreshed = 0;
           let failed = 0;
+          let superseded = 0;
           const warnings: NonNullable<ExtensionOperationStatus['warnings']> = [
             ...commitWarnings,
           ];
           for (let index = 0; index < results.length; index += 1) {
             const settled = results[index]!;
             const runtime = refreshTargets[index]!;
-            if (settled.status === 'fulfilled') {
-              refreshed += settled.result.refreshed;
-              failed += settled.result.failed;
-              if (settled.result.failed > 0) {
+            if (settled.status === 'superseded') {
+              superseded += 1;
+            } else if (settled.status === 'fulfilled') {
+              const runtimeGeneration =
+                'generation' in settled.result &&
+                typeof settled.result.generation === 'number'
+                  ? settled.result.generation
+                  : undefined;
+              const runtimeEpoch =
+                'runtimeEpoch' in settled.result &&
+                typeof settled.result.runtimeEpoch === 'number'
+                  ? settled.result.runtimeEpoch
+                  : undefined;
+              if (
+                options.refreshWorkspaceRuntime &&
+                settled.attempt &&
+                runtimeEpoch !== settled.attempt.runtimeEpoch
+              ) {
+                failed += 1;
+                const error = new Error(
+                  `Workspace runtime epoch changed during extension reconciliation (expected ${settled.attempt.runtimeEpoch}, received ${runtimeEpoch ?? 'none'}).`,
+                );
+                options.onRuntimeReconciliationFailed?.(
+                  runtime,
+                  generation,
+                  settled.attempt,
+                  error,
+                );
+                warnings.push({
+                  workspaceId: runtime.workspaceId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  code: 'runtime_epoch_changed',
+                  error: error.message,
+                });
+              } else if (settled.result.failed > 0) {
+                refreshed += settled.result.refreshed;
+                failed += settled.result.failed;
+                const error = new Error(
+                  `${settled.result.failed} extension runtime refresh(es) failed`,
+                );
+                options.onRuntimeReconciliationFailed?.(
+                  runtime,
+                  generation,
+                  settled.attempt,
+                  error,
+                );
                 warnings.push({
                   workspaceId: runtime.workspaceId,
                   workspaceCwd: runtime.workspaceCwd,
                   error: `${settled.result.failed} session refresh(es) failed`,
                 });
+              } else if (
+                options.refreshWorkspaceRuntime &&
+                runtimeGeneration === undefined
+              ) {
+                failed += 1;
+                const error = new Error(
+                  'Runtime refresh succeeded without an applied extension generation.',
+                );
+                options.onRuntimeReconciliationFailed?.(
+                  runtime,
+                  generation,
+                  settled.attempt,
+                  error,
+                );
+                warnings.push({
+                  workspaceId: runtime.workspaceId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  code: 'runtime_generation_missing',
+                  error:
+                    'Runtime refresh succeeded without an applied extension generation.',
+                });
+              } else if (
+                runtimeGeneration !== undefined &&
+                runtimeGeneration < generation
+              ) {
+                failed += 1;
+                const error = new Error(
+                  `Runtime applied extension generation ${runtimeGeneration}, expected at least ${generation}.`,
+                );
+                options.onRuntimeReconciliationFailed?.(
+                  runtime,
+                  generation,
+                  settled.attempt,
+                  error,
+                );
+                warnings.push({
+                  workspaceId: runtime.workspaceId,
+                  workspaceCwd: runtime.workspaceCwd,
+                  code: 'runtime_generation_stale',
+                  error: `Runtime applied extension generation ${runtimeGeneration}, expected at least ${generation}.`,
+                });
               } else {
-                options.onRuntimeReconciled?.(runtime, committedGeneration);
+                refreshed += settled.result.refreshed;
+                options.onRuntimeReconciled?.(
+                  runtime,
+                  runtimeGeneration ?? generation,
+                  settled.attempt,
+                );
               }
             } else {
               failed += 1;
+              options.onRuntimeReconciliationFailed?.(
+                runtime,
+                generation,
+                settled.attempt,
+                settled.reason,
+              );
               const message = sanitizeDaemonMessage(
                 settled.reason instanceof Error
                   ? settled.reason.message
@@ -718,6 +949,13 @@ export function createExtensionsController(
               ...redactExtensionOperationResult(event),
               refreshed,
               failed,
+              activation:
+                refreshTargets.length === 0 ||
+                superseded === refreshTargets.length
+                  ? 'deferred'
+                  : failed > 0 || superseded > 0
+                    ? 'partial'
+                    : 'applied',
             },
             ...(warnings.length > 0 ? { warnings } : {}),
           });
@@ -726,9 +964,11 @@ export function createExtensionsController(
             const { result, elapsedMs } = await runReconciliation(async () => {
               workspace.invalidateWorkspaceSkillsStatus();
               const startedAt = Date.now();
-              const result = await bridge.refreshExtensionsForAllSessions(
-                bridgeMutationEvent(event),
-              );
+              const refresh = options.refreshWorkspaceRuntime
+                ? (bridge.refreshWorkspaceExtensions?.bind(bridge) ??
+                  bridge.refreshExtensionsForAllSessions.bind(bridge))
+                : bridge.refreshExtensionsForAllSessions.bind(bridge);
+              const result = await refresh(bridgeMutationEvent(event));
               return { result, elapsedMs: Date.now() - startedAt };
             });
             const warnings: NonNullable<ExtensionOperationStatus['warnings']> =
@@ -754,6 +994,7 @@ export function createExtensionsController(
                 ...redactExtensionOperationResult(event),
                 refreshed: result.refreshed,
                 failed: result.failed,
+                activation: result.failed > 0 ? 'partial' : 'applied',
               },
               ...(warnings.length > 0 ? { warnings } : {}),
             });
@@ -919,8 +1160,12 @@ export function createExtensionsController(
       } finally {
         if (deadline) clearTimeout(deadline);
         reconciliationReservation?.release();
-        options.onSettled?.(operationId);
-        releaseOperationSlot();
+        try {
+          options.onSettled?.(operationId);
+        } finally {
+          releaseManagementOperation?.();
+          releaseOperationSlot();
+        }
       }
     })();
   };
@@ -932,10 +1177,16 @@ export function createExtensionsController(
         return extensionsStatusCache.value;
       }
       const extensionManager = createExtensionManager();
-      await extensionManager.refreshCache();
+      const snapshot = await extensionManager.refreshCacheWithSnapshot();
       const entries: ServeExtensionEntry[] = extensionManager
         .getLoadedExtensions()
         .map((ext): ServeExtensionEntry => {
+          const activation =
+            extensionManager.getExtensionActivationFromSnapshot(
+              ext.id,
+              snapshot,
+              boundWorkspace,
+            );
           const capabilities: ServeExtensionCapabilities = {
             mcpServerCount: ext.mcpServers
               ? Object.keys(ext.mcpServers).length
@@ -963,6 +1214,12 @@ export function createExtensionsController(
               : {}),
             version: ext.version,
             isActive: ext.isActive,
+            defaultActivation: activation.default,
+            workspaceActivation:
+              activation.workspace === 'inherit' &&
+              activation.source === 'legacy_path_rule'
+                ? activation.effective
+                : activation.workspace,
             path: ext.path,
             ...(ext.installMetadata?.source
               ? {
@@ -1015,6 +1272,7 @@ export function createExtensionsController(
     createExtensionManager,
     buildLocalExtensionsStatus,
     refreshExtensionsForAllSessions,
+    refreshWorkspaceExtensions,
     getOperation: (operationId) => extensionOperations.get(operationId),
     getActiveOperations: () =>
       [...extensionOperations.values()].filter(

@@ -26,6 +26,7 @@ import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 
@@ -45,10 +46,18 @@ function makeBridge(): AcpSessionBridge {
   return {
     permissionPolicy: 'first-responder',
     knownClientIds: () => new Set<string>(['client-1']),
+    isChannelLive: vi.fn(() => true),
+    getRuntimeEpoch: vi.fn(() => 1),
     publishWorkspaceEvent: vi.fn(),
     refreshExtensionsForAllSessions: vi.fn(async () => ({
       refreshed: 1,
       failed: 0,
+    })),
+    refreshWorkspaceExtensions: vi.fn(async () => ({
+      refreshed: 1,
+      failed: 0,
+      generation: 7,
+      runtimeEpoch: 1,
     })),
     broadcastExtensionsChanged: vi.fn(),
     getDaemonStatusSnapshot: vi.fn(() => ({
@@ -57,7 +66,7 @@ function makeBridge(): AcpSessionBridge {
         maxPendingPromptsPerSession: 5,
         eventRingSize: 8000,
         compactedReplayMaxBytes: 4 * 1024 * 1024,
-        channelIdleTimeoutMs: 0,
+        channelIdleTimeoutMs: null,
         sessionIdleTimeoutMs: 1_800_000,
       },
       sessionCount: 0,
@@ -109,6 +118,7 @@ function makeRuntime(
 }
 
 async function makeHarness(opts?: {
+  primaryTrusted?: boolean;
   secondaryTrusted?: boolean;
   singleWorkspace?: boolean;
 }) {
@@ -123,7 +133,7 @@ async function makeHarness(opts?: {
   const canonicalSecondary = canonicalizeWorkspace(secondaryCwd);
   const primary = makeRuntime(canonicalPrimary, {
     primary: true,
-    trusted: true,
+    trusted: opts?.primaryTrusted ?? true,
     workspaceId: 'primary-id',
   });
   const secondary = makeRuntime(canonicalSecondary, {
@@ -256,6 +266,292 @@ async function pollOperation(
 }
 
 describe('extension management v2 REST', () => {
+  it('keeps runtime refresh out of config routes', async () => {
+    const h = await makeHarness({ singleWorkspace: true });
+
+    const legacy = await auth(
+      request(h.app).post('/workspace/extensions/refresh'),
+    );
+    expect(legacy.status).toBe(200);
+    expect(
+      h.primary.workspaceService.refreshExtensionsForAllSessions,
+    ).toHaveBeenCalledOnce();
+    expect(h.primary.bridge.refreshWorkspaceExtensions).not.toHaveBeenCalled();
+
+    const workspaceConfig = await auth(
+      request(h.app).post('/workspace/config/extensions/refresh'),
+    );
+    expect(workspaceConfig.status).toBe(404);
+    expect(h.primary.bridge.refreshWorkspaceExtensions).not.toHaveBeenCalled();
+    expect(
+      h.primary.workspaceService.refreshExtensionsForAllSessions,
+    ).toHaveBeenCalledOnce();
+
+    const qualifiedConfig = await auth(
+      request(h.app).post('/workspaces/primary-id/config/extensions/refresh'),
+    );
+    expect(qualifiedConfig.status).toBe(404);
+    expect(h.primary.bridge.refreshWorkspaceExtensions).not.toHaveBeenCalled();
+  });
+
+  it('does not start the selected runtime through a config route', async () => {
+    const h = await makeHarness();
+    try {
+      const response = await auth(
+        request(h.app).post(
+          `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/config/extensions/refresh`,
+        ),
+      );
+
+      expect(response.status).toBe(404);
+      expect(
+        h.secondary.bridge.refreshWorkspaceExtensions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.primary.bridge.refreshWorkspaceExtensions,
+      ).not.toHaveBeenCalled();
+      expect(
+        h.primary.workspaceService.refreshExtensionsForAllSessions,
+      ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('enforces extension activation config owners in daemon routes', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    const enableExtension = vi
+      .spyOn(ExtensionManager.prototype, 'enableExtension')
+      .mockResolvedValue({ generation: 7 } as never);
+    try {
+      const singularWorkspace = await auth(
+        request(h.app)
+          .post('/workspace/config/extensions/demo/enable')
+          .send({ scope: 'workspace' }),
+      );
+      expect(singularWorkspace.status).toBe(400);
+      expect(singularWorkspace.body).toMatchObject({
+        code: 'workspace_scope_requires_qualified_workspace',
+      });
+
+      const qualifiedUser = await auth(
+        request(h.app)
+          .post(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/config/extensions/demo/enable`,
+          )
+          .send({ scope: 'user' }),
+      );
+      expect(qualifiedUser.status).toBe(400);
+      expect(qualifiedUser.body).toMatchObject({
+        code: 'global_scope_requires_singular_owner',
+      });
+      expect(enableExtension).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps global config independent of primary trust and only gates qualified mutations', async () => {
+    const h = await makeHarness({
+      primaryTrusted: false,
+      secondaryTrusted: false,
+    });
+    mockExtensionManager();
+    let globalManagerTrusted: boolean | undefined;
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      globalManagerTrusted = (
+        this as unknown as { isWorkspaceTrusted: boolean }
+      ).isWorkspaceTrusted;
+      return {} as never;
+    });
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'commitPreparedExtension',
+    ).mockResolvedValue({
+      identity: { id: extensionId, name: 'demo' },
+      version: '1.0.0',
+      generation: 7,
+    } as never);
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'disposePreparedExtension',
+    ).mockResolvedValue();
+    const enableExtension = vi
+      .spyOn(ExtensionManager.prototype, 'enableExtension')
+      .mockResolvedValue({ generation: 7 } as never);
+    try {
+      const globalInventory = await auth(
+        request(h.app).get('/workspace/config/extensions'),
+      );
+      expect(globalInventory.status).toBe(200);
+
+      const globalMutation = await auth(
+        request(h.app)
+          .post('/workspace/config/extensions/install')
+          .send({ source: '@scope/demo', consent: true }),
+      );
+      expect(globalMutation.status).toBe(202);
+      await pollOperation(
+        h.app,
+        globalMutation.body.operationId,
+        '/workspace/config/extensions/operations',
+      );
+      expect(globalManagerTrusted).toBe(true);
+
+      const qualifiedBase = `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/config/extensions`;
+      const qualifiedInventory = await auth(request(h.app).get(qualifiedBase));
+      expect(qualifiedInventory.status).toBe(200);
+
+      const qualifiedOperations = await auth(
+        request(h.app).get(`${qualifiedBase}/operations`),
+      );
+      expect(qualifiedOperations.status).toBe(200);
+
+      const qualifiedOperation = await auth(
+        request(h.app).get(`${qualifiedBase}/operations/missing`),
+      );
+      expect(qualifiedOperation.status).toBe(404);
+      expect(qualifiedOperation.body).toMatchObject({
+        code: 'extension_operation_not_found',
+      });
+
+      const qualifiedMutation = await auth(
+        request(h.app)
+          .post(`${qualifiedBase}/demo/enable`)
+          .send({ scope: 'workspace' }),
+      );
+      expect(qualifiedMutation.status).toBe(403);
+      expect(qualifiedMutation.body).toMatchObject({
+        code: 'untrusted_workspace',
+      });
+      expect(enableExtension).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('isolates legacy-primary and global config operations', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(ExtensionManager.prototype, 'enableExtension').mockResolvedValue({
+      generation: 7,
+    } as never);
+    try {
+      const legacy = await auth(
+        request(h.app)
+          .post('/workspace/extensions/demo/enable')
+          .send({ scope: 'workspace' }),
+      );
+      expect(legacy.status).toBe(202);
+      const globalMiss = await auth(
+        request(h.app).get(
+          `/workspace/config/extensions/operations/${legacy.body.operationId}`,
+        ),
+      );
+      expect(globalMiss.status).toBe(404);
+      await pollOperation(
+        h.app,
+        legacy.body.operationId,
+        '/workspace/extensions/operations',
+      );
+
+      const global = await auth(
+        request(h.app)
+          .post('/workspace/config/extensions/demo/enable')
+          .send({ scope: 'user' }),
+      );
+      expect(global.status).toBe(202);
+      const legacyMiss = await auth(
+        request(h.app).get(
+          `/workspace/extensions/operations/${global.body.operationId}`,
+        ),
+      );
+      expect(legacyMiss.status).toBe(404);
+      await pollOperation(
+        h.app,
+        global.body.operationId,
+        '/workspace/config/extensions/operations',
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('shares unfinished operation admission across config owners', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    let releaseEnable = () => {};
+    const enableGate = new Promise<void>((resolve) => {
+      releaseEnable = resolve;
+    });
+    vi.spyOn(ExtensionManager.prototype, 'enableExtension').mockImplementation(
+      async () => {
+        await enableGate;
+        return { generation: 7 } as never;
+      },
+    );
+    const qualifiedBase = `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/config/extensions`;
+    try {
+      const globalRequests = Array.from({ length: 5 }, () =>
+        auth(
+          request(h.app)
+            .post('/workspace/config/extensions/demo/enable')
+            .send({ scope: 'user' }),
+        ),
+      );
+      const qualifiedRequests = Array.from({ length: 5 }, () =>
+        auth(
+          request(h.app)
+            .post(`${qualifiedBase}/demo/enable`)
+            .send({ scope: 'workspace' }),
+        ),
+      );
+      const [globalOperations, qualifiedOperations] = await Promise.all([
+        Promise.all(globalRequests),
+        Promise.all(qualifiedRequests),
+      ]);
+
+      expect(
+        [...globalOperations, ...qualifiedOperations].every(
+          (response) => response.status === 202,
+        ),
+      ).toBe(true);
+
+      const rejected = await auth(
+        request(h.app)
+          .post('/workspace/extensions/demo/enable')
+          .send({ scope: 'workspace' }),
+      );
+      expect(rejected.status).toBe(429);
+      expect(rejected.body).toMatchObject({ code: 'extension_queue_full' });
+
+      releaseEnable();
+      await Promise.all([
+        ...globalOperations.map((operation) =>
+          pollOperation(
+            h.app,
+            operation.body.operationId,
+            '/workspace/config/extensions/operations',
+          ),
+        ),
+        ...qualifiedOperations.map((operation) =>
+          pollOperation(
+            h.app,
+            operation.body.operationId,
+            `${qualifiedBase}/operations`,
+          ),
+        ),
+      ]);
+    } finally {
+      releaseEnable();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   afterEach(() => {
     for (const app of activeApps) {
       (
@@ -368,7 +664,6 @@ describe('extension management v2 REST', () => {
             extensionId,
             defaultActivation: 'disabled',
             workspaceActivation: null,
-            effectiveActivation: 'disabled',
             activationSource: 'default',
           },
         ],
@@ -414,11 +709,55 @@ describe('extension management v2 REST', () => {
         expect.any(Function),
       );
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
       expect(
-        h.primary.bridge.refreshExtensionsForAllSessions,
+        h.primary.bridge.refreshWorkspaceExtensions,
       ).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps a workspace management lease until an extension operation settles', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    let finishCommit!: () => void;
+    vi.mocked(
+      ExtensionManager.prototype.setExtensionWorkspaceActivation,
+    ).mockImplementationOnce(
+      async (_extensionId, _workspaceCwd, _state, onCommitted) =>
+        await new Promise<ExtensionStoreSnapshot>((resolve) => {
+          finishCommit = () => {
+            onCommitted?.(7);
+            resolve({
+              version: 2,
+              generation: 7,
+              legacyProjectionHash: 'hash',
+              extensions: {},
+            });
+          };
+        }),
+    );
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/${extensionId}/activation`,
+          )
+          .send({ state: 'enabled' }),
+      );
+
+      expect(started.status).toBe(202);
+      expect(getWorkspaceRuntimeCoordinator(h.secondary).hasActiveWork()).toBe(
+        true,
+      );
+      await vi.waitFor(() => expect(finishCommit).toBeTypeOf('function'));
+      finishCommit();
+      await pollOperation(h.app, started.body.operationId);
+      expect(getWorkspaceRuntimeCoordinator(h.secondary).hasActiveWork()).toBe(
+        false,
+      );
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -537,35 +876,97 @@ describe('extension management v2 REST', () => {
     const refreshGate = new Promise<void>((resolve) => {
       releaseRefresh = resolve;
     });
-    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
+    vi.mocked(h.secondary.bridge.refreshWorkspaceExtensions!)
       .mockImplementationOnce(async () => {
         await refreshGate;
-        return { refreshed: 1, failed: 0 };
+        return { refreshed: 1, failed: 0, generation: 7, runtimeEpoch: 1 };
       })
-      .mockResolvedValue({ refreshed: 1, failed: 0 });
+      .mockResolvedValue({
+        refreshed: 1,
+        failed: 0,
+        generation: 7,
+        runtimeEpoch: 1,
+      } as never);
     try {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
 
       await vi.advanceTimersByTimeAsync(90_000);
 
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
       expect(
-        h.primary.bridge.refreshExtensionsForAllSessions,
+        h.primary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
 
       releaseRefresh();
       await vi.advanceTimersByTimeAsync(30_000);
 
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
     } finally {
       releaseRefresh();
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('runs generation polling through the workspace extension lane', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    let releaseLane = () => {};
+    const laneGate = new Promise<void>((resolve) => {
+      releaseLane = resolve;
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(h.secondary);
+    const blocker = coordinator.runExtensionsPhysicalReconciliation(
+      async () => await laneGate,
+    );
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+
+      expect(
+        h.secondary.bridge.refreshWorkspaceExtensions,
+      ).not.toHaveBeenCalled();
+
+      releaseLane();
+      await blocker;
+      await vi.waitFor(() =>
+        expect(
+          h.secondary.bridge.refreshWorkspaceExtensions,
+        ).toHaveBeenCalledOnce(),
+      );
+    } finally {
+      releaseLane();
+      await blocker;
+      vi.useRealTimers();
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not wake a cold runtime during generation reconciliation', async () => {
+    vi.useFakeTimers();
+    const h = await makeHarness();
+    mockExtensionManager();
+    const secondaryLive = vi.mocked(h.secondary.bridge.isChannelLive);
+    secondaryLive.mockReturnValue(false);
+    try {
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshWorkspaceExtensions,
+      ).not.toHaveBeenCalled();
+
+      secondaryLive.mockReturnValue(true);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(
+        h.secondary.bridge.refreshWorkspaceExtensions,
+      ).toHaveBeenCalledOnce();
+    } finally {
       vi.useRealTimers();
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -576,19 +977,24 @@ describe('extension management v2 REST', () => {
     const h = await makeHarness();
     mockExtensionManager();
     vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
+    vi.mocked(h.secondary.bridge.refreshWorkspaceExtensions!)
       .mockRejectedValueOnce(new Error('refresh failed'))
-      .mockResolvedValue({ refreshed: 1, failed: 0 });
+      .mockResolvedValue({
+        refreshed: 1,
+        failed: 0,
+        generation: 7,
+        runtimeEpoch: 1,
+      } as never);
     try {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
 
       await vi.advanceTimersByTimeAsync(30_000);
 
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
@@ -615,7 +1021,7 @@ describe('extension management v2 REST', () => {
     try {
       await vi.advanceTimersByTimeAsync(30_000);
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
 
       vi.mocked(
@@ -624,10 +1030,18 @@ describe('extension management v2 REST', () => {
       vi.mocked(
         ExtensionManager.prototype.refreshCacheWithSnapshot,
       ).mockResolvedValue(rolledBackSnapshot);
+      vi.mocked(
+        h.secondary.bridge.refreshWorkspaceExtensions!,
+      ).mockResolvedValue({
+        refreshed: 1,
+        failed: 0,
+        generation: 6,
+        runtimeEpoch: 1,
+      } as never);
       await vi.advanceTimersByTimeAsync(30_000);
 
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledTimes(2);
       const projection = await auth(
         request(h.app).get(
@@ -662,9 +1076,7 @@ describe('extension management v2 REST', () => {
 
       await vi.advanceTimersByTimeAsync(30_000);
 
-      expect(
-        late.bridge.refreshExtensionsForAllSessions,
-      ).toHaveBeenCalledOnce();
+      expect(late.bridge.refreshWorkspaceExtensions).toHaveBeenCalledOnce();
       const projection = await auth(
         request(h.app).get('/workspaces/late-stable-id/extensions'),
       );
@@ -681,9 +1093,18 @@ describe('extension management v2 REST', () => {
   it('advances applied generation only after the workspace reconciles', async () => {
     const h = await makeHarness();
     mockExtensionManager();
-    vi.mocked(h.secondary.bridge.refreshExtensionsForAllSessions)
-      .mockResolvedValueOnce({ refreshed: 0, failed: 1 })
-      .mockResolvedValue({ refreshed: 1, failed: 0 });
+    vi.mocked(h.secondary.bridge.refreshWorkspaceExtensions!)
+      .mockResolvedValueOnce({
+        refreshed: 0,
+        failed: 1,
+        runtimeEpoch: 1,
+      } as never)
+      .mockResolvedValue({
+        refreshed: 1,
+        failed: 0,
+        generation: 7,
+        runtimeEpoch: 1,
+      } as never);
     try {
       const activation = await auth(
         request(h.app)
@@ -766,9 +1187,14 @@ describe('extension management v2 REST', () => {
     vi.mocked(
       ExtensionManager.prototype.getExtensionStoreSnapshot,
     ).mockResolvedValue(snapshot(9));
-    vi.mocked(
-      h.secondary.bridge.refreshExtensionsForAllSessions,
-    ).mockResolvedValue({ refreshed: 1, failed: 0 });
+    vi.mocked(h.secondary.bridge.refreshWorkspaceExtensions!).mockResolvedValue(
+      {
+        refreshed: 1,
+        failed: 0,
+        generation: 9,
+        runtimeEpoch: 1,
+      } as never,
+    );
     try {
       const first = await auth(
         request(h.app)
@@ -798,7 +1224,7 @@ describe('extension management v2 REST', () => {
         });
       });
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).not.toHaveBeenCalled();
 
       releaseFirstCommit?.();
@@ -807,10 +1233,13 @@ describe('extension management v2 REST', () => {
       ).resolves.toMatchObject({ status: 'succeeded' });
       await expect(
         pollOperation(h.app, first.body.operationId),
-      ).resolves.toMatchObject({ status: 'succeeded' });
+      ).resolves.toMatchObject({
+        status: 'succeeded',
+        result: { activation: 'deferred' },
+      });
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
-      ).toHaveBeenCalledTimes(2);
+        h.secondary.bridge.refreshWorkspaceExtensions,
+      ).toHaveBeenCalledOnce();
       const projection = await auth(
         request(h.app).get(
           `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
@@ -836,11 +1265,43 @@ describe('extension management v2 REST', () => {
       const operation = await pollOperation(h.app, started.body.operationId);
       expect(operation.status).toBe('succeeded');
       expect(
-        h.primary.bridge.refreshExtensionsForAllSessions,
+        h.primary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
       expect(
-        h.secondary.bridge.refreshExtensionsForAllSessions,
+        h.secondary.bridge.refreshWorkspaceExtensions,
       ).toHaveBeenCalledOnce();
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('defers physical refresh for a draining runtime while advancing its desired generation', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    expect(h.registry.beginDrain(h.secondary)).toBe(true);
+    try {
+      const started = await auth(
+        request(h.app)
+          .put(`/extensions/${extensionId}/activation`)
+          .send({ state: 'disabled' }),
+      );
+      expect(started.status).toBe(202);
+      await expect(
+        pollOperation(h.app, started.body.operationId),
+      ).resolves.toMatchObject({ status: 'succeeded' });
+
+      expect(
+        h.primary.bridge.refreshWorkspaceExtensions,
+      ).toHaveBeenCalledOnce();
+      expect(
+        h.secondary.bridge.refreshWorkspaceExtensions,
+      ).not.toHaveBeenCalled();
+      expect(
+        getWorkspaceRuntimeCoordinator(h.secondary).status().capabilities
+          .extensions,
+      ).toMatchObject({
+        desiredGeneration: 7,
+      });
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -894,9 +1355,7 @@ describe('extension management v2 REST', () => {
       await expect(
         pollOperation(h.app, started.body.operationId),
       ).resolves.toMatchObject({ status: 'succeeded' });
-      expect(
-        late.bridge.refreshExtensionsForAllSessions,
-      ).toHaveBeenCalledOnce();
+      expect(late.bridge.refreshWorkspaceExtensions).toHaveBeenCalledOnce();
       const projection = await auth(
         request(h.app).get('/workspaces/late-id/extensions'),
       );
@@ -1007,6 +1466,75 @@ describe('extension management v2 REST', () => {
           }),
         }),
       );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('does not accept a primary extension interaction through another workspace', async () => {
+    const h = await makeHarness();
+    mockExtensionManager();
+    vi.spyOn(
+      ExtensionManager.prototype,
+      'prepareExtensionInstall',
+    ).mockImplementation(async function (this: ExtensionManager) {
+      const manager = this as unknown as {
+        requestSetting?: (setting: {
+          name: string;
+          description: string;
+          envVar: string;
+        }) => Promise<string>;
+      };
+      await manager.requestSetting?.({
+        name: 'API key',
+        description: 'API key used by this extension',
+        envVar: 'API_KEY',
+      });
+      return {} as never;
+    });
+    try {
+      const started = await auth(
+        request(h.app)
+          .post('/workspace/config/extensions/install')
+          .send({ source: '@scope/demo', consent: true }),
+      );
+      expect(started.status).toBe(202);
+
+      let interactionId = '';
+      await vi.waitFor(async () => {
+        const operation = await auth(
+          request(h.app).get(
+            `/workspace/config/extensions/operations/${started.body.operationId}`,
+          ),
+        );
+        expect(operation.body.status).toBe('waiting_for_input');
+        interactionId = operation.body.interaction.id as string;
+      });
+
+      const crossWorkspace = await auth(
+        request(h.app)
+          .post(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/config/extensions/operations/${started.body.operationId}/interactions/${interactionId}`,
+          )
+          .send({ value: 'secret' }),
+      );
+      expect(crossWorkspace.status).toBe(404);
+
+      const stillWaiting = await auth(
+        request(h.app).get(
+          `/workspace/config/extensions/operations/${started.body.operationId}`,
+        ),
+      );
+      expect(stillWaiting.body.status).toBe('waiting_for_input');
+
+      const cancel = await auth(
+        request(h.app)
+          .post(
+            `/workspace/config/extensions/operations/${started.body.operationId}/interactions/${interactionId}`,
+          )
+          .send({ cancelled: true }),
+      );
+      expect(cancel.status).toBe(200);
     } finally {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
@@ -1218,6 +1746,20 @@ describe('extension management v2 REST', () => {
     const disposePrepared = vi
       .spyOn(ExtensionManager.prototype, 'disposePreparedExtension')
       .mockResolvedValue();
+    vi.mocked(h.primary.bridge.refreshWorkspaceExtensions!).mockResolvedValue({
+      refreshed: 1,
+      failed: 0,
+      generation: 8,
+      runtimeEpoch: 1,
+    } as never);
+    vi.mocked(h.secondary.bridge.refreshWorkspaceExtensions!).mockResolvedValue(
+      {
+        refreshed: 1,
+        failed: 0,
+        generation: 8,
+        runtimeEpoch: 1,
+      } as never,
+    );
     try {
       const started = await auth(
         request(h.app).post(`/extensions/${extensionId}/update`),
@@ -1308,7 +1850,11 @@ describe('extension management v2 REST', () => {
 
       expect(started.status).toBe(202);
       await expect(
-        pollOperation(h.app, started.body.operationId),
+        pollOperation(
+          h.app,
+          started.body.operationId,
+          '/workspace/extensions/operations',
+        ),
       ).resolves.toMatchObject({
         status: 'failed',
         code: 'extension_prepare_timeout',

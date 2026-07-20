@@ -3248,6 +3248,8 @@ export interface DaemonExtensionEntry {
   description?: string;
   version: string;
   isActive: boolean;
+  defaultActivation?: ExtensionActivationState;
+  workspaceActivation?: 'inherit' | ExtensionActivationState;
   path: string;
   source?: string;
   installType?: DaemonExtensionInstallType;
@@ -3263,6 +3265,9 @@ export interface DaemonWorkspaceExtensionsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  desiredGeneration?: number;
+  appliedGeneration?: number;
   extensions: DaemonExtensionEntry[];
   errors?: DaemonStatusCell[];
 }
@@ -3310,7 +3315,6 @@ export interface WorkspaceExtensionProjectionEntry {
   version: string;
   defaultActivation: ExtensionActivationState;
   workspaceActivation: ExtensionWorkspaceActivation;
-  effectiveActivation: ExtensionActivationState;
   activationSource:
     | 'cli_override'
     | 'workspace_override'
@@ -3331,6 +3335,7 @@ export interface WorkspaceExtensionProjection {
 export interface ExtensionInstallResponse {
   accepted: true;
   operationId: string;
+  deadlineAt?: number;
 }
 
 export type ExtensionMutationResponse = ExtensionInstallResponse;
@@ -3362,6 +3367,7 @@ export interface ExtensionOperationResult {
   updated?: boolean;
   reason?: string;
   states?: Record<string, DaemonExtensionUpdateState>;
+  activation?: 'applied' | 'deferred' | 'partial';
 }
 
 export interface ExtensionOperationStatus {
@@ -3372,6 +3378,7 @@ export interface ExtensionOperationStatus {
   phase?: 'preparing' | 'committing' | 'reconciling';
   createdAt: number;
   updatedAt: number;
+  deadlineAt?: number;
   source?: string;
   name?: string;
   result?: ExtensionOperationResult;

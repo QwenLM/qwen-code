@@ -30,9 +30,14 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import {
+  getWorkspaceRuntimeCoordinator,
+  type ExtensionsReconciliationAttempt,
+} from '../workspace-runtime-coordinator.js';
 import type { DaemonWorkspaceService } from '../workspace-service/index.js';
 import {
   createExtensionsController,
+  createExtensionsControllerCoordination,
   redactExtensionDisplaySource,
   type ExtensionPendingInteraction,
   type ExtensionOperationContext,
@@ -198,6 +203,13 @@ export function registerWorkspaceExtensionRoutes(
     workspaceRegistry,
   } = deps;
   const maxExtensionOperationHistory = deps.maxExtensionOperationHistory;
+  const controllerCoordination = createExtensionsControllerCoordination();
+  const isolatedOperationCoordination = () => ({
+    preparationQueue: controllerCoordination.preparationQueue,
+    commitQueue: controllerCoordination.commitQueue,
+    extensionOperations: new Map(),
+    operationAdmission: controllerCoordination.operationAdmission,
+  });
   const controllerDeps = (
     ws: string,
     wsBridge: AcpSessionBridge,
@@ -206,14 +218,43 @@ export function registerWorkspaceExtensionRoutes(
     boundWorkspace: ws,
     bridge: wsBridge,
     workspace: wsService,
+    coordination: controllerCoordination,
     ...(maxExtensionOperationHistory === undefined
       ? {}
       : { maxExtensionOperationHistory }),
   });
 
-  const primaryController = createExtensionsController(
-    controllerDeps(boundWorkspace, bridge, workspace),
-  );
+  const globalController = createExtensionsController({
+    ...controllerDeps(boundWorkspace, bridge, workspace),
+    isWorkspaceTrusted: true,
+  });
+  const legacyPrimaryController = createExtensionsController({
+    ...controllerDeps(boundWorkspace, bridge, workspace),
+    coordination: isolatedOperationCoordination(),
+  });
+  const controllersByRuntime = new WeakMap<
+    WorkspaceRuntime,
+    ExtensionsController
+  >();
+  const controllerForRuntime = (
+    runtime: WorkspaceRuntime,
+  ): ExtensionsController => {
+    let controller = controllersByRuntime.get(runtime);
+    if (!controller) {
+      controller = createExtensionsController({
+        ...controllerDeps(
+          runtime.workspaceCwd,
+          runtime.bridge,
+          runtime.workspaceService,
+        ),
+        coordination: isolatedOperationCoordination(),
+        acquireManagementOperation: () =>
+          getWorkspaceRuntimeCoordinator(runtime).acquireManagementOperation(),
+      });
+      controllersByRuntime.set(runtime, controller);
+    }
+    return controller;
+  };
   type ExtensionInteractionRequest =
     | Omit<
         Extract<ExtensionPendingInteraction, { kind: 'marketplace_plugin' }>,
@@ -371,29 +412,98 @@ export function registerWorkspaceExtensionRoutes(
       },
     };
   };
-  const appliedGenerationByWorkspaceId = new Map<string, number>();
   const onRuntimeReconciled = (
     runtime: WorkspaceRuntime,
     generation: number,
+    attempt: ExtensionsReconciliationAttempt | undefined,
   ): void => {
-    appliedGenerationByWorkspaceId.set(runtime.workspaceId, generation);
+    getWorkspaceRuntimeCoordinator(runtime).setExtensionsAppliedGeneration(
+      generation,
+      attempt,
+    );
   };
-  const globalReconciliationOptions = () =>
+  const onRuntimeReconciliationStarted = (
+    runtime: WorkspaceRuntime,
+    generation: number,
+  ): ExtensionsReconciliationAttempt | undefined =>
+    getWorkspaceRuntimeCoordinator(runtime).beginExtensionsReconciliation(
+      generation,
+    );
+  const onRuntimeReconciliationFailed = (
+    runtime: WorkspaceRuntime,
+    generation: number,
+    attempt: ExtensionsReconciliationAttempt | undefined,
+    error: unknown,
+  ): void => {
+    getWorkspaceRuntimeCoordinator(runtime).failExtensionsReconciliation(
+      attempt,
+      error,
+    );
+  };
+  const markDesiredGeneration = (
+    runtimes: readonly WorkspaceRuntime[],
+    generation: number,
+  ): void => {
+    for (const runtime of runtimes) {
+      getWorkspaceRuntimeCoordinator(runtime).setExtensionsDesiredGeneration(
+        generation,
+      );
+    }
+  };
+  const acquireRuntimeManagementOperations = (
+    runtimes: readonly WorkspaceRuntime[],
+  ): (() => void) => {
+    const releases: Array<() => void> = [];
+    try {
+      for (const runtime of runtimes) {
+        releases.push(
+          getWorkspaceRuntimeCoordinator(runtime).acquireManagementOperation(),
+        );
+      }
+    } catch (error) {
+      for (const release of releases) release();
+      throw error;
+    }
+    return () => {
+      for (const release of releases) release();
+    };
+  };
+  const globalReconciliationOptions = (refreshWorkspaceRuntime: boolean) =>
     workspaceRegistry
       ? {
-          refreshRuntimes: () => workspaceRegistry.list(),
+          acquireManagementOperation: () =>
+            acquireRuntimeManagementOperations(workspaceRegistry.list()),
+          refreshRuntimes: () =>
+            workspaceRegistry
+              .list()
+              .filter((runtime) => runtime.bridge.isChannelLive()),
           reserveRuntimeReconciliation,
           onRuntimeReconciled,
+          onRuntimeReconciliationStarted,
+          onRuntimeReconciliationFailed,
+          onGenerationCommitted: (generation: number) =>
+            markDesiredGeneration(workspaceRegistry.listManaged(), generation),
+          refreshWorkspaceRuntime,
         }
-      : {};
-  const workspaceReconciliationOptions = () =>
-    workspaceRegistry
+      : { refreshWorkspaceRuntime };
+  const workspaceReconciliationOptions = (
+    refreshWorkspaceRuntime: boolean,
+    workspaceCwd: string,
+  ) => {
+    const runtime = workspaceRegistry?.getByWorkspaceCwd(workspaceCwd);
+    return runtime
       ? {
-          refreshRuntimes: [workspaceRegistry.primary],
+          refreshRuntimes: runtime.bridge.isChannelLive() ? [runtime] : [],
           reserveRuntimeReconciliation,
           onRuntimeReconciled,
+          onRuntimeReconciliationStarted,
+          onRuntimeReconciliationFailed,
+          onGenerationCommitted: (generation: number) =>
+            markDesiredGeneration([runtime], generation),
+          refreshWorkspaceRuntime,
         }
-      : {};
+      : { refreshWorkspaceRuntime };
+  };
   const mutationClientBridges = (
     runtimes?:
       | readonly WorkspaceRuntime[]
@@ -411,45 +521,106 @@ export function registerWorkspaceExtensionRoutes(
       if (reconciling) return;
       reconciling = true;
       try {
-        const manager = primaryController.createExtensionManager(
+        const manager = globalController.createExtensionManager(
           boundWorkspace,
           true,
         );
         const generation = (await manager.getExtensionStoreSnapshot())
           .generation;
-        const pendingRuntimes = workspaceRegistry
-          .list()
-          .filter(
-            (runtime) =>
-              (appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0) !==
-              generation,
+        markDesiredGeneration(workspaceRegistry.listManaged(), generation);
+        const pendingRuntimes = workspaceRegistry.list().filter((runtime) => {
+          if (!runtime.bridge.isChannelLive()) return false;
+          const capability =
+            getWorkspaceRuntimeCoordinator(runtime).status().capabilities
+              .extensions;
+          return (
+            capability?.state !== 'ready' ||
+            capability.appliedGeneration !== generation
           );
+        });
         if (generation === observedGeneration && pendingRuntimes.length === 0)
           return;
         const runtimes = pendingRuntimes;
         if (runtimes.length === 0) return;
+        const attempts = new Map<
+          WorkspaceRuntime,
+          ExtensionsReconciliationAttempt | undefined
+        >();
         const results = await runtimeReconciliationQueue.run(
           async () =>
             await Promise.allSettled(
               runtimes.map(async (runtime) => {
-                runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-                const result =
-                  await runtime.bridge.refreshExtensionsForAllSessions();
+                attempts.set(
+                  runtime,
+                  onRuntimeReconciliationStarted(runtime, generation),
+                );
+                if (!attempts.get(runtime)) {
+                  throw new Error(
+                    'Workspace runtime changed before extension reconciliation started',
+                  );
+                }
+                const result = await getWorkspaceRuntimeCoordinator(
+                  runtime,
+                ).runExtensionsPhysicalReconciliation(async () => {
+                  runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+                  const refresh =
+                    runtime.bridge.refreshWorkspaceExtensions?.bind(
+                      runtime.bridge,
+                    ) ??
+                    runtime.bridge.refreshExtensionsForAllSessions.bind(
+                      runtime.bridge,
+                    );
+                  return await refresh();
+                });
+                const attempt = attempts.get(runtime);
+                const resultEpoch =
+                  'runtimeEpoch' in result &&
+                  typeof result.runtimeEpoch === 'number'
+                    ? result.runtimeEpoch
+                    : undefined;
+                if (!attempt || resultEpoch !== attempt.runtimeEpoch) {
+                  throw new Error(
+                    `Workspace runtime epoch changed during extension reconciliation (expected ${attempt?.runtimeEpoch ?? 'none'}, received ${resultEpoch ?? 'none'})`,
+                  );
+                }
                 if (result.failed > 0) {
                   throw new Error(
                     `${result.failed} extension session refresh(es) failed`,
                   );
                 }
+                const runtimeGeneration =
+                  'generation' in result &&
+                  typeof result.generation === 'number'
+                    ? result.generation
+                    : undefined;
+                if (runtimeGeneration === undefined) {
+                  throw new Error(
+                    'Runtime refresh succeeded without an applied extension generation',
+                  );
+                }
+                if (runtimeGeneration < generation) {
+                  throw new Error(
+                    `Runtime applied extension generation ${runtimeGeneration}, expected at least ${generation}`,
+                  );
+                }
+                return runtimeGeneration;
               }),
             ),
         );
         results.forEach((result, index) => {
+          const runtime = runtimes[index]!;
+          const attempt = attempts.get(runtime);
           if (result.status === 'fulfilled') {
-            const workspaceId = runtimes[index]!.workspaceId;
-            appliedGenerationByWorkspaceId.set(workspaceId, generation);
+            onRuntimeReconciled(runtime, result.value, attempt);
           } else {
+            onRuntimeReconciliationFailed(
+              runtime,
+              generation,
+              attempt,
+              result.reason,
+            );
             writeStderrLine(
-              `qwen serve: extension generation reconciliation failed for workspace ${runtimes[index]!.workspaceId}: ${redactUrlCredentials(
+              `qwen serve: extension generation reconciliation failed for workspace ${runtime.workspaceId}: ${redactUrlCredentials(
                 result.reason instanceof Error
                   ? result.reason.message
                   : String(result.reason),
@@ -483,7 +654,39 @@ export function registerWorkspaceExtensionRoutes(
     ).stopExtensionGenerationReconciler = () => clearInterval(generationPoller);
   }
 
-  const registerFor = (base: string, resolve: ResolveController): void => {
+  const registerFor = (
+    base: string,
+    resolve: ResolveController,
+    refreshWorkspaceRuntime: boolean,
+    configOwner: 'legacy-primary' | 'global' | 'workspace',
+  ): void => {
+    const requireGlobalConfigOwner = (res: Response): boolean => {
+      if (configOwner !== 'workspace') return true;
+      res.status(400).json({
+        error:
+          'Global extension configuration must use /workspace/config/extensions',
+        code: 'global_scope_requires_singular_owner',
+      });
+      return false;
+    };
+    const rejectWrongActivationOwner = (
+      scope: SettingScope,
+      res: Response,
+    ): boolean => {
+      if (configOwner === 'workspace' && scope === SettingScope.User) {
+        requireGlobalConfigOwner(res);
+        return true;
+      }
+      if (configOwner === 'global' && scope === SettingScope.Workspace) {
+        res.status(400).json({
+          error:
+            'Workspace extension configuration must use a qualified workspace route',
+          code: 'workspace_scope_requires_qualified_workspace',
+        });
+        return true;
+      }
+      return false;
+    };
     // GET {base} — read-only installed extension status.
     app.get(base, async (req, res) => {
       const ctrl = resolve(req, res, false);
@@ -554,7 +757,7 @@ export function registerWorkspaceExtensionRoutes(
       `${base}/operations/:operationId/interactions/:interactionId`,
       mutate({ strict: true }),
       async (req, res) => {
-        const ctrl = resolve(req, res, false);
+        const ctrl = resolve(req, res, true);
         if (!ctrl) return;
         try {
           if (
@@ -566,10 +769,13 @@ export function registerWorkspaceExtensionRoutes(
           }
           const operationId = req.params['operationId'];
           const interactionId = req.params['interactionId'];
+          const operation = operationId
+            ? ctrl.getOperation(operationId)
+            : undefined;
           const pending = operationId
             ? pendingExtensionInteractions.get(operationId)
             : undefined;
-          if (!operationId || !interactionId || !pending) {
+          if (!operationId || !interactionId || !operation || !pending) {
             res.status(404).json({ error: 'Extension interaction not found' });
             return;
           }
@@ -637,6 +843,7 @@ export function registerWorkspaceExtensionRoutes(
     // POST {base}/install — install an extension and refresh all active
     // sessions asynchronously.
     app.post(`${base}/install`, mutate({ strict: true }), async (req, res) => {
+      if (!requireGlobalConfigOwner(res)) return;
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
@@ -845,7 +1052,7 @@ export function registerWorkspaceExtensionRoutes(
               );
             },
             deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
-            ...globalReconciliationOptions(),
+            ...globalReconciliationOptions(refreshWorkspaceRuntime),
           },
         );
       } catch (err) {
@@ -857,6 +1064,7 @@ export function registerWorkspaceExtensionRoutes(
       `${base}/check-updates`,
       mutate({ strict: true }),
       async (req, res) => {
+        if (!requireGlobalConfigOwner(res)) return;
         const ctrl = resolve(req, res, true);
         if (!ctrl) return;
         let timer: ReturnType<typeof setTimeout> | undefined;
@@ -924,29 +1132,36 @@ export function registerWorkspaceExtensionRoutes(
       },
     );
 
-    app.post(`${base}/refresh`, mutate({ strict: true }), async (req, res) => {
-      const ctrl = resolve(req, res, true);
-      if (!ctrl) return;
-      try {
-        if (
-          !ctrl.validateExtensionMutationClient(req, res, {
-            requireClientId: false,
-          })
-        ) {
-          return;
-        }
-        const releaseOperationSlot = ctrl.acquireOperationSlot(res);
-        if (!releaseOperationSlot) return;
-        try {
-          const result = await ctrl.refreshExtensionsForAllSessions();
-          res.status(200).json(result);
-        } finally {
-          releaseOperationSlot();
-        }
-      } catch (err) {
-        sendBridgeError(res, err, { route: `POST ${base}/refresh` });
-      }
-    });
+    if (!refreshWorkspaceRuntime) {
+      app.post(
+        `${base}/refresh`,
+        mutate({ strict: true }),
+        async (req, res) => {
+          const ctrl = resolve(req, res, true);
+          if (!ctrl) return;
+          try {
+            if (
+              !ctrl.validateExtensionMutationClient(req, res, {
+                requireClientId: false,
+              })
+            ) {
+              return;
+            }
+            const releaseOperationSlot = ctrl.acquireOperationSlot(res);
+            if (!releaseOperationSlot) return;
+            try {
+              res
+                .status(200)
+                .json(await ctrl.refreshExtensionsForAllSessions());
+            } finally {
+              releaseOperationSlot();
+            }
+          } catch (err) {
+            sendBridgeError(res, err, { route: `POST ${base}/refresh` });
+          }
+        },
+      );
+    }
 
     app.post(
       `${base}/:name/enable`,
@@ -969,6 +1184,7 @@ export function registerWorkspaceExtensionRoutes(
           }
           const scope = parseExtensionScope(safeBody(req), res);
           if (scope === null) return;
+          if (rejectWrongActivationOwner(scope, res)) return;
           ctrl.runQueuedExtensionMutation(
             'enable',
             { name },
@@ -991,8 +1207,11 @@ export function registerWorkspaceExtensionRoutes(
             },
             {
               ...(scope === SettingScope.User
-                ? globalReconciliationOptions()
-                : workspaceReconciliationOptions()),
+                ? globalReconciliationOptions(refreshWorkspaceRuntime)
+                : workspaceReconciliationOptions(
+                    refreshWorkspaceRuntime,
+                    ctrl.boundWorkspace,
+                  )),
             },
           );
         } catch (err) {
@@ -1022,6 +1241,7 @@ export function registerWorkspaceExtensionRoutes(
           }
           const scope = parseExtensionScope(safeBody(req), res);
           if (scope === null) return;
+          if (rejectWrongActivationOwner(scope, res)) return;
           ctrl.runQueuedExtensionMutation(
             'disable',
             { name },
@@ -1044,8 +1264,11 @@ export function registerWorkspaceExtensionRoutes(
             },
             {
               ...(scope === SettingScope.User
-                ? globalReconciliationOptions()
-                : workspaceReconciliationOptions()),
+                ? globalReconciliationOptions(refreshWorkspaceRuntime)
+                : workspaceReconciliationOptions(
+                    refreshWorkspaceRuntime,
+                    ctrl.boundWorkspace,
+                  )),
             },
           );
         } catch (err) {
@@ -1058,6 +1281,7 @@ export function registerWorkspaceExtensionRoutes(
       `${base}/:name/update`,
       mutate({ strict: true }),
       async (req, res) => {
+        if (!requireGlobalConfigOwner(res)) return;
         const ctrl = resolve(req, res, true);
         if (!ctrl) return;
         try {
@@ -1145,7 +1369,7 @@ export function registerWorkspaceExtensionRoutes(
                 );
               },
               deadlineMs: EXTENSION_INTERACTIVE_PREPARE_DEADLINE_MS,
-              ...globalReconciliationOptions(),
+              ...globalReconciliationOptions(refreshWorkspaceRuntime),
             },
           );
         } catch (err) {
@@ -1155,6 +1379,7 @@ export function registerWorkspaceExtensionRoutes(
     );
 
     app.delete(`${base}/:name`, mutate({ strict: true }), async (req, res) => {
+      if (!requireGlobalConfigOwner(res)) return;
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
@@ -1191,7 +1416,7 @@ export function registerWorkspaceExtensionRoutes(
             return { status: 'uninstalled', name: extension.name };
           },
           {
-            ...globalReconciliationOptions(),
+            ...globalReconciliationOptions(refreshWorkspaceRuntime),
           },
         );
       } catch (err) {
@@ -1201,7 +1426,39 @@ export function registerWorkspaceExtensionRoutes(
   };
 
   // Legacy singular routes bound to the primary workspace (behavior unchanged).
-  registerFor('/workspace/extensions', () => primaryController);
+  registerFor(
+    '/workspace/extensions',
+    () => legacyPrimaryController,
+    false,
+    'legacy-primary',
+  );
+  registerFor(
+    '/workspace/config/extensions',
+    () => globalController,
+    true,
+    'global',
+  );
+  if (workspaceRegistry) {
+    registerFor(
+      '/workspaces/:workspace/config/extensions',
+      (req, res, requireTrust) => {
+        const runtime = resolveWorkspaceRuntimeFromParam(
+          workspaceRegistry,
+          req,
+          res,
+        );
+        if (
+          !runtime ||
+          (requireTrust && !requireTrustedWorkspaceRuntime(runtime, res))
+        ) {
+          return null;
+        }
+        return controllerForRuntime(runtime);
+      },
+      true,
+      'workspace',
+    );
+  }
 
   const extensionById = (
     manager: ExtensionManager,
@@ -1273,15 +1530,19 @@ export function registerWorkspaceExtensionRoutes(
       deadlineMs?: number;
     } = {},
   ): void => {
+    const affectedRuntimes = (): readonly WorkspaceRuntime[] =>
+      typeof options.refreshRuntimes === 'function'
+        ? options.refreshRuntimes()
+        : (options.refreshRuntimes ?? workspaceRegistry?.listManaged() ?? []);
     if (
-      !primaryController.validateExtensionMutationClient(req, res, {
+      !globalController.validateExtensionMutationClient(req, res, {
         requireClientId: false,
-        bridges: mutationClientBridges(options.refreshRuntimes),
+        bridges: mutationClientBridges(affectedRuntimes),
       })
     ) {
       return;
     }
-    primaryController.runQueuedExtensionMutation(
+    globalController.runQueuedExtensionMutation(
       operation,
       failureContext,
       res,
@@ -1289,16 +1550,43 @@ export function registerWorkspaceExtensionRoutes(
       {
         manager,
         operationBasePath: '/extensions/operations',
+        acquireManagementOperation: () =>
+          acquireRuntimeManagementOperations(
+            affectedRuntimes().filter(
+              (runtime) =>
+                !workspaceRegistry ||
+                workspaceRegistry.getByWorkspaceCwd(runtime.workspaceCwd) ===
+                  runtime,
+            ),
+          ),
         onRuntimeReconciled,
+        onRuntimeReconciliationStarted,
+        onRuntimeReconciliationFailed,
         reserveRuntimeReconciliation,
-        ...options,
+        refreshRuntimes: () =>
+          affectedRuntimes().filter(
+            (runtime) =>
+              runtime.bridge.isChannelLive() &&
+              (!workspaceRegistry ||
+                workspaceRegistry.getByWorkspaceCwd(runtime.workspaceCwd) ===
+                  runtime),
+          ),
+        onGenerationCommitted: (generation) =>
+          markDesiredGeneration(affectedRuntimes(), generation),
+        refreshWorkspaceRuntime: true,
+        ...(options.skipRefresh !== undefined
+          ? { skipRefresh: options.skipRefresh }
+          : {}),
+        ...(options.deadlineMs !== undefined
+          ? { deadlineMs: options.deadlineMs }
+          : {}),
       },
     );
   };
 
   app.get('/extensions', async (_req, res) => {
     try {
-      const manager = primaryController.createExtensionManager(
+      const manager = globalController.createExtensionManager(
         boundWorkspace,
         true,
       );
@@ -1333,7 +1621,7 @@ export function registerWorkspaceExtensionRoutes(
       res.status(400).json({ error: 'Missing extension operation id' });
       return;
     }
-    const operation = primaryController.getOperation(operationId);
+    const operation = globalController.getOperation(operationId);
     if (!operation) {
       res.status(404).json({
         error: `Extension operation "${operationId}" not found`,
@@ -1352,7 +1640,7 @@ export function registerWorkspaceExtensionRoutes(
       if (!extensionId) return;
       const state = parseActivationState(req, res);
       if (!state) return;
-      const manager = primaryController.createExtensionManager(
+      const manager = globalController.createExtensionManager(
         boundWorkspace,
         true,
       );
@@ -1382,7 +1670,7 @@ export function registerWorkspaceExtensionRoutes(
         },
         {
           ...(workspaceRegistry
-            ? { refreshRuntimes: () => workspaceRegistry.list() }
+            ? { refreshRuntimes: () => workspaceRegistry.listManaged() }
             : {}),
         },
       );
@@ -1467,7 +1755,7 @@ export function registerWorkspaceExtensionRoutes(
       res.status(400).json({ error: 'Invalid initial activation' });
       return;
     }
-    const manager = primaryController.createExtensionManager(
+    const manager = globalController.createExtensionManager(
       boundWorkspace,
       true,
     );
@@ -1542,7 +1830,7 @@ export function registerWorkspaceExtensionRoutes(
       {
         deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
         ...(workspaceRegistry
-          ? { refreshRuntimes: () => workspaceRegistry.list() }
+          ? { refreshRuntimes: () => workspaceRegistry.listManaged() }
           : {}),
       },
     );
@@ -1552,7 +1840,7 @@ export function registerWorkspaceExtensionRoutes(
     '/extensions/check-updates',
     mutate({ strict: true }),
     (req, res) => {
-      const manager = primaryController.createExtensionManager(
+      const manager = globalController.createExtensionManager(
         boundWorkspace,
         true,
       );
@@ -1588,7 +1876,7 @@ export function registerWorkspaceExtensionRoutes(
     (req, res) => {
       const extensionId = parseExtensionId(req, res);
       if (!extensionId) return;
-      const manager = primaryController.createExtensionManager(
+      const manager = globalController.createExtensionManager(
         boundWorkspace,
         true,
       );
@@ -1651,7 +1939,7 @@ export function registerWorkspaceExtensionRoutes(
         {
           deadlineMs: EXTENSION_PREPARE_DEADLINE_MS,
           ...(workspaceRegistry
-            ? { refreshRuntimes: () => workspaceRegistry.list() }
+            ? { refreshRuntimes: () => workspaceRegistry.listManaged() }
             : {}),
         },
       );
@@ -1666,7 +1954,7 @@ export function registerWorkspaceExtensionRoutes(
       if (!extensionId) return;
       const route = 'DELETE /extensions/:extensionId';
       if (
-        !primaryController.validateExtensionMutationClient(req, res, {
+        !globalController.validateExtensionMutationClient(req, res, {
           requireClientId: false,
           bridges: mutationClientBridges(),
         })
@@ -1674,7 +1962,7 @@ export function registerWorkspaceExtensionRoutes(
         return;
       }
       try {
-        const manager = primaryController.createExtensionManager(
+        const manager = globalController.createExtensionManager(
           boundWorkspace,
           true,
         );
@@ -1705,7 +1993,7 @@ export function registerWorkspaceExtensionRoutes(
           },
           {
             ...(workspaceRegistry
-              ? { refreshRuntimes: () => workspaceRegistry.list() }
+              ? { refreshRuntimes: () => workspaceRegistry.listManaged() }
               : {}),
           },
         );
@@ -1721,7 +2009,7 @@ export function registerWorkspaceExtensionRoutes(
       const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
       if (!runtime) return;
       try {
-        const manager = primaryController.createExtensionManager(
+        const manager = globalController.createExtensionManager(
           runtime.workspaceCwd,
           runtime.trusted,
         );
@@ -1739,7 +2027,6 @@ export function registerWorkspaceExtensionRoutes(
             defaultActivation: activation.default,
             workspaceActivation:
               activation.workspace === 'inherit' ? null : activation.workspace,
-            effectiveActivation: activation.effective,
             activationSource: activation.source,
           };
         });
@@ -1750,7 +2037,8 @@ export function registerWorkspaceExtensionRoutes(
           trusted: runtime.trusted,
           desiredGeneration: snapshot.generation,
           appliedGeneration:
-            appliedGenerationByWorkspaceId.get(runtime.workspaceId) ?? 0,
+            getWorkspaceRuntimeCoordinator(runtime).status().capabilities
+              .extensions?.appliedGeneration ?? 0,
           extensions,
         });
       } catch (error) {
@@ -1770,7 +2058,7 @@ export function registerWorkspaceExtensionRoutes(
         if (!extensionId) return;
         const state = parseActivationState(req, res);
         if (!state) return;
-        const manager = primaryController.createExtensionManager(
+        const manager = globalController.createExtensionManager(
           runtime.workspaceCwd,
           true,
         );
@@ -1813,7 +2101,7 @@ export function registerWorkspaceExtensionRoutes(
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
         const extensionId = parseExtensionId(req, res);
         if (!extensionId) return;
-        const manager = primaryController.createExtensionManager(
+        const manager = globalController.createExtensionManager(
           runtime.workspaceCwd,
           true,
         );
@@ -1856,7 +2144,7 @@ export function registerWorkspaceExtensionRoutes(
       (req, res) => {
         const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
-        const manager = primaryController.createExtensionManager(
+        const manager = globalController.createExtensionManager(
           runtime.workspaceCwd,
           true,
         );

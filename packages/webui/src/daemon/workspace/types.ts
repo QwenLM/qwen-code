@@ -23,7 +23,6 @@ import type {
   ExtensionInteractionResponseResult,
   ExtensionOperationStatus,
   ExtensionActiveOperations,
-  ExtensionRefreshResponse,
   ExtensionScopeRequest,
   ExtensionInstallRequest,
   ExtensionInstallResponse,
@@ -409,7 +408,7 @@ export interface DaemonWorkspaceActions {
   ): Promise<DaemonSkillMutationResult>;
 
   // Extensions
-  loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
+  loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsViewStatus>;
 
   // Tools
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
@@ -521,7 +520,17 @@ export interface DaemonWorkspaceActions {
   checkExtensionUpdates(
     clientId?: string,
   ): Promise<ExtensionUpdateCheckResponse>;
-  refreshExtensions(clientId?: string): Promise<ExtensionRefreshResponse>;
+  refreshExtensions(clientId?: string): Promise<DaemonWorkspaceRuntimeStatus>;
+  setExtensionActivation(
+    extensionId: string,
+    params:
+      | { scope: 'user'; state: 'enabled' | 'disabled' }
+      | {
+          scope: 'workspace';
+          state: 'inherit' | 'enabled' | 'disabled';
+        },
+    clientId?: string,
+  ): Promise<ExtensionMutationResponse>;
   enableExtension(
     name: string,
     params: ExtensionScopeRequest,

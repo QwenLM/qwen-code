@@ -11,6 +11,7 @@ import type {
   DaemonWorkspaceRuntimeStatus,
   WorkspaceDaemonClient,
 } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
@@ -41,6 +42,17 @@ export function createDaemonWorkspaceActions({
   baseUrl,
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
+  type ExtensionOperationRoute = 'primary' | 'workspace' | 'v2';
+  const extensionOperationRoutes = new Map<string, ExtensionOperationRoute>();
+
+  const rememberExtensionOperation = <T extends { operationId: string }>(
+    result: T,
+    route: ExtensionOperationRoute,
+  ): T => {
+    extensionOperationRoutes.set(result.operationId, route);
+    return result;
+  };
+
   return {
     async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
@@ -417,9 +429,13 @@ export function createDaemonWorkspaceActions({
     },
 
     async loadExtensionsStatus() {
-      const client = requireClient(getClient, 'Load extensions failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load extensions failed',
+      );
       return withActionTimeout(
-        client.workspaceExtensions(),
+        client.workspaceConfigExtensions(),
         'Load extensions timed out',
       );
     },
@@ -809,22 +825,61 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async installExtension(params, clientId) {
+    async installExtension(params) {
       const client = requireClient(getClient, 'Install extension failed');
       return withActionTimeout(
-        client.installExtension(params, clientId),
+        client
+          .installWorkspaceConfigExtension(params)
+          .then((result) => rememberExtensionOperation(result, 'primary')),
         'Install extension timed out',
       );
     },
 
-    async extensionOperationStatus(operationId) {
+    async extensionOperationStatus(operationId, timeoutMs) {
       const client = requireClient(
         getClient,
         'Load extension operation failed',
       );
+      const workspaceClient = client.workspaceByCwd(
+        requireWorkspaceCwd(getWorkspaceCwd),
+      );
+      const route = extensionOperationRoutes.get(operationId);
+      const load = (target: ExtensionOperationRoute) =>
+        target === 'v2'
+          ? client.extensionOperation(operationId)
+          : target === 'primary'
+            ? client.workspaceConfigExtensionOperationStatus(
+                operationId,
+                timeoutMs,
+              )
+            : workspaceClient.workspaceConfigExtensionOperationStatus(
+                operationId,
+                timeoutMs,
+              );
+      let resolvedRoute = route;
+      const operation = route
+        ? load(route)
+        : load('workspace')
+            .then((result) => {
+              resolvedRoute = 'workspace';
+              return result;
+            })
+            .catch((error: unknown) => {
+              if (!(error instanceof DaemonHttpError) || error.status !== 404) {
+                throw error;
+              }
+              resolvedRoute = 'primary';
+              return load('primary');
+            });
       return withActionTimeout(
-        client.extensionOperationStatus(operationId),
+        operation.then((result) => {
+          if (resolvedRoute) {
+            extensionOperationRoutes.set(operationId, resolvedRoute);
+          }
+          return result;
+        }),
         'Load extension operation timed out',
+        timeoutMs,
       );
     },
 
@@ -833,77 +888,144 @@ export function createDaemonWorkspaceActions({
         getClient,
         'Load active extension operations failed',
       );
+      const workspaceClient = client.workspaceByCwd(
+        requireWorkspaceCwd(getWorkspaceCwd),
+      );
       return withActionTimeout(
-        client.activeExtensionOperations(),
+        Promise.all([
+          client.activeWorkspaceConfigExtensionOperations(),
+          workspaceClient.activeWorkspaceConfigExtensionOperations(),
+        ]).then(([primary, workspace]) => {
+          for (const operation of primary.operations) {
+            extensionOperationRoutes.set(operation.operationId, 'primary');
+          }
+          for (const operation of workspace.operations) {
+            extensionOperationRoutes.set(operation.operationId, 'workspace');
+          }
+          return {
+            v: 1 as const,
+            operations: [...primary.operations, ...workspace.operations],
+          };
+        }),
         'Load active extension operations timed out',
       );
     },
 
-    async respondToExtensionInteraction(
-      operationId,
-      interactionId,
-      response,
-      clientId,
-    ) {
+    async respondToExtensionInteraction(operationId, interactionId, response) {
       const client = requireClient(
         getClient,
         'Respond to extension interaction failed',
       );
+      const workspaceClient = client.workspaceByCwd(
+        requireWorkspaceCwd(getWorkspaceCwd),
+      );
+      const route = extensionOperationRoutes.get(operationId) ?? 'primary';
       return withActionTimeout(
-        client.respondToExtensionInteraction(
-          operationId,
-          interactionId,
-          response,
-          clientId,
-        ),
+        route === 'workspace'
+          ? workspaceClient.respondToWorkspaceConfigExtensionInteraction(
+              operationId,
+              interactionId,
+              response,
+            )
+          : client.respondToWorkspaceConfigExtensionInteraction(
+              operationId,
+              interactionId,
+              response,
+            ),
         'Respond to extension interaction timed out',
       );
     },
 
-    async checkExtensionUpdates(clientId) {
+    async checkExtensionUpdates() {
       const client = requireClient(getClient, 'Check extension updates failed');
       return withActionTimeout(
-        client.checkExtensionUpdates(clientId),
+        client.checkWorkspaceConfigExtensionUpdates(),
         'Check extension updates timed out',
       );
     },
 
-    async refreshExtensions(clientId) {
-      const client = requireClient(getClient, 'Refresh extensions failed');
+    async refreshExtensions() {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Refresh extensions failed',
+      );
       return withActionTimeout(
-        client.refreshExtensions(clientId),
+        ensureRuntimeCapability(client, 'extensions'),
         'Refresh extensions timed out',
+        WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS,
       );
     },
 
-    async enableExtension(name, params, clientId) {
-      const client = requireClient(getClient, 'Enable extension failed');
+    async setExtensionActivation(extensionId, params) {
+      const client = requireClient(
+        getClient,
+        'Set extension activation failed',
+      );
+      const operation =
+        params.scope === 'user'
+          ? client.setExtensionDefaultActivation(extensionId, params.state)
+          : params.state === 'inherit'
+            ? client
+                .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+                .clearExtensionActivation(extensionId)
+            : client
+                .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+                .setExtensionActivation(extensionId, params.state);
       return withActionTimeout(
-        client.enableExtension(name, params, clientId),
+        operation.then((result) => rememberExtensionOperation(result, 'v2')),
+        'Set extension activation timed out',
+      );
+    },
+
+    async enableExtension(name, params) {
+      const client = requireClient(getClient, 'Enable extension failed');
+      const route: ExtensionOperationRoute =
+        params.scope === 'user' ? 'primary' : 'workspace';
+      const operation =
+        route === 'primary'
+          ? client.enableWorkspaceConfigExtension(name, { scope: 'user' })
+          : client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .enableWorkspaceConfigExtension(name, { scope: 'workspace' });
+      return withActionTimeout(
+        operation.then((result) => rememberExtensionOperation(result, route)),
         'Enable extension timed out',
       );
     },
 
-    async disableExtension(name, params, clientId) {
+    async disableExtension(name, params) {
       const client = requireClient(getClient, 'Disable extension failed');
+      const route: ExtensionOperationRoute =
+        params.scope === 'user' ? 'primary' : 'workspace';
+      const operation =
+        route === 'primary'
+          ? client.disableWorkspaceConfigExtension(name, { scope: 'user' })
+          : client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .disableWorkspaceConfigExtension(name, { scope: 'workspace' });
       return withActionTimeout(
-        client.disableExtension(name, params, clientId),
+        operation.then((result) => rememberExtensionOperation(result, route)),
         'Disable extension timed out',
       );
     },
 
-    async updateExtension(name, clientId) {
+    async updateExtension(name) {
       const client = requireClient(getClient, 'Update extension failed');
       return withActionTimeout(
-        client.updateExtension(name, clientId),
+        client
+          .updateWorkspaceConfigExtension(name)
+          .then((result) => rememberExtensionOperation(result, 'primary')),
         'Update extension timed out',
       );
     },
 
-    async uninstallExtension(name, clientId) {
+    async uninstallExtension(name) {
       const client = requireClient(getClient, 'Uninstall extension failed');
       return withActionTimeout(
-        client.uninstallExtension(name, clientId),
+        client
+          .uninstallWorkspaceConfigExtension(name)
+          .then((result) => rememberExtensionOperation(result, 'primary')),
         'Uninstall extension timed out',
       );
     },
