@@ -1266,12 +1266,18 @@ export function convertOpenAIResponseToGemini(
       0;
     const providerReasoningTokens =
       usage.completion_tokens_details?.reasoning_tokens;
-    const estimatedThinkingTokens = estimateTextTokens(reasoningText ?? '');
-    const thinkingTokens = providerReasoningTokens ?? estimatedThinkingTokens;
-    if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
-      debugLogger.debug(
-        `convertOpenAIResponseToGemini: reasoning_tokens absent; estimated ${estimatedThinkingTokens} from text`,
-      );
+    let thinkingTokens = providerReasoningTokens;
+    if (thinkingTokens == null) {
+      const estimatedThinkingTokens = estimateTextTokens(reasoningText ?? '');
+      thinkingTokens =
+        completionTokens > 0
+          ? Math.min(estimatedThinkingTokens, completionTokens)
+          : estimatedThinkingTokens;
+      if (thinkingTokens > 0) {
+        debugLogger.debug(
+          `convertOpenAIResponseToGemini: reasoning_tokens absent; estimated ${thinkingTokens} from text`,
+        );
+      }
     }
 
     // If we only have total tokens but no breakdown, estimate the split
@@ -1739,10 +1745,14 @@ export function convertOpenAIChunkToGemini(
       (requestContext.reasoningDeltaState?.emittedTokenUnits ?? 0) /
         TOKEN_ESTIMATE_UNITS_PER_TOKEN,
     );
-    const thinkingTokens = providerReasoningTokens ?? estimatedThinkingTokens;
+    const thinkingTokens =
+      providerReasoningTokens ??
+      (completionTokens > 0
+        ? Math.min(estimatedThinkingTokens, completionTokens)
+        : estimatedThinkingTokens);
     if (providerReasoningTokens == null && estimatedThinkingTokens > 0) {
       debugLogger.debug(
-        `convertOpenAIChunkToGemini: reasoning_tokens absent; estimated ${estimatedThinkingTokens} from streamed text`,
+        `convertOpenAIChunkToGemini: reasoning_tokens absent; estimated ${thinkingTokens} from streamed text`,
       );
     }
     // Support both formats: prompt_tokens_details.cached_tokens (OpenAI standard)
