@@ -23,7 +23,7 @@ import {
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
   writeWorktreeSession,
-  restoreWorktreeContext,
+  readWorktreeSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -1493,6 +1493,13 @@ export function registerSessionRoutes(
         return;
       }
       try {
+        // Pre-read the worktree sidecar BEFORE loadSession/resumeSession.
+        // The ACP layer's #restoreWorktreeOnResume may clear the sidecar
+        // during load (dead worktree, containment failure), so we capture
+        // the metadata here while it still exists.
+        const preReadSidecar = await readWorktreeSession(
+          new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
+        ).catch(() => null);
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
@@ -1552,44 +1559,33 @@ export function registerSessionRoutes(
           }
           return;
         }
-        // Restore worktree isolation for sessions that were created in a
-        // worktree. After daemon restart the bridge entry has no worktree
-        // metadata and the session cwd is the main workspace root. Use the
-        // shared restoreWorktreeContext helper which validates path
-        // containment (path.resolve + path.sep, cross-platform), checks
-        // directory liveness, and clears stale sidecars.
-        if (!session.worktree) {
-          const svc = new SessionService(workspaceCwd);
-          const { session: sidecar } = await restoreWorktreeContext(
-            svc.getWorktreeSessionPath(sessionId),
-            (e) =>
-              daemonLog?.warn('worktree sidecar restore', {
-                sessionId,
-                error: String(e),
-              }),
-          );
-          if (sidecar) {
-            const wt = {
-              slug: sidecar.slug,
-              path: sidecar.worktreePath,
-              branch: sidecar.worktreeBranch,
-            };
-            try {
-              await runtime.bridge.changeSessionCwd(sessionId, {
-                path: wt.path,
-              });
-              runtime.bridge.setSessionWorktree(sessionId, wt);
-              Object.assign(session, { worktree: wt });
-            } catch (restoreErr) {
-              daemonLog?.warn('worktree restore failed on load/resume', {
-                sessionId,
-                worktreePath: wt.path,
-                error:
-                  restoreErr instanceof Error
-                    ? restoreErr.message
-                    : String(restoreErr),
-              });
-            }
+        // Restore worktree isolation using the sidecar pre-read before
+        // loadSession/resumeSession (the ACP layer's
+        // #restoreWorktreeOnResume may have cleared it during load).
+        // The ACP layer already handles containment validation, liveness
+        // checking, stale-sidecar cleanup, and the pendingWorktreeNotice.
+        // Here we only relocate the cwd and populate the bridge entry.
+        if (!session.worktree && preReadSidecar) {
+          const wt = {
+            slug: preReadSidecar.slug,
+            path: preReadSidecar.worktreePath,
+            branch: preReadSidecar.worktreeBranch,
+          };
+          try {
+            await runtime.bridge.changeSessionCwd(sessionId, {
+              path: wt.path,
+            });
+            runtime.bridge.setSessionWorktree(sessionId, wt);
+            Object.assign(session, { worktree: wt });
+          } catch (restoreErr) {
+            daemonLog?.warn('worktree restore failed on load/resume', {
+              sessionId,
+              worktreePath: wt.path,
+              error:
+                restoreErr instanceof Error
+                  ? restoreErr.message
+                  : String(restoreErr),
+            });
           }
         }
         res.status(200).json(session);

@@ -6,7 +6,6 @@
 
 import { Storage } from '../config/storage.js';
 import { getProjectHash } from '../utils/paths.js';
-import { readWorktreeSession } from './worktreeSessionService.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -392,18 +391,16 @@ export class SessionService {
       return true;
     }
 
-    // Worktree sessions record cwd as the worktree path (different project
-    // hash). Check the sidecar's originalCwd to recover membership.
-    // Try both active and archived paths since archiveSessions moves the
-    // sidecar file.
-    for (const state of ['active', 'archived'] as const) {
-      const sidecar = await readWorktreeSession(
-        this.getWorktreeSessionPathForArchiveState(sessionId, state),
-      ).catch(() => null);
-      if (
-        sidecar != null &&
-        getProjectHash(sidecar.originalCwd) === this.projectHash
-      ) {
+    // Worktree sessions record cwd as the worktree path
+    // (<repoRoot>/.qwen/worktrees/<slug>), which has a different project
+    // hash. Infer the repo root from the path and check its hash. This
+    // is durable — it doesn't depend on the sidecar file, which is
+    // transient and cleared when the worktree is removed.
+    const worktreesMarker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
+    const markerIdx = recordCwd.indexOf(worktreesMarker);
+    if (markerIdx > 0) {
+      const repoRoot = recordCwd.substring(0, markerIdx);
+      if (getProjectHash(repoRoot) === this.projectHash) {
         return true;
       }
     }
