@@ -1383,6 +1383,50 @@ describe('runQwenServe initializeTimeoutMs validation', () => {
       }
     }
   });
+
+  it('propagates a valid initializeTimeoutMs to the bridge options', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      const handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          maxSessions: 1,
+          initializeTimeoutMs: 30_000,
+          serveWebShell: false,
+        },
+        { resolveOnListen: true },
+      );
+      try {
+        await handle.runtimeReady;
+        expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+          initializeTimeoutMs: 30_000,
+        });
+      } finally {
+        await handle.close();
+      }
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
 });
 
 // Long-lived self-signed cert (CN=localhost, SAN IP:127.0.0.1) used only
