@@ -27,16 +27,36 @@ export function registerWorkspaceGitRoutes(
     bridge: AcpSessionBridge;
     gitState: WorkspaceGitState;
     sendBridgeError: SendBridgeError;
+    isWorkspaceTrusted?: () => boolean;
+    captureGenerationAssertion?: () => (() => void) | undefined;
   },
 ): void {
   app.get('/workspace/git', async (req, res) => {
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    try {
+      assertGenerationOpen?.();
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route: 'GET /workspace/git' });
+      return;
+    }
+    if (deps.isWorkspaceTrusted?.() === false) {
+      res.status(403).json({
+        error: 'Workspace is not trusted.',
+        code: 'untrusted_workspace',
+      });
+      return;
+    }
     try {
       const wait = req.query['wait'] === '1';
-      res.status(200).json(
-        await deps.gitState.getStatus(deps.boundWorkspace, deps.bridge, {
+      const status = await deps.gitState.getStatus(
+        deps.boundWorkspace,
+        deps.bridge,
+        {
           wait,
-        }),
+        },
       );
+      assertGenerationOpen?.();
+      res.status(200).json(status);
     } catch (err) {
       deps.sendBridgeError(res, err, { route: 'GET /workspace/git' });
     }
@@ -65,6 +85,12 @@ export function registerWorkspaceQualifiedGitRoutes(
     const runtime = resolveTrustedRuntime(deps.workspaceRegistry, req, res);
     if (!runtime) return;
     const route = 'GET /workspaces/:workspace/git';
+    try {
+      runtime.generationGuard?.assertOpen();
+    } catch (err) {
+      deps.sendBridgeError(res, err, { route });
+      return;
+    }
     // Optional ?cwd= override for worktree sessions whose working directory
     // differs from the workspace root. Canonicalize both paths with realpath
     // to prevent symlink escape, then validate containment.
@@ -88,6 +114,7 @@ export function registerWorkspaceQualifiedGitRoutes(
         // creating a watcher entry in WorkspaceGitState (which would leak
         // one fs watcher per worktree path, never disposed).
         const status = await getGitWorkingTreeStatus(gitCwd).catch(() => null);
+        runtime.generationGuard?.assertOpen();
         res.status(200).json(
           status
             ? {
@@ -110,11 +137,11 @@ export function registerWorkspaceQualifiedGitRoutes(
         );
       } else {
         const wait = req.query['wait'] === '1';
-        res
-          .status(200)
-          .json(
-            await deps.gitState.getStatus(gitCwd, runtime.bridge, { wait }),
-          );
+        const status = await deps.gitState.getStatus(gitCwd, runtime.bridge, {
+          wait,
+        });
+        runtime.generationGuard?.assertOpen();
+        res.status(200).json(status);
       }
     } catch (err) {
       deps.sendBridgeError(res, err, { route });

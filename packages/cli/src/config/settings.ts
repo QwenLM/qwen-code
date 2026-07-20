@@ -501,6 +501,7 @@ export class LoadedSettings {
       value: unknown;
     }>,
     onScopeCommitted?: (scope: SettingScope) => void,
+    assertCanCommit?: () => void,
   ): void {
     const scopes = new Set<SettingScope>();
     for (const write of writes) {
@@ -518,6 +519,7 @@ export class LoadedSettings {
     for (let i = 0; i < scopeList.length; i++) {
       const scope = scopeList[i]!;
       try {
+        assertCanCommit?.();
         saveSettings(this.forScope(scope), undefined, undefined, {
           throwOnWriteFailure: true,
         });
@@ -661,6 +663,7 @@ export const CORRUPTED_SUFFIX = '.corrupted';
 export interface LoadSettingsOptions {
   consumeCorruptionEnvVars?: boolean;
   skipLoadEnvironment?: boolean;
+  skipWorkspaceSettings?: boolean;
 }
 
 export function loadSettings(
@@ -916,7 +919,8 @@ export function loadSettings(
     settings: {} as Settings,
     rawJson: undefined,
   };
-  const workspaceSettingsActive = realWorkspaceDir !== realHomeDir;
+  const workspaceSettingsActive =
+    !opts.skipWorkspaceSettings && realWorkspaceDir !== realHomeDir;
   if (workspaceSettingsActive) {
     workspaceResult = loadAndMigrate(
       workspaceSettingsPath,

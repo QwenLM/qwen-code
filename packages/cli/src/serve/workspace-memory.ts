@@ -27,6 +27,7 @@ import {
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
 } from './workspace-route-runtime.js';
 import type { WorkspaceRegistry } from './workspace-registry.js';
 
@@ -80,6 +81,35 @@ export interface WorkspaceMemoryRouteDeps {
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   /** `safeBody` from `server.ts` — strips prototype-pollution keys. */
   safeBody: (req: Request) => Record<string, unknown>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
+}
+
+function requireTrustedWorkspace(
+  deps: WorkspaceMemoryRouteDeps,
+  res: Response,
+): boolean {
+  if (deps.isWorkspaceTrusted?.() !== false) return true;
+  res.status(403).json({
+    error: 'Workspace is not trusted.',
+    code: 'untrusted_workspace',
+  });
+  return false;
+}
+
+function captureOpenGeneration(
+  deps: WorkspaceMemoryRouteDeps,
+  res: Response,
+): (() => void) | null {
+  const assertGenerationOpen =
+    deps.captureGenerationAssertion?.() ?? (() => {});
+  try {
+    assertGenerationOpen();
+    return assertGenerationOpen;
+  } catch (error) {
+    sendGenerationClosedError(res, error);
+    return null;
+  }
 }
 
 const MAX_MEMORY_CONTENT_BYTES = 1024 * 1024;
@@ -94,6 +124,19 @@ function sendWorkspaceMemoryWriteError(
   },
 ): void {
   const { route, scope, mode } = options;
+  if (
+    err &&
+    typeof err === 'object' &&
+    'code' in err &&
+    err.code === 'workspace_generation_closed'
+  ) {
+    res.set('Retry-After', '1');
+    res.status(503).json({
+      error: 'Workspace runtime is not active.',
+      code: 'workspace_runtime_unavailable',
+    });
+    return;
+  }
   if (err instanceof WorkspaceMemoryWriteTimeoutError) {
     writeStderrLine(
       `qwen serve: ${route} timeout — file lock at ` +
@@ -162,11 +205,16 @@ export function mountWorkspaceMemoryRoutes(
   deps: WorkspaceMemoryRouteDeps,
 ): void {
   app.get('/workspace/memory', async (_req, res) => {
+    const assertGenerationOpen = captureOpenGeneration(deps, res);
+    if (!assertGenerationOpen) return;
+    if (!requireTrustedWorkspace(deps, res)) return;
     try {
       const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
       const status = await collectStatus(deps.boundWorkspace);
+      assertGenerationOpen();
       res.status(200).json(status);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       // Per-file stat failures are caught inside
       // `collectWorkspaceMemoryStatus` and surfaced in-band via
       // `errors[]` with `errorKind: 'stat_failed'`. The outer catch
@@ -192,6 +240,9 @@ export function mountWorkspaceMemoryRoutes(
     '/workspace/memory',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      const assertGenerationOpen = captureOpenGeneration(deps, res);
+      if (!assertGenerationOpen) return;
+      if (!requireTrustedWorkspace(deps, res)) return;
       const body = deps.safeBody(req);
 
       const scope = body['scope'];
@@ -266,7 +317,9 @@ export function mountWorkspaceMemoryRoutes(
           mode,
           content,
           projectRoot: deps.boundWorkspace,
+          assertCanCommit: assertGenerationOpen,
         });
+        assertGenerationOpen?.();
         const responseBody = {
           ok: true as const,
           filePath: result.filePath,
@@ -318,8 +371,11 @@ export function mountWorkspaceQualifiedMemoryRoutes(
     if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
     try {
       const collectStatus = deps.collectStatus ?? collectWorkspaceMemoryStatus;
-      res.status(200).json(await collectStatus(runtime.workspaceCwd));
+      const status = await collectStatus(runtime.workspaceCwd);
+      runtime.generationGuard?.assertOpen();
+      res.status(200).json(status);
     } catch (err) {
+      if (sendGenerationClosedError(res, err)) return;
       writeStderrLine(
         `qwen serve: GET /workspaces/:workspace/memory failed: ${
           err instanceof Error ? (err.stack ?? err.message) : String(err)
@@ -342,6 +398,8 @@ export function mountWorkspaceQualifiedMemoryRoutes(
         res,
       );
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const assertGenerationOpen = () => runtime.generationGuard?.assertOpen();
+      assertGenerationOpen();
       const body = deps.safeBody(req);
       if (body['scope'] !== 'workspace') {
         res.status(400).json({
@@ -400,7 +458,9 @@ export function mountWorkspaceQualifiedMemoryRoutes(
           mode,
           content,
           projectRoot: runtime.workspaceCwd,
+          assertCanCommit: assertGenerationOpen,
         });
+        assertGenerationOpen();
         if (result.changed) {
           runtime.bridge.publishWorkspaceEvent({
             type: 'memory_changed',

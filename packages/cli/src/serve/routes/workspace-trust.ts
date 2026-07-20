@@ -9,9 +9,21 @@ import { FatalConfigError } from '@qwen-code/qwen-code-core';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import { resolveWorkspaceRuntimeFromParam } from '../workspace-route-runtime.js';
-import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  resolveWorkspaceEntryFromParam,
+  resolveWorkspaceRuntimeFromParam,
+  sendGenerationClosedError,
+} from '../workspace-route-runtime.js';
+import type {
+  WorkspaceEntry,
+  WorkspaceRegistry,
+} from '../workspace-registry.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
+import {
+  evaluateDaemonWorkspaceTrust,
+  readDaemonTrustPolicySnapshot,
+  type DaemonTrustPolicySnapshot,
+} from '../../config/daemon-trust-policy.js';
 
 export interface WorkspaceTrustRouteDeps {
   boundWorkspace: string;
@@ -22,9 +34,65 @@ export interface WorkspaceTrustRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  workspaceRegistry?: WorkspaceRegistry;
+  workspaceTrustHotReloadAvailable?: boolean;
+}
+
+function unavailableRuntime(res: Response): void {
+  res.set('Retry-After', '1');
+  res.status(503).json({
+    error: 'Workspace runtime is not active',
+    code: 'workspace_runtime_unavailable',
+  });
+}
+
+function trustStatusV2(
+  entry: WorkspaceEntry,
+  snapshot: DaemonTrustPolicySnapshot,
+) {
+  const decision = evaluateDaemonWorkspaceTrust(snapshot, entry.workspaceCwd);
+  const current = entry.state === 'active' ? entry.current : undefined;
+  const reconciliationState =
+    entry.state === 'transitioning' ||
+    entry.configuredRevision !== snapshot.revision
+      ? 'applying'
+      : entry.state === 'blocked' ||
+          entry.applyError !== undefined ||
+          decision.state === 'error'
+        ? 'failed'
+        : 'stable';
+  const errorCode =
+    decision.error?.code ??
+    (entry.applyError !== undefined ? 'runtime_rebuild_failed' : undefined);
+  return {
+    v: 2 as const,
+    workspaceCwd: entry.workspaceCwd,
+    folderTrustEnabled: snapshot.folderTrustEnabled,
+    configured: {
+      state: decision.state,
+      source: decision.source,
+      explicitTrustLevel: decision.explicitTrustLevel,
+    },
+    effective: current
+      ? {
+          state: current.runtime.trusted
+            ? ('trusted' as const)
+            : ('untrusted' as const),
+          trusted: current.runtime.trusted,
+        }
+      : { state: 'unavailable' as const, trusted: null },
+    reconciliation: {
+      state: reconciliationState,
+      revision: snapshot.revision,
+      appliedRevision: entry.appliedRevision,
+      ...(errorCode ? { error: { code: errorCode } } : {}),
+    },
+    requiresDaemonRestartForChanges: false as const,
+  };
 }
 
 function sendTrustError(res: Response, route: string, err: unknown): void {
+  if (sendGenerationClosedError(res, err)) return;
   writeStderrLine(
     `qwen serve: ${route} error: ${
       err instanceof Error ? err.message : String(err)
@@ -53,10 +121,27 @@ export function registerWorkspaceTrustRoutes(
     mutate,
     safeBody,
     parseAndValidateClientId,
+    workspaceRegistry,
+    workspaceTrustHotReloadAvailable,
   } = deps;
 
-  app.get('/workspace/trust', async (_req: Request, res: Response) => {
+  app.get('/workspace/trust', async (req: Request, res: Response) => {
     try {
+      if (
+        req.query['statusVersion'] === '2' &&
+        workspaceRegistry &&
+        workspaceTrustHotReloadAvailable === true
+      ) {
+        res
+          .status(200)
+          .json(
+            trustStatusV2(
+              workspaceRegistry.primaryEntry,
+              await readDaemonTrustPolicySnapshot(),
+            ),
+          );
+        return;
+      }
       const status = await workspace.getWorkspaceTrustStatus({
         route: 'GET /workspace/trust',
         workspaceCwd: boundWorkspace,
@@ -71,6 +156,13 @@ export function registerWorkspaceTrustRoutes(
     '/workspace/trust/request',
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
+      if (
+        workspaceRegistry &&
+        workspaceRegistry.primaryEntry.state !== 'active'
+      ) {
+        unavailableRuntime(res);
+        return;
+      }
       const body = safeBody(req);
       const desiredState = body['desiredState'];
       if (desiredState !== 'trusted' && desiredState !== 'untrusted') {
@@ -127,11 +219,27 @@ export function registerWorkspaceQualifiedTrustRoutes(
   app: Application,
   deps: Pick<WorkspaceTrustRouteDeps, 'mutate' | 'safeBody'> & {
     workspaceRegistry: WorkspaceRegistry;
+    workspaceTrustHotReloadAvailable?: boolean;
   },
 ): void {
   const { workspaceRegistry, mutate, safeBody } = deps;
 
   app.get('/workspaces/:workspace/trust', async (req, res) => {
+    if (
+      req.query['statusVersion'] === '2' &&
+      deps.workspaceTrustHotReloadAvailable === true
+    ) {
+      const entry = resolveWorkspaceEntryFromParam(workspaceRegistry, req, res);
+      if (!entry) return;
+      try {
+        res
+          .status(200)
+          .json(trustStatusV2(entry, await readDaemonTrustPolicySnapshot()));
+      } catch (err) {
+        sendTrustError(res, 'GET /workspaces/:workspace/trust', err);
+      }
+      return;
+    }
     const runtime = resolveWorkspaceRuntimeFromParam(
       workspaceRegistry,
       req,
@@ -154,6 +262,12 @@ export function registerWorkspaceQualifiedTrustRoutes(
     '/workspaces/:workspace/trust/request',
     mutate({ strict: true }),
     async (req, res) => {
+      const entry = resolveWorkspaceEntryFromParam(workspaceRegistry, req, res);
+      if (!entry) return;
+      if (entry.state !== 'active' || !entry.current) {
+        unavailableRuntime(res);
+        return;
+      }
       const runtime = resolveWorkspaceRuntimeFromParam(
         workspaceRegistry,
         req,

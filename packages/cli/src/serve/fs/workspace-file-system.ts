@@ -28,6 +28,7 @@ import {
   type WriteTextFileOptions,
 } from '@qwen-code/qwen-code-core';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type { WorkspaceGenerationGuard } from '../workspace-registry.js';
 import {
   type AuditContext,
   type AuditPublisher,
@@ -43,7 +44,6 @@ import {
 import {
   MAX_READ_BYTES,
   assertTrustedForIntent,
-  detectBinary,
   enforceReadSize,
   enforceWriteSize,
   shouldIgnore,
@@ -271,6 +271,8 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
   customIgnoreFiles?: string[];
   /** Optional shared write-lock registry for multiple daemon entrypoints. */
   pathLocks?: PathMutexRegistry;
+  /** Runtime-generation guard checked at mutation commit points. */
+  generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
 }
 
 /**
@@ -319,6 +321,7 @@ export function createWorkspaceFileSystemFactory(
 
   return {
     assertCanWrite() {
+      deps.generationGuard?.assertOpen();
       assertTrustedForIntent(deps.trusted, 'write');
     },
     forRequest(ctx) {
@@ -330,6 +333,7 @@ export function createWorkspaceFileSystemFactory(
         ctx,
         lowFs,
         pathLocks,
+        generationGuard: deps.generationGuard,
       });
     },
   };
@@ -348,6 +352,7 @@ interface ImplDeps {
   ctx: RequestContext;
   lowFs: StandardFileSystemService;
   pathLocks: PathMutexRegistry;
+  generationGuard?: Pick<WorkspaceGenerationGuard, 'assertOpen'>;
 }
 
 function assertNoNestedWorkspaces(workspaces: readonly string[]): void {
@@ -395,11 +400,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
 
   async resolve(input: string, intent: Intent): Promise<ResolvedPath> {
     try {
-      return await resolveWithinWorkspace(
+      this.deps.generationGuard?.assertOpen();
+      const resolved = await resolveWithinWorkspace(
         input,
         this.deps.workspaces.map((workspace) => workspace.path),
         intent,
       );
+      this.deps.generationGuard?.assertOpen();
+      return resolved;
     } catch (err) {
       throw this.recordAndWrap(err, intent, input);
     }
@@ -408,8 +416,10 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   async stat(p: ResolvedPath): Promise<FsStat> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'stat');
       const st = await fsp.lstat(p as string);
+      this.deps.generationGuard?.assertOpen();
       const out: FsStat = {
         kind: kindFromStatLike(st),
         sizeBytes: st.size,
@@ -433,6 +443,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   ): Promise<{ content: string; meta: ReadMeta }> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'read');
       // Reject `opts.line` values that the docstring forbids
       // (positive integer required). Without this guard `Infinity`
@@ -461,6 +472,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         );
       }
       const snapshot = await readTextSnapshotFromResolvedFile(p, opts);
+      this.deps.generationGuard?.assertOpen();
       const ignoreVerdict = this.ignoreVerdict(p, 'file');
       const meta = snapshot.meta;
       if (ignoreVerdict.ignored) meta.matchedIgnore = ignoreVerdict.category;
@@ -492,6 +504,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   ): Promise<ReadBytesOutcome> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'read');
       const offset = opts.offset ?? 0;
       const maxBytes = opts.maxBytes ?? MAX_READ_BYTES;
@@ -549,6 +562,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         await fh.close();
       }
       await assertInodeStableAfterRead(p as string, st.ino);
+      this.deps.generationGuard?.assertOpen();
       const fullWindow = offset === 0 && buf.length === st.size;
       const out: ReadBytesOutcome = {
         buffer: buf,
@@ -574,6 +588,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   async list(p: ResolvedPath, opts: ListOptions = {}): Promise<FsEntry[]> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'list');
       // Reject malformed caps the same way readText() guards `limit`/`line`:
       // an unvalidated Infinity/NaN/float/0/negative makes the
@@ -590,6 +605,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const entries: FsEntry[] = [];
       const dir = await fsp.opendir(p as string);
       for await (const d of dir) {
+        this.deps.generationGuard?.assertOpen();
         // `path.join(p, d.name)` is a shallow extension of an
         // already-canonical workspace path. Symlinked dirents are
         // tagged as `kind: 'symlink'` rather than auto-followed —
@@ -611,6 +627,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           break;
         }
       }
+      this.deps.generationGuard?.assertOpen();
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'list',
         absolute: p,
@@ -628,6 +645,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   async glob(pattern: string, opts: GlobOptions = {}): Promise<ResolvedPath[]> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'glob');
       // Reject patterns up-front before delegating to `glob` — the
       // per-hit filter below catches escapes after the walk, but
@@ -718,6 +736,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const globErrors: unknown[] = [];
       let successfulGlobRoots = 0;
       for (const searchRoot of searchRoots) {
+        this.deps.generationGuard?.assertOpen();
         if (out.length >= max) break;
         let matches: string[];
         try {
@@ -750,6 +769,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         }
         successfulGlobRoots += 1;
         for (const hit of matches) {
+          this.deps.generationGuard?.assertOpen();
           if (out.length >= max) break;
           const absolute = path.resolve(hit);
           // Per-hit boundary check defends against a glob that
@@ -838,6 +858,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           pattern,
         });
       }
+      this.deps.generationGuard?.assertOpen();
       // `absolute: primaryWorkspace` (rather than `cwd`) ties every
       // glob audit row's `pathHash` to the workspace itself.
       // The literal `pattern` field is the per-call signal;
@@ -863,6 +884,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   ): Promise<WriteTextAtomicOutcome> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'write');
       validateWriteTextAtomicOptions(opts);
       const decodedSizeBytes = Buffer.byteLength(content, 'utf-8');
@@ -877,6 +899,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           if (opts.mode === 'create') {
             await assertCreateTargetAbsent(p as string);
           }
+          this.deps.generationGuard?.assertOpen();
           const meta = mergeWriteMeta(existingMeta, opts);
           const result = await atomicWriteTextResolvedFile({
             target: p,
@@ -884,6 +907,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: opts.mode,
             expectedHash: opts.expectedHash,
             meta,
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
           if (verdict.ignored) meta.matchedIgnore = verdict.category;
@@ -917,6 +941,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   ): Promise<WriteTextAtomicOutcome> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'write');
       const decodedSizeBytes = Buffer.byteLength(content, 'utf-8');
       enforceWriteSize(decodedSizeBytes);
@@ -978,12 +1003,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
               throw err;
             }
           }
+          this.deps.generationGuard?.assertOpen();
           const meta = mergeWriteMeta(existingMeta, opts);
           const result = await atomicWriteTextResolvedFile({
             target: p,
             content,
             mode: 'overwrite',
             meta,
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
           if (verdict.ignored) meta.matchedIgnore = verdict.category;
@@ -1017,6 +1044,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   ): Promise<void> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'write');
       // `Buffer.byteLength` returns the UTF-8 byte count without
       // allocating a Buffer. The earlier `Buffer.from(content,
@@ -1032,6 +1060,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // fine (ahead-of-create flow); an actual symlink is
       // rejected.
       await assertNotSymlinkBeforeWrite(p as string);
+      this.deps.generationGuard?.assertOpen();
       await this.deps.lowFs.writeTextFile({
         path: p as string,
         content,
@@ -1058,6 +1087,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   ): Promise<WriteOutcome> {
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'edit');
       if (!isContentHash(opts.expectedHash)) {
         throw new FsError(
@@ -1109,6 +1139,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             newText +
             current.slice(idx + oldText.length);
           enforceWriteSize(Buffer.byteLength(next, 'utf-8'));
+          this.deps.generationGuard?.assertOpen();
           const meta = mergeWriteMeta(snapshot.meta, {});
           const result = await atomicWriteTextResolvedFile({
             target: p,
@@ -1116,6 +1147,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: 'replace',
             expectedHash: opts.expectedHash,
             meta,
+            assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
           });
           const verdict = this.ignoreVerdict(p, 'file');
           if (verdict.ignored) meta.matchedIgnore = verdict.category;
@@ -1154,37 +1186,8 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
     }
     const start = performance.now();
     try {
+      this.deps.generationGuard?.assertOpen();
       assertTrustedForIntent(this.deps.trusted, 'edit');
-      // Mirror `readText`'s pre-stat OOM gate: `fsp.readFile` would
-      // otherwise slurp the whole target into memory before
-      // `enforceWriteSize` got a chance to refuse. A multi-GB file
-      // already inside the workspace can OOM the daemon even though
-      // the *edited output* would later fail the size check.
-      // Reject above `MAX_READ_BYTES` outright with a typed
-      // `file_too_large`; binary content is also refused since
-      // `current.indexOf(oldText)` over arbitrary bytes is meaningless.
-      const st = await fsp.stat(p as string);
-      if (st.size > MAX_READ_BYTES) {
-        throw new FsError(
-          'file_too_large',
-          `file of ${st.size} bytes exceeds edit cap of ${MAX_READ_BYTES} bytes`,
-          {
-            hint: 'split large edits into bounded readBytes/writeText sequences',
-          },
-        );
-      }
-      if (await detectBinary(p)) {
-        throw new FsError('binary_file', `cannot edit binary file: ${p}`, {
-          hint: 'edit() works on text files only',
-        });
-      }
-      // Reject empty `oldText` BEFORE reading. JavaScript's
-      // `''.indexOf('')` returns `0`, so without this guard
-      // `current.slice(0, 0) + newText + current.slice(0)` would
-      // silently prepend `newText` to the entire file and emit a
-      // success audit event — a textbook silent data corruption
-      // bug. Routes that pass user-supplied `oldText`
-      // through verbatim must not be able to trigger it.
       if (oldText.length === 0) {
         throw new FsError(
           'parse_error',
@@ -1194,72 +1197,39 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           },
         );
       }
-      // Use `lowFs.readTextFile` (not raw `fsp.readFile(p,
-      // 'utf-8')`) so BOM / encoding / CRLF handling matches what
-      // `readText` does and what `writeTextFile` will preserve on
-      // write-back. A direct utf-8 read on a UTF-8-BOM file would
-      // include the U+FEFF BOM codepoint in `current`,
-      // breaking `oldText` matching even when the user passed
-      // the exact string from a previous read; on iconv-supported
-      // codepages (GBK, Big5, Shift_JIS) it would mojibake the
-      // content and round-trip-corrupt the file on write-back.
-      const readResult = await this.deps.lowFs.readTextFile({
-        path: p as string,
-        limit: Number.POSITIVE_INFINITY,
-        line: 0,
-      });
-      const current = readResult.content;
-      // Post-read TOCTOU guard — catches the swap-during-read
-      // attack where `p` is replaced with a symlink between
-      // `fsp.stat` above and the read here.
-      await assertInodeStableAfterRead(p as string, st.ino);
-      // Single replacement to preserve atomic write-once semantics.
-      const idx = current.indexOf(oldText);
-      if (idx === -1) {
-        // Include a snippet of `oldText` in the hint so an operator
-        // staring at "edit failed" at 3 AM can tell whether the
-        // mismatch is whitespace, a stale file, or a wrong target
-        // path. Truncate to keep the hint readable on a one-line
-        // log; the full `oldText` is always reproducible from the
-        // request body.
-        const snippet =
-          oldText.length > 80 ? oldText.slice(0, 80) + '…' : oldText;
-        throw new FsError('parse_error', `oldText not found in ${p}`, {
-          hint: `edit() expects oldText to appear verbatim; searched for: ${JSON.stringify(snippet)}`,
+      return await this.deps.pathLocks.runExclusive(p as string, async () => {
+        const snapshot = await readTextSnapshotFromResolvedFile(p);
+        const current = snapshot.content;
+        const idx = current.indexOf(oldText);
+        if (idx === -1) {
+          const snippet =
+            oldText.length > 80 ? oldText.slice(0, 80) + '…' : oldText;
+          throw new FsError('parse_error', `oldText not found in ${p}`, {
+            hint: `edit() expects oldText to appear verbatim; searched for: ${JSON.stringify(snippet)}`,
+          });
+        }
+        const next =
+          current.slice(0, idx) + newText + current.slice(idx + oldText.length);
+        const writtenBytes = Buffer.byteLength(next, 'utf-8');
+        enforceWriteSize(writtenBytes);
+        this.deps.generationGuard?.assertOpen();
+        const result = await atomicWriteTextResolvedFile({
+          target: p,
+          content: next,
+          mode: 'overwrite',
+          meta: mergeWriteMeta(snapshot.meta, {}),
+          assertGenerationOpen: () => this.deps.generationGuard?.assertOpen(),
         });
-      }
-      const next =
-        current.slice(0, idx) + newText + current.slice(idx + oldText.length);
-      const writtenBytes = Buffer.byteLength(next, 'utf-8');
-      enforceWriteSize(writtenBytes);
-      // Pre-write TOCTOU guard — same shape as writeText.
-      // Defense-in-depth layer.
-      await assertNotSymlinkBeforeWrite(p as string);
-      // Forward the encoding/BOM/lineEnding metadata captured
-      // during the read so the write-back preserves the file's
-      // original encoding profile. Without this, a UTF-8-BOM
-      // file would be written without BOM, and a non-UTF-8 file
-      // (GBK/Shift_JIS) would be written as UTF-8 — silent
-      // round-trip corruption of any file the daemon edits.
-      await this.deps.lowFs.writeTextFile({
-        path: p as string,
-        content: next,
-        _meta: readResult._meta,
+        const verdict = this.ignoreVerdict(p, 'file');
+        this.deps.audit.recordAccess(this.deps.ctx, {
+          intent: 'edit',
+          absolute: p,
+          durationMs: performance.now() - start,
+          sizeBytes: result.sizeBytes,
+          matchedIgnore: verdict.ignored ? verdict.category : undefined,
+        });
+        return { writtenBytes: result.sizeBytes };
       });
-      // Symmetric with `readText` / `writeText` — operators
-      // monitoring `fs.access` need to see when an edit landed on
-      // a `.gitignore`d / `.qwenignore`d file (build artifacts,
-      // logs, etc.) rather than only learning about
-      // matchedIgnore for reads and writes.
-      const editVerdict = this.ignoreVerdict(p, 'file');
-      this.deps.audit.recordAccess(this.deps.ctx, {
-        intent: 'edit',
-        absolute: p,
-        durationMs: performance.now() - start,
-        sizeBytes: writtenBytes,
-        matchedIgnore: editVerdict.ignored ? editVerdict.category : undefined,
-      });
-      return { writtenBytes };
     } catch (err) {
       throw this.recordAndWrap(err, 'edit', p as string);
     }
@@ -1278,7 +1248,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
    *   - routes can still rely on `instanceof FsError`
    *     for their `sendFsError` serializer.
    */
-  private recordAndWrap(err: unknown, intent: Intent, input: string): FsError {
+  private recordAndWrap(err: unknown, intent: Intent, input: string): Error {
+    if (
+      err instanceof Error &&
+      'code' in err &&
+      err.code === 'workspace_generation_closed'
+    ) {
+      return err;
+    }
     const fs = wrapAsFsError(err);
     this.deps.audit.recordDenied(this.deps.ctx, {
       intent,
@@ -1314,6 +1291,7 @@ interface AtomicWriteTextInput {
   mode: WriteMode;
   expectedHash?: ContentHash;
   meta: ReadMeta;
+  assertGenerationOpen?: () => void;
 }
 
 interface AtomicWriteTextOutcome {
@@ -1611,6 +1589,7 @@ async function atomicWriteTextResolvedFile(
     await tempHandle.close();
     tempHandle = undefined;
     await assertTempPathMatchesStat(tmpPath, tempStat);
+    input.assertGenerationOpen?.();
     if (input.mode === 'create') {
       await publishCreateNoClobber(tmpPath, target);
     } else {

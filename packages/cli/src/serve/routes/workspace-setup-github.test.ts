@@ -94,6 +94,7 @@ async function makeHarness(
     trusted?: boolean;
     runtimeEnv?: Readonly<NodeJS.ProcessEnv>;
     daemonEnv?: Readonly<NodeJS.ProcessEnv>;
+    hotReload?: boolean;
   } = {},
 ): Promise<Harness> {
   const scratch = await fsp.mkdtemp(
@@ -133,6 +134,12 @@ async function makeHarness(
     {
       bridge,
       fsFactory,
+      ...(opts.hotReload
+        ? {
+            workspaceTrustHotReloadAvailable: true,
+            primaryWorkspaceTrusted: true,
+          }
+        : {}),
       daemonEnv: opts.daemonEnv ?? {},
       ...(opts.runtimeEnv
         ? {
@@ -254,6 +261,58 @@ describe('POST /workspace/setup-github', () => {
         data: expect.objectContaining({ releaseTag: 'v1.2.3' }),
       }),
     ]);
+  });
+
+  it('does not publish completion after the runtime generation closes', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: 'secret', hotReload: true });
+    setupGithubMocks.setupGithub.mockImplementationOnce(async () => {
+      const registry = h.app.locals['workspaceRegistry'] as {
+        primaryEntry: { current?: { guard: { close(): void } } };
+      };
+      registry.primaryEntry.current?.guard.close();
+      return setupResult();
+    });
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridgeEvents).toEqual([]);
+  });
+
+  it('returns retryable unavailable when generation closes before directory setup', async () => {
+    await teardown(h);
+    h = await makeHarness({ token: 'secret', hotReload: true });
+    setupGithubMocks.setupGithub.mockImplementationOnce(
+      async (opts: {
+        workspaceRoot: string;
+        fileOps: {
+          ensureWorkflowDirectory(gitRepoRoot: string): Promise<void>;
+        };
+      }) => {
+        const registry = h.app.locals['workspaceRegistry'] as {
+          primaryEntry: { current?: { guard: { close(): void } } };
+        };
+        registry.primaryEntry.current?.guard.close();
+        await opts.fileOps.ensureWorkflowDirectory(opts.workspaceRoot);
+        return setupResult();
+      },
+    );
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(h.bridgeEvents).toEqual([]);
   });
 
   it('rejects untrusted workspace before creating workflow directory', async () => {

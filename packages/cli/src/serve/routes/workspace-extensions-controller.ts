@@ -178,6 +178,8 @@ export interface CreateExtensionsControllerDeps {
   bridge: AcpSessionBridge;
   workspace: DaemonWorkspaceService;
   maxExtensionOperationHistory?: number;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 /** Shared coordinator for the legacy adapter and V2 global operations. */
@@ -235,6 +237,7 @@ export interface ExtensionsController {
         runtime: WorkspaceRuntime,
         generation: number,
       ) => void;
+      assertGenerationOpen?: () => void;
     },
   ): void;
 }
@@ -278,6 +281,7 @@ export function createExtensionsController(
       locale: resolveExtensionLocale(workspaceDir),
       isWorkspaceTrusted:
         trustedOverride ??
+        deps.isWorkspaceTrusted?.() ??
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
@@ -448,8 +452,12 @@ export function createExtensionsController(
         runtime: WorkspaceRuntime,
         generation: number,
       ) => void;
+      assertGenerationOpen?: () => void;
     } = {},
   ): void => {
+    const assertGenerationOpen =
+      options.assertGenerationOpen ?? deps.captureGenerationAssertion?.();
+    assertGenerationOpen?.();
     const releaseOperationSlot = acquireOperationSlot(res);
     if (!releaseOperationSlot) return;
     const operationId = crypto.randomUUID();
@@ -496,6 +504,7 @@ export function createExtensionsController(
         return reservation ? await reservation.run(task) : await task();
       };
       try {
+        assertGenerationOpen?.();
         updateExtensionOperation(operationId, {
           status: 'running',
           phase: 'preparing',
@@ -546,6 +555,7 @@ export function createExtensionsController(
               const prepared = await preparationQueue.run(
                 async () => {
                   try {
+                    assertGenerationOpen?.();
                     return await task(deadlineController.signal);
                   } finally {
                     activePreparations -= 1;
@@ -584,18 +594,21 @@ export function createExtensionsController(
           >(
             task: (onCommitted: (generation: number) => void) => Promise<T>,
           ): Promise<T> => {
+            assertGenerationOpen?.();
             updateExtensionOperation(operationId, {
               status: 'running',
               phase: 'committing',
             });
             const result = await commitQueue.runUntilReleased(
-              async (release) =>
-                await task((generation) => {
+              async (release) => {
+                assertGenerationOpen?.();
+                return await task((generation) => {
                   reconciliationReservation ??=
                     options.reserveRuntimeReconciliation?.();
                   committedGeneration = generation;
                   release();
-                }),
+                });
+              },
             );
             if (committedGeneration === undefined) {
               reconciliationReservation ??=

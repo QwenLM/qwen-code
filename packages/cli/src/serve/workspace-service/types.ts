@@ -412,6 +412,12 @@ export interface DaemonWorkspaceServiceDeps {
   /** Canonical absolute path of the bound workspace. */
   boundWorkspace: string;
 
+  /** Trust captured by this immutable workspace runtime generation. */
+  isWorkspaceTrusted: () => boolean;
+
+  /** Rejects work after this runtime generation starts draining. */
+  assertGenerationOpen?: () => void;
+
   /** Context filename (e.g. 'QWEN.md') from workspace settings. */
   contextFilename: string;
 
@@ -450,6 +456,7 @@ export interface DaemonWorkspaceServiceDeps {
     workspace: string,
     toolName: string,
     enabled: boolean,
+    assertGenerationOpen?: () => void,
   ) => Promise<void>;
 
   /** Persist a skill enable/disable change to workspace settings. */
@@ -457,6 +464,7 @@ export interface DaemonWorkspaceServiceDeps {
     workspace: string,
     skillName: string,
     enabled: boolean,
+    assertGenerationOpen?: () => void,
   ) => Promise<PersistDisabledSkillResult>;
 
   persistSetting?: (
@@ -464,11 +472,13 @@ export interface DaemonWorkspaceServiceDeps {
     scope: SettingScope,
     key: string,
     value: unknown,
+    assertGenerationOpen?: () => void,
   ) => Promise<void | LoadedSettings>;
 
   persistSettings?: (
     workspace: string,
     writes: WorkspaceSettingsWrite[],
+    assertGenerationOpen?: () => void,
   ) => Promise<void>;
 
   /** Runtime-local environment used by workspace Voice operations. */
@@ -481,7 +491,10 @@ export interface DaemonWorkspaceServiceDeps {
   voiceSettingsScope?: SettingScope;
 
   /** Reload daemon-side process.env from .env / settings.env. */
-  reloadDaemonEnv?: (workspace: string) => Promise<EnvReloadResult>;
+  reloadDaemonEnv?: (
+    workspace: string,
+    assertGenerationOpen?: () => void,
+  ) => Promise<EnvReloadResult>;
 
   /** Eagerly start the ACP child/channel without creating a session. */
   preheatAcpChild?: () => Promise<void>;

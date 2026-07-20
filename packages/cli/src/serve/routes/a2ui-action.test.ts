@@ -88,6 +88,8 @@ function makeApp(opts: {
     args: A2uiActionArgs,
   ) => Promise<A2uiActionResult>;
   workspace?: string;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }) {
   const app = express();
   app.use(express.json());
@@ -102,6 +104,12 @@ function makeApp(opts: {
       if (opts.serversError) throw new Error('status unavailable');
       return opts.servers ?? [];
     },
+    ...(opts.isWorkspaceTrusted
+      ? { isWorkspaceTrusted: opts.isWorkspaceTrusted }
+      : {}),
+    ...(opts.captureGenerationAssertion
+      ? { captureGenerationAssertion: opts.captureGenerationAssertion }
+      : {}),
     callAction:
       opts.callAction ??
       (async (cfg, args) => {
@@ -138,6 +146,48 @@ describe('POST /session/:id/a2ui-action', () => {
       .send({ name: 'go' })
       .expect(503);
     expect(res.body.error).toMatch(/no a2ui MCP server/);
+  });
+
+  it('does not discover or invoke workspace MCP servers when untrusted', async () => {
+    const callAction = vi.fn(async () => ({ commands: [], fallback: '' }));
+    const { app } = makeApp({
+      servers: [STDIO_SERVER],
+      callAction,
+      isWorkspaceTrusted: () => false,
+    });
+
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' });
+
+    expect(res.status).toBe(403);
+    expect(res.body.code).toBe('untrusted_workspace');
+    expect(callAction).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 when the runtime generation closes during discovery', async () => {
+    let open = true;
+    const callAction = vi.fn(async () => ({ commands: [], fallback: '' }));
+    const { app } = makeApp({
+      servers: [STDIO_SERVER],
+      callAction,
+      captureGenerationAssertion: () => () => {
+        if (!open) {
+          throw Object.assign(new Error('closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+        open = false;
+      },
+    });
+
+    const res = await request(app)
+      .post('/session/s1/a2ui-action')
+      .send({ name: 'go' });
+
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+    expect(callAction).not.toHaveBeenCalled();
   });
 
   it('proxies to the action tool and returns its continuation', async () => {

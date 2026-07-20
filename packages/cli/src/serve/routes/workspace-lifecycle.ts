@@ -28,6 +28,8 @@ interface RegisterWorkspaceLifecycleRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 export function registerWorkspaceLifecycleRoutes(
@@ -46,6 +48,24 @@ export function registerWorkspaceLifecycleRoutes(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
   app.post('/workspace/init', mutate({ strict: true }), async (req, res) => {
+    const assertGenerationOpen = deps.captureGenerationAssertion?.();
+    try {
+      assertGenerationOpen?.();
+    } catch {
+      res.set('Retry-After', '1');
+      res.status(503).json({
+        error: 'Workspace runtime is not active.',
+        code: 'workspace_runtime_unavailable',
+      });
+      return;
+    }
+    if (deps.isWorkspaceTrusted?.() === false) {
+      res.status(403).json({
+        error: 'Workspace is not trusted.',
+        code: 'untrusted_workspace',
+      });
+      return;
+    }
     const body = safeBody(req);
     const force = body['force'];
     if (force !== undefined && typeof force !== 'boolean') {
@@ -58,6 +78,7 @@ export function registerWorkspaceLifecycleRoutes(
     const clientId = parseAndValidateClientId(req, res);
     if (clientId === null) return;
     try {
+      assertGenerationOpen?.();
       const ctx = buildWorkspaceCtx('POST /workspace/init', clientId);
       const result = await workspace.initWorkspace(ctx, {
         force: force === true,
@@ -69,6 +90,9 @@ export function registerWorkspaceLifecycleRoutes(
   });
 
   app.post('/workspace/reload', mutate({ strict: true }), async (req, res) => {
+    await (
+      req.app.locals as { requestTrustReconcile?: () => Promise<void> }
+    ).requestTrustReconcile?.();
     const clientId = parseAndValidateClientId(req, res);
     if (clientId === null) return;
     try {
@@ -136,6 +160,9 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
     '/workspaces/:workspace/reload',
     deps.mutate({ strict: true }),
     async (req, res) => {
+      await (
+        req.app.locals as { requestTrustReconcile?: () => Promise<void> }
+      ).requestTrustReconcile?.();
       const runtime = resolveWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,

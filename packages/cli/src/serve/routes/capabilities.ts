@@ -37,8 +37,11 @@ export function registerCapabilitiesRoutes(
   deps: RegisterCapabilitiesRoutesDeps,
 ): void {
   app.get('/capabilities', (_req, res) => {
-    const runtimes = deps.workspaceRegistry.list();
-    const multiWorkspace = runtimes.length > 1;
+    const entries = deps.workspaceRegistry.listEntries();
+    const activePrimary = entries.find(
+      (entry) => entry.primary && entry.state === 'active',
+    )?.current?.runtime;
+    const multiWorkspace = entries.length > 1;
     const features = deps.currentServeFeatures();
     const runtimeRemoval = features.includes('workspace_runtime_removal');
     const envelope: CapabilitiesEnvelope = {
@@ -57,7 +60,10 @@ export function registerCapabilitiesRoutes(
       // auto-negotiate the best available transport via negotiateTransport().
       transports: ['rest'],
       // Active mediation policy under the `policy` namespace.
-      policy: { permission: deps.permissionPolicy },
+      policy: {
+        permission:
+          activePrimary?.bridge.permissionPolicy ?? deps.permissionPolicy,
+      },
       limits: {
         maxPendingPromptsPerSession: advertisedMaxPendingPromptsPerSession(
           deps.maxPendingPromptsPerSession,
@@ -76,15 +82,16 @@ export function registerCapabilitiesRoutes(
             }
           : {}),
       },
-      workspaces: runtimes.map((runtime) => ({
-        id: runtime.workspaceId,
-        cwd: runtime.workspaceCwd,
-        ...(runtime.displayName !== undefined
-          ? { displayName: runtime.displayName }
+      workspaces: entries.map((entry) => ({
+        id: entry.workspaceId,
+        cwd: entry.workspaceCwd,
+        ...(entry.current?.runtime.displayName !== undefined
+          ? { displayName: entry.current.runtime.displayName }
           : {}),
-        primary: runtime.primary,
-        trusted: runtime.trusted,
-        ...(runtimeRemoval ? { removable: runtime.removable === true } : {}),
+        primary: entry.primary,
+        trusted:
+          entry.state === 'active' && entry.current?.runtime.trusted === true,
+        ...(runtimeRemoval ? { removable: entry.removable } : {}),
       })),
       supportedLanguages: deps.languageCodes,
     };

@@ -36,6 +36,10 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { QWEN_SERVER_TOKEN_ENV } from '../channel-worker-env.js';
 import { snapshotProcessEnv } from '../env-snapshot.js';
+import {
+  sendGenerationClosedError,
+  sendUntrustedWorkspaceResponse,
+} from '../workspace-route-runtime.js';
 
 const A2UI_MIME = 'application/a2ui+json';
 // Standard action-tool name from the official A2UI-over-MCP guide
@@ -92,6 +96,8 @@ interface RegisterA2uiActionRoutesOptions {
     args: A2uiActionArgs,
   ) => Promise<A2uiActionResult>;
   env?: Readonly<Record<string, string | undefined>>;
+  isWorkspaceTrusted?: () => boolean;
+  captureGenerationAssertion?: () => (() => void) | undefined;
 }
 
 /** Exported for unit testing. */
@@ -253,6 +259,17 @@ export function registerA2uiActionRoutes(
     '/session/:id/a2ui-action',
     mutate(),
     async (req: Request, res: Response) => {
+      const assertGenerationOpen = opts.captureGenerationAssertion?.();
+      try {
+        assertGenerationOpen?.();
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
+        throw error;
+      }
+      if (opts.isWorkspaceTrusted?.() === false) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
       const body = safeBody(req);
       const name = body['name'];
       if (typeof name !== 'string' || name.trim().length === 0) {
@@ -277,12 +294,22 @@ export function registerA2uiActionRoutes(
             s.name.toLowerCase().includes('a2ui') &&
             usableServerConfig(s.config),
         );
+        assertGenerationOpen?.();
         const live = servers.find((s) => s.mcpStatus === 'connected');
         cfg = (live ?? servers[0])?.config ?? null;
-      } catch {
+      } catch (error) {
+        if (sendGenerationClosedError(res, error)) return;
         /* Status unavailable -> fall through to the settings fallback. */
       }
-      if (!cfg) cfg = await findFromSettingsFile(boundWorkspace);
+      if (!cfg) {
+        cfg = await findFromSettingsFile(boundWorkspace);
+        try {
+          assertGenerationOpen?.();
+        } catch (error) {
+          if (sendGenerationClosedError(res, error)) return;
+          throw error;
+        }
+      }
       if (!cfg) {
         res.status(503).json({
           error:
@@ -291,13 +318,16 @@ export function registerA2uiActionRoutes(
         return;
       }
       try {
+        assertGenerationOpen?.();
         const { commands, fallback } = await callAction(cfg, {
           name: name.trim(),
           surfaceId,
           context,
         });
+        assertGenerationOpen?.();
         res.status(200).json({ commands, fallback });
       } catch (err) {
+        if (sendGenerationClosedError(res, err)) return;
         // Log the detail server-side; keep the client-facing message generic
         // so internal paths/commands/URLs never leak.
         writeStderrLine(
