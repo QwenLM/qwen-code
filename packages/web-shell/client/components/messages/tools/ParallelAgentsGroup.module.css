@@ -197,6 +197,7 @@
 }
 
 .row {
+  width: 100%;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -204,10 +205,17 @@
   min-width: 0;
   cursor: pointer;
   border-radius: 3px;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
 }
 
-.row:hover {
+.row:hover,
+.row:focus-visible {
   background: var(--secondary);
+  outline: none;
 }
 
 .rowStats {
@@ -230,10 +238,6 @@
 
 .rowTool {
   color: var(--muted-foreground);
-}
-
-.detail {
-  margin-top: 4px;
 }
 
 /* Shared-axis mini timeline: one bar per agent laid out against the

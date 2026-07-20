@@ -296,6 +296,12 @@ describe('agent-transcript', () => {
         round: 1,
         text: 'Hello',
         thoughtText: '',
+        usageMetadata: {
+          promptTokenCount: 100,
+          candidatesTokenCount: 20,
+          cachedContentTokenCount: 40,
+          totalTokenCount: 120,
+        },
         timestamp: Date.now(),
       });
       cleanup();
@@ -304,6 +310,75 @@ describe('agent-transcript', () => {
       expect(records).toHaveLength(1);
       expect(records[0].type).toBe('assistant');
       expect(records[0].message?.parts?.[0]).toMatchObject({ text: 'Hello' });
+      expect(records[0].usageMetadata).toMatchObject({
+        promptTokenCount: 100,
+        candidatesTokenCount: 20,
+        cachedContentTokenCount: 40,
+      });
+    });
+
+    it('persists thought content and live stream chunks separately', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'thinking now',
+        thought: true,
+        timestamp: 1,
+      });
+      emitter.emit(AgentEventType.ROUND_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'answer',
+        thoughtText: 'thinking now',
+        timestamp: 2,
+      });
+      cleanup();
+
+      expect(readJsonl(jsonlPath)[0].message?.parts).toEqual([
+        { text: 'thinking now', thought: true },
+        { text: 'answer' },
+      ]);
+      expect(
+        JSON.parse(fs.readFileSync(`${jsonlPath}.stream`, 'utf8').trim()),
+      ).toMatchObject({ text: 'thinking now', thought: true, timestamp: 1 });
+    });
+
+    it('flushes live stream chunks when the pending buffer reaches 64 KiB', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'x'.repeat(32 * 1024),
+        thought: false,
+        timestamp: 1,
+      });
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'y'.repeat(32 * 1024),
+        thought: false,
+        timestamp: 2,
+      });
+
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(true);
+      const records = fs
+        .readFileSync(`${jsonlPath}.stream`, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      expect(records).toHaveLength(2);
+      expect(records[1]).toMatchObject({
+        round: 1,
+        thought: false,
+        timestamp: 2,
+      });
+      cleanup();
     });
 
     it('drops empty ROUND_TEXT to keep the canonical view free of noise', () => {

@@ -58,6 +58,7 @@ export function createDaemonTranscriptState(
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? DEFAULT_MAX_BLOCKS,
+    retainSubagentBlocks: opts.retainSubagentBlocks ?? true,
   };
   if (opts.onTruncation) truncationCallbacks.set(state, opts.onTruncation);
   return state;
@@ -266,6 +267,7 @@ function applyDaemonTranscriptEvent(
       break;
     }
     case 'assistant.text.delta':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
         next,
         'assistant',
@@ -295,8 +297,12 @@ function applyDaemonTranscriptEvent(
       break;
     case 'assistant.usage':
       applyAssistantUsage(next, event);
+      if (event.parentToolCallId && !next.retainSubagentBlocks) {
+        applySubagentUsageToParentTool(next, event);
+      }
       break;
     case 'thought.text.delta':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
         next,
         'thought',
@@ -306,6 +312,10 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'tool.update':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) {
+        discardToolBlock(next, event.toolCallId);
+        break;
+      }
       upsertToolBlock(next, event);
       break;
     case 'shell.output':
@@ -531,6 +541,44 @@ function applyAssistantUsage(
   block.updatedAt = state.now;
 }
 
+function applySubagentUsageToParentTool(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): void {
+  if (!event.parentToolCallId) return;
+  const block = getWritableBlockById(
+    state,
+    state.toolBlockByCallId[event.parentToolCallId],
+  );
+  if (block?.kind !== 'tool') return;
+  const current = isRecord(block.rawOutput) ? block.rawOutput : undefined;
+  const currentSummary = isRecord(current?.['executionSummary'])
+    ? current['executionSummary']
+    : undefined;
+  const inputTokens =
+    finiteNumber(currentSummary?.['inputTokens']) + event.usage.inputTokens;
+  const outputTokens =
+    finiteNumber(currentSummary?.['outputTokens']) + event.usage.outputTokens;
+  const cachedTokens =
+    finiteNumber(currentSummary?.['cachedTokens']) +
+    (event.usage.cachedTokens ?? 0);
+  block.rawOutput = {
+    ...(current ?? { type: 'task_execution', status: 'running' }),
+    executionSummary: {
+      ...(currentSummary ?? {}),
+      inputTokens,
+      outputTokens,
+      cachedTokens,
+      totalTokens: inputTokens + outputTokens,
+    },
+  };
+  block.updatedAt = state.now;
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
 function clearActiveThought(
   state: DaemonTranscriptState,
   event?: DaemonUiEvent,
@@ -691,6 +739,14 @@ function upsertToolBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
+  const compactTaskOutput =
+    !state.retainSubagentBlocks &&
+    isRecord(event.rawOutput) &&
+    event.rawOutput['type'] === 'task_execution';
+  const rawOutput = compactTaskExecutionOutput(
+    event.rawOutput,
+    state.retainSubagentBlocks,
+  );
   const existingId = state.toolBlockByCallId[event.toolCallId];
   if (existingId === TRIMMED_TOOL_BLOCK_ID) {
     if (shouldRecreateTrimmedToolBlock(event)) {
@@ -724,10 +780,11 @@ function upsertToolBlock(
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.details) existing.details = event.details;
-    if (event.content !== undefined) existing.content = event.content;
+    if (compactTaskOutput) delete existing.content;
+    else if (event.content !== undefined) existing.content = event.content;
     if (event.locations !== undefined) existing.locations = event.locations;
     if (event.rawInput !== undefined) existing.rawInput = event.rawInput;
-    if (event.rawOutput !== undefined) existing.rawOutput = event.rawOutput;
+    if (rawOutput !== undefined) existing.rawOutput = rawOutput;
     existing.sourceRecordIds = unionStrings(
       existing.sourceRecordIds,
       event.sourceRecordIds,
@@ -790,10 +847,12 @@ function upsertToolBlock(
       ? { sourceRecordIds: [...event.sourceRecordIds] }
       : {}),
     ...(event.details ? { details: event.details } : {}),
-    ...(event.content !== undefined ? { content: event.content } : {}),
+    ...(!compactTaskOutput && event.content !== undefined
+      ? { content: event.content }
+      : {}),
     ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
-    ...(event.rawOutput !== undefined ? { rawOutput: event.rawOutput } : {}),
+    ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(event.toolName ? { toolName: event.toolName } : {}),
     ...(event.toolKind ? { toolKind: event.toolKind } : {}),
     ...(event.parentToolCallId
@@ -829,6 +888,48 @@ function upsertToolBlock(
   // with what was actually written to the block.
   updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
   clearActiveText(state, event.parentToolCallId);
+}
+
+function discardToolBlock(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+): void {
+  const blockId = state.toolBlockByCallId[toolCallId];
+  if (!blockId || blockId === TRIMMED_TOOL_BLOCK_ID) return;
+  takeBlocksOwnership(state);
+  state.blocks = state.blocks.filter((block) => block.id !== blockId);
+  state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  delete state.toolBlockByCallId[toolCallId];
+  delete state.toolProgress[toolCallId];
+  if (state.currentToolCallId === toolCallId) {
+    state.currentToolCallId = undefined;
+  }
+}
+
+function compactTaskExecutionOutput(
+  rawOutput: unknown,
+  retainSubagentBlocks: boolean,
+): unknown {
+  if (
+    retainSubagentBlocks ||
+    !isRecord(rawOutput) ||
+    rawOutput['type'] !== 'task_execution'
+  ) {
+    return rawOutput;
+  }
+  const compact: Record<string, unknown> = { type: 'task_execution' };
+  for (const key of [
+    'subagentName',
+    'subagentColor',
+    'taskDescription',
+    'status',
+    'terminateReason',
+    'tokenCount',
+    'executionSummary',
+  ]) {
+    if (rawOutput[key] !== undefined) compact[key] = rawOutput[key];
+  }
+  return compact;
 }
 
 /**
@@ -1170,6 +1271,8 @@ function cloneTranscriptState(
     ...state,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
+    retainSubagentBlocks:
+      opts.retainSubagentBlocks ?? state.retainSubagentBlocks,
     // Lazy copy-on-write for
     // `blocks` + `blockIndexById`. Eager `[...state.blocks]` defeated the
     // `sortedBlocksCache` / `childrenIndexCache` WeakMaps — every dispatch

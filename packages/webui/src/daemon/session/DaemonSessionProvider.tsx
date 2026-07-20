@@ -164,6 +164,7 @@ function prependTranscriptHistory(
   const historyStore = createDaemonTranscriptStore({
     maxBlocks: Number.MAX_SAFE_INTEGER,
     nextOrdinal: current.nextOrdinal,
+    retainSubagentBlocks: current.retainSubagentBlocks,
   });
   historyStore.dispatch(events);
   const history = historyStore.getSnapshot();
@@ -185,6 +186,121 @@ function prependTranscriptHistory(
   });
   return true;
 }
+
+function boundedString(value: unknown, maxLength: number): string | undefined {
+  if (typeof value !== 'string' || value.length === 0) return undefined;
+  return value.length <= maxLength ? value : `${value.slice(0, maxLength)}…`;
+}
+
+function projectSubagentToolUpdate(
+  event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
+): DaemonUiEvent {
+  const rawInput = isRecord(event.rawInput) ? event.rawInput : undefined;
+  const rawOutput = isRecord(event.rawOutput) ? event.rawOutput : undefined;
+  const name = event.toolName?.toLowerCase();
+  const isSubagent =
+    name === 'agent' ||
+    name === 'task' ||
+    typeof rawInput?.['subagent_type'] === 'string' ||
+    rawOutput?.['type'] === 'task_execution';
+  if (!isSubagent) return event;
+
+  const executionSummary = isRecord(rawOutput?.['executionSummary'])
+    ? rawOutput['executionSummary']
+    : undefined;
+  const projectedInput = rawInput
+    ? {
+        ...(boundedString(rawInput['subagent_type'], 120)
+          ? { subagent_type: boundedString(rawInput['subagent_type'], 120) }
+          : {}),
+        ...(boundedString(rawInput['prompt'], 240)
+          ? { prompt: boundedString(rawInput['prompt'], 240) }
+          : {}),
+        ...(boundedString(rawInput['description'], 240)
+          ? { description: boundedString(rawInput['description'], 240) }
+          : {}),
+        ...(rawInput['run_in_background'] === true
+          ? { run_in_background: true }
+          : {}),
+      }
+    : undefined;
+  const projectedOutput = rawOutput
+    ? {
+        ...(rawOutput['type'] === 'task_execution'
+          ? { type: 'task_execution' }
+          : {}),
+        ...(boundedString(rawOutput['subagentName'], 120)
+          ? { subagentName: boundedString(rawOutput['subagentName'], 120) }
+          : {}),
+        ...(boundedString(rawOutput['taskDescription'], 240)
+          ? {
+              taskDescription: boundedString(rawOutput['taskDescription'], 240),
+            }
+          : {}),
+        ...(boundedString(rawOutput['status'], 80)
+          ? { status: boundedString(rawOutput['status'], 80) }
+          : {}),
+        ...(typeof rawOutput['tokenCount'] === 'number'
+          ? { tokenCount: rawOutput['tokenCount'] }
+          : {}),
+        ...(executionSummary
+          ? {
+              executionSummary: {
+                ...(typeof executionSummary['totalToolCalls'] === 'number'
+                  ? { totalToolCalls: executionSummary['totalToolCalls'] }
+                  : {}),
+                ...(typeof executionSummary['totalDurationMs'] === 'number'
+                  ? { totalDurationMs: executionSummary['totalDurationMs'] }
+                  : {}),
+                ...(typeof executionSummary['outputTokens'] === 'number'
+                  ? { outputTokens: executionSummary['outputTokens'] }
+                  : {}),
+                ...(typeof executionSummary['inputTokens'] === 'number'
+                  ? { inputTokens: executionSummary['inputTokens'] }
+                  : {}),
+                ...(typeof executionSummary['cachedTokens'] === 'number'
+                  ? { cachedTokens: executionSummary['cachedTokens'] }
+                  : {}),
+                ...(typeof executionSummary['totalTokens'] === 'number'
+                  ? { totalTokens: executionSummary['totalTokens'] }
+                  : {}),
+              },
+            }
+          : {}),
+        detailsOmitted: true,
+      }
+    : { detailsOmitted: true };
+
+  return {
+    ...event,
+    ...(projectedInput && Object.keys(projectedInput).length > 0
+      ? { rawInput: projectedInput }
+      : { rawInput: undefined }),
+    rawOutput: projectedOutput,
+    content: undefined,
+    details: undefined,
+  };
+}
+
+function projectMainTranscriptEvents(events: DaemonUiEvent[]): DaemonUiEvent[] {
+  const projected: DaemonUiEvent[] = [];
+  for (const event of events) {
+    if (
+      'parentToolCallId' in event &&
+      event.parentToolCallId &&
+      event.type !== 'assistant.usage'
+    ) {
+      continue;
+    }
+    projected.push(
+      event.type === 'tool.update' ? projectSubagentToolUpdate(event) : event,
+    );
+  }
+  return projected;
+}
+
+export const projectMainTranscriptEventsForTesting =
+  projectMainTranscriptEvents;
 
 const DaemonStoreContext = createContext<DaemonTranscriptStore | undefined>(
   undefined,
@@ -270,6 +386,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     maxQueued = 1024,
     maxBlocks = DEFAULT_MAX_BLOCKS,
     historyPageSize,
+    subagentTranscriptMode = 'full',
     suppressOwnUserEcho = true,
     includeRawEvent = false,
     autoConnect = true,
@@ -308,8 +425,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   }
 
   const store = useMemo(
-    () => createDaemonTranscriptStore({ maxBlocks }),
-    [maxBlocks],
+    () =>
+      createDaemonTranscriptStore({
+        maxBlocks,
+        retainSubagentBlocks: subagentTranscriptMode === 'full',
+      }),
+    [maxBlocks, subagentTranscriptMode],
   );
   const sessionRef = useRef<DaemonSessionClient | undefined>(undefined);
   const transcriptHistoryRef = useRef<{
@@ -358,6 +479,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const reconnectConfigRef = useRef({ reconnectDelayMs, maxReconnectDelayMs });
   const loadWarningsRef = useRef(loadWarnings);
   const historyPageSizeRef = useRef(historyPageSize);
+  const subagentTranscriptModeRef = useRef(subagentTranscriptMode);
   const clientIdRef = useRef<string | undefined>(undefined);
   if (!clientIdRef.current || clientId) {
     clientIdRef.current = getStableClientId(clientId);
@@ -366,6 +488,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   reconnectConfigRef.current = { reconnectDelayMs, maxReconnectDelayMs };
   loadWarningsRef.current = loadWarnings;
   historyPageSizeRef.current = historyPageSize;
+  subagentTranscriptModeRef.current = subagentTranscriptMode;
   const modelServiceId = createSessionRequest?.modelServiceId;
   const sessionScope = createSessionRequest?.sessionScope;
   const createSessionRequestRef = useRef(createSessionRequest);
@@ -997,13 +1120,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   setConnection,
                   { updateConnection: false },
                 );
+                const transcriptEvents = filterDaemonUiEventsForTranscript(
+                  replayEvent,
+                  replayUiEvents,
+                  addNotice,
+                  dismissNotice,
+                );
                 allUiEvents.push(
-                  ...filterDaemonUiEventsForTranscript(
-                    replayEvent,
-                    replayUiEvents,
-                    addNotice,
-                    dismissNotice,
-                  ),
+                  ...(subagentTranscriptModeRef.current === 'summary'
+                    ? projectMainTranscriptEvents(transcriptEvents)
+                    : transcriptEvents),
                 );
                 if (replayEvent.type === 'turn_complete') {
                   const stopReason =
@@ -1039,6 +1165,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             if (needsStoreReset || store.getSnapshot().blocks.length === 0) {
               const replayStore = createDaemonTranscriptStore({
                 maxBlocks: Number.MAX_SAFE_INTEGER,
+                retainSubagentBlocks:
+                  subagentTranscriptModeRef.current === 'full',
               });
               replayStore.dispatch(allUiEvents);
               const replayState = replayStore.getSnapshot();
@@ -1344,6 +1472,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 addNotice,
                 dismissNotice,
               );
+              const transcriptUiEvents =
+                subagentTranscriptModeRef.current === 'summary'
+                  ? projectMainTranscriptEvents(uiEvents)
+                  : uiEvents;
               if (event.type === 'state_resync_required') {
                 const reason =
                   typeof event.data === 'object' && event.data !== null
@@ -1427,8 +1559,8 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 !hasSessionActivePrompt() &&
                 store.getSnapshot().activeAssistantBlockId != null;
               const eventsToDispatch = shouldGuardAssistant
-                ? uiEvents.filter((e) => e.type !== 'debug')
-                : uiEvents;
+                ? transcriptUiEvents.filter((e) => e.type !== 'debug')
+                : transcriptUiEvents;
               enqueueTranscriptEvents(eventsToDispatch);
               for (const uiEvent of uiEvents) {
                 if (
@@ -2183,19 +2315,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       const uiEvents: DaemonUiEvent[] = [];
       for (const replayEvent of page.events) {
         try {
-          uiEvents.push(
-            ...filterDaemonUiEventsForTranscript(
+          const transcriptEvents = filterDaemonUiEventsForTranscript(
+            replayEvent,
+            normalizeAndFilterEvent(
               replayEvent,
-              normalizeAndFilterEvent(
-                replayEvent,
-                activeSession.clientId,
-                replayOpts,
-                setConnection,
-                { updateConnection: false },
-              ),
-              addNotice,
-              dismissNotice,
+              activeSession.clientId,
+              replayOpts,
+              setConnection,
+              { updateConnection: false },
             ),
+            addNotice,
+            dismissNotice,
+          );
+          uiEvents.push(
+            ...(subagentTranscriptModeRef.current === 'summary'
+              ? projectMainTranscriptEvents(transcriptEvents)
+              : transcriptEvents),
           );
         } catch (error) {
           const message =

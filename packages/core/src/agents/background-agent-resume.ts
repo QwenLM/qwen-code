@@ -433,6 +433,7 @@ export class BackgroundAgentResumeService {
             : Date.now(),
           abortController: new AbortController(),
           prompt: recovery.initialPrompt,
+          toolUseId: meta.toolUseId,
           outputFile,
           metaPath,
           error:

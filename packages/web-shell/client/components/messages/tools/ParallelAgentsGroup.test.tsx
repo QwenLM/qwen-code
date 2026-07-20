@@ -1,17 +1,9 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../../i18n';
 import type { ACPToolCall } from '../../../adapters/types';
-
-// ParallelAgentsGroup renders SubAgentPanel, which pulls in ToolGroup;
-// ToolGroup imports App only for CompactModeContext — loading the real
-// App module would drag the whole application graph into this unit test.
-vi.mock('../../../App', async () => {
-  const { createContext } = await import('react');
-  return { CompactModeContext: createContext(false) };
-});
 
 const { computeAgentsTimeline, ParallelAgentsGroup } = await import(
   './ParallelAgentsGroup'

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useI18n } from '../../../i18n';
+import { useSubagentDetails } from '../../../subagentDetailsContext';
 import {
   formatElapsed,
   formatLiveElapsed,
@@ -17,7 +18,6 @@ import {
   getAgentDisplayStatus,
   toolContainsCallId,
 } from '../toolFormatting';
-import { SubAgentPanel } from './SubAgentPanel';
 import styles from './ParallelAgentsGroup.module.css';
 
 interface ParallelAgentsGroupProps {
@@ -160,8 +160,8 @@ export function ParallelAgentsGroup({
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
+  const subagentDetails = useSubagentDetails();
   const [groupExpanded, setGroupExpanded] = useState(false);
-  const [expandedId, setExpandedId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
   const liveStartedAtRef = useRef(Date.now());
 
@@ -244,15 +244,13 @@ export function ParallelAgentsGroup({
               const toolHint = getAgentCurrentToolHint(agent, t);
               const stats = getAgentStats(agent, now);
               const status = getAgentDisplayStatus(agent);
-              const isExpanded = expandedId === agent.callId;
               const track = timeline?.rows.get(agent.callId);
               return (
                 <div key={agent.callId}>
-                  <div
+                  <button
+                    type="button"
                     className={styles.row}
-                    onClick={() =>
-                      setExpandedId(isExpanded ? null : agent.callId)
-                    }
+                    onClick={() => subagentDetails?.onOpen(agent)}
                   >
                     <StatusIcon status={status} />
                     <span className={styles.rowDesc}>
@@ -264,7 +262,7 @@ export function ParallelAgentsGroup({
                       )}
                     </span>
                     {stats && <span className={styles.rowStats}>{stats}</span>}
-                  </div>
+                  </button>
                   {track && (
                     <div className={styles.track} aria-hidden="true">
                       <span
@@ -278,11 +276,6 @@ export function ParallelAgentsGroup({
                           width: `${track.widthPct}%`,
                         }}
                       />
-                    </div>
-                  )}
-                  {isExpanded && (
-                    <div className={styles.detail}>
-                      <SubAgentPanel tool={agent} hideHeader />
                     </div>
                   )}
                 </div>

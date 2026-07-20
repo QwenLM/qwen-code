@@ -85,6 +85,13 @@ interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  hideFirstUserMessage?: boolean;
+  firstTurnMetrics?: {
+    durationMs?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedTokens?: number;
+  };
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   onBranchSession?: () => void;
@@ -1574,7 +1581,9 @@ type Translate = (
 ) => string;
 
 function durationMetricText(elapsedMs: number | undefined): string {
-  return elapsedMs !== undefined ? formatDuration(elapsedMs) : '';
+  return elapsedMs !== undefined && elapsedMs > 0
+    ? formatDuration(elapsedMs)
+    : '';
 }
 
 function tokenMetricText(collapse: TurnCollapseHead, t: Translate): string {
@@ -2194,6 +2203,8 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      hideFirstUserMessage = false,
+      firstTurnMetrics,
       showRetryHint = false,
       onRetryClick,
       onBranchSession,
@@ -2401,24 +2412,61 @@ export const MessageList = memo(
       },
       [scheduleScrollOverflowReport],
     );
-    const visibleItems = useMemo(
-      () =>
-        applyTurnCollapse(displayItems, {
-          overrides: collapseOverrides,
-          isResponding,
-          activeTurnStartedAt,
-          pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
-          enabled: collapseEnabled,
-        }),
-      [
-        displayItems,
-        collapseOverrides,
+    const visibleItems = useMemo(() => {
+      const collapsedItems = applyTurnCollapse(displayItems, {
+        overrides: collapseOverrides,
         isResponding,
         activeTurnStartedAt,
-        pendingApproval?.toolCallId,
-        collapseEnabled,
-      ],
-    );
+        pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
+        enabled: collapseEnabled,
+      });
+      let metricsApplied = false;
+      const itemsWithMetrics = firstTurnMetrics
+        ? collapsedItems.map((item) => {
+            if (metricsApplied || item.type !== 'turn_collapse') return item;
+            metricsApplied = true;
+            return {
+              ...item,
+              turnCollapse: {
+                ...item.turnCollapse,
+                ...(firstTurnMetrics.durationMs !== undefined &&
+                firstTurnMetrics.durationMs > 0
+                  ? { elapsedMs: firstTurnMetrics.durationMs }
+                  : {}),
+                ...(firstTurnMetrics.inputTokens !== undefined
+                  ? { inputTokens: firstTurnMetrics.inputTokens }
+                  : {}),
+                ...(firstTurnMetrics.outputTokens !== undefined
+                  ? { outputTokens: firstTurnMetrics.outputTokens }
+                  : {}),
+                ...(firstTurnMetrics.cachedTokens !== undefined
+                  ? { cachedTokens: firstTurnMetrics.cachedTokens }
+                  : {}),
+              },
+            };
+          })
+        : collapsedItems;
+      if (!hideFirstUserMessage) return itemsWithMetrics;
+      const firstUserId = mergedMessages.find(
+        (message) => message.role === 'user',
+      )?.id;
+      return firstUserId
+        ? itemsWithMetrics.filter(
+            (item) =>
+              item.type !== 'message' || item.message.id !== firstUserId,
+          )
+        : itemsWithMetrics;
+    }, [
+      displayItems,
+      collapseOverrides,
+      isResponding,
+      activeTurnStartedAt,
+      pendingApproval?.toolCallId,
+      collapseEnabled,
+      hideFirstUserMessage,
+      firstTurnMetrics,
+      mergedMessages,
+    ]);
     const visibleTurnIdByDisplayIndex = useMemo(
       () => getTurnIdByDisplayIndex(visibleItems),
       [visibleItems],

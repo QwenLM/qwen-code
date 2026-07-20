@@ -1,4 +1,5 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { ACPToolCall } from '../../adapters/types';
 import {
   useWorkspaceActions,
   type DaemonWorkspaceActions,
@@ -42,6 +43,7 @@ import {
 } from './TurnOutputs';
 import { LineStats, sumLineStats } from './LineStats';
 import styles from './ArtifactPanel.module.css';
+import { SubagentDetail } from './SubagentDetail';
 
 const MIN_PANEL_WIDTH_FOR_DEFAULT_TREE = 740;
 const MAX_REVIEW_SIDE_BY_SIDE_WIDTH = 700;
@@ -75,6 +77,15 @@ export type ArtifactPanelTab =
       title: string;
       task: TurnOutputScheduledTask;
       workspaceActions?: DaemonWorkspaceActions;
+    }
+  | {
+      id: string;
+      kind: 'subagent';
+      title: string;
+      sessionId: string;
+      rootToolCallId: string;
+      rootTool: ACPToolCall;
+      workspaceCwd?: string;
     };
 
 interface ArtifactPanelProps {
@@ -90,6 +101,7 @@ interface ArtifactPanelProps {
   onSelectTab: (tabId: string) => void;
   onCloseTab: (tabId: string) => void;
   onClose: () => void;
+  variant?: 'docked' | 'drawer';
 }
 
 export function ArtifactPanel({
@@ -105,6 +117,7 @@ export function ArtifactPanel({
   onSelectTab,
   onCloseTab,
   onClose,
+  variant = 'docked',
 }: ArtifactPanelProps) {
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const defaultWorkspaceActions = useWorkspaceActions();
@@ -115,9 +128,11 @@ export function ArtifactPanel({
 
   return (
     <aside
-      className={styles.panel}
+      className={`${styles.panel} ${variant === 'drawer' ? styles.panelDrawer : ''}`}
       style={
-        panelWidth ? { flexBasis: panelWidth, width: panelWidth } : undefined
+        variant === 'docked' && panelWidth
+          ? { flexBasis: panelWidth, width: panelWidth }
+          : undefined
       }
       aria-label="Right panel"
     >
@@ -146,6 +161,8 @@ export function ArtifactPanel({
                     <TabReviewIcon />
                   ) : tab.kind === 'artifact' ? (
                     <TabArtifactIcon />
+                  ) : tab.kind === 'subagent' ? (
+                    <TabSubagentIcon />
                   ) : (
                     <TabScheduledTaskIcon />
                   )}
@@ -193,6 +210,13 @@ export function ArtifactPanel({
             loading={loading}
             error={error}
           />
+        ) : activeTab.kind === 'subagent' ? (
+          <SubagentDetail
+            sessionId={activeTab.sessionId}
+            rootToolCallId={activeTab.rootToolCallId}
+            initialRootTool={activeTab.rootTool}
+            workspaceCwd={activeTab.workspaceCwd ?? workspaceCwd}
+          />
         ) : (
           <ScheduledTaskDetail
             key={activeTab.id}
@@ -202,6 +226,26 @@ export function ArtifactPanel({
         )}
       </div>
     </aside>
+  );
+}
+
+function TabSubagentIcon() {
+  return (
+    <svg
+      className={styles.tabIconSvg}
+      viewBox="0 0 24 24"
+      fill="none"
+      focusable="false"
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="8" r="3" stroke="currentColor" strokeWidth="1.6" />
+      <path
+        d="M6.5 19c.7-3.1 2.5-4.7 5.5-4.7s4.8 1.6 5.5 4.7"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+      />
+    </svg>
   );
 }
 

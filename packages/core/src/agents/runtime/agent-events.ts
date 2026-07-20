@@ -88,6 +88,7 @@ export interface AgentRoundTextEvent {
   round: number;
   text: string;
   thoughtText: string;
+  usageMetadata?: GenerateContentResponseUsageMetadata;
   timestamp: number;
 }
 
