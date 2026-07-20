@@ -954,7 +954,7 @@ describe('AgentTool', () => {
         spawnTeammate,
       } as never);
       vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryShallow: vi.fn().mockReturnValue([
+        getHistoryForSubagent: vi.fn().mockReturnValue([
           {
             role: 'user',
             parts: [
@@ -3125,7 +3125,7 @@ describe('AgentTool', () => {
 
     it('inherits all parent turns when explicitly requested', async () => {
       vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryShallow: vi.fn().mockReturnValue([
+        getHistoryForSubagent: vi.fn().mockReturnValue([
           {
             role: 'user',
             parts: [
@@ -3167,7 +3167,7 @@ describe('AgentTool', () => {
 
     it('starts without parent history by default', async () => {
       vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryShallow: vi.fn().mockReturnValue([
+        getHistoryForSubagent: vi.fn().mockReturnValue([
           { role: 'user', parts: [{ text: 'parent question' }] },
           { role: 'model', parts: [{ text: 'parent answer' }] },
         ]),
@@ -3199,7 +3199,7 @@ describe('AgentTool', () => {
         { role: 'model', parts: [{ text: 'top-level answer' }] },
       ]);
       vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryShallow: topLevelHistorySpy,
+        getHistoryForSubagent: topLevelHistorySpy,
       } as unknown as ReturnType<Config['getGeminiClient']>);
       const directParentHistory = [
         { role: 'user' as const, parts: [{ text: 'direct parent question' }] },
@@ -4397,7 +4397,7 @@ describe('AgentTool', () => {
     it('persists inherited context for background-agent revival', async () => {
       const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
       vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryShallow: vi.fn().mockReturnValue([
+        getHistoryForSubagent: vi.fn().mockReturnValue([
           { role: 'user', parts: [{ text: 'parent question' }] },
           { role: 'model', parts: [{ text: 'parent answer' }] },
         ]),

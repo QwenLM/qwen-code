@@ -200,7 +200,7 @@ export function buildInheritedSubagentHistory(
           { role: 'model', parts: [{ text: 'Acknowledged.' }] },
         );
       }
-      return prepared;
+      return structuredClone(prepared);
     }
 
     if (isToolResponseContent(last)) {
@@ -208,7 +208,7 @@ export function buildInheritedSubagentHistory(
         role: 'model',
         parts: [{ text: 'Acknowledged.' }],
       });
-      return prepared;
+      return structuredClone(prepared);
     }
 
     prepared.pop();

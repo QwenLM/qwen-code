@@ -1271,10 +1271,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         : undefined;
     const rawHistory =
       directParentHistory ??
-      (geminiClient
-        ? (geminiClient.getHistoryShallow?.(true) ??
-          geminiClient.getHistory(true))
-        : []);
+      (geminiClient ? geminiClient.getHistoryForSubagent() : []);
     return buildInheritedSubagentHistory(rawHistory, forkTurns);
   }
 

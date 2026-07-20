@@ -655,7 +655,7 @@ export class AgentCore {
   ): Promise<ReasoningLoopResult> {
     const inner = () =>
       runWithAgentHistory(
-        () => chat.getHistoryShallow(true),
+        () => chat.getHistoryForSubagent(),
         () =>
           this._runReasoningLoopInner(
             chat,

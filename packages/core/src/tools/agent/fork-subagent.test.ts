@@ -202,6 +202,35 @@ describe('buildInheritedSubagentHistory', () => {
     ]);
   });
 
+  it('does not share nested mutable parts with the parent history', () => {
+    const nestedImage = {
+      inlineData: { mimeType: 'image/png', data: 'c2hvdA==' },
+    };
+    const toolResultWithImage: Content = {
+      role: 'user',
+      parts: [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'read_file',
+            response: { output: 'captured' },
+            parts: [nestedImage],
+          },
+        },
+      ],
+    };
+
+    const inherited = buildInheritedSubagentHistory(
+      [startup, firstUser, toolCall, toolResultWithImage, firstModel],
+      'all',
+    );
+    const inheritedNestedImage =
+      inherited[2]?.parts?.[0]?.functionResponse?.parts?.[0];
+
+    expect(inheritedNestedImage).toEqual(nestedImage);
+    expect(inheritedNestedImage).not.toBe(nestedImage);
+  });
+
   it('drops an unanswered trailing user turn', () => {
     expect(
       buildInheritedSubagentHistory(

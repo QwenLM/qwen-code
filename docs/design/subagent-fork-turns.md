@@ -55,7 +55,9 @@ entries have already been repaired by the chat layer. Nested agents expose
 their local chat through the runtime agent context; top-level launches fall
 back to the session Gemini client. The leading startup context reminder is
 removed because the child generates startup context for its own working
-directory.
+directory. The parent chat removes that startup prefix before curating the
+history, preventing curation from coalescing it with the first real user
+prompt while preserving that turn's own reminders.
 
 For a numeric value, a real user turn is a user-role message that is neither:
 
@@ -71,7 +73,9 @@ included in a numeric window; use `all` when the child should receive it.
 The selected history must end with a model message before the child task is
 sent as a new user turn. A trailing user message is dropped. Open function
 calls in the final model message are closed with placeholder function
-responses followed by a short model acknowledgement.
+responses followed by a short model acknowledgement. The final selected
+window is deep-cloned so the parent and child chats never share mutable nested
+message parts.
 
 ### Runtime composition
 

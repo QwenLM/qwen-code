@@ -97,7 +97,7 @@ describe('AgentCore.runInAgentFrames', () => {
       { role: 'model', parts: [{ text: 'local answer' }] },
     ];
     const chat = {
-      getHistoryShallow: vi.fn().mockReturnValue(history),
+      getHistoryForSubagent: vi.fn().mockReturnValue(history),
     } as unknown as Parameters<AgentCore['runReasoningLoop']>[0];
     let observedHistory: Content[] | undefined;
     const coreWithInner = core as unknown as {
@@ -117,7 +117,7 @@ describe('AgentCore.runInAgentFrames', () => {
     await core.runReasoningLoop(chat, [], [], new AbortController());
 
     expect(observedHistory).toBe(history);
-    expect(chat.getHistoryShallow).toHaveBeenCalledWith(true);
+    expect(chat.getHistoryForSubagent).toHaveBeenCalledOnce();
     expect(getCurrentAgentHistory()).toBeUndefined();
   });
 
