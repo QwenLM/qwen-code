@@ -1024,6 +1024,29 @@ describe('runAcpAgent shutdown cleanup', () => {
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 
+  it('writes config startup warnings to stderr for the ACP client log', async () => {
+    // The ACP path exits gemini.tsx before its startup-warning printing
+    // runs; runAcpAgent must emit config warnings (e.g. the WebSearch
+    // enablement notices) itself or they vanish.
+    (mockConfig as unknown as { getWarnings: () => string[] }).getWarnings =
+      () => ['WebSearch is enabled but no search model is configured.'];
+    const stderrWriteSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+      await vi.waitFor(() => {
+        expect(stderrWriteSpy).toHaveBeenCalledWith(
+          'WebSearch is enabled but no search model is configured.\n',
+        );
+      });
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      stderrWriteSpy.mockRestore();
+    }
+  });
+
   it('disposes the event loop monitor when connection setup fails', async () => {
     const dispose = vi.fn();
     vi.mocked(startEventLoopLagMonitor).mockReturnValueOnce({

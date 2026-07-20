@@ -169,11 +169,23 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     };
   }
 
+  // Parse the selector once for both paths below: a selector written for
+  // the modelProviders path (authType prefix, fast) must keep its meaning
+  // when WEB_SEARCH_BASE_URL overrides the backend — the Responses API
+  // needs the plain model id, not "openai:qwen3.6-plus" verbatim.
+  let resolved;
+  try {
+    resolved = resolveModelId(selector, buildModelIdContext(config));
+  } catch (e) {
+    return {
+      ok: false,
+      notice: `WebSearch is enabled but the search model selector "${selector}" is invalid: ${e instanceof Error ? e.message : String(e)}`,
+    };
+  }
+
   // Env-declared backend (WEB_SEARCH_BASE_URL): mirrors a modelProviders
   // entry for environments that cannot write settings.json. Takes precedence
-  // over modelProviders resolution, per the env-over-settings rule. The
-  // selector is used as the plain DashScope model id here (no authType
-  // prefix semantics).
+  // over modelProviders resolution, per the env-over-settings rule.
   if (settings?.baseUrl) {
     const baseUrlIssue = classifyDashScopeBaseUrl(settings.baseUrl);
     if (baseUrlIssue === 'insecure') {
@@ -198,7 +210,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     return {
       ok: true,
       backend: {
-        modelId: selector,
+        modelId: resolved?.modelId ?? selector,
         apiKeyEnvKey: keyEnv,
         baseUrl: settings.baseUrl,
         webExtractor: settings.webExtractor !== false,
@@ -206,15 +218,6 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     };
   }
 
-  let resolved;
-  try {
-    resolved = resolveModelId(selector, buildModelIdContext(config));
-  } catch (e) {
-    return {
-      ok: false,
-      notice: `WebSearch is enabled but the search model selector "${selector}" is invalid: ${e instanceof Error ? e.message : String(e)}`,
-    };
-  }
   if (!resolved) {
     return {
       ok: false,

@@ -364,6 +364,24 @@ describe('evaluateWebSearchGate', () => {
     if (!gate.ok) expect(gate.notice).toContain('WEB_SEARCH_BASE_URL');
   });
 
+  it('strips an authType prefix from the selector on the env-declared path', () => {
+    // A selector written for the modelProviders path ("openai:<id>", as our
+    // own OAuth notice suggests) must not be sent verbatim to DashScope when
+    // WEB_SEARCH_BASE_URL overrides the backend.
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'openai:qwen3.6-plus',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+        },
+      }),
+    );
+    expect(gate.ok).toBe(true);
+    if (gate.ok) expect(gate.backend.modelId).toBe('qwen3.6-plus');
+  });
+
   it('rejects a plain-http env-declared base URL, naming HTTPS as the fix', () => {
     const gate = evaluateWebSearchGate(
       makeConfig({
