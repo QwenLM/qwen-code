@@ -23,7 +23,7 @@ import {
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
   writeWorktreeSession,
-  readWorktreeSession,
+  restoreWorktreeContext,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -1554,42 +1554,41 @@ export function registerSessionRoutes(
         }
         // Restore worktree isolation for sessions that were created in a
         // worktree. After daemon restart the bridge entry has no worktree
-        // metadata and the session cwd is the main workspace root. Read the
-        // sidecar, relocate the session, and populate the bridge entry.
+        // metadata and the session cwd is the main workspace root. Use the
+        // shared restoreWorktreeContext helper which validates path
+        // containment (path.resolve + path.sep, cross-platform), checks
+        // directory liveness, and clears stale sidecars.
         if (!session.worktree) {
           const svc = new SessionService(workspaceCwd);
-          const sidecar = await readWorktreeSession(
+          const { session: sidecar } = await restoreWorktreeContext(
             svc.getWorktreeSessionPath(sessionId),
-          ).catch(() => null);
+            (e) =>
+              daemonLog?.warn('worktree sidecar restore', {
+                sessionId,
+                error: String(e),
+              }),
+          );
           if (sidecar) {
-            // Validate containment: the worktree path must be under
-            // <originalCwd>/.qwen/worktrees/ to prevent a tampered sidecar
-            // from redirecting file operations elsewhere.
-            const expectedParent = sidecar.originalCwd + '/.qwen/worktrees/';
-            if (sidecar.worktreePath.startsWith(expectedParent)) {
-              const wt = {
-                slug: sidecar.slug,
-                path: sidecar.worktreePath,
-                branch: sidecar.worktreeBranch,
-              };
-              try {
-                await runtime.bridge.changeSessionCwd(sessionId, {
-                  path: wt.path,
-                });
-                runtime.bridge.setSessionWorktree(sessionId, wt);
-                Object.assign(session, { worktree: wt });
-              } catch (restoreErr) {
-                if (daemonLog) {
-                  daemonLog.warn('worktree restore failed on load/resume', {
-                    sessionId,
-                    worktreePath: wt.path,
-                    error:
-                      restoreErr instanceof Error
-                        ? restoreErr.message
-                        : String(restoreErr),
-                  });
-                }
-              }
+            const wt = {
+              slug: sidecar.slug,
+              path: sidecar.worktreePath,
+              branch: sidecar.worktreeBranch,
+            };
+            try {
+              await runtime.bridge.changeSessionCwd(sessionId, {
+                path: wt.path,
+              });
+              runtime.bridge.setSessionWorktree(sessionId, wt);
+              Object.assign(session, { worktree: wt });
+            } catch (restoreErr) {
+              daemonLog?.warn('worktree restore failed on load/resume', {
+                sessionId,
+                worktreePath: wt.path,
+                error:
+                  restoreErr instanceof Error
+                    ? restoreErr.message
+                    : String(restoreErr),
+              });
             }
           }
         }
