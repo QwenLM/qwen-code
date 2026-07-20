@@ -39,7 +39,10 @@ import type {
 import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
-import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import {
+  runWithAgentContext,
+  runWithAgentHistory,
+} from '../../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -426,6 +429,9 @@ describe('AgentTool', () => {
       expect(properties.properties.fork_turns.default).toBe('none');
       expect(properties.properties.fork_turns.description).toContain(
         'positive integer string',
+      );
+      expect(properties.properties.fork_turns.description).toContain(
+        'Omit this parameter when subagent_type is "fork"',
       );
       expect(properties.properties.fork_turns.oneOf).toHaveLength(2);
     });
@@ -3185,6 +3191,46 @@ describe('AgentTool', () => {
           eventEmitter: expect.anything(),
         },
       );
+    });
+
+    it('inherits from the direct parent agent instead of the top-level session', async () => {
+      const topLevelHistorySpy = vi.fn().mockReturnValue([
+        { role: 'user', parts: [{ text: 'top-level question' }] },
+        { role: 'model', parts: [{ text: 'top-level answer' }] },
+      ]);
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow: topLevelHistorySpy,
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+      const directParentHistory = [
+        { role: 'user' as const, parts: [{ text: 'direct parent question' }] },
+        { role: 'model' as const, parts: [{ text: 'direct parent answer' }] },
+      ];
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+        fork_turns: 'all',
+        run_in_background: false,
+      });
+
+      await runWithAgentHistory(
+        () => directParentHistory,
+        () => invocation.execute(),
+      );
+
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        mockSubagents[0],
+        expect.anything(),
+        expect.objectContaining({
+          promptConfigOverrides: {
+            extraHistory: directParentHistory,
+          },
+        }),
+      );
+      expect(topLevelHistorySpy).not.toHaveBeenCalled();
     });
 
     it('should inject additionalContext from SubagentStart hook into context', async () => {

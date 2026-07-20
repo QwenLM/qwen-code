@@ -8,15 +8,18 @@ import { describe, expect, it } from 'vitest';
 import {
   canSpawnNestedAgent,
   childLaunchDepth,
+  getCurrentAgentHistory,
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   isTopLevelSession,
   runWithAgentContext,
+  runWithAgentHistory,
   runWithRuntimeContentGenerator,
   spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
+import type { Content } from '@google/genai';
 import { runWithTeammateIdentity } from '../team/identity.js';
 import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import {
@@ -139,6 +142,48 @@ describe('agent-context (runtimeView)', () => {
       return getRuntimeContentGenerator();
     });
     expect(outerAgain).toBe(outer);
+  });
+});
+
+describe('agent-context (history)', () => {
+  it('exposes direct parent history only inside its frame', async () => {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'parent question' }] },
+      { role: 'model', parts: [{ text: 'parent answer' }] },
+    ];
+
+    expect(getCurrentAgentHistory()).toBeUndefined();
+    await runWithAgentHistory(
+      () => history,
+      async () => {
+        expect(getCurrentAgentHistory()).toBe(history);
+      },
+    );
+    expect(getCurrentAgentHistory()).toBeUndefined();
+  });
+
+  it('isolates concurrent history providers', async () => {
+    const first: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
+    const second: Content[] = [{ role: 'user', parts: [{ text: 'second' }] }];
+
+    const observed = await Promise.all([
+      runWithAgentHistory(
+        () => first,
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          return getCurrentAgentHistory();
+        },
+      ),
+      runWithAgentHistory(
+        () => second,
+        async () => {
+          await new Promise((resolve) => setTimeout(resolve, 1));
+          return getCurrentAgentHistory();
+        },
+      ),
+    ]);
+
+    expect(observed).toEqual([first, second]);
   });
 });
 

@@ -59,6 +59,7 @@ import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
   childLaunchDepth,
+  getCurrentAgentHistory,
   getCurrentAgentId,
   isTopLevelSession,
   runWithAgentContext,
@@ -776,7 +777,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           ],
           default: 'none',
           description:
-            'Parent conversation turns to inherit. Defaults to "none" for backward-compatible isolation; use "all" for the full conversation, or a positive integer string such as "3" for the most recent three real user turns. Tool responses and pure system reminders do not count as turns.',
+            'Parent conversation turns to inherit. Defaults to "none" for backward-compatible isolation; use "all" for the full conversation, or a positive integer string such as "3" for the most recent three real user turns. Tool responses and pure system reminders do not count as turns. Omit this parameter when subagent_type is "fork"; detached forks always inherit the full parent context.',
         },
         run_in_background: {
           type: 'boolean',
@@ -1263,11 +1264,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const forkTurns = normalizeForkTurns(this.params.fork_turns);
     if (forkTurns === 'none') return [];
 
-    const geminiClient = this.config.getGeminiClient();
-    const rawHistory = geminiClient
-      ? (geminiClient.getHistoryShallow?.(true) ??
-        geminiClient.getHistory(true))
-      : [];
+    const directParentHistory = getCurrentAgentHistory();
+    const geminiClient =
+      directParentHistory === undefined
+        ? this.config.getGeminiClient()
+        : undefined;
+    const rawHistory =
+      directParentHistory ??
+      (geminiClient
+        ? (geminiClient.getHistoryShallow?.(true) ??
+          geminiClient.getHistory(true))
+        : []);
     return buildInheritedSubagentHistory(rawHistory, forkTurns);
   }
 

@@ -23,10 +23,12 @@ import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
+  getCurrentAgentHistoryProvider,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   isTopLevelSession,
   runWithAgentContext,
+  runWithAgentHistory,
   runWithRuntimeContentGenerator,
   spawnBlockReason,
   type RuntimeContentGeneratorView,
@@ -652,12 +654,16 @@ export class AgentCore {
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
     const inner = () =>
-      this._runReasoningLoopInner(
-        chat,
-        initialMessages,
-        toolsList,
-        abortController,
-        options,
+      runWithAgentHistory(
+        () => chat.getHistoryShallow(true),
+        () =>
+          this._runReasoningLoopInner(
+            chat,
+            initialMessages,
+            toolsList,
+            abortController,
+            options,
+          ),
       );
     return this.runInAgentFrames(inner);
   }
@@ -704,6 +710,11 @@ export class AgentCore {
    * leader-only `isTeammate()` guard. No-op on the reasoning-loop path,
    * where TeamManager already establishes this frame.
    *
+   * `inheritedAgentHistoryProvider` restores access to the direct parent
+   * agent's local chat. Nested agents do not write their conversation into the
+   * top-level Config's GeminiClient, so a deferred-approved Agent tool would
+   * otherwise inherit the top-level session instead of its direct parent.
+   *
    * Exposed (rather than inlined twice) so the contract stays testable in
    * isolation; see `agent-core.test.ts`.
    */
@@ -713,10 +724,16 @@ export class AgentCore {
     inheritedAgentId?: string,
     inheritedTeammateIdentity?: TeammateIdentity,
     inheritedAgentDepth?: number,
+    inheritedAgentHistoryProvider?: () => Content[],
   ): Promise<T> {
     const runInner = () =>
       subagentNameContext.run(this.name, () => {
-        const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        const runWithHistory = () =>
+          inheritedAgentHistoryProvider
+            ? runWithAgentHistory(inheritedAgentHistoryProvider, fn)
+            : fn();
+        const runWithView = () =>
+          this.withRuntimeView(runWithHistory, inheritedView);
         // inheritedAgentDepth restores the agent's original nesting depth.
         // Without it the frame recomputes from the UI's frame-less async
         // chain to depth 0, and an approved `agent` tool call from a
@@ -1610,6 +1627,8 @@ export class AgentCore {
             // frame at this agent's original depth, or the depth guard on a
             // deferred-approved `agent` tool call would see depth 0.
             const inheritedAgentDepth = getCurrentAgentDepth();
+            const inheritedAgentHistoryProvider =
+              getCurrentAgentHistoryProvider();
             // Capture the teammate identity frame too, while the loop
             // frame is still live, so the deferred-approval continuation
             // can restore it. See `runInAgentFrames` for why this matters
@@ -1646,6 +1665,7 @@ export class AgentCore {
                   inheritedAgentId ?? undefined,
                   inheritedTeammateIdentity,
                   inheritedAgentDepth,
+                  inheritedAgentHistoryProvider,
                 );
               },
               timestamp: Date.now(),

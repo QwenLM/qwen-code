@@ -50,10 +50,12 @@ partially or not context-inheriting, which its runtime does not support.
 
 ### Selecting history
 
-The parent Gemini client's curated history is used so invalid or interrupted
-entries have already been repaired by the chat layer. The leading startup
-context reminder is removed because the child generates startup context for
-its own working directory.
+The direct parent chat's curated history is used so invalid or interrupted
+entries have already been repaired by the chat layer. Nested agents expose
+their local chat through the runtime agent context; top-level launches fall
+back to the session Gemini client. The leading startup context reminder is
+removed because the child generates startup context for its own working
+directory.
 
 For a numeric value, a real user turn is a user-role message that is neither:
 

@@ -5,13 +5,16 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import type { FunctionDeclaration } from '@google/genai';
+import type { Content, FunctionDeclaration } from '@google/genai';
 import { AgentCore } from './agent-core.js';
 import {
+  getCurrentAgentHistory,
+  getCurrentAgentHistoryProvider,
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithAgentContext,
+  runWithAgentHistory,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
@@ -85,6 +88,37 @@ describe('AgentCore.runInAgentFrames', () => {
 
     expect(observedView).toBe(view);
     expect(observedName).toBe('image-agent');
+  });
+
+  it('publishes the local chat history while the reasoning loop runs', async () => {
+    const core = makeCore('history-agent');
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'local question' }] },
+      { role: 'model', parts: [{ text: 'local answer' }] },
+    ];
+    const chat = {
+      getHistoryShallow: vi.fn().mockReturnValue(history),
+    } as unknown as Parameters<AgentCore['runReasoningLoop']>[0];
+    let observedHistory: Content[] | undefined;
+    const coreWithInner = core as unknown as {
+      _runReasoningLoopInner: () => Promise<{
+        text: string;
+        terminateMode: null;
+        turnsUsed: number;
+      }>;
+    };
+    vi.spyOn(coreWithInner, '_runReasoningLoopInner').mockImplementation(
+      async () => {
+        observedHistory = getCurrentAgentHistory();
+        return { text: 'done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    await core.runReasoningLoop(chat, [], [], new AbortController());
+
+    expect(observedHistory).toBe(history);
+    expect(chat.getHistoryShallow).toHaveBeenCalledWith(true);
+    expect(getCurrentAgentHistory()).toBeUndefined();
   });
 
   it('restores frames even when called from a fresh async chain (deferred-approval path)', async () => {
@@ -264,6 +298,42 @@ describe('AgentCore.runInAgentFrames', () => {
     await respondClosure!();
 
     expect(observedDepth).toBe(2);
+  });
+
+  it('restores direct parent history for deferred-approval continuations', async () => {
+    const core = makeCore('approval-agent');
+    const parentHistory: Content[] = [
+      { role: 'user', parts: [{ text: 'parent question' }] },
+      { role: 'model', parts: [{ text: 'parent answer' }] },
+    ];
+
+    let respondClosure: (() => Promise<void>) | undefined;
+    let observedHistory: Content[] | undefined;
+    const onConfirm = async () => {
+      observedHistory = getCurrentAgentHistory();
+    };
+
+    await runWithAgentHistory(
+      () => parentHistory,
+      async () => {
+        const inheritedHistoryProvider = getCurrentAgentHistoryProvider();
+        respondClosure = () =>
+          core.runInAgentFrames(
+            onConfirm,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inheritedHistoryProvider,
+          );
+      },
+    );
+
+    expect(getCurrentAgentHistory()).toBeUndefined();
+    await new Promise((resolve) => setImmediate(resolve));
+    await respondClosure!();
+
+    expect(observedHistory).toBe(parentHistory);
   });
 
   it('restores the teammate identity for deferred-approval continuations', async () => {

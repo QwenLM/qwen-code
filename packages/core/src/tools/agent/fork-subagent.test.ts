@@ -131,6 +131,38 @@ describe('buildInheritedSubagentHistory', () => {
     ).toEqual([secondUser, secondModel]);
   });
 
+  it('does not count empty user content as a real turn', () => {
+    const emptyUser: Content = { role: 'user', parts: [] };
+    const emptyAck: Content = {
+      role: 'model',
+      parts: [{ text: 'ignored empty input' }],
+    };
+
+    expect(
+      buildInheritedSubagentHistory(
+        [startup, firstUser, firstModel, emptyUser, emptyAck],
+        1,
+      ),
+    ).toEqual([firstUser, firstModel, emptyUser, emptyAck]);
+  });
+
+  it('does not count a tool response mixed with a pure reminder', () => {
+    const mixedToolResponse: Content = {
+      role: 'user',
+      parts: [
+        ...toolResult.parts!,
+        { text: '<system-reminder>\nchanged tools\n</system-reminder>' },
+      ],
+    };
+
+    expect(
+      buildInheritedSubagentHistory(
+        [startup, firstUser, toolCall, mixedToolResponse, firstModel],
+        1,
+      ),
+    ).toEqual([firstUser, toolCall, mixedToolResponse, firstModel]);
+  });
+
   it('closes open function calls before the child task user turn', () => {
     const result = buildInheritedSubagentHistory(
       [startup, firstUser, toolCall],

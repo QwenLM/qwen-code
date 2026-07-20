@@ -19,6 +19,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
+import type { Content } from '@google/genai';
 import type {
   ContentGenerator,
   ContentGeneratorConfig,
@@ -34,6 +35,7 @@ export interface RuntimeContentGeneratorView {
 interface AgentContext {
   readonly agentId?: string;
   readonly runtimeView?: RuntimeContentGeneratorView;
+  readonly historyProvider?: () => Content[];
   /**
    * Nesting depth — 0 for a top-level subagent (called from a user's
    * top-level interaction), +1 per nested `runWithAgentContext` frame.
@@ -69,6 +71,24 @@ export function runWithRuntimeContentGenerator<T>(
 ): Promise<T> {
   const current = storage.getStore() ?? {};
   return storage.run({ ...current, runtimeView: view }, fn);
+}
+
+export function runWithAgentHistory<T>(
+  historyProvider: () => Content[],
+  fn: () => Promise<T>,
+): Promise<T> {
+  const current = storage.getStore() ?? {};
+  return storage.run({ ...current, historyProvider }, fn);
+}
+
+export function getCurrentAgentHistory(): Content[] | undefined {
+  return storage.getStore()?.historyProvider?.();
+}
+
+export function getCurrentAgentHistoryProvider():
+  | (() => Content[])
+  | undefined {
+  return storage.getStore()?.historyProvider;
 }
 
 export function getCurrentAgentId(): string | null {

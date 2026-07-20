@@ -8,7 +8,6 @@ import {
   isSystemReminderContent,
   stripStartupContext,
 } from '../../utils/environmentContext.js';
-import { isFunctionResponse } from '../../utils/messageInspectors.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -86,6 +85,35 @@ export function normalizeForkTurns(
   return Number(forkTurns);
 }
 
+function isSystemReminderPart(content: Content, partIndex: number): boolean {
+  const part = content.parts?.[partIndex];
+  return part
+    ? isSystemReminderContent({ role: 'user', parts: [part] })
+    : false;
+}
+
+function isToolResponseContent(content: Content): boolean {
+  if (content.role !== 'user' || !content.parts?.length) return false;
+  return (
+    content.parts.some((part) => part.functionResponse !== undefined) &&
+    content.parts.every(
+      (part, index) =>
+        part.functionResponse !== undefined ||
+        isSystemReminderPart(content, index),
+    )
+  );
+}
+
+function isRealUserTurn(content: Content): boolean {
+  if (content.role !== 'user' || !content.parts?.length) return false;
+  return content.parts.some((part, index) => {
+    if (part.functionResponse || isSystemReminderPart(content, index)) {
+      return false;
+    }
+    return typeof part.text !== 'string' || part.text.trim().length > 0;
+  });
+}
+
 /**
  * Build functionResponse parts for every open function call in a model message.
  *
@@ -140,11 +168,7 @@ export function buildInheritedSubagentHistory(
     const realUserTurnIndexes: number[] = [];
     for (let index = syntheticPrefixLength; index < history.length; index++) {
       const content = history[index]!;
-      if (
-        content.role === 'user' &&
-        !isFunctionResponse(content) &&
-        !isSystemReminderContent(content)
-      ) {
+      if (isRealUserTurn(content)) {
         realUserTurnIndexes.push(index);
       }
     }
@@ -179,7 +203,7 @@ export function buildInheritedSubagentHistory(
       return prepared;
     }
 
-    if (isFunctionResponse(last)) {
+    if (isToolResponseContent(last)) {
       prepared.push({
         role: 'model',
         parts: [{ text: 'Acknowledged.' }],
