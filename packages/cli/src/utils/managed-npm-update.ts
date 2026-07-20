@@ -15,6 +15,7 @@ import lockfile from 'proper-lockfile';
 import semver from 'semver';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
+const OWNERLESS_STAGING_MAX_AGE_MS = 60 * 60 * 1000;
 const execFileAsync = promisify(execFile);
 
 interface ManagedNpmUpdate {
@@ -34,6 +35,43 @@ function assertVersion(version: string): void {
 
 function packageDir(prefix: string): string {
   return path.join(prefix, 'node_modules', '@qwen-code', 'qwen-code');
+}
+
+function processIsAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code === 'EPERM';
+  }
+}
+
+function reclaimStaleStaging(versionsDir: string): void {
+  for (const entry of fs.readdirSync(versionsDir, { withFileTypes: true })) {
+    if (!entry.isDirectory() || !entry.name.startsWith('.')) continue;
+    const stagingDir = path.join(versionsDir, entry.name);
+    const owner = Number.parseInt(
+      entry.name.match(/-(\d+)-[^-]+$/)?.[1] ?? '',
+      10,
+    );
+    if (Number.isInteger(owner) && owner > 0) {
+      if (processIsAlive(owner)) {
+        continue;
+      }
+    } else {
+      let age: number;
+      try {
+        age = Date.now() - fs.statSync(stagingDir).mtimeMs;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+        throw error;
+      }
+      if (age < OWNERLESS_STAGING_MAX_AGE_MS) {
+        continue;
+      }
+    }
+    fs.rmSync(stagingDir, { recursive: true, force: true });
+  }
 }
 
 function resolveBootstrapPath(bootstrapPath?: string): string {
@@ -138,7 +176,10 @@ export function prepareManagedNpmUpdate(
   const launcherRoot = path.join(updateRoot, launcherId(resolvedBootstrapPath));
   const versionsDir = path.join(launcherRoot, 'versions');
   fs.mkdirSync(versionsDir, { recursive: true });
-  const stagingDir = fs.mkdtempSync(path.join(versionsDir, `.${version}-`));
+  reclaimStaleStaging(versionsDir);
+  const stagingDir = fs.mkdtempSync(
+    path.join(versionsDir, `.${version}-${process.pid}-`),
+  );
   return {
     stagingDir,
     versionDir: path.join(versionsDir, version),

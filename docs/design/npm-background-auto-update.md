@@ -23,6 +23,10 @@ empty prefix. Both bypass the current repository's `.npmrc` and inherit the
 same environment and user/global npm configuration, so the version that was
 checked is installed from the same configured registry.
 
+The launcher resolves `QWEN_HOME` from the same home-scoped `.env` files before
+selecting a version. This keeps the bootstrap path aligned with CLI storage even
+though the full environment loader runs later.
+
 After npm exits successfully, Qwen Code verifies the package name, version,
 bundle, and launcher, then atomically writes an `active.json` pointer beside
 that launcher's versions. The global npm package is not modified. The

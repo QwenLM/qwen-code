@@ -65,6 +65,7 @@ const { existsSync, readFileSync, realpathSync, statSync } = await import(
 );
 const { createHash } = await import('node:crypto');
 const { homedir, tmpdir } = await import('node:os');
+const { parseEnv } = await import('node:util');
 const { fileURLToPath, pathToFileURL } = await import('node:url');
 const { delimiter, dirname, join, parse, resolve, sep } = await import(
   'node:path'
@@ -75,10 +76,7 @@ const currentEntryPath = realpathSync(fileURLToPath(import.meta.url));
 
 function resolveQwenHome() {
   const configured = process.env['QWEN_HOME'];
-  if (!configured) {
-    const home = homedir();
-    return join(home || tmpdir(), '.qwen');
-  }
+  if (!configured) return join(homedir() || tmpdir(), '.qwen');
   if (configured === '~') return homedir();
   if (configured.startsWith('~/') || configured.startsWith('~\\')) {
     return resolve(homedir(), configured.slice(2));
@@ -86,7 +84,25 @@ function resolveQwenHome() {
   return resolve(configured);
 }
 
+function preResolveQwenHome() {
+  if (process.env['QWEN_HOME']) return;
+  const home = homedir();
+  if (!home) return;
+  for (const candidate of [join(home, '.qwen', '.env'), join(home, '.env')]) {
+    try {
+      const configured = parseEnv(readFileSync(candidate, 'utf8'))['QWEN_HOME'];
+      if (configured) {
+        process.env['QWEN_HOME'] = configured;
+        return;
+      }
+    } catch {
+      // Match the CLI's quiet handling of missing or invalid home env files.
+    }
+  }
+}
+
 delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE'];
+preResolveQwenHome();
 
 function getManagedNpmInstallation() {
   try {

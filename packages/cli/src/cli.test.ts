@@ -13,6 +13,7 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -505,11 +506,11 @@ describe('bootstrap import boundaries', () => {
     expect(output).toBe(`${expectedVersion}\n`);
   });
 
-  it('launches the active managed npm version with an empty home directory', () => {
+  it('resolves managed updates from home env and an empty home', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-managed-npm-'));
     const entryDir = path.join(tempDir, 'bootstrap');
     const entryPath = path.join(entryDir, 'cli-entry.mjs');
-    const qwenHome = path.join(tempDir, '.qwen');
+    const qwenHome = path.join(tempDir, 'custom-home');
     try {
       mkdirSync(entryDir, { recursive: true });
       copyFileSync('../../scripts/cli-entry.js', entryPath);
@@ -561,12 +562,15 @@ describe('bootstrap import boundaries', () => {
         }),
       );
 
+      mkdirSync(path.join(tempDir, '.qwen'), { recursive: true });
+      writeFileSync(
+        path.join(tempDir, '.qwen', '.env'),
+        `QWEN_HOME=${JSON.stringify(qwenHome)}\n`,
+      );
       const childEnv: NodeJS.ProcessEnv = {
         ...process.env,
-        HOME: '',
-        USERPROFILE: '',
-        HOMEDRIVE: '',
-        HOMEPATH: '',
+        HOME: tempDir,
+        USERPROFILE: tempDir,
         TMPDIR: tempDir,
         TEMP: tempDir,
         TMP: tempDir,
@@ -587,6 +591,36 @@ describe('bootstrap import boundaries', () => {
         args: ['--prompt', 'hello'],
       });
 
+      const emptyHomeRoot = path.join(tempDir, 'empty-home');
+      const emptyQwenHome = path.join(emptyHomeRoot, '.qwen');
+      mkdirSync(emptyQwenHome, { recursive: true });
+      renameSync(
+        path.join(qwenHome, 'updates'),
+        path.join(emptyQwenHome, 'updates'),
+      );
+      const emptyHomeEnv = {
+        ...childEnv,
+        HOME: '',
+        USERPROFILE: '',
+        HOMEDRIVE: '',
+        HOMEPATH: '',
+        TMPDIR: emptyHomeRoot,
+        TEMP: emptyHomeRoot,
+        TMP: emptyHomeRoot,
+      };
+      expect(
+        JSON.parse(
+          execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
+            encoding: 'utf8',
+            env: emptyHomeEnv,
+          }),
+        ),
+      ).toEqual({
+        managed: 'true',
+        launcher: realpathSync(entryPath),
+        args: ['--prompt', 'hello'],
+      });
+
       writeFileSync(
         path.join(entryDir, 'package.json'),
         JSON.stringify({
@@ -598,7 +632,7 @@ describe('bootstrap import boundaries', () => {
         execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
           encoding: 'utf8',
           env: {
-            ...childEnv,
+            ...emptyHomeEnv,
             QWEN_CODE_MANAGED_NPM_UPDATE: 'true',
           },
         }),

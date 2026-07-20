@@ -87,6 +87,22 @@ describe('managed npm update', () => {
     );
   });
 
+  it('reclaims staging owned by a terminated process', () => {
+    const root = makeTemporaryDirectory();
+    const updateRoot = path.join(root, 'updates');
+    const bootstrap = writeBaseInstallation(root);
+    const first = prepareManagedNpmUpdate('2.0.0', bootstrap, updateRoot);
+    const abandoned = path.join(
+      path.dirname(first.stagingDir),
+      '.2.0.0-999999999-abandoned',
+    );
+    fs.renameSync(first.stagingDir, abandoned);
+
+    prepareManagedNpmUpdate('2.0.1', bootstrap, updateRoot);
+
+    expect(fs.existsSync(abandoned)).toBe(false);
+  });
+
   it('activates a verified install without changing running files', async () => {
     const root = makeTemporaryDirectory();
     const bootstrap = writeBaseInstallation(root);
