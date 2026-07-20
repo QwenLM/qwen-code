@@ -80,3 +80,7 @@
 # --- Tier 2: Master Config ---
 /packages/core/src/config/config.ts                     @tanzhenxin @yiliang114
 /packages/core/src/config/approval-mode.ts              @tanzhenxin @LaZzyMan
+
+# --- Tier 2: CUA Driver & Mobile MCP ---
+/packages/cua-driver/                                   @LaZzyMan
+/packages/mobile-mcp/                                   @LaZzyMan
