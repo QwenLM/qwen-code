@@ -4756,6 +4756,34 @@ describe('AgentTool', () => {
       expect(mockSubagentDispose).toHaveBeenCalledOnce();
     });
 
+    it('disposes an idle resident after the session working directory changes', async () => {
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Inspect the project',
+        prompt: 'Inspect the helper',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalled();
+      });
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { continue: (message: string) => boolean }
+        | undefined;
+      expect(resident).toBeDefined();
+
+      vi.mocked(config.getWorkingDir).mockReturnValue('/other/project');
+      expect(resident?.continue('Continue')).toBe(false);
+
+      expect(mockRegistry.restartCompletedAgent).not.toHaveBeenCalled();
+      expect(mockRegistry.unregisterResidentAgent).toHaveBeenCalled();
+      await vi.waitFor(() => {
+        expect(mockSubagentDispose).toHaveBeenCalledOnce();
+      });
+    });
+
     it('should run in background when run_in_background is true even without background config', async () => {
       const fgSubagent: SubagentConfig = {
         ...bgSubagent,

@@ -137,6 +137,8 @@ flow.
 - Pending inputs and cleanup are guarded by resident-controller identity so a
   stale runtime cannot consume work from or unregister its replacement.
 - Failed and cancelled turns remove and dispose the resident controller.
+- A parent-session working-directory change invalidates the resident runtime;
+  the next continuation disposes it and falls back to transcript revival.
 - If claiming a background slot fails, the row stays completed and the caller
   can use the existing cold-revival error path.
 - Disposal during an active turn aborts its controller and defers destructive

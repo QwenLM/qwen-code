@@ -3156,6 +3156,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const needsAutoPermissionLease = () =>
           agentConfig.getApprovalMode() === ApprovalMode.AUTO &&
           this.config.getApprovalMode() !== ApprovalMode.AUTO;
+        const residentWorkingDir = agentConfig.getWorkingDir();
         let runtimeDisposed = false;
         let disposeRequested = false;
         let turnRunning = false;
@@ -3473,6 +3474,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const residentController: ResidentBackgroundAgent = {
           continue: (message) => {
             if (!canStayResident || disposeRequested || runtimeDisposed) {
+              return false;
+            }
+            if (agentConfig.getWorkingDir() !== residentWorkingDir) {
+              requestRuntimeDisposal();
               return false;
             }
             if (needsAutoPermissionLease()) {

@@ -113,6 +113,7 @@ describe('BackgroundAgentResumeService', () => {
       isTrustedFolder: () => true,
       isInteractive: () => false,
       getProjectRoot: () => tempDir,
+      getWorkingDir: vi.fn().mockReturnValue(tempDir),
       getCliVersion: () => 'test-version',
       getGeminiClient: () => undefined,
       getSkillManager: () => undefined,
@@ -2462,7 +2463,7 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const dispose = vi.fn().mockResolvedValue(undefined);
-    const { service, subagentManager } = createService({ hookSystem });
+    const { service, subagentManager, config } = createService({ hookSystem });
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
       dispose,
@@ -2525,10 +2526,16 @@ describe('BackgroundAgentResumeService', () => {
     expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
     expect(dispose).not.toHaveBeenCalled();
 
+    vi.mocked(config.getWorkingDir).mockReturnValue(
+      path.join(tempDir, 'relocated'),
+    );
+    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(dispose).toHaveBeenCalledTimes(1);
+
     registry.reset();
 
     expect(dispose).toHaveBeenCalledTimes(1);
-    expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
+    expect(registry.continueResidentAgent(agentId, 'after reset')).toBe(false);
   });
 
   it('does not revive non-completed or transcript-less entries', async () => {
