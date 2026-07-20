@@ -289,4 +289,30 @@ describe('DefaultAppLayout', () => {
     expect(output).toContain('AgentChatView');
     expect(output).toContain('AgentComposer');
   });
+
+  it('renders update notifications in an agent tab view', () => {
+    mockedUseAgentViewState.mockReturnValue({
+      activeView: 'agent-1',
+      agents: new Map([['agent-1', {}]]),
+    });
+
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      updateInfo: {
+        message: 'Update successful!',
+        update: {
+          latest: '0.20.0',
+          current: '0.19.12',
+          type: 'latest',
+          name: '@qwen-code/qwen-code',
+        },
+      },
+    });
+    const output = lastFrame() ?? '';
+
+    expect(output).toContain('UpdateNotification: Update successful!');
+    expect(output.indexOf('UpdateNotification')).toBeLessThan(
+      output.indexOf('AgentComposer'),
+    );
+  });
 });

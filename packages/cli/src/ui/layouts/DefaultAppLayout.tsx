@@ -69,6 +69,9 @@ export const DefaultAppLayout: React.FC = () => {
           {/* Agent view: chat history + agent-specific composer */}
           <AgentChatView agentId={activeView} />
           <Box flexDirection="column" ref={uiState.mainControlsRef}>
+            {!uiState.dialogsVisible && uiState.updateInfo && (
+              <UpdateNotification message={uiState.updateInfo.message} />
+            )}
             <AgentComposer key={activeView} agentId={activeView} />
             <ExitWarning />
           </Box>
