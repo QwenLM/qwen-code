@@ -374,6 +374,18 @@ export abstract class ChannelBase {
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
   };
+  private readonly bridgeBackgroundResponseListener = (
+    sessionId: string,
+    text: string,
+  ): void => {
+    void this.dispatchBackgroundResponse(sessionId, text).catch(
+      (err: unknown) => {
+        process.stderr.write(
+          `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+      },
+    );
+  };
   private readonly bridgeSessionDiedListener = (
     event: SessionDiedEvent,
   ): void => {
@@ -429,6 +441,25 @@ export abstract class ChannelBase {
       });
     }
     this.onToolCall(chatId, event);
+  }
+
+  async dispatchBackgroundResponse(
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    const target = this.router.getTarget(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      text.trim().length === 0
+    ) {
+      return;
+    }
+    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
+      await this.pushProactive(target, text);
+      return;
+    }
+    await this.sendResponseMessage(target.chatId, text, sessionId);
   }
 
   async dispatchPermissionRequest(
@@ -1775,6 +1806,7 @@ export abstract class ChannelBase {
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
+    bridge.on('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.on('sessionDied', this.bridgeSessionDiedListener);
     bridge.on('permissionRequest', this.bridgePermissionRequestListener);
     bridge.on('permissionResolved', this.bridgePermissionResolvedListener);
@@ -1782,6 +1814,7 @@ export abstract class ChannelBase {
 
   private detachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.off('toolCall', this.bridgeToolCallListener);
+    bridge.off('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.off('sessionDied', this.bridgeSessionDiedListener);
     bridge.off('permissionRequest', this.bridgePermissionRequestListener);
     bridge.off('permissionResolved', this.bridgePermissionResolvedListener);
