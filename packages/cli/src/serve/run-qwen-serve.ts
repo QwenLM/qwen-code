@@ -2398,11 +2398,7 @@ async function runQwenServeImpl(
     }
   }
   if (opts.initializeTimeoutMs !== undefined) {
-    if (
-      !Number.isFinite(opts.initializeTimeoutMs) ||
-      !Number.isInteger(opts.initializeTimeoutMs) ||
-      opts.initializeTimeoutMs <= 0
-    ) {
+    if (!isPositiveIntegerMs(opts.initializeTimeoutMs)) {
       throw new TypeError(
         `Invalid initializeTimeoutMs: ${opts.initializeTimeoutMs}. Must be a positive integer (milliseconds).`,
       );
