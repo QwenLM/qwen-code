@@ -92,9 +92,10 @@ export interface WorkspaceRuntimeGeneration {
 export interface WorkspaceEntry {
   readonly workspaceId: string;
   readonly workspaceCwd: string;
+  displayName?: string;
   readonly primary: boolean;
   readonly removable: boolean;
-  readonly registrationIds: readonly string[];
+  registrationIds: readonly string[];
   lastGenerationId: number;
   state: WorkspaceEntryState;
   current?: WorkspaceRuntimeGeneration;
@@ -156,6 +157,7 @@ export interface WorkspaceRegistry {
   listManaged(): readonly WorkspaceRuntime[];
   getManagedByWorkspaceCwd(workspaceCwd: string): WorkspaceRuntime | undefined;
   getManagedByWorkspaceId(workspaceId: string): WorkspaceRuntime | undefined;
+  syncRuntimeMetadata(runtime: WorkspaceRuntime): void;
   beginDrain(runtime: WorkspaceRuntime): boolean;
   cancelDrain(runtime: WorkspaceRuntime): void;
   commitDrain(runtime: WorkspaceRuntime): void;
@@ -237,6 +239,9 @@ export function createWorkspaceRegistry(
   ): WorkspaceEntry => ({
     workspaceId: runtime.workspaceId,
     workspaceCwd: runtime.workspaceCwd,
+    ...(runtime.displayName !== undefined
+      ? { displayName: runtime.displayName }
+      : {}),
     primary: runtime.primary,
     removable: runtime.removable === true,
     registrationIds: Object.freeze([...(runtime.registrationIds ?? [])]),
@@ -376,6 +381,12 @@ export function createWorkspaceRegistry(
       ) {
         throw new Error('Replacement runtime identity does not match entry.');
       }
+      if (entry.displayName === undefined) {
+        delete runtime.displayName;
+      } else {
+        runtime.displayName = entry.displayName;
+      }
+      runtime.registrationIds = [...entry.registrationIds];
       const generationId = entry.lastGenerationId + 1;
       const generation: WorkspaceRuntimeGeneration = {
         generationId,
@@ -411,6 +422,26 @@ export function createWorkspaceRegistry(
       byCwd.get(workspaceCwd)?.current?.runtime,
     getManagedByWorkspaceId: (workspaceId) =>
       byId.get(workspaceId)?.current?.runtime,
+    syncRuntimeMetadata: (runtime) => {
+      const entry = byCwd.get(runtime.workspaceCwd);
+      if (!entry || entry.workspaceId !== runtime.workspaceId) return;
+      if (runtime.displayName === undefined) {
+        delete entry.displayName;
+      } else {
+        entry.displayName = runtime.displayName;
+      }
+      entry.registrationIds = Object.freeze([
+        ...(runtime.registrationIds ?? []),
+      ]);
+      const current = entry.current?.runtime;
+      if (!current || current === runtime) return;
+      if (entry.displayName === undefined) {
+        delete current.displayName;
+      } else {
+        current.displayName = entry.displayName;
+      }
+      current.registrationIds = [...entry.registrationIds];
+    },
     resolveWorkspaceCwd: (workspaceCwd) =>
       workspaceCwd === undefined
         ? activeRuntime(primaryEntry)

@@ -105,6 +105,37 @@ describe('createSingleWorkspaceRegistry', () => {
     expect(entry.appliedRevision).toBe('policy-2');
   });
 
+  it('preserves updated workspace metadata across a replacement', () => {
+    const runtime = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      displayName: 'Original',
+      registrationIds: ['registration-1'],
+    });
+    const replacement = makeRuntime('/work/primary', {
+      workspaceId: 'ws-primary',
+      primary: true,
+      trusted: false,
+    });
+    const registry = createSingleWorkspaceRegistry(runtime);
+    const entry = registry.primaryEntry;
+
+    expect(registry.beginReplacement(entry, 'policy-2')).toBe(true);
+    registry.activateReplacement(entry, replacement, 'policy-2');
+
+    expect(replacement.displayName).toBe('Original');
+    expect(replacement.registrationIds).toEqual(['registration-1']);
+
+    runtime.displayName = 'Renamed';
+    runtime.registrationIds = ['registration-2'];
+    registry.syncRuntimeMetadata(runtime);
+
+    expect(entry.displayName).toBe('Renamed');
+    expect(entry.registrationIds).toEqual(['registration-2']);
+    expect(replacement.displayName).toBe('Renamed');
+    expect(replacement.registrationIds).toEqual(['registration-2']);
+  });
+
   it('keeps a failed replacement as a queryable blocked entry', () => {
     const runtime = makeRuntime('/work/primary', {
       workspaceId: 'ws-primary',

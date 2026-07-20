@@ -73,6 +73,16 @@ function createMockRegistry(
       return runtime && !draining.has(runtime) ? runtime : undefined;
     },
     getManagedByWorkspaceId: (id: string) => byId.get(id),
+    syncRuntimeMetadata: vi.fn((runtime: WorkspaceRuntime) => {
+      const current = byCwd.get(runtime.workspaceCwd);
+      if (!current || current === runtime) return;
+      if (runtime.displayName === undefined) {
+        delete current.displayName;
+      } else {
+        current.displayName = runtime.displayName;
+      }
+      current.registrationIds = [...(runtime.registrationIds ?? [])];
+    }),
     resolveWorkspaceCwd: () => undefined,
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
     beginDrain: vi.fn((runtime: WorkspaceRuntime) => {

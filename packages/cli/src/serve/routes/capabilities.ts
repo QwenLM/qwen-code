@@ -85,8 +85,8 @@ export function registerCapabilitiesRoutes(
       workspaces: entries.map((entry) => ({
         id: entry.workspaceId,
         cwd: entry.workspaceCwd,
-        ...(entry.current?.runtime.displayName !== undefined
-          ? { displayName: entry.current.runtime.displayName }
+        ...(entry.displayName !== undefined
+          ? { displayName: entry.displayName }
           : {}),
         primary: entry.primary,
         trusted:
