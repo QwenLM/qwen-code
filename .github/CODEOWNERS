@@ -1,0 +1,64 @@
+# ============================================================
+# Qwen Code Core Harness CODEOWNERS
+# 涉及模型效果的核心模块变更，需对应 maintainer review
+# ============================================================
+
+# --- CODEOWNERS file itself ---
+/.github/CODEOWNERS                                    @pomelo-nwu
+
+# --- Tier 1: Agent Loop & System Prompt ---
+/packages/core/src/core/prompts.ts                      @tanzhenxin @yiliang114
+/packages/core/src/core/client.ts                       @tanzhenxin @yiliang114
+/packages/core/src/core/turn.ts                         @tanzhenxin @yiliang114
+/packages/core/src/core/geminiChat.ts                   @tanzhenxin @yiliang114
+/packages/core/src/core/coreToolScheduler.ts            @tanzhenxin @yiliang114
+/packages/core/src/core/tokenLimits.ts                  @tanzhenxin @yiliang114
+/packages/core/src/core/reasoning-effort.ts             @tanzhenxin @yiliang114
+/packages/core/src/core/baseLlmClient.ts                @tanzhenxin @yiliang114
+/packages/core/src/core/contentGenerator.ts             @tanzhenxin @yiliang114
+
+# --- Tier 1: Tool Definitions & Schemas ---
+/packages/core/src/tools/                               @tanzhenxin @LaZzyMan
+
+# --- Tier 1: API Message Serialization ---
+/packages/core/src/core/openaiContentGenerator/         @tanzhenxin @yiliang114
+/packages/core/src/core/anthropicContentGenerator/      @tanzhenxin @yiliang114
+/packages/core/src/core/geminiContentGenerator/         @tanzhenxin @yiliang114
+/packages/core/src/utils/schemaConverter.ts             @tanzhenxin @yiliang114
+
+# --- Tier 1: Context Assembly ---
+/packages/core/src/utils/environmentContext.ts          @LaZzyMan @tanzhenxin
+
+# --- Tier 1: Compaction & Truncation ---
+/packages/core/src/services/chatCompressionService.ts   @tanzhenxin @LaZzyMan
+/packages/core/src/services/postCompactAttachments.ts   @tanzhenxin @LaZzyMan
+/packages/core/src/services/compactionInputSlimming.ts  @tanzhenxin @LaZzyMan
+/packages/core/src/services/microcompaction/            @tanzhenxin @LaZzyMan
+/packages/core/src/utils/truncation.ts                  @tanzhenxin @LaZzyMan
+/packages/core/src/utils/toolResultDisplayCompaction.ts @tanzhenxin @LaZzyMan
+
+# --- Tier 1: Model & Provider Configuration ---
+/packages/core/src/models/                              @yiliang114 @tanzhenxin
+/packages/core/src/providers/                           @yiliang114 @tanzhenxin
+/packages/core/src/config/models.ts                     @yiliang114 @tanzhenxin
+
+# --- Tier 2: Permission System ---
+/packages/core/src/permissions/                         @LaZzyMan @qqqys
+
+# --- Tier 2: Memory System ---
+/packages/core/src/memory/                              @LaZzyMan @qqqys
+
+# --- Tier 2: Loop Detection ---
+/packages/core/src/services/loopDetectionService.ts     @tanzhenxin @LaZzyMan
+
+# --- Tier 2: Skills / Subagents / Agents ---
+/packages/core/src/skills/                              @wenshao @tanzhenxin
+/packages/core/src/subagents/                           @wenshao @tanzhenxin
+/packages/core/src/agents/                              @wenshao @tanzhenxin
+
+# --- Tier 2: Hooks ---
+/packages/core/src/hooks/                               @DennisYu07 @qqqys
+
+# --- Tier 2: Master Config ---
+/packages/core/src/config/config.ts                     @tanzhenxin @yiliang114
+/packages/core/src/config/approval-mode.ts              @tanzhenxin @LaZzyMan
