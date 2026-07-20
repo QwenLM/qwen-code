@@ -39,10 +39,7 @@ import type {
 import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
-import {
-  runWithAgentContext,
-  runWithAgentHistory,
-} from '../../agents/runtime/agent-context.js';
+import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
@@ -415,7 +412,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('declares fork_turns with the backward-compatible none default', () => {
+    it('declares fork_turns for fork agents without a none option', () => {
       const properties = agentTool.schema.parametersJsonSchema as {
         properties: {
           fork_turns: {
@@ -426,12 +423,12 @@ describe('AgentTool', () => {
         };
       };
 
-      expect(properties.properties.fork_turns.default).toBe('none');
+      expect(properties.properties.fork_turns.default).toBeUndefined();
       expect(properties.properties.fork_turns.description).toContain(
         'positive integer string',
       );
       expect(properties.properties.fork_turns.description).toContain(
-        'Omit this parameter when subagent_type is "fork"',
+        'Only valid with subagent_type "fork"',
       );
       expect(properties.properties.fork_turns.oneOf).toHaveLength(2);
     });
@@ -578,38 +575,50 @@ describe('AgentTool', () => {
       );
     });
 
-    it.each(['all', 'none', '1', '12'] as const)(
-      'accepts fork_turns=%s',
+    it.each(['all', '1', '12'] as const)(
+      'accepts fork_turns=%s for fork agents',
       (forkTurns) => {
         expect(
           agentTool.validateToolParams({
             ...validParams,
+            subagent_type: 'fork',
             fork_turns: forkTurns,
           }),
         ).toBeNull();
       },
     );
 
-    it.each(['', '0', '-1', '1.5', ' 3 '] as const)(
+    it.each(['', 'none', '0', '-1', '1.5', ' 3 '] as const)(
       'rejects invalid fork_turns=%j',
       (forkTurns) => {
         expect(
           agentTool.validateToolParams({
             ...validParams,
+            subagent_type: 'fork',
             fork_turns: forkTurns as AgentParams['fork_turns'],
           }),
         ).toMatch(/fork_turns/i);
       },
     );
 
-    it('rejects explicit fork_turns for detached fork agents', () => {
+    it('rejects fork_turns for regular subagents', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          fork_turns: 'all',
+        }),
+      ).toMatch(/only be used with subagent_type "fork"/i);
+    });
+
+    it('rejects fork_turns for named teammates', () => {
       expect(
         agentTool.validateToolParams({
           ...validParams,
           subagent_type: 'fork',
-          fork_turns: 'none',
+          fork_turns: 'all',
+          name: 'worker',
         }),
-      ).toMatch(/always inherit the full parent context/i);
+      ).toMatch(/named teammate/i);
     });
 
     it('accepts a subagent_type missing from the cache (may have been created after startup)', () => {
@@ -944,46 +953,6 @@ describe('AgentTool', () => {
         expect.objectContaining({
           name: 'planner',
           planModeRequired: true,
-        }),
-      );
-    });
-
-    it('passes selected parent history to named teammates', async () => {
-      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
-      vi.mocked(config.getTeamManager).mockReturnValue({
-        spawnTeammate,
-      } as never);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryForSubagent: vi.fn().mockReturnValue([
-          {
-            role: 'user',
-            parts: [
-              {
-                text: '<system-reminder>\nstartup\n</system-reminder>',
-              },
-            ],
-          },
-          { role: 'user', parts: [{ text: 'parent question' }] },
-          { role: 'model', parts: [{ text: 'parent answer' }] },
-        ]),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
-
-      const invocation = agentTool.build({
-        description: 'Investigate issue',
-        prompt: 'Find the cause',
-        subagent_type: 'file-search',
-        name: 'investigator',
-        fork_turns: '1',
-      });
-
-      await invocation.execute(new AbortController().signal);
-
-      expect(spawnTeammate).toHaveBeenCalledWith(
-        expect.objectContaining({
-          chatHistory: [
-            { role: 'user', parts: [{ text: 'parent question' }] },
-            { role: 'model', parts: [{ text: 'parent answer' }] },
-          ],
         }),
       );
     });
@@ -2649,6 +2618,63 @@ describe('AgentTool', () => {
       expect(AgentHeadless.create).toHaveBeenCalledTimes(1);
     });
 
+    it('limits a fork to recent real user turns while preserving startup context', async () => {
+      const startup = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
+      };
+      const firstUser = {
+        role: 'user' as const,
+        parts: [{ text: 'first question' }],
+      };
+      const firstModel = {
+        role: 'model' as const,
+        parts: [{ text: 'first answer' }],
+      };
+      const secondUser = {
+        role: 'user' as const,
+        parts: [{ text: 'second question' }],
+      };
+      const secondModel = {
+        role: 'model' as const,
+        parts: [{ text: 'second answer' }],
+      };
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([
+            startup,
+            firstUser,
+            firstModel,
+            secondUser,
+            secondModel,
+          ]),
+        getHistoryForForkWindow: vi
+          .fn()
+          .mockReturnValue([firstUser, firstModel, secondUser, secondModel]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+        fork_turns: '1',
+      });
+
+      await invocation.execute();
+
+      expect(vi.mocked(AgentHeadless.create).mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({
+          initialMessages: [startup, secondUser, secondModel],
+        }),
+      );
+    });
+
     it('caps fork turns and uses bubble approval mode', async () => {
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
@@ -3121,116 +3147,6 @@ describe('AgentTool', () => {
         // composed signal, not the caller-supplied one.
         expect.any(AbortSignal),
       );
-    });
-
-    it('inherits all parent turns when explicitly requested', async () => {
-      vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryForSubagent: vi.fn().mockReturnValue([
-          {
-            role: 'user',
-            parts: [
-              {
-                text: '<system-reminder>\nstartup\n</system-reminder>',
-              },
-            ],
-          },
-          { role: 'user', parts: [{ text: 'parent question' }] },
-          { role: 'model', parts: [{ text: 'parent answer' }] },
-        ]),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
-
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation({
-        description: 'Search files',
-        prompt: 'Find all TypeScript files',
-        subagent_type: 'file-search',
-        fork_turns: 'all',
-        run_in_background: false,
-      });
-
-      await invocation.execute();
-
-      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
-        mockSubagents[0],
-        expect.anything(),
-        expect.objectContaining({
-          promptConfigOverrides: {
-            extraHistory: [
-              { role: 'user', parts: [{ text: 'parent question' }] },
-              { role: 'model', parts: [{ text: 'parent answer' }] },
-            ],
-          },
-        }),
-      );
-    });
-
-    it('starts without parent history by default', async () => {
-      vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryForSubagent: vi.fn().mockReturnValue([
-          { role: 'user', parts: [{ text: 'parent question' }] },
-          { role: 'model', parts: [{ text: 'parent answer' }] },
-        ]),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
-
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation({
-        description: 'Search files',
-        prompt: 'Find all TypeScript files',
-        subagent_type: 'file-search',
-        run_in_background: false,
-      });
-
-      await invocation.execute();
-
-      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
-        mockSubagents[0],
-        expect.anything(),
-        {
-          eventEmitter: expect.anything(),
-        },
-      );
-    });
-
-    it('inherits from the direct parent agent instead of the top-level session', async () => {
-      const topLevelHistorySpy = vi.fn().mockReturnValue([
-        { role: 'user', parts: [{ text: 'top-level question' }] },
-        { role: 'model', parts: [{ text: 'top-level answer' }] },
-      ]);
-      vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryForSubagent: topLevelHistorySpy,
-      } as unknown as ReturnType<Config['getGeminiClient']>);
-      const directParentHistory = [
-        { role: 'user' as const, parts: [{ text: 'direct parent question' }] },
-        { role: 'model' as const, parts: [{ text: 'direct parent answer' }] },
-      ];
-
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation({
-        description: 'Search files',
-        prompt: 'Find all TypeScript files',
-        subagent_type: 'file-search',
-        fork_turns: 'all',
-        run_in_background: false,
-      });
-
-      await runWithAgentHistory(
-        () => directParentHistory,
-        () => invocation.execute(),
-      );
-
-      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
-        mockSubagents[0],
-        expect.anything(),
-        expect.objectContaining({
-          promptConfigOverrides: {
-            extraHistory: directParentHistory,
-          },
-        }),
-      );
-      expect(topLevelHistorySpy).not.toHaveBeenCalled();
     });
 
     it('should inject additionalContext from SubagentStart hook into context', async () => {
@@ -4392,40 +4308,6 @@ describe('AgentTool', () => {
         'Background agent launched',
       );
       expect(mockRegistry.register).toHaveBeenCalled();
-    });
-
-    it('persists inherited context for background-agent revival', async () => {
-      const attachSpy = vi.spyOn(transcript, 'attachJsonlTranscriptWriter');
-      vi.mocked(config.getGeminiClient).mockReturnValue({
-        getHistoryForSubagent: vi.fn().mockReturnValue([
-          { role: 'user', parts: [{ text: 'parent question' }] },
-          { role: 'model', parts: [{ text: 'parent answer' }] },
-        ]),
-      } as unknown as ReturnType<Config['getGeminiClient']>);
-
-      const invocation = (
-        agentTool as AgentToolWithProtectedMethods
-      ).createInvocation({
-        description: 'Start monitor',
-        prompt: 'Watch for changes',
-        subagent_type: 'monitor',
-        fork_turns: 'all',
-      });
-
-      await invocation.execute();
-
-      expect(attachSpy).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.any(String),
-        expect.objectContaining({
-          bootstrapKind: 'context',
-          bootstrapHistory: [
-            { role: 'user', parts: [{ text: 'parent question' }] },
-            { role: 'model', parts: [{ text: 'parent answer' }] },
-          ],
-        }),
-      );
-      attachSpy.mockRestore();
     });
 
     it('keeps a named-teammate launch in the foreground when no team is active and the flag is omitted', async () => {

@@ -5043,7 +5043,7 @@ describe('GeminiChat', async () => {
     });
   });
 
-  describe('getHistoryForSubagent', () => {
+  describe('getHistoryForForkWindow', () => {
     it('removes startup context before curating adjacent user turns', () => {
       const startup: Content = {
         role: 'user',
@@ -5068,7 +5068,7 @@ describe('GeminiChat', async () => {
       };
       chat.setHistory([startup, firstTurn, answer]);
 
-      expect(chat.getHistoryForSubagent()).toEqual([firstTurn, answer]);
+      expect(chat.getHistoryForForkWindow()).toEqual([firstTurn, answer]);
     });
   });
 

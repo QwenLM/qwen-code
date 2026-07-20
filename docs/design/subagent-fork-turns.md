@@ -1,114 +1,88 @@
-# Subagent `fork_turns`
+# Fork Subagent `fork_turns`
 
 ## Summary
 
-Add a `fork_turns` parameter to the `Agent` tool so a regular subagent or
-named teammate can inherit parent conversation context without becoming the
-existing detached `subagent_type: "fork"` runtime.
+Add an optional `fork_turns` parameter to the Agent tool's existing detached
+`subagent_type: "fork"` runtime. A fork continues to inherit the full parent
+conversation when the parameter is omitted. Callers can explicitly use:
 
-The accepted values match Codex while preserving Qwen Code's existing default:
+- `all` for the full parent conversation, or
+- a positive integer string such as `"3"` for the most recent three real user
+  turns.
 
-- `all` inherits all available conversational history.
-- `none` starts without parent conversation history and is the default.
-- A positive integer string such as `"3"` inherits the most recent three
-  real user turns.
-
-Callers must explicitly opt into context inheritance. Existing calls that omit
-`fork_turns` keep their fresh-context behavior.
+Regular subagents and named teammates do not accept `fork_turns` and continue
+to start without parent conversation history.
 
 ## Goals
 
-- Preserve each regular subagent's own system prompt, model, tools, approval
-  mode, working directory, and lifecycle.
+- Preserve the existing full-history behavior for fork calls that omit the
+  parameter.
+- Let callers bound a fork's inherited history without changing its system
+  prompt, tools, model, approval mode, working directory, or detached
+  lifecycle.
 - Count real user turns rather than raw API messages. Tool responses and pure
   system reminders do not consume the requested turn count.
-- Keep inherited history valid when the parent is currently issuing the
-  `Agent` tool call.
-- Apply the same context-selection semantics to named in-process teammates.
-- Preserve inherited context when a background subagent is later revived from
-  its transcript.
+- Keep the selected fork history isolated from mutable parent message parts.
 
 ## Non-goals
 
-- Change the detached `subagent_type: "fork"` runtime. It already inherits the
-  full parent context and cache-safe runtime prefix.
-- Add context inheritance to subprocess backends. Team teammates currently use
-  the in-process backend.
-- Make `fork_turns` select a model, agent type, or execution mode.
+- Add context inheritance to regular specialized subagents or agent-team
+  teammates.
+- Add a no-history fork mode. Callers that do not want parent context should
+  launch a regular subagent.
+- Change fork availability, nesting rules, background execution, transcript
+  recovery, or reuse of the parent's system prompt and tool declarations.
 
 ## Design
 
 ### Parameter and validation
 
-`AgentParams.fork_turns` is optional. The JSON schema accepts `all`, `none`,
-or a string matching `^[1-9][0-9]*$`, with `none` as the default.
+`AgentParams.fork_turns` is optional. The JSON schema accepts `all` or a string
+matching `^[1-9][0-9]*$`. Omission normalizes to `all`, preserving the existing
+fork behavior.
 
-An explicitly supplied `fork_turns` is rejected with
-`subagent_type: "fork"` because the detached fork always owns the complete
-parent history. Accepting both would imply that a detached fork can be
-partially or not context-inheriting, which its runtime does not support.
+Supplying `fork_turns` with any non-fork subagent type, with no explicit
+subagent type, or while spawning a named teammate is rejected. `none`, zero,
+negative numbers, decimals, whitespace-padded values, and non-string values
+are rejected.
 
 ### Selecting history
 
-The direct parent chat's curated history is used so invalid or interrupted
-entries have already been repaired by the chat layer. Nested agents expose
-their local chat through the runtime agent context; top-level launches fall
-back to the session Gemini client. The leading startup context reminder is
-removed because the child generates startup context for its own working
-directory. The parent chat removes that startup prefix before curating the
-history, preventing curation from coalescing it with the first real user
-prompt while preserving that turn's own reminders.
+`all` uses the same curated parent history as the existing fork runtime.
 
-For a numeric value, a real user turn is a user-role message that is neither:
+For a numeric value, the parent chat removes its leading startup context before
+curating conversation history. This prevents curation from coalescing the
+startup reminder with the first real user prompt. The original startup prefix
+is then prepended to the selected window so the fork retains the parent's
+environment context.
 
-- a pure function-response message, nor
-- a pure system-reminder message.
+A real user turn is a user-role message containing content other than function
+responses, empty text, or pure system reminders. The selected slice begins at
+the Nth most recent real user turn and includes subsequent model messages,
+tool calls, tool responses, and reminders. If fewer than N real turns exist,
+all available real turns are selected.
 
-The selected slice begins at the Nth most recent real user turn and includes
-all model messages, tool calls, tool responses, and reminders after that
-boundary. If fewer than N real turns exist, all available real-turn history
-is inherited. A compacted-history summary is a synthetic prefix and is not
-included in a numeric window; use `all` when the child should receive it.
+A compacted-history summary is a synthetic prefix and is not included in a
+numeric window; callers should use `all` when the fork needs the compacted
+summary. The final selected history is deep-cloned so the fork and parent do
+not share mutable nested message parts.
 
-The selected history must end with a model message before the child task is
-sent as a new user turn. A trailing user message is dropped. Open function
-calls in the final model message are closed with placeholder function
-responses followed by a short model acknowledgement. The final selected
-window is deep-cloned so the parent and child chats never share mutable nested
-message parts.
-
-### Runtime composition
-
-`PromptConfig` gains `extraHistory`, which is appended after the regular
-subagent's own environment bootstrap. This differs from `initialMessages`:
-
-- `extraHistory` preserves the child's startup context and system prompt.
-- `initialMessages` continues to replace startup context for the detached fork
-  and transcript-resume paths that own the complete history.
-
-Regular foreground and background subagents pass selected history through
-`SubagentManager.createAgentHeadless(..., promptConfigOverrides)`. Named
-teammates pass the same history through the existing
-`InProcessSpawnConfig.chatHistory` path.
+The existing fork construction still repairs the final boundary before
+sending the directive. It drops an unanswered trailing user message and
+closes an open model function call with placeholder responses when required.
 
 ### Background revival
 
-When a background regular subagent inherits context, the selected parent
-history is written as a context bootstrap record in its JSONL transcript.
-Transcript recovery prepends that bootstrap between the newly generated child
-environment context and the subagent's own recorded task history. This keeps
-`send_message` revival semantically equivalent to continuing the original
-subagent.
-
-The existing detached-fork bootstrap remains distinct because it also
-persists the exact launch-time system instruction and tools.
+The selected initial messages continue to use the existing fork bootstrap
+record. Transcript recovery therefore revives a bounded-history fork with the
+same selected history, launch-time system instruction, tools, and task prompt
+as its original execution.
 
 ## Compatibility and risks
 
-The default remains zero inherited turns for backward compatibility. Selecting
-`all` can increase prompt size; callers can select a bounded positive count
-when they need context with tighter token control.
-
-Inherited paths may refer to the parent's working tree. Existing worktree
-notices remain authoritative and tell isolated or pinned subagents to
-translate and re-read those paths before editing.
+Existing fork calls remain full-history forks because omission defaults to
+`all`. Existing regular subagent and teammate calls remain isolated. A numeric
+window can omit older facts or compacted summaries, so the directive must
+repeat any older context the fork still needs. It also shortens the reusable
+conversation-history cache prefix, while the parent system prompt, tools, and
+startup context remain shared.

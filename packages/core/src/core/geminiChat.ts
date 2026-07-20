@@ -3398,7 +3398,7 @@ export class GeminiChat {
     return history.map(copyContentContainer);
   }
 
-  getHistoryForSubagent(): Content[] {
+  getHistoryForForkWindow(): Content[] {
     const history = this.history.slice(getStartupContextLength(this.history));
     return extractCuratedHistory(history).map(copyContentContainer);
   }

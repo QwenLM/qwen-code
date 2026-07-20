@@ -13,7 +13,7 @@ Use `agent` to launch a specialized subagent to handle complex, multi-step tasks
 - `description` (string, required): A short (3-5 word) description of the task for user visibility and tracking purposes.
 - `prompt` (string, required): The detailed task prompt for the subagent to execute. Should contain comprehensive instructions for autonomous execution.
 - `subagent_type` (string, optional): The type of specialized agent to use for this task. Defaults to `general-purpose` if omitted.
-- `fork_turns` (string, optional): Parent conversation turns to inherit. Defaults to `none` for a fresh agent. Use `all` for the full conversation, or a positive integer string such as `"3"` for the most recent three real user turns. Tool responses and pure system reminders do not count as turns.
+- `fork_turns` (string, optional): Only valid with `subagent_type="fork"`. Omit it or use `all` for the full parent conversation, or use a positive integer string such as `"3"` for the most recent three real user turns. Tool responses and pure system reminders do not count as turns.
 - `run_in_background` (boolean, optional): Defaults to `true` for top-level one-shot agents. Set to `false` to wait for the result inline. Nested agents run in the foreground. Caller-owned `working_dir` launches default to foreground and reject explicit or configured background execution.
 - `isolation` (string, optional): Set to `"worktree"` to run the agent in an isolated git worktree.
 
@@ -23,15 +23,16 @@ The Agent tool dynamically loads available subagents from your configuration and
 
 When you use the Agent tool, the subagent will:
 
-1. Receive the selected parent conversation context and task prompt
+1. Receive the task prompt and, for a fork, the selected parent conversation context
 2. Execute the task using its available tools
 3. Report a completion notification by default, or return a final result message when run in the foreground
-4. Settle after the one-shot execution; retained background tasks can later be continued or revived
+4. Terminate (subagents are stateless and single-use)
 
 Usage:
 
 ```
-agent(description="Brief task description", prompt="Detailed task instructions for the subagent", subagent_type="agent_name", fork_turns="all")
+agent(description="Brief task description", prompt="Detailed task instructions for the subagent", subagent_type="agent_name")
+agent(description="Brief task description", prompt="Detailed task instructions for the fork", subagent_type="fork", fork_turns="3")
 ```
 
 Set `run_in_background=false` when the current turn must use the subagent result before continuing.
@@ -131,9 +132,9 @@ Don't use the Agent tool for:
 
 ## Important Notes
 
-- **Execution lifecycle**: An `AgentHeadless` execution is one-shot, but top-level background tasks retain a transcript and can be continued or revived with `send_message`.
-- **Context inheritance**: Regular subagents start without parent conversation history by default. Use `fork_turns=all` for the full conversation or a positive integer string for a bounded window.
-- **Follow-up communication**: Running background agents receive `send_message` at a tool-round boundary; completed agents can be revived from their retained transcript.
+- **Stateless execution**: Each subagent invocation is independent with no memory of previous executions
+- **Context inheritance**: Regular subagents start without parent conversation history. Forks inherit the full conversation by default and accept `fork_turns` when a bounded recent window is sufficient.
+- **Single communication**: Subagents provide one final result message - no ongoing communication
 - **Comprehensive prompts**: Your prompt should contain all necessary context and instructions for autonomous execution
 - **Tool access**: Subagents only have access to tools configured in their specific configuration
 - **Parallel capability**: Multiple subagents can run simultaneously for improved efficiency

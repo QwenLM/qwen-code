@@ -201,11 +201,11 @@ describe('AgentTool.toAutoClassifierInput', () => {
       {
         description: 'short desc',
         prompt: longPrompt,
-        subagent_type: 'coder',
+        subagent_type: 'fork',
         fork_turns: '3',
       },
     );
-    expect(result['subagent_type']).toBe('coder');
+    expect(result['subagent_type']).toBe('fork');
     expect(result['fork_turns']).toBe('3');
     expect(result['prompt']).toBe(longPrompt);
     expect((result['prompt'] as string).length).toBe(longPrompt.length);

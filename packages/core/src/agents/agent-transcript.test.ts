@@ -172,7 +172,6 @@ describe('agent-transcript', () => {
       extra: {
         initialUserPrompt?: string;
         bootstrapHistory?: Content[];
-        bootstrapKind?: 'fork' | 'context';
         bootstrapSystemInstruction?: string | Content;
         bootstrapTools?: Array<string | FunctionDeclaration>;
         launchTaskPrompt?: string;
@@ -255,33 +254,6 @@ describe('agent-transcript', () => {
       });
       expect(records[2]?.systemPayload).toMatchObject({
         displayText: 'Begin.',
-      });
-    });
-
-    it('records inherited regular-agent history as a context bootstrap', () => {
-      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
-      const { cleanup } = makeWriter(jsonlPath, {
-        bootstrapKind: 'context',
-        bootstrapHistory: [
-          { role: 'user', parts: [{ text: 'parent question' }] },
-          { role: 'model', parts: [{ text: 'parent answer' }] },
-        ],
-        initialUserPrompt: 'child task',
-      });
-
-      cleanup();
-
-      const records = readJsonl(jsonlPath);
-      expect(records[0]?.systemPayload).toEqual({
-        kind: 'context',
-        history: [
-          { role: 'user', parts: [{ text: 'parent question' }] },
-          { role: 'model', parts: [{ text: 'parent answer' }] },
-        ],
-      });
-      expect(records[1]?.message).toEqual({
-        role: 'user',
-        parts: [{ text: 'child task' }],
       });
     });
 

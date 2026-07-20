@@ -436,8 +436,8 @@ export class GeminiClient {
     return chat.getHistoryShallow?.(curated) ?? chat.getHistory(curated);
   }
 
-  getHistoryForSubagent(): Content[] {
-    return this.getChat().getHistoryForSubagent();
+  getHistoryForForkWindow(): Content[] {
+    return this.getChat().getHistoryForForkWindow();
   }
 
   getHistoryTail(count: number, curated: boolean = false): Content[] {

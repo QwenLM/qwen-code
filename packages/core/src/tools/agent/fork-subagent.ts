@@ -6,7 +6,6 @@ import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 import {
   getStartupContextLength,
   isSystemReminderContent,
-  stripStartupContext,
 } from '../../utils/environmentContext.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
@@ -35,7 +34,7 @@ export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
 export const FORK_AGENT = {
   name: FORK_SUBAGENT_TYPE,
   description:
-    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"` (only in interactive sessions). Runs detached in the background; you are notified when it completes.',
+    'Fork yourself — inherits parent conversation context. Selected explicitly via `subagent_type: "fork"` (only in interactive sessions). Runs detached in the background; you are notified when it completes.',
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
@@ -74,15 +73,15 @@ export function isInForkExecution(): boolean {
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
 
-export type ForkTurns = 'all' | 'none' | `${number}`;
-export type NormalizedForkTurns = 'all' | 'none' | number;
+export type ForkTurns = 'all' | `${number}`;
+export type NormalizedForkTurns = 'all' | number;
 
 export function normalizeForkTurns(
   forkTurns: ForkTurns | undefined,
 ): NormalizedForkTurns {
-  if (forkTurns === undefined || forkTurns === 'none') return 'none';
-  if (forkTurns === 'all') return 'all';
-  return Number(forkTurns);
+  return forkTurns === undefined || forkTurns === 'all'
+    ? 'all'
+    : Number(forkTurns);
 }
 
 function isSystemReminderPart(content: Content, partIndex: number): boolean {
@@ -90,18 +89,6 @@ function isSystemReminderPart(content: Content, partIndex: number): boolean {
   return part
     ? isSystemReminderContent({ role: 'user', parts: [part] })
     : false;
-}
-
-function isToolResponseContent(content: Content): boolean {
-  if (content.role !== 'user' || !content.parts?.length) return false;
-  return (
-    content.parts.some((part) => part.functionResponse !== undefined) &&
-    content.parts.every(
-      (part, index) =>
-        part.functionResponse !== undefined ||
-        isSystemReminderPart(content, index),
-    )
-  );
 }
 
 function isRealUserTurn(content: Content): boolean {
@@ -146,19 +133,16 @@ export function buildFunctionResponseParts(
 }
 
 /**
- * Select parent conversation history for a regular subagent or teammate.
+ * Select parent conversation history for a fork.
  *
  * A turn is a real user prompt, not a function response or a pure structural
- * reminder. The child keeps its own system prompt and startup context; only
- * conversational history is returned here.
+ * reminder. A bounded selection omits synthetic prefixes; the caller can
+ * reattach startup context that the fork still needs.
  */
-export function buildInheritedSubagentHistory(
-  rawHistory: Content[],
+export function selectForkHistory(
+  history: Content[],
   forkTurns: NormalizedForkTurns,
 ): Content[] {
-  if (forkTurns === 'none' || rawHistory.length === 0) return [];
-
-  const history = stripStartupContext(rawHistory);
   let selected = history;
 
   if (typeof forkTurns === 'number') {
@@ -184,37 +168,7 @@ export function buildInheritedSubagentHistory(
     }
   }
 
-  if (selected.length === 0) return [];
-  const prepared = [...selected];
-
-  while (prepared.length > 0) {
-    const last = prepared[prepared.length - 1]!;
-    if (last.role === 'model') {
-      const responses = buildFunctionResponseParts(
-        last,
-        'Delegated to child agent.',
-      );
-      if (responses.length > 0) {
-        prepared.push(
-          { role: 'user', parts: responses },
-          { role: 'model', parts: [{ text: 'Acknowledged.' }] },
-        );
-      }
-      return structuredClone(prepared);
-    }
-
-    if (isToolResponseContent(last)) {
-      prepared.push({
-        role: 'model',
-        parts: [{ text: 'Acknowledged.' }],
-      });
-      return structuredClone(prepared);
-    }
-
-    prepared.pop();
-  }
-
-  return prepared;
+  return structuredClone(selected);
 }
 
 /**

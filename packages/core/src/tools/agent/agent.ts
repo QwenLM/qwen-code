@@ -40,7 +40,6 @@ import {
   FORK_DEFAULT_MAX_TURNS,
   FORK_SUBAGENT_TYPE,
   FORK_PLACEHOLDER_RESULT,
-  buildInheritedSubagentHistory,
   buildForkedMessages,
   buildChildMessage,
   buildPinnedWorktreeNotice,
@@ -48,6 +47,7 @@ import {
   isForkSubagentEnabled,
   normalizeForkTurns,
   runInForkContext,
+  selectForkHistory,
   type ForkTurns,
 } from './fork-subagent.js';
 import {
@@ -57,9 +57,9 @@ import {
 } from '../../services/gitWorktreeService.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
+import { getStartupContextLength } from '../../utils/environmentContext.js';
 import {
   childLaunchDepth,
-  getCurrentAgentHistory,
   getCurrentAgentId,
   isTopLevelSession,
   runWithAgentContext,
@@ -206,9 +206,8 @@ export interface AgentParams {
   prompt: string;
   subagent_type?: string;
   /**
-   * Parent conversation context to inherit. Defaults to `none`; `all` inherits
-   * everything, and a positive integer string inherits that many recent user
-   * turns.
+   * Parent conversation turns inherited by a fork. Omitted or `all` inherits
+   * everything; a positive integer string inherits that many recent user turns.
    */
   fork_turns?: ForkTurns;
   run_in_background?: boolean;
@@ -768,16 +767,15 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           oneOf: [
             {
               type: 'string',
-              enum: ['all', 'none'],
+              enum: ['all'],
             },
             {
               type: 'string',
               pattern: '^[1-9][0-9]*$',
             },
           ],
-          default: 'none',
           description:
-            'Parent conversation turns to inherit. Defaults to "none" for backward-compatible isolation; use "all" for the full conversation, or a positive integer string such as "3" for the most recent three real user turns. Tool responses and pure system reminders do not count as turns. Omit this parameter when subagent_type is "fork"; detached forks always inherit the full parent context.',
+            'Only valid with subagent_type "fork". Omit it or use "all" to inherit the full parent conversation; use a positive integer string such as "3" to inherit the most recent three real user turns. Tool responses and pure system reminders do not count as turns.',
         },
         run_in_background: {
           type: 'boolean',
@@ -881,8 +879,8 @@ ${subagentDescriptions}
 
 ${
   isForkSubagentEnabled(this.config)
-    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Regular subagents start without parent conversation history by default; set \`fork_turns: "all"\` for the full conversation or a positive integer string for a bounded recent window. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
-    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Regular subagents start without parent conversation history by default; set \`fork_turns: "all"\` for the full conversation or a positive integer string for a bounded recent window. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
+    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
+    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
 }
 
 When NOT to use the Agent tool:
@@ -902,7 +900,7 @@ Usage notes:
 - A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- Regular subagents and named teammates start without parent conversation history by default. Set \`fork_turns: "all"\` to inherit the full conversation, or use a positive integer string such as \`"3"\` to inherit only the most recent real user turns.
+- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`; omit it for the full conversation or use a positive integer string such as \`"3"\` for a bounded recent window.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
@@ -914,7 +912,7 @@ ${
     ? `
 ## When to fork
 
-A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context, but its findings do NOT come back to you in a form you can act on. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
+A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context by default, but its findings do NOT come back to you in a form you can act on. Set \`fork_turns\` to a positive integer string only when a bounded recent window is sufficient. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
 
 Fork only when you genuinely won't need the result back — a detached background chore the user asked you to kick off and move on from. The criterion is qualitative: "will I need to read this output?" If yes, don't fork.
 
@@ -924,13 +922,13 @@ Forks are cheap because they share your prompt cache. Don't set \`model\` on a f
 
 **Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
 
-**Writing a fork prompt.** Since the fork inherits your context, the prompt is a *directive* — what to do, not what the situation is. Be specific about scope: what's in, what's out, what another agent is handling. Don't re-explain background.
+**Writing a fork prompt.** With the default full history, the prompt is a *directive* — what to do, not what the situation is. When \`fork_turns\` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
 `
     : ''
 }
 ## Writing the prompt
 
-Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Unless you explicitly select inherited context with \`fork_turns\`, assume it has not seen this conversation.
+Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation; forks inherit all or the selected recent window.
 - Explain what you're trying to accomplish and why.
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
@@ -1059,15 +1057,16 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (
         typeof params.fork_turns !== 'string' ||
         !(
-          params.fork_turns === 'all' ||
-          params.fork_turns === 'none' ||
-          /^[1-9][0-9]*$/.test(params.fork_turns)
+          params.fork_turns === 'all' || /^[1-9][0-9]*$/.test(params.fork_turns)
         )
       ) {
-        return 'Parameter "fork_turns" must be "all", "none", or a positive integer string such as "3".';
+        return 'Parameter "fork_turns" must be "all" or a positive integer string such as "3".';
       }
-      if (params.subagent_type?.toLowerCase() === FORK_SUBAGENT_TYPE) {
-        return 'Parameter "fork_turns" cannot be used with subagent_type "fork"; detached fork agents always inherit the full parent context.';
+      if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
+        return 'Parameter "fork_turns" can only be used with subagent_type "fork".';
+      }
+      if (params.name !== undefined) {
+        return 'Parameter "fork_turns" cannot be used when spawning a named teammate.';
       }
     }
 
@@ -1258,21 +1257,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   // Background agents carry the tool-use id through to completion notifications.
   setCallId(callId: string): void {
     this.callId = callId;
-  }
-
-  private buildInheritedHistory(): Content[] {
-    const forkTurns = normalizeForkTurns(this.params.fork_turns);
-    if (forkTurns === 'none') return [];
-
-    const directParentHistory = getCurrentAgentHistory();
-    const geminiClient =
-      directParentHistory === undefined
-        ? this.config.getGeminiClient()
-        : undefined;
-    const rawHistory =
-      directParentHistory ??
-      (geminiClient ? geminiClient.getHistoryForSubagent() : []);
-    return buildInheritedSubagentHistory(rawHistory, forkTurns);
   }
 
   /**
@@ -1543,10 +1527,32 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
-    const rawHistory = geminiClient
-      ? (geminiClient.getHistoryShallow?.(true) ??
-        geminiClient.getHistory(true))
-      : [];
+    const forkTurns = normalizeForkTurns(this.params.fork_turns);
+    let rawHistory: Content[] = [];
+    if (geminiClient) {
+      if (forkTurns === 'all') {
+        rawHistory = selectForkHistory(
+          geminiClient.getHistoryShallow?.(true) ??
+            geminiClient.getHistory(true),
+          forkTurns,
+        );
+      } else {
+        const comprehensiveHistory =
+          geminiClient.getHistoryShallow?.() ?? geminiClient.getHistory();
+        const startupContext = comprehensiveHistory.slice(
+          0,
+          getStartupContextLength(comprehensiveHistory),
+        );
+        rawHistory = [
+          ...structuredClone(startupContext),
+          ...selectForkHistory(
+            geminiClient.getHistoryForForkWindow?.() ??
+              geminiClient.getHistory(true),
+            forkTurns,
+          ),
+        ];
+      }
+    }
 
     // Build the history that will seed the fork's chat. Must end with a
     // model message so agent-headless can send the task_prompt as a user
@@ -2384,8 +2390,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         subagentConfig = loadedConfig;
       }
-      const inheritedHistory = isFork ? [] : this.buildInheritedHistory();
-
       // Initialize the current display state
       this.currentDisplay = {
         type: 'task_execution' as const,
@@ -2755,16 +2759,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
           agentConfig,
-          {
-            eventEmitter: this.eventEmitter,
-            ...(inheritedHistory.length > 0
-              ? {
-                  promptConfigOverrides: {
-                    extraHistory: inheritedHistory,
-                  },
-                }
-              : {}),
-          },
+          { eventEmitter: this.eventEmitter },
         );
         subagent = result.subagent;
         subagentDispose = result.dispose;
@@ -2886,16 +2881,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const bgResult = await this.subagentManager.createAgentHeadless(
             subagentConfig,
             bgConfig as Config,
-            {
-              eventEmitter: bgEventEmitter,
-              ...(inheritedHistory.length > 0
-                ? {
-                    promptConfigOverrides: {
-                      extraHistory: inheritedHistory,
-                    },
-                  }
-                : {}),
-            },
+            { eventEmitter: bgEventEmitter },
           );
           bgSubagent = bgResult.subagent;
           bgSubagentDispose = bgResult.dispose;
@@ -3018,16 +3004,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // self-describing — readers don't need to consult .meta.json to
             // know what the agent was asked to do.
             initialUserPrompt: this.params.prompt,
-            bootstrapHistory: isFork
-              ? bgInitialMessages
-              : inheritedHistory.length > 0
-                ? inheritedHistory
-                : undefined,
-            bootstrapKind: isFork
-              ? 'fork'
-              : inheritedHistory.length > 0
-                ? 'context'
-                : undefined,
+            bootstrapHistory: isFork ? bgInitialMessages : undefined,
             bootstrapSystemInstruction: isFork
               ? (bgPromptConfig?.renderedSystemPrompt ??
                 bgPromptConfig?.systemPrompt)
@@ -3840,14 +3817,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     });
 
     try {
-      const inheritedHistory = this.buildInheritedHistory();
       await teamManager.spawnTeammate({
         name,
         prompt: this.params.prompt,
         agentType: this.params.subagent_type,
         cwd: this.config.getCwd(),
         planModeRequired: this.params.plan_mode_required === true,
-        chatHistory: inheritedHistory.length > 0 ? inheritedHistory : undefined,
       });
 
       // Return immediately — teammate runs concurrently.

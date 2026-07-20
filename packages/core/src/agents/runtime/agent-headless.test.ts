@@ -681,47 +681,6 @@ describe('subagent.ts', () => {
         expect(history).toEqual(initialMessages);
       });
 
-      it('should append prompt extraHistory after the agent env bootstrap', async () => {
-        const { config } = await createMockConfig();
-        vi.mocked(GeminiChat).mockClear();
-
-        const extraHistory: Content[] = [
-          { role: 'user', parts: [{ text: 'parent user turn' }] },
-          { role: 'model', parts: [{ text: 'parent model turn' }] },
-        ];
-        const promptConfig: PromptConfig = {
-          systemPrompt: 'System ${name}.',
-          extraHistory,
-        };
-        const context = new ContextState();
-        context.set('name', 'Agent');
-
-        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
-
-        const scope = await AgentHeadless.create(
-          'test-agent',
-          config,
-          promptConfig,
-          defaultModelConfig,
-          defaultRunConfig,
-        );
-
-        await scope.execute(context);
-
-        expect(vi.mocked(GeminiChat).mock.calls[0]?.[2]).toEqual([
-          {
-            role: 'user',
-            parts: [
-              {
-                text: '<system-reminder>\nEnv Context\n</system-reminder>',
-              },
-            ],
-          },
-          ...extraHistory,
-        ]);
-        expect(getInitialChatHistory).toHaveBeenCalled();
-      });
-
       it('should skip env history when initialMessages is an empty array', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
