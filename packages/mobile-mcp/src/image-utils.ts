@@ -125,6 +125,21 @@ export class ImageTransformer {
       input: this.buffer,
     });
 
+    // Mirror toBufferWithSips: fail loudly so toBuffer()'s catch can surface
+    // the "Image scaling unavailable" fallback. On a missing binary spawnSync
+    // reports proc.error (ENOENT) with a null status and undefined stdout;
+    // returning that empty/undefined value would crash callers that read
+    // `.length`/`.toString()` on the result.
+    if (proc.error) {
+      throw proc.error;
+    }
+    if (proc.status !== 0) {
+      throw new Error(`ImageMagick failed with status ${proc.status}`);
+    }
+    if (!proc.stdout || proc.stdout.length === 0) {
+      throw new Error('ImageMagick produced no output');
+    }
+
     return proc.stdout;
   }
 }
