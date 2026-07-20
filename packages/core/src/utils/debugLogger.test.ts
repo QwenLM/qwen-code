@@ -9,14 +9,14 @@ import {
   createDebugLogger,
   isDebugLoggingDegraded,
   resetDebugLoggingState,
+  runWithoutDebugLogSession,
   setDebugLogSession,
   type DebugLogSession,
 } from './debugLogger.js';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
 import { Storage } from '../config/storage.js';
-import { trace, type Context, type Span } from '@opentelemetry/api';
-import { setSessionContext } from '../telemetry/session-context.js';
+import { getTraceContext } from '../telemetry/trace-context.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -33,11 +33,8 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-vi.mock('@opentelemetry/api', () => ({
-  trace: {
-    getActiveSpan: vi.fn().mockReturnValue(undefined),
-    getSpan: vi.fn().mockReturnValue(undefined),
-  },
+vi.mock('../telemetry/trace-context.js', () => ({
+  getTraceContext: vi.fn().mockReturnValue(null),
 }));
 
 describe('debugLogger', () => {
@@ -47,7 +44,7 @@ describe('debugLogger', () => {
 
   const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
     Storage.setRuntimeBaseDir(null);
     vi.clearAllMocks();
@@ -55,16 +52,15 @@ describe('debugLogger', () => {
     vi.setSystemTime(new Date('2026-01-24T10:30:00.000Z'));
     resetDebugLoggingState();
     setDebugLogSession(mockSession);
-    setSessionContext(undefined);
-    // Default: no active OTel span
-    vi.mocked(trace.getActiveSpan).mockReturnValue(undefined);
-    vi.mocked(trace.getSpan).mockReturnValue(undefined);
+    await vi.runAllTimersAsync();
+    resetDebugLoggingState();
+    vi.clearAllMocks();
+    vi.mocked(getTraceContext).mockReturnValue(null);
   });
 
   afterEach(() => {
     vi.useRealTimers();
     setDebugLogSession(null);
-    setSessionContext(undefined);
     Storage.setRuntimeBaseDir(null);
     if (previousDebugLogFileEnv === undefined) {
       delete process.env['QWEN_DEBUG_LOG_FILE'];
@@ -84,6 +80,24 @@ describe('debugLogger', () => {
       expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
+    it('suppresses the global debug session within an async context', async () => {
+      const logger = createDebugLogger('READ_ONLY');
+
+      await runWithoutDebugLogSession(async () => {
+        logger.warn('hidden before await');
+        await Promise.resolve();
+        logger.error('hidden after await');
+      });
+      await vi.runAllTimersAsync();
+
+      expect(fs.mkdir).not.toHaveBeenCalled();
+      expect(fs.appendFile).not.toHaveBeenCalled();
+
+      logger.info('visible outside context');
+      await vi.runAllTimersAsync();
+      expect(fs.appendFile).toHaveBeenCalledOnce();
+    });
+
     it('writes debug log without trace context when telemetry context is unset', async () => {
       const logger = createDebugLogger();
       logger.debug('Hello world');
@@ -99,6 +113,31 @@ describe('debugLogger', () => {
         'utf8',
       );
     });
+
+    it('does not write debug log by default when QWEN_DEBUG_LOG_FILE is unset', async () => {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+
+      const logger = createDebugLogger();
+      logger.info('default log');
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.appendFile).not.toHaveBeenCalled();
+    });
+
+    it.each(['', ' ', '0', 'false', 'off', 'no'])(
+      'does not write debug log when QWEN_DEBUG_LOG_FILE is %j',
+      async (value) => {
+        process.env['QWEN_DEBUG_LOG_FILE'] = value;
+
+        const logger = createDebugLogger();
+        logger.info('disabled log');
+
+        await vi.runAllTimersAsync();
+
+        expect(fs.appendFile).not.toHaveBeenCalled();
+      },
+    );
 
     it('writes log with tag when provided', async () => {
       const logger = createDebugLogger('STARTUP');
@@ -130,14 +169,12 @@ describe('debugLogger', () => {
       expect(calls[3]?.[1]).toContain('[ERROR]');
     });
 
-    it('uses real OTel span context when an active span exists', async () => {
-      vi.mocked(trace.getActiveSpan).mockReturnValue({
-        spanContext: () => ({
-          traceId: 'realtraceidddddddddddddddddddddd',
-          spanId: 'realspanid111111',
-          traceFlags: 1,
-        }),
-      } as unknown as Span);
+    it('uses trace context when getTraceContext returns a context', async () => {
+      vi.mocked(getTraceContext).mockReturnValue({
+        traceId: 'realtraceidddddddddddddddddddddd',
+        spanId: 'realspanid111111',
+        traceFlags: 1,
+      });
 
       const logger = createDebugLogger();
       logger.debug('with real span');
@@ -153,34 +190,11 @@ describe('debugLogger', () => {
       );
     });
 
-    it('omits trace context when active span is noop and telemetry context is unset', async () => {
-      vi.mocked(trace.getActiveSpan).mockReturnValue({
-        spanContext: () => ({
-          traceId: '00000000000000000000000000000000',
-          spanId: 'deadbeefdeadbeef',
-          traceFlags: 0,
-        }),
-      } as unknown as Span);
+    it('omits trace context when getTraceContext returns null', async () => {
+      vi.mocked(getTraceContext).mockReturnValue(null);
 
       const logger = createDebugLogger();
-      logger.debug('noop span');
-
-      await vi.runAllTimersAsync();
-
-      expect(fs.appendFile).toHaveBeenCalledWith(
-        expect.any(String),
-        expect.not.stringContaining('trace_id='),
-        'utf8',
-      );
-    });
-
-    it('omits trace context when reading the active span throws and telemetry context is unset', async () => {
-      vi.mocked(trace.getActiveSpan).mockImplementationOnce(() => {
-        throw new Error('otel unavailable');
-      });
-
-      const logger = createDebugLogger();
-      logger.debug('otel failure');
+      logger.debug('no trace context');
 
       await vi.runAllTimersAsync();
 
@@ -206,19 +220,11 @@ describe('debugLogger', () => {
     });
 
     it('uses the session root span context for fallback trace context', async () => {
-      const sessionRootContext = { root: true } as unknown as Context;
-      setSessionContext(sessionRootContext, 'test-session');
-      vi.mocked(trace.getSpan).mockImplementation((ctx) =>
-        ctx === sessionRootContext
-          ? ({
-              spanContext: () => ({
-                traceId: 'cccccccccccccccccccccccccccccccc',
-                spanId: 'dddddddddddddddd',
-                traceFlags: 1,
-              }),
-            } as unknown as Span)
-          : undefined,
-      );
+      vi.mocked(getTraceContext).mockReturnValue({
+        traceId: 'cccccccccccccccccccccccccccccccc',
+        spanId: 'dddddddddddddddd',
+        traceFlags: 1,
+      });
 
       const logger = createDebugLogger();
       logger.debug('session root fallback');
@@ -341,18 +347,42 @@ describe('debugLogger', () => {
 
   describe('latest debug log symlink', () => {
     const expectedLatestPath = path.join(Storage.getGlobalDebugDir(), 'latest');
+    const uuidSession: DebugLogSession = {
+      getSessionId: () => '92ec0176-d354-4147-848b-5cd2d80609c4',
+    };
 
     it('creates a symlink to the current session log file', async () => {
       resetDebugLoggingState();
-      setDebugLogSession(mockSession);
+      setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 
       expect(fs.unlink).toHaveBeenCalledWith(expectedLatestPath);
       expect(fs.symlink).toHaveBeenCalledWith(
-        'test-session-123.txt',
+        '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
         expectedLatestPath,
       );
+    });
+
+    it('does not create latest symlink when QWEN_DEBUG_LOG_FILE is unset', async () => {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+      vi.clearAllMocks();
+      resetDebugLoggingState();
+      setDebugLogSession(uuidSession);
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).not.toHaveBeenCalled();
+    });
+
+    it('does not point latest at non-session debug logs', async () => {
+      resetDebugLoggingState();
+      setDebugLogSession({ getSessionId: () => 'log-to-span-sink-test' });
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).not.toHaveBeenCalled();
+      expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
     it('does not create symlink when session is cleared', async () => {
@@ -369,7 +399,7 @@ describe('debugLogger', () => {
       resetDebugLoggingState();
       vi.mocked(fs.symlink).mockRejectedValueOnce(new Error('EPERM'));
 
-      setDebugLogSession(mockSession);
+      setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 
@@ -380,7 +410,7 @@ describe('debugLogger', () => {
       process.env['QWEN_DEBUG_LOG_FILE'] = '0';
       vi.clearAllMocks();
       resetDebugLoggingState();
-      setDebugLogSession(mockSession);
+      setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, ToolArtifact } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import type {
   SessionUpdate,
@@ -29,15 +29,50 @@ export interface SessionUpdateSender {
 }
 
 /**
- * Session context shared across all emitters.
- * Provides access to session state and configuration.
+ * Running cumulative usage for the conversation, mutated in place as usage
+ * metadata is emitted (MessageEmitter) and snapshotted onto each plan/todo
+ * update (PlanEmitter). The web-shell diffs consecutive snapshots to show a
+ * finished task's token/time spend.
+ *
+ * `apiTimeMs` only advances on the live path: history replay re-emits usage
+ * metadata without per-turn durations, so on `/resume` it stays 0 — the
+ * intended "API time is live-only" behaviour. Tokens accumulate on both paths
+ * because replayed usage metadata carries the counts.
  */
-export interface SessionContext extends SessionUpdateSender {
+export interface CumulativeUsage {
+  promptTokens: number;
+  cachedTokens: number;
+  candidateTokens: number;
+  apiTimeMs: number;
+}
+
+export interface SessionEmitterContext extends SessionUpdateSender {
   readonly sessionId: string;
-  readonly config: Config;
+  /** History replay hook used to correlate emitted updates with disk records. */
+  setActiveRecordId?: (id: string | null, timestamp?: string) => void;
   /** Optional message rewrite middleware for ACP message transformation.
    *  Installed after history replay to avoid rewriting historical messages. */
   messageRewriter?: MessageRewriteMiddleware;
+  /**
+   * Running cumulative usage, when the context wants per-todo resource detail.
+   * Mutated by MessageEmitter as usage is emitted and read by PlanEmitter to
+   * stamp plan updates. Optional so contexts that don't need it (export, etc.)
+   * can omit it.
+   */
+  readonly cumulativeUsage?: CumulativeUsage;
+}
+
+/**
+ * Session context shared by live emitters that may resolve runtime metadata.
+ */
+export interface SessionContext extends SessionEmitterContext {
+  readonly config: Config;
+}
+
+export function hasFullSessionContext(
+  context: SessionEmitterContext,
+): context is SessionContext {
+  return 'config' in context;
 }
 
 /**
@@ -62,6 +97,8 @@ export interface ToolCallStartParams {
   args?: Record<string, unknown>;
   /** Status of the tool call */
   status?: 'pending' | 'in_progress' | 'completed' | 'failed';
+  /** Transient phase recognized by clients that support tool preparation. */
+  phase?: 'preparing';
   /** Optional subagent metadata */
   subagentMeta?: SubagentMeta;
   /** Server-side timestamp (ISO string or ms) for message ordering */
@@ -84,6 +121,8 @@ export interface ToolCallResultParams {
   resultDisplay?: unknown;
   /** Error if tool execution failed */
   error?: Error;
+  /** Structured artifacts produced by the tool result. */
+  artifacts?: ToolArtifact[];
   /** Original args (fallback for TodoWriteTool todos extraction) */
   args?: Record<string, unknown>;
   /** Optional subagent metadata */

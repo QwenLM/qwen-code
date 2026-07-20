@@ -6,12 +6,14 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import { glob, escape } from 'glob';
+import { globStream, escape } from 'glob';
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import {
   resolveAndValidatePath,
+  formatDisplayPath,
+  resolvePath,
   isSubpath,
   unescapePath,
 } from '../utils/paths.js';
@@ -26,10 +28,16 @@ import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isPathWithinRoot } from '../utils/workspaceContext.js';
 
 const debugLogger = createDebugLogger('GLOB');
 
 const MAX_FILE_COUNT = 100;
+const MAX_GLOB_COLLECTED_ENTRIES = MAX_FILE_COUNT * 10;
+const normalizePathForComparison = (p: string) =>
+  process.platform === 'win32' || process.platform === 'darwin'
+    ? p.toLowerCase()
+    : p;
 
 // Subset of 'Path' interface provided by 'glob' that we can implement for testing
 export interface GlobPath {
@@ -99,7 +107,11 @@ class GlobToolInvocation extends BaseToolInvocation<
   getDescription(): string {
     let description = `'${this.params.pattern}'`;
     if (this.params.path) {
-      description += ` in path '${this.params.path}'`;
+      const displayPath = formatDisplayPath(
+        this.params.path,
+        this.config.getTargetDir(),
+      );
+      description += ` in ${displayPath}`;
     }
 
     return description;
@@ -114,7 +126,7 @@ class GlobToolInvocation extends BaseToolInvocation<
       return 'allow'; // Default workspace directory
     }
     const workspaceContext = this.config.getWorkspaceContext();
-    const resolvedPath = path.resolve(
+    const resolvedPath = resolvePath(
       this.config.getTargetDir(),
       this.params.path,
     );
@@ -134,14 +146,63 @@ class GlobToolInvocation extends BaseToolInvocation<
     searchDir: string,
     pattern: string,
     signal: AbortSignal,
-  ): Promise<GlobPath[]> {
+    entryLimit: number,
+  ): Promise<{ entries: GlobPath[]; hitLimit: boolean }> {
     let effectivePattern = pattern;
     const fullPath = path.join(searchDir, effectivePattern);
     if (fs.existsSync(fullPath)) {
       effectivePattern = escape(effectivePattern);
     }
 
-    const entries = (await glob(effectivePattern, {
+    const projectRoot = this.config.getTargetDir();
+    const fileFilteringOptions = this.getFileFilteringOptions();
+
+    // Prune ignored directories DURING traversal (glob's `childrenIgnored`)
+    // rather than only post-filtering the results. Delegating to
+    // FileDiscoveryService reuses the real .gitignore/.qwenignore semantics
+    // (anchoring, negation/re-inclusion, nested ignore files) — a hand-rolled
+    // gitignore→glob pattern conversion cannot reproduce these correctly.
+    const isTraversalIgnored = (entry: {
+      fullpath(): string;
+      isDirectory(): boolean;
+    }): boolean => {
+      try {
+        const relativePath = path.relative(projectRoot, entry.fullpath());
+        // Never prune paths outside the project root (e.g. an external search
+        // dir); ignore rules are only defined relative to the root.
+        if (!relativePath || !isPathWithinRoot(entry.fullpath(), projectRoot)) {
+          return false;
+        }
+        // Append trailing '/' for directories so the ignore library matches
+        // directory-only patterns like `node_modules/`.
+        const ignorePath = entry.isDirectory()
+          ? relativePath + '/'
+          : relativePath;
+        return this.fileService.shouldIgnoreFile(
+          ignorePath,
+          fileFilteringOptions,
+        );
+      } catch (error) {
+        // Fail open: if an ignore check throws, don't prune. The post-filter
+        // below is the source of truth, so a missed prune only costs a little
+        // extra traversal, whereas a false prune would hide real matches and
+        // be indistinguishable from a legitimately empty result.
+        debugLogger.debug(
+          `traversal ignore check failed for ${entry.fullpath()}: ${getErrorMessage(error)}`,
+        );
+        return false;
+      }
+    };
+
+    const isAllowedByFileFilters = (entry: GlobPath): boolean => {
+      const relativePath = path.relative(projectRoot, entry.fullpath());
+      return (
+        this.fileService.filterFiles([relativePath], fileFilteringOptions)
+          .length > 0
+      );
+    };
+
+    const stream = globStream(effectivePattern, {
       cwd: searchDir,
       withFileTypes: true,
       nodir: true,
@@ -150,36 +211,29 @@ class GlobToolInvocation extends BaseToolInvocation<
       dot: true,
       follow: false,
       signal,
-    })) as GlobPath[];
+      ignore: {
+        ignored: isTraversalIgnored,
+        childrenIgnored: isTraversalIgnored,
+      },
+    }) as AsyncIterable<GlobPath> & { destroy?: () => void };
 
-    // Filter using paths relative to the project root (the base that
-    // FileDiscoveryService uses for .gitignore / .qwenignore evaluation).
-    // Using searchDir-relative paths would cause ignore rules to be
-    // evaluated against incorrect paths when searchDir != projectRoot.
-    const projectRoot = this.config.getTargetDir();
-    const relativePaths = entries.map((p) =>
-      path.relative(projectRoot, p.fullpath()),
-    );
+    const entries: GlobPath[] = [];
+    let hitLimit = false;
+    for await (const entry of stream) {
+      if (!isAllowedByFileFilters(entry)) {
+        continue;
+      }
+      if (entries.length >= entryLimit) {
+        hitLimit = true;
+        break;
+      }
+      entries.push(entry);
+    }
+    if (hitLimit) {
+      stream.destroy?.();
+    }
 
-    const { filteredPaths } = this.fileService.filterFilesWithReport(
-      relativePaths,
-      this.getFileFilteringOptions(),
-    );
-
-    const normalizePathForComparison = (p: string) =>
-      process.platform === 'win32' || process.platform === 'darwin'
-        ? p.toLowerCase()
-        : p;
-
-    const filteredAbsolutePaths = new Set(
-      filteredPaths.map((p) =>
-        normalizePathForComparison(path.resolve(projectRoot, p)),
-      ),
-    );
-
-    return entries.filter((entry) =>
-      filteredAbsolutePaths.has(normalizePathForComparison(entry.fullpath())),
-    );
+    return { entries, hitLimit };
   }
 
   async execute(signal: AbortSignal): Promise<ToolResult> {
@@ -213,12 +267,25 @@ class GlobToolInvocation extends BaseToolInvocation<
       const pattern = this.params.pattern;
       const allFilteredEntries: GlobPath[] = [];
       const seenPaths = new Set<string>();
+      let hitCollectionLimit = false;
 
       for (const searchDir of searchDirs) {
-        const entries = await this.globInDirectory(searchDir, pattern, signal);
+        const remainingEntries =
+          MAX_GLOB_COLLECTED_ENTRIES - allFilteredEntries.length;
+        if (remainingEntries <= 0) {
+          hitCollectionLimit = true;
+          break;
+        }
+        const { entries, hitLimit } = await this.globInDirectory(
+          searchDir,
+          pattern,
+          signal,
+          remainingEntries,
+        );
+        hitCollectionLimit ||= hitLimit;
         for (const entry of entries) {
           // Deduplicate entries that might appear in overlapping directories
-          const normalized = entry.fullpath();
+          const normalized = normalizePathForComparison(entry.fullpath());
           if (!seenPaths.has(normalized)) {
             seenPaths.add(normalized);
             allFilteredEntries.push(entry);
@@ -251,7 +318,7 @@ class GlobToolInvocation extends BaseToolInvocation<
         MAX_FILE_COUNT,
         this.config.getTruncateToolOutputLines(),
       );
-      const truncated = totalFileCount > fileLimit;
+      const truncated = hitCollectionLimit || totalFileCount > fileLimit;
 
       // Limit to fileLimit if needed
       const entriesToShow = truncated
@@ -263,11 +330,15 @@ class GlobToolInvocation extends BaseToolInvocation<
       );
       const fileListDescription = sortedAbsolutePaths.join('\n');
 
-      let resultMessage = `Found ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`;
+      let resultMessage = hitCollectionLimit
+        ? `Found at least ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`
+        : `Found ${totalFileCount} file(s) matching "${this.params.pattern}" ${searchLocationDescription}`;
       resultMessage += `, sorted by modification time (newest first):\n---\n${fileListDescription}`;
 
       // Add truncation notice if needed
-      if (truncated) {
+      if (hitCollectionLimit) {
+        resultMessage += `\n---\n[Results truncated after scanning ${totalFileCount} matching files. Narrow the pattern or path.]`;
+      } else if (truncated) {
         const omittedFiles = totalFileCount - fileLimit;
         const fileTerm = omittedFiles === 1 ? 'file' : 'files';
         resultMessage += `\n---\n[${omittedFiles} ${fileTerm} truncated] ...`;
@@ -275,7 +346,7 @@ class GlobToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: resultMessage,
-        returnDisplay: `Found ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
+        returnDisplay: `${hitCollectionLimit ? 'Found at least' : 'Found'} ${totalFileCount} matching file(s)${truncated ? ' (truncated)' : ''}`,
         resultFilePaths: sortedAbsolutePaths,
       };
     } catch (error) {
@@ -303,6 +374,9 @@ class GlobToolInvocation extends BaseToolInvocation<
       respectQwenIgnore:
         options?.respectQwenIgnore ??
         DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore,
+      customIgnoreFiles:
+        options?.customIgnoreFiles ??
+        DEFAULT_FILE_FILTERING_OPTIONS.customIgnoreFiles,
     };
   }
 }

@@ -57,12 +57,14 @@ vi.mock('@opentelemetry/instrumentation-undici');
 vi.mock('./gcp-exporters.js');
 vi.mock('./log-to-span-processor.js');
 vi.mock('./session-context.js');
+vi.mock('./trace-context.js');
 vi.mock('./tracer.js', () => ({
   createSessionRootContext: vi.fn((id: string) => ({ __sessionId: id })),
 }));
 
 import { LogToSpanProcessor } from './log-to-span-processor.js';
 import { setSessionContext } from './session-context.js';
+import { setShellTracePropagation } from './trace-context.js';
 import { createSessionRootContext } from './tracer.js';
 import { HttpInstrumentation } from '@opentelemetry/instrumentation-http';
 import { UndiciInstrumentation } from '@opentelemetry/instrumentation-undici';
@@ -193,7 +195,9 @@ describe('Telemetry SDK', () => {
     const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
     try {
       process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-      setDebugLogSession({ getSessionId: () => 'otel-diag-test-session' });
+      setDebugLogSession({
+        getSessionId: () => '11111111-2222-4333-8444-555555555555',
+      });
 
       diag.error(
         JSON.stringify({
@@ -213,7 +217,7 @@ describe('Telemetry SDK', () => {
       expect(consoleWarnSpy).not.toHaveBeenCalled();
       expect(mkdirSpy).toHaveBeenCalled();
       expect(appendFileSpy).toHaveBeenCalledWith(
-        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining('11111111-2222-4333-8444-555555555555'),
         expectOtelDebugLogLine(
           'ERROR',
           '{"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
@@ -221,12 +225,12 @@ describe('Telemetry SDK', () => {
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
-        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining('11111111-2222-4333-8444-555555555555'),
         expectOtelDebugLogLine('ERROR', 'A different OpenTelemetry diagnostic'),
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
-        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining('11111111-2222-4333-8444-555555555555'),
         expectOtelDebugLogLine('WARN', 'An OpenTelemetry warning'),
         'utf8',
       );
@@ -1301,5 +1305,56 @@ describe('refreshSessionContext', () => {
 
     expect(createSessionRootContext).toHaveBeenCalledWith('bad-session');
     expect(setSessionContext).not.toHaveBeenCalled();
+  });
+});
+
+describe('shell trace propagation wiring', () => {
+  let mockConfig: Config;
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockConfig = {
+      getTelemetryEnabled: () => true,
+      getTelemetryOtlpEndpoint: () => 'http://localhost:4317',
+      getTelemetryOtlpProtocol: () => 'grpc',
+      getTelemetryOtlpTracesEndpoint: () => undefined,
+      getTelemetryOtlpLogsEndpoint: () => undefined,
+      getTelemetryOtlpMetricsEndpoint: () => undefined,
+      getTelemetryTarget: () => 'local',
+      getTelemetryOutfile: () => undefined,
+      getTelemetryIncludeSensitiveSpanAttributes: () => false,
+      getTelemetryResourceAttributes: () => ({}),
+      getTelemetryMetricsIncludeSessionId: () => false,
+      getTelemetryResourceAttributeWarnings: () => [],
+      getDebugMode: () => false,
+      getSessionId: () => 'test-session',
+      getCliVersion: () => '1.0.0-test',
+      getOutboundCorrelationPropagateTraceContext: () => false,
+      isInteractive: () => false,
+    } as unknown as Config;
+  });
+
+  afterEach(async () => {
+    await shutdownTelemetry();
+  });
+
+  it('sets shell trace propagation on init based on config', () => {
+    const config = {
+      ...mockConfig,
+      getOutboundCorrelationPropagateTraceContext: () => true,
+    } as unknown as Config;
+
+    initializeTelemetry(config);
+
+    expect(setShellTracePropagation).toHaveBeenCalledWith(true);
+  });
+
+  it('resets shell trace propagation on shutdown', async () => {
+    initializeTelemetry(mockConfig);
+    vi.mocked(setShellTracePropagation).mockClear();
+
+    await shutdownTelemetry();
+
+    expect(setShellTracePropagation).toHaveBeenCalledWith(false);
   });
 });

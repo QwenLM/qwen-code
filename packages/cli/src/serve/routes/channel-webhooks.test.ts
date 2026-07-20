@@ -1,0 +1,512 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import express from 'express';
+import request from 'supertest';
+import { describe, expect, it, vi } from 'vitest';
+import { ChannelWebhookEnqueueError } from '../channel-webhook-ipc.js';
+import { registerChannelWebhookRoutes } from './channel-webhooks.js';
+
+function appHarness(opts?: {
+  enqueueWebhookTask?: ReturnType<typeof vi.fn>;
+  rateLimiter?: {
+    checkRate: ReturnType<typeof vi.fn>;
+  };
+}) {
+  const app = express();
+  let jsonCallCount = 0;
+  app.use((_req, res, next) => {
+    const originalJson = res.json.bind(res);
+    res.json = ((body: unknown) => {
+      jsonCallCount += 1;
+      return originalJson(body);
+    }) as typeof res.json;
+    next();
+  });
+  const enqueueWebhookTask =
+    opts?.enqueueWebhookTask ??
+    vi.fn(async () => ({
+      accepted: true as const,
+    }));
+
+  registerChannelWebhookRoutes(app, {
+    getChannelsConfig: () => ({
+      'dingtalk-main': {
+        webhooks: {
+          sources: {
+            'github-ci': {
+              secret: 'secret-value',
+              targets: {
+                default: {
+                  chatId: 'group-1',
+                  senderId: 'webhook:github-ci',
+                  isGroup: true,
+                },
+              },
+            },
+          },
+        },
+      },
+    }),
+    safeBody: (req) =>
+      req.body && typeof req.body === 'object' ? req.body : {},
+    enqueueWebhookTask,
+    rateLimiter: opts?.rateLimiter,
+  });
+
+  return {
+    app,
+    enqueueWebhookTask,
+    getJsonCallCount: () => jsonCallCount,
+  };
+}
+
+describe('channel webhook routes', () => {
+  it('accepts an authenticated webhook task', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        summary: 'main is red',
+        payload: { branch: 'main' },
+      });
+
+    expect(res.status).toBe(202);
+    expect(res.body).toEqual({ accepted: true });
+    expect(h.enqueueWebhookTask).toHaveBeenCalledWith({
+      channelName: 'dingtalk-main',
+      source: 'github-ci',
+      eventType: 'ci_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      summary: 'main is red',
+      payload: { branch: 'main' },
+    });
+  });
+
+  it('defaults payload to an empty object', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(202);
+    expect(h.enqueueWebhookTask).toHaveBeenCalledWith({
+      channelName: 'dingtalk-main',
+      source: 'github-ci',
+      eventType: 'ci_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      payload: {},
+    });
+  });
+
+  it('strips prototype pollution keys from payload objects', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {
+          branch: 'main',
+          ['__proto__']: { admin: true },
+          constructor: { admin: true },
+          prototype: { admin: true },
+        },
+      });
+
+    expect(res.status).toBe(202);
+    expect(h.enqueueWebhookTask).toHaveBeenCalledWith({
+      channelName: 'dingtalk-main',
+      source: 'github-ci',
+      eventType: 'ci_failed',
+      targetRef: 'default',
+      title: 'CI failed',
+      payload: { branch: 'main' },
+    });
+  });
+
+  it('rejects deeply nested payload objects', async () => {
+    const h = appHarness();
+    let payload: Record<string, unknown> = {};
+    for (let i = 0; i < 65; i++) {
+      payload = { next: payload };
+    }
+
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload,
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'Body field "payload" exceeds maximum nesting depth (64)',
+    });
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it.each(['string payload', 123, true, ['array']])(
+    'rejects non-object payload values: %s',
+    async (payload) => {
+      const h = appHarness();
+      const res = await request(h.app)
+        .post('/channels/dingtalk-main/webhooks/github-ci')
+        .set('x-qwen-webhook-secret', 'secret-value')
+        .send({
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+          payload,
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Body field "payload" must be an object when provided',
+      });
+      expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rate limits pre-auth attempts with a bounded key', async () => {
+    const rateLimiter = {
+      checkRate: vi.fn(() => true),
+    };
+    const h = appHarness({ rateLimiter });
+
+    const res = await request(h.app)
+      .post('/channels/random-channel/webhooks/random-source')
+      .set('x-qwen-webhook-secret', 'wrong')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(401);
+    expect(rateLimiter.checkRate).toHaveBeenCalledTimes(1);
+    expect(rateLimiter.checkRate).toHaveBeenCalledWith(
+      expect.stringMatching(/^webhook:preauth:/u),
+      'mutation',
+    );
+  });
+
+  it('rate limits authenticated requests by channel and source', async () => {
+    const rateLimiter = {
+      checkRate: vi.fn(() => true),
+    };
+    const h = appHarness({ rateLimiter });
+
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(202);
+    expect(rateLimiter.checkRate).toHaveBeenNthCalledWith(
+      1,
+      expect.stringMatching(/^webhook:preauth:/u),
+      'mutation',
+    );
+    expect(rateLimiter.checkRate).toHaveBeenNthCalledWith(
+      2,
+      'webhook:dingtalk-main:github-ci',
+      'mutation',
+    );
+  });
+
+  it('does not spend configured-source quota for bad secrets', async () => {
+    const rateLimiter = {
+      checkRate: vi.fn(() => true),
+    };
+    const h = appHarness({ rateLimiter });
+
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'wrong')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(401);
+    expect(rateLimiter.checkRate).toHaveBeenCalledTimes(1);
+    expect(rateLimiter.checkRate).toHaveBeenCalledWith(
+      expect.stringMatching(/^webhook:preauth:/u),
+      'mutation',
+    );
+  });
+
+  it('rejects invalid secrets', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'wrong')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(401);
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it('returns a uniform auth failure for unknown sources', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/missing-source')
+      .set('x-qwen-webhook-secret', 'wrong')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(401);
+    expect(res.body).toEqual({ error: 'Invalid webhook secret' });
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects caller-supplied unconfigured target refs', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'other',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(404);
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects inherited target refs like __proto__', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: '__proto__',
+        title: 'CI failed',
+        payload: {},
+      });
+
+    expect(res.status).toBe(404);
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it.each(['eventType', 'targetRef', 'title'])(
+    'rejects missing required string field %s',
+    async (field) => {
+      const h = appHarness();
+      const res = await request(h.app)
+        .post('/channels/dingtalk-main/webhooks/github-ci')
+        .set('x-qwen-webhook-secret', 'secret-value')
+        .send({
+          eventType: 'ci_failed',
+          targetRef: 'default',
+          title: 'CI failed',
+          [field]: '',
+        });
+
+      expect(res.status).toBe(400);
+      expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects an empty body with a single 400 response', async () => {
+    const h = appHarness();
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'Body field "eventType" must be a non-empty string',
+    });
+    expect(h.getJsonCallCount()).toBe(1);
+    expect(h.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it('returns 500 without leaking unexpected enqueue error details', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new Error('worker offline');
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(500);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_enqueue_failed',
+    });
+  });
+
+  it('returns 503 when the worker is unavailable', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new ChannelWebhookEnqueueError(
+          'channel_worker_unavailable',
+          'worker unavailable',
+        );
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_worker_unavailable',
+    });
+  });
+
+  it('returns 503 when the worker webhook queue is full', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_queue_full',
+          'queue full',
+        );
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_queue_full',
+    });
+  });
+
+  it('returns 409 when the target cannot accept webhook work', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_target_unavailable',
+          'target unavailable',
+        );
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_target_unavailable',
+    });
+  });
+
+  it('returns 400 when the worker rejects an invalid webhook task', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_invalid_task',
+          'invalid task',
+        );
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_invalid_task',
+    });
+  });
+
+  it('returns 504 when enqueueing the webhook task times out', async () => {
+    const h = appHarness({
+      enqueueWebhookTask: vi.fn(async () => {
+        throw new ChannelWebhookEnqueueError(
+          'channel_webhook_enqueue_timeout',
+          'timed out',
+        );
+      }),
+    });
+    const res = await request(h.app)
+      .post('/channels/dingtalk-main/webhooks/github-ci')
+      .set('x-qwen-webhook-secret', 'secret-value')
+      .send({
+        eventType: 'ci_failed',
+        targetRef: 'default',
+        title: 'CI failed',
+      });
+
+    expect(res.status).toBe(504);
+    expect(res.body).toEqual({
+      error: 'Failed to enqueue channel webhook task',
+      code: 'channel_webhook_enqueue_timeout',
+    });
+  });
+});

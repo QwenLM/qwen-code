@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
+  DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
@@ -24,6 +25,14 @@ async function collect(
 }
 
 describe('EventBus', () => {
+  beforeEach(() => {
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('assigns monotonic ids and the right schema version', () => {
     const bus = new EventBus();
     const a = bus.publish({ type: 'foo', data: 1 });
@@ -34,6 +43,50 @@ describe('EventBus', () => {
     expect(bus.lastEventId).toBe(2);
   });
 
+  it('rejects invalid maxQueuedBytes options', () => {
+    expect(
+      () => new EventBus(100, undefined, undefined, { maxQueuedBytes: 0 }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.POSITIVE_INFINITY,
+        }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.MAX_SAFE_INTEGER + 1,
+        }),
+    ).toThrow(TypeError);
+  });
+
+  it('stamps published events with serverTimestamp metadata', () => {
+    const bus = new EventBus();
+    const before = Date.now();
+    const event = bus.publish({
+      type: 'foo',
+      data: 1,
+      _meta: { source: 'test' },
+    });
+    const after = Date.now();
+
+    expect(event?._meta?.['source']).toBe('test');
+    expect(event?._meta?.['serverTimestamp']).toBeGreaterThanOrEqual(before);
+    expect(event?._meta?.['serverTimestamp']).toBeLessThanOrEqual(after);
+  });
+
+  it('preserves an existing serverTimestamp when publishing', () => {
+    const bus = new EventBus();
+    const event = bus.publish({
+      type: 'foo',
+      data: 1,
+      _meta: { serverTimestamp: 123 },
+    });
+
+    expect(event?._meta?.['serverTimestamp']).toBe(123);
+  });
+
   it('delivers live publishes to a subscriber', async () => {
     const bus = new EventBus();
     const abort = new AbortController();
@@ -42,30 +95,32 @@ describe('EventBus', () => {
     // Need to start consuming before publishing so the subscriber is
     // registered in the loop below.
     setTimeout(() => {
-      bus.publish({ type: 'foo', data: 'a' });
+      bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-live' });
       bus.publish({ type: 'foo', data: 'b' });
     }, 5);
 
     const events = await collect(iter, 2);
     expect(events.map((e) => e.data)).toEqual(['a', 'b']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-live', undefined]);
     abort.abort();
   });
 
   it('replays events newer than lastEventId from the ring', async () => {
     const bus = new EventBus();
-    bus.publish({ type: 'foo', data: 'a' });
-    bus.publish({ type: 'foo', data: 'b' });
-    bus.publish({ type: 'foo', data: 'c' });
+    bus.publish({ type: 'foo', data: 'a', promptId: 'prompt-a' });
+    bus.publish({ type: 'foo', data: 'b', promptId: 'prompt-b' });
+    bus.publish({ type: 'foo', data: 'c', promptId: 'prompt-c' });
 
     const abort = new AbortController();
     const iter = bus.subscribe({ lastEventId: 1, signal: abort.signal });
     const events = await collect(iter, 2);
     expect(events.map((e) => e.id)).toEqual([2, 3]);
     expect(events.map((e) => e.data)).toEqual(['b', 'c']);
+    expect(events.map((e) => e.promptId)).toEqual(['prompt-b', 'prompt-c']);
     abort.abort();
   });
 
-  it('replay + live: new events follow the replay tail', async () => {
+  it('replay + live: new events follow the replay tail (with replay_complete sentinel)', async () => {
     const bus = new EventBus();
     bus.publish({ type: 'foo', data: 'a' });
     bus.publish({ type: 'foo', data: 'b' });
@@ -75,8 +130,29 @@ describe('EventBus', () => {
 
     setTimeout(() => bus.publish({ type: 'foo', data: 'c' }), 5);
 
-    const events = await collect(iter, 3);
-    expect(events.map((e) => e.data)).toEqual(['a', 'b', 'c']);
+    // The replay loop drains the ring, emits a `replay_complete`
+    // sentinel (id-less, lets consumers drop catch-up indicators), and
+    // then live events flow. Sentinel goes AFTER the ring tail so the
+    // consumer sees historical frames first, then the "you're live now"
+    // signal, then live events.
+    const events = await collect(iter, 4);
+    expect(events.map((e) => e.type)).toEqual([
+      'foo',
+      'foo',
+      'replay_complete',
+      'foo',
+    ]);
+    expect(events.map((e) => e.data)).toEqual([
+      'a',
+      'b',
+      // D4: canonical `lastReplayedEventId` + deprecated `lastEventId` alias.
+      expect.objectContaining({
+        lastReplayedEventId: 2,
+        lastEventId: 2,
+        replayedCount: 2,
+      }),
+      'c',
+    ]);
     abort.abort();
   });
 
@@ -120,6 +196,23 @@ describe('EventBus', () => {
     expect(collected[1]?.data).toBe(2);
     expect(collected[2]?.type).toBe('slow_client_warning');
     expect(collected[3]?.type).toBe('client_evicted');
+    expect(collected[3]?.data).toMatchObject({
+      reason: 'queue_overflow',
+      queueSize: 2,
+      maxQueued: 2,
+      maxQueuedBytes: DEFAULT_MAX_QUEUED_BYTES,
+    });
+    expect(
+      (collected[3]?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (collected[3]?.data as { eventBytes?: number }).eventBytes,
+    ).toBeUndefined();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_overflow"',
+      ),
+    );
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
   });
@@ -142,7 +235,48 @@ describe('EventBus', () => {
     }
     const warnings = collected.filter((e) => e.type === 'slow_client_warning');
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.data).toMatchObject({ maxQueued: 8 });
+    expect(warnings[0]?.data).toMatchObject({
+      maxQueued: 8,
+      threshold: 'frames',
+    });
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus slow_client_warning {"queueSize":6,"maxQueued":8',
+      ),
+    );
+    abort.abort();
+  });
+
+  it('reports frames_and_bytes when both warning thresholds are crossed', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 4, signal: abort.signal });
+
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(300),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const collected: BridgeEvent[] = [];
+    const it = iter[Symbol.asyncIterator]();
+    for (let i = 0; i < 4; i++) collected.push((await it.next()).value);
+
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning?.data).toMatchObject({
+      queueSize: 3,
+      maxQueued: 4,
+      maxQueuedBytes: 1200,
+      threshold: 'frames_and_bytes',
+      lastEventId: 3,
+    });
+    expect(
+      (warning?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThanOrEqual(900);
     abort.abort();
   });
 
@@ -198,6 +332,365 @@ describe('EventBus', () => {
     for (let i = 8; i <= 13; i++) bus.publish({ type: 'foo', data: i });
     const secondEpisode: BridgeEvent[] = [];
     for (let i = 0; i < 7; i++) secondEpisode.push((await it.next()).value);
+    expect(
+      secondEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('does not rearm slow_client_warning until frame and byte backlogs both reset', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 16000,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 8, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    for (let i = 1; i <= 6; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const partiallyDrained: BridgeEvent[] = [];
+    for (let i = 0; i < 3; i++) {
+      partiallyDrained.push((await it.next()).value);
+    }
+    expect(
+      partiallyDrained.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(0);
+
+    for (let i = 7; i <= 9; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'y'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterPartialDrain: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterPartialDrain.push((await it.next()).value);
+    }
+    expect(
+      afterPartialDrain.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    bus.publish({
+      type: 'foo',
+      data: 'small',
+      _meta: { serverTimestamp: 10 },
+    });
+    expect((await it.next()).value.data).toBe('small');
+
+    for (let i = 11; i <= 16; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'z'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterFullReset: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterFullReset.push((await it.next()).value);
+    }
+    expect(
+      afterFullReset.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('evicts a slow subscriber when live queued bytes overflow', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    const live = collected.filter((e) => e.type === 'foo');
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(live).toHaveLength(1);
+    expect(evicted).toBeDefined();
+    expect(evicted!.id).toBeUndefined();
+    expect(evicted!.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 1200,
+    });
+    expect(
+      (evicted!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (evicted!.data as { eventBytes?: number }).eventBytes,
+    ).toBeGreaterThan(0);
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_bytes_overflow"',
+      ),
+    );
+    expect(bus.subscriberCount).toBe(0);
+    abort.abort();
+  });
+
+  it('keeps sibling subscribers alive after one subscriber is byte-evicted', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const slowAbort = new AbortController();
+    const fastAbort = new AbortController();
+    const slowIter = bus.subscribe({
+      maxQueued: 100,
+      signal: slowAbort.signal,
+    });
+    const fastIter = bus.subscribe({
+      maxQueued: 100,
+      signal: fastAbort.signal,
+    });
+    const fastIt = fastIter[Symbol.asyncIterator]();
+
+    const fastFirst = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    expect((await fastFirst).value.data).toBe('x'.repeat(1000));
+
+    const fastSecond = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    expect((await fastSecond).value.data).toBe('y'.repeat(1000));
+
+    const slowEvents: BridgeEvent[] = [];
+    for await (const e of slowIter) slowEvents.push(e);
+    expect(
+      slowEvents.find((e) => e.type === 'client_evicted')?.data,
+    ).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    expect(bus.subscriberCount).toBe(1);
+
+    const fastThird = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await fastThird).value.data).toBe('tail');
+
+    await fastIt.return?.();
+    slowAbort.abort();
+    fastAbort.abort();
+  });
+
+  it('allows one oversized live event on an empty queue before byte eviction', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1024),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    expect(collected[0]?.type).toBe('foo');
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning).toBeDefined();
+    expect(warning!.id).toBeUndefined();
+    expect(warning!.data).toMatchObject({
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 256,
+      threshold: 'bytes',
+      lastEventId: 1,
+    });
+    expect(
+      (warning!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(256);
+
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(evicted?.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    abort.abort();
+  });
+
+  it('does not size events that are delivered directly to a waiting subscriber', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const next = it.next();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(() => bus.publish({ type: 'foo', data: circular })).not.toThrow();
+
+    const delivered = await next;
+    expect(delivered.done).toBe(false);
+    expect(delivered.value.type).toBe('foo');
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('does not poison queued bytes when buffered event sizing fails', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(() => {
+      bus.publish({
+        type: 'foo',
+        data: circular,
+        _meta: { serverTimestamp: 1 },
+      });
+      bus.publish({
+        type: 'foo',
+        data: 'tail',
+        _meta: { serverTimestamp: 2 },
+      });
+    }).not.toThrow();
+
+    const first = await it.next();
+    const second = await it.next();
+    expect(first.done).toBe(false);
+    expect(first.value.type).toBe('foo');
+    expect(second.done).toBe(false);
+    expect(second.value.type).toBe('foo');
+    expect(second.value.data).toBe('tail');
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus event sizing failed {"type":"foo"}',
+      ),
+    );
+    expect(bus.subscriberCount).toBe(1);
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('does not count replay frames toward queued bytes', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 64,
+    });
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'replay',
+        data: 'x'.repeat(512),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const abort = new AbortController();
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 2,
+      signal: abort.signal,
+    });
+    bus.publish({
+      type: 'live',
+      data: 'y'.repeat(512),
+      _meta: { serverTimestamp: 4 },
+    });
+
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) {
+      events.push(e);
+      if (events.length === 5) break;
+    }
+
+    expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
+    expect(events.filter((e) => e.type === 'replay')).toHaveLength(3);
+    expect(events.find((e) => e.type === 'replay_complete')).toBeDefined();
+    expect(events.at(-1)?.type).toBe('live');
+    abort.abort();
+  });
+
+  it('rearms byte-based slow_client_warning after queued bytes drain', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    const firstEpisode: BridgeEvent[] = [];
+    firstEpisode.push((await it.next()).value);
+    firstEpisode.push((await it.next()).value);
+    expect(
+      firstEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    // A large event can jump from fully drained to above the byte warn
+    // threshold; that single publish must not both re-arm and warn.
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    expect((await it.next()).value.data).toBe('y'.repeat(1000));
+
+    bus.publish({
+      type: 'foo',
+      data: 'reset',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await it.next()).value.data).toBe('reset');
+
+    bus.publish({
+      type: 'foo',
+      data: 'z'.repeat(1000),
+      _meta: { serverTimestamp: 4 },
+    });
+    const secondEpisode: BridgeEvent[] = [];
+    secondEpisode.push((await it.next()).value);
+    secondEpisode.push((await it.next()).value);
     expect(
       secondEpisode.filter((e) => e.type === 'slow_client_warning'),
     ).toHaveLength(1);
@@ -274,13 +767,21 @@ describe('EventBus', () => {
     // A `lastEventId: 0` resume with a queue cap larger than the ring
     // collects exactly 8000 live frames; ids start at 2 because id=1
     // was the one shifted out of the ring.
+    //
+    // #4175 F4 prereq: `lastEventId: 0` + earliest-id-in-ring = 2
+    // crosses the eviction-detection threshold (earliest > last + 1),
+    // so an extra synthetic `state_resync_required` frame is emitted
+    // FIRST. The filter below restricts to live ids, which excludes
+    // the synthetic (no id), so the original "8000 live frames"
+    // invariant is preserved.
     const abort = new AbortController();
     const iter = bus.subscribe({
       lastEventId: 0,
       maxQueued: 9000,
       signal: abort.signal,
     });
-    const events = await collect(iter, 8000);
+    // Collect 8001 frames now: 1 synthetic resync + 8000 live.
+    const events = await collect(iter, 8001);
     abort.abort();
     const liveIds = events
       .filter((e) => e.id !== undefined)
@@ -288,6 +789,8 @@ describe('EventBus', () => {
     expect(liveIds).toHaveLength(8000);
     expect(liveIds[0]).toBe(2);
     expect(liveIds[liveIds.length - 1]).toBe(8001);
+    // The synthetic resync frame is the first one.
+    expect(events[0]?.type).toBe('state_resync_required');
   });
 
   it('eviction detaches the abort listener from a stalled consumer (BmJT1)', async () => {
@@ -405,12 +908,15 @@ describe('EventBus', () => {
     const events: BridgeEvent[] = [];
     for await (const e of iter) {
       events.push(e);
-      if (events.length === 11) break;
+      // 10 replay + 1 replay_complete sentinel + 1 live = 12 total
+      if (events.length === 12) break;
     }
     // The live frame must arrive — NOT a `client_evicted` terminal.
     expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
     expect(events.at(-1)?.type).toBe('live');
     expect(events.filter((e) => e.type === 'replay')).toHaveLength(10);
+    // `replay_complete` sentinel signals end-of-replay before live frames.
+    expect(events.filter((e) => e.type === 'replay_complete')).toHaveLength(1);
     abort.abort();
   });
 
@@ -480,9 +986,227 @@ describe('EventBus', () => {
     const out: BridgeEvent[] = [];
     for await (const e of iter) {
       out.push(e);
-      if (out.length === 3) break;
+      // state_resync_required (synthetic) + 3 replay frames +
+      // replay_complete sentinel = 5 frames.
+      if (out.length === 5) break;
     }
-    expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+    // First frame is the synthetic state_resync_required (no id).
+    expect(out[0]?.type).toBe('state_resync_required');
+    expect(out[0]?.id).toBeUndefined();
+    // Then the 3 surviving ring frames.
+    expect(out.slice(1, 4).map((e) => e.id)).toEqual([3, 4, 5]);
+    // The replay_complete sentinel fires at the end of replay even on
+    // the resync path — `replayedCount` is the actual frames pushed (3),
+    // NOT `earliestAvailableId - lastEventId` (which would over-count
+    // across the evicted hole).
+    expect(out[4]?.type).toBe('replay_complete');
+    expect(out[4]?.id).toBeUndefined();
+    expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
     abort.abort();
+  });
+
+  describe('state_resync_required (#4175 F4 prereq, Ilya0527 issue #15)', () => {
+    it('emits state_resync_required when lastEventId is past the ring head', async () => {
+      // Setup: ring holds 3, ids 1..5 published → ring contains [3,4,5].
+      // Consumer reconnects with Last-Event-ID: 1 → events 2 was evicted.
+      // Daemon must emit state_resync_required FIRST so SDK reducer
+      // knows its state is stale before applying any replay frames.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 1,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 replay frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      // First frame is the resync terminal (synthetic, no id).
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('ring_evicted');
+      expect(data.lastDeliveredId).toBe(1);
+      expect(data.earliestAvailableId).toBe(3); // event 2 was evicted
+      // Replay continues after the resync frame (per design — SDK can
+      // compute "what you missed" diff later) — so we still get the
+      // 3 surviving ring frames.
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([3, 4, 5]);
+      // replay_complete sentinel closes the replay even when a resync
+      // gap preceded it; replayedCount counts only the 3 surviving
+      // frames actually delivered (not the evicted hole).
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required when lastEventId is in the ring', async () => {
+      // Consumer's lastEventId is well within the ring → no gap → no
+      // resync needed.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 3) break;
+      }
+      // No resync frame — just the 3 replay frames (ids 3, 4, 5).
+      expect(out.map((e) => e.id)).toEqual([3, 4, 5]);
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required at the exact boundary (lastEventId === earliest - 1)', async () => {
+      // Boundary: ring's earliest id is N, lastEventId is N-1.
+      // No gap → no resync. Off-by-one guard.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      // Ring is now [3, 4, 5]. lastEventId=2 means "I have 1 and 2";
+      // next expected is 3, which IS in the ring. No gap.
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // 3 replay frames + 1 replay_complete sentinel = 4 total
+        if (out.length === 4) break;
+      }
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      // Replay frames in order, then the sentinel (id-less, signals
+      // catch-up complete).
+      expect(out.filter((e) => e.type === 'foo').map((e) => e.id)).toEqual([
+        3, 4, 5,
+      ]);
+      expect(out.filter((e) => e.type === 'replay_complete')).toHaveLength(1);
+      abort.abort();
+    });
+
+    it('emits epoch_reset resync when lastEventId is past the bus high-water (D1)', async () => {
+      // doudouOUC #4484 post-merge review (D1): a fresh bus (nextId=1,
+      // empty ring) that receives a consumer presenting `lastEventId: 5`
+      // means the consumer's cursor is from a PREVIOUS bus epoch (daemon
+      // restart rebuilt the EventBus). Pre-fix this slid past the
+      // `ring_evicted` check (empty ring) and emitted a bare
+      // `replay_complete{replayedCount:0}` — a false "you're caught up"
+      // while the consumer's reducer still held dead-epoch state. Now it
+      // must emit `state_resync_required{reason:'epoch_reset'}` first.
+      const bus = new EventBus(10);
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 5,
+        signal: abort.signal,
+      });
+      // Publish one live event AFTER subscribe to confirm the stream works.
+      setTimeout(() => bus.publish({ type: 'foo', data: 1 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + replay_complete (0 frames) + 1 live = 3 total.
+        if (out.length === 3) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('epoch_reset');
+      expect(data.lastDeliveredId).toBe(5);
+      expect(data.earliestAvailableId).toBe(1);
+      expect(out[1]?.type).toBe('replay_complete');
+      expect(out[1]?.data).toMatchObject({ replayedCount: 0 });
+      expect(out[2]?.type).toBe('foo');
+      expect(out[2]?.id).toBe(1);
+      abort.abort();
+    });
+
+    it('epoch_reset replays the WHOLE fresh ring (stale cursor must not filter new low ids)', async () => {
+      // After a restart the new epoch starts ids at 1 again. A consumer
+      // reconnecting with `lastEventId: 50` (dead epoch) must still receive
+      // the fresh ring's low-id events — filtering replay by 50 would drop
+      // ids 1..3 entirely, leaving the consumer permanently behind.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 50,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 replay frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect((out[0]?.data as { reason: string }).reason).toBe('epoch_reset');
+      // All three fresh events replay despite ids < stale cursor.
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([1, 2, 3]);
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
+      abort.abort();
+    });
+
+    it('does NOT emit epoch_reset at the caught-up boundary (lastEventId === high-water)', async () => {
+      // Consumer fully caught up: lastEventId equals the bus high-water
+      // (nextId - 1). nextId is one past it, so `lastEventId >= nextId` is
+      // false — no epoch reset. Off-by-one guard for D1.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      // high-water is 3; nextId is 4. lastEventId: 3 is the caught-up case.
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 3,
+        signal: abort.signal,
+      });
+      setTimeout(() => bus.publish({ type: 'foo', data: 99 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // replay_complete (0 frames) + 1 live = 2.
+        if (out.length === 2) break;
+      }
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      expect(out[0]?.type).toBe('replay_complete');
+      expect(out[1]?.id).toBe(4);
+      abort.abort();
+    });
+
+    it('does NOT emit state_resync_required when no lastEventId is provided (fresh subscribe)', async () => {
+      // First-time subscriber has no prior state to resync — resync
+      // would be meaningless. Check the no-lastEventId branch is
+      // skipped entirely.
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({ signal: abort.signal });
+      // Live-only — publish one event after subscribe to give the
+      // iterator something to yield.
+      setTimeout(() => bus.publish({ type: 'foo', data: 99 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 1) break;
+      }
+      expect(out[0]?.type).toBe('foo');
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
   });
 });

@@ -126,7 +126,13 @@ When `attempt === 1` and no retries happened, `request_setup_ms` is small (just 
 2. **Single-trace debug** — operator sees `duration_ms=12000, request_setup_ms=11500, ttft_ms=200, sampling_ms=300` → instantly diagnoses "retries ate 11.5s, model itself was fast." Computing `request_setup_ms` from other fields requires also exposing `sampling_ms`, which we do anyway (D6).
 3. **Negligible cost** — 1 INT64 attribute. Same order of magnitude as the existing `input_tokens`, `output_tokens` attributes. Backend ingest cost is not material.
 
-### D4 — Retry telemetry: `onRetry` callback option on `retryWithBackoff` + new `ApiRetryEvent`
+### D4 — Retry telemetry: `onRetry` callback option on `retryWithBackoff` + `ApiRetryEvent` + AsyncLocalStorage propagation
+
+> **Phase 4b update (post-design discovery)**: this section was originally written assuming claude-code's "one LLM span owns the retry loop" pattern. While implementing Phase 4b, we discovered that qwen-code's 4 `retryWithBackoff` call sites (`client.ts:2109`, `baseLlmClient.ts:235,333`, `geminiChat.ts:2035` — line numbers as of merge) all wrap `apiCall = () => contentGenerator.generateContent(...)`. The retry layer sits **above** LoggingContentGenerator. Each retry attempt invokes `apiCall()` fresh → fresh `qwen-code.llm_request` span. There is no single shared span across attempts. An in-`LoggingContentGenerator` accumulator wouldn't work.
+>
+> **Resolution**: propagate retry state via `AsyncLocalStorage` (`retryContext` in `packages/core/src/utils/retryContext.ts`). `retryWithBackoff` wraps each `await fn()` in `retryContext.run({ attempt, requestSetupMs, retryTotalDelayMs }, fn)`. `LoggingContentGenerator` reads the ALS in its synchronous prelude and forwards the values to `endLLMRequestSpan`. This actually gives **richer** observability than the original plan — each per-attempt span has its own `duration_ms` / `ttft_ms` / error details AND knows where in the retry budget it sits via the per-attempt `attempt` / `requestSetupMs` / `retryTotalDelayMs` attributes.
+>
+> The ALS approach matches existing patterns in the codebase (`promptIdContext`, `subagentNameContext`, `agent-context`) — minimal new surface, well-understood semantics. Plan-mode review process captured this revision through 3 review rounds finding 22 issues, all addressed before merge.
 
 `retryWithBackoff` currently calls `logRetryAttempt` (`retry.ts:343`) which only writes to `debugLogger.warn`. We extend the `RetryOptions` interface with an opt-in callback:
 
@@ -188,14 +194,14 @@ export class ApiRetryEvent implements BaseTelemetryEvent {
 
 OTel span attributes are scalars (`string | number | boolean | array of these`). Map-typed attributes (like `retry_count_by_status: {429:2, 503:1}`) require JSON serialization and are awkward to query. Skip them.
 
-| Attribute                  | Type   | Semantic                                                                            |
-| -------------------------- | ------ | ----------------------------------------------------------------------------------- |
-| `attempt`                  | int    | 1-based final attempt count (`attemptStartTimes.length`)                            |
-| `retry_total_delay_ms`     | int    | Sum of all `delayMs` reported by `onRetry`; 0 if no retries                         |
-| `ttft_ms`                  | int    | TTFT per D1; undefined for non-streaming or aborted-before-first-chunk requests     |
-| `request_setup_ms`         | int    | Per D3                                                                              |
-| `sampling_ms`              | int    | Per D6                                                                              |
-| `output_tokens_per_second` | double | Derived; `output_tokens / (sampling_ms / 1000)`; undefined when `sampling_ms === 0` |
+| Attribute                  | Type   | Semantic                                                                                                                                 |
+| -------------------------- | ------ | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `attempt`                  | int    | 1-based monotonic counter from `retryContext.attempt` (this attempt's iteration). Always populated (defaults to 1 when no retry context) |
+| `retry_total_delay_ms`     | int    | Cumulative backoff sleep BEFORE this attempt started. Undefined for direct calls; 0 for attempt 1; > 0 for subsequent retried attempts   |
+| `ttft_ms`                  | int    | TTFT per D1; undefined for non-streaming or aborted-before-first-chunk requests                                                          |
+| `request_setup_ms`         | int    | Per D3                                                                                                                                   |
+| `sampling_ms`              | int    | Per D6                                                                                                                                   |
+| `output_tokens_per_second` | double | Derived; `output_tokens / (sampling_ms / 1000)`; undefined when `sampling_ms === 0`                                                      |
 
 Per-attempt status-code distribution (e.g., "2 of the 3 attempts were 429s") is queryable from log-bridge spans of `ApiRetryEvent` records. No need to duplicate it as a flattened attribute on the parent.
 

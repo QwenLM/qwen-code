@@ -8,6 +8,11 @@ import { describe, it, expect } from 'vitest';
 import { computeApiTruncationIndex, isRealUserTurn } from './historyMapping.js';
 import type { HistoryItem } from '../types.js';
 import type { Content, Part } from '@google/genai';
+import {
+  CompressionStatus,
+  SYSTEM_REMINDER_OPEN,
+  SYSTEM_REMINDER_CLOSE,
+} from '@qwen-code/qwen-code-core';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,11 +37,10 @@ function functionResponseContent(): Content {
   };
 }
 
-function startupPair(): [Content, Content] {
-  return [
-    userContent('Environment context...'),
-    modelContent('Got it. Thanks for the context!'),
-  ];
+function startupEntry(): Content {
+  return userContent(
+    `${SYSTEM_REMINDER_OPEN}\nEnvironment context...\n${SYSTEM_REMINDER_CLOSE}`,
+  );
 }
 
 function userItem(
@@ -54,6 +58,22 @@ function userItem(
 
 function geminiItem(id: number): HistoryItem {
   return { type: 'gemini', id, text: `response ${id}` } as HistoryItem;
+}
+
+function compressionItem(
+  id: number,
+  compressionStatus = CompressionStatus.COMPRESSED,
+): HistoryItem {
+  return {
+    type: 'compression',
+    id,
+    compression: {
+      isPending: false,
+      originalTokenCount: 100,
+      newTokenCount: 40,
+      compressionStatus,
+    },
+  } as HistoryItem;
 }
 
 // ---------------------------------------------------------------------------
@@ -123,16 +143,16 @@ describe('computeApiTruncationIndex', () => {
     });
   });
 
-  describe('with startup context pair', () => {
+  describe('with startup context entry', () => {
     it('keeps startup context when rewinding to the first turn', () => {
       const ui: HistoryItem[] = [userItem(1), geminiItem(2)];
       const api: Content[] = [
-        ...startupPair(),
+        startupEntry(),
         userContent('prompt 1'),
         modelContent('response 1'),
       ];
-      // Rewind to turn 1 → keep startup pair (2 entries)
-      expect(computeApiTruncationIndex(ui, 1, api)).toBe(2);
+      // Rewind to turn 1 -> keep startup entry.
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(1);
     });
 
     it('keeps startup + first turn when rewinding to second turn', () => {
@@ -143,14 +163,81 @@ describe('computeApiTruncationIndex', () => {
         geminiItem(4),
       ];
       const api: Content[] = [
-        ...startupPair(),
+        startupEntry(),
         userContent('prompt 1'),
         modelContent('response 1'),
         userContent('prompt 3'),
         modelContent('response 3'),
       ];
-      // startup(2) + turn1(2) = 4 entries to keep
-      expect(computeApiTruncationIndex(ui, 3, api)).toBe(4);
+      // startup(1) + turn1(2) = 3 entries to keep.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+  });
+
+  describe('with mid-history system-reminder entries', () => {
+    const mcpReminder = (): Content =>
+      userContent(
+        `${SYSTEM_REMINDER_OPEN}\nNew tools available: foo\n${SYSTEM_REMINDER_CLOSE}`,
+      );
+
+    it('does not count an MCP added-tool reminder as a user prompt', () => {
+      // drainPendingAddedMcpToolsReminder injects a pure <system-reminder>
+      // user entry mid-history. It is role:'user' with text, so a naive count
+      // treats it as a real prompt and lands the truncation index one turn
+      // early, silently dropping a turn's context.
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+        userItem(5),
+        geminiItem(6),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('prompt 1'),
+        modelContent('response 1'),
+        mcpReminder(), // must NOT count as a user turn
+        userContent('prompt 3'),
+        modelContent('response 3'),
+        userContent('prompt 5'),
+        modelContent('response 5'),
+      ];
+      // Rewind to turn 5 (2 real turns before it). If the reminder counted,
+      // the walk would stop at its successor (idx 4) and drop turn 3's
+      // context; excluding it lands correctly at prompt 5 (idx 6).
+      expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
+    });
+
+    it('still counts a real turn that has a per-turn reminder prepended', () => {
+      // In plan mode the reminder is an extra part on the SAME Content as the
+      // prompt: parts = [<system-reminder>…, prompt]. That entry IS a real
+      // user turn (it has a non-reminder prompt part), so it must be counted —
+      // a parts[0]-only exclusion would wrongly skip it and miscount.
+      const planTurn = (id: number): Content => ({
+        role: 'user',
+        parts: [
+          {
+            text: `${SYSTEM_REMINDER_OPEN}\nPlan mode is active.\n${SYSTEM_REMINDER_CLOSE}`,
+          } as Part,
+          { text: `prompt ${id}` } as Part,
+        ],
+      });
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        planTurn(1),
+        modelContent('response 1'),
+        planTurn(3),
+        modelContent('response 3'),
+      ];
+      // Rewind to turn 3 → keep startup + turn 1 = 3 entries.
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
     });
   });
 
@@ -195,6 +282,71 @@ describe('computeApiTruncationIndex', () => {
       ];
       // Rewind to turn 5 → 2 user turns before it, but API only has 1 user text
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(-1);
+    });
+
+    it('maps post-compression UI turns from the latest compressed marker', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre-compression prompt'),
+        geminiItem(2),
+        compressionItem(3),
+        userItem(4, 'post 1'),
+        geminiItem(5),
+        userItem(6, 'post 2'),
+        geminiItem(7),
+        userItem(8, 'post 3'),
+        geminiItem(9),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post 1'),
+        modelContent('response 1'),
+        userContent('post 2'),
+        modelContent('response 2'),
+        userContent('post 3'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
+      expect(computeApiTruncationIndex(ui, 6, api)).toBe(5);
+      expect(computeApiTruncationIndex(ui, 8, api)).toBe(7);
+    });
+
+    it('does not rewind to UI turns before a successful compression marker', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'pre-compression prompt'),
+        geminiItem(2),
+        compressionItem(3),
+        userItem(4, 'post compression'),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('<state_snapshot>summary\n\nResume the prior task...'),
+        modelContent('Got it. Thanks for the additional context!'),
+        userContent('post compression'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 1, api)).toBe(-1);
+    });
+
+    it('does not treat no-op compression markers as collapsed history', () => {
+      const ui: HistoryItem[] = [
+        userItem(1, 'first prompt'),
+        geminiItem(2),
+        compressionItem(3, CompressionStatus.NOOP),
+        userItem(4, 'second prompt'),
+        geminiItem(5),
+      ];
+      const api: Content[] = [
+        startupEntry(),
+        userContent('first prompt'),
+        modelContent('response 1'),
+        userContent('second prompt'),
+        modelContent('response 2'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 4, api)).toBe(3);
     });
   });
 
@@ -354,5 +506,14 @@ describe('isRealUserTurn', () => {
 
   it('returns false for non-user items', () => {
     expect(isRealUserTurn(geminiItem(1))).toBe(false);
+    expect(
+      isRealUserTurn({ type: 'info', id: 1, text: 'info' } as HistoryItem),
+    ).toBe(false);
+  });
+
+  it('returns true for user items with suppressOnRestore', () => {
+    const item = userItem(1, 'hello world');
+    item.display = { suppressOnRestore: true };
+    expect(isRealUserTurn(item)).toBe(true);
   });
 });

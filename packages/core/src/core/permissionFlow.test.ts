@@ -13,6 +13,7 @@ import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 // Import the functions we're testing
 import {
   evaluatePermissionFlow,
+  getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
   isAutoEditApproved,
@@ -127,6 +128,93 @@ describe('evaluatePermissionFlow', () => {
     expect(result.finalPermission).toBe('ask');
     expect(result.pmForcedAsk).toBe(true);
   });
+
+  it('passes invocation permission aliases to the permission manager', async () => {
+    const legacyName = 'mcp__server__legacy_name';
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      permissionAliases: [legacyName],
+    });
+
+    await evaluatePermissionFlow(
+      mockConfig({
+        getPermissionManager: vi.fn().mockReturnValue(mockPm),
+      }),
+      invocation,
+      'mcp__server__provider_safe_name',
+      {},
+    );
+
+    expect(mockPm.hasRelevantRules).toHaveBeenCalledWith(
+      expect.objectContaining({ toolAliases: [legacyName] }),
+    );
+  });
+
+  it('forces interaction even when PM allows the tool', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('allow'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig({ getPermissionManager: vi.fn().mockReturnValue(mockPm) }),
+      invocation,
+      ToolNames.EXIT_PLAN_MODE,
+      { plan: 'Plan' },
+    );
+
+    expect(result.finalPermission).toBe('ask');
+    expect(result.requiresUserInteraction).toBe(true);
+  });
+
+  it('preserves an intrinsic deny for an interaction-required tool', async () => {
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('deny'),
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig(),
+      invocation,
+      ToolNames.EXIT_PLAN_MODE,
+      { plan: 'Plan' },
+    );
+
+    expect(result.finalPermission).toBe('deny');
+  });
+
+  it('preserves a permission-rule deny for an interaction-required tool', async () => {
+    const mockPm = {
+      hasRelevantRules: vi.fn().mockReturnValue(true),
+      evaluate: vi.fn().mockResolvedValue('deny'),
+      findMatchingDenyRule: vi.fn().mockReturnValue('deny exit_plan_mode'),
+      hasMatchingAskRule: vi.fn().mockReturnValue(false),
+    };
+    const invocation = mockInvocation({
+      getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+      requiresUserInteraction: vi.fn().mockReturnValue(true),
+    });
+
+    const result = await evaluatePermissionFlow(
+      mockConfig({ getPermissionManager: vi.fn().mockReturnValue(mockPm) }),
+      invocation,
+      ToolNames.EXIT_PLAN_MODE,
+      { plan: 'Plan' },
+    );
+
+    expect(result.finalPermission).toBe('deny');
+    expect(result.denyMessage).toContain('denied by permission rules');
+  });
 });
 
 describe('needsConfirmation', () => {
@@ -143,6 +231,18 @@ describe('needsConfirmation', () => {
     ).toBe(true);
   });
 
+  it('requires confirmation in YOLO when the invocation requires interaction', () => {
+    expect(needsConfirmation('ask', ApprovalMode.YOLO, 'shell', true)).toBe(
+      true,
+    );
+  });
+
+  it('never requests confirmation for a hard deny', () => {
+    expect(needsConfirmation('deny', ApprovalMode.YOLO, 'shell', true)).toBe(
+      false,
+    );
+  });
+
   it('should return true when finalPermission is ask or default', () => {
     expect(needsConfirmation('ask', ApprovalMode.DEFAULT, 'shell')).toBe(true);
     expect(needsConfirmation('default', ApprovalMode.DEFAULT, 'shell')).toBe(
@@ -157,6 +257,21 @@ describe('needsConfirmation', () => {
     expect(needsConfirmation('deny', ApprovalMode.DEFAULT, 'shell')).toBe(
       false,
     );
+  });
+});
+
+describe('getEffectivePermissionForConfirmation', () => {
+  it('forces protected allow-rule fallback through manual confirmation', () => {
+    expect(getEffectivePermissionForConfirmation('allow', true)).toBe('ask');
+  });
+
+  it('preserves ordinary permission decisions', () => {
+    expect(getEffectivePermissionForConfirmation('allow', false)).toBe('allow');
+    expect(getEffectivePermissionForConfirmation('ask', true)).toBe('ask');
+    expect(getEffectivePermissionForConfirmation('default', true)).toBe(
+      'default',
+    );
+    expect(getEffectivePermissionForConfirmation('deny', true)).toBe('deny');
   });
 });
 
@@ -189,6 +304,18 @@ describe('isPlanModeBlocked', () => {
   it('should not block ask_user_question tool', () => {
     expect(
       isPlanModeBlocked(true, false, true, mockConfirmationDetails('exec')),
+    ).toBe(false);
+  });
+
+  it('should not block enter_plan_mode tool', () => {
+    expect(
+      isPlanModeBlocked(
+        true,
+        false,
+        false,
+        mockConfirmationDetails('exec'),
+        true,
+      ),
     ).toBe(false);
   });
 

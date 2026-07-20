@@ -22,13 +22,23 @@ import {
   resourceFromAttributes,
 } from '@opentelemetry/resources';
 
-import { SERVICE_NAME } from './constants.js';
+import { EVENT_SUBAGENT_EXECUTION, SERVICE_NAME } from './constants.js';
 import {
   deriveTraceId,
   randomHexString,
   randomSpanId,
 } from './trace-id-utils.js';
 import { getCurrentSessionId } from './session-context.js';
+import { isInNativeSubagentSpan } from './session-tracing.js';
+
+/**
+ * LogRecord event names that have native span coverage when emitted
+ * inside a `runInSubagentSpanContext` body. The bridge is only skipped
+ * when the ALS confirms a native subagent span is active — paths that
+ * emit the same event WITHOUT a native span (e.g. `runForkedAgent`)
+ * still get a bridge span so trace-tree observability is preserved.
+ */
+const BRIDGE_SKIP_EVENT_NAMES = new Set<string>([EVENT_SUBAGENT_EXECUTION]);
 
 const EXPORT_TIMEOUT_MS = 30_000;
 const DEFAULT_MAX_BUFFER_SIZE = 10_000;
@@ -135,6 +145,17 @@ export class LogToSpanProcessor implements LogRecordProcessor {
 
   onEmit(logRecord: ReadableLogRecord): void {
     if (this.isShutdown) {
+      return;
+    }
+
+    // Skip bridge only when a native subagent span is active in the ALS.
+    // Paths without native coverage (e.g. runForkedAgent) still get bridged.
+    const eventName = logRecord.attributes?.['event.name'];
+    if (
+      typeof eventName === 'string' &&
+      BRIDGE_SKIP_EVENT_NAMES.has(eventName) &&
+      isInNativeSubagentSpan()
+    ) {
       return;
     }
 

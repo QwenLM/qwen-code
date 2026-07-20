@@ -5,7 +5,8 @@
  */
 
 import type React from 'react';
-import { useMemo } from 'react';
+import { memo, useMemo, useRef, useCallback } from 'react';
+import type { DOMElement } from 'ink';
 import {
   escapeAnsiCtrlCodes,
   sanitizeSensitiveText,
@@ -27,6 +28,7 @@ import {
   WarningMessage,
   ErrorMessage,
   RetryCountdownMessage,
+  VisionNoticeMessage,
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
@@ -40,6 +42,7 @@ import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
 import { ToolStatsDisplay } from './ToolStatsDisplay.js';
+import { SkillStatsDisplay } from './SkillStatsDisplay.js';
 import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
 import { Help } from './Help.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -56,7 +59,15 @@ import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
-import { useCompactMode } from '../contexts/CompactModeContext.js';
+import { useSettings } from '../contexts/SettingsContext.js';
+import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
+import { useMouseEvents } from '../hooks/useMouseEvents.js';
+import type { MouseEvent } from '../utils/mouse.js';
+import {
+  measureElementPosition,
+  layoutRowForEvent,
+} from '../utils/measure-element-position.js';
+import { useTerminalSize } from '../hooks/useTerminalSize.js';
 
 interface HistoryItemDisplayProps {
   item: HistoryItem;
@@ -69,22 +80,142 @@ interface HistoryItemDisplayProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   availableTerminalHeightGemini?: number;
-  /**
-   * When the item is a `tool_group`, an optional short LLM-generated label
-   * summarizing the batch. Replaces the generic "Tool × N" line in compact
-   * mode. Computed by the parent from `tool_use_summary` history items.
-   */
-  compactLabel?: string;
-  /**
-   * When the item is a `tool_use_summary`, true if a sibling tool_group has
-   * absorbed this label via its compact-mode header. The standalone `● <label>`
-   * line is suppressed in that case. False for force-expanded groups in
-   * compact mode (they render through the full ToolGroupMessage path and
-   * don't consume compactLabel, so the standalone line is the label's only
-   * path to the screen) and for all tool_use_summary items in full mode.
-   */
-  summaryAbsorbed?: boolean;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  /** Force thinking blocks expanded (e.g. in SessionPreview). */
+  thoughtExpanded?: boolean;
+  /**
+   * Transcript full-detail mode (Ctrl+O). When true, collapse is lifted:
+   * thinking blocks render expanded and tool groups force `forceExpandAll`
+   * + `forceShowResult` (every tool with its full, untruncated result).
+   * Default false (main view stays at the #5661 partition baseline).
+   */
+  fullDetail?: boolean;
+  /**
+   * Head id of the thought group this item belongs to (the `gemini_thought`
+   * head id for both the head and its `gemini_thought_content` continuations).
+   * Used to expand/collapse the whole group as a unit on click.
+   */
+  thoughtHeadId?: number;
+}
+
+/**
+ * Wraps ThinkMessage with mouse click-to-open handling.
+ * Extracted so that non-thought HistoryItemDisplay instances
+ * don't pay the useMouseEvents/useRef/useCallback hook cost.
+ */
+const ClickableThinkMessage: React.FC<{
+  text: string;
+  isPending: boolean;
+  expanded: boolean;
+  availableTerminalHeight?: number;
+  contentWidth: number;
+  durationMs?: number;
+  onToggle: () => void;
+}> = ({
+  text,
+  isPending,
+  expanded,
+  availableTerminalHeight,
+  contentWidth,
+  durationMs,
+  onToggle,
+}) => {
+  const ref = useRef<DOMElement>(null);
+  const pressRef = useRef<{ col: number; row: number } | null>(null);
+  const { rows: terminalHeight } = useTerminalSize();
+  const settings = useSettings();
+  const clickable = !!settings.merged.ui?.useTerminalBuffer;
+  const isActive = !isPending;
+
+  useMouseEvents(
+    useCallback(
+      (event: MouseEvent) => {
+        if (!ref.current) return;
+        if (event.name === 'move') {
+          if (
+            pressRef.current &&
+            (event.col !== pressRef.current.col ||
+              event.row !== pressRef.current.row)
+          ) {
+            pressRef.current = null;
+          }
+          return;
+        }
+        if (event.name !== 'left-press' && event.name !== 'left-release') {
+          pressRef.current = null;
+          return;
+        }
+        const metrics = measureElementPosition(ref.current);
+        const col = event.col - 1;
+        const row = layoutRowForEvent(ref.current, event.row, terminalHeight);
+        const isInside =
+          col >= metrics.x &&
+          col < metrics.x + metrics.width &&
+          row >= metrics.y &&
+          row < metrics.y + metrics.height;
+        if (event.name === 'left-press') {
+          pressRef.current = isInside
+            ? { col: event.col, row: event.row }
+            : null;
+          return;
+        }
+        const press = pressRef.current;
+        pressRef.current = null;
+        if (isInside && press?.col === event.col && press.row === event.row) {
+          onToggle();
+        }
+      },
+      [onToggle, terminalHeight],
+    ),
+    { isActive },
+  );
+
+  return (
+    <Box ref={isActive ? ref : undefined}>
+      <ThinkMessage
+        text={text}
+        isPending={isPending}
+        expanded={expanded}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+        durationMs={durationMs}
+        clickable={clickable}
+      />
+    </Box>
+  );
+};
+
+function getHistoryItemMarginTop(item: HistoryItem): number {
+  switch (item.type) {
+    case 'gemini':
+    case 'gemini_thought':
+      return 1;
+    case 'gemini_content':
+    case 'gemini_thought_content':
+    case 'info':
+    case 'success':
+    case 'warning':
+    case 'error':
+    case 'retry_countdown':
+    case 'memory_saved':
+    case 'tool_group':
+    case 'tool_use_summary':
+    case 'notification':
+    case 'compression':
+    case 'summary':
+    case 'insight_progress':
+    case 'btw':
+    case 'away_recap':
+    case 'user':
+    case 'user_prompt_submit_blocked':
+    case 'stop_hook_loop':
+    case 'stop_hook_system_message':
+    case 'goal_status':
+    case 'vision_notice':
+      return 0;
+    default:
+      return 1;
+  }
 }
 
 const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
@@ -98,16 +229,32 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   activeShellPtyId,
   embeddedShellFocused,
   availableTerminalHeightGemini,
-  compactLabel,
-  summaryAbsorbed = false,
   sourceCopyIndexOffsets,
+  thoughtExpanded,
+  fullDetail = false,
+  thoughtHeadId,
 }) => {
-  const marginTop =
-    item.type === 'gemini_content' || item.type === 'gemini_thought_content'
-      ? 0
-      : 1;
+  const marginTop = getHistoryItemMarginTop(item);
 
-  const { compactMode } = useCompactMode();
+  const {
+    allExpanded,
+    expandedHeadIds,
+    toggle: toggleThought,
+  } = useThoughtExpanded();
+  // A thought spans the `gemini_thought` head plus its trailing
+  // `gemini_thought_content` items; all of them key off the head id so one
+  // click expands the whole group. Continuations receive the head id via
+  // `thoughtHeadId`; the head itself falls back to its own id.
+  const thoughtGroupHeadId = thoughtHeadId ?? item.id;
+  // Ctrl+O full-detail forces every thought open; otherwise honor an explicit
+  // `thoughtExpanded` prop, then the global Alt+T toggle / per-group click set.
+  const resolvedThoughtExpanded =
+    fullDetail ||
+    (thoughtExpanded ??
+      (allExpanded || expandedHeadIds.has(thoughtGroupHeadId)));
+  const settings = useSettings();
+  const showTimestamps = settings.merged.output?.showTimestamps === true;
+
   const itemForDisplay = useMemo(() => escapeAnsiCtrlCodes(item), [item]);
   const contentWidth = terminalWidth - 4;
   const boxWidth = mainAreaWidth || contentWidth;
@@ -131,15 +278,29 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
         <UserShellMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'gemini' && (
-        <AssistantMessage
-          text={itemForDisplay.text}
-          isPending={isPending}
-          availableTerminalHeight={
-            availableTerminalHeightGemini ?? availableTerminalHeight
-          }
-          contentWidth={contentWidth}
-          sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-        />
+        <>
+          {showTimestamps && itemForDisplay.timestamp != null && (
+            <Text dimColor>
+              [
+              {new Date(itemForDisplay.timestamp).toLocaleTimeString('en-US', {
+                hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })}
+              ]
+            </Text>
+          )}
+          <AssistantMessage
+            text={itemForDisplay.text}
+            isPending={isPending}
+            availableTerminalHeight={
+              availableTerminalHeightGemini ?? availableTerminalHeight
+            }
+            contentWidth={contentWidth}
+            sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+          />
+        </>
       )}
       {itemForDisplay.type === 'gemini_content' && (
         <AssistantMessageContent
@@ -152,20 +313,24 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           sourceCopyIndexOffsets={sourceCopyIndexOffsets}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought' && (
-        <ThinkMessage
-          text={itemForDisplay.text}
+      {itemForDisplay.type === 'gemini_thought' && (
+        <ClickableThinkMessage
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
           contentWidth={contentWidth}
+          durationMs={itemForDisplay.durationMs}
+          onToggle={() => toggleThought(thoughtGroupHeadId)}
         />
       )}
-      {!compactMode && itemForDisplay.type === 'gemini_thought_content' && (
+      {itemForDisplay.type === 'gemini_thought_content' && (
         <ThinkMessageContent
-          text={itemForDisplay.text}
+          text={itemForDisplay.text.trimEnd()}
           isPending={isPending}
+          expanded={resolvedThoughtExpanded}
           availableTerminalHeight={
             availableTerminalHeightGemini ?? availableTerminalHeight
           }
@@ -191,6 +356,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'retry_countdown' && (
         <RetryCountdownMessage text={itemForDisplay.text} />
       )}
+      {itemForDisplay.type === 'vision_notice' && (
+        <VisionNoticeMessage text={itemForDisplay.text} />
+      )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
       )}
@@ -208,6 +376,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'tool_stats' && (
         <ToolStatsDisplay width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'skill_stats' && (
+        <SkillStatsDisplay width={boxWidth} />
       )}
       {itemForDisplay.type === 'quit' && (
         <SessionSummaryDisplay
@@ -228,33 +399,14 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryWriteCount={itemForDisplay.memoryWriteCount}
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
-          compactLabel={compactLabel}
+          fullDetail={fullDetail}
         />
       )}
-      {/*
-        `tool_use_summary` as a standalone inline item.
-
-        In full mode (`compactMode=false`), the label arrives via the fast-model
-        call AFTER the tool_group has been committed to Ink's append-only
-        <Static>, so we cannot update the tool_group's header retroactively.
-        Rendering a standalone `● <label>` line appends cleanly.
-
-        In compact mode, the label is normally absorbed into the merged
-        tool_group's header (via `compactLabel` prop to CompactToolGroupDisplay),
-        and `summaryAbsorbed=true` is set so this block does nothing. But when
-        the sibling tool_group is force-expanded (errors, confirmations,
-        user-initiated, focused shell), the full-expand path ignores
-        `compactLabel`, and `MainContent` leaves `summaryAbsorbed=false` —
-        the standalone line below is then the label's only route to the UI,
-        which is exactly the case where a summary is most diagnostically
-        useful ("Fixed NPE in UserService" on an errored batch).
-      */}
-      {itemForDisplay.type === 'tool_use_summary' &&
-        (!compactMode || !summaryAbsorbed) && (
-          <Box paddingLeft={1}>
-            <Text dimColor>● {itemForDisplay.summary}</Text>
-          </Box>
-        )}
+      {itemForDisplay.type === 'tool_use_summary' && (
+        <Box paddingLeft={1}>
+          <Text dimColor>● {itemForDisplay.summary}</Text>
+        </Box>
+      )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}
@@ -357,5 +509,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   );
 };
 
-// Export alias for backward compatibility
-export { HistoryItemDisplayComponent as HistoryItemDisplay };
+// Memoized so the Ctrl+O transcript — which re-renders on every scroll tick —
+// skips re-rendering frozen-snapshot items whose props are shallowly unchanged.
+// The transcript hands stable `item` references (from the freeze snapshot), so
+// the default shallow compare is effective. Harmless for the main view, whose
+// items live in Ink's `<Static>` and render once anyway.
+const HistoryItemDisplay = memo(HistoryItemDisplayComponent);
+HistoryItemDisplay.displayName = 'HistoryItemDisplay';
+
+export { HistoryItemDisplay };

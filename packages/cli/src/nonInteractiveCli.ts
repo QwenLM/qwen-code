@@ -6,10 +6,15 @@
 
 import type {
   BackgroundTaskStatus,
+  ConcurrencyBatch,
   Config,
+  CronJob,
+  CronScheduler,
   ToolCallRequestInfo,
+  ToolCallResponseInfo,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './ui/utils/commandUtils.js';
+import { isInlineModelOverrideAllowed } from './utils/acpModelUtils.js';
 import type { LoadedSettings } from './config/settings.js';
 import {
   executeToolCall,
@@ -25,8 +30,22 @@ import {
   uiTelemetryService,
   parseAndFormatApiError,
   createDebugLogger,
+  detectAutonomousSentinel,
+  detectLoopSentinel,
   SendMessageType,
+  buildSessionRecoveryPlanFromApiHistory,
   restoreWorktreeContext,
+  TeamEventType,
+  ApprovalMode,
+  ToolConfirmationOutcome,
+  createDuplicateProviderToolCallResponse,
+  isSystemReminderContent,
+  markDuplicateProviderToolCallResponseSent,
+  findRepeatedDuplicateProviderToolCall,
+  isToolCallConcurrencySafe,
+  canonicalToolName,
+  parsePositiveIntegerEnv,
+  partitionByConcurrencySafety,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -46,6 +65,10 @@ import {
   handleBudgetExceededError,
 } from './utils/errors.js';
 import { RunBudgetEnforcer } from './utils/runBudget.js';
+import {
+  settleChatRecording,
+  subscribeToHeadlessChatRecordingFailures,
+} from './utils/chat-recording-failure.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -59,6 +82,13 @@ const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
  * slow agent can't block exit indefinitely.
  */
 const STRUCTURED_SHUTDOWN_HOLDBACK_MS = 500;
+
+function isHeadlessLoopSentinel(prompt: string): boolean {
+  return (
+    detectLoopSentinel(prompt) !== null ||
+    detectAutonomousSentinel(prompt) !== null
+  );
+}
 
 /**
  * Body of the synthesised `tool_result` for a `tool_use` block that was
@@ -83,6 +113,7 @@ function suppressedOutputBody(structuredCaptured: boolean): string {
     ? SUPPRESSED_OUTPUT_SUCCESS
     : SUPPRESSED_OUTPUT_RETRY;
 }
+
 import {
   normalizePartList,
   extractPartsFromUserMessage,
@@ -90,6 +121,8 @@ import {
   createToolProgressHandler,
   createAgentToolProgressHandler,
   computeUsageFromMetrics,
+  buildInitialSystemReminders,
+  insertAfterFunctionResponses,
 } from './utils/nonInteractiveHelpers.js';
 
 // Human-readable labels for the detectors that can fire mid-stream.
@@ -106,22 +139,97 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
     'the model spent too many consecutive calls reading files without making progress',
   [LoopType.ACTION_STAGNATION]:
     'the model kept calling the same tool without making progress',
+  [LoopType.SHELL_COMMAND_STAGNATION]:
+    'the model repeated similar shell inspection commands without making progress',
+  [LoopType.GLOBAL_TOOL_CALL_DUPLICATE]:
+    'the model repeated the same tool call across the turn, even when not back-to-back',
+  [LoopType.ALTERNATING_TOOL_CALL_PATTERN]:
+    'the model alternated between the same two tool calls in a repeating pattern',
+  [LoopType.TURN_TOOL_CALL_CAP]:
+    'the turn reached the per-turn tool-call limit',
+  [LoopType.INVALID_TOOL_PARAMS_STAGNATION]:
+    'the model repeatedly sent invalid tool parameters without correcting them',
 };
+
+function formatLoopDetectedMessage(loopType: LoopType | undefined): string {
+  const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
+  const detail = reason ? ` (${loopType}: ${reason})` : '';
+  // The always-on guards run before the skipLoopDetection gate, so that
+  // setting can't disable them — don't suggest it for those loop types. The
+  // per-turn cap is also always-on but has its own knob, so it gets a
+  // dedicated hint instead of membership in this list.
+  const isAlwaysOn =
+    loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
+    loopType === LoopType.SHELL_COMMAND_STAGNATION ||
+    loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
+    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION;
+  const hint =
+    loopType === LoopType.TURN_TOOL_CALL_CAP
+      ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
+      : isAlwaysOn
+        ? ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.'
+        : ' Set the `model.skipLoopDetection` setting to true to disable.';
+  return `Loop detection halted the run${detail}.${hint}`;
+}
+
+/**
+ * Headless handling for fired loop sentinels. loop.md and autonomous sentinel
+ * expansion is interactive-only for now, so a bare sentinel can't be turned into
+ * a real prompt here — the tick is skipped (no-op) rather than sent to the model
+ * as empty content. Returns true when `job` was a sentinel so the caller skips
+ * enqueuing it.
+ *
+ * A recurring SESSION (non-durable) loop.md job would otherwise stay in
+ * `scheduler.sessionSize` and re-fire every interval, pinning the headless run
+ * open forever (the hold-open resolves only when sessionSize hits zero); delete
+ * it so the run can terminate. Durable jobs are left untouched here — they
+ * persist for a future owning session and never count toward sessionSize — and
+ * a one-shot job is already removed before it fires.
+ *
+ * Note: a DURABLE loop.md sentinel never even reaches this callback in headless,
+ * because `setSkipDurableFire` filters it at the scheduler before any fire or
+ * lastFiredAt persist (otherwise the tick would be marked fired while the work
+ * is skipped — silent loss). This guard's durable branch is kept defensive.
+ */
+export function skipHeadlessLoopSentinel(
+  scheduler: CronScheduler,
+  job: CronJob,
+): boolean {
+  if (!isHeadlessLoopSentinel(job.prompt)) {
+    return false;
+  }
+  if (job.recurring && !job.durable) {
+    // A user created this recurring loop.md cron via /loop in interactive mode;
+    // deleting it here is otherwise silent, so leave a trace of why it vanished
+    // from `cron list` when the same workspace is later run headless.
+    debugLogger.debug(
+      'skipHeadlessLoopSentinel: cleaning up recurring session loop.md cron in headless mode',
+      { jobId: job.id },
+    );
+    // delete() removes the in-memory job synchronously before any await, so the
+    // sessionSize check that follows this call sees it gone; the returned promise
+    // has no on-disk work for a session job. Fire-and-forget, but swallow a
+    // rejection so a future async delete() can't surface as an unhandled
+    // rejection (fatal under Node's --unhandled-rejections=throw).
+    void scheduler.delete(job.id).catch(() => {
+      /* session job: nothing to clean up on a delete failure */
+    });
+  }
+  return true;
+}
 
 function emitLoopDetectedMessage(
   config: Config,
   loopType: LoopType | undefined,
-): void {
+): string {
+  const message = formatLoopDetectedMessage(loopType);
   // In TEXT mode the adapter swallows LoopDetected, so we print here. In
   // JSON modes the adapter emits a structured result, which is enough.
   if (config.getOutputFormat() !== OutputFormat.TEXT) {
-    return;
+    return message;
   }
-  const reason = loopType ? LOOP_TYPE_LABELS[loopType] : undefined;
-  const detail = reason ? ` (${loopType}: ${reason})` : '';
-  process.stderr.write(
-    `Loop detection halted the run${detail}. Set the \`model.skipLoopDetection\` setting to true to disable.\n`,
-  );
+  process.stderr.write(`${message}\n`);
+  return message;
 }
 
 /**
@@ -134,6 +242,7 @@ async function emitNonInteractiveFinalMessage(params: {
   adapter: JsonOutputAdapterInterface;
   config: Config;
   startTimeMs: number;
+  beforeEmit: () => Promise<void>;
 }): Promise<void> {
   const { message, isError, adapter, config } = params;
 
@@ -154,6 +263,7 @@ async function emitNonInteractiveFinalMessage(params: {
       ? uiTelemetryService.getMetrics()
       : undefined;
 
+  await params.beforeEmit();
   adapter.emitResult({
     isError,
     durationMs: Date.now() - params.startTimeMs,
@@ -183,6 +293,47 @@ export interface RunNonInteractiveOptions {
   notificationDisplayText?: string;
   captureMonitorNotifications?: boolean;
   captureMonitorRegistrations?: boolean;
+  onResultEmitted?: () => void;
+  /**
+   * Continue the most recent unfinished turn from chat history instead of
+   * submitting `input` (which is ignored). No new user message enters the
+   * transcript: an orphaned trailing user entry is re-submitted with Retry
+   * semantics, and dangling tool calls are closed with synthesized error
+   * functionResponses sent as a ToolResult. When the last turn ended
+   * cleanly the run emits a no-op result and exits 0.
+   */
+  continueInterrupted?: boolean;
+}
+
+/**
+ * Partition headless tool-call requests into consecutive batches by
+ * concurrency safety, mirroring the interactive scheduler
+ * (CoreToolScheduler). Consecutive concurrency-safe calls (independent
+ * sub-agents, read-only shells, pure reads) merge into a single parallel
+ * batch; every unsafe call (edits, writes, mutating shells) forms its own
+ * sequential batch. Request order is preserved.
+ *
+ * Reuses core's `partitionByConcurrencySafety` so the headless and
+ * interactive runtimes share one partition algorithm and can't diverge on
+ * which tool sets they parallelize. Kinds are resolved from the registry
+ * under the tool's canonical name (via `canonicalToolName`, as execution and
+ * the interactive scheduler do) so a legacy alias — e.g. `search_file_content`
+ * for `grep` — classifies with the same safety and doesn't parallelize
+ * differently from the TUI. An unregistered tool resolves to `undefined`,
+ * which {@link isToolCallConcurrencySafe} treats as unsafe.
+ */
+function partitionHeadlessToolCalls(
+  requests: ToolCallRequestInfo[],
+  config: Config,
+): Array<ConcurrencyBatch<ToolCallRequestInfo>> {
+  const registry = config.getToolRegistry();
+  return partitionByConcurrencySafety(requests, (request) =>
+    isToolCallConcurrencySafe(
+      request.name,
+      registry.getTool(canonicalToolName(request.name))?.kind,
+      request.args,
+    ),
+  );
 }
 
 /**
@@ -210,6 +361,28 @@ export async function runNonInteractive(
     } else {
       adapter = new JsonOutputAdapter(config);
     }
+    const ownsAdapter = options.adapter === undefined;
+    const unsubscribeRecordingFailure = ownsAdapter
+      ? subscribeToHeadlessChatRecordingFailures(config, adapter)
+      : undefined;
+    let chatRecordingSettlement: Promise<void> | undefined;
+    const settleBeforeTerminalOutput = (): Promise<void> => {
+      chatRecordingSettlement ??= settleChatRecording(config, {
+        finalize: ownsAdapter,
+      }).then(() => undefined);
+      return chatRecordingSettlement;
+    };
+    const emitResult = async (
+      result: Parameters<JsonOutputAdapterInterface['emitResult']>[0],
+    ): Promise<void> => {
+      await settleBeforeTerminalOutput();
+      // Fire the callback only after a successful emit. The continue caller
+      // (session.ts) uses it to mark the result as delivered and swallow any
+      // later error; if emitResult itself throws, the flag must stay unset so
+      // the error still surfaces instead of losing both result and error.
+      adapter.emitResult(result);
+      options.onResultEmitted?.();
+    };
 
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
@@ -245,6 +418,7 @@ export async function runNonInteractive(
      * `unreachable` throw is only present to keep the type-checker honest.
      */
     const routeAbort = async (): Promise<never> => {
+      await settleBeforeTerminalOutput();
       const exceeded = budgetEnforcer.getExceeded();
       if (exceeded) {
         await handleBudgetExceededError(config, exceeded);
@@ -322,11 +496,135 @@ export async function runNonInteractive(
       abortController.abort();
     };
 
+    // ─── Teammate message queue ─────────────────────────
+    // When teammates send messages to the leader, they
+    // accumulate here and are drained into the LLM
+    // conversation between turns.
+    const pendingTeammateMessages: string[] = [];
+    // Track the manager we're currently bound to so we can
+    // detach the leader callback and approval listener before
+    // a new manager is installed (or in `finally`). Without
+    // this, a reused stream-json session could leave callbacks
+    // attached to a stale TeamManager.
+    let boundManager: import('@qwen-code/qwen-code-core').TeamManager | null =
+      null;
+    let approvalListener:
+      | ((
+          event: import('@qwen-code/qwen-code-core').TeammateApprovalRequestEvent,
+        ) => void)
+      | null = null;
+    const detachFromManager = (
+      m: import('@qwen-code/qwen-code-core').TeamManager,
+    ) => {
+      m.setLeaderMessageCallback(null);
+      if (approvalListener) {
+        m.getEventEmitter().off(
+          TeamEventType.TEAMMATE_APPROVAL_REQUEST,
+          approvalListener,
+        );
+        approvalListener = null;
+      }
+    };
+    const onTeamManagerChangeHandler = (
+      manager: import('@qwen-code/qwen-code-core').TeamManager | null,
+    ) => {
+      // Detach from the previous manager before rebinding.
+      if (boundManager && boundManager !== manager) {
+        detachFromManager(boundManager);
+      }
+      boundManager = manager;
+      if (manager) {
+        manager.setLeaderMessageCallback((formatted) => {
+          pendingTeammateMessages.push(formatted);
+        });
+
+        // Route teammate tool approvals through the session's
+        // permission channel.
+        if (options.controlService) {
+          // Stream-json mode: SDK handles approvals. Catch instead of
+          // void: the handler's own error path re-issues a respond()
+          // that can reject (teammate terminated mid-request), and a
+          // voided rejection here is an unhandledRejection in an SDK
+          // session — mirror the headless listeners below.
+          approvalListener = (event) => {
+            options
+              .controlService!.permission.handleTeammateApproval(event)
+              .catch((err) => {
+                debugLogger.warn('Teammate approval handling failed:', err);
+              });
+          };
+        } else {
+          // Headless / non-stream-json mode: there is no UI to
+          // surface a prompt, so the only safe options are
+          // YOLO (auto-approve) or Cancel. Without this fallback
+          // listener, the event has no subscriber and the teammate
+          // hangs until its 600s stall timeout fires.
+          approvalListener = (event) => {
+            const mode = config.getApprovalMode();
+            const confirmationDetails = event.confirmationDetails;
+            const requiresExplicitHostApproval =
+              confirmationDetails?.type !== 'plan' &&
+              confirmationDetails !== undefined &&
+              'hideAlwaysAllow' in confirmationDetails &&
+              confirmationDetails.hideAlwaysAllow === true;
+            if (mode === ApprovalMode.YOLO && !requiresExplicitHostApproval) {
+              // `respond` may reject if the teammate terminates between the
+              // approval request and our response — catch it so it doesn't
+              // become an unhandledRejection that can crash the process.
+              event
+                .respond(ToolConfirmationOutcome.ProceedOnce)
+                .catch((err) => {
+                  debugLogger.warn(
+                    'Teammate approval ProceedOnce failed:',
+                    err,
+                  );
+                });
+              return;
+            }
+            // Surface a clear reason on stderr — otherwise the
+            // failure looks like the teammate gave up for no reason.
+            const reason = requiresExplicitHostApproval
+              ? mode === ApprovalMode.YOLO
+                ? `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface and cannot be bypassed by YOLO mode.`
+                : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": this request requires an explicit interactive approval surface, which is unavailable in non-stream-json mode with the current approval mode (${mode}). Use --input-format stream-json --output-format stream-json to review it.`
+              : `Auto-cancelling tool ${event.toolName} requested by teammate "${event.teammateName}": current approval mode (${mode}) cannot prompt in non-stream-json mode. Use --yolo or stream-json to allow teammate tool calls.`;
+            process.stderr.write(`[team] ${reason}\n`);
+            // Also surface to the leader's LLM, otherwise it just
+            // sees the teammate fail without any signal that an
+            // approval was needed and the host couldn't prompt.
+            pendingTeammateMessages.push(
+              `<team_notice>\n${reason}\n</team_notice>`,
+            );
+            event.respond(ToolConfirmationOutcome.Cancel).catch((err) => {
+              debugLogger.warn('Teammate approval Cancel failed:', err);
+            });
+          };
+        }
+        manager
+          .getEventEmitter()
+          .on(TeamEventType.TEAMMATE_APPROVAL_REQUEST, approvalListener);
+      }
+    };
+
+    // First-turn SendMessageType override for continuation turns; null means
+    // the regular options.sendMessageType / UserQuery selection applies.
+    let continueSendType: SendMessageType | null = null;
+
     try {
       process.stdout.on('error', stdoutErrorHandler);
 
       process.on('SIGINT', shutdownHandler);
       process.on('SIGTERM', shutdownHandler);
+
+      config.onTeamManagerChange(onTeamManagerChangeHandler);
+
+      // Handle the case where a manager already exists (e.g.,
+      // a follow-up turn in a stream-json session that created
+      // a team on a previous turn).
+      const existingManager = config.getTeamManager();
+      if (existingManager) {
+        onTeamManagerChangeHandler(existingManager);
+      }
 
       // Emit systemMessage first (always the first message in JSON mode)
       const systemMessage = await buildSystemMessage(
@@ -339,6 +637,58 @@ export async function runNonInteractive(
       let initialPartList: PartListUnion | null = extractPartsFromUserMessage(
         options.userMessage,
       );
+      // Per-turn model override captured from an inline `/model <id> <prompt>`
+      // slash command; seeds the loop-scoped `modelOverride` below so the
+      // submitted prompt runs on the chosen model without a session switch.
+      let inlineModelOverride: string | undefined;
+
+      if (options.continueInterrupted) {
+        // Read the full history, not a bounded tail: the Retry send path in
+        // client.ts strips the ENTIRE trailing user run, so detection must
+        // re-submit exactly that run or the oldest orphans get dropped. This
+        // runs once per (rare) continue request, so the full clone is fine.
+        const recoveryPlan = buildSessionRecoveryPlanFromApiHistory({
+          sessionId,
+          apiHistory: geminiClient.getChat().getHistory(),
+        });
+        debugLogger.info('[runNonInteractive] continueInterrupted recovery', {
+          kind: recoveryPlan.kind,
+          repairs: recoveryPlan.repairs,
+          hasContinuation: recoveryPlan.continuation !== undefined,
+        });
+        if (!recoveryPlan.continuation) {
+          await emitNonInteractiveFinalMessage({
+            message: 'No interrupted turn to continue.',
+            isError: false,
+            adapter,
+            config,
+            startTimeMs: startTime,
+            beforeEmit: settleBeforeTerminalOutput,
+          });
+          return 0;
+        }
+
+        initialPartList = recoveryPlan.continuation.parts;
+        if (recoveryPlan.continuation.mode === 'retry_user_parts') {
+          continueSendType = SendMessageType.Retry;
+        } else {
+          continueSendType = SendMessageType.ToolResult;
+        }
+
+        const reminderParts = buildInitialSystemReminders(config);
+        if (reminderParts.length > 0 && initialPartList) {
+          const continuationParts = normalizePartList(initialPartList);
+          const hasSystemReminderPart = continuationParts.some((part) =>
+            isSystemReminderContent({ role: 'user', parts: [part] }),
+          );
+          if (!hasSystemReminderPart) {
+            initialPartList = insertAfterFunctionResponses(
+              continuationParts,
+              reminderParts,
+            );
+          }
+        }
+      }
 
       if (!initialPartList) {
         let slashHandled = false;
@@ -353,6 +703,26 @@ export async function runNonInteractive(
             case 'submit_prompt':
               // A slash command can replace the prompt entirely; fall back to @-command processing otherwise.
               initialPartList = slashCommandResult.content;
+              // Re-validate provider identity rather than trust the producer:
+              // any slash command can set `modelOverride`, so the consumer
+              // enforces that it names a model on the active provider before
+              // redirecting API calls to it.
+              if (
+                slashCommandResult.modelOverride !== undefined &&
+                isInlineModelOverrideAllowed(
+                  config,
+                  slashCommandResult.modelOverride,
+                )
+              ) {
+                inlineModelOverride = slashCommandResult.modelOverride;
+                debugLogger.debug(
+                  `[runNonInteractive] inline model override captured: ${inlineModelOverride}`,
+                );
+              } else if (slashCommandResult.modelOverride !== undefined) {
+                debugLogger.warn(
+                  `[runNonInteractive] ignoring model override '${slashCommandResult.modelOverride}': not a model on the active provider`,
+                );
+              }
               slashHandled = true;
               break;
             case 'message': {
@@ -363,6 +733,7 @@ export async function runNonInteractive(
                 adapter,
                 config,
                 startTimeMs: startTime,
+                beforeEmit: settleBeforeTerminalOutput,
               });
               return slashCommandResult.messageType === 'error' ? 1 : 0;
             }
@@ -377,6 +748,7 @@ export async function runNonInteractive(
                 adapter,
                 config,
                 startTimeMs: startTime,
+                beforeEmit: settleBeforeTerminalOutput,
               });
               return 1;
             }
@@ -433,13 +805,21 @@ export async function runNonInteractive(
           : [reminderPart, existing];
       };
 
-      const startupNotice = config.consumePendingStartupWorktreeNotice();
+      // Continuation turns must not prepend reminder text: a ToolResult
+      // payload's functionResponse parts have to stay at the HEAD of the
+      // user message or Anthropic-compatible backends reject the pairing.
+      const startupNotice = options.continueInterrupted
+        ? null
+        : config.consumePendingStartupWorktreeNotice();
       if (startupNotice) {
         initialPartList = withReminder(initialPartList, startupNotice);
         adapter.emitSystemMessage('worktree_started', {
           notice: startupNotice,
         });
-      } else if (config.getResumedSessionData()) {
+      } else if (
+        !options.continueInterrupted &&
+        config.getResumedSessionData()
+      ) {
         try {
           const sessionPath = config
             .getSessionService()
@@ -507,6 +887,14 @@ export async function runNonInteractive(
         // originating turn has already completed.
         monitorRegistry.setNotificationCallback(
           (displayText, modelText, meta) => {
+            if (
+              meta.status === 'running' &&
+              typeof monitorRegistry.get === 'function'
+            ) {
+              const entry = monitorRegistry.get(meta.monitorId);
+              if (!entry || entry.status !== 'running') return;
+            }
+
             const queueItem = {
               displayText,
               modelText,
@@ -539,7 +927,22 @@ export async function runNonInteractive(
       }
 
       let isFirstTurn = true;
-      let modelOverride: string | undefined;
+      let hasUnsentToolResponse = false;
+      let modelOverride: string | undefined = inlineModelOverride;
+      // An explicit inline `/model <id> <prompt>` override wins for the whole
+      // turn: while active, skill-tool `modelOverride` writes (including the
+      // undefined-clears case) are skipped so they cannot silently revert the
+      // submitted prompt to the session model mid-turn. Unlike useGeminiStream's
+      // ref-based `applyModelOverride`/`clearModelOverride` helpers, this is a
+      // run-scoped const — non-interactive mode is single-turn, so there is no
+      // retry-clearing or skill-tool takeover to guard against, just the
+      // within-turn precedence above.
+      const inlineModelOverrideActive = inlineModelOverride !== undefined;
+      if (inlineModelOverrideActive) {
+        debugLogger.debug(
+          `[runNonInteractive] inline model override active for turn: ${inlineModelOverride}`,
+        );
+      }
       // Session-scoped because the synthetic `structured_output` tool can
       // be invoked from EITHER the main assistant-turn loop or from a
       // drain-turn (queued notification / cron prompt); whichever fires
@@ -552,6 +955,8 @@ export async function runNonInteractive(
       // actually said instead of a static, context-free message.
       let plainTextPreview = '';
       const PLAIN_TEXT_PREVIEW_LIMIT = 200;
+      let loopDetected = false;
+      let loopDetectedMessage = formatLoopDetectedMessage(undefined);
 
       // Shared terminal block for the structured-output success
       // contract. Both the main-turn loop and the drain-turn post-loop
@@ -587,7 +992,7 @@ export async function runNonInteractive(
           outputFormat === OutputFormat.JSON
             ? uiTelemetryService.getMetrics()
             : undefined;
-        adapter.emitResult({
+        await emitResult({
           isError: false,
           durationMs: Date.now() - startTime,
           apiDurationMs: totalApiDurationMs,
@@ -599,9 +1004,37 @@ export async function runNonInteractive(
         return 0;
       };
 
+      const emitLoopDetectedResult = async (): Promise<1> => {
+        registry.abortAll();
+        flushQueuedNotificationsToSdk(localQueue);
+        finalizeOneShotMonitors();
+
+        if (outputFormat === OutputFormat.TEXT) {
+          await settleBeforeTerminalOutput();
+          return 1;
+        }
+
+        const metrics = uiTelemetryService.getMetrics();
+        const usage = computeUsageFromMetrics(metrics);
+        const stats =
+          outputFormat === OutputFormat.JSON
+            ? uiTelemetryService.getMetrics()
+            : undefined;
+        await emitResult({
+          isError: true,
+          durationMs: Date.now() - startTime,
+          apiDurationMs: totalApiDurationMs,
+          numTurns: turnCount,
+          errorMessage: loopDetectedMessage,
+          usage,
+          stats,
+        });
+        return 1;
+      };
+
       /**
        * Shared per-turn tool-call dispatch for the main-turn loop and
-       * `drainOneItem`. Both call sites used to reproduce ~120 lines of
+       * `drainBatch`. Both call sites used to reproduce ~120 lines of
        * near-identical logic that filtered `structured_output` to its
        * own pre-scan when `--json-schema` is active, executed each
        * request through `executeToolCall`, captured the `structured_output`
@@ -619,11 +1052,107 @@ export async function runNonInteractive(
        * helper returns (main-turn → emitStructuredSuccess(); drain-turn
        * → return so the post-drain code emits success).
        */
+      const handledProviderToolCallIds =
+        geminiClient.getHistoryFunctionResponseIds();
+      // Tracks duplicate-error responses emitted during this headless run.
+      // Once a provider id reaches this set, seeing it again is terminal for
+      // the current tool batch so we do not send partial tool responses.
+      const duplicateProviderToolCallResponseIds = new Set<string>();
+
+      type ToolCallBatchResult = {
+        responseParts: Part[];
+        repeatedDuplicateProviderToolCall: boolean;
+      };
+
       const processToolCallBatch = async (
         batchRequests: ToolCallRequestInfo[],
         setModelOverride: (override: string | undefined) => void,
-      ): Promise<Part[]> => {
+      ): Promise<ToolCallBatchResult> => {
         const toolResponseParts: Part[] = [];
+        const structuredOutputActive =
+          config.getJsonSchema() &&
+          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT);
+        const getProviderResponseId = (
+          request: ToolCallRequestInfo,
+        ): string | undefined =>
+          request.providerCallId ??
+          (structuredOutputActive ? undefined : request.callId || undefined);
+        const seenBatchCallIds = new Set<string>();
+        const duplicateBatchRequests: ToolCallRequestInfo[] = [];
+        const uniqueBatchRequests = batchRequests.filter((request) => {
+          if (request.callId) {
+            if (seenBatchCallIds.has(request.callId)) {
+              if (
+                structuredOutputActive &&
+                request.name === ToolNames.STRUCTURED_OUTPUT
+              ) {
+                return true;
+              }
+              debugLogger.debug(
+                `Dropping duplicate non-interactive tool callId=${request.callId} name=${request.name}`,
+              );
+              duplicateBatchRequests.push(request);
+              return false;
+            }
+            seenBatchCallIds.add(request.callId);
+          }
+          return true;
+        });
+        const repeatedDuplicateRequest = findRepeatedDuplicateProviderToolCall(
+          [...uniqueBatchRequests, ...duplicateBatchRequests],
+          getProviderResponseId,
+          handledProviderToolCallIds,
+          duplicateProviderToolCallResponseIds,
+        );
+        if (repeatedDuplicateRequest) {
+          const providerCallId =
+            repeatedDuplicateRequest.providerCallId ??
+            repeatedDuplicateRequest.callId;
+          debugLogger.debug(
+            `[runNonInteractive] Dropping batch after repeated duplicate provider tool-call id: ${providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
+          );
+          return {
+            responseParts: [],
+            repeatedDuplicateProviderToolCall: true,
+          };
+        }
+
+        const respondedRequests = new Set<ToolCallRequestInfo>();
+        const executableBatchRequests: ToolCallRequestInfo[] = [];
+        const duplicatePendingResponses: Part[] = [];
+
+        for (const requestInfo of uniqueBatchRequests) {
+          const providerCallId = getProviderResponseId(requestInfo);
+          if (!providerCallId) {
+            executableBatchRequests.push(requestInfo);
+            continue;
+          }
+
+          if (!handledProviderToolCallIds.has(providerCallId)) {
+            handledProviderToolCallIds.add(providerCallId);
+            executableBatchRequests.push(requestInfo);
+            continue;
+          }
+
+          markDuplicateProviderToolCallResponseSent(
+            providerCallId,
+            duplicateProviderToolCallResponseIds,
+          );
+
+          const toolResponse =
+            createDuplicateProviderToolCallResponse(requestInfo);
+          debugLogger.debug(
+            `[runNonInteractive] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${requestInfo.name})`,
+          );
+          respondedRequests.add(requestInfo);
+          adapter.emitToolResult(requestInfo, toolResponse);
+          duplicatePendingResponses.push(...toolResponse.responseParts);
+        }
+
+        // Duplicate responses must always reach the model. They pair with a
+        // tool call the provider already emitted, even when structured_output
+        // is the only executable sibling in this batch.
+        toolResponseParts.push(...duplicatePendingResponses);
 
         // Pre-scan: when --json-schema is active and the model emitted
         // a `structured_output` call alongside other tools in the same
@@ -632,20 +1161,78 @@ export async function runNonInteractive(
         // suppress every non-structured sibling. See the multi-shape
         // examples in the main loop's prior comment for the
         // [bad/good/side-effect] permutations.
-        let requestsToExecute = batchRequests;
-        if (
-          config.getJsonSchema() &&
-          batchRequests.some((r) => r.name === ToolNames.STRUCTURED_OUTPUT)
-        ) {
-          requestsToExecute = batchRequests.filter(
+        let requestsToExecute = executableBatchRequests;
+        if (structuredOutputActive) {
+          requestsToExecute = executableBatchRequests.filter(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
-        const executedCallIds = new Set<string>();
+        const executedRequests = new Set<ToolCallRequestInfo>(
+          respondedRequests,
+        );
 
-        for (const requestInfo of requestsToExecute) {
-          executedCallIds.add(requestInfo.callId);
+        // Partition this batch by concurrency safety, then run each
+        // partition. Tools that are safe to run concurrently (agent
+        // sub-agents, read-only shell, pure reads) run in parallel;
+        // everything with side effects (edits, writes, mutating shell)
+        // runs sequentially in original order. This mirrors the
+        // interactive CoreToolScheduler (partitionToolCalls /
+        // runConcurrently) via the shared isToolCallConcurrencySafe rule,
+        // so `qwen -p` and the TUI agree on which tools parallelise — a
+        // model turn that emits N parallel agent calls no longer executes
+        // them one-at-a-time. Regardless of execution order, results are
+        // finalised (emitted, recorded, appended to `toolResponseParts`)
+        // strictly in original request order, so the model and the event
+        // log always see a deterministic sequence.
+        const toolBatches = partitionHeadlessToolCalls(
+          requestsToExecute,
+          config,
+        );
 
+        // Tick BEFORE the call so that --max-tool-calls=N caps the run
+        // at exactly N executions: the (N+1)th tick aborts before the
+        // tool runs. Ticking after would let the (N+1)th tool execute
+        // and only then abort. See issue #4103. In a parallel batch the
+        // tick still runs serially and in order before each launch, so
+        // the cap fires on the same call it would serially.
+        //
+        // Exempt `structured_output` ONLY when `--json-schema` is
+        // active: under --json-schema this is the terminal "I'm done"
+        // contract tool, not real work, and counting it would abort
+        // an otherwise-valid completion at the budget edge (budget=3,
+        // model used 3 tools then emits structured_output as call #4
+        // → exit 55 instead of success). Guarding on
+        // `getJsonSchema()` keeps the exemption tied to the feature
+        // that owns the tool name — an MCP server that registers an
+        // unrelated tool literally named `structured_output` would
+        // otherwise inherit a free pass.
+        //
+        // Caveat: failed structured_output calls (Ajv validation
+        // failure) also skip the tick, so a model stuck in a
+        // validation-retry loop is not bounded by --max-tool-calls.
+        // Documented in docs/users/features/headless.md → "Scope".
+        // Combine with --max-session-turns or --max-wall-time.
+        const isBudgetExempt = (requestInfo: ToolCallRequestInfo): boolean =>
+          requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
+          config.getJsonSchema?.() !== undefined;
+
+        // Build the progress/permission callbacks and START a tool call,
+        // returning the in-flight promise. Budget ticking and abort
+        // checks are the caller's responsibility (sequenced before the
+        // launch) so --max-tool-calls stays exact even in a parallel
+        // batch. `async` so a synchronous throw while building the
+        // callbacks (e.g. getInputFormat / getToolCallUpdateCallback)
+        // surfaces as a rejected promise that Promise.allSettled collects
+        // below, instead of aborting the launch loop and leaving the
+        // already-launched siblings as unawaited fire-and-forget. The
+        // launch/settle debug lines identify which call in a parallel batch
+        // is slow or stuck (the serial path made that obvious for free).
+        const launchToolCall = async (
+          requestInfo: ToolCallRequestInfo,
+        ): Promise<ToolCallResponseInfo> => {
+          debugLogger.debug(
+            `[runNonInteractive] launching tool call ${requestInfo.callId} (${requestInfo.name})`,
+          );
           const inputFormat =
             typeof config.getInputFormat === 'function'
               ? config.getInputFormat()
@@ -668,35 +1255,7 @@ export async function runNonInteractive(
               )
             : createToolProgressHandler(requestInfo, adapter);
 
-          // Tick BEFORE the call so that --max-tool-calls=N caps the run
-          // at exactly N executions: the (N+1)th tick aborts before the
-          // tool runs. Ticking after would let the (N+1)th tool execute
-          // and only then abort. See issue #4103.
-          //
-          // Exempt `structured_output` ONLY when `--json-schema` is
-          // active: under --json-schema this is the terminal "I'm done"
-          // contract tool, not real work, and counting it would abort
-          // an otherwise-valid completion at the budget edge (budget=3,
-          // model used 3 tools then emits structured_output as call #4
-          // → exit 55 instead of success). Guarding on
-          // `getJsonSchema()` keeps the exemption tied to the feature
-          // that owns the tool name — an MCP server that registers an
-          // unrelated tool literally named `structured_output` would
-          // otherwise inherit a free pass.
-          //
-          // Caveat: failed structured_output calls (Ajv validation
-          // failure) also skip the tick, so a model stuck in a
-          // validation-retry loop is not bounded by --max-tool-calls.
-          // Documented in docs/users/features/headless.md → "Scope".
-          // Combine with --max-session-turns or --max-wall-time.
-          const isStructuredOutputExempt =
-            requestInfo.name === ToolNames.STRUCTURED_OUTPUT &&
-            config.getJsonSchema?.() !== undefined;
-          if (!isStructuredOutputExempt) {
-            budgetEnforcer.tickToolCall();
-          }
-          if (abortController.signal.aborted) await routeAbort();
-          const toolResponse = await executeToolCall(
+          const response = await executeToolCall(
             config,
             requestInfo,
             abortController.signal,
@@ -707,7 +1266,21 @@ export async function runNonInteractive(
               }),
             },
           );
+          debugLogger.debug(
+            `[runNonInteractive] tool call ${requestInfo.callId} (${requestInfo.name}) settled${
+              response.error ? ' with error' : ''
+            }`,
+          );
+          return response;
+        };
 
+        // Emit + record a completed tool call in the caller's order.
+        // Returns true when this was the terminal structured_output
+        // success (the "first valid call ends the session" contract).
+        const finalizeToolCall = (
+          requestInfo: ToolCallRequestInfo,
+          toolResponse: ToolCallResponseInfo,
+        ): boolean => {
           if (toolResponse.error) {
             // In JSON/STREAM_JSON mode, tool errors are tolerated and
             // formatted as tool_result blocks. handleToolError detects
@@ -750,12 +1323,114 @@ export async function runNonInteractive(
             !toolResponse.error
           ) {
             // Honour the "first valid call ends the session" contract.
-            // The break is after the responseParts/modelOverride capture
+            // Captured after the responseParts/modelOverride handling
             // above so future changes to SyntheticOutputTool can't
             // silently drop those signals. structuredSubmission is the
             // session-scoped binding from the enclosing scope.
             structuredSubmission = requestInfo.args;
-            break;
+            return true;
+          }
+          return false;
+        };
+
+        const maxToolConcurrency = parsePositiveIntegerEnv(
+          process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
+          10,
+        );
+
+        let sessionEnded = false;
+        for (const batch of toolBatches) {
+          if (sessionEnded) break;
+
+          if (batch.concurrent && batch.calls.length > 1) {
+            // Parallel batch. Tick the budget for each call serially and
+            // in order (so --max-tool-calls caps at exactly N and the
+            // abort fires on the same call it would serially), launch only
+            // the calls that fit the budget — capped at
+            // QWEN_CODE_MAX_TOOL_CONCURRENCY in flight — then finalise in
+            // request order once all launched calls have settled.
+            const launched: Array<{
+              requestInfo: ToolCallRequestInfo;
+              promise: Promise<ToolCallResponseInfo>;
+            }> = [];
+            const inFlight = new Set<Promise<void>>();
+            for (const requestInfo of batch.calls) {
+              if (!isBudgetExempt(requestInfo)) {
+                budgetEnforcer.tickToolCall();
+              }
+              // A tick that trips the budget (or an external SIGINT) aborts
+              // here; stop launching and route the abort after the
+              // already-launched calls settle. Mark the request executed
+              // only once it is actually launched, so a
+              // budget-tripped-but-unlaunched call still lands in
+              // unexecutedCalls and gets a synthetic skipped-output response
+              // (matters only if routeAbort ever becomes resumable — today it
+              // throws before that synthesis runs).
+              if (abortController.signal.aborted) break;
+              executedRequests.add(requestInfo);
+              const promise = launchToolCall(requestInfo);
+              launched.push({ requestInfo, promise });
+              // Track a never-rejecting settle marker for the in-flight
+              // cap so Promise.race can't throw mid-launch and abandon
+              // siblings. The real outcome is read from `promise` below.
+              const marker = promise
+                .then(
+                  () => {},
+                  () => {},
+                )
+                .finally(() => {
+                  inFlight.delete(marker);
+                });
+              inFlight.add(marker);
+              if (inFlight.size >= maxToolConcurrency) {
+                await Promise.race(inFlight);
+              }
+            }
+
+            const settled = await Promise.allSettled(
+              launched.map((l) => l.promise),
+            );
+            for (let i = 0; i < launched.length; i++) {
+              const outcome = settled[i];
+              if (outcome.status === 'rejected') {
+                // Preserve the serial contract: an unexpected rejection
+                // (a scheduling failure, not a tool-level error, which
+                // surfaces as toolResponse.error) aborts the turn.
+                throw outcome.reason;
+              }
+              if (finalizeToolCall(launched[i].requestInfo, outcome.value)) {
+                sessionEnded = true;
+                break;
+              }
+            }
+
+            if (!sessionEnded && abortController.signal.aborted) {
+              // A budget overrun (or SIGINT) tripped mid-launch; finalise the
+              // launched calls above, then unwind. Note this is not fully
+              // equivalent to the serial path: serial awaits each in-budget
+              // call to completion before the tick that trips, whereas here
+              // the in-budget siblings were launched before the aborting tick,
+              // so when their execution reaches the scheduler's abort re-check
+              // they resolve as cancelled rather than completing. The run still
+              // exits identically (budget overrun → 55, SIGINT → 130;
+              // routeAbort discerns) and sends nothing to the model.
+              await routeAbort();
+            }
+          } else {
+            // Sequential batch (a single tool, or a side-effecting tool):
+            // identical to the pre-parallelisation behaviour.
+            for (const requestInfo of batch.calls) {
+              if (!isBudgetExempt(requestInfo)) {
+                budgetEnforcer.tickToolCall();
+              }
+              if (abortController.signal.aborted) await routeAbort();
+              executedRequests.add(requestInfo);
+              const toolResponse = await launchToolCall(requestInfo);
+              if (finalizeToolCall(requestInfo, toolResponse)) {
+                sessionEnded = true;
+                break;
+              }
+            }
           }
         }
 
@@ -768,8 +1443,8 @@ export async function runNonInteractive(
         // emitted event log pairs every tool_use with a tool_result
         // AND the retry-turn payload (when reached) doesn't leave
         // Anthropic / OpenAI staring at unpaired tool_use blocks.
-        const unexecutedCalls = batchRequests.filter(
-          (r) => !executedCallIds.has(r.callId),
+        const unexecutedCalls = executableBatchRequests.filter(
+          (r) => !executedRequests.has(r),
         );
         if (unexecutedCalls.length > 0) {
           const skippedOutput = suppressedOutputBody(
@@ -796,16 +1471,78 @@ export async function runNonInteractive(
           }
         }
 
-        return toolResponseParts;
+        for (const requestInfo of duplicateBatchRequests) {
+          const providerCallId = getProviderResponseId(requestInfo);
+          if (!providerCallId) continue;
+          markDuplicateProviderToolCallResponseSent(
+            providerCallId,
+            duplicateProviderToolCallResponseIds,
+          );
+
+          const toolResponse =
+            createDuplicateProviderToolCallResponse(requestInfo);
+          adapter.emitToolResult(requestInfo, toolResponse);
+          toolResponseParts.push(...toolResponse.responseParts);
+        }
+
+        return {
+          responseParts: toolResponseParts,
+          repeatedDuplicateProviderToolCall: false,
+        };
       };
 
       while (true) {
+        // Drain pending teammate messages into the conversation.
+        // sendMessageStream only reads currentMessages[0].parts,
+        // so teammate text must be merged into that same parts
+        // array to avoid being silently dropped.
+        // Skip on the first turn to avoid replacing the user's
+        // initial query — early teammate messages will be picked
+        // up on the next iteration.
+        let isTeammateTurn = false;
+        if (!isFirstTurn && pendingTeammateMessages.length > 0) {
+          const batch = pendingTeammateMessages.splice(0);
+          const teammatePart = { text: batch.join('\n\n') };
+          if (hasUnsentToolResponse && currentMessages[0]) {
+            currentMessages[0].parts = [
+              ...(currentMessages[0].parts || []),
+              teammatePart,
+            ];
+          } else {
+            currentMessages = [{ role: 'user', parts: [teammatePart] }];
+          }
+          // Treat BOTH the standalone and the merged-into-tool-response
+          // cases as a teammate turn. Teammate text is fresh external
+          // input, so the loop detector must reset — otherwise a leader
+          // that polls task_list while teammate messages keep merging
+          // into its tool-response turns climbs the identical-tool-call
+          // counter and trips a false LoopDetected. The Teammate send
+          // path prepends nothing to the request, so a merged turn's
+          // leading functionResponse parts stay paired with their
+          // functionCall.
+          isTeammateTurn = true;
+        }
+        hasUnsentToolResponse = false;
+
         turnCount++;
         if (
           config.getMaxSessionTurns() >= 0 &&
           turnCount > config.getMaxSessionTurns()
         ) {
+          await settleBeforeTerminalOutput();
           await handleMaxTurnsExceededError(config);
+        }
+
+        let sendType: SendMessageType;
+        if (isFirstTurn) {
+          sendType =
+            continueSendType ??
+            options.sendMessageType ??
+            SendMessageType.UserQuery;
+        } else if (isTeammateTurn) {
+          sendType = SendMessageType.Teammate;
+        } else {
+          sendType = SendMessageType.ToolResult;
         }
 
         const toolCallRequests: ToolCallRequestInfo[] = [];
@@ -815,9 +1552,7 @@ export async function runNonInteractive(
           abortController.signal,
           prompt_id,
           {
-            type: isFirstTurn
-              ? (options.sendMessageType ?? SendMessageType.UserQuery)
-              : SendMessageType.ToolResult,
+            type: sendType,
             modelOverride,
             ...(isFirstTurn &&
               options.notificationDisplayText && {
@@ -844,6 +1579,9 @@ export async function runNonInteractive(
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
+          if (event.type === GeminiEventType.ModelFallback) {
+            toolCallRequests.length = 0;
+          }
           if (
             event.type === GeminiEventType.Content &&
             plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT
@@ -853,7 +1591,13 @@ export async function runNonInteractive(
             plainTextPreview += String(event.value).slice(0, remaining);
           }
           if (event.type === GeminiEventType.LoopDetected) {
-            emitLoopDetectedMessage(config, event.value?.loopType);
+            if (!loopDetected) {
+              loopDetectedMessage = emitLoopDetectedMessage(
+                config,
+                event.value?.loopType,
+              );
+            }
+            loopDetected = true;
           }
           if (
             outputFormat === OutputFormat.TEXT &&
@@ -876,6 +1620,10 @@ export async function runNonInteractive(
         adapter.finalizeAssistantMessage();
         totalApiDurationMs += Date.now() - apiStartTime;
 
+        if (loopDetected) {
+          return emitLoopDetectedResult();
+        }
+
         if (toolCallRequests.length > 0) {
           // Dispatch the per-turn tool-call batch through the shared
           // helper (see processToolCallBatch above). The helper handles
@@ -888,12 +1636,14 @@ export async function runNonInteractive(
           // `modelOverride` so the next turn's sendMessageStream sees
           // it; the drain turn updates a per-item `itemModelOverride`
           // scoped to that drain item.
-          const toolResponseParts = await processToolCallBatch(
-            toolCallRequests,
-            (override) => {
+          const {
+            responseParts: toolResponseParts,
+            repeatedDuplicateProviderToolCall,
+          } = await processToolCallBatch(toolCallRequests, (override) => {
+            if (!inlineModelOverrideActive) {
               modelOverride = override;
-            },
-          );
+            }
+          });
 
           if (structuredSubmission !== undefined) {
             // Single-shot terminal contract; aborts in-flight background
@@ -903,22 +1653,135 @@ export async function runNonInteractive(
             // post-loop branch — see emitStructuredSuccess above.
             return emitStructuredSuccess();
           }
+          if (
+            repeatedDuplicateProviderToolCall &&
+            toolResponseParts.length === 0
+          ) {
+            loopDetectedMessage = emitLoopDetectedMessage(
+              config,
+              LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+            );
+            return emitLoopDetectedResult();
+          }
           currentMessages = [{ role: 'user', parts: toolResponseParts }];
+          hasUnsentToolResponse = true;
         } else {
+          // No more tool calls — check if teammates are active.
+          const teamManager = config.getTeamManager();
+          if (teamManager?.hasActiveTeammates()) {
+            // If all remaining teammates are stalled, abort them,
+            // inject a final status, and let the leader wrap up.
+            if (teamManager.allRemainingStalled()) {
+              teamManager.abortStalledTeammates();
+              const status = teamManager.buildTeamStatusSummary();
+              pendingTeammateMessages.push(status);
+              continue;
+            }
+
+            // Wait for messages or termination. On timeout,
+            // wait again — don't inject status summaries that
+            // cause the leader to poll task_list in a loop.
+            // Only break out when a real message arrives or
+            // all teammates finish.
+            while (
+              teamManager.hasActiveTeammates() &&
+              !abortController.signal.aborted
+            ) {
+              if (pendingTeammateMessages.length > 0) {
+                break;
+              }
+              if (teamManager.allRemainingStalled()) {
+                teamManager.abortStalledTeammates();
+                const status = teamManager.buildTeamStatusSummary();
+                pendingTeammateMessages.push(status);
+                break;
+              }
+              const waitResult = await teamManager.waitForTeammateActivity(
+                undefined,
+                abortController.signal,
+              );
+              // Without this log a per-call 120s timeout silently
+              // retries until the 600s stall threshold trips —
+              // making "teammate stuck" debugging painful in
+              // production. `terminated`/`aborted` exit on their
+              // own through the loop conditions, so logging
+              // `timeout` is enough.
+              if (waitResult === 'timeout') {
+                debugLogger.warn(
+                  '[runNonInteractive] waitForTeammateActivity timed ' +
+                    'out (120s); will continue waiting until stall ' +
+                    'threshold or messages arrive.',
+                );
+              }
+            }
+
+            // Drain messages and loop back.
+            if (pendingTeammateMessages.length > 0) {
+              continue;
+            }
+            // All terminated with no messages — fall through.
+          }
+
+          // If the session was aborted (e.g. Ctrl+C), stop
+          // immediately instead of falling through to the
+          // success path.
+          if (abortController.signal.aborted) {
+            await settleBeforeTerminalOutput();
+            await handleCancellationError(config);
+          }
+
+          // Force one final inbox drain before deciding to exit.
+          // A teammate may have written its final send_message
+          // and gone IDLE between the last 500ms poll and now —
+          // without this, that message is lost.
+          if (teamManager) {
+            await teamManager.drainLeaderInbox();
+          }
+
+          // Also drain any final teammate messages.
+          if (pendingTeammateMessages.length > 0) {
+            continue;
+          }
+
           // Drain-turns count toward getMaxSessionTurns() for symmetry with the main
           // loop — otherwise a looping cron or a model that keeps replying to
           // notifications could exceed the cap silently in headless runs.
-          const drainOneItem = async () => {
+          const drainBatch = async () => {
             if (localQueue.length === 0) return;
-            const item = localQueue.shift()!;
 
-            emitNotificationToSdk(item);
+            // Batch-drain: take contiguous same-type items from the front
+            // of the queue. Cron prompts run individually — each needs its
+            // own slash/shell/@ preprocessing and approval cycle.
+            const targetType = localQueue[0]!.sendMessageType;
+            let splitIdx = targetType === SendMessageType.Cron ? 1 : 0;
+            if (splitIdx === 0) {
+              while (
+                splitIdx < localQueue.length &&
+                localQueue[splitIdx]!.sendMessageType === targetType
+              ) {
+                splitIdx++;
+              }
+            }
+            const batch = localQueue.splice(0, splitIdx);
+
+            if (batch.length === 0) return;
+
+            for (const queueItem of batch) {
+              emitNotificationToSdk(queueItem);
+            }
+
+            const item = {
+              displayText: batch.map((i) => i.displayText).join('; '),
+              modelText: batch.map((i) => i.modelText).join('\n\n'),
+              sendMessageType: targetType,
+            };
 
             turnCount++;
             if (
               config.getMaxSessionTurns() >= 0 &&
               turnCount > config.getMaxSessionTurns()
             ) {
+              await settleBeforeTerminalOutput();
               await handleMaxTurnsExceededError(config);
             }
 
@@ -975,7 +1838,13 @@ export async function runNonInteractive(
                   itemToolCallRequests.push(event.value);
                 }
                 if (event.type === GeminiEventType.LoopDetected) {
-                  emitLoopDetectedMessage(config, event.value?.loopType);
+                  if (!loopDetected) {
+                    loopDetectedMessage = emitLoopDetectedMessage(
+                      config,
+                      event.value?.loopType,
+                    );
+                  }
+                  loopDetected = true;
                 }
                 if (
                   outputFormat === OutputFormat.TEXT &&
@@ -996,6 +1865,10 @@ export async function runNonInteractive(
               adapter.finalizeAssistantMessage();
               totalApiDurationMs += Date.now() - itemApiStartTime;
 
+              if (loopDetected) {
+                return;
+              }
+
               if (itemToolCallRequests.length > 0) {
                 // Same shared dispatch as the main-turn loop. The only
                 // call-site difference is `itemModelOverride` is local to
@@ -1003,7 +1876,10 @@ export async function runNonInteractive(
                 // sendMessageStream picks up the per-item override),
                 // while the main loop binds to the session-scoped
                 // `modelOverride`.
-                const itemToolResponseParts = await processToolCallBatch(
+                const {
+                  responseParts: itemToolResponseParts,
+                  repeatedDuplicateProviderToolCall,
+                } = await processToolCallBatch(
                   itemToolCallRequests,
                   (override) => {
                     itemModelOverride = override;
@@ -1013,6 +1889,17 @@ export async function runNonInteractive(
                 if (structuredSubmission !== undefined) {
                   // Stop processing further turns for this drain item;
                   // the post-drain code will emit the terminal result.
+                  return;
+                }
+                if (
+                  repeatedDuplicateProviderToolCall &&
+                  itemToolResponseParts.length === 0
+                ) {
+                  loopDetectedMessage = emitLoopDetectedMessage(
+                    config,
+                    LoopType.GLOBAL_TOOL_CALL_DUPLICATE,
+                  );
+                  loopDetected = true;
                   return;
                 }
                 itemMessages = [{ role: 'user', parts: itemToolResponseParts }];
@@ -1034,11 +1921,12 @@ export async function runNonInteractive(
             if (drainPromise) return drainPromise;
             const p = (async () => {
               while (localQueue.length > 0) {
+                if (loopDetected) return;
                 // Stop draining once a queued item's structured_output
                 // call captured the terminal contract — no point running
                 // more queued prompts that can't influence the result.
                 if (structuredSubmission !== undefined) return;
-                await drainOneItem();
+                await drainBatch();
               }
             })();
             drainPromise = p;
@@ -1049,15 +1937,41 @@ export async function runNonInteractive(
           };
 
           // Start cron scheduler — fires enqueue onto the shared queue.
+          // Durable support is fully enabled: file tasks load, the lock
+          // is acquired or probed, and missed one-shots are detected —
+          // start() below flushes them onto the queue so they execute
+          // during this run. The hold-open stays keyed on session-only
+          // jobs alone, so durable jobs never pin the process: once
+          // session jobs and the drain are done, stop() releases the
+          // lock and the run exits; durable jobs persist for a future
+          // owning session.
           const scheduler = !config.isCronEnabled()
             ? null
             : config.getCronScheduler();
 
-          if (scheduler && scheduler.size > 0) {
+          if (scheduler) {
+            // A headless run can't expand loop sentinels, so durable loop jobs
+            // must be skipped at the scheduler level — firing one here would
+            // stamp+persist its lastFiredAt while the work is skipped (see
+            // skipHeadlessLoopSentinel), silently consuming a tick the owning
+            // interactive session should run. Set BEFORE enableDurable so a
+            // buffered catch-up flush at start() honors it too.
+            scheduler.setSkipDurableFire((job) =>
+              isHeadlessLoopSentinel(job.prompt),
+            );
+            // Durable tasks live under ~/.qwen (user-owned, not in the
+            // working tree), so no folder-trust gate is needed here.
+            await scheduler
+              .enableDurable(config.getSessionId())
+              .catch((err) => {
+                debugLogger.warn(
+                  `Durable cron init failed — persistent tasks will not fire in this run: ${err}`,
+                );
+              });
             await new Promise<void>((resolve, reject) => {
               // Resolve on SIGINT/SIGTERM too — recurring cron jobs never
-              // drop scheduler.size to 0 on their own, so without this the
-              // hold-back loop below is unreachable after an abort.
+              // drop scheduler.sessionSize to 0 on their own, so without
+              // this the hold-back loop below is unreachable after an abort.
               const onAbort = () => {
                 scheduler.stop();
                 resolve();
@@ -1071,6 +1985,12 @@ export async function runNonInteractive(
               });
 
               const checkCronDone = () => {
+                if (loopDetected) {
+                  abortController.signal.removeEventListener('abort', onAbort);
+                  scheduler.stop();
+                  resolve();
+                  return;
+                }
                 // A drain-turn structured_output makes the rest of the
                 // cron schedule moot: we already have a terminal result
                 // and the post-drain emit is about to fire. Stop the
@@ -1081,7 +2001,7 @@ export async function runNonInteractive(
                   resolve();
                   return;
                 }
-                if (scheduler.size === 0 && !drainPromise) {
+                if (scheduler.sessionSize === 0 && !drainPromise) {
                   abortController.signal.removeEventListener('abort', onAbort);
                   scheduler.stop();
                   resolve();
@@ -1090,7 +2010,7 @@ export async function runNonInteractive(
 
               // Propagate drain failures. Without this, a rejected
               // drainLocalQueue() (e.g. a text-mode API error surfacing
-              // out of drainOneItem) would be swallowed by `void` and
+              // out of drainBatch) would be swallowed by `void` and
               // checkCronDone would never fire — hanging the run.
               const onDrainError = (err: unknown) => {
                 abortController.signal.removeEventListener('abort', onAbort);
@@ -1098,10 +2018,19 @@ export async function runNonInteractive(
                 reject(err);
               };
 
-              scheduler.start((job: { prompt: string }) => {
+              scheduler.start((job: CronJob) => {
+                // A bare loop sentinel can't expand in a headless run, so the
+                // tick is skipped. skipHeadlessLoopSentinel also deletes a
+                // recurring session job so it stops re-firing and sessionSize
+                // can fall to zero — otherwise checkCronDone never resolves and
+                // the run hangs. Full headless loop support is a follow-up.
+                if (skipHeadlessLoopSentinel(scheduler, job)) {
+                  checkCronDone();
+                  return;
+                }
                 const label = job.prompt.slice(0, 40);
                 localQueue.push({
-                  displayText: `Cron: ${label}`,
+                  displayText: `${job.cronExpr === '@wakeup' ? 'Loop' : 'Cron'}: ${label}`,
                   modelText: job.prompt,
                   sendMessageType: SendMessageType.Cron,
                 });
@@ -1132,6 +2061,7 @@ export async function runNonInteractive(
             // through the model, but later monitor output is SDK-only.
             captureMonitorTurnsInLocalQueue = false;
             await drainLocalQueue();
+            if (loopDetected) return emitLoopDetectedResult();
             // A drain-turn structured_output captured the terminal
             // contract — bail out of the holdback loop early and let the
             // post-loop code emit the success result.
@@ -1195,7 +2125,7 @@ export async function runNonInteractive(
             const errorMessage =
               `Model produced plain text instead of calling the structured_output tool as required by --json-schema after ${turnCount} turn(s).` +
               previewSuffix;
-            adapter.emitResult({
+            await emitResult({
               isError: true,
               durationMs: Date.now() - startTime,
               apiDurationMs: totalApiDurationMs,
@@ -1207,7 +2137,7 @@ export async function runNonInteractive(
             return 1;
           }
 
-          adapter.emitResult({
+          await emitResult({
             isError: false,
             durationMs: Date.now() - startTime,
             apiDurationMs: totalApiDurationMs,
@@ -1267,6 +2197,9 @@ export async function runNonInteractive(
       const skipAdapterEmit =
         outputFormat === OutputFormat.TEXT && isAlreadyReportedError;
 
+      // This path must settle independently because skipAdapterEmit bypasses
+      // emitResult(), which normally performs the settle step.
+      await settleBeforeTerminalOutput();
       if (!skipAdapterEmit) {
         // Wrap in try/catch: emitResult eventually hits stdout.write, which
         // can throw on EPIPE / ERR_STREAM_WRITE_AFTER_END when a piped
@@ -1276,7 +2209,7 @@ export async function runNonInteractive(
         // contract — precisely when stdout is in trouble. Best-effort emit
         // and continue to the exit handler.
         try {
-          adapter.emitResult({
+          await emitResult({
             isError: true,
             durationMs: Date.now() - startTime,
             apiDurationMs: totalApiDurationMs,
@@ -1300,6 +2233,18 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      // Unsubscribe the leader message callback and approval
+      // listener, but do NOT tear down the team itself — in
+      // stream-json sessions the same Config is reused across
+      // turns, so the team must survive. Full team cleanup
+      // happens via Config.shutdown() / cleanupTeamRuntime()
+      // when the session ends.
+      config.onTeamManagerChange(null, onTeamManagerChangeHandler);
+      if (boundManager) {
+        detachFromManager(boundManager);
+        boundManager = null;
+      }
+
       // Cancel the wall-clock timer so it doesn't fire after a successful
       // run completes — important for callers (e.g. the `qwen serve`
       // daemon, SDK) that reuse a single process across many runs.
@@ -1321,6 +2266,8 @@ export async function runNonInteractive(
       if (options.captureMonitorRegistrations !== false) {
         monReg.setRegisterCallback(undefined);
       }
+
+      unsubscribeRecordingFailure?.();
 
       process.stdout.removeListener('error', stdoutErrorHandler);
       // Cleanup signal handlers

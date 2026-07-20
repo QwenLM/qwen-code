@@ -8,15 +8,86 @@ type TokenCount = number;
  */
 export type TokenLimitType = 'input' | 'output';
 
-export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
+export const DEFAULT_TOKEN_LIMIT: TokenCount = 200_000; // 200K tokens
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
-// Capped default for slot-reservation optimization. 99% of outputs are under 5K
-// tokens, so 32K defaults over-reserve 4-6× slot capacity. With the cap
-// enabled, <1% of requests hit the limit; those get one clean retry at 64K
-// (see geminiChat.ts max_output_tokens escalation).
-export const CAPPED_DEFAULT_MAX_TOKENS: TokenCount = 8_000;
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
+
+/**
+ * Ceiling on the auto (non-user-configured) output request. Models
+ * advertising output limits above this are clipped down; users who
+ * genuinely need more set max_tokens explicitly (respected up to the
+ * model's real limit). Same value as the MAX_TOKENS escalation target —
+ * escalation-on-truncation raises the request up to this ceiling, never
+ * past it.
+ */
+export const OUTPUT_TOKEN_CEILING: TokenCount = ESCALATED_MAX_TOKENS;
+
+/**
+ * Floor applied to the window ROOM when clamping an output request: when the
+ * prompt has (nearly) filled the window, still ask for at least this much
+ * rather than max_tokens <= 0 — compaction/hard-rescue owns that regime. An
+ * explicit user ceiling below this floor is still respected (the floor
+ * bounds the room, not the ceiling). Must stay below ~5K so that
+ * `margin + MIN_CLAMPED_OUTPUT_TOKENS` fits inside the headroom compaction
+ * leaves free (15% of a 100K window); see the window-clamp design doc.
+ */
+export const MIN_CLAMPED_OUTPUT_TOKENS: TokenCount = 4_000;
+
+/**
+ * Safety headroom subtracted from the window before sizing the output
+ * request: absorbs prompt-estimation error plus system/tool/schema overhead
+ * not captured by the API-reported prompt count. Deliberately conservative —
+ * a generous margin only trims output in the final approach to compaction,
+ * while an under-sized one reintroduces the #5950 400s.
+ */
+export function outputClampMargin(contextWindowSize: number): TokenCount {
+  return Math.max(10_000, Math.round(0.05 * contextWindowSize));
+}
+
+/**
+ * Size an output request to the room actually left in the context window:
+ * `min(ceiling, window − prompt − margin)`, floored at
+ * MIN_CLAMPED_OUTPUT_TOKENS. Makes `prompt + max_tokens ≤ window` an
+ * invariant on every main-turn request (issue #5950 becomes structurally
+ * impossible), which is what lets compaction thresholds run against the
+ * full window with no output reservation.
+ *
+ * @param outputCeiling - Upper bound on the request: the user's explicit
+ *   max_tokens when set, else `min(tokenLimit(model,'output'),
+ *   OUTPUT_TOKEN_CEILING)`.
+ * @param contextWindowSize - The configured context window.
+ * @param promptTokens - Estimated prompt size; use the API-authoritative
+ *   count where available (a fresh chars/4 estimate under-counts CJK and
+ *   tool-heavy prompts, which is the one way a residual 400 could return).
+ */
+export function clampOutputTokensToWindow(
+  outputCeiling: number,
+  contextWindowSize: number,
+  promptTokens: number,
+): TokenCount {
+  const room =
+    contextWindowSize - promptTokens - outputClampMargin(contextWindowSize);
+  // Floor the ROOM, then cap by the ceiling — never the other way around: an
+  // explicit ceiling below MIN_CLAMPED_OUTPUT_TOKENS (e.g.
+  // QWEN_CODE_MAX_OUTPUT_TOKENS=2000 on a capacity-constrained backend) must
+  // be respected, not inflated to the floor.
+  return Math.min(outputCeiling, Math.max(MIN_CLAMPED_OUTPUT_TOKENS, room));
+}
+
+export function parsePositiveIntegerEnvValue(
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
+
+  return parsed;
+}
 
 /**
  * Accurate numeric limits:
@@ -104,6 +175,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Anthropic Claude
   // -------------------
+  [/^claude-opus-4-(?:6|7|8)/, LIMITS['1m']], // Opus 4.6-4.8: 1M
   [/^claude-/, LIMITS['200k']], // All Claude models: 200K
 
   // -------------------
@@ -120,7 +192,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^qwen3-max/, LIMITS['256k']],
   // Open-source Qwen3 variants: 256K native
   [/^qwen3-coder-/, LIMITS['256k']],
-  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 128K
+  // Qwen fallback (VL, turbo, plus, 2.5, etc.): 256K
   [/^qwen/, LIMITS['256k']],
 
   // -------------------
@@ -132,8 +204,12 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Zhipu GLM
   // -------------------
-  [/^glm-5/, 202_752 as TokenCount], // GLM-5: exact vendor limit
-  [/^glm-/, 202_752 as TokenCount], // GLM fallback: 128K
+  // 1M context is the forward default for new GLM releases (GLM-5.2+, GLM-6.x,
+  // and beyond) so they need no future code change. Confirmed 200K families
+  // (GLM-5 / 5.0 / 5.1, GLM-4.x and older) are pinned explicitly first.
+  [/^glm-5(\.[01])?(-|$)/, 202_752 as TokenCount], // GLM-5 / 5.0 / 5.1: 200K
+  [/^glm-(?:[5-9]|\d{2,})/, LIMITS['1m']], // GLM-5.2+, 6.x..9.x, 10.x+: 1M
+  [/^glm-/, 202_752 as TokenCount], // GLM <=4.x / non-numeric fallback: 200K
 
   // -------------------
   // MiniMax
@@ -145,6 +221,7 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
+  [/^kimi-k3/, LIMITS['1m']], // Kimi K3: 1M
   [/^kimi-/, LIMITS['256k']], // Kimi fallback: 256K
 
   // -------------------
@@ -169,14 +246,14 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^o\d/, LIMITS['128k']], // o-series: 128K
 
   // Anthropic Claude
-  [/^claude-opus-4-6/, LIMITS['128k']], // Opus 4.6: 128K
+  [/^claude-opus-4-(?:6|7|8)/, 128_000 as TokenCount], // Opus 4.6-4.8: 128K
   [/^claude-sonnet-4-6/, LIMITS['64k']], // Sonnet 4.6: 64K
   [/^claude-/, LIMITS['64k']], // Claude fallback: 64K
 
   // Alibaba / Qwen
   [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
-  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
+  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
 
   // DeepSeek
   [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
@@ -185,13 +262,14 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax
   [/^minimax-m2\.5/i, LIMITS['64k']],
 
   // Kimi
+  [/^kimi-k3/, LIMITS['128k']], // Kimi K3: 128K default max output (up to 1M configurable)
   [/^kimi-k2\.5/, LIMITS['32k']],
 ];
 
@@ -254,4 +332,40 @@ export function tokenLimit(
     knownTokenLimit(model, type) ??
     (type === 'output' ? DEFAULT_OUTPUT_TOKEN_LIMIT : DEFAULT_TOKEN_LIMIT)
   );
+}
+
+/**
+ * The default (non-user-configured) output request for a model: its
+ * advertised output limit, clipped to OUTPUT_TOKEN_CEILING. This is the one
+ * place that policy lives — the send path and both provider layers call it
+ * so a model advertising >64K output is clamped consistently everywhere.
+ */
+export function defaultOutputCeiling(model: Model): TokenCount {
+  const outputLimit = tokenLimit(model, 'output');
+  if (/^claude-opus-4-(?:6|7|8)/.test(normalize(model))) {
+    return outputLimit;
+  }
+  return Math.min(outputLimit, OUTPUT_TOKEN_CEILING);
+}
+
+/**
+ * Reconcile a user-configured `max_tokens` (from samplingParams) with the
+ * send path's window-clamped request value: the smaller wins, so a user's
+ * explicit ceiling is honored while never overriding the window clamp
+ * upward. Returns undefined when the two can't be reconciled (either side
+ * absent), leaving each provider to apply its own fallback — the shared
+ * invariant ("user max_tokens is a ceiling, not an escape hatch") stays in
+ * one place so a new provider can't silently reopen it.
+ */
+export function reconcileMaxTokens(
+  configMaxTokens: number | null | undefined,
+  requestMaxTokens: number | null | undefined,
+): number | undefined {
+  if (
+    typeof configMaxTokens === 'number' &&
+    typeof requestMaxTokens === 'number'
+  ) {
+    return Math.min(configMaxTokens, requestMaxTokens);
+  }
+  return undefined;
 }

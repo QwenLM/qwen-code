@@ -8,7 +8,9 @@ import type { CommandModule } from 'yargs';
 
 import {
   ExtensionManager,
+  isExtensionCommittedWithWarningsError,
   parseInstallSource,
+  type ExtensionScope,
 } from '@qwen-code/qwen-code-core';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -19,7 +21,7 @@ import {
   requestConsentNonInteractive,
   requestChoicePluginNonInteractive,
 } from './consent.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface InstallArgs {
   source: string;
@@ -28,16 +30,25 @@ interface InstallArgs {
   allowPreRelease?: boolean;
   consent?: boolean;
   registry?: string;
+  scope?: string;
+}
+
+// "workspace" is accepted as an alias of "project" to match enable/disable.
+function normalizeScope(scope: string | undefined): ExtensionScope {
+  return scope === 'project' || scope === 'workspace' ? 'project' : 'user';
 }
 
 export async function handleInstall(args: InstallArgs) {
+  const scope = normalizeScope(args.scope);
+  let extensionManager: ExtensionManager | undefined;
   try {
     const installMetadata = await parseInstallSource(args.source);
 
     if (
       installMetadata.type !== 'git' &&
       installMetadata.type !== 'github-release' &&
-      installMetadata.type !== 'npm'
+      installMetadata.type !== 'npm' &&
+      installMetadata.type !== 'archive-url'
     ) {
       if (args.ref || args.autoUpdate) {
         throw new Error(
@@ -48,10 +59,16 @@ export async function handleInstall(args: InstallArgs) {
       }
     }
 
-    if (installMetadata.type === 'npm' && args.ref) {
+    if (
+      (installMetadata.type === 'npm' ||
+        installMetadata.type === 'archive-url') &&
+      args.ref
+    ) {
       throw new Error(
         t(
-          '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).',
+          installMetadata.type === 'npm'
+            ? '--ref is not applicable for npm extensions. Use @version suffix instead (e.g. @scope/package@1.2.0).'
+            : '--ref is not applicable for archive URL extensions.',
         ),
       );
     }
@@ -68,11 +85,11 @@ export async function handleInstall(args: InstallArgs) {
       ? () => Promise.resolve()
       : requestConsentOrFail.bind(null, requestConsentNonInteractive);
     const workspaceDir = process.cwd();
-    const extensionManager = new ExtensionManager({
+    extensionManager = new ExtensionManager({
       workspaceDir,
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(workspaceDir).merged,
-      ),
+      locale: getCurrentLanguage(),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
       requestConsent,
       requestChoicePlugin: requestChoicePluginNonInteractive,
     });
@@ -86,13 +103,46 @@ export async function handleInstall(args: InstallArgs) {
         allowPreRelease: args.allowPreRelease,
       },
       requestConsent,
+      undefined,
+      workspaceDir,
+      undefined,
+      scope === 'project'
+        ? { scope: 'workspace', workspacePath: workspaceDir }
+        : { scope: 'user' },
     );
+    if (args.scope) {
+      try {
+        extensionManager.setExtensionScope(extension.name, scope);
+      } catch (scopeError) {
+        writeStderrLine(
+          `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
+        );
+      }
+    }
     writeStdoutLine(
-      t('Extension "{{name}}" installed successfully and enabled.', {
-        name: extension.name,
-      }),
+      scope === 'project'
+        ? t(
+            'Extension "{{name}}" installed successfully and enabled for the current workspace.',
+            { name: extension.name },
+          )
+        : t('Extension "{{name}}" installed successfully and enabled.', {
+            name: extension.name,
+          }),
     );
   } catch (error) {
+    if (isExtensionCommittedWithWarningsError(error)) {
+      if (args.scope && extensionManager) {
+        try {
+          extensionManager.setExtensionScope(error.identity.name, scope);
+        } catch (scopeError) {
+          writeStderrLine(
+            `Warning: Extension installed, but failed to save scope preference: ${getErrorMessage(scopeError)}`,
+          );
+        }
+      }
+      writeStderrLine(`Warning: ${getErrorMessage(error)}`);
+      return;
+    }
     writeStderrLine(getErrorMessage(error));
     process.exit(1);
   }
@@ -101,13 +151,13 @@ export async function handleInstall(args: InstallArgs) {
 export const installCommand: CommandModule = {
   command: 'install <source>',
   describe: t(
-    'Installs an extension from a git repository URL, local path, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
+    'Installs an extension from a git repository URL, local path or archive, archive URL, scoped npm package (@scope/name), or claude marketplace (marketplace-url:plugin-name).',
   ),
   builder: (yargs) =>
     yargs
       .positional('source', {
         describe: t(
-          'The github URL, local path, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
+          'The github URL, local path or archive, archive URL, or marketplace source (marketplace-url:plugin-name) of the extension to install.',
         ),
         type: 'string',
         demandOption: true,
@@ -135,6 +185,13 @@ export const installCommand: CommandModule = {
         type: 'boolean',
         default: false,
       })
+      .option('scope', {
+        describe: t(
+          'The scope to install the extension in: "user" (global, default) or "project" (current workspace only).',
+        ),
+        type: 'string',
+        choices: ['user', 'project', 'workspace'],
+      })
       .check((argv) => {
         if (!argv.source) {
           throw new Error(t('The source argument must be provided.'));
@@ -149,6 +206,7 @@ export const installCommand: CommandModule = {
       allowPreRelease: argv['pre-release'] as boolean | undefined,
       consent: argv['consent'] as boolean | undefined,
       registry: argv['registry'] as string | undefined,
+      scope: argv['scope'] as string | undefined,
     });
   },
 };

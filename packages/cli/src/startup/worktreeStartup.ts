@@ -26,6 +26,8 @@ import {
   createDebugLogger,
   GitWorktreeService,
   readWorktreeSession,
+  readWorktreeSessionMarker,
+  isSessionRuntimeActive,
   worktreeBranchForSlug,
   writeWorktreeSession,
   writeWorktreeSessionMarker,
@@ -391,19 +393,28 @@ export async function persistStartupWorktreeSidecar(
     overriddenSlug = previous.slug;
   }
 
-  // Best-effort marker write — same policy as EnterWorktreeTool: a failure
-  // here does not abort the session, the worktree is usable, ownership
-  // checks just treat the worktree as "owner unknown" for future
-  // exit_worktree calls.
-  //
-  // SKIP on re-attach: the marker was written by whichever session
-  // ORIGINALLY created this worktree. Overwriting with the current
-  // session id would let `exit_worktree action="remove"` succeed across
-  // sessions, bypassing Phase A's cross-session ownership guard. The
-  // existing marker stays so the original owner remains canonical; the
-  // current session can still operate INSIDE the worktree (file ops,
-  // commits) — ownership only governs the destructive remove.
-  if (!context.wasReattached) {
+  // Best-effort marker write. On re-attach, adopt only when the previous
+  // owner is not a live runtime anymore; otherwise keep the old marker so
+  // two active sessions cannot both remove the same worktree.
+  let shouldWriteMarker = !context.wasReattached;
+  if (context.wasReattached) {
+    const owner = await readWorktreeSessionMarker(context.worktreePath);
+    if (owner === null || owner === sessionId) {
+      shouldWriteMarker = true;
+    } else {
+      const ownerActive = await isSessionRuntimeActive(owner, [
+        context.repoRoot,
+        context.worktreePath,
+      ]).catch((error) => {
+        debugLogger.warn(
+          `persistStartupWorktreeSidecar: failed to check owner runtime ${owner}: ${error}`,
+        );
+        return true;
+      });
+      shouldWriteMarker = !ownerActive;
+    }
+  }
+  if (shouldWriteMarker) {
     await writeWorktreeSessionMarker(context.worktreePath, sessionId).catch(
       () => {},
     );

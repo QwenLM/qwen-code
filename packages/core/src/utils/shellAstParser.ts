@@ -14,13 +14,20 @@
  *   4. `extractCommandRules()`  – extract minimum-scope wildcard permission rules
  */
 
-import Parser from 'web-tree-sitter';
+import type Parser from 'web-tree-sitter';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
+import {
+  classifyAwkCommandSafety,
+  classifySedCommandSafety,
+  hasShellPatternExpansion,
+} from './shell-safety-rules.js';
 
+export type ShellCommandSafety = 'read-only' | 'write' | 'unknown';
+type Safety = ShellCommandSafety;
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -83,7 +90,6 @@ const READ_ONLY_ROOT_COMMANDS = new Set([
   'dirname',
   'du',
   'echo',
-  'env',
   'find',
   'git',
   'grep',
@@ -109,6 +115,8 @@ const READ_ONLY_ROOT_COMMANDS = new Set([
   'whoami',
 ]);
 
+const WRITE_ROOT_COMMAND =
+  /^(chgrp|chmod|chown|cp|install|ln|mkdir|mkfifo|mknod|mv|rename|rm|rmdir|shred|touch|truncate|unlink)$/;
 /** Git sub-commands considered read-only. */
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'blame',
@@ -124,64 +132,28 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
   'status',
   'describe',
 ]);
-
+const WRITE_GIT_SUBCOMMAND =
+  /^(add|am|checkout|cherry-pick|clean|clone|commit|fetch|gc|init|merge|mv|pull|push|rebase|reset|restore|revert|rm|stash|switch)$/;
 /** git remote actions that mutate state. */
-const BLOCKED_GIT_REMOTE_ACTIONS = new Set([
-  'add',
-  'remove',
-  'rename',
-  'set-url',
-  'prune',
-  'update',
-]);
-
+const WRITE_GIT_REMOTE_ACTION =
+  /^(add|remove|rm|rename|set-branches|set-head|set-url|update)$/;
+const GIT_EXTERNAL_HELPER_OPTION =
+  /^--(?:ext-diff|filters|show-signature|textconv|open-files-in-pager)(?:=|$)/;
+const GIT_COMMIT_VALUE_OPTION =
+  /^(?:-[CcFmt]|--(?:author|cleanup|date|file|fixup|message|pathspec-from-file|reedit-message|reuse-message|squash|template|trailer))$/;
 /** git branch flags that mutate state. */
-const BLOCKED_GIT_BRANCH_FLAGS = new Set([
-  '-d',
-  '-D',
-  '--delete',
-  '--move',
-  '-m',
-]);
+const WRITE_GIT_BRANCH_FLAG =
+  /^(?:-[cCdDmMu](?:.|$)|--(?:delete|move|copy|set-upstream(?:-to)?|unset-upstream|create-reflog|edit-description)(?:=|$))/;
+const GIT_BRANCH_LIST_FLAG =
+  /^(?:-[alr]|--(?:all|list|remotes|show-current|contains|no-contains|merged|no-merged|points-at))(?:=|$)/;
 
-/** find flags that have side-effects. */
-const BLOCKED_FIND_FLAGS = new Set([
-  '-delete',
-  '-exec',
-  '-execdir',
-  '-ok',
-  '-okdir',
-]);
+const BLOCKED_FIND_PREFIXES = ['-fls', '-fprint', '-fprintf'];
+const FIND_VALUE_PREDICATE =
+  /^-(?:[ac]?newer|newer[a-z]{2}|[acm](?:min|time)|context|fstype|gid|group|i?(?:lname|name|path|regex)|inum|links|maxdepth|mindepth|path|perm|printf|regextype|samefile|size|type|uid|used|user|wholename|xtype)$/;
 
-const BLOCKED_FIND_PREFIXES = ['-fprint', '-fprintf'];
-
-/** sed flags that cause in-place editing. */
-const BLOCKED_SED_PREFIXES = ['-i'];
-
-/** AWK side-effect patterns that can execute commands or write files. */
-const AWK_SIDE_EFFECT_PATTERNS = [
-  /system\s*\(/,
-  /print\s+[^>|]*>\s*"[^"]*"/,
-  /printf\s+[^>|]*>\s*"[^"]*"/,
-  /print\s+[^>|]*>>\s*"[^"]*"/,
-  /printf\s+[^>|]*>>\s*"[^"]*"/,
-  /print\s+[^|]*\|\s*"[^"]*"/,
-  /printf\s+[^|]*\|\s*"[^"]*"/,
-  /getline\s*<\s*"[^"]*"/,
-  /"[^"]*"\s*\|\s*getline/,
-  /close\s*\(/,
-];
-
-/** SED side-effect patterns. */
-const SED_SIDE_EFFECT_PATTERNS = [
-  /[^\\]e\s/,
-  /^e\s/,
-  /[^\\]w\s/,
-  /^w\s/,
-  /[^\\]r\s/,
-  /^r\s/,
-];
-
+const UNIQ_VALUE_OPTIONS = new Set(
+  '-f --skip-fields -s --skip-chars -w --check-chars'.split(' '),
+);
 /**
  * Write-redirection operators in file_redirect nodes.
  * Input-only redirections (`<`, `<<`, `<<<`) are safe.
@@ -602,6 +574,7 @@ const DOCKER_COMPOSE_SUBCOMMANDS = new Set([
 
 let parserInstance: Parser | null = null;
 let bashLanguage: Parser.Language | null = null;
+let parserClass: typeof Parser;
 let initPromise: Promise<void> | null = null;
 /** Set to true permanently once WASM initialisation fails. */
 let parserInitFailed = false;
@@ -620,24 +593,38 @@ export async function initParser(): Promise<void> {
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
+    // Dynamically import the web-tree-sitter runtime to minimize synchronous bundle size.
+    const { default: ParserClass } = (await import(
+      'web-tree-sitter'
+    )) as unknown as { default: typeof Parser };
+
     const treeSitterWasm = await loadWasmBinary(
       () => import('web-tree-sitter/tree-sitter.wasm?binary' as string),
       'web-tree-sitter/tree-sitter.wasm',
     );
-    await Parser.init({ wasmBinary: treeSitterWasm });
-    parserInstance = new Parser();
+    await ParserClass.init({ wasmBinary: treeSitterWasm });
     const bashWasm = await loadWasmBinary(
       () =>
         import('tree-sitter-wasms/out/tree-sitter-bash.wasm?binary' as string),
       'tree-sitter-wasms/out/tree-sitter-bash.wasm',
     );
-    bashLanguage = await Parser.Language.load(bashWasm);
+    bashLanguage = await ParserClass.Language.load(bashWasm);
+    parserClass = ParserClass;
+    parserInstance = new ParserClass();
     parserInstance.setLanguage(bashLanguage);
   })().catch((err: unknown) => {
+    const failedParser = parserInstance;
+    parserInstance = null;
+    bashLanguage = null;
     // Mark as permanently failed so callers can use the regex fallback
     // instead of retrying (which could cause the agent to hang).
     parserInitFailed = true;
     initPromise = null;
+    try {
+      failedParser?.delete();
+    } catch {
+      // Preserve the initialization error.
+    }
     throw err;
   });
 
@@ -650,7 +637,30 @@ export async function initParser(): Promise<void> {
  */
 export async function parseShellCommand(command: string): Promise<Parser.Tree> {
   await initParser();
-  return parserInstance!.parse(command);
+  const parser = parserInstance!;
+  try {
+    return parser.parse(command);
+  } catch (error) {
+    parserInstance = null;
+    let replacement: Parser | null = null;
+    try {
+      replacement = new parserClass();
+      replacement.setLanguage(bashLanguage);
+      parserInstance = replacement;
+    } catch {
+      try {
+        replacement?.delete();
+      } catch {
+        // Preserve the parse error.
+      }
+      bashLanguage = null;
+      parserInitFailed = true;
+      initPromise = null;
+    } finally {
+      parser.delete();
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,10 +669,16 @@ export async function parseShellCommand(command: string): Promise<Parser.Tree> {
 
 type SyntaxNode = Parser.SyntaxNode;
 
+const SHELL_EXPANSION_TYPES = new Set(
+  'simple_expansion expansion arithmetic_expansion'.split(' '),
+);
+const CHILD_STATEMENT =
+  /^(?:pipeline|list|subshell|compound_statement|negated_command)$/;
 /** Collect all descendant nodes of given types. */
 function collectDescendants(
   node: SyntaxNode,
   types: Set<string>,
+  outermostOnly = false,
 ): SyntaxNode[] {
   const result: SyntaxNode[] = [];
   const stack: SyntaxNode[] = [node];
@@ -670,41 +686,13 @@ function collectDescendants(
     const current = stack.pop()!;
     if (types.has(current.type)) {
       result.push(current);
+      if (outermostOnly) continue;
     }
     for (let i = current.childCount - 1; i >= 0; i--) {
       stack.push(current.child(i)!);
     }
   }
   return result;
-}
-
-/** Check if a tree contains any command_substitution or process_substitution node. */
-function containsCommandSubstitutionAST(node: SyntaxNode): boolean {
-  return (
-    collectDescendants(
-      node,
-      new Set(['command_substitution', 'process_substitution']),
-    ).length > 0
-  );
-}
-
-/** Check if a redirected_statement contains a write-redirection. */
-function hasWriteRedirection(node: SyntaxNode): boolean {
-  if (node.type !== 'redirected_statement') return false;
-  for (let i = 0; i < node.childCount; i++) {
-    const child = node.child(i)!;
-    if (child.type === 'file_redirect') {
-      // The operator is the first non-descriptor child
-      for (let j = 0; j < child.childCount; j++) {
-        const op = child.child(j)!;
-        if (op.type === 'file_descriptor') continue;
-        // operator token
-        if (WRITE_REDIRECT_OPERATORS.has(op.type)) return true;
-        break; // only check the operator position
-      }
-    }
-  }
-  return false;
 }
 
 /**
@@ -748,180 +736,384 @@ function stripOuterQuotes(text: string): string {
   return text;
 }
 
-// ---------------------------------------------------------------------------
-// Read-Only Analysis (per-command)
-// ---------------------------------------------------------------------------
-
-/**
- * Evaluate whether a single `command` node (simple command) is read-only.
- */
-function evaluateCommandReadOnly(commandNode: SyntaxNode): boolean {
-  const root = getCommandName(commandNode);
-  if (!root) return true; // pure variable assignment
-  const argNodes = getArgumentNodes(commandNode);
-  const argTexts = argNodes.map((n) => stripOuterQuotes(n.text));
-
-  if (!READ_ONLY_ROOT_COMMANDS.has(root)) return false;
-
-  // Command-specific analysis
-  if (root === 'git') return evaluateGitReadOnly(argTexts);
-  if (root === 'find') return evaluateFindReadOnly(argTexts);
-  if (root === 'sed') return evaluateSedReadOnly(argTexts);
-  if (root === 'awk') return evaluateAwkReadOnly(argTexts);
-
-  return true;
+function hasShellExpansion(node: SyntaxNode): boolean {
+  return (
+    collectDescendants(node, SHELL_EXPANSION_TYPES).length > 0 ||
+    (['word', 'concatenation'].includes(node.type) &&
+      hasShellPatternExpansion(node.text))
+  );
 }
 
-function evaluateGitReadOnly(args: string[]): boolean {
-  // Skip global flags to find subcommand
-  let idx = 0;
-  while (idx < args.length && args[idx]!.startsWith('-')) {
-    const flag = args[idx]!.toLowerCase();
-    if (flag === '--version' || flag === '--help') return true;
-    idx++;
+function mergeSafety(...results: ShellCommandSafety[]): ShellCommandSafety {
+  if (results.includes('write')) return 'write';
+  if (results.includes('unknown')) return 'unknown';
+  return 'read-only';
+}
+
+function beforeTerminator(args: string[]): string[] {
+  const end = args.indexOf('--');
+  return args.slice(0, end < 0 ? args.length : end);
+}
+
+function hasHelp(args: string[], valueOptions: string[] = []): boolean {
+  return beforeTerminator(args).some(
+    (arg, index, options) =>
+      /^(?:--help|--version)$/i.test(arg) &&
+      !valueOptions.includes(options[index - 1]!),
+  );
+}
+
+function withoutOptionValues(args: string[], valueOption: RegExp): string[] {
+  const result: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    result.push(args[i]!);
+    if (valueOption.test(args[i]!)) i++;
   }
-  if (idx >= args.length) return true; // `git` with only flags
+  return result;
+}
 
-  const subcommand = args[idx]!.toLowerCase();
-  if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return false;
+function evaluateOutputOption(args: string[], long = true, short = true) {
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--') break;
+    if ((short && arg === '-o') || (long && arg === '--output')) {
+      return args[i + 1] ? 'write' : 'unknown';
+    }
+    if (short && arg.startsWith('-o') && arg.length > 2) return 'write';
+    if (long && arg.startsWith('--output=')) {
+      return arg.length > 9 ? 'write' : 'unknown';
+    }
+  }
+  return null;
+}
 
-  const rest = args.slice(idx + 1);
+function evaluateGitSafety(args: string[]): ShellCommandSafety {
+  const first = args[0];
+  if (!first || first === '--version') return 'read-only';
+  if (first === '--help') return args.length === 1 ? 'read-only' : 'unknown';
+  if (first.startsWith('-')) return 'unknown';
+  const subcommand = first.toLowerCase();
+  const rest = args.slice(1);
+  const options = beforeTerminator(rest);
+  const invokesHelper =
+    options.some((arg) => GIT_EXTERNAL_HELPER_OPTION.test(arg)) ||
+    (subcommand === 'grep' && options.some((arg) => arg.startsWith('-O'))) ||
+    (['log', 'show'].includes(subcommand) &&
+      options.some((arg) => /%G[?GKFPST]/.test(arg)));
+  if (WRITE_GIT_SUBCOMMAND.test(subcommand)) {
+    const effectiveArgs =
+      subcommand === 'commit'
+        ? withoutOptionValues(rest, GIT_COMMIT_VALUE_OPTION)
+        : rest;
+    const effectiveOptions = beforeTerminator(effectiveArgs);
+    const help = hasHelp(effectiveArgs);
+    const dryRun =
+      effectiveOptions.includes('--dry-run') ||
+      (effectiveOptions.includes('-n') &&
+        ['add', 'clean', 'mv', 'push', 'rm'].includes(subcommand));
+    return help || dryRun ? 'unknown' : 'write';
+  }
+  if (!READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return 'unknown';
+  if (['diff', 'log', 'show'].includes(subcommand)) {
+    const output = evaluateOutputOption(rest, true, false);
+    if (output) return output;
+  }
+  if (
+    subcommand === 'blame' &&
+    beforeTerminator(rest).some((arg) => /^--output(?:=|$)/.test(arg))
+  )
+    return 'unknown';
+  if (subcommand !== 'branch' && hasHelp(rest)) return 'unknown';
   if (subcommand === 'remote') {
-    return !rest.some((a) => BLOCKED_GIT_REMOTE_ACTIONS.has(a.toLowerCase()));
+    const action = rest.find((arg) => !arg.startsWith('-'))?.toLowerCase();
+    if (!action) return invokesHelper ? 'unknown' : 'read-only';
+    if (['show', 'get-url'].includes(action))
+      return rest.some((arg) =>
+        /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
+          arg,
+        ),
+      ) || invokesHelper
+        ? 'unknown'
+        : 'read-only';
+    if (WRITE_GIT_REMOTE_ACTION.test(action)) return 'write';
+    if (action === 'prune')
+      return rest.some((arg) => ['-n', '--dry-run'].includes(arg))
+        ? 'unknown'
+        : 'write';
+    return 'unknown';
   }
   if (subcommand === 'branch') {
-    return !rest.some((a) => BLOCKED_GIT_BRANCH_FLAGS.has(a));
+    const actions = withoutOptionValues(rest, /^--(?:format|sort)$/);
+    const actionOptions = beforeTerminator(actions);
+    if (hasHelp(actions)) return 'unknown';
+    if (actions.some((arg) => WRITE_GIT_BRANCH_FLAG.test(arg)))
+      return actionOptions.some((arg) => WRITE_GIT_BRANCH_FLAG.test(arg))
+        ? 'write'
+        : 'unknown';
+    if (actions.length !== rest.length) return 'unknown';
+    const lists = actionOptions.some((arg) => GIT_BRANCH_LIST_FLAG.test(arg));
+    if (lists) return 'read-only';
+    if (rest.some((arg) => !arg.startsWith('-'))) return 'write';
+    if (rest.includes('--')) return 'unknown';
+    if (invokesHelper) return 'unknown';
+    return rest.length === 0 ? 'read-only' : 'unknown';
   }
-  return true;
+  if (invokesHelper) return 'unknown';
+  return 'read-only';
 }
 
-function evaluateFindReadOnly(args: string[]): boolean {
-  for (const arg of args) {
-    const lower = arg.toLowerCase();
-    if (BLOCKED_FIND_FLAGS.has(lower)) return false;
-    if (BLOCKED_FIND_PREFIXES.some((p) => lower.startsWith(p))) return false;
+function evaluateFindSafety(args: string[]): ShellCommandSafety {
+  let result: ShellCommandSafety = 'read-only';
+  for (let i = 0; i < args.length; i++) {
+    const lower = args[i]!.toLowerCase();
+    if (lower === '--') return mergeSafety(result, 'unknown');
+    if (/^--(?:help|version)$/.test(lower)) return 'unknown';
+    if (FIND_VALUE_PREDICATE.test(lower)) {
+      if (!args[++i]?.match(/^[^-]/)) result = mergeSafety(result, 'unknown');
+      continue;
+    }
+    if (lower === '-delete') {
+      result = 'write';
+      continue;
+    }
+    if (BLOCKED_FIND_PREFIXES.some((prefix) => lower.startsWith(prefix))) {
+      result = 'write';
+      i += lower.startsWith('-fprintf') ? 2 : 1;
+      continue;
+    }
+    if (['-exec', '-execdir', '-ok', '-okdir'].includes(lower)) {
+      const invoked = args[i + 1]?.toLowerCase();
+      let end = -1;
+      for (let index = i + 2; index < args.length; index++) {
+        if ([';', '\\;', '+'].includes(args[index]!)) {
+          end = index;
+          break;
+        }
+      }
+      const invokedArgs = args.slice(i + 2, end < 0 ? undefined : end);
+      let nested: Safety = 'unknown';
+      if (invoked && WRITE_ROOT_COMMAND.test(invoked))
+        nested = hasHelp(invokedArgs) ? 'unknown' : 'write';
+      else if (invoked && /^(kill|killall|pkill)$/.test(invoked))
+        nested = processSafety(invoked, invokedArgs);
+      result = mergeSafety(result, nested);
+      i = end < 0 ? args.length : end;
+    }
   }
-  return true;
+  return result;
 }
 
-function evaluateSedReadOnly(args: string[]): boolean {
-  for (const arg of args) {
+function evaluateSedSafety(args: string[]): ShellCommandSafety {
+  return classifySedCommandSafety(args);
+}
+
+function evaluateAwkSafety(args: string[]): ShellCommandSafety {
+  return classifyAwkCommandSafety(args);
+}
+
+function evaluateUniqSafety(args: string[]): ShellCommandSafety {
+  let positional = 0;
+  for (let i = 0; i < args.length; i++) {
+    const arg = args[i]!;
+    if (arg === '--') {
+      return args.length - i + positional > 2 ? 'write' : 'read-only';
+    } else if (UNIQ_VALUE_OPTIONS.has(arg)) {
+      if (!args[++i]) return 'unknown';
+    } else if (arg === '-' || !arg.startsWith('-')) positional++;
+  }
+  return positional >= 2 ? 'write' : 'read-only';
+}
+
+function processSafety(root: string, args: string[]): Safety {
+  const options = beforeTerminator(args);
+  const signalZero = /^(?:SIG)?0+$/i;
+  const signalValueOptions = [
+    '--signal',
+    ...(root === 'pkill' ? [] : ['-s']),
+    ...(root === 'kill' ? ['-n'] : []),
+  ];
+  if (
+    args.length === 0 ||
+    hasHelp(args) ||
+    options.some((arg) => ['-h', '-V', '-help', '-version'].includes(arg))
+  )
+    return 'unknown';
+  if (
+    options.some(
+      (arg, index) =>
+        (/[$`*?()[\]{}]/.test(arg) &&
+          (arg.startsWith('-') ||
+            signalValueOptions.includes(options[index - 1]!))) ||
+        /^-(?:[lL0]|-(?:.*list|table)(?:=|$))/.test(arg) ||
+        (/^--signal=/.test(arg) && signalZero.test(arg.slice(9))) ||
+        /^-(?:SIG)?0+$/i.test(arg) ||
+        (root === 'kill' && /^-[sn](?:SIG)?0+$/i.test(arg)) ||
+        (root === 'killall' && /^-s(?:SIG)?0+$/i.test(arg)) ||
+        (index > 0 &&
+          signalValueOptions.includes(options[index - 1]!) &&
+          signalZero.test(arg)),
+    )
+  )
+    return 'unknown';
+  return 'write';
+}
+
+function evaluateSubstitutions(node: SyntaxNode): ShellCommandSafety {
+  const substitutions = collectDescendants(
+    node,
+    new Set(['command_substitution', 'process_substitution']),
+    true,
+  );
+  if (substitutions.length === 0) return 'read-only';
+  return mergeSafety(
+    'unknown',
+    ...substitutions
+      .flatMap((substitution) => substitution.namedChildren)
+      .map(evaluateStatementSafety),
+  );
+}
+
+function evaluateCommandSafety(commandNode: SyntaxNode): ShellCommandSafety {
+  const rawRoot = commandNode.childForFieldName('name')?.text;
+  const root = getCommandName(commandNode);
+  const argNodes = getArgumentNodes(commandNode);
+  const args = argNodes.map((node) => stripOuterQuotes(node.text));
+  let result: ShellCommandSafety;
+  if (!root) result = 'read-only';
+  else if (rawRoot !== root) result = 'unknown';
+  else if (WRITE_ROOT_COMMAND.test(root)) {
+    result = hasHelp(args) ? 'unknown' : 'write';
+  } else if (/^(kill|killall|pkill)$/.test(root)) {
+    result = processSafety(root, args);
+  } else if (root === 'git') result = evaluateGitSafety(args);
+  else if (root === 'find') result = evaluateFindSafety(args);
+  else if (root === 'sed') result = evaluateSedSafety(args);
+  else if (root === 'awk') result = evaluateAwkSafety(args);
+  else if (root === 'sort' || root === 'tree') {
+    result = evaluateOutputOption(args, root === 'sort') ?? 'read-only';
+    if (hasHelp(args, ['-o', '--output'])) result = 'unknown';
     if (
-      BLOCKED_SED_PREFIXES.some((p) => arg.startsWith(p)) ||
-      arg === '--in-place'
+      beforeTerminator(args).some(
+        (arg) =>
+          /^(?:--o|-[^-]+o)/.test(arg) ||
+          (root === 'sort' && arg.startsWith('--co')),
+      )
     ) {
-      return false;
+      result = mergeSafety(result, 'unknown');
+    }
+  } else if (root === 'uniq') {
+    result = hasHelp(args) ? 'unknown' : evaluateUniqSafety(args);
+  } else if (root === 'tee') {
+    const writesFile = args.some(
+      (arg, index) => !arg.startsWith('-') || args[index - 1] === '--',
+    );
+    result = writesFile ? 'write' : 'unknown';
+  } else if (root === 'dd') {
+    result = args.some((arg) => arg.startsWith('of=')) ? 'write' : 'unknown';
+  } else if (
+    (root === 'printf' &&
+      beforeTerminator(args).some((arg) => /^-[^-]*v/.test(arg))) ||
+    ['less', 'more'].includes(root) ||
+    (['rg', 'ripgrep'].includes(root) &&
+      beforeTerminator(args).some((arg) =>
+        /^(?:--(?:hostname-bin|pre)(?:=|$)|--search-zip$|-[^-]*z)/.test(arg),
+      ))
+  ) {
+    result = 'unknown';
+  } else {
+    result = READ_ONLY_ROOT_COMMANDS.has(root) ? 'read-only' : 'unknown';
+  }
+  if (
+    result === 'read-only' &&
+    root &&
+    /^(awk|find|git|printf|rg|ripgrep|sed|sort|tree|uniq)$/.test(root) &&
+    argNodes.some((node) => hasShellExpansion(node))
+  ) {
+    result = 'unknown';
+  }
+  if (
+    result === 'write' &&
+    !['find', 'git', 'sed', 'sort', 'tree'].includes(root ?? '') &&
+    hasHelp(args)
+  )
+    result = 'unknown';
+  const hasEnvironment = commandNode.namedChildren.some(
+    (child) => child.type === 'variable_assignment',
+  );
+  if (root && hasEnvironment) result = mergeSafety(result, 'unknown');
+  return mergeSafety(
+    result,
+    evaluateRedirectionSafety(commandNode),
+    ...commandNode.namedChildren
+      .filter((child) => !child.type.endsWith('_redirect'))
+      .map(evaluateSubstitutions),
+  );
+}
+
+function evaluateRedirectionSafety(node: SyntaxNode): ShellCommandSafety {
+  let result: ShellCommandSafety = 'read-only';
+  for (const redirect of node.namedChildren) {
+    if (!redirect.type.endsWith('_redirect')) continue;
+    result = mergeSafety(result, evaluateSubstitutions(redirect));
+    if (redirect.type !== 'file_redirect') continue;
+    const operator = redirect.children.find(
+      (child) => child.type !== 'file_descriptor',
+    );
+    if (!operator) return 'unknown';
+    if (WRITE_REDIRECT_OPERATORS.has(operator.type)) return 'write';
+    if (operator.type === '>&') {
+      const destination = redirect.childForFieldName('destination');
+      if (!destination) return 'unknown';
+      const target = stripOuterQuotes(destination.text);
+      if (/^(?:\d+|-)$/.test(target)) continue;
+      result = mergeSafety(
+        result,
+        /[$`*?()[\]{}]/.test(target) ? 'unknown' : 'write',
+      );
     }
   }
-  const scriptContent = args.join(' ');
-  return !SED_SIDE_EFFECT_PATTERNS.some((p) => p.test(scriptContent));
+  return result;
 }
 
-function evaluateAwkReadOnly(args: string[]): boolean {
-  const scriptContent = args.join(' ');
-  return !AWK_SIDE_EFFECT_PATTERNS.some((p) => p.test(scriptContent));
+function childrenSafety(node: SyntaxNode, floor: Safety = 'read-only'): Safety {
+  return mergeSafety(floor, ...node.namedChildren.map(evaluateStatementSafety));
 }
 
-// ---------------------------------------------------------------------------
-// Statement-level read-only analysis
-// ---------------------------------------------------------------------------
+function evaluateStatementSafety(node: SyntaxNode): ShellCommandSafety {
+  if (node.type === 'command') return evaluateCommandSafety(node);
+  if (CHILD_STATEMENT.test(node.type)) return childrenSafety(node);
+  if (node.type === 'redirected_statement')
+    return mergeSafety(
+      ...node.namedChildren
+        .filter((child) => !child.type.endsWith('_redirect'))
+        .map((child) => evaluateStatementSafety(child)),
+      evaluateRedirectionSafety(node),
+    );
+  if (/^variable_assignments?$/.test(node.type))
+    return mergeSafety(
+      node.parent?.namedChildCount === 1 ? 'read-only' : 'unknown',
+      evaluateSubstitutions(node),
+    );
+  if (node.type === 'function_definition') return 'unknown';
+  return childrenSafety(node, 'unknown');
+}
 
-/**
- * Recursively evaluate whether a statement AST node is read-only.
- *
- * Handles: command, pipeline, list, redirected_statement, subshell,
- * variable_assignment, negated_command, and compound statements.
- *
- * Command substitution (`$(...)`, `` `...` ``) and process substitution
- * (`<(...)`, `>(...)`) anywhere in the subtree mark the whole node as
- * NOT read-only — checked once at the top so every case below inherits
- * the guard. This matters for non-`command` node types like
- * `variable_assignment` (`FOO=$(curl evil)`) and `redirected_statement`
- * (`cat < $(curl evil)`) where the substitution sits outside any
- * `command` child. See PR #4386 round 4.
- */
-function evaluateStatementReadOnly(node: SyntaxNode): boolean {
-  if (containsCommandSubstitutionAST(node)) return false;
-
-  switch (node.type) {
-    case 'command':
-      return evaluateCommandReadOnly(node);
-
-    case 'pipeline': {
-      // All commands in the pipeline must be read-only
-      for (const child of node.namedChildren) {
-        if (!evaluateStatementReadOnly(child)) return false;
-      }
-      return true;
-    }
-
-    case 'list': {
-      // All commands joined by && / || must be read-only
-      for (const child of node.namedChildren) {
-        if (!evaluateStatementReadOnly(child)) return false;
-      }
-      return true;
-    }
-
-    case 'redirected_statement': {
-      // Write redirections make it non-read-only
-      if (hasWriteRedirection(node)) return false;
-      // Evaluate the body statement
-      const body = node.namedChildren[0];
-      return body ? evaluateStatementReadOnly(body) : true;
-    }
-
-    case 'subshell': {
-      // Evaluate all statements inside the subshell
-      for (const child of node.namedChildren) {
-        if (!evaluateStatementReadOnly(child)) return false;
-      }
-      return true;
-    }
-
-    case 'compound_statement': {
-      // { cmd1; cmd2; } – evaluate each inner statement
-      for (const child of node.namedChildren) {
-        if (!evaluateStatementReadOnly(child)) return false;
-      }
-      return true;
-    }
-
-    case 'variable_assignment':
-    case 'variable_assignments':
-      // Pure assignments without a command – read-only (just sets env)
-      return true;
-
-    case 'negated_command': {
-      const inner = node.namedChildren[0];
-      return inner ? evaluateStatementReadOnly(inner) : true;
-    }
-
-    case 'function_definition':
-      // Function definitions are not read-only operations per se
-      return false;
-
-    case 'if_statement':
-    case 'while_statement':
-    case 'for_statement':
-    case 'case_statement':
-    case 'c_style_for_statement':
-      // Control flow constructs – conservatively non-read-only
-      return false;
-
-    case 'declaration_command':
-      // export/declare/local/readonly/typeset – can modify env
-      return false;
-
-    default:
-      // Unknown node types – conservatively non-read-only
-      return false;
+async function classifyInternal(command: string): Promise<Safety> {
+  const tree = await parseShellCommand(command);
+  try {
+    const root = tree.rootNode;
+    if (root.namedChildCount === 0 || root.hasError) return 'unknown';
+    return mergeSafety(...root.namedChildren.map(evaluateStatementSafety));
+  } finally {
+    tree.delete();
   }
 }
-
-// ---------------------------------------------------------------------------
-// Public API: isShellCommandReadOnlyAST
-// ---------------------------------------------------------------------------
+export async function classifyShellCommandSafety(
+  command: string,
+): Promise<ShellCommandSafety> {
+  if (typeof command !== 'string' || !command.trim()) return 'unknown';
+  return classifyInternal(command).catch(() => 'unknown');
+}
 
 /**
  * AST-based check whether a shell command is read-only.
@@ -949,22 +1141,7 @@ export async function isShellCommandReadOnlyAST(
   }
 
   try {
-    const tree = await parseShellCommand(command);
-    const root = tree.rootNode;
-
-    // Empty program
-    if (root.namedChildCount === 0) return false;
-
-    // Evaluate every top-level statement
-    for (const stmt of root.namedChildren) {
-      if (!evaluateStatementReadOnly(stmt)) {
-        tree.delete();
-        return false;
-      }
-    }
-
-    tree.delete();
-    return true;
+    return (await classifyInternal(command)) === 'read-only';
   } catch {
     // Unexpected runtime failure (e.g. WASM init error on first call) –
     // fall back to the regex-based checker rather than propagating the error.

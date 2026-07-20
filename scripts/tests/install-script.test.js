@@ -29,6 +29,9 @@ const readScript = (path) => readFileSync(path, 'utf8');
 const standaloneReleaseScriptUrl = pathToFileURL(
   path.resolve('scripts/build-standalone-release.js'),
 ).href;
+const standalonePackageScriptUrl = pathToFileURL(
+  path.resolve('scripts/create-standalone-package.js'),
+).href;
 const hostedInstallationScriptUrl = pathToFileURL(
   path.resolve('scripts/build-hosted-installation-assets.js'),
 ).href;
@@ -346,7 +349,9 @@ describe('installation scripts', () => {
     expect(script).toContain('qwen-code\\node\\node.exe');
     expect(script).toContain('Archive contains symlinks or reparse points');
     expect(script).toContain('unsafe path with control character');
-    expect(script).toContain('Failed to update user PATH');
+    expect(script).toContain('Failed to update !PATH_SCOPE! PATH');
+    expect(script).toContain("$ErrorActionPreference = 'Stop'; try");
+    expect(script).toContain('catch { exit 1 }');
     expect(script).toContain('PRE_INSTALL_QWENS_LIST');
     expect(script).toContain('QWEN_INSTALL_ROOT');
     expect(script).toContain('npm fallback also failed');
@@ -574,6 +579,35 @@ describe('release-script-utils', () => {
   });
 });
 
+const STUB_BAT_CONTENT =
+  '@echo off\r\n' +
+  'set "VERSION=%QWEN_INSTALL_VERSION%"\r\n' +
+  'set "REPAIR_PATH=%QWEN_INSTALL_REPAIR_PATH%"\r\n' +
+  'set "PATH_SCOPE=%QWEN_INSTALL_PATH_SCOPE%"\r\n' +
+  'if "%VERSION%"=="" set "VERSION=latest"\r\n' +
+  'set "VERSION=latest"\r\n' +
+  'if "%~1"=="--version" set "VERSION=%~2"\r\n' +
+  'if /i "%~1"=="--repair-path" set "REPAIR_PATH=1"\r\n' +
+  'set "ARG_KEY=%~1"\r\n' +
+  'if /i "!ARG_KEY!"=="--path-scope" set "PATH_SCOPE=%~2"\r\n';
+
+const STUB_SH_CONTENT =
+  '#!/usr/bin/env bash\n' +
+  'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
+  'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n';
+
+const STUB_UNINSTALL_SH_CONTENT =
+  '#!/usr/bin/env bash\n' +
+  'is_qwen_standalone_install_dir() { return 0; }\n' +
+  'remove_shell_path_entry() { :; }\n' +
+  'QWEN_UNINSTALL_PURGE=""\n';
+
+const STUB_UNINSTALL_PS1_CONTENT =
+  'function Test-QwenStandaloneInstallDir { return $true }\n' +
+  'function Remove-PathEntryFromAllScopes { }\n' +
+  'function Remove-CurrentCmdPathShim { }\n' +
+  '$env:QWEN_UNINSTALL_PURGE = ""\n';
+
 describe('standalone release packaging', () => {
   it('defines a standalone packaging script', () => {
     const packageJson = JSON.parse(readScript('package.json'));
@@ -611,6 +645,7 @@ describe('standalone release packaging', () => {
     expect(packageScript).toContain('symlink cycle');
     expect(packageScript).toContain('refusing to write empty SHA256SUMS');
     expect(packageScript).toContain('--skip-checksums');
+    expect(packageScript).toContain('--native-modules-dir');
     expect(packageScript).toContain('dereference: true');
     expect(packageScript).toContain('fs.createReadStream');
     expect(packageScript).toContain('Expand-Archive');
@@ -763,6 +798,35 @@ describe('standalone release packaging', () => {
 
     expect(checksums.get('node-v22.0.0-linux-x64.tar.xz')).toBe('a'.repeat(64));
     expect(checksums.get('node-v22.0.0-win-x64.zip')).toBe('b'.repeat(64));
+  });
+
+  it('stages the locked clipboard packages for every release target', async () => {
+    const { readClipboardPackageSpecs } = await import(
+      standaloneReleaseScriptUrl
+    );
+
+    expect(readClipboardPackageSpecs()).toEqual([
+      '@teddyzhu/clipboard@0.0.5',
+      '@teddyzhu/clipboard-darwin-arm64@0.0.5',
+      '@teddyzhu/clipboard-darwin-x64@0.0.5',
+      '@teddyzhu/clipboard-linux-arm64-gnu@0.0.5',
+      '@teddyzhu/clipboard-linux-x64-gnu@0.0.5',
+      '@teddyzhu/clipboard-win32-x64-msvc@0.0.5',
+    ]);
+  });
+
+  it('maps every release target to its clipboard native package', async () => {
+    const { TARGET_CLIPBOARD_PACKAGE } = await import(
+      standalonePackageScriptUrl
+    );
+
+    expect([...TARGET_CLIPBOARD_PACKAGE]).toEqual([
+      ['darwin-arm64', '@teddyzhu/clipboard-darwin-arm64'],
+      ['darwin-x64', '@teddyzhu/clipboard-darwin-x64'],
+      ['linux-arm64', '@teddyzhu/clipboard-linux-arm64-gnu'],
+      ['linux-x64', '@teddyzhu/clipboard-linux-x64-gnu'],
+      ['win-x64', '@teddyzhu/clipboard-win32-x64-msvc'],
+    ]);
   });
 
   it('validates standalone release checksum output', async () => {
@@ -1049,13 +1113,11 @@ describe('standalone release packaging', () => {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
-          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+        STUB_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+        STUB_BAT_CONTENT,
       );
       // The ps1 shim has every required behavior pattern but also contains
       // a hardcoded $env:QWEN_INSTALL_VERSION assignment, which must be
@@ -1070,17 +1132,11 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'is_qwen_standalone_install_dir() { return 0; }\n' +
-          'remove_shell_path_entry() { :; }\n' +
-          'QWEN_UNINSTALL_PURGE=""\n',
+        STUB_UNINSTALL_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
-        'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-UserPathEntry { }\n' +
-          'function Remove-CurrentCmdPathShim { }\n' +
-          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+        STUB_UNINSTALL_PS1_CONTENT,
       );
 
       await expect(
@@ -1106,13 +1162,11 @@ describe('standalone release packaging', () => {
       mkdirSync(sourceDir, { recursive: true });
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'VERSION="${QWEN_INSTALL_VERSION:-latest}"\n' +
-          'case "$1" in --version) shift; VERSION="$1" ;; --version=*) VERSION="${1#*=}" ;; esac\n',
+        STUB_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'install-qwen-standalone.bat'),
-        '@echo off\r\nset "VERSION=%QWEN_INSTALL_VERSION%"\r\nif "%VERSION%"=="" set "VERSION=latest"\r\nset "VERSION=latest"\r\nif "%~1"=="--version" set "VERSION=%~2"\r\n',
+        STUB_BAT_CONTENT,
       );
       // ps1 contains the exact docstring shipped in production
       // ("$env:QWEN_INSTALL_VERSION = 'vX.Y.Z'") as a `#` comment; the
@@ -1128,17 +1182,11 @@ describe('standalone release packaging', () => {
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.sh'),
-        '#!/usr/bin/env bash\n' +
-          'is_qwen_standalone_install_dir() { return 0; }\n' +
-          'remove_shell_path_entry() { :; }\n' +
-          'QWEN_UNINSTALL_PURGE=""\n',
+        STUB_UNINSTALL_SH_CONTENT,
       );
       writeFileSync(
         path.join(sourceDir, 'uninstall-qwen-standalone.ps1'),
-        'function Test-QwenStandaloneInstallDir { return $true }\n' +
-          'function Remove-UserPathEntry { }\n' +
-          'function Remove-CurrentCmdPathShim { }\n' +
-          '$env:QWEN_UNINSTALL_PURGE = ""\n',
+        STUB_UNINSTALL_PS1_CONTENT,
       );
 
       // Build should succeed (only resolves; throws would fail the test).
@@ -1631,6 +1679,36 @@ describe('standalone release packaging', () => {
     }
   });
 
+  it('requires the standalone cli-entry wrapper in dist', () => {
+    const createdDist = ensureMinimalDist({ includeCliEntry: false });
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            'win-x64',
+            '--node-archive',
+            createFakeWindowsNodeArchive(tmpDir),
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          { stdio: 'pipe' },
+        ),
+      ).toThrow(
+        /Required dist asset missing: .*cli-entry\.js[\s\S]*npm run prepare:package/,
+      );
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
   it('packages a win-x64 standalone archive', () => {
     const createdDist = ensureMinimalDist();
     const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
@@ -1663,8 +1741,21 @@ describe('standalone release packaging', () => {
         existsSync(path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd')),
       ).toBe(true);
       expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
         existsSync(path.join(extractDir, 'qwen-code', 'node', 'node.exe')),
       ).toBe(true);
+      const shim = readScript(
+        path.join(extractDir, 'qwen-code', 'bin', 'qwen.cmd'),
+      );
+      expect(shim).toContain(
+        'set "QWEN_CODE_LAUNCHER_PATH=%ROOT%\\bin\\qwen.cmd"',
+      );
+      expect(shim).toContain(
+        '"%ROOT%\\node\\node.exe" "%ROOT%\\lib\\cli-entry.js" %*',
+      );
+      expect((shim.match(/exit \/b %ERRORLEVEL%/g) || []).length).toBe(1);
       expect(readScript(path.join(outDir, 'SHA256SUMS'))).toContain(
         'qwen-code-win-x64.zip',
       );
@@ -1673,6 +1764,290 @@ describe('standalone release packaging', () => {
       restoreMinimalDist(createdDist);
     }
   }, 30_000);
+
+  it('skips npm-only artifacts staged in dist', () => {
+    const createdDist = ensureMinimalDist({
+      includeNpmPackageArtifacts: true,
+    });
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const outDir = path.join(tmpDir, 'out');
+      execFileSync(
+        'node',
+        [
+          'scripts/create-standalone-package.js',
+          '--target',
+          'win-x64',
+          '--node-archive',
+          createFakeWindowsNodeArchive(tmpDir),
+          '--out-dir',
+          outDir,
+          '--version',
+          '0.0.0-test',
+        ],
+        { stdio: 'pipe' },
+      );
+
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      extractZipForTest(path.join(outDir, 'qwen-code-win-x64.zip'), extractDir);
+
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'postinstall.js')),
+      ).toBe(false);
+      expect(
+        existsSync(path.join(extractDir, 'qwen-code', 'lib', 'patches')),
+      ).toBe(false);
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  }, 30_000);
+
+  it('requires the native audio prebuild when release packaging opts in', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
+
+    try {
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            target,
+            '--node-archive',
+            fakeRuntimeArchive,
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          {
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1',
+            },
+            stdio: 'pipe',
+          },
+        ),
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  it('requires a native audio prebuild file when release packaging opts in', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const target = process.platform === 'win32' ? 'win-x64' : 'linux-x64';
+    const prebuildDirName =
+      process.platform === 'win32' ? 'win32-x64' : 'linux-x64';
+    const fakeRuntimeArchive =
+      process.platform === 'win32'
+        ? createFakeWindowsNodeArchive(tmpDir)
+        : createFakeNodeArchive(tmpDir);
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      prebuildDirName,
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+
+      expect(() =>
+        execFileSync(
+          'node',
+          [
+            'scripts/create-standalone-package.js',
+            '--target',
+            target,
+            '--node-archive',
+            fakeRuntimeArchive,
+            '--out-dir',
+            path.join(tmpDir, 'out'),
+            '--version',
+            '0.0.0-test',
+          ],
+          {
+            env: {
+              ...process.env,
+              QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD: '1',
+            },
+            stdio: 'pipe',
+          },
+        ),
+      ).toThrow(new RegExp(`audio-capture prebuild.*${prebuildDirName}`));
+    } finally {
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
+      }
+      rmSync(tmpDir, { recursive: true, force: true });
+      restoreMinimalDist(createdDist);
+    }
+  });
+
+  itOnUnix(
+    'packages a Unix standalone archive through the CLI entry wrapper',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const extractDir = path.join(tmpDir, 'extract');
+        mkdirSync(extractDir, { recursive: true });
+        execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+          stdio: 'ignore',
+        });
+
+        expect(
+          existsSync(path.join(extractDir, 'qwen-code', 'lib', 'cli-entry.js')),
+        ).toBe(true);
+        const shim = readScript(
+          path.join(extractDir, 'qwen-code', 'bin', 'qwen'),
+        );
+        expect(shim).toContain(
+          'QWEN_CODE_LAUNCHER_PATH="$ROOT/bin/qwen" exec "$ROOT/node/bin/node" "$ROOT/lib/cli-entry.js" "$@"',
+        );
+      } finally {
+        restoreMinimalDist(createdDist);
+        rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  itOnUnix('does not package audio-capture test artifacts', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+    const prebuildDir = path.join(
+      'packages',
+      'audio-capture',
+      'prebuilds',
+      'linux-x64',
+    );
+    const prebuildFile = path.join(
+      prebuildDir,
+      '@qwen-code+audio-capture.node',
+    );
+    const createdPrebuildDir = !existsSync(prebuildDir);
+    const createdPrebuild = !existsSync(prebuildFile);
+
+    try {
+      mkdirSync(prebuildDir, { recursive: true });
+      if (createdPrebuild) {
+        writeFileSync(prebuildFile, 'fake native addon\n');
+      }
+
+      const archive = packageFakeStandalone(tmpDir);
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      const addonDist = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@qwen-code',
+        'audio-capture',
+        'dist',
+      );
+      expect(existsSync(path.join(addonDist, 'index.js'))).toBe(true);
+      expect(existsSync(path.join(addonDist, 'platform.test.js'))).toBe(false);
+      expect(existsSync(path.join(addonDist, 'platform.test.d.ts'))).toBe(
+        false,
+      );
+      expect(existsSync(path.join(addonDist, 'platform.test.js.map'))).toBe(
+        false,
+      );
+    } finally {
+      if (createdPrebuild) {
+        rmSync(prebuildFile, { force: true });
+      }
+      if (createdPrebuildDir) {
+        rmSync(prebuildDir, { recursive: true, force: true });
+      }
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('packages only the matching clipboard native addon', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeClipboardModules(tmpDir, [
+        '@teddyzhu/clipboard-linux-x64-gnu',
+        '@teddyzhu/clipboard-darwin-arm64',
+      ]);
+      const archive = packageFakeStandalone(tmpDir, {}, { nativeModulesDir });
+      const extractDir = path.join(tmpDir, 'extract');
+      mkdirSync(extractDir, { recursive: true });
+      execFileSync('tar', ['-xzf', archive, '-C', extractDir], {
+        stdio: 'ignore',
+      });
+
+      const clipboardScope = path.join(
+        extractDir,
+        'qwen-code',
+        'lib',
+        'node_modules',
+        '@teddyzhu',
+      );
+      expect(
+        existsSync(path.join(clipboardScope, 'clipboard', 'index.js')),
+      ).toBe(true);
+      expect(
+        existsSync(
+          path.join(
+            clipboardScope,
+            'clipboard-linux-x64-gnu',
+            'clipboard.linux-x64-gnu.node',
+          ),
+        ),
+      ).toBe(true);
+      expect(
+        existsSync(path.join(clipboardScope, 'clipboard-darwin-arm64')),
+      ).toBe(false);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  itOnUnix('rejects incomplete explicit clipboard staging', () => {
+    const createdDist = ensureMinimalDist();
+    const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-package-test-'));
+
+    try {
+      const nativeModulesDir = createFakeClipboardModules(tmpDir, []);
+      expect(() =>
+        packageFakeStandalone(tmpDir, {}, { nativeModulesDir }),
+      ).toThrow(/Required clipboard packages for linux-x64/);
+    } finally {
+      restoreMinimalDist(createdDist);
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
 
   itOnUnix('dereferences safe Node.js runtime symlinks', () => {
     const createdDist = ensureMinimalDist();
@@ -1798,13 +2173,16 @@ describe('standalone release packaging', () => {
     // release.yml builds standalone archives, verifies them, and creates GitHub Release
     expect(releaseWorkflow).toContain('npm run package:standalone:release --');
     expect(releaseWorkflow).toContain(
+      'QWEN_STANDALONE_REQUIRE_AUDIO_CAPTURE_PREBUILD',
+    );
+    expect(releaseWorkflow).toContain(
       'npm run verify:installation-release -- --dir dist/standalone',
     );
     expect(releaseWorkflow).not.toContain('package:installation-assets');
     expect(releaseWorkflow).not.toContain('verify_node_checksum()');
     expect(releaseWorkflow).not.toContain('download_node()');
     const createReleaseStepIndex = releaseWorkflow.indexOf(
-      "name: 'Create GitHub Release and Tag'",
+      "- name: 'Create GitHub Release and Tag'",
     );
     expect(createReleaseStepIndex).toBeGreaterThanOrEqual(0);
     const createReleaseStep = releaseWorkflow.slice(createReleaseStepIndex);
@@ -1844,21 +2222,25 @@ describe('standalone release packaging', () => {
     );
 
     const syncStepIndex = ossWorkflow.indexOf(
-      "name: 'Sync Release Assets to Aliyun OSS'",
+      "- name: 'Sync Release Assets to Aliyun OSS'",
+    );
+    const packageHostedStepIndex = ossWorkflow.indexOf(
+      "- name: 'Package Hosted Installation Assets'",
     );
     const verifyStepIndex = ossWorkflow.indexOf(
-      "name: 'Verify Aliyun OSS Release Assets'",
+      "- name: 'Verify Aliyun OSS Release Assets'",
     );
     const publishLatestStepIndex = ossWorkflow.indexOf(
-      "name: 'Publish Aliyun OSS Latest VERSION'",
+      "- name: 'Publish Aliyun OSS Latest VERSION'",
     );
     const syncHostedStepIndex = ossWorkflow.indexOf(
-      "name: 'Sync Hosted Installation Assets to Aliyun OSS'",
+      "- name: 'Sync Hosted Installation Assets to Aliyun OSS'",
     );
     const verifyHostedStepIndex = ossWorkflow.indexOf(
-      "name: 'Verify Aliyun OSS Hosted Installation Assets'",
+      "- name: 'Verify Aliyun OSS Hosted Installation Assets'",
     );
     expect(syncStepIndex).toBeGreaterThanOrEqual(0);
+    expect(packageHostedStepIndex).toBeGreaterThanOrEqual(0);
     expect(verifyStepIndex).toBeGreaterThan(syncStepIndex);
     expect(syncHostedStepIndex).toBeGreaterThan(verifyStepIndex);
     expect(verifyHostedStepIndex).toBeGreaterThan(syncHostedStepIndex);
@@ -1943,6 +2325,25 @@ describe('standalone release packaging', () => {
     );
   });
 
+  it('automatically publishes the VSCode companion after stable CLI releases', () => {
+    const workflow = readScript(
+      '.github/workflows/release-vscode-companion.yml',
+    );
+
+    expect(workflow).toContain("release:\n    types: ['published']");
+    expect(workflow).toContain('workflow_dispatch:');
+    expect(workflow).toContain("github.event_name != 'release'");
+    expect(workflow).toContain(
+      "startsWith(github.event.release.tag_name, 'v')",
+    );
+    expect(workflow).toContain('github.event.release.prerelease == false');
+    expect(
+      workflow.match(
+        /github\.event\.release\.tag_name \|\| github\.event\.inputs\.ref \|\| github\.sha/g,
+      ) || [],
+    ).toHaveLength(3);
+  });
+
   it('does not whitelist internal planning documents in gitignore', () => {
     const gitignore = readScript('.gitignore');
 
@@ -1988,7 +2389,9 @@ describe('standalone release packaging', () => {
     expect(uninstallPowerShellSource).toContain(
       'Test-QwenStandaloneInstallDir',
     );
-    expect(uninstallPowerShellSource).toContain('Remove-UserPathEntry');
+    expect(uninstallPowerShellSource).toContain(
+      'Remove-PathEntryFromAllScopes',
+    );
     expect(uninstallPowerShellSource).toContain('Remove-CurrentCmdPathShim');
     expect(uninstallPowerShellSource).toContain(
       'Remove-RecordedCurrentCmdPathShim',
@@ -2206,7 +2609,7 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         expect(output).toContain('installed successfully, to start:');
         expect(output).toContain('0.0.0-smoke');
         expect(output).toContain('cd <project>');
-        expect(output).toContain('qwenlm.github.io/qwen-code');
+        expect(output).toContain('github.com/QwenLM/qwen-code');
         expect(output).not.toContain('rm -rf');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
@@ -2562,6 +2965,11 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
         const bashrc = readScript(path.join(home, '.bashrc'));
 
         expect(output).toContain('installed successfully, to start:');
+        expect(output).toContain(
+          'Other qwen executables were found and may shadow the new install',
+        );
+        expect(output).toContain(existingQwen);
+        expect(output).toContain('source ~/.bashrc');
         expect(bashrc).toContain('# Qwen Code PATH block begin');
         expect(bashrc).toContain(
           `export PATH='${path.join(installRoot, 'bin')}':$PATH`,
@@ -2582,6 +2990,78 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
           .toString()
           .trim();
         expect(resolvedQwen).toBe(installedBin);
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+  );
+
+  itOnUnix(
+    'prints a shell reload hint when the install dir is not on PATH yet',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+
+        const output = runUnixInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          // Minimal PATH keeps the fresh install dir off the invoking
+          // shell's PATH so the reload hint is always printed. The shadow
+          // warning is NOT asserted on either way: PRE_INSTALL_QWENS also
+          // scans well-known absolute paths (/usr/local/bin etc.), so its
+          // output depends on the host machine.
+          { SHELL: '/bin/bash', PATH: '/usr/bin:/bin' },
+        ).toString();
+
+        expect(output).toContain('source ~/.bashrc');
+        expect(output).toContain('Load new PATH');
+      } finally {
+        rmSync(tmpDir, { recursive: true, force: true });
+        restoreMinimalDist(createdDist);
+      }
+    },
+  );
+
+  itOnUnix(
+    'points the reload hint at ~/.bash_profile when it is the rc file written',
+    () => {
+      const createdDist = ensureMinimalDist();
+      const tmpDir = mkdtempSync(path.join(tmpdir(), 'qwen-install-test-'));
+
+      try {
+        const archive = packageFakeStandalone(tmpDir);
+        const installRoot = path.join(tmpDir, 'install');
+        const home = path.join(tmpDir, 'home');
+        const bashProfile = path.join(home, '.bash_profile');
+
+        // Default macOS bash setup: ~/.bash_profile exists, ~/.bashrc does
+        // not, so maybe_update_shell_path falls back to ~/.bash_profile.
+        mkdirSync(home, { recursive: true });
+        writeFileSync(bashProfile, '# existing profile\n');
+
+        const output = runUnixInstaller(
+          archive,
+          installRoot,
+          home,
+          'standalone',
+          { SHELL: '/bin/bash', PATH: '/usr/bin:/bin' },
+        ).toString();
+
+        expect(readFileSync(bashProfile, 'utf8')).toContain(
+          '# Qwen Code PATH block begin',
+        );
+        // An ANSI reset sits between "in" and the rc name, so match the
+        // success message and the reload hint on the rc name alone.
+        expect(output).toContain('source ~/.bash_profile');
+        expect(output).not.toContain('~/.bashrc');
       } finally {
         rmSync(tmpDir, { recursive: true, force: true });
         restoreMinimalDist(createdDist);
@@ -3336,7 +3816,13 @@ describe('Linux/macOS installer end-to-end', { timeout: 15000 }, () => {
       const fakeBin = path.join(tmpDir, 'bin');
       mkdirSync(fakeBin, { recursive: true });
       writeFileSync(path.join(fakeBin, 'curl'), '#!/usr/bin/env sh\nexit 22\n');
+      // Shadow any system Node on PATH (e.g. /usr/bin/node on self-hosted
+      // runners) with a stub that fails version detection, so the npm fallback
+      // deterministically fails with "Unable to determine Node.js version"
+      // regardless of whether the host has Node installed in /usr/bin.
+      writeFileSync(path.join(fakeBin, 'node'), '#!/usr/bin/env sh\nexit 1\n');
       chmodSync(path.join(fakeBin, 'curl'), 0o755);
+      chmodSync(path.join(fakeBin, 'node'), 0o755);
 
       let failureMessage = '';
       try {
@@ -3701,7 +4187,10 @@ describe('Windows PowerShell uninstaller end-to-end', () => {
   });
 });
 
-function ensureMinimalDist() {
+function ensureMinimalDist({
+  includeCliEntry = true,
+  includeNpmPackageArtifacts = false,
+} = {}) {
   const distPath = path.resolve('dist');
   const backupPath = existsSync(distPath)
     ? path.join(
@@ -3721,6 +4210,20 @@ function ensureMinimalDist() {
     recursive: true,
   });
   writeFileSync(path.join(distPath, 'cli.js'), 'console.log("qwen");\n');
+  if (includeCliEntry) {
+    writeFileSync(path.join(distPath, 'cli-entry.js'), 'import "./cli.js";\n');
+  }
+  if (includeNpmPackageArtifacts) {
+    writeFileSync(
+      path.join(distPath, 'postinstall.js'),
+      'console.log("postinstall");\n',
+    );
+    mkdirSync(path.join(distPath, 'patches'), { recursive: true });
+    writeFileSync(
+      path.join(distPath, 'patches', 'dependency.patch'),
+      'patch\n',
+    );
+  }
   writeFileSync(path.join(distPath, 'chunks/index.js'), 'export {};\n');
   writeFileSync(
     path.join(distPath, 'package.json'),
@@ -4010,25 +4513,56 @@ function extractZipForTest(archive, destination) {
   });
 }
 
-function packageFakeStandalone(tmpDir, nodeArchiveOptions = {}) {
+function packageFakeStandalone(
+  tmpDir,
+  nodeArchiveOptions = {},
+  { nativeModulesDir } = {},
+) {
   const outDir = path.join(tmpDir, 'out');
   mkdirSync(outDir, { recursive: true });
-  execFileSync(
-    'node',
-    [
-      'scripts/create-standalone-package.js',
-      '--target',
-      'linux-x64',
-      '--node-archive',
-      createFakeNodeArchive(tmpDir, nodeArchiveOptions),
-      '--out-dir',
-      outDir,
-      '--version',
-      '0.0.0-smoke',
-    ],
-    { stdio: 'pipe' },
-  );
+  const args = [
+    'scripts/create-standalone-package.js',
+    '--target',
+    'linux-x64',
+    '--node-archive',
+    createFakeNodeArchive(tmpDir, nodeArchiveOptions),
+    '--out-dir',
+    outDir,
+    '--version',
+    '0.0.0-smoke',
+  ];
+  if (nativeModulesDir) {
+    args.push('--native-modules-dir', nativeModulesDir);
+  }
+  execFileSync('node', args, { stdio: 'pipe' });
   return path.join(outDir, 'qwen-code-linux-x64.tar.gz');
+}
+
+function createFakeClipboardModules(tmpDir, nativePackages) {
+  const modulesDir = path.join(tmpDir, 'clipboard-modules');
+  const clipboardDir = path.join(modulesDir, '@teddyzhu', 'clipboard');
+  mkdirSync(clipboardDir, { recursive: true });
+  writeFileSync(
+    path.join(clipboardDir, 'package.json'),
+    JSON.stringify({ name: '@teddyzhu/clipboard', version: '0.0.5' }),
+  );
+  writeFileSync(path.join(clipboardDir, 'index.js'), 'module.exports = {};\n');
+
+  for (const packageName of nativePackages) {
+    const packageDir = path.join(modulesDir, packageName);
+    const binaryName = packageName.replace(
+      '@teddyzhu/clipboard-',
+      'clipboard.',
+    );
+    mkdirSync(packageDir, { recursive: true });
+    writeFileSync(
+      path.join(packageDir, 'package.json'),
+      JSON.stringify({ name: packageName, version: '0.0.5' }),
+    );
+    writeFileSync(path.join(packageDir, `${binaryName}.node`), 'native\n');
+  }
+
+  return modulesDir;
 }
 
 function runUnixInstaller(

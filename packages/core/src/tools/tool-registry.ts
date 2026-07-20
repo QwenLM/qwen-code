@@ -12,7 +12,7 @@ import type {
   ToolInvocation,
 } from './tools.js';
 import { Kind, BaseDeclarativeTool, BaseToolInvocation } from './tools.js';
-import type { Config } from '../config/config.js';
+import { type Config, matchesAnyServerPattern } from '../config/config.js';
 import { spawn } from 'node:child_process';
 import { StringDecoder } from 'node:string_decoder';
 import type { SendSdkMcpMessage } from './mcp-client.js';
@@ -25,11 +25,18 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
+import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 
 type ToolParams = Record<string, unknown>;
 
 /** Factory function for lazy tool instantiation via dynamic import. */
 export type ToolFactory = () => Promise<AnyDeclarativeTool>;
+
+export interface DeferredToolSummary {
+  name: string;
+  description: string;
+  serverName?: string;
+}
 
 const debugLogger = createDebugLogger('TOOL_REGISTRY');
 
@@ -196,24 +203,60 @@ export class ToolRegistry {
     sendSdkMcpMessage?: SendSdkMcpMessage,
   ) {
     this.config = config;
-    this.mcpClientManager = new McpClientManager(
-      this.config,
-      this,
+    // options-bag
+    // ctor; previously 7 positional args with `undefined, undefined`
+    // sentinels for `healthConfig` / `budgetConfig`. `pool` is
+    // forwarded from Config (set by daemon-mode QwenAgent in
+    // `newSessionConfig`); when undefined the manager keeps its previous
+    // per-session spawn behavior, when defined non-SDK MCP discovery
+    // goes through `pool.acquire` so N sessions in the same workspace
+    // share one transport per unique server config.
+    this.mcpClientManager = new McpClientManager(this.config, this, {
       eventEmitter,
       sendSdkMcpMessage,
-    );
+      pool: this.config.getMcpTransportPool(),
+    });
+  }
+
+  // Stable declaration order keeps the serialized tools block independent of
+  // async registration history (MCP discovery, reconnects, ToolSearch reveals).
+  private static compareToolsByDeclarationName(
+    a: AnyDeclarativeTool,
+    b: AnyDeclarativeTool,
+  ): number {
+    const aName = a.schema.name ?? a.name;
+    const bName = b.schema.name ?? b.name;
+    const byName = aName.localeCompare(bName);
+    if (byName !== 0) return byName;
+    return a.displayName.localeCompare(b.displayName);
   }
 
   /**
    * Returns true when `name` is in the Config's `disabledTools` set, in
    * which case `registerTool` / `registerFactory` will skip it. This is
    * the chokepoint for the daemon mutation route at `POST /workspace/
-   * tools/:name/enable {enabled:false}` (#4175 Wave 4 PR 17); both
+   * tools/:name/enable {enabled:false}`; both
    * built-ins and MCP-discovered tools flow through `registerTool`, so
    * gating here covers every registration path.
    */
-  private isToolDisabled(name: string): boolean {
-    return this.config.getDisabledTools().has(name);
+  private isToolDisabled(
+    name: string,
+    aliases: readonly string[] = [],
+  ): boolean {
+    const disabledTools = this.config.getDisabledTools();
+    const hasExactMatch =
+      disabledTools.has(name) ||
+      aliases.some((alias) => disabledTools.has(alias));
+    if (hasExactMatch || !name.startsWith('mcp__')) {
+      return hasExactMatch;
+    }
+
+    for (const disabledName of disabledTools) {
+      if (normalizeMcpToolName(disabledName) === name) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /**
@@ -221,7 +264,12 @@ export class ToolRegistry {
    * @param tool - The tool object containing schema and execution logic.
    */
   registerTool(tool: AnyDeclarativeTool): void {
-    if (this.isToolDisabled(tool.name)) {
+    if (
+      this.isToolDisabled(
+        tool.name,
+        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+      )
+    ) {
       debugLogger.info(
         `Tool "${tool.name}" skipped: present in disabledTools set.`,
       );
@@ -250,7 +298,7 @@ export class ToolRegistry {
         );
       }
     }
-    // #4282 fold-in 2 (gpt-5.5 CV3): re-check the disabled set against
+    // Re-check the disabled set against
     // the FINAL registration name. Without this, an MCP tool that
     // collides with a lazy factory and gets renamed via
     // `asFullyQualifiedTool()` (e.g. `structured_output` →
@@ -258,7 +306,12 @@ export class ToolRegistry {
     // `isToolDisabled(tool.name)` gate above when the operator
     // disabled the renamed-and-exposed name. Re-evaluating after the
     // rename closes that hole.
-    if (this.isToolDisabled(tool.name)) {
+    if (
+      this.isToolDisabled(
+        tool.name,
+        tool instanceof DiscoveredMCPTool ? tool.permissionAliases : [],
+      )
+    ) {
       debugLogger.info(
         `Tool "${tool.name}" skipped (post-rename): present in disabledTools set.`,
       );
@@ -401,6 +454,9 @@ export class ToolRegistry {
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
 
+    // Remove resources
+    this.config.getResourceRegistry().removeResourcesByServer(serverName);
+
     // Disconnect the MCP client
     await this.mcpClientManager.disconnectServer(serverName);
   }
@@ -417,6 +473,9 @@ export class ToolRegistry {
     // Remove prompts
     this.config.getPromptRegistry().removePromptsByServer(serverName);
 
+    // Remove resources
+    this.config.getResourceRegistry().removeResourcesByServer(serverName);
+
     try {
       // Disconnect the MCP client
       await this.mcpClientManager.disconnectServer(serverName);
@@ -430,14 +489,14 @@ export class ToolRegistry {
         // while isMcpServerDisabled still returns false, mis-reporting
         // an intentional disable as a connectivity failure.
         const currentExcluded = this.config.getExcludedMcpServers() || [];
-        if (!currentExcluded.includes(serverName)) {
+        if (!matchesAnyServerPattern(serverName, currentExcluded)) {
           this.config.setExcludedMcpServers([...currentExcluded, serverName]);
         }
       } finally {
         // Always drop the server from the global status registry — even
         // if disconnect or the exclusion-list update throws — so the
         // Footer's MCP health pill stops counting it as "offline". A
-        // leftover entry would resurrect the bug from #3895.
+        // leftover entry would resurrect the bug.
         removeMCPServerStatus(serverName);
       }
     }
@@ -463,6 +522,7 @@ export class ToolRegistry {
     this.removeDiscoveredTools();
 
     this.config.getPromptRegistry().clear();
+    this.config.getResourceRegistry().clear();
 
     await this.discoverAndRegisterToolsFromCommand();
 
@@ -480,6 +540,7 @@ export class ToolRegistry {
     this.removeDiscoveredTools();
 
     this.config.getPromptRegistry().clear();
+    this.config.getResourceRegistry().clear();
 
     // discover tools using MCP servers, if configured
     await this.mcpClientManager.discoverAllMcpTools(this.config);
@@ -510,6 +571,7 @@ export class ToolRegistry {
     }
 
     this.config.getPromptRegistry().removePromptsByServer(serverName);
+    this.config.getResourceRegistry().removeResourcesByServer(serverName);
 
     await this.mcpClientManager.discoverMcpToolsForServer(
       serverName,
@@ -657,19 +719,16 @@ export class ToolRegistry {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
     const includeDeferred = options?.includeDeferred === true;
-    const declarations: FunctionDeclaration[] = [];
-    this.tools.forEach((tool) => {
-      if (
-        !includeDeferred &&
-        tool.shouldDefer &&
-        !tool.alwaysLoad &&
-        !this.revealedDeferred.has(tool.name)
-      ) {
-        return;
-      }
-      declarations.push(tool.schema);
-    });
-    return declarations;
+    return Array.from(this.tools.values())
+      .filter(
+        (tool) =>
+          includeDeferred ||
+          !tool.shouldDefer ||
+          tool.alwaysLoad ||
+          !this.isDeferredAndHidden(tool.name),
+      )
+      .sort(ToolRegistry.compareToolsByDeclarationName)
+      .map((tool) => tool.schema);
   }
 
   /**
@@ -700,6 +759,25 @@ export class ToolRegistry {
   }
 
   /**
+   * Whether a deferred tool is currently hidden from the model's
+   * function-declaration list. Returns `true` when the tool:
+   * - is deferred (`shouldDefer=true`),
+   * - is not always-loaded,
+   * - has not been revealed this session, AND
+   * - is not in the visibleTools config list.
+   */
+  isDeferredAndHidden(name: string): boolean {
+    const tool = this.tools.get(name);
+    if (!tool) return false;
+    return (
+      tool.shouldDefer &&
+      !tool.alwaysLoad &&
+      !this.revealedDeferred.has(name) &&
+      !this.config.getVisibleTools().has(name)
+    );
+  }
+
+  /**
    * Clears the set of revealed deferred tools. Called by {@link GeminiClient}
    * when a chat session is reset (e.g. `/clear`) so the new session starts
    * with no revealed tools — the same state as any fresh session.
@@ -709,21 +787,36 @@ export class ToolRegistry {
   }
 
   /**
-   * Returns a lightweight summary ({name, description}) of tools that are
+   * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
-   * set of on-demand tools in the system prompt so the model knows what is
-   * reachable via ToolSearch. `alwaysLoad` tools are excluded.
+   * set of on-demand tools in the startup reminder so the model knows what is
+   * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
+   * {@link Config.getVisibleTools} are excluded.
    */
-  getDeferredToolSummary(): Array<{ name: string; description: string }> {
-    const summary: Array<{ name: string; description: string }> = [];
+  getDeferredToolSummary(): DeferredToolSummary[] {
+    const summary: DeferredToolSummary[] = [];
     this.tools.forEach((tool) => {
-      if (tool.shouldDefer && !tool.alwaysLoad) {
-        summary.push({ name: tool.name, description: tool.description });
+      if (
+        tool.shouldDefer &&
+        !tool.alwaysLoad &&
+        !this.config.getVisibleTools().has(tool.name)
+      ) {
+        summary.push({
+          name: tool.name,
+          description: tool.description,
+          ...(tool instanceof DiscoveredMCPTool
+            ? { serverName: tool.serverName }
+            : {}),
+        });
       }
     });
-    // Stable order so the system prompt text is deterministic across runs.
+    // Stable order so the startup reminder text is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
+  }
+
+  getMcpServerInstructions(): Map<string, string> {
+    return this.mcpClientManager.getServerInstructions();
   }
 
   /**

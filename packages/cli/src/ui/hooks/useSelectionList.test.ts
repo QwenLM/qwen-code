@@ -1027,4 +1027,101 @@ describe('useSelectionList', () => {
       expect(mockOnSelect).not.toHaveBeenCalled();
     });
   });
+
+  describe('disableVimNav', () => {
+    it('bare j does NOT dispatch MOVE_DOWN when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('j');
+      expect(result.current.activeIndex).toBe(0);
+    });
+
+    it('bare k does NOT dispatch MOVE_UP when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          initialIndex: 2,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('k');
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('Ctrl+N still dispatches MOVE_DOWN when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('n', 'n', { ctrl: true });
+      expect(result.current.activeIndex).toBe(2);
+    });
+
+    it('arrow keys still work when disableVimNav is true', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          disableVimNav: true,
+        }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      pressKey('down');
+      expect(result.current.activeIndex).toBe(2);
+      pressKey('up');
+      expect(result.current.activeIndex).toBe(0);
+    });
+  });
+
+  describe('selectIndex (click-to-choose)', () => {
+    it('moves the active index to the target and selects it', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({
+          items,
+          onSelect: mockOnSelect,
+          onHighlight: mockOnHighlight,
+        }),
+      );
+      act(() => {
+        result.current.selectIndex(2);
+      });
+      expect(result.current.activeIndex).toBe(2);
+      expect(mockOnSelect).toHaveBeenCalledWith('C');
+    });
+
+    it('selects the already-active row when targeted again', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({ items, onSelect: mockOnSelect }),
+      );
+      expect(result.current.activeIndex).toBe(0);
+      act(() => {
+        result.current.selectIndex(0);
+      });
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnSelect).toHaveBeenCalledWith('A');
+    });
+
+    it('ignores a disabled target (no move, no select)', () => {
+      const { result } = renderHook(() =>
+        useSelectionList({ items, onSelect: mockOnSelect }),
+      );
+      act(() => {
+        result.current.selectIndex(1); // 'B' is disabled
+      });
+      expect(result.current.activeIndex).toBe(0);
+      expect(mockOnSelect).not.toHaveBeenCalled();
+    });
+  });
 });

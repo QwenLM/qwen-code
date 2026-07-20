@@ -83,7 +83,6 @@ function parseArenaArgs(args: string): {
     task = task.replace(/--models\s+\S+/, '').trim();
   }
 
-  // Strip surrounding quotes from task
   task = task.replace(/^["']|["']$/g, '').trim();
 
   return { models, task };

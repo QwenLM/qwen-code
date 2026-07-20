@@ -142,6 +142,12 @@ describe('UiTelemetryService', () => {
         totalLinesAdded: 0,
         totalLinesRemoved: 0,
       },
+      skills: {
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      },
     });
     expect(service.getLastPromptTokenCount()).toBe(0);
   });
@@ -798,6 +804,40 @@ describe('UiTelemetryService', () => {
     });
   });
 
+  describe('Skill Invocation Metrics', () => {
+    it('aggregates successful and failed skill invocations by name', () => {
+      service.recordSkillInvocation('review', true);
+      service.recordSkillInvocation('review', false);
+      service.recordSkillInvocation('testing', true);
+
+      expect(service.getMetrics().skills).toEqual({
+        totalCalls: 3,
+        totalSuccess: 2,
+        totalFail: 1,
+        byName: {
+          review: { count: 2, success: 1, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('handles skill names that collide with object prototype keys', () => {
+      service.recordSkillInvocation('constructor', true);
+      service.recordSkillInvocation('__proto__', false);
+
+      expect(service.getMetrics().skills?.byName['constructor']).toEqual({
+        count: 1,
+        success: 1,
+        fail: 0,
+      });
+      expect(service.getMetrics().skills?.byName['__proto__']).toEqual({
+        count: 1,
+        success: 0,
+        fail: 1,
+      });
+    });
+  });
+
   describe('resetLastPromptTokenCount', () => {
     it('should reset the last prompt token count to 0', () => {
       // First, set up some initial token count
@@ -969,6 +1009,224 @@ describe('UiTelemetryService', () => {
       const metrics = service.getMetrics();
       expect(metrics.files.totalLinesAdded).toBe(0);
       expect(metrics.files.totalLinesRemoved).toBe(0);
+    });
+  });
+
+  describe('Per-Session Metrics Isolation', () => {
+    const SESSION_A = 'session-aaa';
+    const SESSION_B = 'session-bbb';
+
+    const makeApiEvent = (model: string, inputTokens: number) =>
+      ({
+        'event.name': EVENT_API_RESPONSE,
+        model,
+        duration_ms: 100,
+        input_token_count: inputTokens,
+        output_token_count: 10,
+        total_token_count: inputTokens + 10,
+        cached_content_token_count: 0,
+        thoughts_token_count: 0,
+      }) as ApiResponseEvent & { 'event.name': typeof EVENT_API_RESPONSE };
+
+    const makeToolEvent = (name: string) =>
+      ({
+        'event.name': EVENT_TOOL_CALL,
+        function_name: name,
+        duration_ms: 50,
+        success: true,
+        decision: ToolCallDecision.AUTO_ACCEPT,
+        prompt_id: 'p1',
+      }) as ToolCallEvent & { 'event.name': typeof EVENT_TOOL_CALL };
+
+    it('should isolate metrics by sessionId', () => {
+      service.addEvent(makeApiEvent('model-a', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-b', 200), SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.models['model-a']?.tokens.prompt).toBe(100);
+      expect(metricsA.models['model-b']).toBeUndefined();
+
+      expect(metricsB.models['model-b']?.tokens.prompt).toBe(200);
+      expect(metricsB.models['model-a']).toBeUndefined();
+    });
+
+    it('should still accumulate to global metrics', () => {
+      service.addEvent(makeApiEvent('model-x', 100), SESSION_A);
+      service.addEvent(makeApiEvent('model-x', 200), SESSION_B);
+
+      const global = service.getMetrics();
+      expect(global.models['model-x']?.tokens.prompt).toBe(300);
+    });
+
+    it('should return empty metrics for unknown session', () => {
+      const metrics = service.getMetricsForSession('unknown');
+      expect(metrics.models).toEqual({});
+      expect(metrics.tools.totalCalls).toBe(0);
+    });
+
+    it('should handle events without sessionId (global only)', () => {
+      service.addEvent(makeApiEvent('model-z', 50));
+
+      const global = service.getMetrics();
+      expect(global.models['model-z']?.tokens.prompt).toBe(50);
+
+      const sessionMetrics = service.getMetricsForSession('any-session');
+      expect(sessionMetrics.models).toEqual({});
+    });
+
+    it('resetSession should clear only that session', () => {
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.addEvent(makeApiEvent('m', 200), SESSION_B);
+
+      service.resetSession(SESSION_A);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.models).toEqual({});
+      expect(metricsB.models['m']?.tokens.prompt).toBe(200);
+
+      // Global should not be affected
+      const global = service.getMetrics();
+      expect(global.models['m']?.tokens.prompt).toBe(300);
+    });
+
+    it('removeSession should prevent late events from recreating bucket', () => {
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.removeSession(SESSION_A);
+
+      // Late event after removal
+      service.addEvent(makeApiEvent('m', 50), SESSION_A);
+
+      // Session bucket should not be recreated
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.models).toEqual({});
+
+      // But global should still accumulate
+      const global = service.getMetrics();
+      expect(global.models['m']?.tokens.prompt).toBe(150);
+    });
+
+    it('resetSession should re-enable a closed session', () => {
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.removeSession(SESSION_A);
+
+      // Re-open the session
+      service.resetSession(SESSION_A);
+      service.addEvent(makeApiEvent('m', 50), SESSION_A);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.models['m']?.tokens.prompt).toBe(50);
+    });
+
+    it('should isolate tool call metrics by session', () => {
+      service.addEvent(makeToolEvent('Read'), SESSION_A);
+      service.addEvent(makeToolEvent('Write'), SESSION_B);
+      service.addEvent(makeToolEvent('Read'), SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.tools.totalCalls).toBe(1);
+      expect(metricsA.tools.byName['Read']?.count).toBe(1);
+      expect(metricsA.tools.byName['Write']).toBeUndefined();
+
+      expect(metricsB.tools.totalCalls).toBe(2);
+      expect(metricsB.tools.byName['Write']?.count).toBe(1);
+      expect(metricsB.tools.byName['Read']?.count).toBe(1);
+    });
+
+    it('should isolate skill invocation metrics by session', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.recordSkillInvocation('review', false, SESSION_B);
+      service.recordSkillInvocation('testing', true, SESSION_B);
+
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      const metricsB = service.getMetricsForSession(SESSION_B);
+
+      expect(metricsA.skills).toEqual({
+        totalCalls: 1,
+        totalSuccess: 1,
+        totalFail: 0,
+        byName: {
+          review: { count: 1, success: 1, fail: 0 },
+        },
+      });
+      expect(metricsB.skills).toEqual({
+        totalCalls: 2,
+        totalSuccess: 1,
+        totalFail: 1,
+        byName: {
+          review: { count: 1, success: 0, fail: 1 },
+          testing: { count: 1, success: 1, fail: 0 },
+        },
+      });
+    });
+
+    it('removeSession should prevent late skill metrics from recreating bucket', () => {
+      service.recordSkillInvocation('review', true, SESSION_A);
+      service.removeSession(SESSION_A);
+
+      service.recordSkillInvocation('review', false, SESSION_A);
+
+      expect(service.getMetricsForSession(SESSION_A).skills).toEqual({
+        totalCalls: 0,
+        totalSuccess: 0,
+        totalFail: 0,
+        byName: {},
+      });
+      expect(service.getMetrics().skills?.byName['review']).toEqual({
+        count: 2,
+        success: 1,
+        fail: 1,
+      });
+    });
+
+    it('resetSession should not clear global metrics (replay scenario)', () => {
+      // Simulate: session A active, session B being resumed
+      service.addEvent(makeApiEvent('m', 100), SESSION_A);
+      service.addEvent(makeApiEvent('m', 200), SESSION_B);
+
+      // Resume session B: resetSession only clears B's bucket
+      service.resetSession(SESSION_B);
+
+      // Session A untouched
+      const metricsA = service.getMetricsForSession(SESSION_A);
+      expect(metricsA.models['m']?.tokens.prompt).toBe(100);
+
+      // Session B cleared
+      const metricsB = service.getMetricsForSession(SESSION_B);
+      expect(metricsB.models).toEqual({});
+
+      // Global NOT cleared (still has both sessions' original data)
+      const global = service.getMetrics();
+      expect(global.models['m']?.tokens.prompt).toBe(300);
+
+      // Replay events into session B
+      service.addEvent(makeApiEvent('m', 50), SESSION_B);
+
+      // Session B has only replayed data
+      const metricsB2 = service.getMetricsForSession(SESSION_B);
+      expect(metricsB2.models['m']?.tokens.prompt).toBe(50);
+
+      // Global accumulated the replay too
+      const global2 = service.getMetrics();
+      expect(global2.models['m']?.tokens.prompt).toBe(350);
+    });
+
+    it('#closedSessions should be bounded', () => {
+      // Add more than MAX_CLOSED_SESSIONS
+      for (let i = 0; i < 1005; i++) {
+        service.addEvent(makeApiEvent('m', 1), `session-${i}`);
+        service.removeSession(`session-${i}`);
+      }
+      // Late event to oldest session should now create a new bucket
+      // (oldest was evicted from closedSessions)
+      service.addEvent(makeApiEvent('m', 99), 'session-0');
+      const metrics = service.getMetricsForSession('session-0');
+      expect(metrics.models['m']?.tokens.prompt).toBe(99);
     });
   });
 });

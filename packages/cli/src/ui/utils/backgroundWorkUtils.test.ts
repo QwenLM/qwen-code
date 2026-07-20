@@ -12,13 +12,14 @@ import {
 } from './backgroundWorkUtils.js';
 
 function createMockConfig(overrides?: {
-  hasUnfinalizedTasks?: boolean;
+  hasRunningTasks?: boolean;
   runningMonitors?: unknown[];
   hasRunningEntries?: boolean;
+  hasRunningWorkflows?: boolean;
 }): Config {
   return {
     getBackgroundTaskRegistry: () => ({
-      hasUnfinalizedTasks: () => overrides?.hasUnfinalizedTasks ?? false,
+      hasRunningTasks: () => overrides?.hasRunningTasks ?? false,
       reset: vi.fn(),
     }),
     getMonitorRegistry: () => ({
@@ -29,6 +30,10 @@ function createMockConfig(overrides?: {
       hasRunningEntries: () => overrides?.hasRunningEntries ?? false,
       reset: vi.fn(),
     }),
+    getWorkflowRunRegistry: () => ({
+      hasRunningEntries: () => overrides?.hasRunningWorkflows ?? false,
+      reset: vi.fn(),
+    }),
   } as unknown as Config;
 }
 
@@ -37,11 +42,13 @@ describe('hasBlockingBackgroundWork', () => {
     expect(hasBlockingBackgroundWork(createMockConfig())).toBe(false);
   });
 
-  it('returns true when background tasks are unfinalized', () => {
+  // #5949: the gate keys off hasRunningTasks(), NOT hasUnfinalizedTasks()
+  // — a cancelled task whose finalize callback hasn't fired yet must not
+  // block /clear or session resume (both abort-and-reset right after the
+  // gate, suppressing the pending notification anyway).
+  it('returns true when background tasks are still running', () => {
     expect(
-      hasBlockingBackgroundWork(
-        createMockConfig({ hasUnfinalizedTasks: true }),
-      ),
+      hasBlockingBackgroundWork(createMockConfig({ hasRunningTasks: true })),
     ).toBe(true);
   });
 
@@ -59,10 +66,21 @@ describe('hasBlockingBackgroundWork', () => {
     ).toBe(true);
   });
 
-  it('short-circuits: does not check monitors or shells when tasks are unfinalized', () => {
+  // R7 (wenshao): workflow registry is the 4th sibling. Without
+  // including it in the OR chain, /clear and session-resume happily
+  // ran while a workflow was mid-run, orphaning the dispatch loop.
+  it('returns true when a workflow is still running', () => {
+    expect(
+      hasBlockingBackgroundWork(
+        createMockConfig({ hasRunningWorkflows: true }),
+      ),
+    ).toBe(true);
+  });
+
+  it('short-circuits: does not check monitors or shells when tasks are running', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: () => true,
+        hasRunningTasks: () => true,
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => {
@@ -79,7 +97,7 @@ describe('hasBlockingBackgroundWork', () => {
   it('short-circuits: does not check shells when monitors are running', () => {
     const config = {
       getBackgroundTaskRegistry: () => ({
-        hasUnfinalizedTasks: () => false,
+        hasRunningTasks: () => false,
         reset: vi.fn(),
       }),
       getMonitorRegistry: () => ({
@@ -96,15 +114,17 @@ describe('hasBlockingBackgroundWork', () => {
 });
 
 describe('resetBackgroundStateForSessionSwitch', () => {
-  it('calls reset on all three registries', () => {
+  it('calls reset on all four registries', () => {
     const resetTasks = vi.fn();
     const resetMonitors = vi.fn();
     const resetShells = vi.fn();
+    const resetWorkflows = vi.fn();
 
     const config = {
       getBackgroundTaskRegistry: () => ({ reset: resetTasks }),
       getMonitorRegistry: () => ({ reset: resetMonitors }),
       getBackgroundShellRegistry: () => ({ reset: resetShells }),
+      getWorkflowRunRegistry: () => ({ reset: resetWorkflows }),
     } as unknown as Config;
 
     resetBackgroundStateForSessionSwitch(config);
@@ -112,5 +132,6 @@ describe('resetBackgroundStateForSessionSwitch', () => {
     expect(resetTasks).toHaveBeenCalledOnce();
     expect(resetMonitors).toHaveBeenCalledOnce();
     expect(resetShells).toHaveBeenCalledOnce();
+    expect(resetWorkflows).toHaveBeenCalledOnce();
   });
 });

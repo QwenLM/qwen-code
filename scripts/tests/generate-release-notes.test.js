@@ -1,0 +1,537 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { describe, expect, it } from 'vitest';
+import {
+  buildPullRequestQuery,
+  classifyChange,
+  createOpenAiCompleter,
+  enrichEntries,
+  generateAiContent,
+  generateReleaseNotes,
+  parseGeneratedEntries,
+  renderReleaseNotes,
+} from '../generate-release-notes.js';
+
+const PR = (number) => `https://github.com/QwenLM/qwen-code/pull/${number}`;
+
+const entry = (number, title, labels = []) => ({
+  number,
+  title,
+  url: PR(number),
+  author: 'alice',
+  labels,
+  body: '',
+  files: [],
+  additions: 1,
+  deletions: 0,
+  changedFiles: 1,
+});
+
+describe('parseGeneratedEntries', () => {
+  it('extracts the authoritative PR list from GitHub generated notes', () => {
+    const body = [
+      "## What's Changed",
+      `* feat(cli): add session search by @alice in ${PR(12)}`,
+      `* fix(core): preserve tool results by @bob in ${PR(8)}`,
+      `* fix(ci): retry publishing by @carol with @Copilot in ${PR(6574)}`,
+      '',
+      '**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v1...v2',
+    ].join('\n');
+
+    expect(parseGeneratedEntries(body)).toEqual([
+      {
+        number: 12,
+        title: 'feat(cli): add session search',
+        url: PR(12),
+        author: 'alice',
+      },
+      {
+        number: 8,
+        title: 'fix(core): preserve tool results',
+        url: PR(8),
+        author: 'bob',
+      },
+      {
+        number: 6574,
+        title: 'fix(ci): retry publishing',
+        url: PR(6574),
+        author: 'carol',
+        coAuthors: ['Copilot'],
+      },
+    ]);
+  });
+
+  it('rejects a partially parsed GitHub PR list', () => {
+    const body = [
+      `* feat(cli): parsed by @alice in ${PR(1)}`,
+      `* fix(core): changed format by @bob and @carol in ${PR(2)}`,
+    ].join('\n');
+
+    expect(() => parseGeneratedEntries(body)).toThrow(
+      /Could not parse every pull request entry/,
+    );
+  });
+
+  it('does not drop a PR bullet when GitHub omits the author phrase', () => {
+    const body = [
+      "## What's Changed",
+      `* feat(cli): parsed by @alice in ${PR(1)}`,
+      `* fix(core): changed format in ${PR(2)}`,
+      '',
+      '## New Contributors',
+      `* @newbie made their first contribution in ${PR(2)}`,
+    ].join('\n');
+
+    expect(parseGeneratedEntries(body)).toEqual([
+      {
+        number: 1,
+        title: 'feat(cli): parsed',
+        url: PR(1),
+        author: 'alice',
+      },
+      {
+        number: 2,
+        title: 'fix(core): changed format',
+        url: PR(2),
+        author: null,
+      },
+    ]);
+  });
+});
+
+describe('classifyChange', () => {
+  it.each([
+    ['feat(cli): add x', [], 'Features'],
+    ['fix(core): repair x', [], 'Bug Fixes'],
+    ['perf: speed up x', [], 'Performance'],
+    ['docs: explain x', [], 'Documentation'],
+    ['test(core): cover x', [], 'Internal Changes'],
+  ])('classifies %s deterministically', (title, labels, expected) => {
+    expect(classifyChange(entry(1, title, labels))).toBe(expected);
+  });
+
+  it('lets an explicit breaking-change label override the title category', () => {
+    expect(
+      classifyChange(
+        entry(1, 'refactor(core): replace x', ['breaking-change']),
+      ),
+    ).toBe('Breaking Changes');
+  });
+
+  it.each([
+    ['type/feature-request', 'Features'],
+    ['type/bug', 'Bug Fixes'],
+    ['category/performance', 'Performance'],
+    ['type/documentation', 'Documentation'],
+    ['scope/documentation', 'Documentation'],
+  ])('uses an explicit %s label for prefixless titles', (label, expected) => {
+    expect(classifyChange(entry(1, 'A clearer change title', [label]))).toBe(
+      expected,
+    );
+  });
+});
+
+describe('renderReleaseNotes', () => {
+  it('renders highlights and every PR exactly once in the complete list', () => {
+    const entries = [
+      {
+        ...entry(1, 'feat(cli): add session search'),
+        coAuthors: ['Copilot'],
+      },
+      entry(2, 'fix(core): preserve tool results'),
+      entry(3, 'docs: explain session search'),
+      entry(4, 'refactor(core): remove legacy path', ['breaking-change']),
+    ];
+    const summaries = new Map([
+      [1, 'Adds session search to the CLI.'],
+      [2, 'Preserves tool results when history is repaired.'],
+      [3, 'Documents session search.'],
+      [4, 'Removes a legacy compatibility path.'],
+    ]);
+
+    const markdown = renderReleaseNotes({
+      entries,
+      summaries,
+      highlights: [
+        {
+          text: 'Session workflows are easier to find and recover.',
+          prs: [1, 2],
+        },
+      ],
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(markdown).toContain('<!-- qwen-release-notes:v1 -->');
+    expect(markdown).toContain('## Highlights');
+    expect(markdown).toContain(
+      'Session workflows are easier to find and recover. ([#1]',
+    );
+    expect(markdown).toContain('## Complete Change List');
+    expect(markdown).toContain('### Features');
+    expect(markdown).toContain('### Bug Fixes');
+    expect(markdown).toContain('### Documentation');
+    expect(markdown).toContain(
+      `Adds session search to the CLI. ([#1](${PR(1)})) by @alice with @Copilot`,
+    );
+    for (const number of [1, 2, 3, 4]) {
+      expect(markdown.match(new RegExp(`\\[#${number}\\]`, 'g'))).toHaveLength(
+        number < 3 ? 2 : 1,
+      );
+    }
+    expect(markdown).toContain(
+      '**Full Changelog**: https://github.com/QwenLM/qwen-code/compare/v1.0.0...v1.1.0',
+    );
+  });
+});
+
+describe('generateAiContent', () => {
+  it('summarizes bounded batches and then generates highlights', async () => {
+    const entries = [
+      entry(1, 'feat(cli): add session search'),
+      entry(2, 'fix(core): preserve tool results'),
+      entry(3, 'docs: explain session search'),
+    ];
+    const calls = [];
+    const complete = async (request) => {
+      calls.push(request);
+      if (request.kind === 'summaries') {
+        return `\`\`\`json\n${JSON.stringify({
+          summaries: request.entries.map((item) => ({
+            pr: item.number,
+            summary: `User-facing summary for ${item.number}.`,
+          })),
+        })}\n\`\`\``;
+      }
+      return `\`\`\`json\n${JSON.stringify({
+        highlights: [{ text: 'Session workflows are clearer.', prs: [1, 2] }],
+      })}\n\`\`\``;
+    };
+
+    const result = await generateAiContent(entries, complete, { batchSize: 2 });
+
+    expect(calls.map((call) => call.kind)).toEqual([
+      'summaries',
+      'summaries',
+      'highlights',
+    ]);
+    expect(result.summaries.get(3)).toBe('User-facing summary for 3.');
+    expect(result.highlights).toEqual([
+      { text: 'Session workflows are clearer.', prs: [1, 2] },
+    ]);
+  });
+
+  it('falls back to original titles for an invalid summary batch', async () => {
+    const entries = [entry(1, 'feat: original'), entry(2, 'fix: original')];
+    const complete = async (request) => {
+      if (request.kind === 'summaries') {
+        return '{not-json';
+      }
+      return JSON.stringify({ highlights: [] });
+    };
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries).toEqual(
+      new Map([
+        [1, 'feat: original'],
+        [2, 'fix: original'],
+      ]),
+    );
+    expect(result.warnings).toHaveLength(1);
+  });
+
+  it('falls back to original titles when the model omits a PR summary', async () => {
+    const entries = [entry(1, 'feat: original'), entry(2, 'fix: original')];
+    const complete = async (request) =>
+      request.kind === 'summaries'
+        ? JSON.stringify({ summaries: [{ pr: 1, summary: 'Only one.' }] })
+        : JSON.stringify({ highlights: [] });
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries).toEqual(
+      new Map([
+        [1, 'feat: original'],
+        [2, 'fix: original'],
+      ]),
+    );
+    expect(result.warnings[0]).toMatch(/missing pull request summaries/);
+  });
+
+  it('falls back only the summary whose text is unsafe', async () => {
+    const entries = [entry(1, 'feat: original'), entry(2, 'fix: original')];
+    const complete = async (request) =>
+      request.kind === 'summaries'
+        ? JSON.stringify({
+            summaries: [
+              { pr: 1, summary: 'A safe summary.' },
+              { pr: 2, summary: '@QwenLM/security should review this.' },
+            ],
+          })
+        : JSON.stringify({ highlights: [] });
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries).toEqual(
+      new Map([
+        [1, 'A safe summary.'],
+        [2, 'fix: original'],
+      ]),
+    );
+    expect(result.warnings).toEqual([
+      'Summary fallback for #2: Summary for pull request 2 must be plain text without links or HTML.',
+    ]);
+  });
+
+  it('rejects GFM autolinks and encoded mentions from model text', async () => {
+    const entries = [
+      entry(1, 'feat: original one'),
+      entry(2, 'fix: original two'),
+      entry(3, 'docs: original three'),
+    ];
+    const complete = async (request) =>
+      request.kind === 'summaries'
+        ? JSON.stringify({
+            summaries: [
+              { pr: 1, summary: 'Visit www.example.com for details.' },
+              { pr: 2, summary: 'Contact security@example.com.' },
+              { pr: 3, summary: 'Ping &#x40;octocat for details.' },
+            ],
+          })
+        : JSON.stringify({ highlights: [] });
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries).toEqual(
+      new Map([
+        [1, 'feat: original one'],
+        [2, 'fix: original two'],
+        [3, 'docs: original three'],
+      ]),
+    );
+    expect(result.warnings).toHaveLength(3);
+  });
+
+  it('drops invalid highlights without losing the complete list', async () => {
+    const entries = [entry(1, 'feat: original')];
+    const complete = async (request) =>
+      request.kind === 'summaries'
+        ? JSON.stringify({ summaries: [{ pr: 1, summary: 'Readable.' }] })
+        : JSON.stringify({
+            highlights: [{ text: 'Invented.', prs: [99] }],
+          });
+
+    const result = await generateAiContent(entries, complete);
+
+    expect(result.summaries.get(1)).toBe('Readable.');
+    expect(result.highlights).toEqual([]);
+    expect(result.warnings).toHaveLength(1);
+  });
+});
+
+describe('enrichEntries', () => {
+  it('keeps authoritative order and fills metadata returned by GitHub', () => {
+    const base = parseGeneratedEntries(
+      `* feat: a by @alice in ${PR(2)}\n* fix: b by @bob in ${PR(1)}`,
+    );
+    const enriched = enrichEntries(base, [
+      {
+        number: 1,
+        body: 'Why it matters.',
+        labels: [{ name: 'type/bug' }],
+        files: [{ path: 'packages/core/a.ts' }],
+        additions: 3,
+        deletions: 2,
+        changedFiles: 1,
+      },
+    ]);
+
+    expect(enriched.map((item) => item.number)).toEqual([2, 1]);
+    expect(enriched[0].body).toBe('');
+    expect(enriched[1].body).toBe('Why it matters.');
+    expect(enriched[1].files).toEqual(['packages/core/a.ts']);
+  });
+});
+
+describe('buildPullRequestQuery', () => {
+  it('builds one aliased metadata lookup per authoritative PR number', () => {
+    const query = buildPullRequestQuery([12, 8]);
+
+    expect(query).toContain('pr0: pullRequest(number: 12)');
+    expect(query).toContain('pr1: pullRequest(number: 8)');
+    expect(query).toContain('files(first: 40)');
+    expect(query).not.toContain('pullRequest(number: undefined)');
+  });
+});
+
+describe('createOpenAiCompleter', () => {
+  it('uses a tool-free JSON completion request', async () => {
+    const requests = [];
+    const complete = createOpenAiCompleter({
+      apiKey: 'secret',
+      baseUrl: 'https://model.example/v1/',
+      model: 'qwen-test',
+      fetchImpl: async (url, init) => {
+        requests.push({ url, init });
+        return {
+          ok: true,
+          json: async () => ({
+            choices: [{ message: { content: '{"summaries":[]}' } }],
+          }),
+        };
+      },
+    });
+
+    await complete({ kind: 'summaries', entries: [] });
+
+    expect(requests[0].url).toBe('https://model.example/v1/chat/completions');
+    expect(requests[0].init.headers.Authorization).toBe('Bearer secret');
+    const body = JSON.parse(requests[0].init.body);
+    expect(body.model).toBe('qwen-test');
+    expect(body.response_format).toEqual({ type: 'json_object' });
+    expect(body.max_tokens).toBe(4096);
+    expect(body.tools).toBeUndefined();
+    expect(requests[0].init.signal).toBeDefined();
+  });
+});
+
+describe('generateReleaseNotes', () => {
+  it('returns GitHub notes unchanged when there are no PR entries', async () => {
+    const generatedBody =
+      '**Full Changelog**: https://example.com/compare/a...b';
+    const result = await generateReleaseNotes({
+      generatedBody,
+      metadata: [],
+      complete: async () => {
+        throw new Error('must not be called');
+      },
+      previousTag: 'v1.0.0',
+      tag: 'v1.0.1',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(result.markdown).toBe(generatedBody);
+    expect(result.usedAi).toBe(false);
+  });
+
+  it('renders the complete fallback list and new contributor credits', async () => {
+    const generatedBody = [
+      "## What's Changed",
+      `* feat(cli): add search by @alice in ${PR(1)}`,
+      '',
+      '## New Contributors',
+      `* @newbie made their first contribution in ${PR(1)}`,
+    ].join('\n');
+
+    const result = await generateReleaseNotes({
+      generatedBody,
+      metadata: [],
+      complete: null,
+      previousTag: 'v1.0.0',
+      tag: 'v1.1.0',
+      repo: 'QwenLM/qwen-code',
+    });
+
+    expect(result.markdown).toContain('### Features');
+    expect(result.markdown).toContain(
+      `feat(cli): add search ([#1](${PR(1)})) by @alice`,
+    );
+    expect(result.markdown).toContain('## New Contributors');
+    expect(result.markdown).toContain(
+      `- @newbie made their first contribution in [#1](${PR(1)})`,
+    );
+    expect(result.usedAi).toBe(false);
+    expect(result.warnings).toEqual(['Model configuration is unavailable.']);
+  });
+
+  it('runs the CLI path with fake gh data and writes fallback notes', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-notes-cli-'));
+    try {
+      const gh = join(dir, 'gh');
+      const output = join(dir, 'notes.md');
+      writeFileSync(
+        gh,
+        [
+          '#!/usr/bin/env node',
+          'const args = process.argv.slice(2);',
+          "if (args[0] === 'api' && args.includes('repos/QwenLM/qwen-code/releases/generate-notes')) {",
+          "  process.stdout.write([\"## What's Changed\", '* feat: add cli path by @alice in https://github.com/QwenLM/qwen-code/pull/1'].join('\\n'));",
+          '  process.exit(0);',
+          '}',
+          "if (args[0] === 'api' && args[1] === 'graphql') {",
+          "  process.stdout.write(JSON.stringify({ data: { repository: { pr0: { number: 1, body: 'Body.', additions: 1, deletions: 0, changedFiles: 1, labels: { nodes: [] }, files: { nodes: [] } } } } }));",
+          '  process.exit(0);',
+          '}',
+          'process.exit(1);',
+        ].join('\n'),
+      );
+      chmodSync(gh, 0o755);
+
+      execFileSync(
+        process.execPath,
+        [
+          'scripts/generate-release-notes.js',
+          '--tag=v1.0.1',
+          '--previous-tag=v1.0.0',
+          `--output=${output}`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            OPENAI_API_KEY: '',
+            OPENAI_BASE_URL: '',
+            OPENAI_MODEL: '',
+          },
+        },
+      );
+
+      const markdown = readFileSync(output, 'utf8');
+      expect(markdown).toContain('### Features');
+      expect(markdown).toContain(
+        `feat: add cli path ([#1](${PR(1)})) by @alice`,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('does not duplicate ERROR prefixes for argument failures', () => {
+    try {
+      execFileSync(
+        process.execPath,
+        [
+          'scripts/generate-release-notes.js',
+          '--repo=bad repo',
+          '--tag=v1.0.1',
+          '--previous-tag=v1.0.0',
+          '--dry-run',
+        ],
+        { encoding: 'utf8', stdio: 'pipe' },
+      );
+      throw new Error('expected command to fail');
+    } catch (error) {
+      expect(error.stderr).toContain(
+        'ERROR: Invalid repository "bad repo"; expected "owner/name".',
+      );
+      expect(error.stderr).not.toContain('ERROR: ERROR:');
+    }
+  });
+});

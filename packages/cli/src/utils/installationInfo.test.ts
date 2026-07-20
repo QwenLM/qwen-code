@@ -5,7 +5,12 @@
  */
 
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { getInstallationInfo, PackageManager } from './installationInfo.js';
+import {
+  formatUpdateInstructions,
+  getInstallationInfo,
+  PackageManager,
+  resolveUpdateCommand,
+} from './installationInfo.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
@@ -576,6 +581,51 @@ describe('getInstallationInfo', () => {
     expect(info.isGlobal).toBe(false);
   });
 
+  it('should not detect a sibling directory as the local git clone', () => {
+    const siblingPath = `${projectRoot}-other/packages/cli/dist/index.js`;
+    process.argv[1] = siblingPath;
+    mockedRealPathSync.mockReturnValue(siblingPath);
+    mockedIsGitRepository.mockReturnValue(true);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+
+    const info = getInstallationInfo(projectRoot, false);
+
+    expect(info.updateMessage).not.toContain('local git clone');
+    expect(info.isGlobal).toBe(true);
+  });
+
+  it('should not detect a Windows sibling directory as the local git clone', () => {
+    const windowsRoot = 'C:/repo/app';
+    const siblingPath = 'C:\\repo\\app-other\\packages\\cli\\dist\\index.js';
+    process.argv[1] = siblingPath;
+    mockedRealPathSync.mockReturnValue(siblingPath);
+    mockedIsGitRepository.mockReturnValue(true);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+
+    const info = getInstallationInfo(windowsRoot, false);
+
+    expect(info.updateMessage).not.toContain('local git clone');
+    expect(info.isGlobal).toBe(true);
+  });
+
+  it('should not detect a node_modules-prefixed sibling directory as local install', () => {
+    const siblingPath = `${projectRoot}/node_modules-backup/.bin/gemini`;
+    process.argv[1] = siblingPath;
+    mockedRealPathSync.mockReturnValue(siblingPath);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+
+    const info = getInstallationInfo(projectRoot, false);
+
+    expect(info.updateMessage).not.toContain('Locally installed');
+    expect(info.isGlobal).toBe(true);
+  });
+
   it('should default to global npm installation for unrecognized paths', () => {
     const globalPath = `/usr/local/bin/gemini`;
     process.argv[1] = globalPath;
@@ -596,5 +646,97 @@ describe('getInstallationInfo', () => {
     // isAutoUpdateEnabled = false -> "Please run..."
     const infoDisabled = getInstallationInfo(projectRoot, false);
     expect(infoDisabled.updateMessage).toContain('Please run npm install');
+  });
+
+  it('should ask for sudo and NOT migrate to standalone when the npm global prefix is not writable', () => {
+    const globalPath = `/usr/lib/node_modules/@qwen-code/qwen-code/cli-entry.js`;
+    process.argv[1] = globalPath;
+    mockedRealPathSync.mockReturnValue(globalPath);
+    mockedExecSync.mockImplementation(() => {
+      throw new Error('Command failed');
+    });
+    // npm global package dir is not writable -> `npm install -g` would need sudo.
+    vi.mocked(fs.accessSync).mockImplementation(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), {
+        code: 'EACCES',
+      });
+    });
+
+    const info = getInstallationInfo(projectRoot, true);
+
+    expect(info.packageManager).toBe(PackageManager.NPM);
+    expect(info.isGlobal).toBe(true);
+    // Must NOT silently migrate to the standalone installer (bundled Node can be
+    // incompatible with the host, e.g. an older glibc).
+    expect(info.isStandalone).toBeUndefined();
+    expect(info.standaloneDir).toBeUndefined();
+    // No updateCommand -> the auto-updater won't attempt an unattended sudo.
+    expect(info.updateCommand).toBeUndefined();
+    expect(info.updateMessage).toContain('sudo');
+  });
+});
+
+describe('resolveUpdateCommand', () => {
+  it('replaces @latest with the pinned stable version', () => {
+    expect(
+      resolveUpdateCommand('npm i -g @qwen-code/qwen-code@latest', '1.2.3'),
+    ).toBe('npm i -g @qwen-code/qwen-code@1.2.3');
+  });
+
+  it('replaces @latest with @nightly for nightly versions', () => {
+    expect(
+      resolveUpdateCommand(
+        'npm i -g @qwen-code/qwen-code@latest',
+        '1.2.3-nightly.20250101',
+      ),
+    ).toBe('npm i -g @qwen-code/qwen-code@nightly');
+  });
+});
+
+describe('formatUpdateInstructions', () => {
+  it('formats package-manager update commands', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+        },
+        '1.2.3',
+      ),
+    ).toEqual([
+      'Run the following to update:',
+      '  npm i -g @qwen-code/qwen-code@1.2.3',
+    ]);
+  });
+
+  it('resolves @latest in updateMessage-only guidance for nightly versions', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.NPM,
+          isGlobal: true,
+          updateMessage:
+            'Update requires sudo. Please run: sudo npm i -g @qwen-code/qwen-code@latest',
+        },
+        '1.2.3-nightly.20250101',
+      ),
+    ).toEqual([
+      'Update requires sudo. Please run:',
+      '  sudo npm i -g @qwen-code/qwen-code@nightly',
+    ]);
+  });
+
+  it('keeps updateMessage-only guidance as-is when no formatter applies', () => {
+    expect(
+      formatUpdateInstructions(
+        {
+          packageManager: PackageManager.NPX,
+          isGlobal: true,
+          updateMessage: 'Running via npx, update not applicable.',
+        },
+        '1.2.3',
+      ),
+    ).toEqual(['Running via npx, update not applicable.']);
   });
 });

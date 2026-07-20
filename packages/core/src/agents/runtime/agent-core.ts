@@ -22,13 +22,24 @@ import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import {
+  getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
+  spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
-import { type ToolCallRequestInfo } from '../../core/turn.js';
+import {
+  createDuplicateProviderToolCallResponse,
+  findRepeatedDuplicateProviderToolCall,
+  GeminiEventType,
+  markDuplicateProviderToolCallResponseSent,
+  type ServerGeminiStreamEvent,
+  type ToolCallRequestInfo,
+} from '../../core/turn.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -40,6 +51,7 @@ import type {
   ToolCallConfirmationDetails,
   ToolResultDisplay,
 } from '../../tools/tools.js';
+import { isShellProgressData } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import { FinishReason } from '@google/genai';
 import type {
@@ -51,6 +63,10 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import {
+  dedupeToolCallsById,
+  getProviderToolCallId,
+} from '../../core/toolCallIdUtils.js';
 import type {
   PromptConfig,
   ModelConfig,
@@ -76,18 +92,46 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import { getResponseText } from '../../utils/partUtils.js';
+import { getThoughtSummary } from '../../utils/thoughtUtils.js';
+import {
+  isTeammate,
+  getTeammateContext,
+  runWithTeammateIdentity,
+} from '../team/identity.js';
+import type { TeammateIdentity } from '../team/types.js';
+import {
+  getLeaderOnlyToolUnavailableMessage,
+  getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
+  isPlanRequiredTeammateContext,
+  isPlanLifecycleToolUnavailableInSubagent,
+  SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+} from './subagent-plan-tool-policy.js';
 
 /**
  * Result of a single reasoning loop invocation.
  */
 /**
- * Tools that must never be available to subagents (including forked agents).
- * - AgentTool prevents recursive subagent spawning.
+ * Tools that must never be available to non-team subagents (including
+ * forked agents spawned via the Agent tool).
+ * - AgentTool is depth-gated rather than unconditionally excluded:
+ *   `isExcluded()` in `prepareTools()` re-admits it while
+ *   `canSpawnNestedAgent()` permits another nesting level, and consults
+ *   this set only for every other tool. The entry here remains the
+ *   fail-closed floor for consumers of the raw set.
  * - Cron tools are session-scoped and should only run from the main session.
  * - TaskStop and SendMessage are parent-side control-plane tools for managing
  *   background subagents; subagents have no agent IDs to manage natively, so
  *   exposing them only widens the surface for cross-agent interference if an
  *   ID leaks via prompt or transcript.
+ * - Team management (team_create/team_delete) and task coordination
+ *   (task_create/task_update/task_list) are leader/teammate tools. A
+ *   non-team Agent subagent has no teammate identity, so isTeammate()
+ *   returns false and these tools would treat it as the leader — letting
+ *   it delete or rewrite the active team.
+ * - Plan lifecycle tools are owned by the caller/main session. A subagent
+ *   should return its plan to the caller instead of entering or exiting mode.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -96,11 +140,65 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_DELETE,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.TASK_CREATE,
+  ToolNames.TASK_UPDATE,
+  ToolNames.TASK_LIST,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session — a subagent must
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
+  // V1 session artifacts are owned by the parent daemon session.
+  ToolNames.ARTIFACT,
+  ToolNames.RECORD_ARTIFACT,
+  // FIX-8 (SEC-I1): WORKFLOW is excluded to prevent unbounded recursive
+  // fan-out: a subagent spawned by Workflow that calls Workflow would create
+  // O(k^n) subagents.
+  ToolNames.WORKFLOW,
 ]);
+
+/**
+ * Tools excluded from teammates. Teammates need send_message and the
+ * task_* coordination tools to do their job, but they must not be able
+ * to create or destroy the team itself — only the leader can do that.
+ * Plan lifecycle tools remain caller-owned for teammates too.
+ */
+const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ToolNames.CRON_CREATE,
+  ToolNames.CRON_LIST,
+  ToolNames.CRON_DELETE,
+  ToolNames.TASK_STOP,
+  ToolNames.TEAM_CREATE,
+  ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  // Worktree management belongs to the parent session.
+  ToolNames.ENTER_WORKTREE,
+  ToolNames.EXIT_WORKTREE,
+  // Same recursion guard as EXCLUDED_TOOLS_FOR_SUBAGENTS: the teammate
+  // identity propagates through AsyncLocalStorage into anything it
+  // spawns, so prepareTools() would keep choosing THIS exclusion set
+  // for nested agents — without WORKFLOW here, a teammate-launched
+  // workflow re-arms the O(k^n) fan-out the subagent set prevents.
+  ToolNames.WORKFLOW,
+]);
+
+function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
+  if (!isTeammate()) {
+    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
+  }
+  if (!isPlanRequiredTeammateContext()) {
+    return EXCLUDED_TOOLS_FOR_TEAMMATES;
+  }
+
+  const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
+  excluded.delete(ToolNames.EXIT_PLAN_MODE);
+  return excluded;
+}
 
 /**
  * Prefix applied to each external message injected into a background agent's
@@ -322,12 +420,14 @@ export class AgentCore {
     // When initialMessages is set, the caller owns the full prior history
     // (including any env bootstrap it wants). Fork relies on this to inherit
     // the parent conversation verbatim without duplicating env messages.
-    const hasInitialMessages =
-      !!this.promptConfig.initialMessages &&
-      this.promptConfig.initialMessages.length > 0;
-    const envHistory = hasInitialMessages
-      ? []
-      : await getInitialChatHistory(this.runtimeContext);
+    const hasInitialMessages = this.promptConfig.initialMessages !== undefined;
+    const hasSkillTool = this.willHaveSkillTool();
+    const [envHistory] = hasInitialMessages
+      ? [[]]
+      : await getInitialChatHistory(this.runtimeContext, undefined, {
+          includeDeferredToolsReminder: false,
+          includeAvailableSkillsReminder: hasSkillTool,
+        });
 
     const startHistory = [
       ...envHistory,
@@ -379,6 +479,25 @@ export class AgentCore {
   // ─── Tool Preparation ─────────────────────────────────────
 
   /**
+   * Returns true if this agent's effective tool surface will include the Skill
+   * tool. Used before `prepareTools()` to decide whether to inject the
+   * `<available_skills>` snapshot.
+   */
+  private willHaveSkillTool(): boolean {
+    if (!this.toolConfig) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    const asStrings = this.toolConfig.tools.filter(
+      (t): t is string => typeof t === 'string',
+    );
+    const hasWildcard = asStrings.includes('*');
+    if (hasWildcard || asStrings.length === 0) {
+      return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
+    }
+    return asStrings.includes(ToolNames.SKILL);
+  }
+
+  /**
    * Prepares the list of tools available to this agent.
    *
    * If no explicit toolConfig or it contains "*" or is empty,
@@ -389,10 +508,33 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = EXCLUDED_TOOLS_FOR_SUBAGENTS;
-    // When a subagent has an explicit tools list (not wildcard), only the
-    // recursive-spawn guard (AgentTool) is enforced.
-    const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
+    const excludedFromSubagents = getExcludedToolsForCurrentContext();
+
+    // Nested sub-agents: the AgentTool is normally excluded to prevent
+    // recursive spawning, but when maxSubagentDepth permits another level we
+    // let it back in. prepareTools() runs inside this sub-agent's own
+    // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
+    // spawnBlockReason() reads this agent's own depth and context — the same
+    // shared predicate AgentTool.execute() backstops at runtime.
+    //
+    // !isTopLevelSession() fails closed: prepareTools() only ever serves
+    // agents — never the top-level user session — so a missing agent frame
+    // means the launch path forgot runWithAgentContext. Without this check
+    // such an agent would be depth-gated as the top-level session and receive
+    // the AgentTool even at maxSubagentDepth=1 (codex review: frame-less
+    // AgentInteractive.start(), since fixed to establish its frame).
+    const nestingAllowed =
+      !isTopLevelSession() &&
+      spawnBlockReason(this.runtimeContext.getMaxSubagentDepth()) === null;
+
+    // Effective exclusion test. AgentTool is depth-gated (allowed only when
+    // this sub-agent is shallow enough to spawn another level); every other
+    // control-plane tool follows the static exclusion set unchanged.
+    const isExcluded = (name: string | undefined): boolean => {
+      if (!name) return false;
+      if (name === ToolNames.AGENT) return !nestingAllowed;
+      return excludedFromSubagents.has(name);
+    };
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
@@ -409,30 +551,50 @@ export class AgentCore {
       ) {
         // Subagents inherit the full tool surface — including deferred tools
         // (MCP, low-frequency built-ins). Subagents are one-shot and don't
-        // have the same "save tokens" lifecycle as the main chat, and they
-        // don't see the "Deferred Tools" section of the system prompt, so
-        // hiding schemas would silently break existing `tools: ['*']` configs.
+        // have the same "save tokens" lifecycle as the main chat, so hiding
+        // schemas would silently break existing `tools: ['*']` configs.
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
-            .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
+            .filter((t) => !isExcluded(t.name)),
         );
       } else {
         // Explicit tool list: apply the full subagent exclusion set (not just
         // the recursion guard). This prevents control-plane tools
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
+        const allowedNames = asStrings.filter((name) => {
+          if (isExcluded(name)) {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.debug(
+                `[prepareTools] Filtered "${name}" from explicit subagent tool list`,
+              );
+            return false;
+          }
+          return true;
+        });
         toolsList.push(
-          ...toolRegistry.getFunctionDeclarationsFiltered(
-            asStrings.filter((name) => !excludedFromSubagents.has(name)),
-          ),
+          ...toolRegistry.getFunctionDeclarationsFiltered(allowedNames),
         );
       }
-      // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
+      // Also filter inline FunctionDeclaration[] passed directly in toolConfig
+      // through the same exclusion test as the registry branches, so the
+      // depth-gated AgentTool and every other control-plane tool are handled
+      // uniformly (the inline form must not become a leak path for
+      // workflow/cron/team tools into a subagent).
       toolsList.push(
-        ...onlyInlineDecls.filter(
-          (d) => !(d.name && recursionGuardOnly.has(d.name)),
-        ),
+        ...onlyInlineDecls.filter((d) => {
+          if (isExcluded(d.name)) {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.debug(
+                `[prepareTools] Filtered inline declaration "${d.name}" from subagent tool list`,
+              );
+            return false;
+          }
+          return true;
+        }),
       );
     } else {
       // Inherit all available tools by default when not specified — see the
@@ -440,7 +602,7 @@ export class AgentCore {
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
-          .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
+          .filter((t) => !isExcluded(t.name)),
       );
     }
 
@@ -527,7 +689,19 @@ export class AgentCore {
    * `inheritedAgentId` does the same for logical agent ownership. It is
    * needed by deferred approval because the user's approval response runs
    * from the parent UI chain, after the subagent's AsyncLocalStorage frame
-   * has unwound.
+   * has unwound. `inheritedAgentDepth` accompanies it: without the original
+   * nesting depth the restored frame recomputes to depth 0, letting a
+   * deferred-approved `agent` tool call from a leaf-depth sub-agent bypass
+   * maxSubagentDepth.
+   *
+   * `inheritedTeammateIdentity` restores the in-process teammate identity
+   * frame (`teammateIdentityStore`). Deferred approval needs it for the
+   * same reason as the others: when a teammate's `send_message` /
+   * `task_update` resumes from the UI chain, `getAgentName()` would
+   * otherwise be undefined and the tool would mis-attribute the message
+   * to the leader (forged `from="leader"` envelope) and slip past the
+   * leader-only `isTeammate()` guard. No-op on the reasoning-loop path,
+   * where TeamManager already establishes this frame.
    *
    * Exposed (rather than inlined twice) so the contract stays testable in
    * isolation; see `agent-core.test.ts`.
@@ -536,13 +710,27 @@ export class AgentCore {
     fn: () => Promise<T>,
     inheritedView?: RuntimeContentGeneratorView,
     inheritedAgentId?: string,
+    inheritedTeammateIdentity?: TeammateIdentity,
+    inheritedAgentDepth?: number,
   ): Promise<T> {
-    return subagentNameContext.run(this.name, () => {
-      const runWithView = () => this.withRuntimeView(fn, inheritedView);
-      return inheritedAgentId
-        ? runWithAgentContext(inheritedAgentId, runWithView)
-        : runWithView();
-    });
+    const runInner = () =>
+      subagentNameContext.run(this.name, () => {
+        const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        // inheritedAgentDepth restores the agent's original nesting depth.
+        // Without it the frame recomputes from the UI's frame-less async
+        // chain to depth 0, and an approved `agent` tool call from a
+        // leaf-depth sub-agent would bypass maxSubagentDepth.
+        return inheritedAgentId
+          ? runWithAgentContext(
+              inheritedAgentId,
+              runWithView,
+              inheritedAgentDepth,
+            )
+          : runWithView();
+      });
+    return inheritedTeammateIdentity
+      ? runWithTeammateIdentity(inheritedTeammateIdentity, runInner)
+      : runInner();
   }
 
   /**
@@ -571,6 +759,24 @@ export class AgentCore {
     let turnCounter = 0;
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
+    const handledProviderToolCallIds = chat.getHistoryFunctionResponseIds();
+    // Scoped to this reasoning loop. A second duplicate response for the same
+    // provider id would keep deterministic providers in a tool-result loop.
+    const duplicateProviderToolCallResponseIds = new Set<string>();
+    let stickyMaxOutputTokens: number | undefined;
+    const loopDetector = new LoopDetectionService(this.runtimeContext);
+    loopDetector.reset(
+      `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
+    );
+    const checkSubagentLoop = (event: ServerGeminiStreamEvent): boolean => {
+      if (loopDetector.checkAlwaysOnSafeties(event)) {
+        return true;
+      }
+      return (
+        !this.runtimeContext.getSkipLoopDetection() &&
+        loopDetector.addAndCheckHeuristicLoops(event)
+      );
+    };
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -606,6 +812,9 @@ export class AgentCore {
           config: {
             abortSignal: roundAbortController.signal,
             tools: [{ functionDeclarations: toolsList }],
+            ...(stickyMaxOutputTokens !== undefined
+              ? { maxOutputTokens: stickyMaxOutputTokens }
+              : {}),
           },
         };
 
@@ -631,6 +840,7 @@ export class AgentCore {
           undefined;
         let currentResponseId: string | undefined = undefined;
         let wasOutputTruncated = false;
+        let loopDetectedInStream = false;
 
         for await (const streamEvent of responseStream) {
           if (roundAbortController.signal.aborted) {
@@ -645,6 +855,14 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (checkSubagentLoop({ type: GeminiEventType.Retry })) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+            if (streamEvent.maxOutputTokensEscalated !== undefined) {
+              stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
+            }
             functionCalls.length = 0;
             roundText = '';
             roundThoughtText = '';
@@ -673,7 +891,8 @@ export class AgentCore {
             if (resp.responseId) {
               currentResponseId = resp.responseId;
             }
-            if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+            const chunkFunctionCalls = resp.functionCalls ?? [];
+            functionCalls.push(...chunkFunctionCalls);
             if (
               resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
             ) {
@@ -696,7 +915,79 @@ export class AgentCore {
                 });
             }
             if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+
+            const thoughtSummary = getThoughtSummary(resp);
+            if (
+              thoughtSummary &&
+              checkSubagentLoop({
+                type: GeminiEventType.Thought,
+                value: thoughtSummary,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            const responseText = getResponseText(resp);
+            if (
+              responseText &&
+              checkSubagentLoop({
+                type: GeminiEventType.Content,
+                value: responseText,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            for (const fc of chunkFunctionCalls) {
+              const toolName = String(fc.name);
+              if (
+                checkSubagentLoop({
+                  type: GeminiEventType.ToolCallRequest,
+                  value: {
+                    callId: fc.id ?? `${toolName}-${Date.now()}`,
+                    providerCallId: getProviderToolCallId(fc),
+                    name: toolName,
+                    args: (fc.args ?? {}) as Record<string, unknown>,
+                    isClientInitiated: false,
+                    prompt_id: promptId,
+                    response_id: currentResponseId,
+                    wasOutputTruncated,
+                  },
+                })
+              ) {
+                terminateMode = AgentTerminateMode.LOOP_DETECTED;
+                loopDetectedInStream = true;
+                break;
+              }
+            }
+            if (loopDetectedInStream) {
+              break;
+            }
+
+            const finishReason = resp.candidates?.[0]?.finishReason;
+            if (
+              finishReason &&
+              checkSubagentLoop({
+                type: GeminiEventType.Finished,
+                value: {
+                  reason: finishReason,
+                  usageMetadata: resp.usageMetadata,
+                },
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
           }
+        }
+
+        if (loopDetectedInStream) {
+          break;
         }
 
         if (roundText || roundThoughtText) {
@@ -724,7 +1015,7 @@ export class AgentCore {
         }
 
         if (functionCalls.length > 0) {
-          currentMessages = await this.processFunctionCalls(
+          const toolCallResult = await this.processFunctionCalls(
             functionCalls,
             roundAbortController,
             promptId,
@@ -732,7 +1023,14 @@ export class AgentCore {
             toolsList,
             currentResponseId,
             wasOutputTruncated,
+            handledProviderToolCallIds,
+            duplicateProviderToolCallResponseIds,
           );
+          if (toolCallResult.repeatedDuplicateProviderToolCall) {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            break;
+          }
+          currentMessages = toolCallResult.messages;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -748,6 +1046,10 @@ export class AgentCore {
             // user-role record. The framing prefix is stripped — the prefix
             // is a model-facing detail, not part of the original message.
             this.emitExternalInputEvents(externalInputs);
+          }
+          if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
+            terminateMode = AgentTerminateMode.ERROR;
+            break;
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -991,6 +1293,48 @@ export class AgentCore {
 
   // ─── Tool Execution ───────────────────────────────────────
 
+  private emitSyntheticToolError(params: {
+    callId: string;
+    name: string;
+    args: Record<string, unknown>;
+    errorMessage: string;
+    responseParts: Part[];
+    resultDisplay: ToolResultDisplay | undefined;
+    currentRound: number;
+    durationMs?: number;
+  }): void {
+    this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
+      subagentId: this.subagentId,
+      round: params.currentRound,
+      callId: params.callId,
+      name: params.name,
+      args: params.args,
+      description: params.errorMessage,
+      isOutputMarkdown: false,
+      timestamp: Date.now(),
+    } as AgentToolCallEvent);
+
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
+      subagentId: this.subagentId,
+      round: params.currentRound,
+      callId: params.callId,
+      name: params.name,
+      success: false,
+      error: params.errorMessage,
+      responseParts: params.responseParts,
+      resultDisplay: params.resultDisplay,
+      durationMs: params.durationMs ?? 0,
+      timestamp: Date.now(),
+    } as AgentToolResultEvent);
+
+    this.recordToolCallStats(
+      params.name,
+      false,
+      params.durationMs ?? 0,
+      params.errorMessage,
+    );
+  }
+
   /**
    * Processes a list of function calls via CoreToolScheduler.
    *
@@ -1007,34 +1351,53 @@ export class AgentCore {
     toolsList: FunctionDeclaration[],
     responseId?: string,
     wasOutputTruncated = false,
-  ): Promise<Content[]> {
+    handledProviderToolCallIds = new Set<string>(),
+    duplicateProviderToolCallResponseIds = new Set<string>(),
+  ): Promise<{
+    messages: Content[];
+    repeatedDuplicateProviderToolCall: boolean;
+  }> {
     const toolResponseParts: Part[] = [];
+    const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
+    const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
+      uniqueFunctionCalls,
+      (fc) => getProviderToolCallId(fc) ?? fc.id,
+      handledProviderToolCallIds,
+      duplicateProviderToolCallResponseIds,
+    );
+    if (repeatedDuplicateCall) {
+      const providerCallId =
+        getProviderToolCallId(repeatedDuplicateCall) ??
+        repeatedDuplicateCall.id;
+      this.runtimeContext
+        .getDebugLogger()
+        ?.debug(
+          `[processFunctionCalls] Dropping batch after repeated duplicate provider tool-call id: ${providerCallId} (tool: ${String(repeatedDuplicateCall.name)}, round: ${currentRound})`,
+        );
+      return {
+        messages: [{ role: 'user', parts: [] }],
+        repeatedDuplicateProviderToolCall: true,
+      };
+    }
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
-    for (const fc of functionCalls) {
+    let duplicateEventIndex = 0;
+    for (const fc of uniqueFunctionCalls) {
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
+      const toolName = String(fc.name);
+      const args = (fc.args ?? {}) as Record<string, unknown>;
 
       if (!allowedToolNames.has(fc.name)) {
-        const toolName = String(fc.name);
-        const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
-
-        // Emit TOOL_CALL event for visibility
-        this.eventEmitter?.emit(AgentEventType.TOOL_CALL, {
-          subagentId: this.subagentId,
-          round: currentRound,
-          callId,
-          name: toolName,
-          args: fc.args ?? {},
-          description: `Tool "${toolName}" not found`,
-          isOutputMarkdown: false,
-          timestamp: Date.now(),
-        } as AgentToolCallEvent);
-
-        // Build function response part (used for both event and LLM)
+        const errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
+          ? getSubagentPlanToolUnavailableMessage(toolName)
+          : isLeaderOnlyToolUnavailableInSubagent(toolName)
+            ? getLeaderOnlyToolUnavailableMessage(toolName)
+            : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
         const functionResponsePart = {
           functionResponse: {
             id: callId,
@@ -1043,26 +1406,63 @@ export class AgentCore {
           },
         };
 
-        // Emit TOOL_RESULT event with error
-        this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
-          subagentId: this.subagentId,
-          round: currentRound,
+        this.emitSyntheticToolError({
           callId,
           name: toolName,
-          success: false,
-          error: errorMessage,
+          args,
+          errorMessage,
           responseParts: [functionResponsePart],
           resultDisplay: errorMessage,
-          durationMs: 0,
-          timestamp: Date.now(),
-        } as AgentToolResultEvent);
+          currentRound,
+        });
 
-        // Record blocked tool call in stats
-        this.recordToolCallStats(toolName, false, 0, errorMessage);
-
-        // Add function response for LLM
         toolResponseParts.push(functionResponsePart);
         continue;
+      }
+
+      if (providerCallId) {
+        if (handledProviderToolCallIds.has(providerCallId)) {
+          markDuplicateProviderToolCallResponseSent(
+            providerCallId,
+            duplicateProviderToolCallResponseIds,
+          );
+
+          const request: ToolCallRequestInfo = {
+            callId,
+            providerCallId,
+            name: toolName,
+            args,
+            isClientInitiated: true,
+            prompt_id: promptId,
+            response_id: responseId,
+            wasOutputTruncated,
+          };
+          const response = createDuplicateProviderToolCallResponse(request);
+          const errorMessage =
+            response.error?.message ??
+            'Duplicate provider tool call was ignored.';
+          const eventCallId = `${callId}:duplicate:${currentRound}:${duplicateEventIndex++}`;
+
+          this.runtimeContext
+            .getDebugLogger()
+            ?.debug(
+              `[processFunctionCalls] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${toolName}, round: ${currentRound})`,
+            );
+
+          this.emitSyntheticToolError({
+            callId: eventCallId,
+            name: toolName,
+            args,
+            errorMessage,
+            responseParts: response.responseParts,
+            resultDisplay: response.resultDisplay,
+            currentRound,
+          });
+
+          toolResponseParts.push(...response.responseParts);
+          continue;
+        }
+        handledProviderToolCallIds.add(providerCallId);
       }
       authorizedCalls.push(fc);
     }
@@ -1082,6 +1482,11 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       outputUpdateHandler: (callId, outputChunk) => {
+        // Shell liveness heartbeats have no subagent consumer; broadcasting
+        // one would overwrite the live output view kept in liveOutputs.
+        if (isShellProgressData(outputChunk)) {
+          return;
+        }
         this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
           subagentId: this.subagentId,
           round: currentRound,
@@ -1200,6 +1605,15 @@ export class AgentCore {
             // restore it. See `runInAgentFrames` for the wiring.
             const inheritedView = getRuntimeContentGenerator();
             const inheritedAgentId = getCurrentAgentId();
+            // Depth pairs with the id: the continuation must re-enter the
+            // frame at this agent's original depth, or the depth guard on a
+            // deferred-approved `agent` tool call would see depth 0.
+            const inheritedAgentDepth = getCurrentAgentDepth();
+            // Capture the teammate identity frame too, while the loop
+            // frame is still live, so the deferred-approval continuation
+            // can restore it. See `runInAgentFrames` for why this matters
+            // (mis-attributed `from="leader"` + leader-guard bypass).
+            const inheritedTeammateIdentity = getTeammateContext();
             this.eventEmitter?.emit(AgentEventType.TOOL_WAITING_APPROVAL, {
               subagentId: this.subagentId,
               round: currentRound,
@@ -1209,6 +1623,7 @@ export class AgentCore {
                 waiting.request.name,
                 waiting.request.args,
               ),
+              args: waiting.request.args,
               confirmationDetails: rest,
               respond: async (
                 outcome: ToolConfirmationOutcome,
@@ -1228,6 +1643,8 @@ export class AgentCore {
                   () => waiting.confirmationDetails.onConfirm(outcome, payload),
                   inheritedView,
                   inheritedAgentId ?? undefined,
+                  inheritedTeammateIdentity,
+                  inheritedAgentDepth,
                 );
               },
               timestamp: Date.now(),
@@ -1245,9 +1662,11 @@ export class AgentCore {
     const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
       const toolName = String(fc.name || 'unknown');
       const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const args = (fc.args ?? {}) as Record<string, unknown>;
       const request: ToolCallRequestInfo = {
         callId,
+        ...(providerCallId ? { providerCallId } : {}),
         name: toolName,
         args,
         isClientInitiated: true,
@@ -1350,7 +1769,10 @@ export class AgentCore {
       });
     }
 
-    return [{ role: 'user', parts: toolResponseParts }];
+    return {
+      messages: [{ role: 'user', parts: toolResponseParts }],
+      repeatedDuplicateProviderToolCall: false,
+    };
   }
 
   // ─── Observable state accessors ────────────────────────────

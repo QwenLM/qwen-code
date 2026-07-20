@@ -9,7 +9,7 @@ export {
   runQwenServe,
   type RunHandle,
   type RunQwenServeDeps,
-} from './runQwenServe.js';
+} from './run-qwen-serve.js';
 export {
   CAPABILITIES_SCHEMA_VERSION,
   STAGE1_FEATURES,
@@ -42,9 +42,12 @@ export {
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
   createIdleAcpPreflightCells,
+  createIdleWorkspaceExtensionsStatus,
+  createIdleWorkspaceHooksStatus,
   createIdleWorkspaceMcpStatus,
   createIdleWorkspaceProvidersStatus,
   createIdleWorkspaceSkillsStatus,
+  IDLE_HOOK_EVENTS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
   type ServeEnvCell,
@@ -56,7 +59,14 @@ export {
   type ServePreflightCell,
   type ServePreflightKind,
   type ServeSessionContextStatus,
+  type ServeSessionAgentTaskStatus,
+  type ServeSessionMonitorTaskStatus,
+  type ServeSessionProcessTaskLifecycleStatus,
+  type ServeSessionShellTaskStatus,
   type ServeSessionSupportedCommandsStatus,
+  type ServeSessionTaskLifecycleStatus,
+  type ServeSessionTaskStatus,
+  type ServeSessionTasksStatus,
   type ServeSkillLevel,
   type ServeStatus,
   type ServeStatusCell,
@@ -70,13 +80,25 @@ export {
   type ServeWorkspaceProvidersStatus,
   type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
-} from './status.js';
+  type ServeHookConfig,
+  type ServeHookEntry,
+  type ServeHookEventMeta,
+  type ServeHookMatcherKind,
+  type ServeHookSource,
+  type ServeSessionHooksStatus,
+  type ServeWorkspaceHooksStatus,
+  type ServeExtensionCapabilities,
+  type ServeExtensionEntry,
+  type ServeExtensionInstallType,
+  type ServeExtensionOriginSource,
+  type ServeWorkspaceExtensionsStatus,
+} from '@qwen-code/acp-bridge/status';
 export {
   ENV_NONSECRET_VARS,
   ENV_PROXY_VARS,
   ENV_SECRET_VARS,
   buildEnvStatusFromProcess,
-} from './envSnapshot.js';
+} from './env-snapshot.js';
 export {
   bearerAuth,
   createMutationGate,
@@ -86,21 +108,36 @@ export {
   type MutationGateOptions,
 } from './auth.js';
 export {
+  createAcpSessionBridge,
   createHttpAcpBridge,
   defaultSpawnChannelFactory,
+  // #4297 fold-in 1 (16:32:44-round S2): export every typed error
+  // class that `sendBridgeError` matches via `instanceof`. External
+  // embeds that want to recognize these errors (parallel to how
+  // they already match `WorkspaceInitConflictError` /
+  // `SessionNotFoundError`) need them on the public barrel; without
+  // this they have to deep-import `./acp-session-bridge.js`.
+  McpServerNotFoundError,
+  McpServerRestartFailedError,
   SessionNotFoundError,
+  SessionShellClientRequiredError,
+  SessionShellDisabledError,
   WorkspaceInitConflictError,
+  WorkspaceInitPathEscapeError,
+  WorkspaceInitSymlinkError,
+  WorkspaceInitRaceError,
   type AcpChannel,
+  type AcpSessionBridge,
   type BridgeOptions,
   type BridgeSession,
   type BridgeSpawnRequest,
   type ChannelFactory,
   type HttpAcpBridge,
-} from './httpAcpBridge.js';
+} from './acp-session-bridge.js';
 export {
   EventBus,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type SubscribeOptions,
-} from './eventBus.js';
-export { createInMemoryChannel } from './inMemoryChannel.js';
+} from '@qwen-code/acp-bridge/eventBus';
+export { createInMemoryChannel } from '@qwen-code/acp-bridge/inMemoryChannel';

@@ -1,0 +1,18 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "declaration": true,
+    "emitDeclarationOnly": true,
+    "declarationDir": "dist/types",
+    "noEmit": false
+  },
+  "include": ["client/**/*.ts", "client/**/*.tsx"],
+  "exclude": [
+    "client/**/*.test.ts",
+    "client/**/*.test.tsx",
+    "client/e2e/**",
+    "client/test/**",
+    "node_modules",
+    "dist"
+  ]
+}

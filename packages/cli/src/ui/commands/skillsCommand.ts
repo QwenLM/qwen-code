@@ -6,139 +6,105 @@
 
 import {
   CommandKind,
-  type CommandCompletionItem,
   type CommandContext,
   type SlashCommand,
+  type SlashCommandActionReturn,
 } from './types.js';
-import { MessageType, type HistoryItemSkillsList } from '../types.js';
+import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
-import { AsyncFzf } from 'fzf';
-import type { SkillConfig } from '@qwen-code/qwen-code-core';
-import {
-  createDebugLogger,
-  normalizeSkillPriority,
-} from '@qwen-code/qwen-code-core';
-
-const debugLogger = createDebugLogger('SKILLS_COMMAND');
+import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
+import { levelLabel } from '../utils/skill-level-label.js';
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
   get description() {
-    return t('List available skills.');
+    return t('Open the skills panel (browse, search, toggle, pick).');
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'acp'] as const,
-  action: async (context: CommandContext, args?: string) => {
-    const rawArgs = args?.trim() ?? '';
-    const [skillName = ''] = rawArgs.split(/\s+/);
-
+  // Accepting `/skills` from the auto-completion popup (e.g. typing
+  // `/skil<Enter>`) submits immediately rather than inserting `/skills `
+  // and forcing a second Enter — `/skills` has no required arg, the bare
+  // action just opens the dialog. See `SlashCommand.submitOnAccept`.
+  submitOnAccept: true,
+  action: async (
+    context: CommandContext,
+  ): Promise<void | SlashCommandActionReturn> => {
+    // `/skills` is dialog-only. Any trailing args are ignored — the dialog
+    // is the single entry for browsing, search, toggle, and skill launch.
     const skillManager = context.services.config?.getSkillManager();
     if (!skillManager) {
-      context.ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: t('Could not retrieve skill manager.'),
-        },
-        Date.now(),
-      );
-      return;
-    }
-
-    const skills = await skillManager.listSkills();
-    if (skills.length === 0) {
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text: t('No skills are currently available.'),
-        },
-        Date.now(),
-      );
-      return;
-    }
-
-    if (!skillName) {
-      // listSkills() returns a stable name-asc order. `priority:` only
-      // reorders the `/skills` listing, so apply the priority-desc,
-      // name-asc sort here at the display layer (unset/invalid → 0).
-      const sortedSkills = [...skills].sort(
-        (a, b) =>
-          normalizeSkillPriority(b.priority) -
-            normalizeSkillPriority(a.priority) || a.name.localeCompare(b.name),
-      );
-      const skillsListItem: HistoryItemSkillsList = {
-        type: MessageType.SKILLS_LIST,
-        skills: sortedSkills.map((skill) => ({ name: skill.name })),
+      if (context.executionMode === 'interactive') {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Could not retrieve skill manager.'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: t('Could not retrieve skill manager.'),
       };
-      context.ui.addItem(skillsListItem, Date.now());
-      return;
     }
-    const normalizedName = skillName.toLowerCase();
-    const hasSkill = skills.some(
-      (skill) => skill.name.toLowerCase() === normalizedName,
+
+    if (context.executionMode === 'interactive') {
+      return { type: 'dialog', dialog: 'skills_manage' };
+    }
+
+    // ACP / non-interactive: dialog can't render; fall back to a read-only
+    // listing so users in those contexts still get something useful from
+    // the bare command.
+    const skills = await skillManager.listSkills();
+    // Reuse the central disabled-set provider so all surfaces
+    // (<available_skills>, /<name> completion, this list) agree on a
+    // single normalization pass instead of drifting independently.
+    const disabled =
+      context.services.config?.getDisabledSkillNames() ?? new Set<string>();
+    const userInvocableSkills = skills.filter(
+      (skill) => skill.userInvocable !== false,
     );
-
-    if (!hasSkill) {
-      context.ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: t('Unknown skill: {{name}}', { name: skillName }),
-        },
-        Date.now(),
-      );
-      return;
+    const visibleSkills = userInvocableSkills.filter(
+      (s) => !disabled.has(s.name.toLowerCase()),
+    );
+    if (visibleSkills.length === 0) {
+      const content =
+        skills.length > 0 && userInvocableSkills.length === 0
+          ? t('All skills are marked as non-user-invocable.')
+          : userInvocableSkills.length === 0
+            ? t('No skills are currently available.')
+            : t(
+                'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.',
+              );
+      return {
+        type: 'message' as const,
+        messageType: 'info' as const,
+        content,
+      };
     }
-
-    const rawInput = context.invocation?.raw ?? `/skills ${rawArgs}`;
+    const sortedSkills = [...visibleSkills].sort(
+      (a, b) =>
+        normalizeSkillPriority(b.priority) -
+          normalizeSkillPriority(a.priority) || a.name.localeCompare(b.name),
+    );
+    const sanitize = (text: string, max: number): string => {
+      const oneLine = text.replace(/[\r\n]+/g, ' ').trim();
+      return oneLine.length <= max
+        ? oneLine
+        : `${oneLine.slice(0, Math.max(0, max - 1))}…`;
+    };
+    const lines = sortedSkills.map(
+      (s) =>
+        `  - ${s.name}${s.description ? `  ${sanitize(s.description, 80)}` : ''}` +
+        `${s.level ? `  (${levelLabel(s.level)})` : ''}`,
+    );
     return {
-      type: 'submit_prompt',
-      content: [{ text: rawInput }],
+      type: 'message' as const,
+      messageType: 'info' as const,
+      content: `${t('Available skills:')}\n\n${lines.join('\n')}`,
     };
   },
-  completion: async (
-    context: CommandContext,
-    partialArg: string,
-  ): Promise<CommandCompletionItem[]> => {
-    const skillManager = context.services.config?.getSkillManager();
-    if (!skillManager) {
-      return [];
-    }
-
-    const skills = await skillManager.listSkills();
-    const normalizedPartial = partialArg.trim();
-    const matches = await getSkillMatches(skills, normalizedPartial);
-
-    return matches.map((skill) => ({
-      value: skill.name,
-      description: skill.description,
-    }));
-  },
 };
-
-async function getSkillMatches(
-  skills: SkillConfig[],
-  query: string,
-): Promise<SkillConfig[]> {
-  if (!query) {
-    return skills;
-  }
-
-  const names = skills.map((skill) => skill.name);
-  const skillMap = new Map(skills.map((skill) => [skill.name, skill]));
-
-  try {
-    const fzf = new AsyncFzf(names, {
-      fuzzy: 'v2',
-      casing: 'case-insensitive',
-    });
-    const results = (await fzf.find(query)) as Array<{ item: string }>;
-    return results
-      .map((result) => skillMap.get(result.item))
-      .filter((skill): skill is SkillConfig => !!skill);
-  } catch (error) {
-    debugLogger.error('[skillsCommand] Fuzzy match failed:', error);
-    const lowerQuery = query.toLowerCase();
-    return skills.filter((skill) =>
-      skill.name.toLowerCase().startsWith(lowerQuery),
-    );
-  }
-}

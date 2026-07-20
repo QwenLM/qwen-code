@@ -5,10 +5,16 @@
  */
 
 import path from 'node:path';
+import fs from 'node:fs';
 import os from 'node:os';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  normalizeMcpToolName,
+  sanitizeToolNameForProvider,
+} from '../utils/tool-name-utils.js';
+import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -88,8 +94,10 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   ListFilesTool: 'list_directory',
   ReadFolder: 'list_directory', // legacy display name
 
-  // TodoWrite tool
+  // TodoList tool (wire name todo_write; class TodoWriteTool)
   todo_write: 'todo_write',
+  TodoList: 'todo_write',
+  // Legacy display name (renamed from "TodoWrite")
   TodoWrite: 'todo_write',
   TodoWriteTool: 'todo_write',
 
@@ -97,6 +105,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   web_fetch: 'web_fetch',
   WebFetch: 'web_fetch',
   WebFetchTool: 'web_fetch',
+
+  // ReadMcpResource tool
+  read_mcp_resource: 'read_mcp_resource',
+  ReadMcpResource: 'read_mcp_resource',
+  ReadMcpResourceTool: 'read_mcp_resource',
 
   // Agent (subagent) tool
   agent: 'agent',
@@ -117,6 +130,11 @@ export const TOOL_NAME_ALIASES: Readonly<Record<string, string>> = {
   exit_plan_mode: 'exit_plan_mode',
   ExitPlanMode: 'exit_plan_mode',
   ExitPlanModeTool: 'exit_plan_mode',
+
+  // EnterPlanMode tool
+  enter_plan_mode: 'enter_plan_mode',
+  EnterPlanMode: 'enter_plan_mode',
+  EnterPlanModeTool: 'enter_plan_mode',
 
   // LSP tool
   lsp: 'lsp',
@@ -250,37 +268,96 @@ export function toolMatchesRuleToolName(
 export function parseRule(raw: string): PermissionRule {
   const trimmed = raw.trim();
 
-  // Handle legacy `:*` suffix (deprecated, equivalent to ` *`)
-  // e.g. "Bash(git:*)" → "Bash(git *)"
-  const normalized = trimmed.replace(/:(\*)/, ' $1');
-
-  const openParen = normalized.indexOf('(');
+  const openParen = trimmed.indexOf('(');
 
   if (openParen === -1) {
     // Simple tool name rule (no specifier)
-    const canonicalName = resolveToolName(normalized);
+    const canonicalName = resolveToolName(trimmed);
     return {
       raw: trimmed,
       toolName: canonicalName,
     };
   }
 
-  const toolPart = normalized.substring(0, openParen).trim();
+  const toolPart = trimmed.substring(0, openParen).trim();
 
-  if (!normalized.endsWith(')')) {
+  if (!trimmed.endsWith(')')) {
     // Malformed: unbalanced parentheses — mark as invalid so it never matches.
     return { raw: trimmed, toolName: resolveToolName(toolPart), invalid: true };
   }
 
-  const specifier = normalized.substring(openParen + 1, normalized.length - 1);
+  let rawSpecifier = trimmed.substring(openParen + 1, trimmed.length - 1);
   const canonicalName = resolveToolName(toolPart);
-  const specifierKind = specifier ? getSpecifierKind(canonicalName) : undefined;
+
+  // Handle legacy `:*` suffix for command specifiers (deprecated, equivalent to ` *`)
+  // e.g. "Bash(git:*)" → specifier becomes "git *"
+  // Only applies to command-type specifiers to avoid interfering with key:value syntax
+  const specifierKind = rawSpecifier
+    ? getSpecifierKind(canonicalName)
+    : undefined;
+  if (specifierKind === 'command') {
+    rawSpecifier = rawSpecifier.replace(/:(\*)/g, ' $1');
+  }
+
+  // For literal specifier kind, extract `key:value` param matchers.
+  // Comma-separated: `Agent(coder,model:opus,type:*)` →
+  //   specifier = "coder", toolParamMatchers = [{model,opus},{type,*}]
+  let specifier: string | undefined = rawSpecifier;
+  let toolParamMatchers:
+    | Array<{ key: string; valuePattern: string }>
+    | undefined;
+
+  if (
+    specifierKind === 'literal' &&
+    !canonicalName.startsWith('mcp__') &&
+    rawSpecifier.includes(':')
+  ) {
+    const parts = rawSpecifier.split(',').map((p) => p.trim());
+    const plainParts: string[] = [];
+    const matchers: Array<{ key: string; valuePattern: string }> = [];
+
+    for (const part of parts) {
+      const colonIdx = part.indexOf(':');
+      if (colonIdx > 0) {
+        const key = part.substring(0, colonIdx).trim();
+        const valuePattern = part.substring(colonIdx + 1).trim();
+        if (key && /^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          if (valuePattern === '') {
+            debugLogger.warn(
+              `Empty valuePattern in rule "${trimmed}": key="${key}" will only match empty strings. Use "*" to match any value.`,
+            );
+          }
+          matchers.push({ key, valuePattern });
+          continue;
+        } else if (key && !/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(key)) {
+          debugLogger.warn(
+            `Invalid key "${key}" in rule "${trimmed}": keys must match /^[a-zA-Z_][a-zA-Z0-9_]*$/. Hyphens and dots are not supported.`,
+          );
+        }
+      }
+      plainParts.push(part);
+    }
+
+    if (matchers.length > 0) {
+      toolParamMatchers = matchers;
+      specifier = plainParts.join(',').trim() || undefined;
+    }
+  } else if (
+    specifierKind !== 'literal' &&
+    rawSpecifier.includes(':') &&
+    !rawSpecifier.startsWith('domain:')
+  ) {
+    debugLogger.warn(
+      `key:value syntax is only supported for literal-specifier tools (got ${specifierKind} for "${canonicalName}")`,
+    );
+  }
 
   return {
     raw: trimmed,
     toolName: canonicalName,
     specifier,
     specifierKind,
+    toolParamMatchers,
   };
 }
 
@@ -331,14 +408,16 @@ const CANONICAL_TO_RULE_DISPLAY: Readonly<Record<string, string>> = {
   monitor: 'Monitor',
   // Web
   web_fetch: 'WebFetch',
+  read_mcp_resource: 'ReadMcpResource',
   // Agent / Skill
   agent: 'Agent',
   skill: 'Skill',
   // Others
   save_memory: 'SaveMemory',
-  todo_write: 'TodoWrite',
+  todo_write: 'TodoList',
   lsp: 'Lsp',
   exit_plan_mode: 'ExitPlanMode',
+  enter_plan_mode: 'EnterPlanMode',
 };
 
 /**
@@ -432,11 +511,34 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
       return [displayName];
 
     case 'literal':
-    default:
-      if (ctx.specifier) {
-        return [`${displayName}(${ctx.specifier})`];
+    default: {
+      // MCP tool names already encode server + tool identity.
+      // Don't add specifiers or params — matchesRule rejects MCP rules
+      // with specifiers, and existing MCP rules in user configs should
+      // remain backward compatible.
+      if (canonicalName.startsWith('mcp__')) {
+        return [displayName];
       }
+
+      const parts: string[] = [];
+      if (ctx.specifier) parts.push(ctx.specifier);
+      // Only serialize stable, identity-bearing params — not volatile content
+      // like `prompt` or `query`, which would make rules invocation-specific
+      // and could leak sensitive data into settings.json.
+      const stableParamKeys = new Set(['model', 'subagent_type', 'skill']);
+      if (ctx.toolParams) {
+        for (const key of stableParamKeys) {
+          const v = ctx.toolParams[key];
+          if (typeof v === 'string' || typeof v === 'number') {
+            // Skip values already represented by ctx.specifier
+            if (ctx.specifier && String(v) === ctx.specifier) continue;
+            parts.push(`${key}:${v}`);
+          }
+        }
+      }
+      if (parts.length > 0) return [`${displayName}(${parts.join(',')})`];
       return [displayName];
+    }
   }
 }
 
@@ -453,9 +555,10 @@ const DISPLAY_NAME_TO_VERB: Readonly<Record<string, string>> = {
   Agent: 'use agent',
   Skill: 'use skill',
   SaveMemory: 'save memory',
-  TodoWrite: 'write todos',
+  TodoList: 'write todos',
   Lsp: 'use LSP',
   ExitPlanMode: 'exit plan mode',
+  EnterPlanMode: 'enter plan mode',
 };
 
 /**
@@ -552,7 +655,7 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
  * Shell operator tokens that act as command boundaries.
  * Ordered by length (longest first) for correct multi-char operator detection.
  */
-const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';'];
+const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '\n'];
 
 /**
  * Split a compound shell command into its individual simple commands
@@ -715,6 +818,102 @@ export function matchesCommandPattern(
 }
 
 /**
+ * Match a glob pattern against a value using linear-time greedy matching.
+ * `*` matches any substring (including empty). Case-insensitive to match
+ * the convention used by matchesDomainPattern. No regex involved — avoids
+ * ReDoS risk from catastrophic backtracking on multi-wildcard patterns.
+ */
+function matchesParamValuePattern(pattern: string, value: string): boolean {
+  const normalizedPattern = pattern.toLowerCase();
+  const normalizedValue = value.toLowerCase();
+
+  if (normalizedPattern === '*') {
+    return true;
+  }
+  if (!normalizedPattern.includes('*')) {
+    return normalizedValue === normalizedPattern;
+  }
+
+  const segments = normalizedPattern.split('*');
+  let pos = 0;
+
+  // First segment must match at the start
+  if (segments[0]!.length > 0) {
+    if (!normalizedValue.startsWith(segments[0]!)) {
+      return false;
+    }
+    pos = segments[0]!.length;
+  }
+
+  // Middle segments: find next occurrence greedily
+  for (let i = 1; i < segments.length - 1; i++) {
+    const seg = segments[i]!;
+    if (seg.length === 0) continue;
+    const idx = normalizedValue.indexOf(seg, pos);
+    if (idx === -1) {
+      return false;
+    }
+    pos = idx + seg.length;
+  }
+
+  // Last segment must match at the end
+  const last = segments[segments.length - 1]!;
+  if (last.length > 0) {
+    if (normalizedValue.length - pos < last.length) {
+      return false;
+    }
+    return normalizedValue.endsWith(last);
+  }
+
+  return true;
+}
+
+/**
+ * Evaluate all param matchers against the given toolParams.
+ * Returns true if all matchers pass, false otherwise.
+ * Shared between MCP and standard matching branches.
+ */
+function evaluateParamMatchers(
+  matchers: Array<{ key: string; valuePattern: string }>,
+  toolParams: Record<string, unknown> | undefined,
+  ruleRaw: string,
+): boolean {
+  if (!toolParams) {
+    debugLogger.debug(`Param matcher rule "${ruleRaw}" skipped: no toolParams`);
+    return false;
+  }
+  for (const matcher of matchers) {
+    if (!Object.hasOwn(toolParams, matcher.key)) {
+      debugLogger.debug(
+        `Param matcher failed: rule="${ruleRaw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=missing`,
+      );
+      return false;
+    }
+    const actualValue = toolParams[matcher.key];
+    if (actualValue === undefined || actualValue === null) {
+      debugLogger.debug(
+        `Param matcher failed: rule="${ruleRaw}" key=${matcher.key} expected="${matcher.valuePattern}" actual=null/undefined`,
+      );
+      return false;
+    }
+    if (typeof actualValue !== 'string' && typeof actualValue !== 'number') {
+      debugLogger.debug(
+        `Param matcher skipped: rule="${ruleRaw}" key=${matcher.key} value is ${typeof actualValue}`,
+      );
+      return false;
+    }
+    const actualStr = String(actualValue);
+    if (!matchesParamValuePattern(matcher.valuePattern, actualStr)) {
+      debugLogger.debug(
+        `Param matcher failed: rule="${ruleRaw}" key=${matcher.key} expected="${matcher.valuePattern}" actual="${actualStr}"`,
+      );
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
  * Escape special regex characters.
  */
 function escapeRegex(s: string): string {
@@ -816,11 +1015,15 @@ export function resolvePathPattern(
  * Uses picomatch for the actual glob matching, following gitignore semantics:
  *   - `*` matches files in a single directory (does not cross `/`)
  *   - `**` matches recursively across directories
+ * When `matchMode` is `'canonical'`, both the lexical absolute path and its
+ * canonical filesystem destination are considered. For new files, the closest
+ * existing ancestor is canonicalized.
  *
  * @param specifier - The raw specifier from the rule (e.g. "./secrets/**")
  * @param filePath - The absolute path of the file being accessed
  * @param projectRoot - The project root directory (absolute)
  * @param cwd - The current working directory (absolute)
+ * @param matchMode - Whether to also match the canonical filesystem destination
  * @returns True if the file path matches the pattern
  */
 export function matchesPathPattern(
@@ -828,22 +1031,106 @@ export function matchesPathPattern(
   filePath: string,
   projectRoot: string,
   cwd: string,
+  matchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
+  const patterns =
+    matchMode === 'canonical'
+      ? getCanonicalPatternCandidates(resolvedPattern)
+      : [resolvedPattern];
+  const matchers = patterns.map((pattern) =>
+    picomatch(pattern, {
+      dot: true,
+      nocase: false,
+    }),
+  );
+  const paths =
+    matchMode === 'canonical'
+      ? getCanonicalPathMatchCandidates(filePath, cwd)
+      : [toPosixPath(filePath)];
 
-  // Normalize filePath to forward slashes for cross-platform picomatch compatibility.
-  // On Windows, incoming paths may use backslashes; picomatch expects forward slashes.
-  const normalizedFilePath = toPosixPath(filePath);
+  return paths.some((candidate) =>
+    matchers.some((isMatch) => isMatch(candidate)),
+  );
+}
 
-  // Use picomatch for gitignore-style matching
-  const isMatch = picomatch(resolvedPattern, {
-    dot: true, // Match dotfiles (e.g. .env)
-    nocase: false, // Case-sensitive (filesystem convention)
-    // Note: do NOT set bash: true — it makes `*` match across directories.
-    // Default picomatch behavior is gitignore-style: `*` = single dir, `**` = recursive.
-  });
+function getCanonicalPatternCandidates(resolvedPattern: string): string[] {
+  const candidates = new Set([resolvedPattern]);
+  const { base } = picomatch.scan(resolvedPattern);
+  const canonicalBase = realpathNearestExisting(base);
+  if (canonicalBase !== undefined) {
+    candidates.add(
+      `${toPosixPath(canonicalBase)}${resolvedPattern.slice(base.length)}`,
+    );
+  }
+  return [...candidates];
+}
 
-  return isMatch(normalizedFilePath);
+function getCanonicalPathMatchCandidates(
+  filePath: string,
+  cwd: string,
+): string[] {
+  const candidates = new Set([toPosixPath(filePath)]);
+  const absolutePath = resolveWithoutNormalizing(cwd, filePath);
+  const canonicalPath = realpathNearestExisting(absolutePath);
+  if (canonicalPath !== undefined) {
+    candidates.add(toPosixPath(canonicalPath));
+  }
+  return [...candidates];
+}
+
+function resolveWithoutNormalizing(base: string, filePath: string): string {
+  // Preserve `..` until realpathNearestExisting resolves symlinks on disk.
+  return path.isAbsolute(filePath)
+    ? filePath
+    : `${base}${/[\\/]$/.test(base) ? '' : path.sep}${filePath}`;
+}
+
+function realpathNearestExisting(filePath: string): string | undefined {
+  let current = filePath;
+  const missingSegments: string[] = [];
+  let symlinkHops = 0;
+  const maxSymlinkHops = 40;
+
+  while (true) {
+    try {
+      // Joining deliberately normalizes traversal in the unresolved suffix.
+      return path.join(fs.realpathSync.native(current), ...missingSegments);
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    try {
+      if (fs.lstatSync(current).isSymbolicLink()) {
+        if (symlinkHops++ >= maxSymlinkHops) {
+          return undefined;
+        }
+        const target = fs.readlinkSync(current);
+        const parent = fs.realpathSync.native(path.dirname(current));
+        current = resolveWithoutNormalizing(parent, target);
+        continue;
+      }
+    } catch (error: unknown) {
+      if (
+        !isNodeError(error) ||
+        (error.code !== 'ENOENT' && error.code !== 'ENOTDIR')
+      ) {
+        return undefined;
+      }
+    }
+
+    const parent = path.dirname(current);
+    if (parent === current) {
+      return undefined;
+    }
+    missingSegments.unshift(path.basename(current));
+    current = parent;
+  }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -907,12 +1194,22 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     return true;
   }
 
+  // Exact rules persisted before provider-safe MCP names were introduced
+  // should continue matching their deterministic normalized registration.
+  if (
+    !pattern.endsWith('*') &&
+    pattern.split('__').length >= 3 &&
+    normalizeMcpToolName(pattern) === normalizeMcpToolName(toolName)
+  ) {
+    return true;
+  }
+
   // Wildcard: patterns ending with "*" match by prefix.
   // e.g. "mcp__server__*" matches all tools from that server,
   //      "mcp__chrome__use_*" matches all "use_*" tools from chrome.
   if (pattern.endsWith('*')) {
-    const prefix = pattern.slice(0, -1); // strip trailing "*"
-    return toolName.startsWith(prefix);
+    const prefix = sanitizeToolNameForProvider(pattern.slice(0, -1));
+    return sanitizeToolNameForProvider(toolName).startsWith(prefix);
   }
 
   // Server-level match: "mcp__puppeteer" matches "mcp__puppeteer__anything"
@@ -923,7 +1220,8 @@ export function matchesMcpPattern(pattern: string, toolName: string): boolean {
     patternParts.length === 2 &&
     toolParts.length >= 3 &&
     patternParts[0] === toolParts[0] &&
-    patternParts[1] === toolParts[1]
+    sanitizeToolNameForProvider(patternParts[1]) ===
+      sanitizeToolNameForProvider(toolParts[1])
   ) {
     return true;
   }
@@ -970,6 +1268,7 @@ export interface PathMatchContext {
  * @param filePath - Absolute file path (for Read/Edit rules)
  * @param domain - Domain (for WebFetch rules)
  * @param pathContext - Project root and cwd for resolving relative path patterns
+ * @param pathMatchMode - Whether path rules also match canonical destinations
  */
 export function matchesRule(
   rule: PermissionRule,
@@ -979,6 +1278,9 @@ export function matchesRule(
   domain?: string,
   pathContext?: PathMatchContext,
   specifier?: string,
+  toolParams?: Record<string, unknown>,
+  toolAliases?: readonly string[],
+  pathMatchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
   const canonicalCtxToolName = resolveToolName(toolName);
 
@@ -992,7 +1294,39 @@ export function matchesRule(
     rule.toolName.startsWith('mcp__') ||
     canonicalCtxToolName.startsWith('mcp__')
   ) {
-    return matchesMcpPattern(rule.toolName, canonicalCtxToolName);
+    const matchesLegacyExactName =
+      !rule.toolName.endsWith('*') &&
+      rule.toolName.split('__').length >= 3 &&
+      (toolAliases ?? []).some(
+        (alias) => rule.toolName === resolveToolName(alias),
+      );
+    const matchesMcpName =
+      matchesMcpPattern(rule.toolName, canonicalCtxToolName) ||
+      matchesLegacyExactName;
+    if (!matchesMcpName) {
+      return false;
+    }
+
+    // MCP rules should not carry an unexpected specifier — the tool name
+    // already encodes server + tool identity. If a specifier was somehow
+    // parsed (e.g. user wrote `mcp__srv__tool(XXX)`), reject the match
+    // rather than silently ignoring the constraint.
+    if (rule.specifier) {
+      debugLogger.debug(
+        `MCP rule "${rule.raw}" has specifier "${rule.specifier}" — MCP tool names already encode server identity; specifier not supported`,
+      );
+      return false;
+    }
+
+    // MCP tools matched by name; now check param matchers if present
+    if (rule.toolParamMatchers?.length) {
+      if (
+        !evaluateParamMatchers(rule.toolParamMatchers, toolParams, rule.raw)
+      ) {
+        return false;
+      }
+    }
+    return true;
   }
 
   // ── Standard tool name matching (with meta-category support) ─────────
@@ -1000,53 +1334,71 @@ export function matchesRule(
     return false;
   }
 
-  // ── No specifier → match any invocation of the tool ──────────────────
-  if (!rule.specifier) {
+  // ── No specifier and no param matchers → match any invocation ────────
+  if (!rule.specifier && !rule.toolParamMatchers?.length) {
     return true;
   }
 
   // ── Specifier matching (kind-dependent) ──────────────────────────────
   const kind = rule.specifierKind ?? getSpecifierKind(rule.toolName);
 
-  switch (kind) {
-    case 'command': {
-      if (command === undefined) {
-        return false;
-      }
-      return matchesCommandPattern(rule.specifier, command);
-    }
+  let specifierMatched = true;
 
-    case 'path': {
-      if (filePath === undefined) {
-        return false;
+  if (rule.specifier) {
+    switch (kind) {
+      case 'command': {
+        if (command === undefined) {
+          return false;
+        }
+        specifierMatched = matchesCommandPattern(rule.specifier, command);
+        break;
       }
-      const ctx = pathContext ?? {
-        projectRoot: process.cwd(),
-        cwd: process.cwd(),
-      };
-      return matchesPathPattern(
-        rule.specifier,
-        filePath,
-        ctx.projectRoot,
-        ctx.cwd,
-      );
-    }
 
-    case 'domain': {
-      if (domain === undefined) {
-        return false;
+      case 'path': {
+        if (filePath === undefined) {
+          return false;
+        }
+        const ctx = pathContext ?? {
+          projectRoot: process.cwd(),
+          cwd: process.cwd(),
+        };
+        specifierMatched = matchesPathPattern(
+          rule.specifier,
+          filePath,
+          ctx.projectRoot,
+          ctx.cwd,
+          pathMatchMode,
+        );
+        break;
       }
-      return matchesDomainPattern(rule.specifier, domain);
-    }
 
-    case 'literal':
-    default: {
-      // Literal/exact matching (for Skill names, Agent subagent types, etc.)
-      const value = command ?? specifier;
-      if (value !== undefined) {
-        return value === rule.specifier;
+      case 'domain': {
+        if (domain === undefined) {
+          return false;
+        }
+        specifierMatched = matchesDomainPattern(rule.specifier, domain);
+        break;
       }
+
+      case 'literal':
+      default: {
+        const value = command ?? specifier;
+        specifierMatched = value !== undefined && value === rule.specifier;
+        break;
+      }
+    }
+  }
+
+  if (!specifierMatched) {
+    return false;
+  }
+
+  // ── Tool param matching (key:value syntax) ───────────────────────────
+  if (rule.toolParamMatchers?.length) {
+    if (!evaluateParamMatchers(rule.toolParamMatchers, toolParams, rule.raw)) {
       return false;
     }
   }
+
+  return true;
 }

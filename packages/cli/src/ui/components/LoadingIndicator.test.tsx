@@ -104,6 +104,27 @@ describe('<LoadingIndicator />', () => {
     expect(lastFrame()).toContain('Processing data...');
   });
 
+  it('should display whole elapsed seconds below one minute', () => {
+    const half = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={17.5} />,
+      StreamingState.Responding,
+    );
+    expect(half.lastFrame()).toContain('(17s · esc to cancel)');
+
+    const whole = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={18} />,
+      StreamingState.Responding,
+    );
+    expect(whole.lastFrame()).toContain('(18s · esc to cancel)');
+
+    // Timer start / reset publishes exactly 0.
+    const zero = renderWithContext(
+      <LoadingIndicator currentLoadingPhrase="Working..." elapsedTime={0} />,
+      StreamingState.Responding,
+    );
+    expect(zero.lastFrame()).toContain('(0s · esc to cancel)');
+  });
+
   it('should display the elapsedTime correctly when Responding', () => {
     const props = {
       currentLoadingPhrase: 'Working...',
@@ -180,58 +201,6 @@ describe('<LoadingIndicator />', () => {
       </StreamingContext.Provider>,
     );
     expect(lastFrame()).toBe('');
-  });
-
-  it('should display fallback phrase if thought is empty', () => {
-    const props = {
-      thought: null,
-      currentLoadingPhrase: 'Loading...',
-      elapsedTime: 5,
-    };
-    const { lastFrame } = renderWithContext(
-      <LoadingIndicator {...props} />,
-      StreamingState.Responding,
-    );
-    const output = lastFrame();
-    expect(output).toContain('Loading...');
-  });
-
-  it('should display the subject of a thought', () => {
-    const props = {
-      thought: {
-        subject: 'Thinking about something...',
-        description: 'and other stuff.',
-      },
-      elapsedTime: 5,
-    };
-    const { lastFrame } = renderWithContext(
-      <LoadingIndicator {...props} />,
-      StreamingState.Responding,
-    );
-    const output = lastFrame();
-    expect(output).toBeDefined();
-    if (output) {
-      expect(output).toContain('Thinking about something...');
-      expect(output).not.toContain('and other stuff.');
-    }
-  });
-
-  it('should prioritize thought.subject over currentLoadingPhrase', () => {
-    const props = {
-      thought: {
-        subject: 'This should be displayed',
-        description: 'A description',
-      },
-      currentLoadingPhrase: 'This should not be displayed',
-      elapsedTime: 5,
-    };
-    const { lastFrame } = renderWithContext(
-      <LoadingIndicator {...props} />,
-      StreamingState.Responding,
-    );
-    const output = lastFrame();
-    expect(output).toContain('This should be displayed');
-    expect(output).not.toContain('This should not be displayed');
   });
 
   it('should truncate long primary text instead of wrapping', () => {
@@ -373,6 +342,104 @@ describe('<LoadingIndicator />', () => {
       );
       const output = lastFrame();
       expect(output).toContain('(5s · ↓ 5.4k tokens · esc to cancel)');
+    });
+
+    it('should not show response tokens/sec by default', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator {...defaultProps} candidatesTokens={500} />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 500 tokens');
+      expect(output).not.toContain('t/s');
+    });
+
+    it('should show response tokens/sec when enabled', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={500}
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 500 tokens');
+      expect(output).toContain('100 t/s');
+    });
+
+    it('should calculate response tokens/sec from tokens produced after the timer reset', () => {
+      const streamingCharsRef = { current: 400 };
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={550}
+          taskStartTokens={500}
+          taskStartStreamingChars={200}
+          streamingCharsRef={streamingCharsRef}
+          isStreaming
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 650 tokens');
+      expect(output).toContain('20 t/s');
+      expect(output).not.toContain('130 t/s');
+    });
+
+    it('should not count excluded tool tokens toward response tokens/sec', () => {
+      const streamingCharsRef = { current: 400 };
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={8000}
+          taskStartTokens={8000}
+          streamingCharsRef={streamingCharsRef}
+          isStreaming
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↓ 8.1k tokens');
+      expect(output).toContain('20 t/s');
+      expect(output).not.toContain('1620 t/s');
+    });
+
+    it('should format sub-10 response tokens/sec with one decimal place', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          currentLoadingPhrase="Working..."
+          elapsedTime={8}
+          candidatesTokens={25}
+          showResponseTokensPerSecond
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('3.1 t/s');
+    });
+
+    it('should not show response tokens/sec before content arrives', () => {
+      const { lastFrame } = renderWithContext(
+        <LoadingIndicator
+          {...defaultProps}
+          candidatesTokens={500}
+          showResponseTokensPerSecond
+          isReceivingContent={false}
+        />,
+        StreamingState.Responding,
+        120,
+      );
+      const output = lastFrame();
+      expect(output).toContain('↑ 500 tokens');
+      expect(output).not.toContain('t/s');
     });
 
     it('should show ↑ arrow when waiting for API response', () => {

@@ -73,12 +73,16 @@ describe('AskUserQuestionTool', () => {
       expect(result).toContain('between 1 and 4 questions');
     });
 
-    it('should reject question with header too long', () => {
+    it('should accept a header longer than 12 characters', () => {
+      // The 12-char limit is guidance in the schema, not a hard constraint.
+      // A slightly over-length header (e.g. "Target config", 13 chars) must
+      // pass validation instead of bouncing the tool call back to the model;
+      // the TUI truncates over-length headers for the chip/tab layout.
       const params = {
         questions: [
           {
             question: 'Test question?',
-            header: 'ThisHeaderIsTooLong',
+            header: 'Target config',
             options: [
               { label: 'A', description: 'Option A' },
               { label: 'B', description: 'Option B' },
@@ -89,7 +93,7 @@ describe('AskUserQuestionTool', () => {
       };
 
       const result = tool.validateToolParams(params);
-      expect(result).toContain('12 characters or less');
+      expect(result).toBeNull();
     });
 
     it('should reject question with too few options', () => {
@@ -295,6 +299,111 @@ describe('AskUserQuestionTool', () => {
       expect(result.returnDisplay).toContain(
         'has provided the following answers:',
       );
+    });
+
+    it('should ignore answers with malformed question indexes', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: {
+          '0junk': 'React',
+        },
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('Framework**: React');
+      expect(result.llmContent).toContain('No valid answers were provided.');
+    });
+
+    it('should ignore non-canonical decimal answer indexes', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+            multiSelect: false,
+          },
+          {
+            question: 'Pick a language?',
+            header: 'Language',
+            options: [
+              { label: 'TypeScript', description: 'Typed JavaScript' },
+              { label: 'Python', description: 'General purpose language' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: {
+          '01': 'TypeScript',
+        },
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('Language**: TypeScript');
+      expect(result.llmContent).toContain('No valid answers were provided.');
+    });
+
+    it('should ignore answers with out-of-range question indexes', async () => {
+      const params = {
+        questions: [
+          {
+            question: 'Pick a framework?',
+            header: 'Framework',
+            options: [
+              { label: 'React', description: 'A JavaScript library' },
+              { label: 'Vue', description: 'Progressive framework' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      };
+
+      const invocation = tool.build(params);
+      const confirmation = await invocation.getConfirmationDetails(
+        new AbortController().signal,
+      );
+
+      await confirmation.onConfirm(ToolConfirmationOutcome.ProceedOnce, {
+        answers: {
+          '1': 'TypeScript',
+        },
+      });
+
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.llmContent).not.toContain('Question 2**: TypeScript');
+      expect(result.llmContent).toContain('No valid answers were provided.');
     });
   });
 });

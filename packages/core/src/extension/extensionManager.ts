@@ -24,13 +24,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 
-import {
-  atomicWriteFile,
-  atomicWriteFileSync,
-} from '../utils/atomicFileWrite.js';
+import { atomicWriteFile } from '../utils/atomicFileWrite.js';
 import { getErrorMessage } from '../utils/errors.js';
 import {
   EXTENSIONS_CONFIG_FILENAME,
+  EXTENSION_SETTINGS_FILENAME,
   INSTALL_METADATA_FILENAME,
   recursivelyHydrateStrings,
   substituteHookVariables,
@@ -40,7 +38,10 @@ import { resolveEnvVarsInObject } from '../utils/envVarResolver.js';
 import {
   checkForExtensionUpdate,
   cloneFromGit,
+  downloadFromArchiveUrl,
   downloadFromGitHubRelease,
+  extractArchiveFile,
+  isSupportedArchivePath,
   parseGitHubRepoForReleases,
 } from './github.js';
 import { downloadFromNpmRegistry } from './npm.js';
@@ -48,17 +49,35 @@ import { redactUrlCredentials } from './redaction.js';
 import type { LoadExtensionContext } from './variableSchema.js';
 import { Override, type AllExtensionsEnablementConfig } from './override.js';
 import {
-  isGeminiExtensionConfig,
-  convertGeminiExtensionPackage,
-} from './gemini-converter.js';
-import { convertClaudePluginPackage } from './claude-converter.js';
+  ExtensionPreferencesStore,
+  type ExtensionScope,
+} from './extensionPreferences.js';
+import {
+  SourceRegistryStore,
+  discoverPlugins,
+  parseExtensionSourceType,
+  type ExtensionSource,
+  type DiscoveredPlugin,
+} from './sourceRegistry.js';
+import {
+  loadMarketplaceConfigFromSource,
+  parseInstallSource,
+} from './marketplace.js';
+import { convertGeminiOrClaudeExtension } from './extension-converter.js';
 import { glob } from 'glob';
 import { createHash } from 'node:crypto';
 import { ExtensionStorage } from './storage.js';
 import {
+  resolveExtensionConfigLocale,
+  type RawExtensionConfig,
+  type LocalizableString,
+} from './i18n.js';
+import {
   getEnvContents,
   maybePromptForSettings,
   promptForSetting,
+  type PreparedExtensionSettingsMutation,
+  validateExtensionSettingEnvVars,
 } from './extensionSettings.js';
 import type {
   ExtensionSetting,
@@ -79,6 +98,14 @@ import {
 import { loadSkillsFromDir } from '../skills/skill-load.js';
 import { loadSubagentFromDir } from '../subagents/subagent-manager.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { refreshExtensionRuntime } from './extension-runtime-refresh.js';
+import {
+  ExtensionStore,
+  type ExtensionActivation,
+  type ExtensionActivationResult,
+  type ExtensionStoreSnapshot,
+  type InitialExtensionActivation,
+} from './extension-store.js';
 
 const debugLogger = createDebugLogger('EXTENSIONS');
 
@@ -105,6 +132,7 @@ export interface ExtensionChannelConfig {
 export interface Extension {
   id: string;
   name: string;
+  displayName?: string;
   version: string;
   isActive: boolean;
   path: string;
@@ -125,6 +153,13 @@ export interface Extension {
 export interface ExtensionConfig {
   name: string;
   version: string;
+  displayName?: string;
+  description?: string;
+  /** Original localizable values before resolution, for runtime re-resolution on language change. */
+  _rawLocalizable?: {
+    displayName?: LocalizableString;
+    description?: LocalizableString;
+  };
   mcpServers?: Record<string, MCPServerConfig>;
   lspServers?: string | Record<string, unknown>;
   contextFileName?: string | string[];
@@ -140,6 +175,28 @@ export interface ExtensionUpdateInfo {
   name: string;
   originalVersion: string;
   updatedVersion: string;
+  warnings?: Array<{ code: string; error: string }>;
+}
+
+export interface ExtensionCommittedWithWarningsError extends Error {
+  code: 'extension_committed_with_warnings';
+  committed: true;
+  identity: { id: string; name: string };
+  warnings: ReadonlyArray<{ code: string; error: string }>;
+}
+
+export function isExtensionCommittedWithWarningsError(
+  error: unknown,
+): error is ExtensionCommittedWithWarningsError {
+  const candidate = error as Partial<ExtensionCommittedWithWarningsError>;
+  return (
+    error instanceof Error &&
+    candidate.code === 'extension_committed_with_warnings' &&
+    candidate.committed === true &&
+    typeof candidate.identity?.id === 'string' &&
+    typeof candidate.identity.name === 'string' &&
+    Array.isArray(candidate.warnings)
+  );
 }
 
 export interface ExtensionUpdateStatus {
@@ -150,6 +207,7 @@ export interface ExtensionUpdateStatus {
 export enum ExtensionUpdateState {
   CHECKING_FOR_UPDATES = 'checking for updates',
   UPDATED_NEEDS_RESTART = 'updated, needs restart',
+  UPDATED_WITH_WARNINGS = 'updated with warnings',
   UPDATING = 'updating',
   UPDATED = 'updated',
   UPDATE_AVAILABLE = 'update available',
@@ -177,6 +235,8 @@ export interface ExtensionManagerOptions {
   /** Override list of enabled extension names (from CLI -e flag) */
   enabledExtensionOverrides?: string[];
   isWorkspaceTrusted: boolean;
+  /** Locale code for resolving localizable fields (e.g., 'en', 'zh'). Defaults to 'en'. */
+  locale?: string;
   telemetrySettings?: TelemetrySettings;
   config?: Config;
   requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
@@ -184,7 +244,96 @@ export interface ExtensionManagerOptions {
   requestChoicePlugin?: (
     marketplace: ClaudeMarketplaceConfig,
   ) => Promise<string>;
+  extensionStore?: ExtensionStore;
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
 }
+
+export interface PrepareExtensionInstallOptions {
+  installMetadata: ExtensionInstallMetadata;
+  initialActivation: InitialExtensionActivation;
+  requestConsent?: (options?: ExtensionRequestOptions) => Promise<void>;
+  requestSetting?: (setting: ExtensionSetting) => Promise<string>;
+  cwd?: string;
+  signal?: AbortSignal;
+}
+
+export interface PrepareExtensionUpdateOptions {
+  extension: Extension;
+  signal?: AbortSignal;
+}
+
+export interface PreparedExtensionMutation {
+  readonly operation: 'install' | 'update';
+  readonly identity: { id: string; name: string };
+  readonly version: string;
+  readonly expectedArtifactGeneration?: number;
+  /** @internal */
+  readonly installMetadata: ExtensionInstallMetadata;
+  /** @internal */
+  readonly config: ExtensionConfig;
+  /** @internal */
+  readonly previousConfig?: ExtensionConfig;
+  /** @internal */
+  readonly initialActivation: InitialExtensionActivation;
+  /** @internal */
+  readonly stagingDirectory: string;
+  /** @internal */
+  readonly destinationDirectory: string;
+  /** @internal */
+  readonly currentDir: string;
+  /** @internal */
+  readonly cleanupPaths: readonly string[];
+  /** @internal */
+  readonly commitSettings?: () => Promise<void>;
+  /** @internal */
+  readonly discardSettings?: () => Promise<void>;
+  /** @internal */
+  settingsActivated: boolean;
+  /** @internal */
+  consumed: boolean;
+  /** @internal */
+  disposed: boolean;
+}
+
+export interface CommittedExtensionMutation {
+  identity: { id: string; name: string };
+  version: string;
+  generation: number;
+  extension?: Extension;
+  warnings?: Array<{ code: string; error: string }>;
+}
+
+export interface ExtensionStoreMutationResult extends ExtensionStoreSnapshot {
+  warnings?: Array<{ code: string; error: string }>;
+}
+
+export type ExtensionCommitCallback = (generation: number) => void;
+
+export class PreparedExtensionConsumedError extends Error {
+  readonly code = 'prepared_extension_consumed';
+
+  constructor() {
+    super('Prepared extension mutation has already been consumed.');
+    this.name = 'PreparedExtensionConsumedError';
+  }
+}
+
+export class InvalidPreparedExtensionError extends Error {
+  readonly code = 'invalid_prepared_extension';
+
+  constructor() {
+    super('Prepared extension mutation does not belong to this manager.');
+    this.name = 'InvalidPreparedExtensionError';
+  }
+}
+
+export interface ExtensionMutationEvent {
+  id: number;
+  phase: 'start' | 'end';
+  operation: string;
+}
+
+export type ExtensionMutationListener = (event: ExtensionMutationEvent) => void;
 
 // ============================================================================
 // Helper Functions
@@ -239,19 +388,16 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   };
 
   try {
-    const mdFiles = await glob('**/*.md', {
+    const allFiles = await glob('**/*.{md,toml}', {
       ...globOptions,
       cwd: dir,
     });
 
-    const commandNames = mdFiles.map((file) => {
-      const relativePathWithExt = path.relative(dir, path.join(dir, file));
-      const relativePath = relativePathWithExt.substring(
-        0,
-        relativePathWithExt.length - 3,
-      );
+    const commandNames = allFiles.map((file) => {
+      const ext = path.extname(file);
+      const relativePath = file.substring(0, file.length - ext.length);
       const commandName = relativePath
-        .split(path.sep)
+        .split(/[/\\]/)
         .map((segment) => segment.replaceAll(':', '_'))
         .join(':');
 
@@ -269,45 +415,39 @@ async function loadCommandsFromDir(dir: string): Promise<string[]> {
   }
 }
 
-async function convertGeminiOrClaudeExtension(
-  extensionDir: string,
-  pluginName?: string,
-): Promise<{ extensionDir: string; originSource: ExtensionOriginSource }> {
-  let newExtensionDir = extensionDir;
-  let originSource: ExtensionOriginSource = 'QwenCode';
-  const configFilePath = path.join(extensionDir, EXTENSIONS_CONFIG_FILENAME);
-  if (fs.existsSync(configFilePath)) {
-    newExtensionDir = extensionDir;
-  } else if (isGeminiExtensionConfig(extensionDir)) {
-    newExtensionDir = (await convertGeminiExtensionPackage(extensionDir))
-      .convertedDir;
-    originSource = 'Gemini';
-  } else if (pluginName) {
-    newExtensionDir = (
-      await convertClaudePluginPackage(extensionDir, pluginName)
-    ).convertedDir;
-    originSource = 'Claude';
-  }
-  // Claude plugin conversion not yet implemented
-  return { extensionDir: newExtensionDir, originSource };
-}
-
 // ============================================================================
 // ExtensionManager Class
 // ============================================================================
 
 export class ExtensionManager {
   private extensionCache: Map<string, Extension> | null = null;
+  private readonly mutationListeners = new Set<ExtensionMutationListener>();
+  private nextMutationId = 0;
 
   // Enablement configuration (directly implemented)
   private readonly configDir: string;
   private readonly configFilePath: string;
   private readonly enabledExtensionNamesOverride: string[];
   private readonly workspaceDir: string;
+  private readonly preferencesStore: ExtensionPreferencesStore;
+  private readonly sourceRegistryStore: SourceRegistryStore;
+  private readonly extensionStore: ExtensionStore;
+  private readonly networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+  private readonly preparedMutations = new WeakSet<PreparedExtensionMutation>();
+  private discoverCache: DiscoveredPlugin[] | null = null;
+
+  private withNetworkPolicy(
+    installMetadata: ExtensionInstallMetadata | undefined,
+  ): ExtensionInstallMetadata | undefined {
+    return installMetadata && this.networkPolicy
+      ? { ...installMetadata, networkPolicy: this.networkPolicy }
+      : installMetadata;
+  }
 
   private config?: Config;
   private telemetrySettings?: TelemetrySettings;
   private isWorkspaceTrusted: boolean;
+  private readonly locale: string;
   private requestConsent: (options?: ExtensionRequestOptions) => Promise<void>;
   private requestSetting?: (setting: ExtensionSetting) => Promise<string>;
   private requestChoicePlugin: (
@@ -316,14 +456,25 @@ export class ExtensionManager {
 
   constructor(options: ExtensionManagerOptions) {
     this.workspaceDir = options.workspaceDir ?? process.cwd();
+    this.locale = options.locale ?? 'en';
     this.enabledExtensionNamesOverride =
       options.enabledExtensionOverrides?.map((name) => name.toLowerCase()) ??
       [];
-    this.configDir = ExtensionStorage.getUserExtensionsDir();
+    this.extensionStore = options.extensionStore ?? new ExtensionStore();
+    this.configDir = this.extensionStore.extensionsDir;
     this.configFilePath = path.join(
       this.configDir,
       'extension-enablement.json',
     );
+    this.preferencesStore = new ExtensionPreferencesStore(
+      path.join(this.configDir, 'extension-preferences.json'),
+    );
+    this.sourceRegistryStore = new SourceRegistryStore(
+      // Keep the on-disk filename as marketplaces.json for backward
+      // compatibility with sources added before the source/* rename.
+      path.join(this.configDir, 'marketplaces.json'),
+    );
+    this.networkPolicy = options.networkPolicy;
     this.requestSetting = options.requestSetting;
     this.requestChoicePlugin =
       options.requestChoicePlugin || (() => Promise.resolve(''));
@@ -355,6 +506,34 @@ export class ExtensionManager {
     ) => Promise<string>,
   ): void {
     this.requestChoicePlugin = requestChoicePlugin;
+  }
+
+  addMutationListener(listener: ExtensionMutationListener): () => void {
+    this.mutationListeners.add(listener);
+    return () => {
+      this.mutationListeners.delete(listener);
+    };
+  }
+
+  private beginMutation(operation: string): () => void {
+    const id = ++this.nextMutationId;
+    this.emitMutation({ id, phase: 'start', operation });
+    let ended = false;
+    return () => {
+      if (ended) return;
+      ended = true;
+      this.emitMutation({ id, phase: 'end', operation });
+    };
+  }
+
+  private emitMutation(event: ExtensionMutationEvent): void {
+    for (const listener of this.mutationListeners) {
+      try {
+        listener(event);
+      } catch (error) {
+        debugLogger.warn('Extension mutation listener failed:', error);
+      }
+    }
   }
 
   // ==========================================================================
@@ -403,9 +582,21 @@ export class ExtensionManager {
     const extensionConfig = config[extensionName];
     let enabled = true;
     const allOverrides = extensionConfig?.overrides ?? [];
+    const lexicalPath = ensureLeadingAndTrailingSlash(checkPath);
+    let canonicalPath = lexicalPath;
+    try {
+      canonicalPath = ensureLeadingAndTrailingSlash(
+        fs.realpathSync.native(path.resolve(checkPath)),
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+    }
     for (const rule of allOverrides) {
       const override = Override.fromFileRule(rule);
-      if (override.matchesPath(ensureLeadingAndTrailingSlash(checkPath))) {
+      if (
+        override.matchesPath(lexicalPath) ||
+        override.matchesPath(canonicalPath)
+      ) {
         enabled = !override.isDisable;
       }
     }
@@ -419,7 +610,8 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
-  ): Promise<void> {
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
     const currentDir = cwd ?? this.workspaceDir;
     if (
       scope === SettingScope.System ||
@@ -433,13 +625,33 @@ export class ExtensionManager {
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
-    const scopePath =
-      scope === SettingScope.Workspace ? currentDir : os.homedir();
-    this.enableByPath(name, true, scopePath);
-    const config = getTelemetryConfig(currentDir, this.telemetrySettings);
-    logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
-    extension.isActive = true;
-    await this.refreshTools();
+
+    const endMutation = this.beginMutation('enableExtension');
+    try {
+      let snapshot: ExtensionStoreSnapshot;
+      if (scope === SettingScope.Workspace) {
+        snapshot = await this.extensionStore.setWorkspaceActivation(
+          { id: extension.id, name: extension.name },
+          currentDir,
+          'enabled',
+        );
+      } else {
+        const scopePath = os.homedir();
+        snapshot = await this.extensionStore.setLegacyPathActivation(
+          { id: extension.id, name: extension.name },
+          scopePath,
+          'enabled',
+        );
+      }
+      onCommitted?.(snapshot.generation);
+      const config = getTelemetryConfig(currentDir, this.telemetrySettings);
+      logExtensionEnable(config, new ExtensionEnableEvent(name, scope));
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
   }
 
   /**
@@ -449,7 +661,8 @@ export class ExtensionManager {
     name: string,
     scope: SettingScope,
     cwd?: string,
-  ): Promise<void> {
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
     const currentDir = cwd ?? this.workspaceDir;
     const config = getTelemetryConfig(currentDir, this.telemetrySettings);
     if (
@@ -464,56 +677,383 @@ export class ExtensionManager {
     if (!extension) {
       throw new Error(`Extension with name ${name} does not exist.`);
     }
-    const scopePath =
-      scope === SettingScope.Workspace ? currentDir : os.homedir();
-    this.disableByPath(name, true, scopePath);
-    logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
-    extension.isActive = false;
-    await this.refreshTools();
+
+    const endMutation = this.beginMutation('disableExtension');
+    try {
+      let snapshot: ExtensionStoreSnapshot;
+      if (scope === SettingScope.Workspace) {
+        snapshot = await this.extensionStore.setWorkspaceActivation(
+          { id: extension.id, name: extension.name },
+          currentDir,
+          'disabled',
+        );
+      } else {
+        const scopePath = os.homedir();
+        snapshot = await this.extensionStore.setLegacyPathActivation(
+          { id: extension.id, name: extension.name },
+          scopePath,
+          'disabled',
+        );
+      }
+      onCommitted?.(snapshot.generation);
+      logExtensionDisable(config, new ExtensionDisableEvent(name, scope));
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  async getExtensionStoreSnapshot(): Promise<ExtensionStoreSnapshot> {
+    return await this.extensionStore.readSnapshot();
+  }
+
+  async getExtensionActivation(
+    extensionId: string,
+    workspacePath: string = this.workspaceDir,
+  ): Promise<ExtensionActivationResult> {
+    const snapshot = await this.extensionStore.readSnapshot();
+    return this.getExtensionActivationFromSnapshot(
+      extensionId,
+      snapshot,
+      workspacePath,
+    );
+  }
+
+  getExtensionActivationFromSnapshot(
+    extensionId: string,
+    snapshot: ExtensionStoreSnapshot,
+    workspacePath: string = this.workspaceDir,
+  ): ExtensionActivationResult {
+    const extension = this.findExtensionById(extensionId);
+    const activation = this.extensionStore.getActivation(
+      snapshot,
+      extension.id,
+      extension.name,
+      workspacePath,
+    );
+    if (this.enabledExtensionNamesOverride.length === 0) {
+      return activation;
+    }
+    return {
+      ...activation,
+      effective: this.isEnabled(extension.name) ? 'enabled' : 'disabled',
+      source: 'cli_override',
+    };
+  }
+
+  async setExtensionDefaultActivation(
+    extensionId: string,
+    activation: ExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const extension = this.findExtensionById(extensionId);
+    const endMutation = this.beginMutation('setExtensionDefaultActivation');
+    try {
+      const snapshot = await this.extensionStore.setDefaultActivation(
+        { id: extension.id, name: extension.name },
+        activation,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  async setExtensionActivationScope(
+    extensionId: string,
+    activation: InitialExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const extension = this.findExtensionById(extensionId);
+    const endMutation = this.beginMutation('setExtensionActivationScope');
+    try {
+      const snapshot = await this.extensionStore.setActivationScope(
+        { id: extension.id, name: extension.name },
+        activation,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  async setExtensionWorkspaceActivation(
+    extensionId: string,
+    workspacePath: string,
+    activation: ExtensionActivation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const extension = this.findExtensionById(extensionId);
+    const endMutation = this.beginMutation('setExtensionWorkspaceActivation');
+    try {
+      const snapshot = await this.extensionStore.setWorkspaceActivation(
+        { id: extension.id, name: extension.name },
+        workspacePath,
+        activation,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  async clearExtensionWorkspaceActivation(
+    extensionId: string,
+    workspacePath: string,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const extension = this.findExtensionById(extensionId);
+    const endMutation = this.beginMutation('clearExtensionWorkspaceActivation');
+    try {
+      const snapshot = await this.extensionStore.clearWorkspaceActivation(
+        { id: extension.id, name: extension.name },
+        workspacePath,
+      );
+      onCommitted?.(snapshot.generation);
+      this.applyStoreActivation(snapshot);
+      const warning = await this.refreshToolsAfterActivation(extension.name);
+      return warning ? { ...snapshot, warnings: [warning] } : snapshot;
+    } finally {
+      endMutation();
+    }
+  }
+
+  private findExtensionById(extensionId: string): Extension {
+    const extension = this.getLoadedExtensions().find(
+      (candidate) => candidate.id === extensionId,
+    );
+    if (!extension) {
+      throw new Error(`Extension with id ${extensionId} does not exist.`);
+    }
+    return extension;
+  }
+
+  private applyStoreActivation(snapshot: ExtensionStoreSnapshot): void {
+    for (const extension of this.getLoadedExtensions()) {
+      if (this.enabledExtensionNamesOverride.length > 0) {
+        extension.isActive = this.isEnabled(extension.name);
+        continue;
+      }
+      extension.isActive =
+        this.extensionStore.getActivation(
+          snapshot,
+          extension.id,
+          extension.name,
+          this.workspaceDir,
+        ).effective === 'enabled';
+    }
+  }
+
+  private async refreshToolsAfterActivation(
+    name: string,
+  ): Promise<{ code: string; error: string } | undefined> {
+    try {
+      await this.refreshTools();
+      return undefined;
+    } catch (error) {
+      debugLogger.warn(
+        `Extension "${name}" activation changed, but runtime refresh failed: ${getErrorMessage(error)}`,
+      );
+      return {
+        code: 'extension_runtime_refresh_failed',
+        error: getErrorMessage(error),
+      };
+    }
+  }
+
+  // ==========================================================================
+  // Favorites & scope preferences (Installed view grouping)
+  // ==========================================================================
+
+  isFavorite(name: string): boolean {
+    return this.preferencesStore.isFavorite(name);
+  }
+
+  getFavorites(): string[] {
+    return this.preferencesStore.getFavorites();
+  }
+
+  /** Toggles favorite state for an extension/MCP server; returns new state. */
+  toggleFavorite(name: string): boolean {
+    return this.preferencesStore.toggleFavorite(name);
+  }
+
+  getExtensionScope(name: string): ExtensionScope | undefined {
+    return this.preferencesStore.getScope(name);
+  }
+
+  getExtensionScopes(): Record<string, ExtensionScope> {
+    return this.preferencesStore.getScopes();
+  }
+
+  setExtensionScope(name: string, scope: ExtensionScope): void {
+    const endMutation = this.beginMutation('setExtensionScope');
+    try {
+      this.preferencesStore.setScope(name, scope);
+    } finally {
+      endMutation();
+    }
+  }
+
+  /** MCP servers individually disabled inside the given extension. */
+  getDisabledMcpServers(extensionName: string): string[] {
+    return this.preferencesStore.getDisabledMcpServers(extensionName);
+  }
+
+  setMcpServerDisabled(
+    extensionName: string,
+    serverName: string,
+    disabled: boolean,
+  ): void {
+    const endMutation = this.beginMutation('setMcpServerDisabled');
+    try {
+      this.preferencesStore.setMcpServerDisabled(
+        extensionName,
+        serverName,
+        disabled,
+      );
+    } finally {
+      endMutation();
+    }
+  }
+
+  // ==========================================================================
+  // Marketplace registry & discovery
+  // ==========================================================================
+
+  getSources(): ExtensionSource[] {
+    return this.sourceRegistryStore.read();
   }
 
   /**
-   * Removes enablement configuration for an extension.
+   * Adds a marketplace source. Loads the marketplace config to resolve a
+   * human-readable name (falling back to the raw source). Throws if no
+   * marketplace config can be resolved from the source.
    */
-  removeEnablementConfig(extensionName: string): void {
-    const config = this.readEnablementConfig();
-    if (config[extensionName]) {
-      delete config[extensionName];
-      this.writeEnablementConfig(config);
+  async addSource(source: string): Promise<ExtensionSource> {
+    const trimmed = source.trim();
+    if (!trimmed) {
+      throw new Error('Marketplace source cannot be empty.');
     }
-  }
-
-  private enableByPath(
-    extensionName: string,
-    includeSubdirs: boolean,
-    scopePath: string,
-  ): void {
-    const config = this.readEnablementConfig();
-    if (!config[extensionName]) {
-      config[extensionName] = { overrides: [] };
-    }
-    const override = Override.fromInput(scopePath, includeSubdirs);
-    const overrides = config[extensionName].overrides.filter((rule) => {
-      const fileOverride = Override.fromFileRule(rule);
-      if (
-        fileOverride.conflictsWith(override) ||
-        fileOverride.isEqualTo(override)
-      ) {
-        return false;
+    const config = await loadMarketplaceConfigFromSource(
+      trimmed,
+      this.networkPolicy,
+    );
+    if (!config) {
+      // A "marketplace" is a Claude-format collection (.claude-plugin/
+      // marketplace.json). A single extension repo (Gemini/Claude/git/npm) is
+      // not a marketplace — guide the user to install it directly instead.
+      let isInstallableExtension = false;
+      try {
+        await parseInstallSource(trimmed, {
+          networkPolicy: this.networkPolicy,
+        });
+        isInstallableExtension = true;
+      } catch {
+        // Not a recognizable install source either.
       }
-      return !fileOverride.isChildOf(override);
-    });
-    overrides.push(override.output());
-    config[extensionName].overrides = overrides;
-    this.writeEnablementConfig(config);
+      const redacted = redactUrlCredentials(trimmed);
+      if (isInstallableExtension) {
+        throw new Error(
+          `"${redacted}" looks like a single extension, not a marketplace. ` +
+            `Install it directly with: /extensions install ${redacted}`,
+        );
+      }
+      throw new Error(
+        `No marketplace found at "${redacted}". ` +
+          `Expected a .claude-plugin/marketplace.json.`,
+      );
+    }
+
+    const endMutation = this.beginMutation('addSource');
+    try {
+      const now = new Date().toISOString();
+      const entry: ExtensionSource = {
+        name: config.name || trimmed,
+        source: trimmed,
+        type: parseExtensionSourceType(trimmed),
+        addedAt: now,
+        lastUpdatedAt: now,
+      };
+      this.sourceRegistryStore.add(entry);
+      this.discoverCache = null; // sources changed -> refetch on next discover
+      return entry;
+    } finally {
+      endMutation();
+    }
   }
 
-  private disableByPath(
-    extensionName: string,
-    includeSubdirs: boolean,
-    scopePath: string,
-  ): void {
-    this.enableByPath(extensionName, includeSubdirs, `!${scopePath}`);
+  removeSource(name: string): boolean {
+    const endMutation = this.beginMutation('removeSource');
+    try {
+      const removed = this.sourceRegistryStore.remove(name);
+      if (removed) {
+        this.discoverCache = null;
+      }
+      return removed;
+    } finally {
+      endMutation();
+    }
+  }
+
+  /**
+   * Records a fresh "last updated" timestamp for a marketplace and invalidates
+   * the discovery cache so the next discover re-fetches it.
+   */
+  markSourceUpdated(name: string): ExtensionSource | undefined {
+    const entry = this.getSources().find((m) => m.name === name);
+    if (!entry) {
+      return undefined;
+    }
+    const updated: ExtensionSource = {
+      ...entry,
+      lastUpdatedAt: new Date().toISOString(),
+    };
+    this.sourceRegistryStore.add(updated); // add() replaces by name
+    this.discoverCache = null;
+    return updated;
+  }
+
+  loadSource(source: string): Promise<ClaudeMarketplaceConfig | null> {
+    return loadMarketplaceConfigFromSource(source, this.networkPolicy);
+  }
+
+  /**
+   * Discovers all installable plugins across configured sources, marking
+   * which are already installed. The fetched listing is cached for the session;
+   * pass `{ refresh: true }` to force a re-fetch. The cheap `installed` flags are
+   * always recomputed against the current install state.
+   */
+  async discoverPlugins(options?: {
+    refresh?: boolean;
+  }): Promise<DiscoveredPlugin[]> {
+    const installedNames = new Set(
+      this.getLoadedExtensions().map((ext) => ext.name),
+    );
+    if (this.discoverCache && !options?.refresh) {
+      return this.discoverCache.map((plugin) => ({
+        ...plugin,
+        installed: installedNames.has(plugin.name),
+      }));
+    }
+    const result = await discoverPlugins(
+      this.getSources(),
+      installedNames,
+      this.networkPolicy,
+    );
+    this.discoverCache = result;
+    return result;
   }
 
   private readEnablementConfig(): AllExtensionsEnablementConfig {
@@ -533,34 +1073,48 @@ export class ExtensionManager {
     }
   }
 
-  private writeEnablementConfig(config: AllExtensionsEnablementConfig): void {
-    fs.mkdirSync(this.configDir, { recursive: true });
-    atomicWriteFileSync(this.configFilePath, JSON.stringify(config, null, 2));
-  }
-
   /**
    * Refreshes the extension cache from disk.
    */
   async refreshCache(options?: { names?: string[] }): Promise<void> {
-    this.extensionCache = new Map<string, Extension>();
+    await this.refreshCacheWithSnapshot(options);
+  }
+
+  async refreshCacheWithSnapshot(options?: {
+    names?: string[];
+  }): Promise<ExtensionStoreSnapshot> {
     const requestedNames = options?.names?.filter(Boolean) ?? [];
-    let extensions: Extension[];
-    if (requestedNames.length > 0) {
-      extensions = (
-        await Promise.all(
-          requestedNames.map((name) => this.loadExtensionByName(name)),
-        )
-      ).filter((extension): extension is Extension => extension !== null);
-    } else {
-      // Default: load all extensions from QWEN_HOME-aware user extensions dir.
-      extensions = await this.loadExtensionsFromExtensionsDir(
-        ExtensionStorage.getUserExtensionsDir(),
-        this.workspaceDir,
-      );
-    }
+    const { value: extensions, snapshot } =
+      await this.extensionStore.readConsistent(async () => {
+        let loaded: Extension[];
+        if (requestedNames.length > 0) {
+          loaded = (
+            await Promise.all(
+              requestedNames.map((name) => this.loadExtensionByName(name)),
+            )
+          ).filter((extension): extension is Extension => extension !== null);
+        } else {
+          // Default: load all extensions from QWEN_HOME-aware user extensions dir.
+          loaded = await this.loadExtensionsFromExtensionsDir(
+            this.configDir,
+            this.workspaceDir,
+          );
+        }
+        return {
+          value: loaded,
+          extensions: loaded.map((extension) => ({
+            id: extension.id,
+            name: extension.name,
+          })),
+        };
+      });
+    const nextCache = new Map<string, Extension>();
     extensions.forEach((extension) => {
-      this.extensionCache!.set(extension.name, extension);
+      nextCache.set(extension.name, extension);
     });
+    this.extensionCache = nextCache;
+    this.applyStoreActivation(snapshot);
+    return snapshot;
   }
 
   getLoadedExtensions(): Extension[] {
@@ -582,7 +1136,7 @@ export class ExtensionManager {
     workspaceDir?: string,
   ): Promise<Extension | null> {
     const cwd = workspaceDir ?? this.workspaceDir;
-    const userExtensionsDir = ExtensionStorage.getUserExtensionsDir();
+    const userExtensionsDir = this.configDir;
     if (!fs.existsSync(userExtensionsDir)) {
       return null;
     }
@@ -642,6 +1196,7 @@ export class ExtensionManager {
 
   async loadExtension(
     context: LoadExtensionContext,
+    options: { throwOnError?: boolean } = {},
   ): Promise<Extension | null> {
     const { extensionDir, workspaceDir } = context;
     if (!fs.statSync(extensionDir).isDirectory()) {
@@ -666,6 +1221,7 @@ export class ExtensionManager {
       const extension: Extension = {
         id: getExtensionId(config, installMetadata),
         name: config.name,
+        displayName: config.displayName,
         version:
           config.version ||
           installMetadata?.marketplaceConfig?.metadata?.version ||
@@ -768,6 +1324,7 @@ export class ExtensionManager {
 
       return extension;
     } catch (e) {
+      if (options.throwOnError) throw e;
       debugLogger.warn(
         `Warning: Skipping extension in ${effectiveExtensionPath}: ${getErrorMessage(
           e,
@@ -808,13 +1365,15 @@ export class ExtensionManager {
     }
     try {
       const configContent = fs.readFileSync(configFilePath, 'utf-8');
-      const config = recursivelyHydrateStrings(JSON.parse(configContent), {
+      const rawConfig = recursivelyHydrateStrings(JSON.parse(configContent), {
         extensionPath: extensionDir,
         CLAUDE_PLUGIN_ROOT: extensionDir,
         workspacePath: workspaceDir,
         '/': path.sep,
         pathSeparator: path.sep,
-      }) as unknown as ExtensionConfig;
+      }) as unknown as RawExtensionConfig;
+
+      const config = resolveExtensionConfigLocale(rawConfig, this.locale);
 
       if (!config.name) {
         throw new Error(
@@ -822,6 +1381,7 @@ export class ExtensionManager {
         );
       }
       validateName(config.name);
+      validateExtensionSettingEnvVars(config.settings);
       return config;
     } catch (e) {
       throw new Error(
@@ -845,7 +1405,155 @@ export class ExtensionManager {
     requestSetting?: (setting: ExtensionSetting) => Promise<string>,
     cwd?: string,
     previousExtensionConfig?: ExtensionConfig,
+    initialActivation: InitialExtensionActivation = { scope: 'user' },
+    signal?: AbortSignal,
   ): Promise<Extension> {
+    if (!previousExtensionConfig) {
+      const endMutation = this.beginMutation('installExtension');
+      let prepared: PreparedExtensionMutation | undefined;
+      try {
+        prepared = await this.prepareExtensionInstall({
+          installMetadata,
+          initialActivation,
+          ...(requestConsent ? { requestConsent } : {}),
+          ...(requestSetting ? { requestSetting } : {}),
+          ...(cwd ? { cwd } : {}),
+          ...(signal ? { signal } : {}),
+        });
+        const committed = await this.commitPreparedExtensionInternal(
+          prepared,
+          false,
+        );
+        const warnings = committed.warnings ?? [];
+        if (!committed.extension || warnings.length > 0) {
+          const reloadWarning = committed.warnings?.find(
+            (warning) => warning.code === 'extension_reload_failed',
+          );
+          const firstWarning = reloadWarning ?? warnings[0];
+          const error = new Error(
+            `Extension "${prepared.identity.name}" committed with warnings${
+              firstWarning
+                ? `: ${firstWarning.code}: ${firstWarning.error}`
+                : '.'
+            }`,
+            firstWarning ? { cause: new Error(firstWarning.error) } : undefined,
+          ) as ExtensionCommittedWithWarningsError;
+          error.code = 'extension_committed_with_warnings';
+          error.committed = true;
+          error.identity = committed.identity;
+          error.warnings = warnings;
+          throw error;
+        }
+        return committed.extension;
+      } finally {
+        if (prepared) await this.disposePreparedExtension(prepared);
+        endMutation();
+      }
+    }
+    return (await this.installExtensionInternal(
+      installMetadata,
+      requestConsent,
+      requestSetting,
+      cwd,
+      previousExtensionConfig,
+      initialActivation,
+      signal,
+      false,
+      true,
+    )) as Extension;
+  }
+
+  async prepareExtensionInstall(
+    options: PrepareExtensionInstallOptions,
+  ): Promise<PreparedExtensionMutation> {
+    return (await this.installExtensionInternal(
+      { ...options.installMetadata },
+      options.requestConsent,
+      options.requestSetting,
+      options.cwd,
+      undefined,
+      options.initialActivation,
+      options.signal,
+      true,
+      false,
+    )) as PreparedExtensionMutation;
+  }
+
+  private async prepareExtensionUpdateFromState(
+    extension: Extension,
+    signal?: AbortSignal,
+  ): Promise<PreparedExtensionMutation> {
+    const installMetadata = this.loadInstallMetadata(extension.path);
+    if (!installMetadata?.type || installMetadata.type === 'link') {
+      throw new Error(`Extension ${extension.name} cannot be updated.`);
+    }
+    const previousConfig = this.loadExtensionConfig({
+      extensionDir: extension.path,
+    });
+    return (await this.installExtensionInternal(
+      { ...installMetadata },
+      undefined,
+      undefined,
+      undefined,
+      previousConfig,
+      { scope: 'user' },
+      signal,
+      true,
+      false,
+    )) as PreparedExtensionMutation;
+  }
+
+  async prepareExtensionUpdate(
+    options: PrepareExtensionUpdateOptions,
+  ): Promise<
+    | { upToDate: true; extension: Extension }
+    | { upToDate: false; prepared: PreparedExtensionMutation }
+  > {
+    const installMetadata = this.withNetworkPolicy(
+      options.extension.installMetadata,
+    );
+    const extension =
+      installMetadata === options.extension.installMetadata
+        ? options.extension
+        : { ...options.extension, installMetadata };
+    const state = await checkForExtensionUpdate(
+      extension,
+      this,
+      options.signal,
+    );
+    if (state === ExtensionUpdateState.UP_TO_DATE) {
+      return { upToDate: true, extension: options.extension };
+    }
+    if (state !== ExtensionUpdateState.UPDATE_AVAILABLE) {
+      throw new Error(
+        `Extension "${options.extension.name}" update check returned ${state}.`,
+      );
+    }
+    return {
+      upToDate: false,
+      prepared: await this.prepareExtensionUpdateFromState(
+        options.extension,
+        options.signal,
+      ),
+    };
+  }
+
+  private async installExtensionInternal(
+    installMetadata: ExtensionInstallMetadata,
+    requestConsent:
+      | ((options?: ExtensionRequestOptions) => Promise<void>)
+      | undefined,
+    requestSetting:
+      | ((setting: ExtensionSetting) => Promise<string>)
+      | undefined,
+    cwd: string | undefined,
+    previousExtensionConfig: ExtensionConfig | undefined,
+    initialActivation: InitialExtensionActivation,
+    signal: AbortSignal | undefined,
+    prepareOnly: boolean,
+    emitMutation: boolean,
+  ): Promise<Extension | PreparedExtensionMutation> {
+    installMetadata = this.withNetworkPolicy(installMetadata)!;
     const currentDir = cwd ?? this.workspaceDir;
     const telemetryConfig = getTelemetryConfig(
       currentDir,
@@ -855,9 +1563,22 @@ export class ExtensionManager {
     const redactedInstallSource = redactUrlCredentials(installMetadata.source);
 
     const isUpdate = !!previousExtensionConfig;
+    const expectedArtifactGeneration = previousExtensionConfig
+      ? ((await this.extensionStore.readSnapshot()).extensions[
+          getExtensionId(previousExtensionConfig, installMetadata)
+        ]?.artifactGeneration ?? 0)
+      : undefined;
     let newExtensionConfig: ExtensionConfig | null = null;
     let localSourcePath: string | undefined;
+    let tempDir: string | undefined;
+    let convertedSourcePath: string | undefined;
+    let stagingPath: string | undefined;
+    let preparedSettings: PreparedExtensionSettingsMutation | undefined;
 
+    let ownershipTransferred = false;
+    const endMutation = emitMutation
+      ? this.beginMutation('installExtension')
+      : () => undefined;
     try {
       if (!this.isWorkspaceTrusted) {
         throw new Error(
@@ -865,7 +1586,7 @@ export class ExtensionManager {
         );
       }
 
-      const extensionsDir = ExtensionStorage.getUserExtensionsDir();
+      const extensionsDir = this.configDir;
       await fs.promises.mkdir(extensionsDir, { recursive: true });
 
       if (
@@ -877,8 +1598,6 @@ export class ExtensionManager {
           installMetadata.source,
         );
       }
-
-      let tempDir: string | undefined;
 
       if (
         installMetadata.originSource === 'Claude' &&
@@ -900,6 +1619,7 @@ export class ExtensionManager {
           const result = await downloadFromGitHubRelease(
             installMetadata,
             tempDir,
+            signal,
           );
           if (
             installMetadata.type === 'git' ||
@@ -909,16 +1629,41 @@ export class ExtensionManager {
             installMetadata.releaseTag = result.tagName;
           }
         } catch (_error) {
-          await cloneFromGit(installMetadata, tempDir);
+          signal?.throwIfAborted();
+          // downloadFromGitHubRelease may have written a partial archive or
+          // extracted files into tempDir before failing (e.g. a repo whose
+          // latest release is a source tarball that isn't a valid extension
+          // archive). Reusing that dirty directory makes `git clone` fail with
+          // "destination path '.' already exists and is not an empty directory".
+          // Recreate a clean tempDir before falling back to a plain clone.
+          // See #6334.
+          await fs.promises.rm(tempDir, { recursive: true, force: true });
+          await fs.promises.mkdir(tempDir, { recursive: true });
+          await cloneFromGit(installMetadata, tempDir, signal);
           if (installMetadata.type === 'github-release') {
             installMetadata.type = 'git';
           }
         }
         localSourcePath = tempDir;
+      } else if (installMetadata.type === 'archive-url') {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await downloadFromArchiveUrl(installMetadata, tempDir, signal);
+        localSourcePath = tempDir;
       } else if (installMetadata.type === 'npm') {
         tempDir = await ExtensionStorage.createTmpDir();
-        const result = await downloadFromNpmRegistry(installMetadata, tempDir);
+        const result = await downloadFromNpmRegistry(
+          installMetadata,
+          tempDir,
+          signal,
+        );
         installMetadata.releaseTag = result.version;
+        localSourcePath = tempDir;
+      } else if (
+        installMetadata.type === 'local' &&
+        isSupportedArchivePath(installMetadata.source)
+      ) {
+        tempDir = await ExtensionStorage.createTmpDir();
+        await extractArchiveFile(installMetadata.source, tempDir, signal);
         localSourcePath = tempDir;
       } else if (
         installMetadata.type === 'local' ||
@@ -929,13 +1674,21 @@ export class ExtensionManager {
         throw new Error(`Unsupported install type: ${installMetadata.type}`);
       }
 
+      signal?.throwIfAborted();
       try {
+        const sourceBeforeConversion = localSourcePath;
         const { extensionDir, originSource } =
           await convertGeminiOrClaudeExtension(
-            localSourcePath,
+            sourceBeforeConversion,
             installMetadata.pluginName,
+            installMetadata.networkPolicy,
+            signal,
           );
+        signal?.throwIfAborted();
 
+        if (extensionDir !== sourceBeforeConversion) {
+          convertedSourcePath = extensionDir;
+        }
         localSourcePath = extensionDir;
         installMetadata.originSource = originSource;
 
@@ -965,7 +1718,8 @@ export class ExtensionManager {
 
         const newExtensionName = newExtensionConfig.name;
         const previous = this.getLoadedExtensions().find(
-          (installed) => installed.name === newExtensionName,
+          (installed) =>
+            installed.name.toLowerCase() === newExtensionName.toLowerCase(),
         );
         if (isUpdate && !previous) {
           throw new Error(
@@ -1016,46 +1770,55 @@ export class ExtensionManager {
           });
         }
 
-        const extensionStorage = new ExtensionStorage(newExtensionName);
-        const destinationPath = extensionStorage.getExtensionDir();
+        const destinationPath = path.join(this.configDir, newExtensionName);
         const extensionId = getExtensionId(newExtensionConfig, installMetadata);
+        if (isUpdate && previous?.id !== extensionId) {
+          throw new Error(
+            `Extension "${newExtensionName}" changed its stable id during update.`,
+          );
+        }
         let previousSettings: Record<string, string> | undefined;
         if (isUpdate) {
           previousSettings = await getEnvContents(
             previousExtensionConfig,
             extensionId,
           );
-          await this.uninstallExtension(newExtensionName, isUpdate);
         }
-        await fs.promises.mkdir(destinationPath, { recursive: true });
+        stagingPath = await this.extensionStore.createStagingDirectory();
+
+        if (installMetadata.type !== 'link') {
+          await copyExtension(localSourcePath, stagingPath);
+        }
 
         if (isUpdate) {
-          await maybePromptForSettings(
+          preparedSettings = await maybePromptForSettings(
             newExtensionConfig,
             extensionId,
             requestSetting || this.requestSetting || promptForSetting,
             previousExtensionConfig,
             previousSettings,
+            path.join(stagingPath, EXTENSION_SETTINGS_FILENAME),
+            true,
           );
         } else {
-          await maybePromptForSettings(
+          preparedSettings = await maybePromptForSettings(
             newExtensionConfig,
             extensionId,
             requestSetting || this.requestSetting || promptForSetting,
+            undefined,
+            undefined,
+            path.join(stagingPath, EXTENSION_SETTINGS_FILENAME),
+            true,
           );
         }
 
-        if (installMetadata.type !== 'link') {
-          await copyExtension(localSourcePath, destinationPath);
-        }
-
         // Perform variable replacement in extension files (e.g., ${CLAUDE_PLUGIN_ROOT}) for Claude extensions
-        const hooksDir = path.join(destinationPath, 'hooks');
+        const hooksDir = path.join(stagingPath, 'hooks');
         const configHooksPath =
           typeof newExtensionConfig.hooks === 'string'
             ? path.isAbsolute(newExtensionConfig.hooks)
               ? newExtensionConfig.hooks
-              : path.join(destinationPath, newExtensionConfig.hooks)
+              : path.join(stagingPath, newExtensionConfig.hooks)
             : null;
 
         if (
@@ -1065,22 +1828,120 @@ export class ExtensionManager {
             fs.existsSync(configHooksPath))
         ) {
           try {
-            await performVariableReplacement(destinationPath);
+            await performVariableReplacement(stagingPath, destinationPath);
           } catch (error) {
             debugLogger.error('Variable replacement failed', error);
           }
         }
 
         const metadataString = JSON.stringify(installMetadata, null, 2);
-        const metadataPath = path.join(
-          destinationPath,
-          INSTALL_METADATA_FILENAME,
-        );
+        const metadataPath = path.join(stagingPath, INSTALL_METADATA_FILENAME);
         await atomicWriteFile(metadataPath, metadataString);
 
-        extension = await this.loadExtension({ extensionDir: destinationPath });
-        if (!extension) {
-          throw new Error(`Extension not found`);
+        const stagedExtension = await this.loadExtension(
+          { extensionDir: stagingPath, workspaceDir: currentDir },
+          { throwOnError: true },
+        );
+        if (!stagedExtension) {
+          throw new Error('Prepared extension could not be loaded.');
+        }
+
+        signal?.throwIfAborted();
+        if (prepareOnly) {
+          const cleanupPaths = [
+            tempDir,
+            convertedSourcePath !== tempDir ? convertedSourcePath : undefined,
+            localSourcePath !== tempDir &&
+            localSourcePath !== convertedSourcePath &&
+            installMetadata.type !== 'link' &&
+            installMetadata.type !== 'local'
+              ? localSourcePath
+              : undefined,
+          ].filter((value): value is string => !!value);
+          const prepared: PreparedExtensionMutation = {
+            operation: isUpdate ? 'update' : 'install',
+            identity: { id: extensionId, name: newExtensionName },
+            version: stagedExtension.version,
+            ...(expectedArtifactGeneration === undefined
+              ? {}
+              : { expectedArtifactGeneration }),
+            installMetadata,
+            config: newExtensionConfig,
+            ...(previousExtensionConfig
+              ? { previousConfig: previousExtensionConfig }
+              : {}),
+            initialActivation,
+            stagingDirectory: stagingPath,
+            destinationDirectory: destinationPath,
+            currentDir,
+            cleanupPaths,
+            ...(preparedSettings
+              ? {
+                  commitSettings: preparedSettings.commit,
+                  discardSettings: preparedSettings.discard,
+                }
+              : {}),
+            settingsActivated: false,
+            consumed: false,
+            disposed: false,
+          };
+          this.preparedMutations.add(prepared);
+          ownershipTransferred = true;
+          return prepared;
+        }
+        const snapshot = await this.extensionStore.commitArtifact({
+          operation: isUpdate ? 'update' : 'install',
+          identity: { id: extensionId, name: newExtensionName },
+          stagingDirectory: stagingPath,
+          destinationDirectory: destinationPath,
+          ...(!isUpdate ? { initialActivation } : {}),
+          ...(expectedArtifactGeneration === undefined
+            ? {}
+            : { expectedArtifactGeneration }),
+        });
+        await preparedSettings?.commit().catch((error) => {
+          debugLogger.warn(
+            `Extension "${newExtensionName}" settings compatibility cleanup failed: ${getErrorMessage(error)}`,
+          );
+        });
+        preparedSettings = undefined;
+        stagingPath = undefined;
+
+        try {
+          extension = await this.loadExtension(
+            {
+              extensionDir: destinationPath,
+            },
+            { throwOnError: true },
+          );
+          if (!extension) throw new Error('Extension not found after commit.');
+        } catch (reloadError) {
+          this.extensionCache?.delete(newExtensionName);
+          this.applyStoreActivation(snapshot);
+          const warnings = [
+            {
+              code: 'extension_reload_failed',
+              error: getErrorMessage(reloadError),
+            },
+          ];
+          await this.refreshTools().catch((error) => {
+            warnings.push({
+              code: 'extension_runtime_refresh_failed',
+              error: getErrorMessage(error),
+            });
+            debugLogger.warn(
+              `Extension "${newExtensionName}" was committed, but runtime refresh failed: ${getErrorMessage(error)}`,
+            );
+          });
+          const error = new Error(
+            `Extension "${newExtensionName}" committed but could not be reloaded: ${getErrorMessage(reloadError)}`,
+            { cause: reloadError },
+          ) as ExtensionCommittedWithWarningsError;
+          error.code = 'extension_committed_with_warnings';
+          error.committed = true;
+          error.identity = { id: extensionId, name: newExtensionName };
+          error.warnings = warnings;
+          throw error;
         }
 
         if (this.extensionCache) {
@@ -1099,7 +1960,6 @@ export class ExtensionManager {
               'success',
             ),
           );
-          await this.refreshTools();
         } else {
           logExtensionInstallEvent(
             telemetryConfig,
@@ -1110,16 +1970,48 @@ export class ExtensionManager {
               'success',
             ),
           );
-          this.enableExtension(newExtensionConfig.name, SettingScope.User);
         }
+        if (this.extensionCache) this.applyStoreActivation(snapshot);
+        await this.refreshTools().catch((error) => {
+          debugLogger.warn(
+            `Extension "${newExtensionName}" was installed, but runtime refresh failed: ${getErrorMessage(error)}`,
+          );
+        });
       } finally {
-        if (tempDir) {
+        if (!ownershipTransferred && preparedSettings) {
+          await preparedSettings.discard().catch((error) => {
+            debugLogger.warn(
+              `Failed to discard prepared extension settings: ${getErrorMessage(error)}`,
+            );
+          });
+        }
+        if (stagingPath && !ownershipTransferred) {
+          await fs.promises.rm(stagingPath, {
+            recursive: true,
+            force: true,
+          });
+          stagingPath = undefined;
+        }
+        if (tempDir && !ownershipTransferred) {
           await fs.promises.rm(tempDir, { recursive: true, force: true });
         }
         if (
+          convertedSourcePath &&
+          convertedSourcePath !== tempDir &&
+          !ownershipTransferred
+        ) {
+          await fs.promises.rm(convertedSourcePath, {
+            recursive: true,
+            force: true,
+          });
+        }
+        if (
+          localSourcePath &&
           localSourcePath !== tempDir &&
+          localSourcePath !== convertedSourcePath &&
           installMetadata.type !== 'link' &&
-          installMetadata.type !== 'local'
+          installMetadata.type !== 'local' &&
+          !ownershipTransferred
         ) {
           await fs.promises.rm(localSourcePath, {
             recursive: true,
@@ -1139,6 +2031,15 @@ export class ExtensionManager {
           // Ignore error
         }
       }
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      if (convertedSourcePath && convertedSourcePath !== tempDir) {
+        await fs.promises.rm(convertedSourcePath, {
+          recursive: true,
+          force: true,
+        });
+      }
       const config = newExtensionConfig ?? previousExtensionConfig;
       const extensionId = config
         ? getExtensionId(config, installMetadata)
@@ -1152,7 +2053,7 @@ export class ExtensionManager {
             newExtensionConfig?.version ?? '',
             previousExtensionConfig.version,
             installMetadata.type,
-            'error',
+            isExtensionCommittedWithWarningsError(error) ? 'success' : 'error',
           ),
         );
       } else {
@@ -1167,7 +2068,229 @@ export class ExtensionManager {
         );
       }
       throw error;
+    } finally {
+      endMutation();
     }
+  }
+
+  async commitPreparedExtension(
+    prepared: PreparedExtensionMutation,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<CommittedExtensionMutation> {
+    return await this.commitPreparedExtensionInternal(
+      prepared,
+      true,
+      onCommitted,
+    );
+  }
+
+  private async commitPreparedExtensionInternal(
+    prepared: PreparedExtensionMutation,
+    emitMutation: boolean,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<CommittedExtensionMutation> {
+    if (!this.preparedMutations.has(prepared)) {
+      throw new InvalidPreparedExtensionError();
+    }
+    if (prepared.consumed) throw new PreparedExtensionConsumedError();
+    prepared.consumed = true;
+    const endMutation = emitMutation
+      ? this.beginMutation(
+          prepared.operation === 'update'
+            ? 'updateExtension'
+            : 'installExtension',
+        )
+      : () => undefined;
+    try {
+      let snapshot: ExtensionStoreSnapshot;
+      try {
+        const stagedExtension = await this.loadExtension(
+          {
+            extensionDir: prepared.stagingDirectory,
+            workspaceDir: prepared.currentDir,
+          },
+          { throwOnError: true },
+        );
+        if (!stagedExtension) {
+          throw new Error('Prepared extension could not be loaded.');
+        }
+        if (
+          stagedExtension.id !== prepared.identity.id ||
+          stagedExtension.name !== prepared.identity.name ||
+          stagedExtension.version !== prepared.version
+        ) {
+          throw new Error('Prepared extension identity changed before commit.');
+        }
+        snapshot = await this.extensionStore.commitArtifact({
+          operation: prepared.operation,
+          identity: prepared.identity,
+          stagingDirectory: prepared.stagingDirectory,
+          destinationDirectory: prepared.destinationDirectory,
+          ...(prepared.operation === 'install'
+            ? { initialActivation: prepared.initialActivation }
+            : {
+                expectedArtifactGeneration:
+                  prepared.expectedArtifactGeneration ?? 0,
+              }),
+        });
+        prepared.settingsActivated = true;
+      } catch (error) {
+        const telemetryConfig = getTelemetryConfig(
+          prepared.currentDir,
+          this.telemetrySettings,
+        );
+        if (prepared.operation === 'update' && prepared.previousConfig) {
+          logExtensionUpdateEvent(
+            telemetryConfig,
+            new ExtensionUpdateEvent(
+              prepared.identity.name,
+              prepared.identity.id,
+              prepared.version,
+              prepared.previousConfig.version,
+              prepared.installMetadata.type,
+              'error',
+            ),
+          );
+        } else {
+          logExtensionInstallEvent(
+            telemetryConfig,
+            new ExtensionInstallEvent(
+              prepared.identity.name,
+              prepared.version,
+              redactUrlCredentials(prepared.installMetadata.source),
+              'error',
+            ),
+          );
+        }
+        throw error;
+      }
+      const warnings: NonNullable<CommittedExtensionMutation['warnings']> = [];
+      onCommitted?.(snapshot.generation);
+      try {
+        await prepared.commitSettings?.();
+      } catch (error) {
+        warnings.push({
+          code: 'extension_settings_legacy_sync_failed',
+          error: getErrorMessage(error),
+        });
+      }
+      let extension: Extension | undefined;
+      try {
+        extension =
+          (await this.loadExtension(
+            {
+              extensionDir: prepared.destinationDirectory,
+            },
+            { throwOnError: true },
+          )) ?? undefined;
+        if (!extension) throw new Error('Extension not found after commit.');
+        this.extensionCache?.set(extension.name, extension);
+        this.applyStoreActivation(snapshot);
+      } catch (error) {
+        this.extensionCache?.delete(prepared.identity.name);
+        this.applyStoreActivation(snapshot);
+        warnings.push({
+          code: 'extension_reload_failed',
+          error: getErrorMessage(error),
+        });
+      }
+
+      const telemetryConfig = getTelemetryConfig(
+        prepared.currentDir,
+        this.telemetrySettings,
+      );
+      if (prepared.operation === 'update' && prepared.previousConfig) {
+        logExtensionUpdateEvent(
+          telemetryConfig,
+          new ExtensionUpdateEvent(
+            prepared.identity.name,
+            prepared.identity.id,
+            prepared.version,
+            prepared.previousConfig.version,
+            prepared.installMetadata.type,
+            'success',
+          ),
+        );
+      } else {
+        logExtensionInstallEvent(
+          telemetryConfig,
+          new ExtensionInstallEvent(
+            prepared.identity.name,
+            prepared.version,
+            redactUrlCredentials(prepared.installMetadata.source),
+            'success',
+          ),
+        );
+      }
+      try {
+        await this.refreshTools();
+      } catch (error) {
+        warnings.push({
+          code: 'extension_runtime_refresh_failed',
+          error: getErrorMessage(error),
+        });
+      }
+      for (const error of await this.cleanupPreparedExtension(prepared)) {
+        warnings.push({
+          code: 'extension_temp_cleanup_failed',
+          error: getErrorMessage(error),
+        });
+      }
+      return {
+        identity: prepared.identity,
+        version: prepared.version,
+        generation: snapshot.generation,
+        ...(extension ? { extension } : {}),
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
+    } finally {
+      endMutation();
+    }
+  }
+
+  async disposePreparedExtension(
+    prepared: PreparedExtensionMutation,
+  ): Promise<void> {
+    if (!this.preparedMutations.has(prepared)) {
+      throw new InvalidPreparedExtensionError();
+    }
+    for (const error of await this.cleanupPreparedExtension(prepared)) {
+      debugLogger.warn(
+        `Failed to clean prepared extension files: ${getErrorMessage(error)}`,
+      );
+    }
+  }
+
+  private async cleanupPreparedExtension(
+    prepared: PreparedExtensionMutation,
+  ): Promise<unknown[]> {
+    if (prepared.disposed) return [];
+    const settingsCleanup =
+      !prepared.settingsActivated && prepared.discardSettings
+        ? await Promise.allSettled([prepared.discardSettings()])
+        : [];
+    const settingsErrors = settingsCleanup.flatMap((result) =>
+      result.status === 'rejected' ? [result.reason] : [],
+    );
+    const paths = [prepared.stagingDirectory, ...prepared.cleanupPaths];
+    let failedPaths = paths;
+    let pathErrors: unknown[] = [];
+    for (let attempt = 0; attempt < 2 && failedPaths.length > 0; attempt++) {
+      const results = await Promise.allSettled(
+        failedPaths.map(async (target) =>
+          fs.promises.rm(target, { recursive: true, force: true }),
+        ),
+      );
+      pathErrors = results.flatMap((result) =>
+        result.status === 'rejected' ? [result.reason] : [],
+      );
+      failedPaths = failedPaths.filter(
+        (_target, index) => results[index]?.status === 'rejected',
+      );
+    }
+    const errors = [...settingsErrors, ...pathErrors];
+    prepared.disposed = errors.length === 0;
+    return errors;
   }
 
   /**
@@ -1177,47 +2300,111 @@ export class ExtensionManager {
     extensionIdentifier: string,
     isUpdate: boolean,
     cwd?: string,
-  ): Promise<void> {
-    const currentDir = cwd ?? this.workspaceDir;
-    const telemetryConfig = getTelemetryConfig(
-      currentDir,
-      this.telemetrySettings,
-    );
-    const installedExtensions = this.getLoadedExtensions();
-    const extension = installedExtensions.find(
-      (installed) =>
-        installed.config.name.toLowerCase() ===
-          extensionIdentifier.toLowerCase() ||
-        installed.installMetadata?.source.toLowerCase() ===
-          extensionIdentifier.toLowerCase(),
-    );
-    if (!extension) {
-      throw new Error(`Extension not found.`);
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const endMutation = this.beginMutation('uninstallExtension');
+    try {
+      const currentDir = cwd ?? this.workspaceDir;
+      const telemetryConfig = getTelemetryConfig(
+        currentDir,
+        this.telemetrySettings,
+      );
+      const installedExtensions = this.getLoadedExtensions();
+      const extension = installedExtensions.find(
+        (installed) =>
+          installed.config.name.toLowerCase() ===
+            extensionIdentifier.toLowerCase() ||
+          installed.installMetadata?.source.toLowerCase() ===
+            extensionIdentifier.toLowerCase(),
+      );
+      if (!extension) {
+        throw new Error(`Extension not found.`);
+      }
+      return await this.uninstallExtensionPolicy(
+        { id: extension.id, name: extension.name },
+        extension.installMetadata?.type === 'link'
+          ? path.join(this.configDir, extension.name)
+          : extension.path,
+        isUpdate,
+        telemetryConfig,
+        onCommitted,
+      );
+    } finally {
+      endMutation();
     }
-    const storage = new ExtensionStorage(
-      extension.installMetadata?.type === 'link'
-        ? extension.name
-        : path.basename(extension.path),
-    );
+  }
 
-    await fs.promises.rm(storage.getExtensionDir(), {
-      recursive: true,
-      force: true,
+  async uninstallExtensionById(
+    extensionId: string,
+    isUpdate: boolean,
+    cwd?: string,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const endMutation = this.beginMutation('uninstallExtension');
+    try {
+      const snapshot = await this.extensionStore.readSnapshot();
+      const policy = snapshot.extensions[extensionId];
+      if (!policy) return snapshot;
+      const extension = this.getLoadedExtensions().find(
+        (candidate) => candidate.id === extensionId,
+      );
+      return await this.uninstallExtensionPolicy(
+        { id: extensionId, name: policy.name },
+        extension && extension.installMetadata?.type !== 'link'
+          ? extension.path
+          : path.join(this.configDir, policy.name),
+        isUpdate,
+        getTelemetryConfig(cwd ?? this.workspaceDir, this.telemetrySettings),
+        onCommitted,
+      );
+    } finally {
+      endMutation();
+    }
+  }
+
+  private async uninstallExtensionPolicy(
+    identity: { id: string; name: string },
+    destinationDirectory: string,
+    isUpdate: boolean,
+    telemetryConfig: Config,
+    onCommitted?: ExtensionCommitCallback,
+  ): Promise<ExtensionStoreMutationResult> {
+    const snapshot = await this.extensionStore.commitArtifact({
+      operation: 'uninstall',
+      identity,
+      destinationDirectory,
     });
-
-    if (this.extensionCache) {
-      this.extensionCache.delete(extension.name);
+    onCommitted?.(snapshot.generation);
+    this.extensionCache?.delete(identity.name);
+    if (isUpdate) return snapshot;
+    const warnings: NonNullable<ExtensionStoreMutationResult['warnings']> = [];
+    try {
+      this.preferencesStore.clear(identity.name);
+    } catch (error) {
+      debugLogger.warn(
+        `Extension "${identity.name}" was uninstalled, but preference cleanup failed: ${getErrorMessage(error)}`,
+      );
+      warnings.push({
+        code: 'extension_preferences_cleanup_failed',
+        error: getErrorMessage(error),
+      });
     }
-
-    if (isUpdate) return;
-
-    this.removeEnablementConfig(extension.name);
-    await this.refreshTools();
-
+    try {
+      await this.refreshTools();
+    } catch (error) {
+      debugLogger.warn(
+        `Extension "${identity.name}" was uninstalled, but runtime refresh failed: ${getErrorMessage(error)}`,
+      );
+      warnings.push({
+        code: 'extension_runtime_refresh_failed',
+        error: getErrorMessage(error),
+      });
+    }
     logExtensionUninstall(
       telemetryConfig,
-      new ExtensionUninstallEvent(extension.name, 'success'),
+      new ExtensionUninstallEvent(identity.name, 'success'),
     );
+    return warnings.length > 0 ? { ...snapshot, warnings } : snapshot;
   }
 
   async performWorkspaceExtensionMigration(
@@ -1239,7 +2426,15 @@ export class ExtensionManager {
           requestConsent,
           requestSetting,
         );
-      } catch (_) {
+      } catch (error) {
+        if (
+          isExtensionCommittedWithWarningsError(error) &&
+          !error.warnings.some(
+            (warning) => warning.code === 'extension_reload_failed',
+          )
+        ) {
+          continue;
+        }
         failedInstallNames.push(extension.config.name);
       }
     }
@@ -1248,6 +2443,9 @@ export class ExtensionManager {
 
   async checkForAllExtensionUpdates(
     callback: (extensionName: string, state: ExtensionUpdateState) => void,
+    signal?: AbortSignal,
+    schedule: <T>(task: () => Promise<T>) => Promise<T> = async (task) =>
+      await task(),
   ): Promise<void> {
     const extensions = this.getLoadedExtensions();
     const promises: Array<Promise<void>> = [];
@@ -1256,14 +2454,30 @@ export class ExtensionManager {
         callback(extension.name, ExtensionUpdateState.NOT_UPDATABLE);
         continue;
       }
+      const installMetadata = this.withNetworkPolicy(extension.installMetadata);
+      const extensionForUpdate =
+        installMetadata === extension.installMetadata
+          ? extension
+          : { ...extension, installMetadata };
       callback(extension.name, ExtensionUpdateState.CHECKING_FOR_UPDATES);
       promises.push(
-        checkForExtensionUpdate(extension, this)
+        schedule(
+          async () =>
+            await checkForExtensionUpdate(extensionForUpdate, this, signal),
+        )
           .then((state) => callback(extension.name, state))
-          .catch(() => callback(extension.name, ExtensionUpdateState.ERROR)),
+          .catch(() => {
+            signal?.throwIfAborted();
+            callback(extension.name, ExtensionUpdateState.ERROR);
+          }),
       );
     }
-    await Promise.all(promises);
+    const results = await Promise.allSettled(promises);
+    signal?.throwIfAborted();
+    const rejected = results.find(
+      (result): result is PromiseRejectedResult => result.status === 'rejected',
+    );
+    if (rejected) throw rejected.reason;
   }
 
   async updateExtension(
@@ -1271,6 +2485,7 @@ export class ExtensionManager {
     currentState: ExtensionUpdateState,
     callback: (extensionName: string, state: ExtensionUpdateState) => void,
     enableExtensionReloading: boolean = true,
+    signal?: AbortSignal,
   ): Promise<ExtensionUpdateInfo | undefined> {
     if (currentState === ExtensionUpdateState.UPDATING) {
       return undefined;
@@ -1288,49 +2503,49 @@ export class ExtensionManager {
       callback(extension.name, ExtensionUpdateState.UP_TO_DATE);
       throw new Error(`Extension is linked so does not need to be updated`);
     }
+    const endMutation = this.beginMutation('updateExtension');
     const originalVersion = extension.version;
+    let prepared: PreparedExtensionMutation | undefined;
 
-    const tempDir = await ExtensionStorage.createTmpDir();
     try {
-      const previousExtensionConfig = this.loadExtensionConfig({
-        extensionDir: extension.path,
-      });
-      let updatedExtension: Extension;
-      try {
-        updatedExtension = await this.installExtension(
-          installMetadata,
-          undefined,
-          undefined,
-          undefined,
-          previousExtensionConfig,
-        );
-      } catch (e) {
-        callback(extension.name, ExtensionUpdateState.ERROR);
-        throw new Error(
-          `Updated extension not found after installation, got error:\n${redactUrlCredentials(getErrorMessage(e))}`,
+      prepared = await this.prepareExtensionUpdateFromState(extension, signal);
+      const committed = await this.commitPreparedExtensionInternal(
+        prepared,
+        false,
+      );
+      const warnings = committed.warnings ?? [];
+      for (const warning of warnings) {
+        debugLogger.warn(
+          `Update of "${extension.name}" warning: ${warning.code}: ${warning.error}`,
         );
       }
-      const updatedVersion = updatedExtension.version;
+      const updatedVersion = committed.extension?.version ?? committed.version;
+      const needsRestart = warnings.some(
+        (warning) =>
+          warning.code === 'extension_reload_failed' ||
+          warning.code === 'extension_runtime_refresh_failed',
+      );
       callback(
         extension.name,
-        enableExtensionReloading
-          ? ExtensionUpdateState.UPDATED
-          : ExtensionUpdateState.UPDATED_NEEDS_RESTART,
+        !committed.extension || needsRestart || !enableExtensionReloading
+          ? ExtensionUpdateState.UPDATED_NEEDS_RESTART
+          : warnings.length > 0
+            ? ExtensionUpdateState.UPDATED_WITH_WARNINGS
+            : ExtensionUpdateState.UPDATED,
       );
       return {
         name: extension.name,
         originalVersion,
         updatedVersion,
+        ...(warnings.length > 0 ? { warnings } : {}),
       };
     } catch (e) {
-      debugLogger.error(
-        `Error updating extension, rolling back. ${getErrorMessage(e)}`,
-      );
+      debugLogger.error(`Error updating extension. ${getErrorMessage(e)}`);
       callback(extension.name, ExtensionUpdateState.ERROR);
-      await copyExtension(tempDir, extension.path);
       throw e;
     } finally {
-      await fs.promises.rm(tempDir, { recursive: true, force: true });
+      if (prepared) await this.disposePreparedExtension(prepared);
+      endMutation();
     }
   }
 
@@ -1360,54 +2575,8 @@ export class ExtensionManager {
     ).filter((updateInfo) => !!updateInfo);
   }
 
-  async refreshMemory(): Promise<void> {
-    if (!this.config) return;
-    // refresh mcp servers
-    await this.config.getToolRegistry().restartMcpServers();
-    // Refresh skills + subagents in parallel. Both `refreshCache` calls
-    // now resolve only after their async change-listener chain settles
-    // — for skills, that includes `SkillTool.refreshSkills()` rebuilding
-    // the model-facing tool description and updating `geminiClient`'s
-    // tool list. allSettled (rather than Promise.all) so a rejection
-    // from one leg does not cascade — the other leg's result is still
-    // applied, refreshHierarchicalMemory below still runs, and the
-    // `refreshTools` callers (`enableExtension`, etc.) don't unwind
-    // because of an unrelated transient failure.
-    const skillManager = this.config.getSkillManager();
-    const settled = await Promise.allSettled([
-      skillManager?.refreshCache(),
-      this.config.getSubagentManager().refreshCache(),
-    ]);
-    for (const result of settled) {
-      if (result.status === 'rejected') {
-        debugLogger.warn(
-          'refreshMemory: a refreshCache leg failed:',
-          result.reason,
-        );
-      }
-    }
-    // Hierarchical memory refresh is now awaited too — the previous
-    // fire-and-forget defeated the rest of the function's "wait until
-    // refresh is done" contract. Wrap in try/catch so a transient
-    // failure doesn't propagate up to `enableExtension` /
-    // `installExtension` callers, which have already mutated their
-    // `isActive`/`installed` flags by the time refreshMemory is
-    // invoked. A failed memory refresh leaves stale memory but should
-    // not back out the surrounding extension transition.
-    try {
-      await this.config.refreshHierarchicalMemory();
-    } catch (err) {
-      debugLogger.error(
-        'refreshMemory: refreshHierarchicalMemory failed:',
-        err,
-      );
-    }
-  }
-
   async refreshTools(): Promise<void> {
-    if (!this.config) return;
-    // FIXME: restart all mcp servers now, this can be optimized by only restarting changed ones at here
-    await this.refreshMemory();
+    await refreshExtensionRuntime(this.config);
   }
 }
 

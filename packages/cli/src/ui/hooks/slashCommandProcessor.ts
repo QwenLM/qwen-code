@@ -7,6 +7,7 @@
 import {
   useCallback,
   useMemo,
+  useLayoutEffect,
   useEffect,
   useRef,
   useState,
@@ -19,13 +20,16 @@ import {
   type Logger,
   type Config,
   createDebugLogger,
-  GitService,
   logSlashCommand,
   makeSlashCommandEvent,
   SlashCommandStatus,
   ToolConfirmationOutcome,
   IdeClient,
   type SessionListItem,
+  addMCPStatusChangeListener,
+  removeMCPStatusChangeListener,
+  MCPServerStatus,
+  recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
 import { useSessionStats } from '../contexts/SessionContext.js';
 import type {
@@ -38,15 +42,31 @@ import type {
 } from '../types.js';
 import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
-import { type CommandContext, type SlashCommand } from '../commands/types.js';
+import {
+  CommandKind,
+  type CommandContext,
+  type SlashCommand,
+} from '../commands/types.js';
 import type { RecentSlashCommand } from './useSlashCompletion.js';
 import { CommandService } from '../../services/CommandService.js';
 import { BuiltinCommandLoader } from '../../services/BuiltinCommandLoader.js';
 import { BundledSkillLoader } from '../../services/BundledSkillLoader.js';
 import { FileCommandLoader } from '../../services/FileCommandLoader.js';
+import { SavedWorkflowLoader } from '../../services/saved-workflow-loader.js';
 import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import { SkillCommandLoader } from '../../services/SkillCommandLoader.js';
-import { parseSlashCommand } from '../../utils/commands.js';
+import {
+  parseSlashCommand,
+  parseStackedSlashCommands,
+  MAX_STACKED_SKILLS,
+} from '../../utils/commands.js';
+import { AppEvent } from '../../utils/events.js';
+import { t } from '../../i18n/index.js';
+import { refreshExtensionContentRuntime } from '../../config/extension-runtime-reload.js';
+import {
+  EXTENSION_RELOAD_FAILED_REASON,
+  ExtensionRefreshState,
+} from '../../config/extension-refresh-state.js';
 import {
   hasSlashCommandPathSeparator,
   isBtwCommand,
@@ -57,9 +77,22 @@ import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
 } from '../state/extensions.js';
+import {
+  appendUserPromptExpansionAdditionalContext,
+  formatUserPromptExpansionBlockedMessage,
+  serializeUserPromptExpansionPrompt,
+} from '../../utils/userPromptExpansionHook.js';
 
 type SerializableHistoryItem = Record<string, unknown>;
 const debugLogger = createDebugLogger('SLASH_COMMAND_PROCESSOR');
+
+function hasUserPromptExpansionHooks(config: Config | null): config is Config {
+  return (
+    !!config &&
+    !config.getDisableAllHooks?.() &&
+    (config.hasHooksForEvent?.('UserPromptExpansion') ?? false)
+  );
+}
 
 function serializeHistoryItemForRecording(
   item: HistoryItemWithoutId,
@@ -81,7 +114,13 @@ const SLASH_COMMANDS_SKIP_RECORDING = new Set([
   'delete',
   'branch',
   'btw',
+  'history',
 ]);
+const MAX_EXTENSION_CONTENT_REFRESH_PASSES = 5;
+
+function getSkillCommandName(command: SlashCommand): string {
+  return command.skillDetail?.name ?? command.name;
+}
 
 export interface SlashCommandProcessorActions {
   openAuthDialog: () => void;
@@ -91,12 +130,18 @@ export interface SlashCommandProcessorActions {
   openMemoryDialog: () => void;
   openSettingsDialog: () => void;
   openStatusLineDialog: () => void;
-  openModelDialog: (options?: { fastModelMode?: boolean }) => void;
+  openModelDialog: (options?: {
+    fastModelMode?: boolean;
+    voiceModelMode?: boolean;
+    visionModelMode?: boolean;
+    persistScope?: 'workspace' | 'user';
+  }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
+  openEffortDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
-  handleResume: (sessionId: string) => void;
+  handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
   openDeleteDialog: () => void;
   quit: (messages: HistoryItem[]) => void;
@@ -105,9 +150,11 @@ export interface SlashCommandProcessorActions {
   addConfirmUpdateExtensionRequest: (request: ConfirmationRequest) => void;
   openSubagentCreateDialog: () => void;
   openAgentsManagerDialog: () => void;
+  openSkillsManagerDialog: () => void;
   openExtensionsManagerDialog: () => void;
   openMcpDialog: () => void;
   openHooksDialog: () => void;
+  openStatsDialog: () => void;
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
@@ -119,6 +166,7 @@ export interface SlashCommandProcessorActions {
 export const useSlashCommandProcessor = (
   config: Config | null,
   settings: LoadedSettings,
+  history: HistoryItem[],
   addItem: UseHistoryManagerReturn['addItem'],
   clearItems: UseHistoryManagerReturn['clearItems'],
   loadHistory: UseHistoryManagerReturn['loadHistory'],
@@ -134,7 +182,24 @@ export const useSlashCommandProcessor = (
   logger: Logger | null,
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
+  extensionRefreshState?: ExtensionRefreshState,
 ) => {
+  const fallbackExtensionRefreshStateRef = useRef<ExtensionRefreshState | null>(
+    null,
+  );
+  if (!fallbackExtensionRefreshStateRef.current) {
+    fallbackExtensionRefreshStateRef.current = new ExtensionRefreshState();
+  }
+  const activeExtensionRefreshState =
+    extensionRefreshState ?? fallbackExtensionRefreshStateRef.current;
+
+  // Ref avoids adding `history` to the commandContext useMemo deps,
+  // which would cause a full context rebuild on every history append.
+  const historyRef = useRef(history);
+  useLayoutEffect(() => {
+    historyRef.current = history;
+  }, [history]);
+
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
   const [recentCommands, setRecentCommands] = useState<
@@ -144,6 +209,19 @@ export const useSlashCommandProcessor = (
   const commandReloadResolversRef = useRef<
     Array<{ trigger: number; resolve: () => void }>
   >([]);
+  const extensionContentRefreshTimerRef = useRef<ReturnType<
+    typeof setTimeout
+  > | null>(null);
+  const extensionContentRefreshRunningRef = useRef(false);
+  const extensionContentRefreshPendingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const resolveCommandReloads = useCallback((completedTrigger: number) => {
     if (commandReloadResolversRef.current.length === 0) {
@@ -177,6 +255,83 @@ export const useSlashCommandProcessor = (
       });
     });
   }, [config]);
+
+  const clearPendingExtensionContentRefresh = useCallback(() => {
+    if (!extensionContentRefreshTimerRef.current) {
+      return;
+    }
+    clearTimeout(extensionContentRefreshTimerRef.current);
+    extensionContentRefreshTimerRef.current = null;
+  }, []);
+
+  const showExtensionContentRefreshError = useCallback(
+    (error: unknown) => {
+      if (!mountedRef.current) {
+        return;
+      }
+      addItem(
+        {
+          type: MessageType.ERROR,
+          text:
+            error instanceof Error
+              ? t(
+                  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+                  { message: error.message },
+                )
+              : t(
+                  'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+                ),
+        },
+        Date.now(),
+      );
+    },
+    [addItem],
+  );
+
+  const runExtensionContentRefresh = useCallback(async () => {
+    if (!config) {
+      return;
+    }
+    if (extensionContentRefreshRunningRef.current) {
+      extensionContentRefreshPendingRef.current = true;
+      return;
+    }
+    extensionContentRefreshRunningRef.current = true;
+    let refreshPasses = 0;
+    try {
+      do {
+        if (refreshPasses >= MAX_EXTENSION_CONTENT_REFRESH_PASSES) {
+          extensionContentRefreshPendingRef.current = false;
+          showExtensionContentRefreshError(
+            new Error('too many extension content changes are still pending'),
+          );
+          return;
+        }
+        refreshPasses++;
+        extensionContentRefreshPendingRef.current = false;
+        if (activeExtensionRefreshState.isReloadInProgress()) {
+          return;
+        }
+        if (activeExtensionRefreshState.needsExtensionRefresh()) {
+          return;
+        }
+        await refreshExtensionContentRuntime({
+          config,
+          reloadCommands,
+        });
+      } while (extensionContentRefreshPendingRef.current);
+    } catch (error: unknown) {
+      extensionContentRefreshPendingRef.current = false;
+      showExtensionContentRefreshError(error);
+    } finally {
+      extensionContentRefreshRunningRef.current = false;
+    }
+  }, [
+    activeExtensionRefreshState,
+    config,
+    reloadCommands,
+    showExtensionContentRefreshError,
+  ]);
   const [shellConfirmationRequest, setShellConfirmationRequest] =
     useState<null | {
       commands: string[];
@@ -193,13 +348,6 @@ export const useSlashCommandProcessor = (
   const [sessionShellAllowlist, setSessionShellAllowlist] = useState(
     new Set<string>(),
   );
-  const gitService = useMemo(() => {
-    if (!config?.getProjectRoot()) {
-      return;
-    }
-    return new GitService(config.getProjectRoot(), config.storage);
-  }, [config]);
-
   const [pendingItem, setPendingItem] = useState<HistoryItemWithoutId | null>(
     null,
   );
@@ -277,6 +425,10 @@ export const useSlashCommandProcessor = (
         historyItemContent = {
           type: 'tool_stats',
         };
+      } else if (message.type === MessageType.SKILL_STATS) {
+        historyItemContent = {
+          type: 'skill_stats',
+        };
       } else if (message.type === MessageType.QUIT) {
         historyItemContent = {
           type: 'quit',
@@ -312,10 +464,13 @@ export const useSlashCommandProcessor = (
       services: {
         config,
         settings,
-        git: gitService,
         logger,
+        extensionRefreshState: activeExtensionRefreshState,
       },
       ui: {
+        get history() {
+          return historyRef.current;
+        },
         addItem,
         clear: () => {
           cancelBtw();
@@ -325,6 +480,7 @@ export const useSlashCommandProcessor = (
           setSessionName?.(null);
         },
         loadHistory,
+        refreshStatic,
         setDebugMessage: actions.setDebugMessage,
         pendingItem,
         setPendingItem,
@@ -352,7 +508,6 @@ export const useSlashCommandProcessor = (
     [
       config,
       settings,
-      gitService,
       logger,
       loadHistory,
       addItem,
@@ -373,6 +528,7 @@ export const useSlashCommandProcessor = (
       setSessionName,
       extensionsUpdateState,
       isIdleRef,
+      activeExtensionRefreshState,
     ],
   );
 
@@ -398,8 +554,44 @@ export const useSlashCommandProcessor = (
     };
   }, [config, reloadCommands]);
 
-  // SkillManager already rebuilds its own cache and notifies SkillTool
-  // (which re-runs `setTools()` so `<available_skills>` is fresh). The
+  // MCP discovery is progressive: it runs in the background after the UI is
+  // already interactive, so a server's prompts (prompts/list) are not in the
+  // registry when the command loaders first run. Without this, an MCP prompt
+  // never surfaces as a `/<prompt>` command until some unrelated reload (IDE
+  // status / skill change) happens to fire — the `/mcp` dialog shows the
+  // prompt count while the slash menu stays empty. Rebuild the command tree
+  // when a server finishes connecting; debounce so a burst of servers
+  // connecting at startup triggers a single rebuild.
+  useEffect(() => {
+    if (!config) {
+      return;
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const listener = (
+      _serverName: string,
+      status: MCPServerStatus | undefined,
+    ) => {
+      if (status !== MCPServerStatus.CONNECTED) {
+        return;
+      }
+      if (timer) {
+        clearTimeout(timer);
+      }
+      timer = setTimeout(() => {
+        timer = null;
+        reloadCommands();
+      }, 250);
+    };
+    addMCPStatusChangeListener(listener);
+    return () => {
+      removeMCPStatusChangeListener(listener);
+      if (timer) {
+        clearTimeout(timer);
+      }
+    };
+  }, [config, reloadCommands]);
+
+  // SkillManager rebuilds its own cache when skills change on disk. The
   // slash-command list is a separate consumer: SkillCommandLoader reads
   // `listSkills()` once during CommandService.create(), so without this
   // bridge a newly added SKILL.md never produces a `/<skill-name>` entry
@@ -414,9 +606,97 @@ export const useSlashCommandProcessor = (
       return;
     }
     return skillManager.addChangeListener(() => {
+      // The `/skills` dialog calls `reloadCommands()` itself BEFORE it
+      // calls `notifyConfigChanged()`, so a listener-driven second reload
+      // would be a wasted CommandService rebuild on every save. Honor the
+      // one-shot suppression signal — disk-driven changes (no
+      // dialog-orchestrated reload) leave the flag false and reload
+      // normally.
+      if (skillManager.consumeSlashReloadSuppression()) {
+        return;
+      }
       reloadCommands();
     });
   }, [config, isConfigInitialized, reloadCommands]);
+
+  useEffect(() => {
+    const listener = (reason?: unknown) => {
+      clearPendingExtensionContentRefresh();
+      addItem(
+        {
+          type: MessageType.INFO,
+          text:
+            reason === EXTENSION_RELOAD_FAILED_REASON
+              ? t(
+                  'Extension reload did not complete. Run /reload-plugins to try again.',
+                )
+              : t(
+                  'Extensions changed on disk. Run /reload-plugins to apply updates.',
+                ),
+        },
+        Date.now(),
+      );
+    };
+    activeExtensionRefreshState.on(AppEvent.ExtensionRefreshNeeded, listener);
+    return () => {
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionRefreshNeeded,
+        listener,
+      );
+    };
+  }, [
+    activeExtensionRefreshState,
+    addItem,
+    clearPendingExtensionContentRefresh,
+  ]);
+
+  useEffect(() => {
+    activeExtensionRefreshState.on(
+      AppEvent.ExtensionsReloadStarted,
+      clearPendingExtensionContentRefresh,
+    );
+    activeExtensionRefreshState.on(
+      AppEvent.ExtensionsReloaded,
+      clearPendingExtensionContentRefresh,
+    );
+    return () => {
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionsReloadStarted,
+        clearPendingExtensionContentRefresh,
+      );
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionsReloaded,
+        clearPendingExtensionContentRefresh,
+      );
+    };
+  }, [activeExtensionRefreshState, clearPendingExtensionContentRefresh]);
+
+  useEffect(() => {
+    if (!config) {
+      return;
+    }
+    const listener = () => {
+      clearPendingExtensionContentRefresh();
+      extensionContentRefreshTimerRef.current = setTimeout(() => {
+        extensionContentRefreshTimerRef.current = null;
+        void runExtensionContentRefresh();
+      }, 250);
+    };
+    activeExtensionRefreshState.on(AppEvent.ExtensionContentChanged, listener);
+    return () => {
+      activeExtensionRefreshState.off(
+        AppEvent.ExtensionContentChanged,
+        listener,
+      );
+      clearPendingExtensionContentRefresh();
+      extensionContentRefreshPendingRef.current = false;
+    };
+  }, [
+    clearPendingExtensionContentRefresh,
+    config,
+    activeExtensionRefreshState,
+    runExtensionContentRefresh,
+  ]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -427,6 +707,7 @@ export const useSlashCommandProcessor = (
           new BuiltinCommandLoader(config),
           new BundledSkillLoader(config),
           new SkillCommandLoader(config),
+          new SavedWorkflowLoader(config),
           new FileCommandLoader(config),
         ];
         const disabled = config?.getDisabledSlashCommands() ?? [];
@@ -439,8 +720,9 @@ export const useSlashCommandProcessor = (
         if (controller.signal.aborted) {
           return;
         }
-        // Register model-invocable commands provider so SkillTool can include
-        // bundled skills, file commands, and MCP prompts in its description.
+        // Register model-invocable commands provider so the startup snapshot
+        // and per-turn drain include bundled skills, file commands, and MCP
+        // prompts in the <available_skills> listing.
         if (config) {
           config.setModelInvocableCommandsProvider(() =>
             commandService.getModelInvocableCommands().map((cmd) => ({
@@ -464,11 +746,37 @@ export const useSlashCommandProcessor = (
                   name,
                   args,
                 },
-                services: { config, settings, git: gitService, logger: null },
+                services: { config, settings, logger: null },
               } as unknown as Parameters<typeof cmd.action>[0];
               const result = await cmd.action(minimalContext, args);
               if (!result || result.type !== 'submit_prompt') return null;
-              const content = result.content;
+              const output = hasUserPromptExpansionHooks(config)
+                ? await config
+                    .getHookSystem()
+                    ?.fireUserPromptExpansionEvent(
+                      name,
+                      args,
+                      serializeUserPromptExpansionPrompt(result.content),
+                      controller.signal,
+                    )
+                : undefined;
+              if (controller.signal.aborted) {
+                return { error: 'Skill execution cancelled by user.' };
+              }
+              if (output) {
+                const blockingError = output.getBlockingError();
+                if (blockingError.blocked || output.shouldStopExecution()) {
+                  return {
+                    error: formatUserPromptExpansionBlockedMessage(
+                      blockingError.reason || output.getEffectiveReason(),
+                    ),
+                  };
+                }
+              }
+              const content = appendUserPromptExpansionAdditionalContext(
+                result.content,
+                output?.getAdditionalContext(),
+              );
               if (typeof content === 'string') return content;
               if (Array.isArray(content)) {
                 return content
@@ -503,7 +811,6 @@ export const useSlashCommandProcessor = (
     reloadTrigger,
     isConfigInitialized,
     settings,
-    gitService,
     resolveCommandReloads,
   ]);
 
@@ -566,8 +873,106 @@ export const useSlashCommandProcessor = (
         resolvedCommandPath.length > 1
           ? resolvedCommandPath.slice(1).join(' ')
           : undefined;
+      const isSkillCommand = commandToExecute?.kind === CommandKind.SKILL;
+      let skillInvocationRecorded = false;
+      const recordSkillCommandInvocation = (success: boolean) => {
+        if (
+          !config ||
+          !commandToExecute ||
+          !isSkillCommand ||
+          skillInvocationRecorded
+        ) {
+          return;
+        }
+        recordSkillInvocation(config, {
+          skillName: getSkillCommandName(commandToExecute),
+          success,
+        });
+        skillInvocationRecorded = true;
+      };
 
       try {
+        // Handle stacked skill invocations (e.g. /feat-dev /e2e-testing implement X)
+        const stackedResult = parseStackedSlashCommands(trimmed, commands);
+        if (stackedResult.skills.length >= 2) {
+          const combinedContent: PartListUnion[] = [];
+          let firstModelOverride: string | undefined;
+          const onCompleteCallbacks: Array<() => Promise<void>> = [];
+
+          for (const skill of stackedResult.skills) {
+            if (!skill.action) continue;
+            const skillContext: CommandContext = {
+              invocation: {
+                raw: `/${skill.name}`,
+                name: skill.name,
+                args: '',
+              },
+              services: { config, settings, logger: null },
+            } as unknown as CommandContext;
+
+            const skillResult = await skill.action(skillContext, '');
+            if (skillResult?.type === 'submit_prompt') {
+              combinedContent.push(skillResult.content);
+              firstModelOverride ??= skillResult.modelOverride;
+              if (skillResult.onComplete) {
+                onCompleteCallbacks.push(skillResult.onComplete);
+              }
+            } else if (
+              skillResult?.type === 'message' &&
+              skillResult.messageType === 'error'
+            ) {
+              addMessage({
+                type: MessageType.ERROR,
+                content: `Skill "/${skill.name}" error: ${skillResult.content}`,
+                timestamp: new Date(),
+              });
+            }
+
+            if (config) {
+              recordSkillInvocation(config, {
+                skillName: getSkillCommandName(skill),
+                success: skillResult?.type === 'submit_prompt',
+              });
+            }
+          }
+
+          // Append user's remaining text after skill tokens
+          if (stackedResult.remainingText) {
+            combinedContent.push([{ text: stackedResult.remainingText }]);
+          }
+
+          if (stackedResult.exceededMax) {
+            addMessage({
+              type: MessageType.WARNING,
+              content: `Only the first ${MAX_STACKED_SKILLS} skills were loaded. Additional /skill tokens were treated as prompt text.`,
+              timestamp: new Date(),
+            });
+          }
+
+          // Mark as sent to model so chat recording and telemetry work correctly
+          invocationSentToModel = true;
+          if (invocationItemId !== undefined) {
+            updateItem(invocationItemId, { sentToModel: true });
+          }
+
+          // Combine all content into a single submit_prompt
+          const mergedContent: PartListUnion = combinedContent.flat();
+          return {
+            type: 'submit_prompt',
+            content: mergedContent,
+            ...(firstModelOverride
+              ? { modelOverride: firstModelOverride }
+              : {}),
+            ...(onCompleteCallbacks.length
+              ? {
+                  onComplete: async () => {
+                    for (const cb of onCompleteCallbacks) await cb();
+                  },
+                }
+              : {}),
+          };
+        }
+
         if (commandToExecute) {
           if (!commandToExecute.hidden) {
             setRecentCommands((previous) => {
@@ -692,10 +1097,27 @@ export const useSlashCommandProcessor = (
                       actions.openMemoryDialog();
                       return { type: 'handled' };
                     case 'model':
-                      actions.openModelDialog();
+                      actions.openModelDialog({
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'fast-model':
-                      actions.openModelDialog({ fastModelMode: true });
+                      actions.openModelDialog({
+                        fastModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'voice-model':
+                      actions.openModelDialog({
+                        voiceModelMode: true,
+                        persistScope: result.persistScope,
+                      });
+                      return { type: 'handled' };
+                    case 'vision-model':
+                      actions.openModelDialog({
+                        visionModelMode: true,
+                        persistScope: result.persistScope,
+                      });
                       return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
@@ -709,18 +1131,27 @@ export const useSlashCommandProcessor = (
                     case 'subagent_list':
                       actions.openAgentsManagerDialog();
                       return { type: 'handled' };
+                    case 'skills_manage':
+                      actions.openSkillsManagerDialog();
+                      return { type: 'handled' };
                     case 'mcp':
                       actions.openMcpDialog();
                       return { type: 'handled' };
                     case 'hooks':
                       actions.openHooksDialog();
                       return { type: 'handled' };
+                    case 'stats':
+                      actions.openStatsDialog();
+                      return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
+                    case 'effort':
+                      actions.openEffortDialog();
+                      return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
-                        actions.handleResume(result.sessionId);
+                        await actions.handleResume(result.sessionId);
                       } else {
                         actions.openResumeDialog(result.matchedSessions);
                       }
@@ -769,7 +1200,42 @@ export const useSlashCommandProcessor = (
                   actions.quit(result.messages);
                   return { type: 'handled' };
 
-                case 'submit_prompt':
+                case 'submit_prompt': {
+                  const invocation = fullCommandContext.invocation;
+                  let content = result.content;
+                  const output = hasUserPromptExpansionHooks(config)
+                    ? await config
+                        .getHookSystem()
+                        ?.fireUserPromptExpansionEvent(
+                          invocation?.name ?? '',
+                          invocation?.args ?? '',
+                          serializeUserPromptExpansionPrompt(content),
+                          abortController.signal,
+                        )
+                    : undefined;
+                  if (abortController.signal.aborted) {
+                    hasError = true;
+                    return { type: 'handled' };
+                  }
+                  if (output) {
+                    const blockingError = output.getBlockingError();
+                    if (blockingError.blocked || output.shouldStopExecution()) {
+                      hasError = true;
+                      recordSkillCommandInvocation(false);
+                      addMessage({
+                        type: MessageType.ERROR,
+                        content: formatUserPromptExpansionBlockedMessage(
+                          blockingError.reason || output.getEffectiveReason(),
+                        ),
+                        timestamp: new Date(),
+                      });
+                      return { type: 'handled' };
+                    }
+                    content = appendUserPromptExpansionAdditionalContext(
+                      content,
+                      output.getAdditionalContext(),
+                    );
+                  }
                   if (invocationItemId !== undefined) {
                     invocationSentToModel = true;
                     debugLogger.debug(
@@ -782,11 +1248,14 @@ export const useSlashCommandProcessor = (
                     // consumers observe it after state has rendered.
                     updateItem(invocationItemId, { sentToModel: true });
                   }
+                  recordSkillCommandInvocation(true);
                   return {
                     type: 'submit_prompt',
-                    content: result.content,
+                    content,
                     onComplete: result.onComplete,
+                    modelOverride: result.modelOverride,
                   };
+                }
                 case 'confirm_shell_commands': {
                   const { outcome, approvedCommands } = await new Promise<{
                     outcome: ToolConfirmationOutcome;
@@ -905,6 +1374,7 @@ export const useSlashCommandProcessor = (
           return { type: 'handled' };
         }
         hasError = true;
+        recordSkillCommandInvocation(false);
         if (config) {
           const event = makeSlashCommandEvent({
             command: resolvedCommandPath[0],
@@ -972,6 +1442,7 @@ export const useSlashCommandProcessor = (
     },
     [
       config,
+      settings,
       addItem,
       actions,
       commands,
@@ -993,8 +1464,13 @@ export const useSlashCommandProcessor = (
     btwItem,
     setBtwItem,
     cancelBtw,
+    cancelSlashCommand,
     commandContext,
     shellConfirmationRequest,
     confirmationRequest,
+    // Exposed so dialogs (e.g. SkillsManagerDialog) can trigger a
+    // CommandService rebuild without going through `commandContext.ui`,
+    // which is plumbed only to slash-command actions, not arbitrary UI.
+    reloadCommands,
   };
 };

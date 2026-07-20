@@ -8,6 +8,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execSync } from 'node:child_process';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   DualOutputBridge,
@@ -63,6 +64,63 @@ describe('DualOutputBridge', () => {
   });
 
   describe('--json-file output', () => {
+    it('emits recording failures for the affected session and unsubscribes on shutdown', async () => {
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      const unsubscribe = vi.fn();
+      config = {
+        ...createMockConfig(),
+        onChatRecordingFailure: vi.fn((nextListener) => {
+          listener = nextListener;
+          return unsubscribe;
+        }),
+      } as unknown as Config;
+      bridge = new DualOutputBridge(config, { filePath: target });
+
+      listener?.({ sessionId: 'affected-session', error: new Error('EACCES') });
+      await bridge.shutdown();
+
+      expect(readJsonl(target)).toContainEqual(
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'session_recording_degraded',
+          session_id: 'affected-session',
+          data: expect.objectContaining({
+            session_id: 'affected-session',
+            reason: 'write_failed',
+          }),
+        }),
+      );
+      expect(unsubscribe).toHaveBeenCalledOnce();
+
+      listener?.({ sessionId: 'late-session', error: new Error('ENOSPC') });
+      expect(readJsonl(target)).not.toContainEqual(
+        expect.objectContaining({ session_id: 'late-session' }),
+      );
+    });
+
+    it('disables dual output when recording failure reporting throws', () => {
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      config = {
+        ...createMockConfig(),
+        onChatRecordingFailure: vi.fn((nextListener) => {
+          listener = nextListener;
+          return vi.fn();
+        }),
+      } as unknown as Config;
+      bridge = new DualOutputBridge(config, { filePath: target });
+      vi.spyOn(bridge['adapter'], 'emitMessage').mockImplementation(() => {
+        throw new Error('sidecar disconnected');
+      });
+
+      listener?.({ sessionId: 'affected-session', error: new Error('ENOSPC') });
+
+      expect(bridge.isConnected).toBe(false);
+    });
+
     it('creates the file automatically when it does not exist (ENOENT fallback)', async () => {
       const newFile = path.join(tmpDir, 'does-not-exist.jsonl');
       // newFile is NOT pre-created — tests the ENOENT fallback path
@@ -159,7 +217,20 @@ describe('DualOutputBridge', () => {
 
     it('routes permission requests + responses through the adapter', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
-      bridge.emitPermissionRequest('req-1', 'shell', 'tu-1', { cmd: 'ls' });
+      bridge.emitPermissionRequest(
+        'req-1',
+        'shell',
+        'tu-1',
+        { cmd: 'ls' },
+        null,
+        [
+          {
+            type: 'allow',
+            label: 'Allow Command',
+            description: 'Exact one-off approval required',
+          },
+        ],
+      );
       bridge.emitControlResponse('req-1', false);
       await bridge.shutdown();
 
@@ -174,6 +245,13 @@ describe('DualOutputBridge', () => {
           tool_name: 'shell',
           tool_use_id: 'tu-1',
           input: { cmd: 'ls' },
+          permission_suggestions: [
+            {
+              type: 'allow',
+              label: 'Allow Command',
+              description: 'Exact one-off approval required',
+            },
+          ],
           blocked_path: null,
         },
       });
@@ -199,4 +277,119 @@ describe('DualOutputBridge', () => {
       expect(() => bridge!.emitControlResponse('req', true)).not.toThrow();
     });
   });
+
+  describe('buffer overflow guard', () => {
+    it('disables itself when buffered data exceeds 1 MB', () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      expect(bridge.isConnected).toBe(true);
+
+      // Simulate a bloated buffer by overriding writableLength
+      Object.defineProperty(bridge['stream'], 'writableLength', {
+        value: 1024 * 1024 + 1,
+      });
+
+      // Any write method should trigger the guard
+      bridge.emitSystemMessage('test', {});
+      expect(bridge.isConnected).toBe(false);
+    });
+
+    it('destroys the stream on overflow so consumers receive EOF', () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      const destroySpy = vi.spyOn(bridge['stream'], 'destroy');
+
+      Object.defineProperty(bridge['stream'], 'writableLength', {
+        value: 1024 * 1024 + 1,
+      });
+
+      bridge.emitSystemMessage('test', {});
+      expect(destroySpy).toHaveBeenCalled();
+    });
+
+    it('shutdown resolves immediately after buffer overflow destroys stream', async () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+
+      Object.defineProperty(bridge['stream'], 'writableLength', {
+        value: 1024 * 1024 + 1,
+      });
+      bridge.emitSystemMessage('test', {});
+      expect(bridge.isConnected).toBe(false);
+
+      await expect(bridge.shutdown()).resolves.toBeUndefined();
+    });
+
+    it('disables on ERR_SYSTEM_ERROR stream error', () => {
+      bridge = new DualOutputBridge(config, { filePath: target });
+      expect(bridge.isConnected).toBe(true);
+
+      bridge['stream'].emit(
+        'error',
+        Object.assign(new Error('EAGAIN'), { code: 'ERR_SYSTEM_ERROR' }),
+      );
+      expect(bridge.isConnected).toBe(false);
+    });
+  });
+
+  describe.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'FIFO (named pipe) support',
+    () => {
+      let fifoPath: string;
+
+      beforeEach(() => {
+        fifoPath = path.join(tmpDir, 'events.fifo');
+        execSync(`mkfifo "${fifoPath}"`);
+      });
+
+      it('does not block when opened without a reader connected', () => {
+        const start = Date.now();
+        bridge = new DualOutputBridge(config, { filePath: fifoPath });
+        const elapsed = Date.now() - start;
+
+        expect(elapsed).toBeLessThan(500);
+        expect(bridge.isConnected).toBe(true);
+      });
+
+      it('delivers events to a reader that connects after construction', async () => {
+        bridge = new DualOutputBridge(config, { filePath: fifoPath });
+        bridge.emitSystemMessage('test_event', { key: 'value' });
+
+        const received = await new Promise<string>((resolve) => {
+          const chunks: Buffer[] = [];
+          const reader = fs.createReadStream(fifoPath);
+          reader.on('data', (chunk) => chunks.push(chunk as Buffer));
+          reader.on('end', () => resolve(Buffer.concat(chunks).toString()));
+          reader.on('open', () => bridge!.shutdown());
+        });
+
+        const lines = received
+          .split('\n')
+          .filter(Boolean)
+          .map((l) => JSON.parse(l));
+        expect(lines[0]).toMatchObject({
+          type: 'system',
+          subtype: 'session_start',
+        });
+        const testEvent = lines.find(
+          (l: Record<string, unknown>) =>
+            l['type'] === 'system' && l['subtype'] === 'test_event',
+        );
+        expect(testEvent).toMatchObject({
+          data: { key: 'value' },
+        });
+      });
+
+      it('throws actionable error when FIFO lacks read permission', () => {
+        const noReadFifo = path.join(tmpDir, 'no-read.fifo');
+        // chmod 0200 (write-only): first openSync(O_WRONLY) returns ENXIO
+        // (no reader), retry with O_RDWR fails EACCES (no read permission)
+        execSync(`mkfifo "${noReadFifo}" && chmod 0200 "${noReadFifo}"`);
+        try {
+          expect(
+            () => new DualOutputBridge(config, { filePath: noReadFifo }),
+          ).toThrow(/permission denied opening FIFO for read-write/);
+        } finally {
+          execSync(`chmod 644 "${noReadFifo}"`);
+        }
+      });
+    },
+  );
 });

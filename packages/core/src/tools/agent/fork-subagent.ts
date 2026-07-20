@@ -1,24 +1,27 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
 import type { Config } from '../../config/config.js';
+import type { SubagentConfig } from '../../subagents/types.js';
+import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
 /**
- * Fork subagent feature gate.
+ * Fork subagent availability gate.
  *
- * Fork requires two conditions:
- * 1. Explicit opt-in via QWEN_CODE_ENABLE_FORK_SUBAGENT=1 env var
- *    or programmatic `forkSubagentEnabled: true` (defaults to off).
- * 2. An interactive session — non-interactive sessions (e.g. `qwen -p`,
- *    SDK headless, CI/CD) lack a terminal UI for fork progress display
- *    and permission bubble-up, which can cause hangs or silent failures.
+ * Fork is available in interactive sessions. Non-interactive sessions
+ * (e.g. `qwen -p`, SDK headless, CI/CD) lack a terminal UI for fork progress
+ * display and permission prompts, which can cause hangs or silent failures.
  *
- * When fork is disabled, omitting `subagent_type` falls back to a
- * general-purpose subagent instead of forking.
+ * Forking is an explicit choice — the caller selects it with
+ * `subagent_type: "fork"`. Omitting `subagent_type` always resolves to the
+ * general-purpose subagent, never a fork. Regular top-level subagents run in
+ * the background by default; callers can set `run_in_background: false` for an
+ * inline result. When fork is unavailable, an explicit `subagent_type: "fork"`
+ * falls back to the general-purpose subagent.
  */
 export function isForkSubagentEnabled(config: Config): boolean {
-  return config.isForkSubagentEnabled() && config.isInteractive();
+  return config.isInteractive();
 }
 
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
@@ -27,12 +30,20 @@ export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
 export const FORK_AGENT = {
   name: FORK_SUBAGENT_TYPE,
   description:
-    'Implicit fork — inherits full conversation context. Not selectable via subagent_type; triggered by omitting subagent_type.',
+    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"` (only in interactive sessions). Runs detached in the background; you are notified when it completes.',
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
+  // `bubble` surfaces this fork's permission prompts to the parent's Background-
+  // tasks UI; a detached fork has no inline UI, so 'default' would auto-deny them.
+  approvalMode: BUBBLE_APPROVAL_MODE,
   level: 'session' as const,
-};
+} satisfies SubagentConfig;
+
+// Turn cap for a detached fork — fire-and-forget background work nobody awaits,
+// so an unbounded reasoning loop burns tokens silently. Matches claude-code's
+// fork cap of 200.
+export const FORK_DEFAULT_MAX_TURNS = 200;
 
 // Recursive-fork guard. A fork child keeps the `agent` tool in its declarations
 // for byte-identical cache parity with the parent, so tool-availability
@@ -168,6 +179,24 @@ export function buildWorktreeNotice(
   );
 }
 
+/**
+ * Notice for a sub-agent pinned to a caller-owned worktree via `working_dir`.
+ *
+ * Deliberately narrower than {@link buildWorktreeNotice}: that one describes a
+ * freshly provisioned copy of the parent's tree, so it asks the agent to
+ * translate inherited paths and to re-read files the parent may have touched.
+ * A pinned worktree is instead the code the agent was asked to work on, and its
+ * cwd already IS that directory — telling it to prefix absolute paths or to
+ * translate the parent's paths would contradict the caller's own instructions.
+ */
+export function buildPinnedWorktreeNotice(worktreeCwd: string): string {
+  return (
+    `Your working directory is ${worktreeCwd}, a git worktree checked out to the code you have been asked to work on. ` +
+    `Relative paths, shell commands, and searches already resolve there — do not \`cd\` elsewhere and do not prefix paths with the parent's directory. ` +
+    `Do not operate on the parent's checkout.`
+  );
+}
+
 export function buildChildMessage(directive: string): string {
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.
@@ -179,7 +208,7 @@ RULES (non-negotiable):
 2. Do NOT converse, ask questions, or suggest next steps
 3. Do NOT editorialize or add meta-commentary
 4. USE your tools directly: Bash, Read, Write, etc.
-5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+5. If you modify files, report the files changed and verification performed. Do NOT create a commit unless the directive explicitly asks you to.
 6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
 7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
 8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
@@ -190,7 +219,8 @@ Output format (plain text labels, not markdown headers):
   Scope: <echo back your assigned scope in one sentence>
   Result: <the answer or key findings, limited to the scope above>
   Key files: <relevant file paths — include for research tasks>
-  Files changed: <list with commit hash — include only if you modified files>
+  Files changed: <list — include only if you modified files>
+  Verification: <checks performed and their outcome — include only if you modified files>
   Issues: <list — include only if there are issues to flag>
 </${FORK_BOILERPLATE_TAG}>
 

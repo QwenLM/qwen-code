@@ -10,6 +10,8 @@ interface GaxiosError {
   };
 }
 
+const MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH = 1000;
+
 export function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && 'code' in error;
 }
@@ -36,13 +38,152 @@ export function isAbortError(error: unknown): boolean {
   return false;
 }
 
+/**
+ * Best-effort one-line description of an error's `cause`, used to surface the
+ * underlying syscall behind opaque wrappers like undici's `TypeError: fetch
+ * failed` (whose own message carries nothing). Returns `undefined` when there
+ * is no useful detail.
+ *
+ * Handles three shapes:
+ *   - `AggregateError` (undici retries multiple addresses, e.g. IPv6 `::1` then
+ *     IPv4 `127.0.0.1`): its own `message` is empty, so unwrap `.errors[]`.
+ *   - a plain `Error` with a Node `code` (e.g. `ECONNREFUSED`) but possibly an
+ *     empty message — prefer `code`, combine with message when both add signal.
+ *   - nested `.cause` chains: walk through opaque wrappers to the deepest code.
+ *   - any other value — stringify.
+ */
+function describeErrorCause(cause: unknown): string | undefined {
+  if (cause == null) return undefined;
+  return (
+    describeCodedCause(cause, 0, new Set<object>()) ??
+    describeCauseFallback(cause)
+  );
+}
+
+function describeCauseFallback(cause: unknown): string | undefined {
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((error) => describeSingleError(error))
+      .filter((detail): detail is string => Boolean(detail));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+  return describeSingleError(cause);
+}
+
+function describeCodedCause(
+  cause: unknown,
+  depth: number,
+  visited: Set<object>,
+): string | undefined {
+  if (
+    cause == null ||
+    depth >= 8 ||
+    typeof cause !== 'object' ||
+    visited.has(cause)
+  ) {
+    return undefined;
+  }
+
+  visited.add(cause);
+
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((error) => describeCodedCause(error, depth + 1, visited))
+      .filter((detail): detail is string => Boolean(detail));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+
+  const nested = describeCodedCause(
+    (cause as { cause?: unknown }).cause,
+    depth + 1,
+    visited,
+  );
+  if (nested) {
+    return nested;
+  }
+
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === 'string' && code
+    ? describeSingleError(cause)
+    : undefined;
+}
+
+function describeSingleError(err: unknown): string | undefined {
+  if (err instanceof Error) {
+    const code = (err as { code?: unknown }).code;
+    const codeStr = typeof code === 'string' ? code : undefined;
+    const msg = err.message?.trim();
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr || (err.name !== 'Error' ? err.name : undefined);
+  }
+  if (err && typeof err === 'object' && !Array.isArray(err)) {
+    const rec = err as Record<string, unknown>;
+    const code = rec['code'];
+    const codeStr =
+      typeof code === 'string' && code
+        ? code
+        : typeof code === 'number'
+          ? String(code)
+          : undefined;
+    const message = rec['message'];
+    const msg =
+      typeof message === 'string' && message.trim()
+        ? message.trim()
+        : undefined;
+    if (msg && codeStr && !msg.includes(codeStr)) {
+      return `${codeStr}: ${msg}`;
+    }
+    return msg || codeStr;
+  }
+  const str = String(err);
+  return str && str !== '[object Object]' ? str : undefined;
+}
+
+function truncateStringifiedErrorMessage(message: string): string {
+  if (message.length <= MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH) {
+    return message;
+  }
+  return `${message.slice(0, MAX_STRINGIFIED_ERROR_MESSAGE_LENGTH - 3)}...`;
+}
+
 export function getErrorMessage(error: unknown): string {
   if (error instanceof Error) {
-    const cause = error.cause;
-    if (cause instanceof Error && cause.message !== error.message) {
-      return `${error.message} (cause: ${cause.message})`;
+    const detail = describeErrorCause(error.cause);
+    if (detail && detail !== error.message) {
+      return truncateStringifiedErrorMessage(
+        `${error.message} (cause: ${detail})`,
+      );
     }
     return error.message;
+  }
+  if (error !== null && typeof error === 'object' && !Array.isArray(error)) {
+    const { message, cause } = error as {
+      message?: unknown;
+      cause?: unknown;
+    };
+    if (typeof message === 'string' && message.trim()) {
+      const detail = describeErrorCause(cause);
+      const result =
+        detail && detail !== message
+          ? `${message} (cause: ${detail})`
+          : message;
+      return truncateStringifiedErrorMessage(result);
+    }
+    try {
+      const serialized = JSON.stringify(error);
+      return serialized
+        ? truncateStringifiedErrorMessage(serialized)
+        : String(error);
+    } catch {
+      const detail = describeSingleError(error);
+      return detail ? truncateStringifiedErrorMessage(detail) : String(error);
+    }
   }
   try {
     return String(error);

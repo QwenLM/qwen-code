@@ -21,6 +21,7 @@ import { ToolConfirmationOutcome } from './tools.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import type { ToolRegistry } from './tool-registry.js';
+import { clearAutoMemoryRootCache } from '../memory/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -74,6 +75,7 @@ const mockConfigInternal = {
   getFileReadCache: () => fileReadCache,
   getFileReadCacheDisabled: () => false,
   getFileHistoryService: () => mockFileHistoryService,
+  isRecordArtifactEnabled: vi.fn(() => false),
 };
 const mockConfig = mockConfigInternal as unknown as Config;
 
@@ -120,6 +122,7 @@ describe('WriteFileTool', () => {
     // Reset mocks before each test
     mockConfigInternal.getApprovalMode.mockReturnValue(ApprovalMode.DEFAULT);
     mockConfigInternal.setApprovalMode.mockClear();
+    mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(false);
   });
 
   afterEach(() => {
@@ -230,6 +233,82 @@ describe('WriteFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('ask');
+    });
+
+    it('auto-allows private memory writes but proposes team memory writes', async () => {
+      const prev = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      clearAutoMemoryRootCache();
+      try {
+        const privatePath = path.join(
+          rootDir,
+          '.qwen',
+          'memory',
+          'user',
+          'x.md',
+        );
+        const teamPath = path.join(
+          rootDir,
+          '.qwen',
+          'team-memory',
+          'feedback',
+          'x.md',
+        );
+        expect(
+          await tool
+            .build({ file_path: privatePath, content: 'c' })
+            .getDefaultPermission(),
+        ).toBe('allow');
+        expect(
+          await tool
+            .build({ file_path: teamPath, content: 'c' })
+            .getDefaultPermission(),
+        ).toBe('ask');
+      } finally {
+        if (prev === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_LOCAL'] = prev;
+        }
+        clearAutoMemoryRootCache();
+      }
+    });
+
+    it('blocks writing a secret to a team-memory path', () => {
+      const params = {
+        file_path: path.join(rootDir, '.qwen', 'team-memory', 'feedback.md'),
+        content: `token = ghp_${'a'.repeat(36)}`,
+      };
+      expect(() => tool.build(params)).toThrow(
+        /shared with all repository collaborators/i,
+      );
+    });
+
+    it('blocks a secret added to team-memory content before execute', async () => {
+      const filePath = path.join(
+        rootDir,
+        '.qwen',
+        'team-memory',
+        'feedback.md',
+      );
+      const invocation = tool.build({
+        file_path: filePath,
+        content: 'clean content',
+      });
+      invocation.params.content = `token = ghp_${'a'.repeat(36)}`;
+
+      const result = await invocation.execute(abortSignal);
+
+      expect(JSON.stringify(result)).toMatch(
+        /shared with all repository collaborators/i,
+      );
+      // The blocked write must carry an `error` field so the framework
+      // treats it as a failure, not a silent success.
+      expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+      expect(result.error?.message).toMatch(
+        /shared with all repository collaborators/i,
+      );
+      expect(fs.existsSync(filePath)).toBe(false);
     });
 
     it('should throw if _getCorrectedFileContent returns an error', async () => {
@@ -366,6 +445,65 @@ describe('WriteFileTool', () => {
       expect(display.fileDiff).toMatch(
         proposedContent.replace(/[.*+?^${}()|[\\]\\]/g, '\\$&'),
       );
+    });
+
+    it('reminds the model to record artifact-like workspace files', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', 'weather.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Weather</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('record_artifact');
+      expect(result.llmContent).toContain(
+        'workspacePath "reports/weather.html"',
+      );
+      expect(result.artifacts).toBeUndefined();
+    });
+
+    it('reminds for case-insensitive artifact extensions', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'reports', 'dashboard.HTML');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Dashboard</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).toContain('record_artifact');
+      expect(result.llmContent).toContain(
+        'workspacePath "reports/dashboard.HTML"',
+      );
+    });
+
+    it('does not remind for ordinary source files', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(rootDir, 'src', 'index.ts');
+      const params = {
+        file_path: filePath,
+        content: 'export const value = 1;\n',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('record_artifact');
+    });
+
+    it('does not remind for files outside the workspace', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const filePath = path.join(tempDir, 'outside.html');
+      const params = {
+        file_path: filePath,
+        content: '<!doctype html><html><body>Outside</body></html>',
+      };
+
+      const result = await tool.build(params).execute(abortSignal);
+
+      expect(result.llmContent).not.toContain('record_artifact');
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
@@ -768,6 +906,51 @@ describe('WriteFileTool', () => {
       expect(result.returnDisplay).toContain(
         'Error writing to file: Generic write error',
       );
+    });
+
+    it('should include cause details for non-Node write errors', async () => {
+      const filePath = path.join(rootDir, 'write_error_with_cause.txt');
+      const content = 'test content';
+
+      vi.restoreAllMocks();
+
+      const cause = Object.assign(new Error(''), { code: 'ECONNREFUSED' });
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce(
+        new TypeError('fetch failed', { cause }),
+      );
+
+      const params = { file_path: filePath, content };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error writing to file: fetch failed (cause: ECONNREFUSED)',
+      );
+      expect(result.returnDisplay).toContain(
+        'Error writing to file: fetch failed (cause: ECONNREFUSED)',
+      );
+    });
+
+    it('should surface plain object write error messages without object stringification', async () => {
+      const filePath = path.join(rootDir, 'plain_object_error_file.txt');
+      const content = 'test content';
+
+      vi.restoreAllMocks();
+
+      vi.spyOn(fsService, 'writeTextFile').mockRejectedValueOnce({
+        message: 'Plain object write error',
+      });
+
+      const params = { file_path: filePath, content };
+      const invocation = tool.build(params);
+      const result = await invocation.execute(abortSignal);
+
+      expect(result.error?.type).toBe(ToolErrorType.FILE_WRITE_FAILURE);
+      expect(result.llmContent).toContain(
+        'Error writing to file: Plain object write error',
+      );
+      expect(result.llmContent).not.toContain('[object Object]');
     });
   });
 

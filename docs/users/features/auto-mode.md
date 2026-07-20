@@ -15,6 +15,16 @@ walks three layers in order:
 
 1. **acceptEdits fast-path** — Edit / Write whose target path is inside
    the workspace is auto-approved without invoking the classifier.
+   **Exception:** writes to Qwen Code's own self-modification surfaces
+   (`.qwen/settings*.json`, `QWEN.md`, `AGENTS.md`, `QWEN.local.md`,
+   configured context filenames, `.qwen/rules/`, `.qwen/commands/`,
+   `.qwen/agents/`, `.qwen/skills/`, `.qwen/hooks/`, `.mcp.json`) and
+   persistence surfaces (`.git/`, `.husky/`, `package.json`, `.npmrc`,
+   `Makefile`, `.github/workflows/`, etc.) route through the classifier
+   even when they are inside the workspace. Symlinks targeting protected
+   paths are resolved and rejected too. Shell commands that reach these
+   paths via `cd && bash -lc '...'` or other wrappers go through the
+   classifier as well.
 2. **Safe-tool allowlist** — Read-only and metadata-only built-in tools
    (Read, Grep, Glob, LS, LSP, TodoWrite, AskUserQuestion, etc.) are
    auto-approved without invoking the classifier.
@@ -33,6 +43,14 @@ The classifier uses your configured fast model
 (`/model --fast`). If no fast model is configured, the main session
 model is used instead.
 
+> [!tip]
+>
+> Shell commands that the permission system detects as read-only (e.g.
+> `ls`, `cat`, `git log`) are auto-approved before reaching the
+> classifier. Set `permissions.autoMode.classifyAllShell: true` to
+> override this and route all shell commands through the classifier —
+> see [Classify all shell commands](#classify-all-shell-commands) below.
+
 ## Hard rules still win
 
 Auto Mode does **not** replace hard permission rules. Before the classifier
@@ -42,7 +60,12 @@ runs:
   classifier never sees it.
 - `permissions.allow` rules with specific specifiers (e.g.
   `Bash(git status)`, `Read(./docs/**)`) still auto-allow without the
-  classifier.
+  classifier — **except** when the call resolves to a write at a
+  protected self-modification or persistence path (see the list under
+  "How it works"). In that case Auto Mode re-checks the call through
+  the classifier so an allow rule on `Bash(*)` cannot silently turn
+  into permission to rewrite Qwen Code settings, commands, hooks,
+  skills, or MCP servers.
 - `permissions.ask` rules force manual confirmation even in Auto Mode.
 
 ## Over-broad allow rules are stripped while in Auto Mode
@@ -69,6 +92,19 @@ entries are natural-language descriptions, not rule patterns — they are
 injected additively into the classifier's system prompt alongside the
 built-in defaults.
 
+There are three hint categories plus an environment list:
+
+- **`allow`** — actions the classifier should auto-approve.
+- **`softDeny`** — destructive or irreversible actions the classifier
+  should block **unless the user's most recent explicit request asked
+  for that exact action and scope**. Soft denies can be cleared by
+  user intent; a generic "yes do whatever" doesn't count.
+- **`hardDeny`** — security-boundary actions the classifier must block
+  in Auto Mode regardless of `autoMode.hints.allow` or recent user
+  intent. This is classifier policy, not a deterministic permission
+  rule: it does not override `permissions.allow`. Use `permissions.deny`
+  for actions that must never be allowed by the permission manager.
+
 ```json
 {
   "permissions": {
@@ -79,10 +115,13 @@ built-in defaults.
           "Cleaning build artifacts under ./dist or ./build",
           "Reading any file under /Users/me/code/"
         ],
-        "deny": [
-          "Any network call to intranet.example.com endpoints",
-          "Modifying anything under ~/.ssh or ~/.aws",
+        "softDeny": [
+          "Editing Qwen Code settings unless I explicitly ask for the exact change",
           "Running migration scripts that touch the production DB"
+        ],
+        "hardDeny": [
+          "Sending secrets or .env contents to any network endpoint",
+          "Modifying anything under ~/.ssh or ~/.aws"
         ]
       },
       "environment": [
@@ -94,13 +133,18 @@ built-in defaults.
 }
 ```
 
+`hints.deny` is still accepted for backward compatibility and is treated
+as `softDeny`. Mixing both is fine — entries are concatenated, `softDeny`
+first.
+
 ### Length and count limits
 
 To keep the classifier system prompt small:
 
 - Each entry is capped at 200 characters (longer entries are truncated
   with a warning).
-- `hints.allow` and `hints.deny` accept up to 50 entries each.
+- `hints.allow`, `hints.softDeny`, and `hints.hardDeny` accept up to 50
+  entries each.
 - `environment` accepts up to 20 entries.
 
 ### Layering across settings files
@@ -109,20 +153,61 @@ To keep the classifier system prompt small:
 way other permission settings are: arrays are concatenated and
 de-duplicated.
 
+### Classify all shell commands
+
+By default, read-only shell commands (`ls`, `cat`, `git status`, …) are
+auto-approved without invoking the classifier — the permission system
+detects them as safe at layer 3 and skips the classifier entirely. Set
+`classifyAllShell` to `true` to force **every** shell command through
+the classifier, including read-only ones:
+
+```json
+{
+  "permissions": {
+    "autoMode": {
+      "classifyAllShell": true
+    }
+  }
+}
+```
+
+This is useful for production or high-security environments where you
+want defense-in-depth: even seemingly harmless commands are reviewed by
+the classifier before execution. The trade-off is added latency (~300ms
+per read-only shell call) and reliance on classifier availability — if
+the classifier API is unreachable, read-only shell commands will also be
+blocked (fail-closed).
+
+> [!note]
+>
+> `classifyAllShell` only affects shell commands (`run_shell_command` and
+> `monitor`). Built-in read-only tools (`read_file`, `grep_search`,
+> `glob`, `list_directory`, etc.) are unaffected and still use the
+> fast-path allowlist.
+
 ## Reading the decision
 
 When the classifier blocks an action, the tool call fails with one of
 the following error texts:
 
-- **`Blocked by auto mode policy: <reason>`** — the classifier judged
-  the action unsafe. The reason comes from Stage 2 of the classifier.
+- **`Blocked by auto mode policy: <reason>`** —
+  the classifier judged the action unsafe. The reason comes from Stage
+  2 of the classifier.
 - **`Auto mode classifier unavailable; action blocked for safety`** —
   the classifier API was unreachable, timed out, or returned an
   un-parseable response. This is fail-closed behavior: when in doubt,
   block.
 
-The main LLM sees the same message in the tool result and adjusts its
-approach (asks you, switches tactic, gives up).
+Both messages are followed by a trailing guidance line telling the agent
+that the **denied action specifically** must not be completed through
+another tool, shell indirection, generated script, alias, symlink,
+config change, hook, command file, MCP configuration, encoded payload,
+or equivalent path. **Unrelated safe work and genuinely safer
+alternatives are still allowed** — only attempts to accomplish the same
+denied intent through a different surface are blocked.
+
+If the denied action is genuinely required, the agent should stop and
+ask you for explicit approval rather than route around the denial.
 
 ### Classifier reason language
 

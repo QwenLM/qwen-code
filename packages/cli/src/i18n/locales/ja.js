@@ -18,7 +18,9 @@ export default {
   '@src/myFile.ts': '@src/myFile.ts',
   'Shell mode': 'シェルモード',
   'YOLO mode': 'YOLOモード',
-  'Auto mode': 'Autoモード',
+  'Auto mode': '自動モード',
+  'auto_mode.entry_notice':
+    '自動モードが有効です。\n   LLM 分類器が各ツール呼び出しを評価します — 安全な操作は自動承認され、\n   危険な操作はブロックされます。終了: Shift+Tab または /approval-mode default。',
   'plan mode': 'プランモード',
   'auto-accept edits': '編集を自動承認',
   'Accepting edits': '編集を承認中',
@@ -74,7 +76,39 @@ export default {
     'プロジェクトを分析し、カスタマイズされた QWEN.md ファイルを作成',
   'List available Qwen Code tools. Usage: /tools [desc]':
     '利用可能な Qwen Code ツールを一覧表示。使い方: /tools [desc]',
-  'List available skills.': '利用可能なスキルを一覧表示する。',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'スキルパネルを開く（一覧・検索・有効化/無効化・選択）。',
+  'Manage Skills': 'スキルを管理',
+  'Skills configuration saved.': 'スキル設定を保存しました。',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'スキル設定を保存しましたが、更新に失敗しました：{{error}}。再起動して新しい状態が反映されることを確認してください。',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'ワークスペースが信頼されていないため、ワークスペース設定はマージ設定で無視されます。先に /trust を実行するか、~/.qwen/settings.json を直接編集してユーザースコープでスキルを管理してください。',
+  'SkillManager not available.': 'SkillManager は利用できません。',
+  'Loading skills…': 'スキルを読み込み中…',
+  'Failed to load skills: {{error}}': 'スキルの読み込みに失敗：{{error}}',
+  'Failed to save skills configuration: {{error}}':
+    'スキル設定の保存に失敗しました：{{error}}',
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'すべての利用可能なスキルが無効化されています。~/.qwen/settings.json または .qwen/settings.json (skills.disabled) を編集して再有効化してください。',
+  'Press esc to close.': 'Esc で閉じる。',
+  '{{count}} skills · ': '{{count}} スキル · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} スキル · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'スペース 切替 · Enter 選択（入力欄に挿入） · Esc 保存して終了 · ワークスペーススコープ',
+  'Search:': '検索：',
+  'type to filter…': 'フィルタを入力…',
+  'No skills are currently available.': '利用可能なスキルはありません。',
+  'All available skills are locked at a higher scope (see below).':
+    'すべての利用可能なスキルは上位スコープでロックされています（下記参照）。',
+  'No skills match the search.': '検索に一致するスキルはありません。',
+  'Locked by higher-scope settings (cannot toggle here):':
+    '上位スコープ設定によってロックされています（ここでは切替不可）：',
+  'higher scope': '上位スコープ',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [ロック中：{{scope}}]',
+  '↑/↓ navigate · backspace edits search': '↑/↓ 移動 · Backspace 検索編集',
+  Bundled: '組み込み',
   'Available Qwen Code CLI tools:': '利用可能な Qwen Code CLI ツール:',
   'No tools available': '利用可能なツールはありません',
   'View or change the approval mode for tool usage':
@@ -149,8 +183,8 @@ export default {
     'ブラウザで Qwen Code のドキュメントを開く',
   'Configuration not available.': '設定が利用できません',
   'Connect an LLM provider': 'LLM プロバイダーに接続',
-  'Copy the last result or code snippet to clipboard':
-    '最後の結果またはコードスニペットをクリップボードにコピー',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    '最新のAI応答をクリップボードにコピー（/copy N で新しい方からN番目）',
 
   // ============================================================================
   // Commands - Agents
@@ -173,6 +207,43 @@ export default {
   'Delete {{name}}': '{{name}} を削除',
   'Unknown Step': '不明なステップ',
   'Esc to close': 'Esc で閉じる',
+  Transcript: 'トランスクリプト',
+  'to close': '閉じる',
+  'to scroll': 'スクロール',
+  'Failed to render transcript.': 'トランスクリプトの描画に失敗しました。',
+  'Read {{count}} file': '{{count}} 件のファイルを読み込みました',
+  'Read {{count}} files': '{{count}} 件のファイルを読み込みました',
+  'Reading {{count}} file': '{{count}} 件のファイルを読み込み中',
+  'Reading {{count}} files': '{{count}} 件のファイルを読み込み中',
+  'Edited {{count}} file': '{{count}} 件のファイルを編集しました',
+  'Edited {{count}} files': '{{count}} 件のファイルを編集しました',
+  'Editing {{count}} file': '{{count}} 件のファイルを編集中',
+  'Editing {{count}} files': '{{count}} 件のファイルを編集中',
+  'Wrote {{count}} file': '{{count}} 件のファイルを書き込みました',
+  'Wrote {{count}} files': '{{count}} 件のファイルを書き込みました',
+  'Writing {{count}} file': '{{count}} 件のファイルを書き込み中',
+  'Writing {{count}} files': '{{count}} 件のファイルを書き込み中',
+  'Searched {{count}} pattern': '{{count}} 件のパターンを検索しました',
+  'Searched {{count}} patterns': '{{count}} 件のパターンを検索しました',
+  'Searching {{count}} pattern': '{{count}} 件のパターンを検索中',
+  'Searching {{count}} patterns': '{{count}} 件のパターンを検索中',
+  'Listed {{count}} directory': '{{count}} 件のディレクトリを一覧表示しました',
+  'Listed {{count}} directories':
+    '{{count}} 件のディレクトリを一覧表示しました',
+  'Listing {{count}} directory': '{{count}} 件のディレクトリを一覧表示中',
+  'Listing {{count}} directories': '{{count}} 件のディレクトリを一覧表示中',
+  'Ran {{count}} command': '{{count}} 件のコマンドを実行しました',
+  'Ran {{count}} commands': '{{count}} 件のコマンドを実行しました',
+  'Running {{count}} command': '{{count}} 件のコマンドを実行中',
+  'Running {{count}} commands': '{{count}} 件のコマンドを実行中',
+  'Ran {{count}} agent': '{{count}} 件のエージェントを実行しました',
+  'Ran {{count}} agents': '{{count}} 件のエージェントを実行しました',
+  'Running {{count}} agent': '{{count}} 件のエージェントを実行中',
+  'Running {{count}} agents': '{{count}} 件のエージェントを実行中',
+  'Used {{count}} tool': '{{count}} 件のツールを使用しました',
+  'Used {{count}} tools': '{{count}} 件のツールを使用しました',
+  'Using {{count}} tool': '{{count}} 件のツールを使用中',
+  'Using {{count}} tools': '{{count}} 件のツールを使用中',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter で選択、↑↓ で移動、Esc で閉じる',
   'Esc to go back': 'Esc で戻る',
@@ -204,18 +275,17 @@ export default {
   'Open in editor': 'エディタで開く',
   'Edit tools': 'ツールを編集',
   'Edit color': '色を編集',
-  '❌ Error:': '❌ エラー:',
+  '✗ Error:': '✗ エラー:',
   'Are you sure you want to delete agent "{{name}}"?':
     'エージェント "{{name}}" を削除してもよろしいですか?',
   'Project Level (.qwen/agents/)': 'プロジェクトレベル (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'ユーザーレベル (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!':
-    '✅ サブエージェントの作成に成功しました!',
+  '✓ Subagent Created Successfully!': '✓ サブエージェントの作成に成功しました!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'サブエージェント "{{name}}" を {{level}} に保存しました',
   'Name: ': '名前: ',
   'Location: ': '場所: ',
-  '❌ Error saving subagent:': '❌ サブエージェント保存エラー:',
+  '✗ Error saving subagent:': '✗ サブエージェント保存エラー:',
   'Warnings:': '警告:',
   'Step {{n}}: Choose Location': 'ステップ {{n}}: 場所を選択',
   'Step {{n}}: Choose Generation Method': 'ステップ {{n}}: 作成方法を選択',
@@ -326,12 +396,56 @@ export default {
   'Tool Output Truncation Lines': 'ツール出力の切り詰め行数',
   'Tool Schema Compliance': 'Tool Schema 準拠',
   'Auto (detect from system)': '自動(システムから検出)',
+  'Auto (follow user input)': '自動(ユーザー入力に従う)',
   'Auto (detect terminal theme)': '自動（端末テーマを検出）',
   Auto: '自動',
-  'check session stats. Usage: /stats [model|tools]':
-    'セッション統計を確認。使い方: /stats [model|tools]',
   'Show model-specific usage statistics.': 'モデル別の使用統計を表示',
   'Show tool-specific usage statistics.': 'ツール別の使用統計を表示',
+  'Show daily token usage statistics.': '日次 token 使用統計を表示',
+  'Show monthly token usage statistics.': '月次 token 使用統計を表示',
+  'Export token usage statistics to CSV or JSON.':
+    'token 使用統計を CSV または JSON にエクスポート',
+  'No usage data.': '使用データはありません。',
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}}: {{tokens}} tokens（{{requests}} リクエスト）',
+  'Daily token usage for {{value}}': '{{value}} の日次 token 使用量',
+  'Monthly token usage for {{value}}': '{{value}} の月次 token 使用量',
+  'Total: {{tokens}} tokens': '合計: {{tokens}} tokens',
+  'Requests: {{requests}}': 'リクエスト数: {{requests}}',
+  'Breakdown:': '内訳:',
+  'Input: {{tokens}}': '入力: {{tokens}}',
+  'Output: {{tokens}}': '出力: {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'キャッシュ（入力に含まれる）: {{tokens}}',
+  'Thoughts: {{tokens}}': '思考: {{tokens}}',
+  'By model:': 'モデル別:',
+  'By auth type:': '認証タイプ別:',
+  'By model/auth type:': 'モデル/認証タイプ別:',
+  'By source:': 'ソース別:',
+  'Failed to load token usage stats: {{error}}':
+    'token 使用統計の読み込みに失敗しました: {{error}}',
+  'Expected --format csv or --format json.':
+    '--format csv または --format json を指定してください。',
+  'Expected a file path after --output.':
+    '--output の後にファイルパスを指定してください。',
+  'Unexpected argument: {{argument}}': '予期しない引数: {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    '使い方: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    'token 使用量のエクスポート先はプロジェクト作業ディレクトリ内である必要があります。',
+  'Export target does not exist: {{path}}':
+    'エクスポート先が存在しません: {{path}}',
+  'Cannot resolve export path within the working directory.':
+    '作業ディレクトリ内でエクスポートパスを解決できません。',
+  'Could not create a temporary export file.':
+    '一時エクスポートファイルを作成できませんでした。',
+  'Token usage exported to {{format}}: {{path}}':
+    'token 使用量を {{format}} にエクスポートしました: {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    'token 使用統計のエクスポートに失敗しました: {{error}}',
+  'Unclosed quote in arguments.': '引数の引用符が閉じられていません。',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    '注: 生成時間（TTFT/TPS）は生成メトリクスに属します。',
   'Manage workspace directories': 'ワークスペースディレクトリを管理',
   'Add directories to the workspace. Use comma to separate multiple paths':
     'ワークスペースにディレクトリを追加。複数パスはカンマで区切ってください',
@@ -447,6 +561,8 @@ export default {
   'After tool execution fails': 'ツール実行失敗時',
   'When notifications are sent': '通知送信時',
   'When the user submits a prompt': 'ユーザーがプロンプトを送信した時',
+  'When a slash command expands into a prompt':
+    'スラッシュコマンドがプロンプトに展開された時',
   'When a new session is started': '新しいセッションが開始された時',
   'Right before Qwen Code concludes its response':
     'Qwen Code が応答を終了する直前',
@@ -470,6 +586,8 @@ export default {
     'コマンドへの入力は通知メッセージとタイプを持つ JSON です。',
   'Input to command is JSON with original user prompt text.':
     'コマンドへの入力は元のユーザープロンプトテキストを持つ JSON です。',
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    'コマンドへの入力は command_name、command_args、展開後のプロンプトテキストを持つ JSON です。',
   'Input to command is JSON with session start source.':
     'コマンドへの入力はセッション開始ソースを持つ JSON です。',
   'Input to command is JSON with session end reason.':
@@ -498,6 +616,8 @@ export default {
     'stderr をユーザーのみに表示し、ツール呼び出しを続ける',
   'block processing, erase original prompt, and show stderr to user only':
     '処理をブロックし、元のプロンプトを消去し、stderr をユーザーのみに表示',
+  'block expanded prompt submission and show stderr to user only':
+    '展開後のプロンプト送信をブロックし、stderr をユーザーのみに表示',
   'stdout shown to Qwen': 'stdout を Qwen に表示',
   'show stderr to user only (blocking errors ignored)':
     'stderr をユーザーのみに表示（ブロッキングエラーは無視）',
@@ -545,6 +665,21 @@ export default {
   'Resume a previous session': '前のセッションを再開する',
   'Fork the current conversation into a new session':
     '現在の会話を新しいセッションに分岐する',
+  'Spawn a background agent that inherits the full conversation':
+    '会話全体を引き継ぐバックグラウンドエージェントを起動する',
+  'Please provide a directive. Usage: /fork <directive>':
+    '指示を入力してください。使用法: /fork <指示>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    '応答またはツール呼び出しの処理中はフォークできません。完了するか、保留中のツール呼び出しを解決してください。',
+  'Cannot fork before the first conversation turn.':
+    '最初の会話ターンの前にはフォークできません。',
+  'The agent tool is unavailable; cannot fork.':
+    'エージェントツールを利用できないため、フォークできません。',
+  'Failed to launch fork: {{error}}': 'フォークの起動に失敗しました: {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    'ユーザーが /fork でバックグラウンドフォークを起動しました: {{directive}}',
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    'バックグラウンドエージェントにフォークしました。この会話を引き継ぎ、ブロックせずに実行されます — バックグラウンドタスクパネルで追跡でき、完了時に報告します。',
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     '応答またはツール呼び出しの処理中は分岐できません。完了するか、保留中のツール呼び出しを解決してください。',
   'No conversation to branch.': '分岐できる会話がありません。',
@@ -823,15 +958,38 @@ export default {
   ', {{inProgress}} in progress': '、{{inProgress}} 進行中',
   'Pending Tasks:': '保留中のタスク:',
   'Current tasks': '現在のタスク',
+  'Background tasks': 'バックグラウンドタスク',
+  'No tasks currently running': '現在実行中のタスクはありません',
+  'No entry to show.': '表示するエントリはありません。',
+  'needs approval': '承認待ち',
+  'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
+  'Background agent needs approval':
+    'バックグラウンドエージェントが承認待ちです',
+  'Approve or deny the request above':
+    '上のリクエストを承認または拒否してください',
+  Running: '実行中',
+  Paused: '一時停止中',
+  Completed: '完了',
+  Failed: '失敗',
+  Stopped: '停止済み',
+  Shell: 'シェル',
+  Monitor: 'モニター',
+  Command: 'コマンド',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] メモリ統合',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] メモリ統合 ({{count}} セッションを確認中)',
   '... and {{count}} more': '... 他 {{count}} 件',
   'What would you like to do?': '何をしますか?',
   'Choose how to proceed with your session:':
     'セッションの続行方法を選択してください:',
   'Start new chat session': '新しいチャットセッションを開始',
   'Continue previous conversation': '前回の会話を続行',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 おかえりなさい!(最終更新: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 全体目標:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'おかえりなさい!(最終更新: {{timeAgo}})',
+  'Overall Goal:': '全体目標:',
   'Connect a Provider': 'プロバイダーに接続',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '続行するにはプロバイダーに接続してください。Ctrl+C をもう一度押すと終了します',
@@ -969,8 +1127,8 @@ export default {
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
   'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers を起動中({{count}} 初期化中)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers を起動中({{count}} 初期化中)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注: 初回起動には時間がかかる場合があります。ツールの利用可能状況は自動的に更新されます',
   'Starting... (first startup may take longer)':
@@ -987,8 +1145,9 @@ export default {
   'Tools:': 'ツール:',
   'Parameters:': 'パラメータ:',
   'Prompts:': 'プロンプト:',
+  'Resources:': 'リソース:',
   Blocked: 'ブロック',
-  '💡 Tips:': '💡 ヒント:',
+  '★ Tips:': '★ ヒント:',
   Use: '使用',
   'to show server and tool descriptions': 'サーバーとツールの説明を表示',
   'to show tool parameter schemas': 'tool parameter schemas を表示',
@@ -1020,8 +1179,6 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Ctrl+O でコンパクトモードを切り替え — ツール出力と思考を非表示にしてすっきり表示。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1086,6 +1243,21 @@ export default {
     'このセッションではツール呼び出しが行われていません',
   'Session start time is unavailable, cannot calculate stats.':
     'セッション開始時刻が利用できないため、統計を計算できません',
+  Activity: 'アクティビティ',
+  Efficiency: '効率',
+  Today: '今日',
+  'Token Trend': 'Token トレンド',
+  'Cache Hit Rate': 'キャッシュヒット率',
+  'Tool Success': 'ツール成功率',
+  'Tool Leaderboard': 'ツールランキング',
+  Time: '時間',
+  Success: '成功率',
+  Cache: 'キャッシュ',
+  Latency: 'レイテンシ',
+  'Code Impact': 'コード変更',
+  net: '純増',
+  streak: '連続',
+  best: '最長',
   // Loading
   'Waiting for user confirmation...': 'ユーザーの確認を待っています...',
   // Witty Loading Phrases
@@ -1235,8 +1407,8 @@ export default {
     'Coding Plan の API Key を入力してください: ',
   'Select authentication method:': '認証方法を選択:',
   '\n=== Authentication Status ===\n': '\n=== 認証ステータス ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  認証方法が設定されていません。\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  認証方法が設定されていません。\n',
   'Run one of the following commands to get started:\n':
     '以下のコマンドのいずれかを実行して開始してください:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1257,8 +1429,8 @@ export default {
   '  Current Model: {{model}}': '  現在のモデル: {{model}}',
   '  Config Version: {{version}}': '  設定バージョン: {{version}}',
   '  Status: API key configured\n': '  ステータス: API Key 設定済み\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  認証方法: Alibaba Cloud Coding Plan（不完全）',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  認証方法: Alibaba Cloud Coding Plan（不完全）',
   '  Issue: API key not found in environment or settings\n':
     '  問題: 環境変数または設定に API Key が見つかりません\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1272,12 +1444,11 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  'to toggle compact mode': 'コンパクトモードの切り替え',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
-  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
+  'to view transcript': 'トランスクリプトを表示',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '推論対応モデルの思考の強さを設定します（{{tiers}}）。プロバイダーごとにマッピング・制限されます。',
   'Exited plan mode. Previous approval mode restored.':
     'プランモードを終了しました。以前の承認モードに戻りました。',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1516,7 +1687,7 @@ export default {
     'アンインストールする拡張機能名を位置引数として指定してください。',
   'Enables an extension.': '拡張機能を有効にします。',
   'The name of the extension to enable.': '有効化する拡張機能の名前。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '拡張機能を有効化するスコープ。未指定の場合はすべてのスコープで有効化されます。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'スコープ "{{scope}}" で拡張機能 "{{name}}" を正常に有効化しました。',
@@ -1526,7 +1697,7 @@ export default {
     '無効なスコープです: {{scope}}。{{scopes}} のいずれかを指定してください。',
   'Disables an extension.': '拡張機能を無効にします。',
   'The name of the extension to disable.': '無効化する拡張機能の名前。',
-  'The scope to disable the extenison in.': '拡張機能を無効化するスコープ。',
+  'The scope to disable the extension in.': '拡張機能を無効化するスコープ。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'スコープ "{{scope}}" で拡張機能 "{{name}}" を正常に無効化しました。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1605,6 +1776,12 @@ export default {
   'ANTHROPIC_BASE_URL environment variable not found.':
     '環境変数 ANTHROPIC_BASE_URL が見つかりません。',
   'Invalid auth method selected.': '無効な認証方式が選択されました。',
+  ' (this project)': ' (このプロジェクト)',
+  ' (global)': ' (グローバル)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'モデルの選択をプロジェクト設定に永続化（ワークスペーススコープ）',
+  'Persist the model selection to the user settings (global scope)':
+    'モデルの選択をユーザー設定に永続化（グローバルスコープ）',
   'API Key': 'API Key',
   '(default)': '(デフォルト)',
   '(not set)': '(未設定)',
@@ -1666,9 +1843,157 @@ export default {
     '次回のセッション期限切れクリーンアップでファイルが削除されるまで、以降の dream はロック中としてスキップされる可能性があります。',
   "The scheduler gate did not see this dream's timestamp; the next dream cycle may re-fire sooner than usual.":
     'スケジューラーゲートがこの dream のタイムスタンプを認識しませんでした。次の dream サイクルは通常より早く再実行される可能性があります。',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    '履歴を折りたたみました：{{n}} 件のメッセージが非表示です。/history expand-now で表示します。',
+
   // === Same-as-English optimization ===
   ' (not in model registry)': '（モデルレジストリにありません）',
   'Attribution: commit': 'コミットの帰属表示',
   '中国 (China)': '中国',
   '中国 (China) - 阿里云百炼': '中国 - 阿里云百炼',
+
+  // Stats Dashboard — Category 2 (missing from ja)
+  'Activity Heatmap': 'アクティビティヒートマップ',
+  Less: '少',
+  More: '多',
+  Sessions: 'セッション数',
+  Duration: '所要時間',
+  Projects: 'プロジェクト',
+  'Loading stats...': '統計を読み込み中...',
+  '(no data)': '(データなし)',
+  d: '日',
+  h: '時',
+  m: '分',
+  Input: '入力',
+  Models: 'モデル',
+  'All time': '全期間',
+  'Last 7 days': '過去 7 日間',
+  'Last 30 days': '過去 30 日間',
+  'Show usage statistics dashboard.': '使用統計ダッシュボードを表示する。',
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'APIリクエスト',
+  'Tool Calls': 'ツール呼び出し',
+  'Success rate': '成功率',
+  'Code Changes': 'コード変更',
+  Tool: 'ツール',
+  reqs: 'リクエスト',
+  in: '入力',
+  out: '出力',
+  'In/Out': '入力/出力',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code のアップデートがあります！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
+  'Unable to check for updates: {{reason}}':
+    'アップデートを確認できません: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'アップデート成功！新バージョンは次回起動時に使用されます。',
+  'Update downloaded. It will be applied after you exit this session.':
+    'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
+  'Update failed: {{error}}': 'アップデート失敗：{{error}}',
+  'Downloading update...': 'アップデートをダウンロードしています...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'アップデートに成功しました！新しいバージョンを使用するには Qwen Code を再起動してください。再起動前にモデルプロバイダーを切り替えると正しく動作しない場合があります。',
+  'Automatic update failed. Please try updating manually.':
+    '自動アップデートに失敗しました。手動で更新してください。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自動更新に失敗しました: {{error}}。手動で更新するにはインストーラーを再実行してください。',
+  'Running from a local git clone. Please update with "git pull".':
+    'ローカル Git クローンから実行中です。"git pull" で更新してください。',
+  'Running via npx, update not applicable.':
+    'npx 経由で実行中のため、更新は適用されません。',
+  'Running via pnpx, update not applicable.':
+    'pnpx 経由で実行中のため、更新は適用されません。',
+  'Running via bunx, update not applicable.':
+    'bunx 経由で実行中のため、更新は適用されません。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Homebrew 経由でインストールされています。"brew upgrade" で更新してください。',
+  "Locally installed. Please update via your project's package.json.":
+    'ローカルにインストールされています。プロジェクトの package.json 経由で更新してください。',
+  'Update requires sudo. Please run:':
+    '更新には sudo が必要です。次を実行してください:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'スタンドアロンインストールを検出しました。自動更新を試行しています...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'スタンドアロンインストールを検出しました。更新するにはスタンドアロンインストーラーを再実行してください:',
+  'Run the following to update:':
+    '以下のコマンドを実行してアップデートしてください：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '手動更新が必要です。Qwen Codeを再インストールしてください。',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'このセッションではカスタムサンドボックスイメージ {{image}} を使用しています。イメージを更新して Qwen Code を再起動してください。',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'ホスト上の Qwen Code を更新してから、サンドボックスを再起動してください。',
+  'The update will be installed after you exit this session.':
+    'このセッションを終了すると、更新が自動的にインストールされます。',
+  'Run /update to install the update on the host.':
+    '/update を実行してホストに更新をインストールしてください。',
+  'Run /update to install the update.':
+    '/update を実行して更新をインストールしてください。',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、新しいセッションを開始して記録を再開してください。詳細はデバッグログを確認してください。',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    '書き込みに失敗したため、セッションの記録を停止しました。影響を受けたセッションの新しいメッセージは保存されません。ディスク容量と権限を確認してから、`/clear` を実行して記録可能な新しいセッションを開始してください。詳細はデバッグログを確認してください。',
 };

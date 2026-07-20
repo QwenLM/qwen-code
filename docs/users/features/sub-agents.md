@@ -12,18 +12,18 @@ Subagents are independent AI assistants that:
 - **Work autonomously** - Once given a task, they work independently until completion or failure
 - **Provide detailed feedback** - You can see their progress, tool usage, and execution statistics in real-time
 
-## Fork Subagent (Implicit Fork)
+## Fork Subagent
 
-In addition to named subagents, Qwen Code supports **implicit forking** — when the AI omits the `subagent_type` parameter, it triggers a fork that inherits the parent's full conversation context.
+In addition to named subagents, Qwen Code supports **forking** — selected explicitly with `subagent_type: "fork"` (available in interactive sessions). A fork inherits the parent's full conversation context and runs detached in the background. Omitting `subagent_type` does **not** fork; it launches the general-purpose subagent. Top-level named subagents run in the background by default and deliver their results through completion notifications. Set `run_in_background: false` when the current turn must wait for the result inline.
 
 ### How Fork Differs from Named Subagents
 
-|               | Named Subagent                    | Fork Subagent                                         |
-| ------------- | --------------------------------- | ----------------------------------------------------- |
-| Context       | Starts fresh, no parent history   | Inherits parent's full conversation history           |
-| System prompt | Uses its own configured prompt    | Uses parent's exact system prompt (for cache sharing) |
-| Execution     | Blocks the parent until done      | Runs in background, parent continues immediately      |
-| Use case      | Specialized tasks (testing, docs) | Parallel tasks that need the current context          |
+|               | Named Subagent                                                 | Fork Subagent                                         |
+| ------------- | -------------------------------------------------------------- | ----------------------------------------------------- |
+| Context       | Starts fresh, no parent history                                | Inherits parent's full conversation history           |
+| System prompt | Uses its own configured prompt                                 | Uses parent's exact system prompt (for cache sharing) |
+| Execution     | Background by default; supports an explicit foreground opt-out | Always detached; parent continues immediately         |
+| Use case      | Specialized tasks (testing, docs)                              | Parallel tasks that need the current context          |
 
 ### When Fork is Used
 
@@ -59,9 +59,9 @@ Fork children cannot create further forks. This is enforced at runtime — if a 
 ## How Subagents Work
 
 1. **Configuration**: You create Subagents configurations that define their behavior, tools, and system prompts
-2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or implicitly fork when no specific subagent type is needed
+2. **Delegation**: The main AI can automatically delegate tasks to appropriate Subagents — or fork itself (`subagent_type: "fork"`) when it wants to inherit the full conversation context and discard the intermediate output
 3. **Execution**: Subagents work independently, using their configured tools to complete tasks
-4. **Results**: They return results and execution summaries back to the main conversation
+4. **Results**: Background runs notify the main conversation when they finish; foreground opt-outs return results inline
 
 ## Getting Started
 
@@ -135,7 +135,7 @@ Subagents are configured using Markdown files with YAML frontmatter. This format
 name: agent-name
 description: Brief description of when and how to use this agent
 model: inherit # Optional: inherit, fast, modelId, or authType:modelId
-approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo
+approvalMode: auto-edit # Optional: default, plan, auto-edit, yolo, bubble
 tools:         # Optional: allowlist of tools
   - tool1
   - tool2
@@ -194,6 +194,27 @@ When the selector resolves to another auth type, Qwen Code creates a dedicated
 runtime provider for that subagent request and sends the provider only the bare
 model ID.
 
+The built-in Explore agent inherits the main session model by default. To
+select a different model for only that built-in agent, configure
+`agents.builtin.exploreModel` in `settings.json` and restart Qwen Code:
+
+Earlier versions used `fastModel` for Explore by default. To preserve that
+behavior, set `agents.builtin.exploreModel` to `fast`.
+
+```json
+{
+  "agents": {
+    "builtin": {
+      "exploreModel": "fast"
+    }
+  }
+}
+```
+
+This setting accepts the same selectors described above. It is applied only
+when Qwen Code resolves the built-in Explore definition; a session, project,
+user, or extension agent named Explore keeps its own `model` setting.
+
 #### Permission Mode
 
 Use the optional `approvalMode` frontmatter field to control how a subagent's tool calls are approved. Valid values:
@@ -202,6 +223,7 @@ Use the optional `approvalMode` frontmatter field to control how a subagent's to
 - `plan`: Analyze-only mode — the agent plans but does not execute changes
 - `auto-edit`: Tools are auto-approved without prompting (recommended for most agents)
 - `yolo`: All tools auto-approved, including potentially destructive ones
+- `bubble`: Background-agent tool approvals are surfaced in the parent session
 
 If you omit this field, the subagent's permission mode is determined automatically:
 
@@ -274,6 +296,66 @@ disallowedTools:
   - mcp__slack
 ---
 ```
+
+#### Claude Code Compatibility Fields
+
+Qwen Code accepts the Claude Code 2.1.168 frontmatter fields below so you
+can drop a CC agent file into `.qwen/agents/` and have the supported fields
+parse identically. Optional fields with invalid values are silently dropped
+at parse time rather than rejected — the same lenient posture CC uses.
+
+| Field            | Type             | Notes                                                                                                                                                                                                                                                                            |
+| ---------------- | ---------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `permissionMode` | enum string      | `acceptEdits`, `auto`, `bypassPermissions`, `default`, `dontAsk`, `plan`. Mapped to `approvalMode` at parse time; when both are set, the explicit `approvalMode` wins.                                                                                                           |
+| `maxTurns`       | positive integer | Caps the agent's turn budget. Wired into `runConfig.max_turns` at runtime; when both are set, the top-level field wins. The legacy nested value is pruned from the on-disk file on save to avoid two sources of truth.                                                           |
+| `color`          | enum string      | Display color. Allowlist: `red`, `blue`, `green`, `yellow`, `purple`, `orange`, `pink`, `cyan` (mirrors CC's `_Y`). The legacy qwen sentinel `auto` is preserved for backward compatibility. Other values are silently dropped on parse.                                         |
+| `mcpServers`     | record of specs  | Per-agent MCP server overrides. Merged with the session-level MCP server set when the agent spawns; on key collision the agent's spec wins (matching CC's `scope: 'agent'` semantics). Malformed entries are dropped per-key with a warning rather than failing the whole agent. |
+| `hooks`          | record of arrays | Per-agent hooks. Keys are CC hook event names (`PreToolUse`, `PostToolUse`, `UserPromptSubmit`, …); values are arrays of `{ matcher?, hooks: [...] }` definitions in the same shape as `settings.json`'s `hooks` field. Registered while the agent runs, removed when it stops.  |
+
+Example with all of the above:
+
+```
+---
+name: rigorous-reviewer
+description: Deep code review with a turn cap
+permissionMode: plan
+maxTurns: 50
+color: cyan
+tools:
+  - read_file
+  - grep_search
+  - glob
+mcpServers:
+  filesystem:
+    type: stdio
+    command: node
+    args: [/usr/local/lib/mcp-fs/server.js]
+hooks:
+  PreToolUse:
+    - matcher: Bash
+      hooks:
+        - type: command
+          command: echo "review-agent about to run a shell command"
+---
+
+You are a code reviewer. Analyze the code thoroughly and report findings
+ordered by severity.
+```
+
+The remaining CC frontmatter fields — `effort`, `skills`, `initialPrompt`,
+`memory`, `isolation` — are documented in the declarative-agent design doc
+and land in follow-up PRs once the prerequisite infrastructure exists
+(`effort` needs a model-layer parameter; `memory` needs a scoped memory
+subsystem; `--agent` CLI flag enables `initialPrompt`; etc.).
+
+> **`hooks` v1 limitation.** While a subagent declaring `hooks` is running,
+> its hook entries fire for every matching event in the session, not only
+> for that subagent's own tool calls. If two subagents with different
+> per-agent hook sets run concurrently, both sets fire for both agents.
+> Per-agent scope filtering at hook-firing time is left to a follow-up;
+> for v1, prefer per-agent hooks that are safe to fire globally for the
+> duration of the agent's run (e.g. logging) over hooks that mutate
+> behavior.
 
 #### Example Usage
 

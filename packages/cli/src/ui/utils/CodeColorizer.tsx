@@ -30,6 +30,46 @@ import {
 
 const debugLogger = createDebugLogger('CODE_COLORIZER');
 
+// Regex for structural box-drawing characters that are strong indicators of
+// ASCII art/diagrams. These characters (│ ├ └ ┌ ┐ ┘ ┬ ┴ ┼) almost never
+// appear in real code — their presence is a reliable signal of diagram content.
+const STRUCTURAL_BOX_RE = /[│├└┌┐┘┬┴┼]/;
+
+// Regex for detecting high ratio of CJK characters (for Chinese text blocks).
+const CJK_RE = /[\u4E00-\u9FFF\u3400-\u4DBF]/g; // CJK Unified + Extension A
+
+/**
+ * Heuristic: detect lines that are unlikely to be real code and would confuse
+ * `lowlight.highlightAuto()`. Box-drawing characters in unlabeled code blocks
+ * (e.g., ASCII art timelines, diagrams) can trigger unexpected language
+ * grammars and produce anomalous HAST trees that crash the renderer.
+ *
+ * Detection strategy:
+ * 1. Any structural box-drawing char (│ ├ └ ┌ etc.) → almost certainly a diagram
+ * 2. High CJK ratio (>30%) → Chinese text block that confuses auto-detection
+ *
+ * Returns `true` if the line should skip `highlightAuto` and render as plain text.
+ */
+export function looksLikeDiagramOrArt(line: string): boolean {
+  const trimmed = line.trim();
+  if (trimmed.length === 0) return false;
+
+  // Strategy 1: Structural box-drawing characters are a strong signal.
+  // These characters (│ ├ └ ┌ ┐ ┘ ┬ ┴ ┼) almost never appear in real code.
+  if (STRUCTURAL_BOX_RE.test(trimmed)) {
+    return true;
+  }
+
+  // Strategy 2: High CJK ratio indicates a Chinese text block.
+  const cjkMatches = trimmed.match(CJK_RE) || [];
+  const totalChars = trimmed.replace(/\s/g, '').length;
+  if (totalChars > 0 && cjkMatches.length / totalChars > 0.3) {
+    return true;
+  }
+
+  return false;
+}
+
 // Lowlight is heavy (~1.5 MB bundled, ~36–60 ms V8 parse). It's loaded lazily
 // from `./lowlightLoader.js` via dynamic import so it lives in a separate
 // esbuild chunk that's only parsed once a code block actually needs
@@ -138,6 +178,15 @@ function highlightAndRenderLine(
   if (!lowlight) {
     return line;
   }
+
+  // When language is unspecified (null), skip highlightAuto for lines that
+  // look like diagrams or ASCII art. Box-drawing + CJK + arrow characters
+  // can confuse lowlight's auto-detection, producing anomalous HAST trees
+  // that crash the renderer during React commit phase (Yoga layout).
+  if (!language && looksLikeDiagramOrArt(line)) {
+    return line;
+  }
+
   try {
     const getHighlightedLine = () =>
       !language || !lowlight.registered(language)
@@ -171,18 +220,33 @@ export function colorizeLine(
  *
  * @param code The code string to highlight.
  * @param language The language identifier (e.g., 'javascript', 'css', 'html')
- * @param tabWidth The number of spaces to replace each tab character with, default is 4
+ * @param availableHeight Optional cap on rendered rows (older lines are clipped).
+ * @param maxWidth Optional cap on rendered width.
+ * @param options Presentation overrides:
+ *   - `theme` — theme to use (defaults to the active theme)
+ *   - `settings` — loaded settings (drives showLineNumbers)
+ *   - `tabWidth` — spaces per tab, default 4
+ *   - `startLineNumber` — the number shown for the first line, default 1. Lets a
+ *     code block that was split across streaming commits (see splitFencedMarkdown)
+ *     continue its gutter numbering instead of restarting at 1.
  * @returns A React.ReactNode containing Ink <Text> elements for the highlighted code.
  */
+export interface ColorizeCodeOptions {
+  theme?: Theme;
+  settings?: LoadedSettings;
+  tabWidth?: number;
+  startLineNumber?: number;
+}
+
 export function colorizeCode(
   code: string,
   language: string | null,
   availableHeight?: number,
   maxWidth?: number,
-  theme?: Theme,
-  settings?: LoadedSettings,
-  tabWidth = 4,
+  options: ColorizeCodeOptions = {},
 ): React.ReactNode {
+  const { theme, settings, tabWidth = 4, startLineNumber = 1 } = options;
+  const firstLineNumber = Math.max(1, Math.trunc(startLineNumber));
   const codeToHighlight = code
     .replace(/\n$/, '')
     .replace(/\t/g, ' '.repeat(tabWidth));
@@ -198,7 +262,8 @@ export function colorizeCode(
     // Render the HAST tree using the adapted theme
     // Apply the theme's default foreground color to the top-level Text element
     let lines = codeToHighlight.split('\n');
-    const padWidth = String(lines.length).length; // Calculate padding width based on number of lines
+    // Pad to the widest gutter number, accounting for a non-1 start offset.
+    const padWidth = String(lines.length + firstLineNumber - 1).length;
 
     let hiddenLinesCount = 0;
 
@@ -231,10 +296,9 @@ export function colorizeCode(
             <Box key={index}>
               {showLineNumbers && (
                 <Text color={activeTheme.colors.Gray}>
-                  {`${String(index + 1 + hiddenLinesCount).padStart(
-                    padWidth,
-                    ' ',
-                  )} `}
+                  {`${String(
+                    index + firstLineNumber + hiddenLinesCount,
+                  ).padStart(padWidth, ' ')} `}
                 </Text>
               )}
               <Text color={activeTheme.defaultColor} wrap="wrap">
@@ -253,7 +317,7 @@ export function colorizeCode(
     // Fall back to plain text with default color on error
     // Also display line numbers in fallback
     const lines = codeToHighlight.split('\n');
-    const padWidth = String(lines.length).length; // Calculate padding width based on number of lines
+    const padWidth = String(lines.length + firstLineNumber - 1).length;
     return (
       <MaxSizedBox
         maxHeight={availableHeight}
@@ -264,7 +328,7 @@ export function colorizeCode(
           <Box key={index}>
             {showLineNumbers && (
               <Text color={activeTheme.defaultColor}>
-                {`${String(index + 1).padStart(padWidth, ' ')} `}
+                {`${String(index + firstLineNumber).padStart(padWidth, ' ')} `}
               </Text>
             )}
             <Text color={activeTheme.colors.Gray}>{line}</Text>

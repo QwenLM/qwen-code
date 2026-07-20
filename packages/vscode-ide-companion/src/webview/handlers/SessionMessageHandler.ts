@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { logger } from '../../utils/logger.js';
 import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
@@ -169,7 +170,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
             initialModelId: modelId,
           });
         } catch (error) {
-          console.error(
+          logger.error(
             '[SessionMessageHandler] Failed to open new chat tab:',
             error,
           );
@@ -203,7 +204,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         break;
 
       default:
-        console.warn(
+        logger.warn(
           '[SessionMessageHandler] Unknown message type:',
           message.type,
         );
@@ -290,7 +291,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       snapshot.messages,
     );
     if (!restored) {
-      console.warn(
+      logger.warn(
         '[SessionMessageHandler] Failed to restore conversation snapshot; conversation not found:',
         snapshot.id,
       );
@@ -416,7 +417,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         return match.cwd;
       }
     } catch (error) {
-      console.warn(
+      logger.warn(
         '[SessionMessageHandler] Failed to resolve export session cwd:',
         error,
       );
@@ -464,7 +465,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       });
     } catch (error) {
       const errorMsg = this.getErrorMessage(error);
-      console.error('[SessionMessageHandler] Failed to export session:', error);
+      logger.error('[SessionMessageHandler] Failed to export session:', error);
       this.sendToWebView({
         type: 'error',
         data: { message: `Failed to export session: ${errorMsg}` },
@@ -493,14 +494,17 @@ export class SessionMessageHandler extends BaseMessageHandler {
     attachments?: ImageAttachment[],
     editTargetTurnIndex?: number,
   ): Promise<void> {
-    console.log('[SessionMessageHandler] handleSendMessage called with:', text);
+    logger.log('[SessionMessageHandler] handleSendMessage called', {
+      textLength: text.length,
+      attachmentCount: attachments?.length ?? 0,
+    });
     // Guard: do not process empty or whitespace-only messages.
     // This prevents ghost user-message bubbles when slash-command completions
     // or model-selector interactions clear the input but still trigger a submit.
     const trimmedText = stripZeroWidthSpaces(text).trim();
     const hasAttachments = (attachments?.length ?? 0) > 0;
     if (!trimmedText && !hasAttachments) {
-      console.warn('[SessionMessageHandler] Ignoring empty message');
+      logger.warn('[SessionMessageHandler] Ignoring empty message');
       return;
     }
 
@@ -546,7 +550,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     if (hasAttachments && !trimmedText && savedImageCount === 0) {
       const errorMsg =
         'Failed to attach the pasted image. Nothing was sent. Please paste the image again.';
-      console.warn('[SessionMessageHandler]', errorMsg);
+      logger.warn('[SessionMessageHandler]', errorMsg);
       vscode.window.showErrorMessage(errorMsg);
       this.sendToWebView({
         type: 'error',
@@ -557,7 +561,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     // Ensure we have an active conversation
     if (!this.currentConversationId) {
-      console.log(
+      logger.log(
         '[SessionMessageHandler] No active conversation, creating one...',
       );
       try {
@@ -569,7 +573,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         });
       } catch (error) {
         const errorMsg = `Failed to create conversation: ${this.getErrorMessage(error)}`;
-        console.error('[SessionMessageHandler]', errorMsg);
+        logger.error('[SessionMessageHandler]', errorMsg);
         vscode.window.showErrorMessage(errorMsg);
         this.sendToWebView({
           type: 'error',
@@ -582,7 +586,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     if (!this.currentConversationId) {
       const errorMsg =
         'Failed to create conversation. Please restart the extension.';
-      console.error('[SessionMessageHandler]', errorMsg);
+      logger.error('[SessionMessageHandler]', errorMsg);
       vscode.window.showErrorMessage(errorMsg);
       this.sendToWebView({
         type: 'error',
@@ -599,7 +603,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
     if (editTargetTurnIndex !== undefined) {
       if (!Number.isInteger(editTargetTurnIndex) || editTargetTurnIndex < 0) {
         const errorMsg = 'Invalid message edit target.';
-        console.error('[SessionMessageHandler]', errorMsg, editTargetTurnIndex);
+        logger.error('[SessionMessageHandler]', errorMsg, editTargetTurnIndex);
         this.sendToWebView({
           type: 'error',
           data: { message: errorMsg },
@@ -620,7 +624,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
           await this.agentManager.createNewSession(workingDir);
         } catch (createErr) {
-          console.error(
+          logger.error(
             '[SessionMessageHandler] Failed to create session before editing message:',
             createErr,
           );
@@ -643,7 +647,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           this.currentConversationId,
         );
       } catch (error) {
-        console.error(
+        logger.error(
           '[SessionMessageHandler] Failed to capture edit restore snapshot:',
           error,
         );
@@ -657,7 +661,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       }
 
       if (!editRestoreSnapshot) {
-        console.warn(
+        logger.warn(
           '[SessionMessageHandler] Local conversation snapshot missing before edit; continuing with ACP rewind only.',
         );
       }
@@ -690,7 +694,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
               editAcpHistorySnapshot,
             );
           } catch (restoreError) {
-            console.warn(
+            logger.warn(
               '[SessionMessageHandler] Failed to restore ACP history after rewind failure:',
               restoreError,
             );
@@ -700,7 +704,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           await this.restoreConversationSnapshot(editRestoreSnapshot);
         }
         const errorMsg = this.getErrorMessage(error);
-        console.error(
+        logger.error(
           '[SessionMessageHandler] Failed to rewind session:',
           error,
         );
@@ -724,7 +728,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         );
         isFirstMessage = !conversation || conversation.messages.length === 0;
       } catch (error) {
-        console.error(
+        logger.error(
           '[SessionMessageHandler] Failed to check conversation:',
           error,
         );
@@ -756,7 +760,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         userMessage,
       );
     } catch (error) {
-      console.error(
+      logger.error(
         '[SessionMessageHandler] Failed to save user message:',
         error,
       );
@@ -765,7 +769,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         try {
           await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
         } catch (restoreError) {
-          console.warn(
+          logger.warn(
             '[SessionMessageHandler] Failed to restore ACP history after user message save failure:',
             restoreError,
           );
@@ -792,7 +796,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
     // Check if agent is connected
     if (!this.agentManager.isConnected) {
-      console.warn('[SessionMessageHandler] Agent not connected');
+      logger.warn('[SessionMessageHandler] Agent not connected');
 
       // Show non-modal notification with Configure button
       await this.promptAuth(
@@ -808,7 +812,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         const workingDir = workspaceFolder?.uri.fsPath || process.cwd();
         await this.agentManager.createNewSession(workingDir);
       } catch (createErr) {
-        console.error(
+        logger.error(
           '[SessionMessageHandler] Failed to create session before sending message:',
           createErr,
         );
@@ -878,7 +882,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
             acpSessionId,
           );
           if (!renamed) {
-            console.warn(
+            logger.warn(
               '[SessionMessageHandler] Failed to align conversation store with ACP session id:',
               previousConversationId,
               acpSessionId,
@@ -898,13 +902,13 @@ export class SessionMessageHandler extends BaseMessageHandler {
         });
       }
     } catch (error) {
-      console.error('[SessionMessageHandler] Error sending message:', error);
+      logger.error('[SessionMessageHandler] Error sending message:', error);
 
       if (editAcpMutationApplied && editAcpHistorySnapshot) {
         try {
           await this.agentManager.restoreSessionHistory(editAcpHistorySnapshot);
         } catch (restoreError) {
-          console.warn(
+          logger.warn(
             '[SessionMessageHandler] Failed to restore ACP history after send failure:',
             restoreError,
           );
@@ -958,7 +962,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         if (isTimeoutError) {
           // Note: session_prompt no longer has a timeout, so this should rarely occur
           // This path may still be hit for other methods (initialize, etc.) or network-level timeouts
-          console.warn(
+          logger.warn(
             '[SessionMessageHandler] Request timed out; suppressing popup',
           );
 
@@ -993,7 +997,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
    */
   private async handleNewQwenSession(): Promise<void> {
     try {
-      console.log('[SessionMessageHandler] Creating new Qwen session...');
+      logger.log('[SessionMessageHandler] Creating new Qwen session...');
 
       // Ensure connection (auth) before creating a new session
       if (!this.agentManager.isConnected) {
@@ -1019,7 +1023,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Reset title flag when creating a new session
       this.isTitleSet = false;
     } catch (error) {
-      console.error(
+      logger.error(
         '[SessionMessageHandler] Failed to create new session:',
         error,
       );
@@ -1052,7 +1056,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
    */
   private async handleSwitchQwenSession(sessionId: string): Promise<void> {
     try {
-      console.log('[SessionMessageHandler] Switching to session:', sessionId);
+      logger.log('[SessionMessageHandler] Switching to session:', sessionId);
 
       // If not connected yet, offer to authenticate or view offline
       if (!this.agentManager.isConnected) {
@@ -1097,7 +1101,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
               s.id === sessionId || s.sessionId === sessionId,
           ) || null;
       } catch (err) {
-        console.log(
+        logger.log(
           '[SessionMessageHandler] Could not get session details:',
           err,
         );
@@ -1119,7 +1123,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
           sessionId,
           (sessionDetails?.cwd as string | undefined) || undefined,
         );
-        console.log(
+        logger.log(
           '[SessionMessageHandler] session/load succeeded (per ACP spec result is null; actual history comes via session/update):',
           loadResponse,
         );
@@ -1136,7 +1140,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         // Successfully loaded session, return early to avoid fallback logic
         return;
       } catch (loadError) {
-        console.warn(
+        logger.warn(
           '[SessionMessageHandler] session/load failed, using fallback:',
           loadError,
         );
@@ -1199,7 +1203,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
               );
             }
           } catch (createError) {
-            console.error(
+            logger.error(
               '[SessionMessageHandler] Failed to create session:',
               createError,
             );
@@ -1240,7 +1244,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         }
       }
     } catch (error) {
-      console.error('[SessionMessageHandler] Failed to switch session:', error);
+      logger.error('[SessionMessageHandler] Failed to switch session:', error);
 
       // Safely convert error to string
       const errorMsg = this.getErrorMessage(error);
@@ -1289,7 +1293,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
         },
       });
     } catch (error) {
-      console.error('[SessionMessageHandler] Failed to get sessions:', error);
+      logger.error('[SessionMessageHandler] Failed to get sessions:', error);
 
       // Safely convert error to string
       const errorMsg = this.getErrorMessage(error);
@@ -1319,7 +1323,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
    */
   private async handleCancelStreaming(): Promise<void> {
     try {
-      console.log('[SessionMessageHandler] Canceling streaming...');
+      logger.log('[SessionMessageHandler] Canceling streaming...');
 
       // Cancel the current streaming operation in the agent manager
       await this.agentManager.cancelCurrentPrompt();
@@ -1327,9 +1331,9 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Use sendStreamEnd to include requestId for proper correlation
       this.sendStreamEnd('user_cancelled');
 
-      console.log('[SessionMessageHandler] Streaming cancelled successfully');
+      logger.log('[SessionMessageHandler] Streaming cancelled successfully');
     } catch (_error) {
-      console.log('[SessionMessageHandler] Streaming cancelled (interrupted)');
+      logger.log('[SessionMessageHandler] Streaming cancelled (interrupted)');
 
       // Use sendStreamEnd (with duplicate guard) to include requestId
       this.sendStreamEnd('user_cancelled');
@@ -1400,7 +1404,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
 
       await this.handleGetQwenSessions();
     } catch (error) {
-      console.error('[SessionMessageHandler] Failed to resume session:', error);
+      logger.error('[SessionMessageHandler] Failed to resume session:', error);
 
       // Safely convert error to string
       const errorMsg = this.getErrorMessage(error);
@@ -1528,7 +1532,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       await this.agentManager.setApprovalModeFromUi(modeId);
       // No explicit response needed; WebView listens for modeChanged
     } catch (error) {
-      console.error('[SessionMessageHandler] Failed to set mode:', error);
+      logger.error('[SessionMessageHandler] Failed to set mode:', error);
       const errorMsg = this.getErrorMessage(error);
       this.sendToWebView({
         type: 'error',
@@ -1550,7 +1554,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       // Defensive guard: refuse non-runtime Qwen OAuth models in case the UI
       // is bypassed (programmatic call, stale webview, restored session).
       if (isDiscontinuedModel(modelId)) {
-        console.warn(
+        logger.warn(
           '[SessionMessageHandler] Rejected discontinued model',
           modelId,
         );
@@ -1568,7 +1572,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       );
     } catch (error) {
       const errorMsg = this.getErrorMessage(error);
-      console.error('[SessionMessageHandler] Failed to set model:', error);
+      logger.error('[SessionMessageHandler] Failed to set model:', error);
       vscode.window.showErrorMessage(`Failed to switch model: ${errorMsg}`);
       this.sendToWebView({
         type: 'error',

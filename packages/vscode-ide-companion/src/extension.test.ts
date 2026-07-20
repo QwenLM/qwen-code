@@ -82,6 +82,11 @@ describe('activate', () => {
     vi.mocked(vscode.window.showInformationMessage).mockResolvedValue(
       undefined,
     );
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [];
     context = {
       subscriptions: [],
       environmentVariableCollection: {
@@ -99,6 +104,7 @@ describe('activate', () => {
           version: '1.1.0',
         },
       },
+      extensionMode: vscode.ExtensionMode.Production,
     } as unknown as vscode.ExtensionContext;
   });
 
@@ -120,6 +126,65 @@ describe('activate', () => {
     );
   });
 
+  it('writes production logs to the Qwen Code Companion output channel', async () => {
+    const appendLine = vi.fn();
+    vi.mocked(vscode.window.createOutputChannel).mockReturnValue({
+      appendLine,
+    } as unknown as vscode.LogOutputChannel);
+
+    await activate(context);
+
+    expect(vscode.window.createOutputChannel).toHaveBeenCalledWith(
+      'Qwen Code Companion',
+    );
+    expect(appendLine).toHaveBeenCalledWith('[INFO] Extension activated');
+  });
+
+  it('launches Qwen Code with the full multi-root workspace env', async () => {
+    vi.mocked(context.globalState.get).mockReturnValue(true);
+    const first = {
+      name: 'first',
+      index: 0,
+      uri: { fsPath: '/workspace/first' },
+    } as vscode.WorkspaceFolder;
+    const second = {
+      name: 'second',
+      index: 1,
+      uri: { fsPath: '/workspace/second' },
+    } as vscode.WorkspaceFolder;
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [first, second];
+    vi.mocked(vscode.window.showWorkspaceFolderPick).mockResolvedValue(second);
+    vi.mocked(vscode.Uri.joinPath).mockReturnValue({
+      fsPath: '/extension/dist/qwen-cli/cli.js',
+    } as vscode.Uri);
+
+    await activate(context);
+
+    const command = vi
+      .mocked(vscode.commands.registerCommand)
+      .mock.calls.find(([id]) => id === 'qwen-code.runQwenCode')?.[1] as
+      | (() => Promise<void>)
+      | undefined;
+    expect(command).toBeDefined();
+    await command!();
+
+    expect(vscode.window.createTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: '/workspace/second',
+        env: {
+          QWEN_CODE_IDE_WORKSPACE_PATH: JSON.stringify([
+            '/workspace/first',
+            '/workspace/second',
+          ]),
+        },
+      }),
+    );
+  });
+
   it('should not show the info message on subsequent activations', async () => {
     vi.mocked(context.globalState.get).mockReturnValue(true);
     vi.mocked(vscode.extensions.getExtension).mockReturnValue({
@@ -134,20 +199,16 @@ describe('activate', () => {
     expect(vscode.workspace.onDidGrantWorkspaceTrust).toHaveBeenCalled();
   });
 
-  it('should register webview view providers for sidebar and secondary positions', async () => {
+  it('should register the webview view provider for the sidebar position', async () => {
     await activate(context);
 
-    // Verify registerWebviewViewProvider was called 2 times (sidebar + secondary)
     const registerCalls = vi.mocked(vscode.window.registerWebviewViewProvider)
       .mock.calls;
-    expect(registerCalls).toHaveLength(2);
+    expect(registerCalls).toHaveLength(1);
 
-    // Extract view IDs from the calls
     const viewIds = registerCalls.map((call) => call[0]);
 
-    // Only sidebar and secondary are registered; panel view was removed
     expect(viewIds).toContain('qwen-code.chatView.sidebar');
-    expect(viewIds).toContain('qwen-code.chatView.secondary');
   });
 
   it('should launch the Qwen Code when the user clicks the button', async () => {

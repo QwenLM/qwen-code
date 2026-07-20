@@ -14,7 +14,7 @@ import {
 } from './consent.js';
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import { loadSettings } from '../../config/settings.js';
-import { t } from '../../i18n/index.js';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 interface UninstallArgs {
   name: string; // can be extension name or source URL.
@@ -25,19 +25,22 @@ export async function handleUninstall(args: UninstallArgs) {
     const workspaceDir = process.cwd();
     const extensionManager = new ExtensionManager({
       workspaceDir,
+      locale: getCurrentLanguage(),
       requestConsent: requestConsentOrFail.bind(
         null,
         requestConsentNonInteractive,
       ),
-      isWorkspaceTrusted: !!isWorkspaceTrusted(
-        loadSettings(workspaceDir).merged,
-      ),
+      isWorkspaceTrusted:
+        isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
     });
     await extensionManager.refreshCache();
-    await extensionManager.uninstallExtension(args.name, false);
+    const result = await extensionManager.uninstallExtension(args.name, false);
     writeStdoutLine(
       t('Extension "{{name}}" successfully uninstalled.', { name: args.name }),
     );
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
+    }
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
     process.exit(1);

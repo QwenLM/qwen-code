@@ -1,0 +1,1018 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+// `qwen review compose-review`: deterministic event selection and body
+// composition for the /review skill's Step 7 submission.
+//
+// This logic used to be prose — a C/S table, three event-capping overrides,
+// a seven-clause body composition, and presubmit downgrade carve-outs,
+// restated across four places in SKILL.md. Keeping the restatements in sync
+// by hand produced five shipped bugs (four Critical), all of the same shape:
+// one downstream branch not updated when an upstream rule gained a new
+// state. This module is the single source of truth; the skill gathers the
+// state, calls it, and uses `{event, body}` verbatim. 422 recovery is the
+// same call with the updated `--comments` file — the counts are counted
+// from it, never updated by hand.
+//
+// The model stays responsible for judgment (what is a Critical, is it
+// real); this owns only the bookkeeping that follows from the counts.
+
+import type { CommandModule } from 'yargs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
+import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import {
+  coverageFromTranscripts,
+  verificationGaps,
+  TranscriptsUnavailableError,
+} from './lib/coverage.js';
+import { shellQuotePath } from './lib/shell-quote.js';
+import {
+  CRITICAL_PREFIX,
+  SUGGESTION_PREFIX,
+  countInlineFindings,
+  unmarkedComments,
+  type DraftedComment,
+} from './lib/inline-counts.js';
+
+export type ReviewEvent = 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT';
+
+export interface ComposeReviewInput {
+  /**
+   * Critical findings anchored as inline `comments` entries.
+   *
+   * A seam for the two CLI boundaries and the tests — NEVER a field of the
+   * model-written state JSON. Both boundaries derive it from the drafted
+   * comments (`compose-review --comments`, `submit`'s payload) and refuse it
+   * when the JSON carries it: a count handed over beside the thing it counts
+   * is a count that can disagree with it, and a dogfooded report-only run —
+   * where nothing downstream recounts — moved its one Critical from
+   * `bodyCriticals` to an inline comment, lost the count on the way, and this
+   * function printed `Verdict: Approve` over a Critical the report listed.
+   */
+  criticalsInline?: number;
+  /** Suggestion findings anchored inline. Same seam, same refusal. */
+  suggestionsInline?: number;
+  /**
+   * Critical descriptions whose only copy lives in the review body — the
+   * last-resort unmappable findings and 422-relocated ones. They count
+   * toward `C` exactly like anchored Criticals.
+   */
+  bodyCriticals?: string[];
+  /** Suggestions discarded as unanchorable (offline validation or 422). */
+  suggestionsDiscarded?: number;
+  /**
+   * Existing Criticals already on the PR whose Step 6 re-check landed on
+   * `cannot tell` — one line each (location + what could not be decided).
+   * Not counted in `C` (the review did not confirm them), but their
+   * presence forbids an approval.
+   */
+  cannotTellCriticals?: string[];
+  /** Uncoverable chunks, e.g. `"chunk 5 (src/big.min.js)"`. */
+  uncoverableChunks?: string[];
+  /**
+   * Dimensions nobody reviewed. A bare name (`"security"`) means its agent
+   * whiffed twice and gets the standard explanation; an entry carrying its
+   * own reason after an em-dash (`"issue-fidelity — linked issue #123 could
+   * not be fetched"`) is rendered verbatim.
+   */
+  unreviewedDimensions?: string[];
+  /**
+   * The plan report from Step 1.
+   *
+   * Coverage is derived from it plus the harness's transcripts — it is not an
+   * input. See the recomputation below for why a caller does not get to say
+   * whether the diff was read.
+   */
+  planPath?: string;
+  /**
+   * Where to look for the harness's records. Defaults to the environment the CLI
+   * exported. A test seam only — production never passes it, and a model cannot:
+   * `compose-review` reads its input as JSON, and this is not serialisable into
+   * anything that would change where the transcripts are found on a real run.
+   */
+  env?: NodeJS.ProcessEnv;
+  /** Step 1's lightweight `pr-context` fetch failed. */
+  contextUnavailable?: boolean;
+  presubmit?: {
+    downgradeApprove?: boolean;
+    downgradeRequestChanges?: boolean;
+    downgradeReasons?: string[];
+  };
+  /** Model id for the footer, e.g. `qwen3.7-max`. */
+  modelId: string;
+}
+
+export interface ComposeReviewResult {
+  event: ReviewEvent;
+  body: string;
+  /** The table row before caps and downgrades — for the terminal report. */
+  baseEvent: ReviewEvent;
+  /** Which cap states applied (empty when none). */
+  cappedBy: string[];
+  /** True when a presubmit flag actually changed the event. */
+  downgraded: boolean;
+  /**
+   * What the presubmit downgrade moved the event *from*, when it moved one.
+   *
+   * `baseEvent` cannot answer this: it is the row before caps AND downgrades, so a
+   * `REQUEST_CHANGES` that a cap already softened to `COMMENT` before the downgrade
+   * ran would look the same as one the downgrade itself moved. This names the
+   * transition the downgrade made, so the terminal verdict can say a Request
+   * changes — a review with confirmed Criticals — was downgraded, and not let it
+   * read as "Comment, nothing blocking".
+   */
+  downgradedFrom: 'Approve' | 'Request changes' | null;
+  /**
+   * The orchestrator-facing fix for each coverage/verification gap the body
+   * discloses — printed to stderr by the command, never rendered into the body.
+   * The body tells the PR author what the review cannot certify; this tells the
+   * operator which command repairs it. Two registers, two channels.
+   */
+  remediation: string[];
+}
+
+function withMarker(line: string): string {
+  return line.startsWith(CRITICAL_PREFIX) ? line : `${CRITICAL_PREFIX} ${line}`;
+}
+
+// The input arrives as JSON a model wrote, and the skill tells it to omit
+// fields that do not apply — so absence is normal and means zero/empty. What
+// must never pass is a PRESENT field of the wrong shape: `undefined + 1` is
+// NaN, and NaN fails both `c >= 1` and `s >= 1`, which once turned a
+// body-Critical-only input into an APPROVE that dropped the only blocker.
+function toCount(value: unknown, field: string): number {
+  if (value === undefined || value === null) return 0;
+  if (typeof value !== 'number' || !Number.isInteger(value) || value < 0) {
+    throw new TypeError(
+      `compose-review: ${field} must be a non-negative integer, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+function toStringList(value: unknown, field: string): string[] {
+  if (value === undefined || value === null) return [];
+  if (!Array.isArray(value) || value.some((v) => typeof v !== 'string')) {
+    throw new TypeError(
+      `compose-review: ${field} must be an array of strings, got ${JSON.stringify(value)}`,
+    );
+  }
+  // A copy. The caller's array is not ours to push into, and coverage-derived
+  // entries are appended to these lists — a programmatic caller that reused one
+  // across two calls would find the first call's caps in the second.
+  return [...(value as string[])];
+}
+
+// Booleans get the same boundary treatment as the counts: the JSON is
+// model-written, and a stringified `"false"` is truthy — it once stood to
+// fire the downgrade sentence on a review that was never downgraded, and to
+// publish the diff-only warning on a run that fetched its context fine.
+function toBool(value: unknown, field: string): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value !== 'boolean') {
+    throw new TypeError(
+      `compose-review: ${field} must be a boolean, got ${JSON.stringify(value)}`,
+    );
+  }
+  return value;
+}
+
+export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
+  const criticalsInline = toCount(input.criticalsInline, 'criticalsInline');
+  const suggestionsInline = toCount(
+    input.suggestionsInline,
+    'suggestionsInline',
+  );
+  const bodyCriticals = toStringList(input.bodyCriticals, 'bodyCriticals');
+  const suggestionsDiscarded = toCount(
+    input.suggestionsDiscarded,
+    'suggestionsDiscarded',
+  );
+  const cannotTell = toStringList(
+    input.cannotTellCriticals,
+    'cannotTellCriticals',
+  );
+  const uncoverable = toStringList(
+    input.uncoverableChunks,
+    'uncoverableChunks',
+  );
+  const unreviewed = toStringList(
+    input.unreviewedDimensions,
+    'unreviewedDimensions',
+  );
+  // The coverage-derived disclosures, kept STRUCTURAL ({subject, reason})
+  // from the site that knows the boundary — reparsing the rendered prose for
+  // it was the bug. `unreviewed` above stays what the caller wrote, verbatim.
+  const coverageEntries: Array<{ subject: string; reason: string }> = [];
+  // The fixes for the gaps above, for stderr — never for the body. The gap says
+  // what the review cannot certify, to the PR author; the remediation names the
+  // command that repairs it, to the orchestrator. #7012's public body was fourteen
+  // lines of the second register posted to the first reader.
+  const remediation: string[] = [];
+  // FIX lines are commands. `<plan>` was a placeholder a reader had to notice
+  // and fill; pasted literally it parses as a shell redirection. The run KNOWS
+  // its plan path — substitute it, and leave only the selectors (`<id>`, `<r>`)
+  // that genuinely vary per agent, resolvable from the labels alongside.
+  // Shell-quoted: a workspace path containing a space would otherwise split
+  // the copy-pasted repair at the space, and a bare '…' wrap broke on embedded
+  // apostrophes instead. (`<plan>` stays bare — a placeholder, not a path.)
+  const planRef = input.planPath ? shellQuotePath(input.planPath) : '<plan>';
+
+  // Coverage is shown, not asserted. Whatever the caller listed by hand, the
+  // report's own gaps are added to it — a run cannot approve past a chunk nobody
+  // receipted or an agent that returned nothing, and it cannot do so by leaving
+  // the lists empty.
+  // Separate from `uncoverable`. The uncoverable renderer explains the gap as
+  // "a line there exceeds the read limit", which is true of an uncoverable chunk
+  // and a fabrication about a chunk nobody receipted. The public body would give
+  // the author a false cause.
+  const missingReceipts: number[] = [];
+
+  // The Criticals a verifier must have ruled on before this review may post
+  // them as blockers. Deterministic `[build]`/`[test]` body findings are
+  // pre-confirmed and skip verification by design; every other Critical —
+  // anchored or body — is a claim, and a claim is confirmed by Step 4 or it
+  // is not confirmed at all.
+  const nonDeterministicBodyCriticals = bodyCriticals.filter(
+    (x) => !/\[(?:build|test)\]/i.test(x),
+  ).length;
+  const criticalsNeedingVerify =
+    criticalsInline + nonDeterministicBodyCriticals;
+  // Fail closed at every exit: this flag softens a Request changes below, and
+  // it must end up true whenever the review posts non-deterministic Criticals
+  // and CANNOT SHOW they were verified — verifier absent, transcripts
+  // unreadable, or no plan to check against. "Could not show" and "was not"
+  // read the same to the person the blocker would be posted at.
+  let criticalsUnverified = false;
+
+  // Coverage is NOT taken from the input. It is recomputed here, from the
+  // harness's own per-agent transcripts.
+  //
+  // The previous shape accepted a `coverage` object inside this very JSON — a
+  // document the model writes. Hardening `check-coverage` while this still
+  // believed a hand-typed `{"ok": true}` would have moved the forgery one hop
+  // downstream and made it *cheaper*: one object, instead of the eighteen
+  // fabricated receipts it actually wrote the last time it wanted an approval.
+  // A caller cannot forge what it cannot supply, so it no longer supplies this.
+  //
+  // What it supplies is `planPath` — a path, whose contents the CLI wrote. The
+  // transcripts are found from the environment the CLI exported.
+  if (!input.planPath) {
+    coverageEntries.push({
+      subject: 'coverage',
+      reason:
+        'no plan was given, so this run cannot show that any of the diff ' +
+        'was read',
+    });
+    criticalsUnverified = criticalsNeedingVerify >= 1;
+  } else {
+    try {
+      const cov = coverageFromTranscripts(input.planPath, input.env);
+      for (const id of cov.missingChunks) missingReceipts.push(id);
+      for (const id of cov.uncoverableChunks) {
+        // The caller may already have named this chunk, but in a richer form:
+        // `chunk 5 (src/big.min.js)` vs the bare `chunk 5` here. A strict-equality
+        // dedup misses that and the body reads "Not reviewed: chunk 5, chunk 5".
+        // Compare by the `chunk <id>` prefix.
+        const prefix = `chunk ${id}`;
+        const already = uncoverable.some(
+          (e) => e === prefix || e.startsWith(`${prefix} `),
+        );
+        if (!already) uncoverable.push(prefix);
+      }
+      for (const label of cov.idleAgents) {
+        coverageEntries.push({
+          subject: label,
+          reason: 'the agent made no tool call: it read nothing',
+        });
+      }
+      if (cov.idleAgents.length > 0) {
+        remediation.push(
+          'idle agents: relaunch each with the same printed prompt — it already ' +
+            'names the brief and the diff reads; an agent that makes no tool ' +
+            'call has reviewed nothing, whatever its return says',
+        );
+      }
+      // The defect that actually happened, named as itself. A blind agent was
+      // launched with a prompt that never mentioned the diff, so it could not
+      // have read it — and relaunching it would produce another agent that
+      // cannot either. Do not call this a whiff; the prompt is the bug.
+      // The rebuild command goes to stderr with the other remediation, not into
+      // this line: the line lands in the posted body, and `qwen review
+      // agent-prompt` is not something a PR author can run.
+      for (const label of cov.blindAgents) {
+        coverageEntries.push({
+          subject: label,
+          reason:
+            'launched with a prompt that never named the diff file, so it ' +
+            'could not have read it',
+        });
+      }
+      if (cov.blindAgents.length > 0) {
+        remediation.push(
+          'blind agents: rebuild each prompt with `"${QWEN_CODE_CLI:-qwen}" ' +
+            `review agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`) ` +
+            '`[--rules <rules file>]` and launch an agent with it verbatim — ' +
+            'do not relaunch the old prompt; a second blind agent reads no ' +
+            'more than the first',
+        );
+      }
+      // Worked, but not on the diff. Not idle and not blind — it had the path and
+      // spent its run somewhere else, which on a diff with deletions means it
+      // reviewed a file the removed lines are simply not in.
+      for (const label of cov.unopenedAgents) {
+        coverageEntries.push({
+          subject: label,
+          reason:
+            'pointed at diff lines it never opened: it made tool calls, but ' +
+            'none of them read the diff',
+        });
+      }
+      if (cov.unopenedAgents.length > 0) {
+        remediation.push(
+          'agents that never opened the diff: relaunch each with the same ' +
+            'printed prompt — the prompt already names the diff and its ranges; ' +
+            'the read is what proves the review happened',
+        );
+      }
+      // The prompt was built in code and edited on the way to the agent. This caps
+      // for the same reason the others do: what the agent was actually asked is not
+      // what this skill's guarantees are written against.
+      // `coverage.ts` already writes these self-explanatory (`… — launched with a
+      // prompt that is not the one the CLI built`), so push the label as-is —
+      // wrapping it in a second ` — ` clause read as one run-on sentence with two
+      // dashes. Same for `missingRoles` below; `unreadBriefs` already did this.
+      // rewritten, missing-role and unread-brief entries arrive structurally
+      // (`cov.disclosures`, push order preserved) — their labels can carry
+      // em-dashes of their own, which is why they are never reparsed here.
+      coverageEntries.push(...cov.disclosures);
+      if (cov.rewrittenPrompts.length > 0) {
+        remediation.push(
+          'rewritten launches: re-run `"${QWEN_CODE_CLI:-qwen}" review ' +
+            `agent-prompt --plan ${planRef} --chunk <id>\` (or \`--role <r>\`, with ` +
+            '`--file <path>` for an invariant agent) `[--rules <rules file>]` ' +
+            'for each named agent and pass its output unedited — copy it, do ' +
+            'not retype it. Pass --rules whenever the review loaded any, or ' +
+            'the rebuilt brief silently drops the project rules',
+        );
+      }
+      // A dimension nobody reviewed. This is exactly what `unreviewedDimensions`
+      // has always meant, arrived at from the plan instead of from the orchestrator
+      // noticing — which, on the run that never launched Agent 0, it did not.
+
+      if (cov.missingRoles.length > 0) {
+        remediation.push(
+          'missing briefs: build every required prompt in one call — ' +
+            `\`"\${QWEN_CODE_CLI:-qwen}" review agent-prompt --plan ${planRef} ` +
+            '--roster [--rules <rules file>]` — and launch one agent per block ' +
+            'it prints, verbatim; `--role <n>` or `--chunk <id>` rebuilds a ' +
+            'single one. Pass --rules whenever the review loaded any',
+        );
+      }
+      // Launched, but never read the brief it was pointed at: it reviewed with no
+      // dimension, no severity definitions and no project rules.
+
+      if (cov.unreadBriefs.length > 0) {
+        remediation.push(
+          'unread briefs: relaunch each agent with the same printed prompt — ' +
+            'the agent must OPEN the brief file the prompt names; that read ' +
+            'is the receipt',
+        );
+      }
+    } catch (err) {
+      // Two different failures, and they must not wear each other's message. A
+      // malformed plan is the caller's mistake and says so; missing transcripts
+      // are an environment fault (a read-only HOME, a sandbox) and say *that*.
+      // Both cap — a run that cannot show what it read has not shown it read
+      // anything — but a reader chasing "could not read the transcripts" over a
+      // plan with no `chunks[]` is chasing the wrong thing.
+      const why =
+        err instanceof TranscriptsUnavailableError
+          ? `could not read the agents' transcripts (${err.message})`
+          : `the plan could not be used (${(err as Error).message})`;
+      coverageEntries.push({
+        subject: 'coverage',
+        reason: `${why}, so this run cannot show that any of the diff was read`,
+      });
+    }
+
+    // Step 4 (verify) and Step 5 (reverse audit) ran, and read their briefs?
+    // `check-coverage` proves Step 3, but it runs at Step 3D — before these exist —
+    // and their count is not in the plan, so its roster cannot reach them. This is
+    // the floor that does, and only `compose-review` asks it, which runs only at
+    // high effort — the only effort at which verify and reverse audit run at all.
+    // Reverse audit is required on every high-effort review; verify once the review
+    // has non-deterministic findings to verify. Deterministic `[build]`/`[test]`
+    // findings are pre-confirmed and skip verification by design, so they do not
+    // demand a verifier — including a body Critical that carries their source tag.
+    // Its own try, so a read failure here says so rather than wearing the coverage
+    // message, and does not undo a coverage pass a line above it.
+    try {
+      const findingsToVerify =
+        criticalsInline + suggestionsInline + nonDeterministicBodyCriticals;
+      const verification = verificationGaps(
+        input.planPath,
+        { postsFindings: findingsToVerify > 0 },
+        input.env,
+      );
+      for (const gap of verification.gaps) {
+        // The machine's own two subjects ('verification', 'reverse audit'),
+        // dash-free by construction — the first separator is the boundary.
+        const cut = gap.indexOf(' — ');
+        coverageEntries.push(
+          cut === -1
+            ? { subject: gap, reason: '' }
+            : {
+                subject: gap.slice(0, cut),
+                reason: gap.slice(cut + ' — '.length),
+              },
+        );
+      }
+      remediation.push(...verification.remediation);
+      criticalsUnverified =
+        verification.unverifiedFindings && criticalsNeedingVerify >= 1;
+    } catch (err) {
+      coverageEntries.push({
+        subject: 'verification',
+        reason:
+          `could not check that Step 4 and Step 5 ran ` +
+          `(${(err as Error).message})`,
+      });
+      // Fail closed: a verification that cannot be CHECKED is not a
+      // verification that happened.
+      criticalsUnverified = criticalsNeedingVerify >= 1;
+    }
+  }
+  const contextUnavailable = toBool(
+    input.contextUnavailable,
+    'contextUnavailable',
+  );
+  const presubmitRaw: unknown = input.presubmit ?? {};
+  if (typeof presubmitRaw !== 'object' || Array.isArray(presubmitRaw)) {
+    throw new TypeError(
+      `compose-review: presubmit must be an object, got ${JSON.stringify(presubmitRaw)}`,
+    );
+  }
+  const presubmitObj = presubmitRaw as Record<string, unknown>;
+  const downgradeApprove = toBool(
+    presubmitObj['downgradeApprove'],
+    'presubmit.downgradeApprove',
+  );
+  const downgradeRequestChanges = toBool(
+    presubmitObj['downgradeRequestChanges'],
+    'presubmit.downgradeRequestChanges',
+  );
+  const downgradeReasons = toStringList(
+    presubmitObj['downgradeReasons'],
+    'presubmit.downgradeReasons',
+  );
+  const modelId: unknown = input.modelId;
+  if (typeof modelId !== 'string' || modelId.trim() === '') {
+    throw new TypeError(
+      'compose-review: modelId is required (the public footer names the reviewing model)',
+    );
+  }
+
+  // `C` counts every Critical the review posts anywhere — inline or body.
+  // `S` counts every *confirmed* Suggestion — anchored or discarded: the
+  // verdict reflects the findings the review confirmed, not the ones that
+  // anchored, so dropping every Suggestion's anchor must never upgrade the
+  // event to APPROVE.
+  const c = criticalsInline + bodyCriticals.length;
+  const s = suggestionsInline + suggestionsDiscarded;
+
+  const baseEvent: ReviewEvent =
+    c >= 1 ? 'REQUEST_CHANGES' : s >= 1 ? 'COMMENT' : 'APPROVE';
+
+  // Caps: states outside this run's confirmed count that forbid an
+  // approval. A REQUEST_CHANGES earned by a confirmed Critical is never
+  // softened by them.
+  const cappedBy: string[] = [];
+  if (cannotTell.length > 0) cappedBy.push('cannot-tell-existing-critical');
+  if (missingReceipts.length > 0) cappedBy.push('chunk-nobody-read');
+  if (uncoverable.length > 0) cappedBy.push('uncoverable-chunk');
+  if (unreviewed.length + coverageEntries.length > 0) {
+    cappedBy.push('unreviewed-dimension');
+  }
+  if (contextUnavailable) cappedBy.push('context-unavailable');
+  if (criticalsUnverified) cappedBy.push('criticals-unverified');
+
+  let event: ReviewEvent = baseEvent;
+  if (event === 'APPROVE' && cappedBy.length > 0) event = 'COMMENT';
+  // The ONE cap that reaches a Request changes — because it removes the
+  // premise the never-soften rule stands on. "A REQUEST_CHANGES earned by a
+  // confirmed Critical is never softened" presumes CONFIRMED, and this flag
+  // is precisely the statement that no verifier ever ruled on the blockers.
+  // The header's own principle — an unverified finding must not become a
+  // public blocker (the false "leaks tokens" Critical is the exact harm) —
+  // was mechanics for the Approve row only, and a real bot review shipped
+  // through the gap: a CHANGES_REQUESTED on an external contributor's PR
+  // (#7166) whose one Critical the body itself disclosed as unverified.
+  // The findings still post, disclosed; the review just may not BLOCK on a
+  // claim nobody confirmed. Manipulation check: a run that wants an Approve
+  // gains nothing here (the same flag caps Approve via `unreviewed`), and a
+  // run that wants to block without verifying now cannot.
+  // …unless a DETERMINISTIC Critical also rides the review: a `[build]`/
+  // `[test]` finding is pre-confirmed, its Request changes is earned with or
+  // without a verifier, and softening it alongside its unverified sibling
+  // would un-block a confirmed build failure. The unverified ones stay
+  // disclosed either way.
+  const deterministicBodyCriticals =
+    bodyCriticals.length - nonDeterministicBodyCriticals;
+  if (
+    event === 'REQUEST_CHANGES' &&
+    criticalsUnverified &&
+    deterministicBodyCriticals === 0
+  ) {
+    event = 'COMMENT';
+  }
+
+  // Presubmit downgrades apply after the caps and only when the verdict
+  // they name is the one on the table.
+  let downgraded = false;
+  let downgradedFrom: 'Approve' | 'Request changes' | null = null;
+  if (event === 'APPROVE' && downgradeApprove) {
+    event = 'COMMENT';
+    downgraded = true;
+    downgradedFrom = 'Approve';
+  } else if (
+    (event === 'REQUEST_CHANGES' ||
+      (baseEvent === 'REQUEST_CHANGES' && criticalsUnverified)) &&
+    downgradeRequestChanges
+  ) {
+    // The unverified-blockers cap softened the event first, but the presubmit
+    // still ruled: without this arm its reasons (self-PR, failing CI) would
+    // silently vanish from the body whenever both held. The verdict line
+    // keeps the unverified sentence — the more fundamental defect — and the
+    // body's downgrade clause carries the presubmit reasons.
+    event = 'COMMENT';
+    downgraded = true;
+    downgradedFrom = 'Request changes';
+  }
+
+  const footer = `_— ${modelId} via Qwen Code /review_`;
+  const finish = (text: string): string =>
+    text === '' ? '' : `${text}\n\n${footer}`;
+
+  // Clause 6 — scope nobody reviewed. Legal on COMMENT and (alongside body
+  // Criticals) on REQUEST_CHANGES: the blocker must not squeeze out the
+  // disclosure of what was never read.
+  const notReviewedParts: string[] = [];
+  if (missingReceipts.length > 0) {
+    // One block for both channels, so an edit cannot touch the disclosure and
+    // miss its repair (or vice versa) — the drift the rest of this file exists
+    // to prevent.
+    remediation.push(
+      'chunks nobody read: build each with `"${QWEN_CODE_CLI:-qwen}" review ' +
+        `agent-prompt --plan ${planRef} --chunk <id> [--rules <rules file>]\` — or ` +
+        'the whole fan-out with `--roster` — and launch one agent per block, ' +
+        'verbatim',
+    );
+    // Its own sentence, because its own cause. The clause below explains a gap
+    // as a line too long to read, which is true of an *uncoverable* chunk and a
+    // fabrication about one nobody receipted — the author would be told the diff
+    // defeated the reader, when in fact no reader turned up.
+    //
+    // But a chunk whose disclosure entry already says WHY it went unread — its
+    // launch never happened, or happened on a rewritten prompt — is one fact,
+    // not two: "nobody read chunk 2" beside "chunk 2 — its prompt was built,
+    // but no agent on record was launched with it" restates the consequence
+    // next to its cause, and #7166's first post-grouping body carried
+    // seventeen chunks twice exactly this way. The cap and the remediation
+    // above keep the FULL list — only the posted sentence dedupes, and only
+    // for subjects another sentence already explains.
+    const disclosedSubjects = new Set(coverageEntries.map((e) => e.subject));
+    const unexplainedReceipts = missingReceipts.filter(
+      (id) => !disclosedSubjects.has(`chunk ${id}`),
+    );
+    if (unexplainedReceipts.length > 0) {
+      notReviewedParts.push(
+        `Not reviewed: ${unexplainedReceipts
+          .map((id) => `chunk ${id}`)
+          .join(', ')} — no agent reported covering these; nobody read them.`,
+      );
+    }
+  }
+  if (uncoverable.length > 0) {
+    notReviewedParts.push(
+      `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,
+    );
+  }
+  // One disclosure per subject, one sentence per cause — structurally, not by
+  // reparsing prose. The first cut recovered a subject/reason boundary from
+  // the rendered text (the last ` — ` segment), and a reason is free-form:
+  // an invariant label carries a dash for its file, an error interpolation
+  // can carry anything, and a boundary guessed wrong regroups the entries it
+  // garbles. Coverage now hands the entries over as `{subject, reason}`
+  // pairs; only the CALLER\'s entries are prose, and those are never parsed —
+  // they are matched against known coverage subjects by prefix (exactly how
+  // the chunk list above dedupes), and rendered verbatim when nothing
+  // matches. A run that pasted the gate\'s own gap lines into its input
+  // posted every disclosure twice — 22 clauses for 11 roles on a public PR
+  // (#7188) — and the coverage-derived text wins the collision: it is the
+  // evidence-bounded register this body is written in.
+  const covEntries = coverageEntries;
+  const callerLeft: string[] = [];
+  const seenCaller = new Set<string>();
+  for (const d of unreviewed) {
+    if (seenCaller.has(d)) continue; // a caller pasting itself twice
+    seenCaller.add(d);
+    const echoesCoverage = covEntries.some(
+      (e) => d === e.subject || d.startsWith(`${e.subject} — `),
+    );
+    if (!echoesCoverage) callerLeft.push(d);
+  }
+  // Bare caller names share the whiffed-agent explanation; an entry that
+  // brought its own reason (after an em-dash) is rendered verbatim, its own
+  // line — unparsed, ungrouped, because its structure is not ours to guess.
+  const whiffedDimensions = callerLeft.filter((d) => !d.includes(' — '));
+  const explainedCaller = callerLeft.filter((d) => d.includes(' — '));
+  if (whiffedDimensions.length > 0) {
+    notReviewedParts.push(
+      `Not reviewed: ${whiffedDimensions.join(', ')} — the agent returned no evidence of its walk twice.`,
+    );
+  }
+  for (const d of explainedCaller) {
+    notReviewedParts.push(`Not reviewed: ${d}.`);
+  }
+  // Same cause, one sentence: forty-three chunks launched with rewritten
+  // prompts are one failure with forty-three subjects, not forty-three
+  // paragraphs — a posted body on #7166 was ninety-nine clauses over four
+  // causes, the six real findings buried beneath. Grouped by the reason
+  // STRING, so a reason embedding per-subject detail (an unread brief\'s own
+  // path) differs per entry and keeps its own line. One subject that appears
+  // under two causes keeps the FIRST — the categories push in precision
+  // order, and a chunk flagged `rewritten` is also, to the roster, a
+  // requirement with no verbatim launch; repeating it under the later, vaguer
+  // cause would tell the author "no agent was launched" about an agent that
+  // demonstrably ran.
+  const seenSubjects = new Set<string>();
+  const byReason = new Map<string, string[]>();
+  for (const { subject, reason } of covEntries) {
+    if (seenSubjects.has(subject)) continue;
+    seenSubjects.add(subject);
+    const subjects = byReason.get(reason) ?? [];
+    subjects.push(subject);
+    byReason.set(reason, subjects);
+  }
+  for (const [reason, subjects] of byReason) {
+    notReviewedParts.push(
+      reason
+        ? `Not reviewed: ${subjects.join(', ')} — ${reason}.`
+        : `Not reviewed: ${subjects.join(', ')}.`,
+    );
+  }
+
+  // Clause 5 — blockers the review could neither confirm nor clear. They
+  // survive every event shape: erasing one is how a review approves the
+  // very thing it is asking about.
+  const cannotTellBlock =
+    cannotTell.length === 0
+      ? []
+      : [
+          `Unresolved, please confirm: ${cannotTell
+            .map((l) => withMarker(l))
+            .join(' ')}`,
+        ];
+
+  const bodyCriticalBlock = bodyCriticals.map((l) => withMarker(l));
+
+  const contextUnavailableClause =
+    'Reviewed diff-only — the PR’s existing discussion could not be fetched, so this is not an approval and not a no-blockers claim.';
+
+  if (event === 'REQUEST_CHANGES') {
+    // Empty body, except the disclosures: every clause whose state holds
+    // appears on every event — a confirmed blocker must not squeeze out the
+    // trust warning (clause 2), an undecided existing Critical (clause 5),
+    // or the unread-scope disclosure (clause 6).
+    const parts = [
+      ...(contextUnavailable ? [contextUnavailableClause] : []),
+      ...cannotTellBlock,
+      ...notReviewedParts,
+      ...bodyCriticalBlock,
+    ];
+    return {
+      event,
+      body: finish(parts.join('\n\n')),
+      baseEvent,
+      cappedBy,
+      downgraded,
+      downgradedFrom,
+      remediation,
+    };
+  }
+
+  if (event === 'APPROVE') {
+    return {
+      event,
+      body: finish('No issues found. LGTM! ✅'),
+      baseEvent,
+      cappedBy,
+      downgraded,
+      downgradedFrom,
+      remediation,
+    };
+  }
+
+  // COMMENT: ordered clause composition — each clause present iff its
+  // condition holds, nothing else.
+  const clauses: string[] = [];
+
+  // 1. Downgrade sentence (only when a presubmit flag changed the event).
+  if (downgraded && downgradedFrom) {
+    const reasons = downgradeReasons.join('; ');
+    clauses.push(
+      `⚠️ Downgraded from ${downgradedFrom} to Comment${reasons ? `: ${reasons}` : ''}.`,
+    );
+  }
+
+  // 2. Context-unavailable clause — when present, it opens the body and no
+  //    clause may certify "no blockers".
+  if (contextUnavailable) {
+    clauses.push(contextUnavailableClause);
+  } else {
+    // 3. Opener — certifying only when the review can actually certify it.
+    // Certification is keyed to whether presubmit PERMITS it, not to
+    // whether presubmit changed the event: a Suggestion-only review is
+    // already COMMENT, so failing CI or a self-PR flips no event — but a
+    // body that certifies "no blockers" over failing CI, or a self-review
+    // certifying its own PR, misstates authority all the same.
+    const canCertify =
+      !downgraded &&
+      !downgradeApprove &&
+      !downgradeRequestChanges &&
+      c === 0 &&
+      cannotTell.length === 0 &&
+      uncoverable.length === 0 &&
+      unreviewed.length + coverageEntries.length === 0 &&
+      // A missing receipt caps the event but was left out of certification, so a
+      // body could open "Reviewed — no blockers." two lines above "nobody read
+      // them." Nothing nobody read can be certified blocker-free.
+      missingReceipts.length === 0;
+    clauses.push(canCertify ? 'Reviewed — no blockers.' : 'Reviewed.');
+  }
+
+  // 4. Suggestions clause — keyed off the POSTED count, not `s`: an
+  //    all-discarded run has nothing inline, and claiming otherwise while
+  //    the discarded sentence says the opposite is the round-6 collision
+  //    this module exists to kill. (`s` stays right for the event — see
+  //    above.)
+  if (suggestionsInline > 0) clauses.push('Suggestions are inline.');
+  if (suggestionsDiscarded > 0) {
+    // Self-contained: this lands in the posted body, and "see the terminal
+    // output" pointed the PR author at a terminal only the operator has —
+    // eight hours of real bot reviews carried that dead reference on five
+    // different pull requests.
+    clauses.push(
+      `${suggestionsDiscarded} Suggestion-level finding(s) could not be ` +
+        `anchored to a changed line and were dropped; nothing further to act ` +
+        `on here.`,
+    );
+  }
+
+  // 5. Unresolved existing Criticals.
+  clauses.push(...cannotTellBlock);
+
+  // 6. Not-reviewed disclosure.
+  clauses.push(...notReviewedParts);
+
+  // 7. Body Criticals — on a COMMENT that stands where a REQUEST_CHANGES
+  //    would have been: the presubmit carve-out, and the unverified-blockers
+  //    cap. Either way the body copy is the ONLY copy of an unanchorable
+  //    blocker, and softening the event must never erase it.
+  if (downgradedFrom === 'Request changes' || criticalsUnverified) {
+    clauses.push(...bodyCriticalBlock);
+  }
+
+  return {
+    event,
+    body: finish(clauses.join(' ')),
+    baseEvent,
+    cappedBy,
+    downgraded,
+    downgradedFrom,
+    remediation,
+  };
+}
+
+interface ComposeReviewCliArgs {
+  input: string | undefined;
+  comments: string;
+  out: string | undefined;
+}
+
+/**
+ * The drafted inline comments, read from the file Step 6 is told to pass.
+ *
+ * Accepts the bare array or the full review-payload shape (`{comments: […]}`),
+ * so the same file Step 7 submits can be handed over unchanged. Every entry
+ * must open with a severity marker: `countInlineFindings` weighs an unmarked
+ * body as nothing, and for a verdict computation "nothing" means a blocker
+ * written without its marker approves the review it should have blocked.
+ * Step 6 is where the draft is still cheap to fix, so it refuses here.
+ */
+function readDraftedComments(path: string): DraftedComment[] {
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new Error(
+      `compose-review: cannot read the comments file ${path}: ` +
+        `${(err as Error).message}. Pass the drafted inline comments — the ` +
+        `same array the review payload will carry — or a file containing [] ` +
+        `when nothing anchors inline.`,
+    );
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(
+      `compose-review: the comments file ${path} is not JSON: ${(err as Error).message}`,
+    );
+  }
+  const comments = Array.isArray(parsed)
+    ? parsed
+    : (parsed as { comments?: unknown })?.comments;
+  if (!Array.isArray(comments)) {
+    throw new Error(
+      `compose-review: the comments file ${path} must be a JSON array of ` +
+        `comment objects, or a review payload with a \`comments\` array.`,
+    );
+  }
+  const unmarked = unmarkedComments(comments as DraftedComment[]);
+  if (unmarked.length > 0) {
+    throw new Error(
+      `compose-review: comments[${unmarked.join(', ')}] in ${path} open with ` +
+        `neither ${CRITICAL_PREFIX} nor ${SUGGESTION_PREFIX}. Every inline ` +
+        `comment is a finding and carries its severity first — an unmarked ` +
+        `body would be counted as neither, and a blocker that weighs nothing ` +
+        `approves the review it should block. Fix the draft, not the counts.`,
+    );
+  }
+  return comments as DraftedComment[];
+}
+
+export const composeReviewCommand: CommandModule = {
+  command: 'compose-review',
+  describe:
+    'Compute the review event and body from the drafted comments and run states (the Step 7 invariant, as code); reads the state JSON from --input or stdin',
+  builder: (yargs) =>
+    yargs
+      .option('input', {
+        type: 'string',
+        describe: 'Path to the state JSON (omit to read stdin)',
+      })
+      .option('comments', {
+        type: 'string',
+        demandOption: true,
+        describe:
+          'Path to the drafted inline comments JSON (the review payload, or ' +
+          'its bare comments array). The inline counts are counted from it, ' +
+          'never typed — pass a file containing [] when nothing anchors inline.',
+      })
+      .option('out', {
+        type: 'string',
+        describe: 'Also write the {event, body} JSON to this path',
+      }),
+  handler: (argv) => {
+    const { input, comments, out } = argv as unknown as ComposeReviewCliArgs;
+    // yargs enforces --comments on the real command line; this covers every
+    // other way in (tests, programmatic calls) with the same sentence instead
+    // of an ENOENT on `undefined`.
+    if (!comments) {
+      throw new Error(
+        'compose-review: --comments is required — the inline counts are ' +
+          'counted from the drafted comments file, never typed. Pass a file ' +
+          'containing [] when nothing anchors inline.',
+      );
+    }
+    const raw = readFileSync(input ?? 0, 'utf8');
+    // The input is a JSON the model wrote. `env` decides where the harness
+    // transcripts are read from, and it must NOT come from that JSON: a model
+    // that wanted an approval could point it at a directory of transcripts it
+    // fabricated, which is the whole gate reopened through one extra key. It is a
+    // unit-test seam and nothing else, so it is stripped here — the real run
+    // always resolves the transcripts from the environment the CLI exported.
+    const parsed = JSON.parse(raw) as ComposeReviewInput;
+    delete parsed.env;
+    // The inline counts are counted, not accepted — `submit` has refused them
+    // since the count-beside-the-comments bug, and this boundary refusing them
+    // too is what makes the Step 6 line and the posted verdict the same
+    // computation on the same source. Silently overwriting instead would let a
+    // run keep believing the number it typed.
+    if (
+      parsed.criticalsInline !== undefined ||
+      parsed.suggestionsInline !== undefined
+    ) {
+      throw new Error(
+        'compose-review: `criticalsInline` / `suggestionsInline` are counted ' +
+          'from the --comments file, not taken from the state JSON. Remove ' +
+          'them. (A dogfooded run moved its one Critical from `bodyCriticals` ' +
+          'to an inline comment, dropped the count on the way, and the ' +
+          'verdict line read Approve over a blocker.)',
+      );
+    }
+    const drafted = readDraftedComments(comments);
+    const result = composeReview({
+      ...parsed,
+      ...countInlineFindings(drafted),
+    });
+    // The exact terminal verdict, persisted beside the fields it is computed
+    // from. `event` + `cappedBy` alone cannot reconstruct it — a presubmit
+    // downgrade also depends on `downgraded`/`downgradedFrom` — and Step 8's
+    // archived report copies this line rather than re-deriving a lossy one.
+    const json = JSON.stringify(
+      { ...result, verdictLine: verdictLine(result) },
+      null,
+      2,
+    );
+    if (out) {
+      mkdirSync(dirname(out), { recursive: true });
+      writeFileSync(out, json, 'utf8');
+    }
+    writeStdoutLine(json);
+    // The verdict a human reads, next to the JSON a program reads.
+    //
+    // Step 6 prints a verdict to the terminal, and until now it *composed* one —
+    // from the same prose rules this file exists to replace. So a run could skip
+    // this command entirely and tell the user whatever it had concluded: dogfooded,
+    // one did, and reported an Approve on a review whose coverage check had refused.
+    // There is now nothing to compose. This is the sentence; print it.
+    //
+    // The fixes first, the verdict last. These lines are the orchestrator's copy
+    // of what the body's `Not reviewed:` disclosures only describe — the body
+    // names what cannot be certified for the PR author; this names the command
+    // that repairs it, on the channel the author never sees.
+    for (const fix of result.remediation) {
+      writeStderrLine(`FIX: ${fix}`);
+    }
+    writeStderrLine(verdictLine(result));
+  },
+};
+
+/** The terminal verdict, in the words Step 6 is told to print. */
+export function verdictLine(r: ComposeReviewResult): string {
+  const label: Record<ReviewEvent, string> = {
+    APPROVE: 'Approve',
+    REQUEST_CHANGES: 'Request changes',
+    COMMENT: 'Comment',
+  };
+  const why: Record<string, string> = {
+    'cannot-tell-existing-critical':
+      'an existing blocker could not be ruled on',
+    'chunk-nobody-read': 'part of the diff was never read',
+    'uncoverable-chunk': 'part of the diff cannot be read at all',
+    'unreviewed-dimension': 'a dimension nobody reviewed',
+    'context-unavailable': "the PR's existing discussion could not be read",
+  };
+  let line = `Verdict: ${label[r.event]}`;
+  // Why an Approve was not available — but only when one would otherwise have been.
+  // A cap and a presubmit downgrade are BOTH reasons, and either can be the sole
+  // one: a review with no cap state that the presubmit dropped from Approve to
+  // Comment has an empty `cappedBy` and `downgraded: true`. Joining `cappedBy`
+  // unconditionally then printed `an Approve was NOT available:  — downgraded …`,
+  // a dangling colon over nothing. Collect the reasons first, and say the clause
+  // only if there is a reason to say it.
+  //
+  // A coverage cap never softens a Request changes — a confirmed blocker earned
+  // that, and naming a constraint that did not bind would send the reader
+  // looking for an effect that is not there — so the Approve clause is gated on
+  // the base having been an Approve at all. The unverified-blockers cap is the
+  // one exception, because it says the confirmation never happened, and its
+  // sentence must name what the reader would otherwise chase: a Comment posted
+  // over visible **[Critical]** comments reads as a contradiction until the
+  // line says why.
+  if (
+    r.baseEvent === 'REQUEST_CHANGES' &&
+    r.event === 'COMMENT' &&
+    r.cappedBy.includes('criticals-unverified')
+  ) {
+    line +=
+      ' — a Request changes was NOT available: its blockers were never ' +
+      'verified (they are posted, disclosed as unverified)';
+  } else if (r.baseEvent === 'APPROVE' && r.event !== 'APPROVE') {
+    const reasons = r.cappedBy.map((c) => why[c] ?? c);
+    if (r.downgraded) reasons.push('a presubmit check failed');
+    line += ` — an Approve was NOT available: ${reasons.join('; ')}`;
+  } else if (r.downgradedFrom === 'Request changes') {
+    // The decisive case, and the one a review caught. A presubmit downgrade can
+    // move a REQUEST_CHANGES — a review with **confirmed Criticals** — down to
+    // COMMENT (a self-PR, failing CI). Printed as a bare "Comment — downgraded",
+    // that reads to an operator as "minor issues, nothing blocking", while the
+    // review has just posted blockers inline. Say what it was.
+    line +=
+      ' — Request changes, downgraded to Comment by a presubmit check ' +
+      '(the blockers are still posted)';
+  } else if (r.downgraded) {
+    // A Suggestion-only Comment the presubmit still moved: there was no Approve to
+    // lose and no blocker to hide, but the event did change and the user should see
+    // it did.
+    line += ' — downgraded by a presubmit check';
+  }
+  return line;
+}

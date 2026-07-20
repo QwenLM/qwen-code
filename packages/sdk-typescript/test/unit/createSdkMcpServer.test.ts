@@ -12,9 +12,9 @@
 
 import { describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { createSdkMcpServer } from '../../src/mcp/createSdkMcpServer.js';
-import { tool } from '../../src/mcp/tool.js';
-import type { SdkMcpToolDefinition } from '../../src/mcp/tool.js';
+import { createSdkMcpServer } from '../../src/daemon-mcp/createSdkMcpServer.js';
+import { tool } from '../../src/daemon-mcp/tool.js';
+import type { SdkMcpToolDefinition } from '../../src/daemon-mcp/tool.js';
 
 describe('createSdkMcpServer', () => {
   describe('Server Creation', () => {

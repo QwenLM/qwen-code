@@ -237,9 +237,17 @@ function compareRankedCommandMatches(
   left: RankedCommandMatch,
   right: RankedCommandMatch,
 ): number {
+  // Name match beats alias match — e.g. /re should prefer `resume` (name)
+  // over `clear` via its `reset` alias, since users type the primary name
+  // more often than obscure alternates.
+  const leftIsName = left.matchedAlias === undefined ? 1 : 0;
+  const rightIsName = right.matchedAlias === undefined ? 1 : 0;
+  const nameVsAlias = rightIsName - leftIsName;
+
   return (
     right.matchStrength - left.matchStrength ||
     right.completionPriority - left.completionPriority ||
+    nameVsAlias ||
     right.recentScore - left.recentScore ||
     right.score - left.score ||
     left.start - right.start ||
@@ -309,6 +317,7 @@ function toCommandSuggestion(
     matchedAlias,
     supportedModes: command.supportedModes,
     modelInvocable: command.modelInvocable,
+    submitOnAccept: command.submitOnAccept,
   };
 }
 

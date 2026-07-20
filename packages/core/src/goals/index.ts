@@ -27,10 +27,11 @@ export {
   MAX_GOAL_ITERATIONS,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_HOOK_TIMEOUT_SECONDS,
+  getStopHookContinuationReason,
   createGoalStopHookCallback,
   abortGoalForStopHookCap,
   registerGoalHook,
   unregisterGoalHook,
 } from './goalHook.js';
 export { judgeGoal } from './goalJudge.js';
-export type { JudgeResult } from './goalJudge.js';
+export type { GoalJudgeOutcome, JudgeResult } from './goalJudge.js';

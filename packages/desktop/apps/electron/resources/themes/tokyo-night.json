@@ -1,0 +1,26 @@
+{
+  "name": "Tokyo Night",
+  "description": "Downtown Tokyo at night",
+  "author": "enkia",
+  "license": "MIT",
+  "source": "https://github.com/enkia/tokyo-night-vscode-theme",
+  "supportedModes": ["dark"],
+  "shikiTheme": {
+    "light": "github-light",
+    "dark": "tokyo-night"
+  },
+  "background": "#1a1b26",
+  "foreground": "#c0caf5",
+  "accent": "#7aa2f7",
+  "info": "#e0af68",
+  "success": "#9ece6a",
+  "destructive": "#f7768e",
+  "dark": {
+    "background": "#1a1b26",
+    "foreground": "#c0caf5",
+    "accent": "#7aa2f7",
+    "info": "#e0af68",
+    "success": "#9ece6a",
+    "destructive": "#f7768e"
+  }
+}

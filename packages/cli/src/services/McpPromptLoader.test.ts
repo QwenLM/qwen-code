@@ -101,6 +101,25 @@ describe('McpPromptLoader', () => {
       expect(result).toEqual({ named: 'value', pos: 'positional' });
     });
 
+    it('should preserve empty optional named arguments', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [{ name: 'trail', required: false }];
+      const userArgs = '--trail=""';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ trail: '' });
+    });
+
+    it('should treat empty required named arguments as provided', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const promptArgs: PromptArgument[] = [
+        { name: 'name', required: true },
+        { name: 'age', required: true },
+      ];
+      const userArgs = '--name="" --age=""';
+      const result = loader.parseArgs(userArgs, promptArgs);
+      expect(result).toEqual({ name: '', age: '' });
+    });
+
     it('should handle positional args followed by named args', () => {
       const loader = new McpPromptLoader(mockConfig);
       const promptArgs: PromptArgument[] = [
@@ -155,6 +174,51 @@ describe('McpPromptLoader', () => {
         pos3: 'p3 "with quotes"',
       });
     });
+
+    it('should forward positional input as "input" when promptArgs is undefined', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs('hello world', undefined);
+      expect(result).toEqual({ input: 'hello world' });
+    });
+
+    it('should forward positional input as "input" when promptArgs is empty', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs('hello world', []);
+      expect(result).toEqual({ input: 'hello world' });
+    });
+
+    it('should return empty object when promptArgs is undefined and no input', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs('', undefined);
+      expect(result).toEqual({});
+    });
+
+    it('should forward named args when promptArgs is undefined', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs('--key="value"', undefined);
+      expect(result).toEqual({ key: 'value' });
+    });
+
+    it('should forward both named and positional args when promptArgs is undefined', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs('--key="value" some text', undefined);
+      expect(result).toEqual({ key: 'value', input: 'some text' });
+    });
+
+    it('should strip quotes from positional input when promptArgs is undefined', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs('"hello world"', undefined);
+      expect(result).toEqual({ input: 'hello world' });
+    });
+
+    it('should not overwrite a named "input" arg with positional text', () => {
+      const loader = new McpPromptLoader(mockConfig);
+      const result = loader.parseArgs(
+        '--input="named value" some text',
+        undefined,
+      );
+      expect(result).toEqual({ input: 'named value' });
+    });
   });
 
   describe('loadCommands', () => {
@@ -200,6 +264,24 @@ describe('McpPromptLoader', () => {
         type: 'message',
         messageType: 'error',
         content: 'Missing required argument(s): --age, --species',
+      });
+    });
+
+    it('should forward user input when prompt has no declared arguments', async () => {
+      vi.spyOn(cliCore, 'getMCPServerPrompts').mockReturnValue([
+        { ...mockPrompt, arguments: undefined },
+      ]);
+      const loader = new McpPromptLoader(mockConfigWithPrompts);
+      const commands = await loader.loadCommands(new AbortController().signal);
+      const action = commands[0].action!;
+      const context = {} as CommandContext;
+      const result = await action(context, 'some user input');
+      expect(mockPrompt.invoke).toHaveBeenCalledWith({
+        input: 'some user input',
+      });
+      expect(result).toEqual({
+        type: 'submit_prompt',
+        content: JSON.stringify('Hello, world!'),
       });
     });
 

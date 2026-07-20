@@ -4,9 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { Content } from '@google/genai';
+import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getStartupContextLength,
+  stripSystemReminderBlocks,
+} from '../utils/environmentContext.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 
 const debugLogger = createDebugLogger('SESSION_RECAP');
@@ -16,8 +20,6 @@ const RECENT_MESSAGE_WINDOW = 30;
 const RECAP_SYSTEM_PROMPT = `You generate session recaps for a programming assistant CLI.
 
 The user stepped away and is coming back. Recap in under 40 words, 1-2 plain sentences, no markdown. Lead with the overall goal and current task, then the one next action. Skip root-cause narrative, fix internals, secondary to-dos, and em-dash tangents.
-
-Match the dominant language of the conversation (English or Chinese). For Chinese, treat the budget as roughly 80 characters total.
 
 Output format — strict:
 - Wrap your recap in <recap>...</recap> tags.
@@ -47,15 +49,29 @@ export async function generateSessionRecap(
 ): Promise<string | null> {
   try {
     const geminiClient = config.getGeminiClient();
-    if (!geminiClient) return null;
+    if (!geminiClient) {
+      debugLogger.debug('recap skipped: no geminiClient available');
+      return null;
+    }
 
     const fullHistory = geminiClient.getHistoryShallow();
-    if (fullHistory.length < 2) return null;
+    if (fullHistory.length < 2) {
+      debugLogger.debug(
+        `recap skipped: history too short (${fullHistory.length} messages)`,
+      );
+      return null;
+    }
 
     const dialog = filterToDialog(fullHistory);
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
-    if (recentHistory.length === 0) return null;
+    if (recentHistory.length === 0) {
+      debugLogger.debug('recap skipped: no dialog messages after filtering');
+      return null;
+    }
 
+    debugLogger.debug(
+      `recap: sending side-query with ${recentHistory.length} messages`,
+    );
     const result = await runSideQuery(config, {
       purpose: 'session-recap',
       contents: [
@@ -72,13 +88,23 @@ export async function generateSessionRecap(
       maxAttempts: 1,
     });
 
-    if (abortSignal.aborted) return null;
+    if (abortSignal.aborted) {
+      debugLogger.debug('recap aborted by signal');
+      return null;
+    }
 
-    if (!result.text) return null;
+    if (!result.text) {
+      debugLogger.debug('recap: model returned empty text');
+      return null;
+    }
 
     const text = extractRecap(result.text);
-    if (!text) return null;
+    if (!text) {
+      debugLogger.debug('recap: failed to extract <recap> tags from response');
+      return null;
+    }
 
+    debugLogger.debug(`recap generated: len=${text.length}`);
     return text;
   } catch (err) {
     debugLogger.warn(
@@ -120,15 +146,22 @@ function extractRecap(raw: string): string {
  */
 function filterToDialog(history: Content[]): Content[] {
   const out: Content[] = [];
-  for (const msg of history) {
+  for (const msg of history.slice(getStartupContextLength(history))) {
     if (msg.role !== 'user' && msg.role !== 'model') continue;
-    const textParts = (msg.parts ?? []).filter(
-      (part) =>
-        typeof part?.text === 'string' &&
-        part.text.trim() !== '' &&
-        !part.thought &&
-        !part.thoughtSignature,
-    );
+    const textParts: Part[] = [];
+    for (const part of msg.parts ?? []) {
+      if (
+        typeof part?.text !== 'string' ||
+        part.text.trim() === '' ||
+        part.thought ||
+        part.thoughtSignature
+      ) {
+        continue;
+      }
+      const text = stripSystemReminderBlocks(part.text);
+      if (text.trim() === '') continue;
+      textParts.push({ ...part, text });
+    }
     if (textParts.length === 0) continue;
     out.push({ role: msg.role, parts: textParts });
   }

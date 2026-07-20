@@ -9,6 +9,7 @@ import type { SlashCommand } from '../ui/commands/types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { aboutCommand } from '../ui/commands/aboutCommand.js';
 import { tasksCommand } from '../ui/commands/tasksCommand.js';
+import { workflowsCommand } from '../ui/commands/workflowsCommand.js';
 import { agentsCommand } from '../ui/commands/agentsCommand.js';
 import { arenaCommand } from '../ui/commands/arenaCommand.js';
 import { approvalModeCommand } from '../ui/commands/approvalModeCommand.js';
@@ -16,9 +17,12 @@ import { authCommand } from '../ui/commands/authCommand.js';
 import { branchCommand } from '../ui/commands/branchCommand.js';
 import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
+import { cdCommand } from '../ui/commands/cdCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
+import { configCommand } from '../ui/commands/config-command.js';
 import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
+import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
 import { contextCommand } from '../ui/commands/contextCommand.js';
 import { copyCommand } from '../ui/commands/copyCommand.js';
 import { docsCommand } from '../ui/commands/docsCommand.js';
@@ -26,12 +30,16 @@ import { doctorCommand } from '../ui/commands/doctorCommand.js';
 import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
+import { effortCommand } from '../ui/commands/effort-command.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
+import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
 import { goalCommand } from '../ui/commands/goalCommand.js';
 import { helpCommand } from '../ui/commands/helpCommand.js';
+import { historyCommand } from '../ui/commands/historyCommand.js';
 import { hooksCommand } from '../ui/commands/hooksCommand.js';
 import { ideCommand } from '../ui/commands/ideCommand.js';
+import { importConfigCommand } from '../ui/commands/importConfigCommand.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { initCommand } from '../ui/commands/initCommand.js';
 import { languageCommand } from '../ui/commands/languageCommand.js';
@@ -46,6 +54,7 @@ import { permissionsCommand } from '../ui/commands/permissionsCommand.js';
 import { trustCommand } from '../ui/commands/trustCommand.js';
 import { quitCommand } from '../ui/commands/quitCommand.js';
 import { recapCommand } from '../ui/commands/recapCommand.js';
+import { reloadPluginsCommand } from '../ui/commands/reload-plugins-command.js';
 import { renameCommand } from '../ui/commands/renameCommand.js';
 import { restoreCommand } from '../ui/commands/restoreCommand.js';
 import { resumeCommand } from '../ui/commands/resumeCommand.js';
@@ -58,10 +67,13 @@ import { terminalSetupCommand } from '../ui/commands/terminalSetupCommand.js';
 import { themeCommand } from '../ui/commands/themeCommand.js';
 import { toolsCommand } from '../ui/commands/toolsCommand.js';
 import { vimCommand } from '../ui/commands/vimCommand.js';
+import { voiceCommand } from '../ui/commands/voice-command.js';
 import { setupGithubCommand } from '../ui/commands/setupGithubCommand.js';
 import { insightCommand } from '../ui/commands/insightCommand.js';
+import { learnCommand } from '../ui/commands/learn-command.js';
 import { statuslineCommand } from '../ui/commands/statuslineCommand.js';
 import { lspCommand } from '../ui/commands/lspCommand.js';
+import { updateCommand } from '../ui/commands/update-command.js';
 
 const builtinDebugLogger = createDebugLogger('BUILTIN_COMMAND_LOADER');
 
@@ -97,14 +109,24 @@ export class BuiltinCommandLoader implements ICommandLoader {
       aboutCommand,
       agentsCommand,
       tasksCommand,
+      // Gated behind isWorkflowsEnabled — feature flag honors
+      // QWEN_CODE_ENABLE_WORKFLOWS (opt-in) and QWEN_CODE_DISABLE_WORKFLOWS
+      // (kill switch). When the flag is off the command vanishes entirely
+      // from typeahead and help, matching the established convention for
+      // experimental builtins.
+      this.config?.isWorkflowsEnabled() ? workflowsCommand : null,
       arenaCommand,
       approvalModeCommand,
       authCommand,
       branchCommand,
       btwCommand,
+      forkCommand,
       bugCommand,
+      cdCommand,
       clearCommand,
       compressCommand,
+      compressFastCommand,
+      configCommand,
       contextCommand,
       copyCommand,
       diffCommand,
@@ -113,15 +135,19 @@ export class BuiltinCommandLoader implements ICommandLoader {
       doctorCommand,
       directoryCommand,
       editorCommand,
+      effortCommand,
       exportCommand,
       extensionsCommand,
       helpCommand,
+      historyCommand,
       hooksCommand,
       resolvedIdeCommand,
+      importConfigCommand,
       initCommand,
       languageCommand,
+      learnCommand,
       mcpCommand,
-      ...(this.config?.getManagedAutoMemoryEnabled()
+      ...(this.config?.isManagedMemoryAvailable()
         ? [dreamCommand, forgetCommand]
         : []),
       goalCommand,
@@ -133,6 +159,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       ...(this.config?.getFolderTrust() ? [trustCommand] : []),
       quitCommand,
       recapCommand,
+      reloadPluginsCommand,
       renameCommand,
       restoreCommand(this.config),
       resumeCommand,
@@ -144,6 +171,8 @@ export class BuiltinCommandLoader implements ICommandLoader {
       toolsCommand,
       settingsCommand,
       vimCommand,
+      updateCommand,
+      voiceCommand,
       setupGithubCommand,
       terminalSetupCommand,
       insightCommand,

@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { FunctionDeclaration } from '@google/genai';
 import { AgentCore } from './agent-core.js';
 import {
+  getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithAgentContext,
@@ -15,6 +16,15 @@ import {
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
+import { ToolNames } from '../../tools/tool-names.js';
+import {
+  getAgentName,
+  getTeammateContext,
+  isTeammate,
+  runWithTeammateIdentity,
+} from '../team/identity.js';
+import type { TeammateIdentity } from '../team/types.js';
 import type { Config } from '../../config/config.js';
 import type {
   ModelConfig,
@@ -213,6 +223,91 @@ describe('AgentCore.runInAgentFrames', () => {
     expect(observedAgentId).toBe('agent-123');
   });
 
+  it('restores the nesting depth for deferred-approval continuations', async () => {
+    // Regression (codex review): the respond closure captured only the agent
+    // id, so runWithAgentContext recomputed depth 0 from the UI's frame-less
+    // chain — a deferred-approved `agent` tool call from a leaf-depth
+    // sub-agent would then bypass maxSubagentDepth. The closure must carry
+    // the depth captured at emit time.
+    const core = makeCore('approval-agent');
+
+    let respondClosure: (() => Promise<void>) | undefined;
+    let observedDepth: number | null = null;
+    const onConfirm = async () => {
+      observedDepth = getCurrentAgentDepth();
+    };
+
+    // Emit from a nested frame (depth 2), mirroring a sub-agent of a
+    // sub-agent whose tool call parks for approval.
+    await runWithAgentContext('lvl1', () =>
+      runWithAgentContext('lvl2', () =>
+        runWithAgentContext('lvl3', async () => {
+          const inheritedAgentId = getCurrentAgentId();
+          const inheritedAgentDepth = getCurrentAgentDepth();
+          expect(inheritedAgentDepth).toBe(2);
+          respondClosure = () =>
+            core.runInAgentFrames(
+              onConfirm,
+              undefined,
+              inheritedAgentId ?? undefined,
+              undefined,
+              inheritedAgentDepth,
+            );
+        }),
+      ),
+    );
+
+    // The frames are gone; respond fires from a fresh chain like the UI.
+    expect(getCurrentAgentId()).toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await respondClosure!();
+
+    expect(observedDepth).toBe(2);
+  });
+
+  it('restores the teammate identity for deferred-approval continuations', async () => {
+    // Regression: a teammate's `send_message`/`task_update` that requires
+    // confirmation resumes from the UI's async chain, outside the
+    // teammate identity frame TeamManager established. Before the fix,
+    // `getAgentName()` returned undefined there and send_message fell back
+    // to the leader — forging a `from="leader"` envelope and slipping past
+    // the leader-only `isTeammate()` guard. The respond closure must carry
+    // the identity captured at emit time back into the resumed tool body.
+    const core = makeCore('approval-agent');
+    const teammateIdentity: TeammateIdentity = {
+      agentId: 'scribe@demo',
+      agentName: 'scribe',
+      teamName: 'demo',
+      isTeamLead: false,
+    };
+
+    let respondClosure: (() => Promise<void>) | undefined;
+    let observedAgentName: string | undefined;
+    let observedIsTeammate: boolean | undefined;
+    const onConfirm = async () => {
+      observedAgentName = getAgentName();
+      observedIsTeammate = isTeammate();
+    };
+
+    // Simulate the teammate's loop frame being live at emit time.
+    await runWithTeammateIdentity(teammateIdentity, async () => {
+      const inherited = getTeammateContext();
+      respondClosure = () =>
+        core.runInAgentFrames(onConfirm, undefined, undefined, inherited);
+    });
+
+    // Teammate frame is gone; jump to a fresh microtask chain to be sure.
+    expect(getAgentName()).toBeUndefined();
+    expect(isTeammate()).toBe(false);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await respondClosure!();
+
+    expect(observedAgentName).toBe('scribe');
+    expect(observedIsTeammate).toBe(true);
+  });
+
   it("prefers the agent's own view over inheritedView when both are present", async () => {
     // Defensive: if a future caller wires both, the agent's explicit view
     // wins — we never want a captured snapshot to override the agent's
@@ -251,23 +346,30 @@ describe('AgentCore.prepareTools', () => {
   // toolConfig entirely — must inherit DEFERRED tools too. Otherwise a
   // subagent configured with `tools: ['*']` against a registry that
   // includes MCP / lsp / cron_* tools would silently lose them once
-  // ToolSearch was introduced (the main chat sees them via the
-  // "Deferred Tools" prompt + ToolSearch flow, but subagents don't get
-  // either of those scaffolds).
+  // ToolSearch was introduced.
   function buildAgentForTools(
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],
+    maxSubagentDepth = 5,
   ): {
     core: AgentCore;
+    debugSpy: ReturnType<typeof vi.fn>;
     getFunctionDeclarationsSpy: ReturnType<typeof vi.fn>;
+    getFunctionDeclarationsFilteredSpy: ReturnType<typeof vi.fn>;
   } {
+    const debugSpy = vi.fn();
     const getFunctionDeclarationsSpy = vi.fn().mockReturnValue(fnDeclarations);
+    const getFunctionDeclarationsFilteredSpy = vi.fn((names: string[]) =>
+      fnDeclarations.filter((d) => d.name && names.includes(d.name)),
+    );
     const config = {
+      getDebugLogger: vi.fn().mockReturnValue({ debug: debugSpy }),
       getToolRegistry: vi.fn().mockReturnValue({
         warmAll: vi.fn().mockResolvedValue(undefined),
         getFunctionDeclarations: getFunctionDeclarationsSpy,
-        getFunctionDeclarationsFiltered: vi.fn().mockReturnValue([]),
+        getFunctionDeclarationsFiltered: getFunctionDeclarationsFilteredSpy,
       }),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -278,7 +380,12 @@ describe('AgentCore.prepareTools', () => {
       { max_turns: 1 },
       toolConfig,
     );
-    return { core, getFunctionDeclarationsSpy };
+    return {
+      core,
+      debugSpy,
+      getFunctionDeclarationsSpy,
+      getFunctionDeclarationsFilteredSpy,
+    };
   }
 
   it('wildcard tools:["*"] inherits deferred tools (passes includeDeferred: true)', async () => {
@@ -311,17 +418,26 @@ describe('AgentCore.prepareTools', () => {
   it('absent toolConfig also inherits deferred tools (default = wildcard)', async () => {
     const fnDecls: FunctionDeclaration[] = [
       { name: 'lsp', description: 'language server' } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
     ];
     const { core, getFunctionDeclarationsSpy } = buildAgentForTools(
       undefined,
       fnDecls,
     );
 
-    await core.prepareTools();
+    const tools = await core.prepareTools();
 
     expect(getFunctionDeclarationsSpy).toHaveBeenCalledWith({
       includeDeferred: true,
     });
+    expect(tools.map((t) => t.name)).toEqual(['lsp']);
   });
 
   it('explicit tools list does NOT use the wildcard inherit path', async () => {
@@ -337,5 +453,304 @@ describe('AgentCore.prepareTools', () => {
     await core.prepareTools();
 
     expect(getFunctionDeclarationsSpy).not.toHaveBeenCalled();
+  });
+
+  it('excludes plan lifecycle tools from wildcard/default subagent tools', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: 'core_tool', description: 'core' } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    const tools = await core.prepareTools();
+
+    expect(tools.map((t) => t.name)).toEqual(['core_tool']);
+  });
+
+  it('does not re-enable plan lifecycle tools via explicit tool names', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      { name: ToolNames.READ_FILE, description: 'read' } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core, debugSpy, getFunctionDeclarationsFilteredSpy } =
+      buildAgentForTools(
+        {
+          tools: [
+            ToolNames.READ_FILE,
+            ToolNames.ENTER_PLAN_MODE,
+            ToolNames.EXIT_PLAN_MODE,
+          ],
+        },
+        fnDecls,
+      );
+
+    const tools = await core.prepareTools();
+
+    expect(getFunctionDeclarationsFilteredSpy).toHaveBeenCalledWith([
+      ToolNames.READ_FILE,
+    ]);
+    expect(tools.map((t) => t.name)).toEqual([ToolNames.READ_FILE]);
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered "${ToolNames.ENTER_PLAN_MODE}" from explicit subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered "${ToolNames.EXIT_PLAN_MODE}" from explicit subagent tool list`,
+    );
+  });
+
+  it('filters inline declarations using the full subagent exclusion floor', async () => {
+    const inlineSafe = {
+      name: 'inline_safe',
+      description: 'safe inline tool',
+    } as FunctionDeclaration;
+    const { core, debugSpy } = buildAgentForTools(
+      {
+        tools: [
+          { name: ToolNames.SEND_MESSAGE } as FunctionDeclaration,
+          { name: ToolNames.TASK_UPDATE } as FunctionDeclaration,
+          { name: ToolNames.ENTER_PLAN_MODE } as FunctionDeclaration,
+          { name: ToolNames.EXIT_PLAN_MODE } as FunctionDeclaration,
+          inlineSafe,
+        ],
+      },
+      [],
+    );
+
+    const tools = await core.prepareTools();
+
+    expect(tools).toEqual([inlineSafe]);
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.SEND_MESSAGE}" from subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.TASK_UPDATE}" from subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.ENTER_PLAN_MODE}" from subagent tool list`,
+    );
+    expect(debugSpy).toHaveBeenCalledWith(
+      `[prepareTools] Filtered inline declaration "${ToolNames.EXIT_PLAN_MODE}" from subagent tool list`,
+    );
+  });
+
+  it('keeps teammate coordination tools but excludes plan lifecycle tools', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      {
+        name: ToolNames.SEND_MESSAGE,
+        description: 'send message',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.TASK_UPDATE,
+        description: 'task update',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    let tools: FunctionDeclaration[] = [];
+    await runWithTeammateIdentity(
+      {
+        agentId: 'agent@test',
+        agentName: 'agent',
+        teamName: 'test',
+        isTeamLead: false,
+      },
+      async () => {
+        tools = await core.prepareTools();
+      },
+    );
+
+    expect(tools.map((t) => t.name)).toEqual([
+      ToolNames.SEND_MESSAGE,
+      ToolNames.TASK_UPDATE,
+    ]);
+  });
+
+  it('keeps exit_plan_mode for plan-required teammates only', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      {
+        name: ToolNames.SEND_MESSAGE,
+        description: 'send message',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    let tools: FunctionDeclaration[] = [];
+    await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      async () => {
+        tools = await core.prepareTools();
+      },
+    );
+
+    expect(tools.map((t) => t.name)).toEqual([
+      ToolNames.SEND_MESSAGE,
+      ToolNames.EXIT_PLAN_MODE,
+    ]);
+  });
+
+  it.each([ToolNames.ENTER_PLAN_MODE, ToolNames.EXIT_PLAN_MODE])(
+    'returns a dedicated message when filtered %s is called directly',
+    async (toolName) => {
+      const { core } = buildAgentForTools(undefined, []);
+
+      const result = await runWithAgentContext('test-subagent', () =>
+        core.runInAgentFrames(() =>
+          core.processFunctionCalls(
+            [
+              {
+                name: toolName,
+                args: { plan: 'Plan from filtered tool' },
+                id: 'call-1',
+              },
+            ],
+            new AbortController(),
+            'prompt-filtered-plan-tool',
+            1,
+            [{ name: ToolNames.READ_FILE } as FunctionDeclaration],
+          ),
+        ),
+      );
+
+      const response = result.messages[0]?.parts?.[0]?.functionResponse
+        ?.response as { error?: string } | undefined;
+      expect(response?.error).toContain('not available inside subagents');
+      expect(response?.error).toContain('return your plan');
+      expect(response?.error).not.toContain('not found');
+    },
+  );
+
+  // ─── Nested sub-agents ──────────────────────────────────────────
+  // The AgentTool is depth-gated: available to a sub-agent only while
+  // maxSubagentDepth still permits another level. prepareTools() reads the
+  // sub-agent's own 0-based depth from getCurrentAgentDepth(); a child sits
+  // at level (depth + 2), which must not exceed the cap.
+  const nestingDecls = (): FunctionDeclaration[] => [
+    { name: 'read_file', description: 'read' } as FunctionDeclaration,
+    {
+      name: ToolNames.AGENT,
+      description: 'spawn subagent',
+    } as FunctionDeclaration,
+  ];
+
+  it('nesting: includes AgentTool for a shallow subagent when depth permits', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    // One frame → getCurrentAgentDepth() === 0 (a top-level sub-agent).
+    const tools = await runWithAgentContext('lvl1', () => core.prepareTools());
+    expect(tools.map((t) => t.name)).toContain(ToolNames.AGENT);
+  });
+
+  it('nesting: excludes AgentTool at the leaf depth', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 2);
+    // Two nested frames → depth === 1 → level 2 → the leaf when max === 2.
+    const tools = await runWithAgentContext('lvl1', () =>
+      runWithAgentContext('lvl2', () => core.prepareTools()),
+    );
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('nesting: maxSubagentDepth=1 reproduces the old no-nesting behavior', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 1);
+    const tools = await runWithAgentContext('lvl1', () => core.prepareTools());
+    expect(tools.map((t) => t.name)).not.toContain(ToolNames.AGENT);
+  });
+
+  it('nesting: frameless prepareTools fails closed — AgentTool excluded', async () => {
+    // prepareTools() only ever serves agents, never the top-level session.
+    // A missing agent frame means the launch path forgot runWithAgentContext
+    // (codex review: AgentInteractive.start() before it established its
+    // frame); such an agent must not be depth-gated as the top-level session.
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    const tools = await core.prepareTools();
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('nesting: fork execution contexts never receive the AgentTool', async () => {
+    // The fork contract is context-sharing, not isolation — forks must not
+    // spawn. Depth would otherwise permit nesting here (one frame, max 5).
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    const tools = await runInForkContext(() =>
+      runWithAgentContext('lvl1', () => core.prepareTools()),
+    );
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('nesting: teammates never receive the AgentTool regardless of depth', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    const identity: TeammateIdentity = {
+      agentId: 'scribe@demo',
+      agentName: 'scribe',
+      teamName: 'demo',
+      isTeamLead: false,
+    };
+    const tools = await runWithTeammateIdentity(identity, () =>
+      runWithAgentContext('lvl1', () => core.prepareTools()),
+    );
+    expect(tools.map((t) => t.name)).not.toContain(ToolNames.AGENT);
+  });
+
+  it('nesting: explicit tools list includes AgentTool only when nesting is allowed', async () => {
+    const allowed = buildAgentForTools(
+      { tools: ['read_file', ToolNames.AGENT] },
+      nestingDecls(),
+      5,
+    );
+    const allowedTools = await runWithAgentContext('lvl1', () =>
+      allowed.core.prepareTools(),
+    );
+    expect(allowedTools.map((t) => t.name)).toContain(ToolNames.AGENT);
+
+    const denied = buildAgentForTools(
+      { tools: ['read_file', ToolNames.AGENT] },
+      nestingDecls(),
+      1,
+    );
+    const deniedTools = await runWithAgentContext('lvl1', () =>
+      denied.core.prepareTools(),
+    );
+    const deniedNames = deniedTools.map((t) => t.name);
+    expect(deniedNames).not.toContain(ToolNames.AGENT);
+    expect(deniedNames).toContain('read_file');
   });
 });

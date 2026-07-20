@@ -16,7 +16,10 @@ import type {
   HookInput,
   HookExecutionResult,
   UserPromptSubmitInput,
+  UserPromptExpansionInput,
   StopInput,
+  MessageDisplayInput,
+  ContextUsageData,
   SessionStartInput,
   SessionEndInput,
   SessionStartSource,
@@ -47,11 +50,17 @@ import type {
   TodoCompletedInput,
   TodoItem,
   TodoStatus,
+  InstructionsLoadedInput,
+  InstructionMemoryType,
+  InstructionLoadReason,
+  BackgroundTaskInfo,
+  CronJobInfo,
 } from './types.js';
 import { HookPhase, PermissionMode } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { logHookCall } from '../telemetry/loggers.js';
 import { HookCallEvent } from '../telemetry/types.js';
+import type { CronJob } from '../services/cronScheduler.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
 
@@ -98,6 +107,50 @@ export class HookEventHandler {
   }
 
   /**
+   * Snapshot of current background tasks for hook payloads.
+   * Non-blocking: reads registry state synchronously.
+   */
+  private getBackgroundTaskSnapshot(): BackgroundTaskInfo[] {
+    try {
+      const registry = this.config.getBackgroundTaskRegistry();
+      return registry.getAll().map((task) => ({
+        id: task.id,
+        status: task.status,
+        agent_type: task.subagentType ?? 'unknown',
+        started_at: new Date(task.startTime).toISOString(),
+        description: task.description,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Snapshot of current cron jobs for hook payloads.
+   * Non-blocking: reads scheduler state synchronously.
+   */
+  private getCronJobSnapshot(): CronJobInfo[] {
+    try {
+      const scheduler = this.config.getCronScheduler();
+      return scheduler.list().map((job: CronJob) => ({
+        id: job.id,
+        schedule: job.cronExpr,
+        prompt: job.prompt,
+        recurring: job.recurring,
+        next_run: job.fireAtMs
+          ? new Date(job.fireAtMs).toISOString()
+          : undefined,
+        last_run: job.lastFiredAt
+          ? new Date(job.lastFiredAt).toISOString()
+          : undefined,
+        enabled: true,
+      }));
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * Fire a UserPromptSubmit event
    * Called by handleHookExecutionRequest - executes hooks directly
    */
@@ -119,21 +172,111 @@ export class HookEventHandler {
   }
 
   /**
+   * Fire an InstructionsLoaded event.
+   * Called when instruction/context files are loaded during session startup or
+   * import resolution.
+   */
+  async fireInstructionsLoadedEvent(
+    filePath: string,
+    memoryType: InstructionMemoryType,
+    loadReason: InstructionLoadReason,
+    options: {
+      triggerFilePath?: string;
+      parentFilePath?: string;
+    } = {},
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: InstructionsLoadedInput = {
+      ...this.createBaseInput(HookEventName.InstructionsLoaded),
+      file_path: filePath,
+      memory_type: memoryType,
+      load_reason: loadReason,
+      trigger_file_path: options.triggerFilePath,
+      parent_file_path: options.parentFilePath,
+    };
+
+    return this.executeHooks(
+      HookEventName.InstructionsLoaded,
+      input,
+      {
+        filePath,
+      },
+      signal,
+    );
+  }
+
+  /**
+   * Fire a UserPromptExpansion event
+   * Called when a slash command expands into a prompt.
+   */
+  async fireUserPromptExpansionEvent(
+    commandName: string,
+    commandArgs: string,
+    prompt: string,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: UserPromptExpansionInput = {
+      ...this.createBaseInput(HookEventName.UserPromptExpansion),
+      command_name: commandName,
+      command_args: commandArgs,
+      prompt,
+    };
+
+    return this.executeHooks(
+      HookEventName.UserPromptExpansion,
+      input,
+      { commandName },
+      signal,
+    );
+  }
+
+  /**
    * Fire a Stop event
    * Called by handleHookExecutionRequest - executes hooks directly
    */
   async fireStopEvent(
     stopHookActive: boolean = false,
     lastAssistantMessage: string = '',
+    contextUsage?: ContextUsageData,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
     const input: StopInput = {
       ...this.createBaseInput(HookEventName.Stop),
       stop_hook_active: stopHookActive,
       last_assistant_message: lastAssistantMessage,
+      background_tasks: this.getBackgroundTaskSnapshot(),
+      crons: this.getCronJobSnapshot(),
+      ...contextUsage,
     };
 
     return this.executeHooks(HookEventName.Stop, input, undefined, signal);
+  }
+
+  /**
+   * Fire a MessageDisplay event
+   * Called repeatedly as the assistant's reply streams (before Stop). Fire-and-forget:
+   * callers should not await this on the critical streaming path — see client.ts, which
+   * fires it without blocking the next chunk's display.
+   */
+  async fireMessageDisplayEvent(
+    messageId: string,
+    displayedText: string,
+    isFinal: boolean,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: MessageDisplayInput = {
+      ...this.createBaseInput(HookEventName.MessageDisplay),
+      message_id: messageId,
+      displayed_text: displayedText,
+      is_final: isFinal,
+    };
+
+    return this.executeHooks(
+      HookEventName.MessageDisplay,
+      input,
+      undefined,
+      signal,
+    );
   }
 
   /**
@@ -200,6 +343,7 @@ export class HookEventHandler {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PreToolUseInput = {
       ...this.createBaseInput(HookEventName.PreToolUse),
@@ -207,6 +351,7 @@ export class HookEventHandler {
       tool_name: toolName,
       tool_input: toolInput,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -231,6 +376,7 @@ export class HookEventHandler {
     toolUseId: string,
     permissionMode: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseInput = {
       ...this.createBaseInput(HookEventName.PostToolUse),
@@ -239,6 +385,7 @@ export class HookEventHandler {
       tool_input: toolInput,
       tool_response: toolResponse,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
     };
 
     // Pass tool name as context for matcher filtering
@@ -264,11 +411,13 @@ export class HookEventHandler {
     isInterrupt?: boolean,
     permissionMode?: PermissionMode,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PostToolUseFailureInput = {
       ...this.createBaseInput(HookEventName.PostToolUseFailure),
       permission_mode: permissionMode ?? PermissionMode.Default,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
       tool_name: toolName,
       tool_input: toolInput,
       error: errorMessage,
@@ -404,12 +553,14 @@ export class HookEventHandler {
     toolUseId: string,
     reason: PermissionDeniedReason,
     signal?: AbortSignal,
+    tool_call_id?: string,
   ): Promise<AggregatedHookResult> {
     const input: PermissionDeniedInput = {
       ...this.createBaseInput(HookEventName.PermissionDenied),
       tool_name: toolName,
       tool_input: toolInput,
       tool_use_id: toolUseId,
+      ...(tool_call_id && { tool_call_id }),
       reason,
     };
 
@@ -472,6 +623,8 @@ export class HookEventHandler {
       agent_type: agentType,
       agent_transcript_path: agentTranscriptPath,
       last_assistant_message: lastAssistantMessage,
+      background_tasks: this.getBackgroundTaskSnapshot(),
+      crons: this.getCronJobSnapshot(),
     };
 
     // Pass agentType as context for matcher filtering

@@ -6,10 +6,10 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
-import { isAutoMemPath } from '../memory/paths.js';
+import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
+import { checkTeamMemorySecrets } from '../memory/team-memory-secret-guard.js';
 import type {
   FileDiff,
   ToolCallConfirmationDetails,
@@ -34,7 +34,7 @@ import {
 import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
@@ -53,6 +53,17 @@ import { CommitAttributionService } from '../services/commitAttribution.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
+const ARTIFACT_LIKE_EXTENSIONS = new Set([
+  '.htm',
+  '.html',
+  '.ipynb',
+  '.jpeg',
+  '.jpg',
+  '.pdf',
+  '.png',
+  '.svg',
+  '.webp',
+]);
 
 /**
  * Parameters for the WriteFile tool
@@ -103,12 +114,20 @@ class WriteFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Write operations always need user confirmation, except for managed
-   * auto-memory files which are written autonomously by the model.
+   * Write operations always need user confirmation, except for the private
+   * managed auto-memory files (user/project) which are written autonomously.
+   * Team memory is shared and committed to the repo, so it is NOT auto-allowed
+   * like the private tiers — writes default to 'ask'. (In AUTO_EDIT/YOLO the
+   * user has globally opted into auto-approval; team writes still surface in the
+   * git diff for review before commit.)
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const projectRoot = this.config.getProjectRoot();
-    if (isAutoMemPath(path.resolve(this.params.file_path), projectRoot)) {
+    const filePath = path.resolve(this.params.file_path);
+    if (isTeamAutoMemPath(filePath, projectRoot)) {
+      return 'ask';
+    }
+    if (isAnyAutoMemPath(filePath, projectRoot)) {
       return 'allow';
     }
     return 'ask';
@@ -218,13 +237,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     );
     const fileName = path.basename(this.params.file_path);
 
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
-      originalContent, // Original content (empty if new file or unreadable)
-      this.params.content, // Content after potential correction
+      originalContent,
+      this.params.content,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
 
     const confirmationDetails: ToolEditConfirmationDetails = {
@@ -254,6 +272,24 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     let detectedEncoding: string | undefined;
     let detectedLineEnding: LineEnding | undefined;
     const dirName = path.dirname(file_path);
+
+    const teamMemoryError = checkTeamMemorySecrets(
+      file_path,
+      content,
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      // Must carry `error` so the framework treats the blocked write as a
+      // failure (retry/telemetry), not a silent success. Mirrors edit.ts.
+      return {
+        llmContent: `[ERROR: ${teamMemoryError}]`,
+        returnDisplay: teamMemoryError,
+        error: {
+          message: teamMemoryError,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
 
     // Prior-read enforcement runs BEFORE we read the existing file:
     //  - rejecting a write should not first slurp the entire file
@@ -499,13 +535,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // However, if it was unreadable, currentContentForDiff will be empty.
       const currentContentForDiff = originalContent;
 
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
         currentContentForDiff,
         content,
         'Original',
         'Written',
-        DEFAULT_DIFF_OPTIONS,
       );
 
       const originallyProposedContent = ai_proposed_content || content;
@@ -525,6 +560,13 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         llmSuccessMessageParts.push(
           `User modified the \`content\` to be: ${content}`,
         );
+      }
+      const artifactReminder = buildRecordArtifactReminder(
+        this.config,
+        file_path,
+      );
+      if (artifactReminder) {
+        llmSuccessMessageParts.push(artifactReminder);
       }
 
       // Log file operation for telemetry (without diff_stat to avoid double-counting)
@@ -585,10 +627,8 @@ class WriteFileToolInvocation extends BaseToolInvocation<
         if (this.config.getDebugMode() && error.stack) {
           debugLogger.debug('Write file error stack:', error.stack);
         }
-      } else if (error instanceof Error) {
-        errorMsg = `Error writing to file: ${error.message}`;
       } else {
-        errorMsg = `Error writing to file: ${String(error)}`;
+        errorMsg = `Error writing to file: ${getErrorMessage(error)}`;
       }
 
       return {
@@ -601,6 +641,33 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       };
     }
   }
+}
+
+function buildRecordArtifactReminder(
+  config: Config,
+  filePath: string,
+): string | null {
+  if (!config.isRecordArtifactEnabled()) {
+    return null;
+  }
+  if (!ARTIFACT_LIKE_EXTENSIONS.has(path.extname(filePath).toLowerCase())) {
+    return null;
+  }
+  const relativePath = path.relative(config.getTargetDir(), filePath);
+  if (
+    !relativePath ||
+    relativePath === '..' ||
+    relativePath.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relativePath)
+  ) {
+    return null;
+  }
+  const workspacePath = relativePath.split(path.sep).join('/');
+  return (
+    `If this file is a reusable user-facing artifact, call ` +
+    `record_artifact with workspacePath "${workspacePath}" before telling ` +
+    `the user it is available in the artifacts panel.`
+  );
 }
 
 /**
@@ -662,9 +729,18 @@ The user has the ability to modify \`content\`. If modified, this will be stated
         }
       }
     } catch (statError: unknown) {
-      return `Error accessing path properties for validation: ${filePath}. Reason: ${
-        statError instanceof Error ? statError.message : String(statError)
-      }`;
+      return `Error accessing path properties for validation: ${filePath}. Reason: ${getErrorMessage(
+        statError,
+      )}`;
+    }
+
+    const teamMemoryError = checkTeamMemorySecrets(
+      filePath,
+      params.content ?? '',
+      this.config.getProjectRoot(),
+    );
+    if (teamMemoryError) {
+      return teamMemoryError;
     }
 
     return null;

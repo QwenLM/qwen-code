@@ -22,6 +22,7 @@ import {
   DiscoveredMCPTool,
   uiTelemetryService,
   getCoreSystemPrompt,
+  resolveInteractionMode,
   DEFAULT_TOKEN_LIMIT,
   ToolNames,
   buildSkillLlmContent,
@@ -108,10 +109,27 @@ export async function collectContextData(
   const contextWindowSize =
     contentGeneratorConfig.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
 
-  const apiTotalTokens = uiTelemetryService.getLastPromptTokenCount();
+  // Prefer the per-session chat's API-reported count. `uiTelemetryService` is
+  // a process-global singleton shared by every session in a `serve` daemon, so
+  // reading it here reports whichever session most recently completed a turn
+  // (#5763). The active chat carries the correct per-session value; fall back
+  // to the global singleton only when no chat exists yet (first /context,
+  // --continue resume before any send).
+  const geminiClient = config.getGeminiClient?.();
+  const apiTotalTokens = geminiClient?.isInitialized?.()
+    ? geminiClient.getChat().getLastPromptTokenCount()
+    : uiTelemetryService.getLastPromptTokenCount();
+  // Cached-content tokens have no per-chat mirror today (only the global
+  // singleton is written, geminiChat.ts), so this read stays global. It only
+  // refines the messages-vs-cache split, not the headline total or tier.
   const apiCachedTokens = uiTelemetryService.getLastCachedContentTokenCount();
 
-  const systemPromptText = getCoreSystemPrompt(undefined, modelName);
+  const systemPromptText = getCoreSystemPrompt(
+    undefined,
+    modelName,
+    undefined,
+    resolveInteractionMode(config),
+  );
   const systemPromptTokens = estimateTokens(systemPromptText);
 
   const toolRegistry = config.getToolRegistry();
@@ -131,11 +149,7 @@ export async function collectContextData(
   const builtinTools: ContextToolDetail[] = [];
   const mcpTools: ContextToolDetail[] = [];
   for (const tool of allTools) {
-    if (
-      tool.shouldDefer &&
-      !tool.alwaysLoad &&
-      !toolRegistry?.isDeferredToolRevealed(tool.name)
-    ) {
+    if (toolRegistry?.isDeferredAndHidden(tool.name)) {
       continue;
     }
     const toolJsonStr = JSON.stringify(tool.schema);
@@ -195,7 +209,10 @@ export async function collectContextData(
 
   const skillsTokens = skillToolDefinitionTokens + loadedBodiesTokens;
 
-  const thresholds = computeThresholds(contextWindowSize);
+  const thresholds = computeThresholds(
+    contextWindowSize,
+    config.getAutoCompactThreshold(),
+  );
   // Keep the `(window - auto)` buffer for the legacy three-segment progress
   // bar in ContextUsage.tsx — it visualizes the headroom between the auto
   // threshold and the window edge, which is exactly `contextWindowSize -
@@ -326,7 +343,7 @@ export async function collectContextData(
   // single render — that resolves the moment any send happens.
   //
   // TODO: plumb the chat history into collectContextData and use
-  // estimatePromptTokens(history, undefined, 0, imageTokenEstimate) here
+  // estimatePromptTokens(history, undefined, 0, 0, imageTokenEstimate) here
   // for same-source-of-truth as the cheap-gate. Defer because Config
   // doesn't expose the active chat instance today.
   const tierTokens = isEstimated ? rawOverhead : apiTotalTokens;
@@ -378,7 +395,10 @@ function fmtCategoryRow(
   contextWindowSize: number,
   indent = '  ',
 ): string {
-  const percentage = ((tokens / contextWindowSize) * 100).toFixed(1);
+  const percentage =
+    contextWindowSize > 0
+      ? ((tokens / contextWindowSize) * 100).toFixed(1)
+      : '0.0';
   const right = `${fmtTokens(tokens)} tokens (${percentage}%)`;
   const leftPart = `${indent}${label}`;
   const totalWidth = 56;
@@ -536,9 +556,8 @@ export const contextCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (context: CommandContext, args?: string) => {
-    const showDetails =
-      args?.trim().toLowerCase() === 'detail' ||
-      args?.trim().toLowerCase() === '-d';
+    const normalizedArgs = args?.trim().toLowerCase();
+    const showDetails = normalizedArgs === 'detail' || normalizedArgs === '-d';
     const executionMode = context.executionMode ?? 'interactive';
     const { config } = context.services;
     if (!config) {
@@ -564,13 +583,12 @@ export const contextCommand: SlashCommand = {
     if (executionMode === 'interactive') {
       context.ui.addItem(contextUsageItem, Date.now());
       return;
-    } else {
-      return {
-        type: 'message',
-        messageType: 'info',
-        content: formatContextUsageText(contextUsageItem),
-      };
     }
+    return {
+      type: 'message',
+      messageType: 'info',
+      content: formatContextUsageText(contextUsageItem),
+    };
   },
   subCommands: [
     {

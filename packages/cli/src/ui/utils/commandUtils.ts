@@ -9,6 +9,8 @@ import { spawn } from 'node:child_process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import type { SlashCommand } from '../commands/types.js';
 import type { RecentSlashCommands } from '../hooks/useSlashCompletion.js';
+import { writeOsc52 } from './clipboardUtils.js';
+import { toCodePoints } from './textUtils.js';
 
 /**
  * Common Windows console code pages (CP) used for encoding conversions.
@@ -148,9 +150,14 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackError instanceof Error &&
             (fallbackError as NodeJS.ErrnoException).code === 'ENOENT';
           if (xclipNotFound && xselNotFound) {
-            throw new Error(
-              'Please ensure xclip or xsel is installed and configured.',
-            );
+            // Neither xclip nor xsel available — try OSC 52 escape sequence
+            // (works over SSH without X11 display server).
+            if (!writeOsc52(text)) {
+              throw new Error(
+                'Clipboard unavailable: xclip/xsel not found and OSC 52 requires a TTY. Try running inside a terminal emulator.',
+              );
+            }
+            return;
           }
 
           let primaryMsg =
@@ -168,8 +175,11 @@ export const copyToClipboard = async (text: string): Promise<void> => {
             fallbackMsg = `xsel not found`;
           }
 
+          // Tools exist but failed — try OSC 52 before giving up
+          if (writeOsc52(text)) return;
+
           throw new Error(
-            `All copy commands failed. "${primaryMsg}", "${fallbackMsg}". `,
+            `Clipboard unavailable: xclip/xsel failed ("${primaryMsg}", "${fallbackMsg}") and OSC 52 requires a TTY. Try running inside a terminal emulator.`,
           );
         }
       }
@@ -217,11 +227,25 @@ export type MidInputSlashCommand = {
 };
 
 /**
+ * A slash command is completable mid-input (not at the start of the line) only
+ * when it is model-invocable and not hidden: built-in commands typed in the
+ * middle of text won't be executed, and hidden commands shouldn't surface.
+ * Shared so the dropdown filter, ghost-text fallback, and exact-match suppressor
+ * all agree on which commands qualify.
+ */
+export function isMidInputCompletableCommand(cmd: SlashCommand): boolean {
+  return cmd.modelInvocable === true && !cmd.hidden;
+}
+
+/**
  * Finds a slash command token that appears mid-input (not at position 0).
  * Only triggers when the "/" is preceded by whitespace and the cursor is
  * right at or within the partial command (no text between cursor and slash).
  *
  * Returns null when input starts with "/" (handled by start-of-line completion).
+ *
+ * `cursorOffset` and all returned positions are code-point offsets, so non-BMP
+ * characters before the token (e.g. "please 👍 /sto") don't skew the result.
  */
 export function findMidInputSlashCommand(
   input: string,
@@ -230,17 +254,22 @@ export function findMidInputSlashCommand(
   // Start-of-line slash handled by existing dropdown completion
   if (input.startsWith('/')) return null;
 
-  const beforeCursor = input.slice(0, cursorOffset);
+  // Work in code points. The slash and command chars are always BMP, so once we
+  // anchor on the slash, lengths map 1:1 to UTF-16 — only the prefix can drift.
+  const codePoints = toCodePoints(input);
+  const beforeCursor = codePoints.slice(0, cursorOffset).join('');
 
   // Match: whitespace then "/" then optional command chars, anchored at end
   // Capture whitespace instead of lookbehind to avoid JSC JIT regression
   const match = beforeCursor.match(/\s\/([a-zA-Z0-9_:-]*)$/);
-  if (!match || match.index === undefined) return null;
+  if (!match) return null;
 
-  const slashPos = match.index + 1; // +1 to skip the captured whitespace char
-  const textAfterSlash = input.slice(slashPos + 1);
+  // Command chars before the cursor; slash sits one code point ahead of them.
+  const partialCommand = match[1];
+  const slashPos = cursorOffset - 1 - partialCommand.length;
 
   // Extend to next space (or end of input) to find the full command name
+  const textAfterSlash = codePoints.slice(slashPos + 1).join('');
   const commandMatch = textAfterSlash.match(/^[a-zA-Z0-9_:-]*/);
   const fullCommand = commandMatch ? commandMatch[0] : '';
 
@@ -251,7 +280,7 @@ export function findMidInputSlashCommand(
   return {
     token: '/' + fullCommand,
     startPos: slashPos,
-    partialCommand: input.slice(slashPos + 1, cursorOffset),
+    partialCommand,
   };
 }
 
@@ -276,9 +305,7 @@ export function getBestSlashCommandMatch(
 
   const matches = commands
     .filter((cmd) => {
-      // Only suggest model-invocable commands for mid-input completion,
-      // since built-in commands typed in the middle of text won't be executed.
-      if (!cmd.modelInvocable) return false;
+      if (!isMidInputCompletableCommand(cmd)) return false;
       const name = cmd.name.toLowerCase();
       return name.startsWith(query) && (name !== query || !!cmd.argumentHint);
     })

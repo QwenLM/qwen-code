@@ -33,7 +33,11 @@ import { formatMemoryUsage } from '../utils/formatters.js';
 const MEMORY_SUBCOMMAND = 'memory';
 const CPU_PROFILE_SUBCOMMAND = 'cpu-profile';
 const ROLLBACK_SUBCOMMAND = 'rollback';
-const DOCTOR_SUBCOMMANDS = [MEMORY_SUBCOMMAND, CPU_PROFILE_SUBCOMMAND, ROLLBACK_SUBCOMMAND] as const;
+const DOCTOR_SUBCOMMANDS = [
+  MEMORY_SUBCOMMAND,
+  CPU_PROFILE_SUBCOMMAND,
+  ROLLBACK_SUBCOMMAND,
+] as const;
 function getHeapSnapshotSensitiveDataWarning(): string {
   return t(
     'Heap snapshot may contain prompts, file contents, tool results, and other sensitive data. Do not share it publicly without reviewing it first.',
@@ -58,7 +62,8 @@ export const doctorCommand: SlashCommand = {
   },
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  argumentHint: '[memory|cpu-profile|rollback] [--sample] [--snapshot] [--duration]',
+  argumentHint:
+    '[memory|cpu-profile|rollback] [--sample] [--snapshot] [--duration]',
   examples: [
     '/doctor',
     '/doctor memory',
@@ -437,6 +442,13 @@ const CPU_PROFILE_USAGE_HINT = '/doctor cpu-profile [--duration <seconds>]';
 const DEFAULT_CPU_PROFILE_DURATION_SEC = 30;
 const MAX_CPU_PROFILE_DURATION_SEC = 300;
 
+function parseCpuProfileDuration(raw: string | undefined): number {
+  if (!raw || !/^\d+$/.test(raw)) {
+    return NaN;
+  }
+  return Number(raw);
+}
+
 async function cpuProfileDoctorAction(
   context: CommandContext,
   args = '',
@@ -457,7 +469,7 @@ async function cpuProfileDoctorAction(
   const durationIdx = tokens.indexOf('--duration');
   if (durationIdx !== -1) {
     const rawVal = tokens[durationIdx + 1];
-    const val = rawVal ? parseInt(rawVal, 10) : NaN;
+    const val = parseCpuProfileDuration(rawVal);
     if (
       !Number.isFinite(val) ||
       val < 1 ||

@@ -10,22 +10,39 @@ import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
 import * as SdkClientStdioLib from '@modelcontextprotocol/sdk/client/stdio.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { AuthProviderType, type Config } from '../config/config.js';
+import {
+  AuthProviderType,
+  MCPServerConfig,
+  type Config,
+} from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
 import { MCPOAuthProvider } from '../mcp/oauth-provider.js';
+import { MCPOAuthTokenStorage } from '../mcp/oauth-token-storage.js';
+import { OAuthUtils } from '../mcp/oauth-utils.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
+import type { ResourceRegistry } from '../resources/resource-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import {
   addMCPStatusChangeListener,
+  attemptAutomaticMcpOAuth,
+  connectToMcpServer,
   createStreamableHttpCompatibilityFetch,
   createTransport,
+  discoverPrompts,
+  discoverResources,
   getAllMCPServerStatuses,
+  getMcpOAuthDialogInstruction,
   getMCPServerStatus,
   hasNetworkTransport,
   isEnabled,
+  listMcpPrompts,
+  listMcpResources,
   MCPServerStatus,
   McpClient,
+  mcpServerRequiresOAuth,
+  discoverTools,
   populateMcpServerCommand,
+  probeMcpServerForOAuth,
   removeMCPServerStatus,
   removeMCPStatusChangeListener,
   updateMCPServerStatus,
@@ -40,6 +57,7 @@ const mockDebugLogger = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
 const ORIGINAL_ENV = process.env;
+const TEST_MCP_TOOL_IDLE_TIMEOUT_MS = 300000;
 
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
@@ -53,17 +71,976 @@ vi.mock('../utils/debugLogger.js', () => ({
   createDebugLogger: vi.fn(() => mockDebugLogger),
 }));
 
+/**
+ * Minimal Config stub for the non-pool `discover()` path, which now reads
+ * `cliConfig.getResourceRegistry()` to register discovered resources. The
+ * returned registry just needs to accept `registerResource` without
+ * throwing — these tests assert on the constructor-injected tool/prompt
+ * registries, not the resource one.
+ */
+function cfgWithResources(): Config {
+  return {
+    getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
+    getResourceRegistry: () => ({
+      registerResource: vi.fn(),
+      removeResourcesByServer: vi.fn(),
+    }),
+  } as unknown as Config;
+}
+
 describe('mcp-client', () => {
   beforeEach(() => {
     vi.clearAllMocks();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
     process.env = ORIGINAL_ENV;
   });
 
+  describe('getMcpOAuthDialogInstruction', () => {
+    it('builds an authenticate instruction for the named MCP server', () => {
+      expect(getMcpOAuthDialogInstruction('authenticate', 'foo')).toBe(
+        "In interactive Qwen Code sessions, open the /mcp dialog to authenticate with MCP server 'foo'. For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-* or settings.json, then authenticate once in an interactive session before connecting.",
+      );
+    });
+
+    it('builds a re-authenticate instruction for the named MCP server', () => {
+      expect(getMcpOAuthDialogInstruction('re-authenticate', 'foo')).toBe(
+        "In interactive Qwen Code sessions, open the /mcp dialog to re-authenticate with MCP server 'foo'. For headless or SDK usage, configure MCP OAuth with qwen mcp add --oauth-* or settings.json, then re-authenticate once in an interactive session before connecting.",
+      );
+    });
+  });
+
+  describe('connectToMcpServer', () => {
+    afterEach(() => {
+      vi.mocked(MCPOAuthProvider).mockReset();
+      vi.mocked(MCPOAuthTokenStorage).mockReset();
+    });
+
+    function setupHttpOAuthRetry(connectError: Error) {
+      const connect = vi
+        .fn()
+        .mockRejectedValueOnce(connectError)
+        .mockResolvedValueOnce(undefined);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect,
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ clientId: 'client-id' });
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const authenticate = vi.fn().mockResolvedValue(undefined);
+      const getValidToken = vi.fn().mockResolvedValue('access-token');
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            authenticate,
+            getValidToken,
+          }) as unknown as MCPOAuthProvider,
+      );
+      const discoverOAuthConfig = vi
+        .spyOn(OAuthUtils, 'discoverOAuthConfig')
+        .mockResolvedValue({
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        });
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      return {
+        authenticate,
+        connect,
+        discoverOAuthConfig,
+        getCredentials,
+        getValidToken,
+        workspaceContext,
+      };
+    }
+
+    it('reports rejected stored OAuth tokens for SSE servers', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue({
+              clientId: 'client-id',
+            }),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken: vi.fn().mockResolvedValue('stored-token'),
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth token for SSE server 'sse-server' was rejected. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+    });
+
+    it('reports unusable stored OAuth tokens for SSE servers', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce(null);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+    });
+
+    it('reports unusable SSE OAuth tokens when token validation fails', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' });
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const getValidToken = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockRejectedValue(new Error('Token store unavailable'));
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            getValidToken,
+          }) as unknown as MCPOAuthProvider,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+        getMcpOAuthDialogInstruction('re-authenticate', 'sse-server');
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        "Failed to validate stored OAuth token for SSE server 'sse-server': Token store unavailable",
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('logs unusable SSE OAuth tokens when stored credentials disappear', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce(null);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+          getMcpOAuthDialogInstruction('re-authenticate', 'sse-server'),
+      );
+    });
+
+    it('reports SSE OAuth guidance when credentials fail to re-read after 401', async () => {
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockResolvedValueOnce({ clientId: 'client-id' })
+        .mockRejectedValueOnce(new Error('Corrupt token file'));
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "Stored OAuth tokens for SSE server 'sse-server' are expired or could not be refreshed. " +
+        getMcpOAuthDialogInstruction('re-authenticate', 'sse-server');
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(
+        "Failed to re-read stored OAuth credentials for SSE server 'sse-server' after 401: Corrupt token file",
+      );
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports missing OAuth configuration for SSE servers without stored credentials', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(
+        "401 error received for SSE server 'sse-server' without OAuth configuration. " +
+          getMcpOAuthDialogInstruction('authenticate', 'sse-server'),
+      );
+    });
+
+    it('continues connecting when the SSE OAuth credential pre-read fails', async () => {
+      const connect = vi.fn();
+      const getCredentials = vi
+        .fn()
+        .mockRejectedValueOnce(new Error('Corrupt token file'))
+        .mockResolvedValue(null);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect,
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+
+      await expect(
+        connectToMcpServer(
+          'sse-server',
+          { url: 'http://test-server/sse' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+      expect(connect).toHaveBeenCalledOnce();
+      expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+        "Failed to pre-read stored OAuth credentials for SSE server 'sse-server': Corrupt token file",
+      );
+    });
+
+    it('reports OAuth guidance when automatic OAuth handling fails', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(
+              'HTTP 401 Unauthorized\nwww-authenticate: Bearer realm="example", resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+            ),
+          ),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockResolvedValue(null);
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "Failed to handle automatic OAuth for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('retries HTTP connections after base-url OAuth discovery without www-authenticate', async () => {
+      const {
+        authenticate,
+        connect,
+        discoverOAuthConfig,
+        getValidToken,
+        workspaceContext,
+      } = setupHttpOAuthRetry(
+        new Error(
+          'Streamable HTTP error: Error POSTing to endpoint: {"error":"unauthorized"}',
+        ),
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(authenticate).toHaveBeenCalledWith(
+        'http-server',
+        {
+          enabled: true,
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        },
+        'http://test-server/mcp',
+      );
+      expect(getValidToken).toHaveBeenCalledWith('http-server', {
+        clientId: 'client-id',
+      });
+      expect(connect).toHaveBeenCalledTimes(2);
+      const oauthTransport = connect.mock.calls[1][0] as {
+        _requestInit?: { headers?: Record<string, string> };
+      };
+      expect(oauthTransport._requestInit?.headers).toMatchObject({
+        Authorization: 'Bearer access-token',
+      });
+    });
+
+    it('falls back to base-url OAuth discovery when www-authenticate lacks resource metadata', async () => {
+      const { authenticate, connect, discoverOAuthConfig, workspaceContext } =
+        setupHttpOAuthRetry(
+          new Error(
+            'HTTP 401 Unauthorized\nwww-authenticate: Bearer realm="example"',
+          ),
+        );
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).resolves.toBeDefined();
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(authenticate).toHaveBeenCalledWith(
+        'http-server',
+        {
+          enabled: true,
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: ['mcp.read'],
+        },
+        'http://test-server/mcp',
+      );
+      expect(connect).toHaveBeenCalledTimes(2);
+    });
+
+    it('reports OAuth guidance when post-discovery transport creation fails', async () => {
+      const config = { httpUrl: 'http://test-server/mcp' };
+      const { connect, discoverOAuthConfig, getValidToken, workspaceContext } =
+        setupHttpOAuthRetry(new Error('HTTP 401 Unauthorized'));
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getValidToken.mockImplementation(async () => {
+        config.httpUrl = 'not a valid URL';
+        return 'access-token';
+      });
+      const oauthMessage =
+        "Failed to create OAuth transport for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer('http-server', config, false, workspaceContext),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith('http://test-server');
+      expect(connect).toHaveBeenCalledTimes(1);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports OAuth guidance when post-discovery token lookup fails', async () => {
+      const { getValidToken, workspaceContext } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getValidToken.mockResolvedValue(null);
+      const oauthMessage =
+        "Failed to get OAuth token for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('reports OAuth guidance when post-discovery credentials are unavailable', async () => {
+      const { getCredentials, workspaceContext } = setupHttpOAuthRetry(
+        new Error('HTTP 401 Unauthorized'),
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 401 }),
+      );
+      getCredentials.mockReset();
+      getCredentials.mockResolvedValue(null);
+      const oauthMessage =
+        "Failed to get stored credentials for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server');
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+
+    it('wraps OAuth discovery errors with remediation guidance', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('HTTP 401 Unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        notification: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 404 }),
+      );
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockRejectedValue(
+        new Error('Discovery timed out'),
+      );
+      const workspaceContext = {
+        getDirectories: vi.fn().mockReturnValue([]),
+        onDirectoriesChanged: vi.fn().mockReturnValue(vi.fn()),
+      } as unknown as WorkspaceContext;
+      const oauthMessage =
+        "OAuth discovery failed for server 'http-server'. " +
+        getMcpOAuthDialogInstruction('authenticate', 'http-server') +
+        ' Original error: Discovery timed out';
+
+      await expect(
+        connectToMcpServer(
+          'http-server',
+          { httpUrl: 'http://test-server/mcp' },
+          false,
+          workspaceContext,
+        ),
+      ).rejects.toThrow(oauthMessage);
+      expect(mockDebugLogger.error).toHaveBeenCalledWith(oauthMessage);
+    });
+  });
+
   describe('McpClient', () => {
+    it('recovers HTTP connections when the SDK omits the 401 status', async () => {
+      const connect = vi
+        .fn()
+        .mockRejectedValueOnce(
+          new Error(
+            'Streamable HTTP error: Error POSTing to endpoint: {"error":"unauthorized"}',
+          ),
+        )
+        .mockResolvedValueOnce(undefined);
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect,
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+      } as unknown as ClientLib.Client);
+      const getCredentials = vi
+        .fn()
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce({ clientId: 'client-id' });
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials,
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const authenticate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            authenticate,
+            getValidToken: vi.fn().mockResolvedValue('access-token'),
+          }) as unknown as MCPOAuthProvider,
+      );
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockResolvedValue({
+        authorizationUrl: 'https://auth.example/authorize',
+        tokenUrl: 'https://auth.example/token',
+        scopes: ['mcp.read'],
+      });
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, {
+          status: 401,
+          headers: {
+            'www-authenticate':
+              'Bearer resource_metadata="https://example.com/.well-known/oauth-protected-resource"',
+          },
+        }),
+      );
+      const serverName = 'active-http-oauth-server';
+      const serverConfig = {
+        httpUrl: 'https://example.com/mcp',
+        headers: { 'X-Tenant': 'tenant-a' },
+      };
+      const client = new McpClient(
+        serverName,
+        serverConfig,
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await expect(client.connect()).rejects.toThrow('unauthorized');
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(mcpServerRequiresOAuth.has(serverName)).toBe(false);
+
+      await expect(
+        Promise.all([
+          probeMcpServerForOAuth(serverName, serverConfig),
+          probeMcpServerForOAuth(serverName, serverConfig),
+        ]),
+      ).resolves.toEqual([true, true]);
+
+      expect(fetchSpy).toHaveBeenCalledWith(
+        'https://example.com/mcp',
+        expect.objectContaining({
+          method: 'HEAD',
+          headers: expect.objectContaining({ 'X-Tenant': 'tenant-a' }),
+          redirect: 'manual',
+        }),
+      );
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(mcpServerRequiresOAuth.get(serverName)).toBe(true);
+      expect(authenticate).not.toHaveBeenCalled();
+
+      await expect(
+        attemptAutomaticMcpOAuth(serverName, serverConfig, false),
+      ).resolves.toBe(false);
+      expect(authenticate).not.toHaveBeenCalled();
+
+      await expect(
+        Promise.all([
+          attemptAutomaticMcpOAuth(serverName, serverConfig, true),
+          attemptAutomaticMcpOAuth(serverName, serverConfig, true),
+        ]),
+      ).resolves.toEqual([true, true]);
+      await expect(client.connect()).resolves.toBeUndefined();
+
+      expect(authenticate).toHaveBeenCalledOnce();
+      expect(connect).toHaveBeenCalledTimes(2);
+      expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
+      expect(mcpServerRequiresOAuth.has(serverName)).toBe(false);
+    });
+
+    it('preserves a captured OAuth challenge when the SDK error only reports 401', async () => {
+      const serverName = 'status-only-http-oauth-server';
+      const serverConfig = { httpUrl: 'https://example.com/mcp' };
+      const resourceMetadataUrl =
+        'https://example.com/.well-known/oauth-protected-resource';
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, {
+          status: 401,
+          headers: {
+            'www-authenticate': `Bearer resource_metadata="${resourceMetadataUrl}"`,
+          },
+        }),
+      );
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockImplementation(async (transport: unknown) => {
+          const transportFetch = (transport as { _fetch: typeof fetch })._fetch;
+          await transportFetch(serverConfig.httpUrl, { method: 'POST' });
+          throw new Error('Streamable HTTP error: HTTP 401 Unauthorized');
+        }),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const authenticate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () => ({ authenticate }) as unknown as MCPOAuthProvider,
+      );
+      const discoverOAuthConfig = vi
+        .spyOn(OAuthUtils, 'discoverOAuthConfig')
+        .mockResolvedValue({
+          authorizationUrl: 'https://auth.example/authorize',
+          tokenUrl: 'https://auth.example/token',
+          scopes: [],
+        });
+      const client = new McpClient(
+        serverName,
+        serverConfig,
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await expect(client.connect()).rejects.toThrow('HTTP 401 Unauthorized');
+      await expect(
+        attemptAutomaticMcpOAuth(serverName, serverConfig, true),
+      ).resolves.toBe(true);
+
+      expect(discoverOAuthConfig).toHaveBeenCalledWith(resourceMetadataUrl);
+      expect(authenticate).toHaveBeenCalledOnce();
+      expect(fetchSpy).toHaveBeenCalledOnce();
+    });
+
+    it('does not classify a non-401 HTTP failure as OAuth', async () => {
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi
+          .fn()
+          .mockRejectedValue(
+            new Error(
+              'HTTP 403 Forbidden\nwww-authenticate: Bearer error="insufficient_scope"',
+            ),
+          ),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+        new Response(null, { status: 503 }),
+      );
+      const serverName = 'active-http-non-oauth-server';
+      const client = new McpClient(
+        serverName,
+        { httpUrl: 'https://example.com/mcp' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      mcpServerRequiresOAuth.set(serverName, true);
+
+      await expect(client.connect()).rejects.toThrow('HTTP 403 Forbidden');
+
+      await expect(
+        probeMcpServerForOAuth(serverName, {
+          httpUrl: 'https://example.com/mcp',
+        }),
+      ).resolves.toBe(false);
+
+      expect(mcpServerRequiresOAuth.has(serverName)).toBe(false);
+    });
+
+    it('serializes browser OAuth across servers and isolates requirements by URL', async () => {
+      const firstConfig = { httpUrl: 'https://first.example/mcp' };
+      const secondConfig = { httpUrl: 'https://second.example/mcp' };
+      const unauthorized = Object.assign(new Error('unauthorized'), {
+        status: 401,
+      });
+      await probeMcpServerForOAuth('queued-first', firstConfig, unauthorized);
+      await probeMcpServerForOAuth('queued-second', secondConfig, unauthorized);
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockResolvedValue({
+        authorizationUrl: 'https://auth.example/authorize',
+        tokenUrl: 'https://auth.example/token',
+        scopes: [],
+      });
+      let activeAuthentications = 0;
+      let maxActiveAuthentications = 0;
+      const authenticate = vi.fn().mockImplementation(async () => {
+        activeAuthentications += 1;
+        maxActiveAuthentications = Math.max(
+          maxActiveAuthentications,
+          activeAuthentications,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        activeAuthentications -= 1;
+      });
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () => ({ authenticate }) as unknown as MCPOAuthProvider,
+      );
+
+      await expect(
+        attemptAutomaticMcpOAuth(
+          'queued-first',
+          { httpUrl: 'https://other.example/mcp' },
+          true,
+        ),
+      ).resolves.toBe(false);
+      await expect(
+        Promise.all([
+          attemptAutomaticMcpOAuth('queued-first', firstConfig, true),
+          attemptAutomaticMcpOAuth('queued-second', secondConfig, true),
+        ]),
+      ).resolves.toEqual([true, true]);
+
+      expect(authenticate).toHaveBeenCalledTimes(2);
+      expect(maxActiveAuthentications).toBe(1);
+    });
+
+    it('times out automatic OAuth so discovery can settle', async () => {
+      vi.useFakeTimers();
+      const serverName = 'hanging-oauth-server';
+      const serverConfig = { httpUrl: 'https://hanging.example/mcp' };
+      const unauthorized = Object.assign(new Error('unauthorized'), {
+        status: 401,
+      });
+      await probeMcpServerForOAuth(serverName, serverConfig, unauthorized);
+      vi.spyOn(OAuthUtils, 'discoverOAuthConfig').mockResolvedValue({
+        authorizationUrl: 'https://auth.example/authorize',
+        tokenUrl: 'https://auth.example/token',
+        scopes: [],
+      });
+      vi.mocked(MCPOAuthProvider).mockImplementation(
+        () =>
+          ({
+            authenticate: vi.fn(() => new Promise(() => undefined)),
+          }) as unknown as MCPOAuthProvider,
+      );
+
+      const recovery = attemptAutomaticMcpOAuth(serverName, serverConfig, true);
+      await vi.advanceTimersByTimeAsync(60_000);
+
+      await expect(recovery).resolves.toBe(false);
+    });
+
+    it('ignores stale OAuth probe results after the requirement is cleared', async () => {
+      let resolveProbe!: (response: Response) => void;
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockReturnValue(
+        new Promise<Response>((resolve) => {
+          resolveProbe = resolve;
+        }),
+      );
+      const serverName = 'cleared-oauth-probe-server';
+      const serverConfig = { httpUrl: 'https://example.com/mcp' };
+      vi.mocked(ClientLib.Client).mockReturnValue({
+        connect: vi.fn().mockRejectedValue(new Error('unauthorized')),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
+      } as unknown as ClientLib.Client);
+      vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+        () =>
+          ({
+            getCredentials: vi.fn().mockResolvedValue(null),
+          }) as unknown as MCPOAuthTokenStorage,
+      );
+      const client = new McpClient(
+        serverName,
+        serverConfig,
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+      await expect(client.connect()).rejects.toThrow('unauthorized');
+
+      const probe = probeMcpServerForOAuth(serverName, serverConfig);
+      client.clearOAuthState();
+      resolveProbe(new Response(null, { status: 401 }));
+
+      await expect(probe).resolves.toBe(false);
+      expect(fetchSpy).toHaveBeenCalledOnce();
+      expect(mcpServerRequiresOAuth.has(serverName)).toBe(false);
+    });
+
+    it('clears only the matching URL from the name-level OAuth marker', async () => {
+      const serverName = 'shared-name-oauth-server';
+      const firstConfig = { httpUrl: 'https://first.example/mcp' };
+      const secondConfig = { httpUrl: 'https://second.example/mcp' };
+      const unauthorized = Object.assign(new Error('unauthorized'), {
+        status: 401,
+      });
+      await probeMcpServerForOAuth(serverName, firstConfig, unauthorized);
+      await probeMcpServerForOAuth(serverName, secondConfig, unauthorized);
+      const registries = [
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+      ] as const;
+      const firstClient = new McpClient(
+        serverName,
+        firstConfig,
+        ...registries,
+        false,
+      );
+      const secondClient = new McpClient(
+        serverName,
+        secondConfig,
+        ...registries,
+        false,
+      );
+
+      firstClient.clearOAuthState();
+      expect(mcpServerRequiresOAuth.get(serverName)).toBe(true);
+
+      secondClient.clearOAuthState();
+      expect(mcpServerRequiresOAuth.has(serverName)).toBe(false);
+    });
+
     it('should discover tools', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -72,6 +1049,7 @@ describe('mcp-client', () => {
         getStatus: vi.fn(),
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -102,8 +1080,79 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await client.discover({} as Config);
+      await client.discover(cfgWithResources());
       expect(mockedMcpToTool).toHaveBeenCalledOnce();
+    });
+
+    it('stores server instructions returned during initialization', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getInstructions: vi.fn().mockReturnValue('Use concise replies.'),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+
+      const client = new McpClient(
+        'test-server',
+        {
+          command: 'test-command',
+        },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        {} as PromptRegistry,
+        {
+          getDirectories: vi.fn().mockReturnValue([]),
+        } as unknown as WorkspaceContext,
+        false,
+      );
+
+      await client.connect();
+
+      expect(client.getInstructions()).toBe('Use concise replies.');
+    });
+
+    it('readResource does not gate on the resources capability (lenient read)', async () => {
+      // Regression guard for the discover/read parity bug: a server that
+      // answers resources/read but under-declares the `resources` capability
+      // must still be readable (matching the lenient `listMcpResources`).
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}), // not declared
+        request: vi.fn().mockResolvedValue({
+          contents: [{ uri: 'res://doc', text: 'BODY' }],
+        }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const result = await client.readResource('res://doc');
+      expect(mockedClient.request).toHaveBeenCalledWith(
+        { method: 'resources/read', params: { uri: 'res://doc' } },
+        expect.anything(),
+        undefined,
+      );
+      expect((result.contents[0] as { text: string }).text).toBe('BODY');
     });
 
     it('should not skip tools even if a parameter is missing a type', async () => {
@@ -115,6 +1164,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         tool: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -161,7 +1211,7 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await client.discover({} as Config);
+      await client.discover(cfgWithResources());
       expect(mockedToolRegistry.registerTool).toHaveBeenCalledTimes(2);
     });
 
@@ -175,6 +1225,7 @@ describe('mcp-client', () => {
         setRequestHandler: vi.fn(),
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockRejectedValue(new Error('Test error')),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -196,8 +1247,8 @@ describe('mcp-client', () => {
         false,
       );
       await client.connect();
-      await expect(client.discover({} as Config)).rejects.toThrow(
-        'No prompts or tools found on the server.',
+      await expect(client.discover(cfgWithResources())).rejects.toThrow(
+        'No prompts, tools, or resources found on the server.',
       );
     });
 
@@ -220,6 +1271,7 @@ describe('mcp-client', () => {
         getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
         request: vi.fn().mockRejectedValue(new Error('tools/list crashed')),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -246,12 +1298,746 @@ describe('mcp-client', () => {
       // discover failure we're about to assert against.
       expect(client.getStatus()).toBe(MCPServerStatus.CONNECTED);
 
-      await expect(client.discover({} as Config)).rejects.toThrow();
+      await expect(client.discover(cfgWithResources())).rejects.toThrow();
 
       expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
       expect(getMCPServerStatus(serverName)).toBe(MCPServerStatus.DISCONNECTED);
     });
+
+    it('discoverAndReturn returns tools and prompts WITHOUT registering them', async () => {
+      // F2 (#4175) pool path: a single shared McpClient produces this
+      // snapshot once; per-session SessionMcpView instances each register
+      // a filtered copy. The bare method must therefore NOT touch any
+      // registry — otherwise sharing a snapshot across sessions would
+      // double-register or cross-contaminate.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'pure-prompt', description: 'p' }],
+        }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'pure-tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const client = new McpClient(
+        'pure-server',
+        { command: 'test-command' },
+        toolRegistry,
+        promptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
+
+      expect(snapshot.tools).toHaveLength(1);
+      expect(snapshot.tools[0].serverToolName).toBe('pure-tool');
+      expect(snapshot.prompts).toHaveLength(1);
+      expect(snapshot.prompts[0].name).toBe('pure-prompt');
+      expect(snapshot.prompts[0].serverName).toBe('pure-server');
+      expect(typeof snapshot.prompts[0].invoke).toBe('function');
+      // The critical assertion: registries untouched.
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
+    });
+
+    it('marks discovered tools alwaysLoad when the MCP server config requests it', async () => {
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'chrome_tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'chrome-devtools',
+        {
+          command: 'test-command',
+          alwaysLoadTools: true,
+        },
+        mockedClient,
+        cfgWithResources(),
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0].alwaysLoad).toBe(true);
+    });
+
+    it('discoverAndReturn with { applyConfigFilters: false } ignores config filters and trust for shared pool snapshots', async () => {
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'allowed' },
+              { name: 'filtered_out' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const client = new McpClient(
+        'pure-filter-server',
+        new MCPServerConfig(
+          'test-command',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          ['allowed'],
+          ['filtered_out'],
+        ),
+        toolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      // R23 T1: pool callers explicitly opt out of filters via the
+      // `applyConfigFilters: false` opts argument. Default
+      // `discoverAndReturn(cliConfig)` (no opts) applies filters,
+      // matching the legacy `discover()` semantics expected by
+      // non-pool consumers.
+      const snapshot = await client.discoverAndReturn(cfgWithResources(), {
+        applyConfigFilters: false,
+      });
+
+      expect(snapshot.tools.map((tool) => tool.serverToolName)).toEqual([
+        'allowed',
+        'filtered_out',
+      ]);
+      expect(snapshot.tools.every((tool) => tool.trust === undefined)).toBe(
+        true,
+      );
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn (default) applies config filters and trust — legacy non-pool callers (R23 T1)', async () => {
+      // R23 T1 regression: pre-fix `discoverAndReturn` hardcoded
+      // `{ applyConfigFilters: false }`, so legacy `discover()`
+      // (which delegates here) silently lost filtering and trust.
+      // Operators with `trust: true` saw unexpected permission
+      // prompts, and `excludeTools` was ignored.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [
+              { name: 'allowed' },
+              { name: 'filtered_out' },
+            ],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const client = new McpClient(
+        'legacy-filter-server',
+        new MCPServerConfig(
+          'test-command',
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          undefined,
+          true,
+          undefined,
+          ['allowed'],
+          ['filtered_out'],
+        ),
+        toolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+
+      // No opts → default applyConfigFilters=true → filters applied.
+      const snapshot = await client.discoverAndReturn(cfgWithResources());
+
+      // `excludeTools: ['filtered_out']` excludes the second tool;
+      // `includeTools: ['allowed']` keeps the first.
+      expect(snapshot.tools.map((tool) => tool.serverToolName)).toEqual([
+        'allowed',
+      ]);
+      // `trust: true` config → tools carry trust=true (pre-fix this
+      // was always undefined because discoverAndReturn forced
+      // applyConfigFilters=false).
+      expect(snapshot.tools[0].trust).toBe(true);
+    });
+
+    it('discoverAndReturn throws "No prompts or tools found" when both empty', async () => {
+      // Preserves the discover() pre-F2 invariant — the wrapping
+      // McpClientManager / pool entry uses this signal to mark the
+      // entry as failed (vs "server up, just empty").
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({ prompts: [] }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      // Forward defense (per code-reviewer P2.4): also assert registries
+      // were NOT touched even on the throw path. Catches a future
+      // refactor in commits 2-6 that accidentally registers a partial
+      // batch before the "no prompts or tools" guard fires.
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const client = new McpClient(
+        'empty-server',
+        { command: 'test-command' },
+        toolRegistry,
+        promptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('No prompts, tools, or resources found on the server.');
+      // Status flipped to DISCONNECTED (same as discover() path).
+      expect(client.getStatus()).toBe(MCPServerStatus.DISCONNECTED);
+      // Registries strictly untouched even on throw — pure method invariant.
+      expect(toolRegistry.registerTool).not.toHaveBeenCalled();
+      expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn throws when called before connect()', async () => {
+      const client = new McpClient(
+        'unconnected-server',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      // Status starts DISCONNECTED; discoverAndReturn must reject without
+      // hitting the network.
+      await expect(
+        client.discoverAndReturn(cfgWithResources()),
+      ).rejects.toThrow('Client is not connected.');
+    });
+
+    it('discover() delegates to discoverAndReturn and registers both tools and prompts', async () => {
+      // Backward-compat sanity: the historical discover() entry point
+      // still produces side effects in BOTH registries. Previously
+      // prompt registration was a side effect inside discoverPrompts;
+      // post-F2-1 it is an explicit step in discover() after
+      // discoverAndReturn returns.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'p1' }, { name: 'p2' }],
+        }),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 't1' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+      const toolRegistry = {
+        registerTool: vi.fn(),
+      } as unknown as ToolRegistry;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const client = new McpClient(
+        'compat-server',
+        { command: 'test-command' },
+        toolRegistry,
+        promptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await client.discover(cfgWithResources());
+      expect(toolRegistry.registerTool).toHaveBeenCalledTimes(1);
+      expect(promptRegistry.registerPrompt).toHaveBeenCalledTimes(2);
+    });
+
+    it('discover() registers discovered resources into the Config ResourceRegistry', async () => {
+      const registerResource = vi.fn();
+      const removeResourcesByServer = vi.fn();
+      const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
+        getResourceRegistry: () => ({
+          registerResource,
+          removeResourcesByServer,
+        }),
+      } as unknown as Config;
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockImplementation((req: { method?: string }) =>
+            req.method === 'resources/list'
+              ? Promise.resolve({ resources: [{ uri: 'res://a', name: 'a' }] })
+              : Promise.resolve({ prompts: [] }),
+          ),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await client.discover(cfg);
+      // Clear-then-register so re-discovery (reconnect) is idempotent and a
+      // dropped resource doesn't linger.
+      expect(removeResourcesByServer).toHaveBeenCalledWith('srv');
+      expect(registerResource).toHaveBeenCalledWith(
+        expect.objectContaining({ uri: 'res://a', serverName: 'srv' }),
+      );
+    });
+
+    it('discover() does NOT clear resources when the list returns empty (transient-failure guard)', async () => {
+      // listMcpResources swallows a transient resources/list failure to [].
+      // With tools present (discovery still succeeds), an empty resource list
+      // must NOT wipe the registry.
+      const registerResource = vi.fn();
+      const removeResourcesByServer = vi.fn();
+      const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
+        getResourceRegistry: () => ({
+          registerResource,
+          removeResourcesByServer,
+        }),
+      } as unknown as Config;
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockResolvedValue({ resources: [], prompts: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      // A tool exists so discovery does not fail with "no prompts/tools/resources".
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [{ name: 't1' }] }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        { registerTool: vi.fn() } as unknown as ToolRegistry,
+        { registerPrompt: vi.fn() } as unknown as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      await client.discover(cfg);
+      expect(removeResourcesByServer).not.toHaveBeenCalled();
+      expect(registerResource).not.toHaveBeenCalled();
+    });
+
+    it('discoverAndReturn connects a resource-only server (does not throw)', async () => {
+      // The failed-discovery guard now counts resources: a server exposing
+      // only resources (no tools/prompts) is a successful discovery.
+      const mockedClient = {
+        connect: vi.fn(),
+        registerCapabilities: vi.fn(),
+        setRequestHandler: vi.fn(),
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockImplementation((req: { method?: string }) =>
+            req.method === 'resources/list'
+              ? Promise.resolve({ resources: [{ uri: 'res://a', name: 'a' }] })
+              : Promise.resolve({ prompts: [] }),
+          ),
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+        getInstructions: vi.fn(),
+      };
+      vi.mocked(ClientLib.Client).mockReturnValue(
+        mockedClient as unknown as ClientLib.Client,
+      );
+      vi.spyOn(SdkClientStdioLib, 'StdioClientTransport').mockReturnValue(
+        {} as SdkClientStdioLib.StdioClientTransport,
+      );
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () => Promise.resolve({ functionDeclarations: [] }),
+      } as unknown as GenAiLib.CallableTool);
+      const client = new McpClient(
+        'srv',
+        { command: 'test-command' },
+        {} as ToolRegistry,
+        {} as PromptRegistry,
+        {} as WorkspaceContext,
+        false,
+      );
+      await client.connect();
+      const snap = await client.discoverAndReturn(cfgWithResources());
+      expect(snap.resources).toHaveLength(1);
+      expect(snap.tools).toHaveLength(0);
+      expect(snap.prompts).toHaveLength(0);
+    });
   });
+
+  describe('listMcpPrompts (F2 pure helper)', () => {
+    it('returns enriched DiscoveredMCPPrompt[] with serverName + bound invoke', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [
+            { name: 'greet', description: 'Greet a user' },
+            { name: 'farewell' },
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+
+      const result = await listMcpPrompts('my-server', mockClient);
+      expect(result).toHaveLength(2);
+      expect(result[0].serverName).toBe('my-server');
+      expect(result[0].name).toBe('greet');
+      expect(typeof result[0].invoke).toBe('function');
+      expect(result[1].name).toBe('farewell');
+    });
+
+    it('attempts prompts/list even when the prompts capability is undeclared (lenient)', async () => {
+      // Regression guard: pre-fix this returned [] WITHOUT a request when
+      // `capabilities.prompts` was absent, hiding prompts from servers that
+      // under-declare the capability. We now always attempt the call.
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi
+          .fn()
+          .mockRejectedValue(new Error('MCP error -32601: Method not found')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('no-prompts', mockClient);
+      expect(result).toEqual([]);
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+    });
+
+    it('lists prompts from a server that omits the prompts capability but still answers', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'greet' }],
+        }),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('under-declared', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('greet');
+      expect(result[0].serverName).toBe('under-declared');
+    });
+
+    it('returns [] on protocol error (server up but list call rejects)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(new Error('boom')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('flaky', mockClient);
+      expect(result).toEqual([]);
+    });
+
+    it('retries on transient ECONNRESET and succeeds on second attempt', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('read ECONNRESET'))
+          .mockResolvedValueOnce({
+            prompts: [{ name: 'greet', description: 'Greet' }],
+          }),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('retry-prompts', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('greet');
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(2);
+    });
+
+    it('exhausts retries on persistent transient errors and returns []', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(new Error('read ECONNRESET')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('always-failing', mockClient);
+      expect(result).toEqual([]);
+      // 1 initial + 2 retries = 3 total calls
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('listMcpResources', () => {
+    it('returns enriched DiscoveredMCPResource[] with serverName', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockResolvedValue({
+          resources: [
+            { uri: 'file:///a.txt', name: 'a' },
+            { uri: 'file:///b.txt', name: 'b', mimeType: 'text/plain' },
+          ],
+        }),
+      } as unknown as ClientLib.Client;
+
+      const result = await listMcpResources('my-server', mockClient);
+      expect(result).toHaveLength(2);
+      expect(result[0].serverName).toBe('my-server');
+      expect(result[0].uri).toBe('file:///a.txt');
+      expect(result[1].mimeType).toBe('text/plain');
+      // Resources carry no bound invoke (unlike prompts).
+      expect((result[0] as Record<string, unknown>)['invoke']).toBeUndefined();
+    });
+
+    it('attempts resources/list even when the resources capability is undeclared (lenient)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi
+          .fn()
+          .mockRejectedValue(new Error('MCP error -32601: Method not found')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('no-resources', mockClient);
+      expect(result).toEqual([]);
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(1);
+    });
+
+    it('returns [] on protocol error (server up but list call rejects)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('boom')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('flaky', mockClient);
+      expect(result).toEqual([]);
+    });
+
+    it('treats JSON-RPC code -32601 as method-absent even when the message differs (no error logged)', async () => {
+      // A spec-compliant server signals an unimplemented method by the
+      // numeric code; the message text is not guaranteed (it may be
+      // localized or worded "Method not implemented"). It must not be
+      // logged as an error.
+      const err = Object.assign(new Error('Método no implementado'), {
+        code: -32601,
+      });
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({}),
+        request: vi.fn().mockRejectedValue(err),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('localized', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('logs genuinely unexpected errors (not method-absent)', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('connection reset')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('broken', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).toHaveBeenCalled();
+    });
+
+    it('swallows the exact "Method not found" message even without a code', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('Method not found')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('no-method', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).not.toHaveBeenCalled();
+    });
+
+    it('does NOT swallow an unrelated error that merely contains "method not found" (case-sensitive)', async () => {
+      // Regression guard for the message-substring narrowing: the old broad
+      // /method not found/i would have hidden this genuine failure.
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValue(
+            new Error('Error in method not found handler: null pointer'),
+          ),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('weird', mockClient);
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.error).toHaveBeenCalled();
+    });
+
+    it('retries on transient ECONNRESET and succeeds on second attempt', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('read ECONNRESET'))
+          .mockResolvedValueOnce({
+            resources: [{ uri: 'file:///a.txt', name: 'a' }],
+          }),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('retry-server', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('a');
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(2);
+    });
+
+    it('exhausts retries on persistent transient errors and returns []', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('read ECONNRESET')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('always-failing', mockClient);
+      expect(result).toEqual([]);
+      // 1 initial + 2 retries = 3 total calls
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  describe('discoverResources wrapper', () => {
+    it('registers discovered resources into the supplied ResourceRegistry', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockResolvedValue({
+          resources: [{ uri: 'file:///x.txt', name: 'x' }],
+        }),
+      } as unknown as ClientLib.Client;
+      const resourceRegistry = {
+        registerResource: vi.fn(),
+      } as unknown as ResourceRegistry;
+      const out = await discoverResources(
+        'wrapper-server',
+        mockClient,
+        resourceRegistry,
+      );
+      expect(resourceRegistry.registerResource).toHaveBeenCalledTimes(1);
+      expect(out).toHaveLength(1);
+      expect(out[0].uri).toBe('file:///x.txt');
+      expect(out[0].serverName).toBe('wrapper-server');
+    });
+  });
+
+  describe('discoverPrompts wrapper (backward compat after F2-1 split)', () => {
+    it('still registers prompts into the supplied PromptRegistry', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockResolvedValue({
+          prompts: [{ name: 'register-me' }],
+        }),
+      } as unknown as ClientLib.Client;
+      const promptRegistry = {
+        registerPrompt: vi.fn(),
+      } as unknown as PromptRegistry;
+      const out = await discoverPrompts(
+        'wrapper-server',
+        mockClient,
+        promptRegistry,
+      );
+      expect(promptRegistry.registerPrompt).toHaveBeenCalledTimes(1);
+      expect(out).toHaveLength(1);
+      expect(out[0].name).toBe('register-me');
+      // Historical contract: return type strips serverName/invoke.
+      expect((out[0] as Record<string, unknown>)['serverName']).toBeUndefined();
+      expect((out[0] as Record<string, unknown>)['invoke']).toBeUndefined();
+    });
+  });
+
   describe('appendMcpServerCommand', () => {
     it('should do nothing if no MCP servers or command are configured', () => {
       const out = populateMcpServerCommand({}, undefined);
@@ -311,6 +2097,39 @@ describe('mcp-client', () => {
         });
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         expect((transport as any)._fetch).toEqual(expect.any(Function));
+      });
+
+      it('captures OAuth challenges from the initial HTTP handshake', async () => {
+        const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+          new Response(null, {
+            status: 401,
+            headers: {
+              'www-authenticate':
+                'Bearer resource_metadata="https://test-server/.well-known/oauth-protected-resource"',
+            },
+          }),
+        );
+        const serverName = 'handshake-oauth-server';
+        const serverConfig = { httpUrl: 'https://test-server/mcp' };
+        const transport = await createTransport(
+          serverName,
+          serverConfig,
+          false,
+        );
+        const transportFetch = (
+          transport as unknown as { _fetch: typeof fetch }
+        )._fetch;
+
+        const response = await transportFetch(serverConfig.httpUrl, {
+          method: 'POST',
+        });
+
+        expect(response.status).toBe(401);
+        expect(mcpServerRequiresOAuth.get(serverName)).toBe(true);
+        await expect(
+          probeMcpServerForOAuth(serverName, serverConfig),
+        ).resolves.toBe(true);
+        expect(fetchSpy).toHaveBeenCalledTimes(1);
       });
 
       it('treats 400 from optional GET SSE stream as unsupported', async () => {
@@ -713,6 +2532,81 @@ describe('mcp-client', () => {
     });
 
     describe('authenticated Streamable HTTP compatibility fetch', () => {
+      afterEach(() => {
+        vi.mocked(MCPOAuthProvider).mockReset();
+        vi.mocked(MCPOAuthTokenStorage).mockReset();
+      });
+
+      it('throws the /mcp instruction when OAuth has no valid token', async () => {
+        const getValidToken = vi.fn().mockResolvedValue(null);
+        vi.mocked(MCPOAuthProvider).mockImplementation(
+          () =>
+            ({
+              getValidToken,
+            }) as unknown as MCPOAuthProvider,
+        );
+
+        await expect(
+          createTransport(
+            'oauth-test-server',
+            {
+              httpUrl: 'http://test-server',
+              oauth: {
+                enabled: true,
+                clientId: 'client-id',
+              },
+            },
+            false,
+          ),
+        ).rejects.toThrow(
+          getMcpOAuthDialogInstruction('authenticate', 'oauth-test-server'),
+        );
+        expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
+          enabled: true,
+          clientId: 'client-id',
+        });
+      });
+
+      it('warns when stored OAuth credentials cannot produce a token', async () => {
+        const getCredentials = vi.fn().mockResolvedValue({
+          clientId: 'client-id',
+        });
+        const getValidToken = vi.fn().mockResolvedValue(null);
+        vi.mocked(MCPOAuthTokenStorage).mockImplementation(
+          () =>
+            ({
+              getCredentials,
+            }) as unknown as MCPOAuthTokenStorage,
+        );
+        vi.mocked(MCPOAuthProvider).mockImplementation(
+          () =>
+            ({
+              getValidToken,
+            }) as unknown as MCPOAuthProvider,
+        );
+
+        const transport = await createTransport(
+          'oauth-test-server',
+          {
+            httpUrl: 'http://test-server',
+          },
+          false,
+        );
+
+        expect(transport).toBeInstanceOf(StreamableHTTPClientTransport);
+        expect(getCredentials).toHaveBeenCalledWith('oauth-test-server');
+        expect(getValidToken).toHaveBeenCalledWith('oauth-test-server', {
+          clientId: 'client-id',
+        });
+        expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+          "Stored OAuth credentials exist for server 'oauth-test-server' but no valid token could be obtained. Transport will be created without authentication; expect a 401. " +
+            getMcpOAuthDialogInstruction(
+              're-authenticate',
+              'oauth-test-server',
+            ),
+        );
+      });
+
       it('wires the compatibility fetch for OAuth httpUrl transports', async () => {
         const getValidToken = vi.fn().mockResolvedValue('oauth-token');
         vi.mocked(MCPOAuthProvider).mockImplementation(
@@ -866,6 +2760,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,
@@ -912,6 +2807,7 @@ describe('mcp-client', () => {
         registerCapabilities: vi.fn(),
         setRequestHandler: vi.fn(),
         close: vi.fn(),
+        getInstructions: vi.fn(),
       };
       vi.mocked(ClientLib.Client).mockReturnValue(
         mockedClient as unknown as ClientLib.Client,

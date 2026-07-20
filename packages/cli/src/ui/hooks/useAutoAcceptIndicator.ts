@@ -14,13 +14,20 @@ import { useKeypress } from './useKeypress.js';
 import type { HistoryItemWithoutId } from '../types.js';
 import { MessageType } from '../types.js';
 import { type LoadedSettings, SettingScope } from '../../config/settings.js';
+import { t } from '../../i18n/index.js';
 
-const AUTO_MODE_FIRST_TIME_MESSAGE =
-  '✨ Auto mode enabled.\n' +
-  '   An LLM classifier evaluates each tool call and auto-approves safe actions,\n' +
-  '   blocks risky ones. Most read-only operations and in-cwd edits skip the\n' +
-  '   classifier for speed. To exit: Shift+Tab or /approval-mode default.\n' +
-  '   (This notice will not appear again.)';
+const AUTO_MODE_FIRST_TIME_MESSAGE_KEY = 'auto_mode.entry_notice';
+const AUTO_MODE_FIRST_TIME_MESSAGE_FALLBACK =
+  'Auto mode enabled.\n' +
+  '   An LLM classifier evaluates each tool call — safe actions auto-approve,\n' +
+  '   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.';
+
+const getAutoModeFirstTimeMessage = () => {
+  const message = t(AUTO_MODE_FIRST_TIME_MESSAGE_KEY);
+  return message === AUTO_MODE_FIRST_TIME_MESSAGE_KEY
+    ? AUTO_MODE_FIRST_TIME_MESSAGE_FALLBACK
+    : message;
+};
 
 export interface UseAutoAcceptIndicatorArgs {
   config: Config;
@@ -147,7 +154,7 @@ export function emitAutoModeEntryNotices(opts: {
   const acknowledged = settings?.merged.ui?.autoModeAcknowledged === true;
   if (!acknowledged) {
     addItem(
-      { type: MessageType.INFO, text: AUTO_MODE_FIRST_TIME_MESSAGE },
+      { type: MessageType.INFO, text: getAutoModeFirstTimeMessage() },
       now,
     );
     if (settings) {
@@ -167,8 +174,10 @@ export function emitAutoModeEntryNotices(opts: {
     stripped &&
     (stripped.persistent.length > 0 || stripped.session.length > 0)
   ) {
+    // Intentionally untranslated operational notice: rule text is copied from
+    // user/session allow-rule configuration and may contain command syntax.
     const lines = [
-      'ℹ️ Auto mode temporarily disabled these allow rules',
+      'ℹ Auto mode temporarily disabled these allow rules',
       '   (they would bypass the classifier):',
       ...stripped.persistent.map((r) => `   - ${r.raw} (from user settings)`),
       ...stripped.session.map((r) => `   - ${r.raw} (session)`),

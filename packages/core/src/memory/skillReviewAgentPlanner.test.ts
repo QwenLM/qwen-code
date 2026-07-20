@@ -16,14 +16,23 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import {
+  AUTO_SKILL_DIR_PREFIX,
   buildTaskPrompt,
   createSkillScopedAgentConfig,
+  DEFAULT_AUTO_SKILL_TIMEOUT_MS,
   listExistingSkillDirNames,
+  runSkillReviewByAgent,
+  SKILL_REVIEW_SYSTEM_PROMPT,
 } from './skillReviewAgentPlanner.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { runForkedAgent } from '../utils/forkedAgent.js';
+
+vi.mock('../utils/forkedAgent.js', () => ({
+  runForkedAgent: vi.fn(),
+}));
 
 function makeMinimalConfig(projectRoot: string): Config {
   return {
@@ -349,5 +358,98 @@ describe('buildTaskPrompt', () => {
     const prompt = await buildTaskPrompt(projectRoot);
     expect(prompt).toContain(path.join(projectRoot, '.qwen', 'skills'));
     expect(prompt).toContain('real');
+  });
+
+  it('instructs the agent to use the auto-skill- directory prefix (#4837)', async () => {
+    // The `.gitignore` re-ignores `.qwen/skills/auto-skill-*/`, so new
+    // auto-generated skills must land under an `auto-skill-`-prefixed
+    // directory to stay out of version control. The prompt is the soft
+    // guard that steers the agent there.
+    const prompt = await buildTaskPrompt(projectRoot);
+    expect(prompt).toContain(AUTO_SKILL_DIR_PREFIX);
+    expect(prompt).toContain(`.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/`);
+    expect(prompt).toMatch(/mandatory/i);
+  });
+});
+
+describe('SKILL_REVIEW_SYSTEM_PROMPT', () => {
+  it('requires the auto-skill- directory prefix for new skills (#4837)', () => {
+    // The system prompt and buildTaskPrompt carry the prefix instruction on
+    // two independent string arrays. buildTaskPrompt is asserted above; this
+    // guards the parallel system-prompt line so an edit to one can't silently
+    // drop the prefix mandate from the other.
+    expect(SKILL_REVIEW_SYSTEM_PROMPT).toContain(AUTO_SKILL_DIR_PREFIX);
+    expect(SKILL_REVIEW_SYSTEM_PROMPT).toContain(
+      `.qwen/skills/${AUTO_SKILL_DIR_PREFIX}<name>/`,
+    );
+    expect(SKILL_REVIEW_SYSTEM_PROMPT).toMatch(/MUST use/i);
+  });
+});
+
+describe('runSkillReviewByAgent timeout wiring', () => {
+  let tempDir: string;
+  let projectRoot: string;
+
+  function makeConfig(timeoutMinutes: number | undefined): Config {
+    return {
+      getProjectRoot: () => projectRoot,
+      getPermissionManager: () => undefined,
+      getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(timeoutMinutes),
+    } as unknown as Config;
+  }
+
+  beforeEach(async () => {
+    vi.mocked(runForkedAgent).mockReset();
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+    });
+    tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-timeout-'));
+    projectRoot = path.join(tempDir, 'project');
+    await fs.mkdir(projectRoot, { recursive: true });
+  });
+
+  afterEach(async () => {
+    await fs.rm(tempDir, { recursive: true, force: true });
+  });
+
+  it('uses the configured memory agent timeout when no timeoutMs param is passed', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig(30),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 30 }),
+    );
+  });
+
+  it('lets an explicit timeoutMs param override the configured value', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig(30),
+      projectRoot,
+      history: [],
+      timeoutMs: 60_000,
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ maxTimeMinutes: 1 }),
+    );
+  });
+
+  it('falls back to the built-in default when neither is set', async () => {
+    await runSkillReviewByAgent({
+      config: makeConfig(undefined),
+      projectRoot,
+      history: [],
+    });
+
+    expect(runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        maxTimeMinutes: DEFAULT_AUTO_SKILL_TIMEOUT_MS / 60_000,
+      }),
+    );
   });
 });

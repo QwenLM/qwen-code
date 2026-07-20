@@ -1,0 +1,504 @@
+.tableShell {
+  position: relative;
+  max-width: 100%;
+  margin: 8px 0;
+  overflow: visible;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--card);
+}
+
+.densityCompact {
+  --table-cell-padding: 3px 6px;
+  --table-header-padding: 5px 7px;
+  --table-detail-padding: 7px 9px;
+  --table-detail-gap: 5px;
+  --table-line-height: 1.35;
+  --table-column-min-width: 72px;
+  --table-column-max-width: 240px;
+}
+
+.densityStandard {
+  --table-cell-padding: 6px 8px;
+  --table-header-padding: 7px 8px;
+  --table-detail-padding: 9px 11px;
+  --table-detail-gap: 6px;
+  --table-line-height: 1.45;
+}
+
+.densityComfortable {
+  --table-cell-padding: 8px 10px;
+  --table-header-padding: 9px 10px;
+  --table-detail-padding: 11px 13px;
+  --table-detail-gap: 8px;
+  --table-line-height: 1.55;
+}
+
+.toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--subtle-bg);
+  font-size: 12px;
+}
+
+.summary {
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.hint {
+  color: var(--muted-foreground);
+}
+
+.selection {
+  color: var(--agent-blue-500);
+  font-weight: 600;
+}
+
+.selectionStats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  color: var(--muted-foreground);
+}
+
+.selectionMetric {
+  white-space: nowrap;
+}
+
+.selectionMetricValue {
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.copyButton {
+  padding: 3px 8px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+  background: var(--card);
+}
+
+.copyCheck {
+  margin-right: 4px;
+}
+
+.copyButton:hover {
+  background: var(--subtle-bg-strong);
+}
+
+.scroller {
+  max-width: 100%;
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  outline: none;
+}
+
+.scroller:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
+}
+
+.table {
+  --action-column-width: 88px;
+
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.headerCell,
+.cell {
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+
+.headerCell:last-child,
+.cell:last-child {
+  border-right: none;
+}
+
+.headerCell {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  min-width: var(--table-column-min-width, 120px);
+  max-width: var(--table-column-max-width, 360px);
+  overflow: visible;
+  background: var(--card);
+  color: var(--foreground);
+  font-weight: 600;
+  text-align: left;
+}
+
+.frozenHeaderCell {
+  left: var(--action-column-width);
+  z-index: 5;
+}
+
+.headerControls {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.headerButton {
+  display: flex;
+  min-width: 0;
+  flex: 1 1 auto;
+  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--table-header-padding, 7px 8px);
+  border: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.headerButton:hover,
+.filterTrigger:hover {
+  background: var(--subtle-bg-strong);
+}
+
+.headerText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sortIcon {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.filterTrigger {
+  flex: 0 0 28px;
+  border: none;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.activeHeaderCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
+.reorderHandle {
+  flex: 0 0 0;
+  width: 0;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  border: none;
+  border-left: 0 solid transparent;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 12px;
+  cursor: grab;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    flex-basis 120ms ease,
+    width 120ms ease,
+    opacity 120ms ease,
+    border-color 120ms ease,
+    background 120ms ease;
+}
+
+.reorderHandleVisible,
+.reorderHandle:focus-visible,
+.reorderHandle:active {
+  flex-basis: 24px;
+  width: 24px;
+  border-left-width: 1px;
+  border-left-color: var(--border);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.reorderHandle:active {
+  cursor: grabbing;
+}
+
+.reorderHandle:hover,
+.reorderHandle:focus-visible {
+  background: var(--subtle-bg-strong);
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  z-index: 7;
+  width: 6px;
+  height: 100%;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: col-resize;
+}
+
+.resizeHandle:hover,
+.resizeHandle:focus-visible {
+  background: color-mix(in srgb, var(--agent-blue-500) 45%, transparent);
+  outline: none;
+}
+
+.filterTriggerActive {
+  background: color-mix(in srgb, var(--agent-blue-500) 18%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.columnContextMenu {
+  position: fixed;
+  z-index: 1000;
+  width: 220px;
+  padding: 5px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--card);
+  box-shadow: 0 14px 28px rgb(0 0 0 / 30%);
+  color: var(--foreground);
+  font-size: 12px;
+}
+
+.columnContextMenuAction {
+  width: 100%;
+  padding: 6px 8px;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.columnContextMenuAction:hover,
+.columnContextMenuAction:focus-visible {
+  background: var(--subtle-bg-strong);
+  outline: none;
+}
+
+.cell {
+  min-width: var(--table-column-min-width, 120px);
+  max-width: var(--table-column-max-width, 360px);
+  padding: var(--table-cell-padding, 6px 8px);
+  background: var(--card);
+  color: var(--foreground);
+  line-height: var(--table-line-height, 1.45);
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  cursor: cell;
+}
+
+.cellContent,
+.detailValueContent {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.cellText,
+.detailValueText {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.cellContentCollapsed .cellText,
+.detailValueCollapsed .detailValueText {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 1;
+}
+
+.dragging .cell {
+  user-select: none;
+}
+
+.evenRow .cell {
+  background: color-mix(in srgb, var(--subtle-bg) 55%, transparent);
+}
+
+tr:hover .cell {
+  background: var(--subtle-bg-strong);
+}
+
+.selectedCell,
+.evenRow .selectedCell,
+tr:hover .selectedCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 20%, transparent);
+  box-shadow: inset 0 0 0 1px var(--agent-blue-500);
+}
+
+.actionHeaderCell,
+.actionCell {
+  box-sizing: border-box;
+  width: var(--action-column-width);
+  min-width: var(--action-column-width);
+  max-width: var(--action-column-width);
+  text-align: center;
+}
+
+.stickyActionHeaderCell,
+.stickyActionCell {
+  position: sticky;
+  left: 0;
+  z-index: 6;
+}
+
+.stickyActionHeaderCell {
+  z-index: 8;
+}
+
+.actionCell {
+  padding: 4px 6px;
+  cursor: default;
+  user-select: none;
+}
+
+.frozenCell {
+  position: sticky;
+  left: var(--action-column-width);
+  z-index: 4;
+}
+
+.hasFrozenColumn .frozenHeaderCell,
+.hasFrozenColumn .frozenCell {
+  box-shadow:
+    8px 0 14px -12px rgb(0 0 0 / 55%),
+    inset -1px 0 0 var(--border, rgb(255 255 255 / 18%));
+}
+
+.stickyActionHeaderCell,
+.frozenHeaderCell,
+.stickyActionCell,
+.frozenCell {
+  background: var(--card);
+}
+
+.activeHeaderCell.frozenHeaderCell {
+  background: color-mix(in srgb, var(--agent-blue-500) 8%, var(--card));
+}
+
+.evenRow .stickyActionCell,
+.evenRow .frozenCell {
+  background: linear-gradient(var(--subtle-bg), var(--subtle-bg)), var(--card);
+}
+
+tr:hover .stickyActionCell,
+tr:hover .frozenCell {
+  background:
+    linear-gradient(var(--subtle-bg-strong), var(--subtle-bg-strong)),
+    var(--card);
+}
+
+.stickyActionCell.selectedCell,
+.frozenCell.selectedCell,
+.evenRow .stickyActionCell.selectedCell,
+.evenRow .frozenCell.selectedCell,
+tr:hover .stickyActionCell.selectedCell,
+tr:hover .frozenCell.selectedCell {
+  background:
+    linear-gradient(
+      color-mix(in srgb, var(--agent-blue-500) 20%, transparent),
+      color-mix(in srgb, var(--agent-blue-500) 20%, transparent)
+    ),
+    var(--card);
+  box-shadow:
+    8px 0 14px -12px rgb(0 0 0 / 55%),
+    inset 0 0 0 1px var(--agent-blue-500);
+}
+
+.rowDetailButton {
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  background: var(--card);
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+}
+
+.rowDetailButton:hover,
+.rowDetailButton[aria-expanded='true'] {
+  background: var(--subtle-bg-strong);
+}
+
+.detailRow {
+  background: var(--subtle-bg);
+}
+
+.detailCell {
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  background: var(--subtle-bg);
+  color: var(--foreground);
+}
+
+.detailPanel {
+  display: grid;
+  gap: var(--table-detail-gap, 6px);
+  padding: var(--table-detail-padding, 9px 11px);
+}
+
+.detailTitle {
+  color: var(--foreground);
+  font-weight: 700;
+}
+
+.detailItem {
+  display: grid;
+  grid-template-columns: minmax(84px, 140px) minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
+.detailLabel {
+  color: var(--muted-foreground);
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.detailValue {
+  min-width: 0;
+  color: var(--foreground);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.emptyValue {
+  color: var(--muted-foreground);
+  font-style: italic;
+}
+
+.emptyState {
+  padding: 16px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  text-align: center;
+}

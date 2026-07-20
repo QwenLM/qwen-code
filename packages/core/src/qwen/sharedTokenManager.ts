@@ -28,7 +28,8 @@ const QWEN_LOCK_FILENAME = 'oauth_creds.lock';
 
 // Token and Cache Configuration
 const TOKEN_REFRESH_BUFFER_MS = 30 * 1000; // 30 seconds
-const LOCK_TIMEOUT_MS = 10000; // 10 seconds lock timeout
+// Must exceed QWEN_OAUTH_REFRESH_TIMEOUT_MS so an in-flight refresh keeps its lock.
+const LOCK_TIMEOUT_MS = 35_000;
 const CACHE_CHECK_INTERVAL_MS = 5000; // 5 seconds cache check interval (increased from 1 second)
 
 // Lock acquisition configuration (can be overridden for testing)
@@ -474,7 +475,6 @@ export class SharedTokenManager {
       // Check if we have a refresh token before attempting refresh
       const currentCredentials = qwenClient.getCredentials();
       if (!currentCredentials.refresh_token) {
-        // console.debug('create a NO_REFRESH_TOKEN error');
         throw new TokenManagerError(
           TokenError.NO_REFRESH_TOKEN,
           'No refresh token available for token refresh',

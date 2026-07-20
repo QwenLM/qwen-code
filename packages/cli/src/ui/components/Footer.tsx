@@ -15,22 +15,23 @@ import { BackgroundTasksPill } from './background-view/BackgroundTasksPill.js';
 import { MCPHealthPill } from './mcp/MCPHealthPill.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 
-import { useStatusLine } from '../hooks/useStatusLine.js';
+import { MAX_STATUS_LINES, useStatusLine } from '../hooks/useStatusLine.js';
 import { useConfigInitMessage } from '../hooks/useConfigInitMessage.js';
 import { useUIState } from '../contexts/UIStateContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
-import { useVimMode } from '../contexts/VimModeContext.js';
-import { ApprovalMode } from '@qwen-code/qwen-code-core';
+import { useVimModeState } from '../contexts/VimModeContext.js';
 import { GeminiSpinner } from './GeminiRespondingSpinner.js';
 import { GoalPill, useFooterGoalState } from './GoalPill.js';
+import { CronPill, useFooterCronTaskCount } from './CronPill.js';
 import { t } from '../../i18n/index.js';
+import { StreamingState } from '../types.js';
 
 export const Footer: React.FC = () => {
   const uiState = useUIState();
   const config = useConfig();
   const settings = useSettings();
-  const { vimEnabled, vimMode } = useVimMode();
+  const { vimEnabled, vimMode } = useVimModeState();
   const {
     lines: statusLineLines,
     useThemeColors,
@@ -88,14 +89,35 @@ export const Footer: React.FC = () => {
     </Text>
   ) : vimEnabled && vimMode === 'INSERT' ? (
     <Text color={theme.text.secondary}>-- INSERT --</Text>
+  ) : vimEnabled && vimMode === 'NORMAL' ? (
+    <Text color={theme.text.secondary}>-- NORMAL --</Text>
   ) : uiState.shellModeActive ? (
     <ShellModeIndicator />
   ) : configInitMessage ? (
     <Text color={theme.text.secondary}>
       <GeminiSpinner /> {configInitMessage}
     </Text>
-  ) : showAutoAcceptIndicator !== undefined &&
-    showAutoAcceptIndicator !== ApprovalMode.DEFAULT ? (
+  ) : uiState.startupIdeConnectionStatus.state === 'connecting' ? (
+    <Text color={theme.text.secondary}>
+      <GeminiSpinner /> {t('IDE connecting... context may be unavailable')}
+    </Text>
+  ) : uiState.startupIdeConnectionStatus.state === 'failed' ? (
+    <Text color={theme.status.warning}>
+      {t('IDE connection unavailable: {{message}}', {
+        message: uiState.startupIdeConnectionStatus.message,
+      })}
+    </Text>
+  ) : uiState.streamingState === StreamingState.Responding ? (
+    <Text color={theme.text.secondary}>
+      {t('Enter to steer · Ctrl+Q to queue')}
+      {showAutoAcceptIndicator !== undefined && (
+        <>
+          {' · '}
+          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+        </>
+      )}
+    </Text>
+  ) : showAutoAcceptIndicator !== undefined ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
   ) : suppressHint ? null : (
     <Text color={theme.text.secondary}>{t('? for shortcuts')}</Text>
@@ -105,7 +127,13 @@ export const Footer: React.FC = () => {
   if (sandboxInfo) {
     rightItems.push({
       key: 'sandbox',
-      node: <Text color={theme.status.success}>🔒 {sandboxInfo}</Text>,
+      node: <Text color={theme.status.success}>{sandboxInfo}</Text>,
+    });
+  }
+  if (config.isSafeMode()) {
+    rightItems.push({
+      key: 'safe-mode',
+      node: <Text color={theme.status.warning}>⚠ Safe Mode</Text>,
     });
   }
   if (debugMode) {
@@ -115,7 +143,7 @@ export const Footer: React.FC = () => {
     });
   }
   // Dream tasks now surface via the BackgroundTasksPill (e.g. "1 dream")
-  // alongside the other background-task kinds. The previous `✦ dreaming`
+  // alongside the other background-task kinds. The previous `◆ dreaming`
   // right-column indicator was removed to avoid two simultaneous signals
   // for the same underlying state.
   if (promptTokenCount > 0 && contextWindowSize && !hideContextIndicator) {
@@ -139,6 +167,10 @@ export const Footer: React.FC = () => {
   if (goalActive) {
     rightItems.push({ key: 'goal', node: <GoalPill /> });
   }
+  const cronTaskCount = useFooterCronTaskCount();
+  if (cronTaskCount > 0) {
+    rightItems.push({ key: 'cron', node: <CronPill count={cronTaskCount} /> });
+  }
 
   // Layout matches upstream: left column has status line (top) + hints/mode
   // (bottom), right section has indicators. Status line and hints coexist.
@@ -151,26 +183,36 @@ export const Footer: React.FC = () => {
       gap={isNarrow ? 0 : 1}
     >
       {/* Left column — status line on top, hints/mode on bottom */}
-      <Box flexDirection="column" flexShrink={isNarrow ? 0 : 1}>
+      <Box
+        flexDirection="column"
+        flexGrow={1}
+        flexShrink={isNarrow ? 0 : 1}
+        minWidth={0}
+      >
         {statusLineLines.length > 0 &&
           !uiState.ctrlCPressedOnce &&
-          !uiState.ctrlDPressedOnce &&
-          statusLineLines.map((line, i) => (
-            <Text
-              key={`status-line-${i}`}
-              color={
-                respectUserColors
-                  ? undefined
-                  : useThemeColors
-                    ? theme.text.accent
-                    : undefined
-              }
-              dimColor={respectUserColors ? false : !useThemeColors}
-              wrap="truncate"
+          !uiState.ctrlDPressedOnce && (
+            <Box
+              flexDirection="column"
+              maxHeight={MAX_STATUS_LINES}
+              overflow="hidden"
+              width="100%"
             >
-              {line}
-            </Text>
-          ))}
+              <Text
+                color={
+                  respectUserColors
+                    ? undefined
+                    : useThemeColors
+                      ? theme.text.accent
+                      : undefined
+                }
+                dimColor={respectUserColors ? false : !useThemeColors}
+                wrap="wrap"
+              >
+                {statusLineLines.join('\n')}
+              </Text>
+            </Box>
+          )}
         {/* Built-in worktree indicator. Shown by default whenever a
             worktree is active so the user always has a UI affordance,
             even when a custom statusline is configured — their script
@@ -190,10 +232,28 @@ export const Footer: React.FC = () => {
               {`⎇ ${uiState.activeWorktree.branch} (${uiState.activeWorktree.slug})`}
             </Text>
           )}
+        {/* P7-trigger: the current turn was steered toward the Workflow tool
+            by the `workflow` keyword. Hidden during ctrl-quit warnings so they
+            take precedence (matches the worktree indicator above). */}
+        {uiState.workflowKeywordActive &&
+          !uiState.ctrlCPressedOnce &&
+          !uiState.ctrlDPressedOnce && (
+            <Text color={theme.text.accent} wrap="truncate">
+              {`▷ ${t('workflow active')}`}
+            </Text>
+          )}
         <Box flexDirection="row" flexShrink={1}>
           <Text wrap="truncate">{leftBottomContent}</Text>
           <BackgroundTasksPill />
           <MCPHealthPill />
+          {!uiState.isSkillReviewDialogOpen &&
+            (uiState.skillReviewPending?.skills.length ?? 0) > 0 && (
+              <Text color={theme.status.warning}>
+                {` ⚠ ${t('{{count}} skill(s) pending review', {
+                  count: String(uiState.skillReviewPending!.skills.length),
+                })}`}
+              </Text>
+            )}
         </Box>
       </Box>
 

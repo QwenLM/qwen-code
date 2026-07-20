@@ -12,6 +12,7 @@ import { ArenaManager } from './ArenaManager.js';
 import { ArenaEventType } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
+import { ApprovalMode } from '../../config/config.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
 const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
@@ -348,6 +349,24 @@ describe('ArenaManager', () => {
   });
 
   describe('chat history forwarding', () => {
+    it('passes approvalMode to in-process backend spawn configs', async () => {
+      mockBackend.type = 'in-process';
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start({
+        ...createValidStartOptions(),
+        approvalMode: ApprovalMode.PLAN,
+      });
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: { approvalMode?: unknown };
+        };
+        expect(spawnConfig.inProcess?.approvalMode).toBe(ApprovalMode.PLAN);
+      }
+    });
+
     it('should pass chatHistory to backend spawnAgent calls', async () => {
       const manager = new ArenaManager(mockConfig as never);
       const chatHistory = [
@@ -382,6 +401,33 @@ describe('ArenaManager', () => {
           inProcess?: { chatHistory?: unknown };
         };
         expect(spawnConfig.inProcess?.chatHistory).toBeUndefined();
+      }
+    });
+
+    it('builds the in-process worker system prompt in headless interaction mode', async () => {
+      // Arena workers run non-interactively, so ArenaManager passes 'headless'
+      // as the interaction mode (4th arg) to getCoreSystemPrompt. A regression
+      // that drops that argument would fall back to the interactive prompt,
+      // telling arena workers to ask the user questions no one can answer.
+      // Assert on the produced prompt: the headless variant carries a
+      // single-turn marker that is absent from every other interaction mode.
+      mockBackend.type = 'in-process';
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start(createValidStartOptions());
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        const systemPrompt =
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt;
+        expect(systemPrompt).toContain(
+          'This is a non-interactive, single-turn run',
+        );
       }
     });
   });

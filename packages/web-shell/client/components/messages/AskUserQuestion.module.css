@@ -1,0 +1,382 @@
+.question {
+  position: relative;
+  margin: 12px auto;
+  width: 100%;
+  max-width: min(800px, var(--chat-content-width, 800px));
+  box-sizing: border-box;
+  padding: 16px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+}
+
+.floating {
+  max-height: min(520px, 64vh);
+  margin: 0 auto;
+  overflow: auto;
+  border-radius: 12px;
+  background: var(--background);
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
+  font-family: var(--font-sans);
+}
+
+.titleLine {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 22px;
+  margin-bottom: 16px;
+}
+
+.icon {
+  display: none;
+}
+
+.toolName {
+  display: none;
+}
+
+.toolDesc {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.tabs {
+  display: flex;
+  gap: 4px;
+  margin: 0;
+  border-bottom: 0;
+  padding: 0;
+  flex-wrap: nowrap;
+  align-items: center;
+}
+
+.topRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.collapseButton {
+  display: flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.collapseButton:hover {
+  color: var(--foreground);
+}
+
+.collapseIcon {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+}
+
+.collapseIconCollapsed {
+  transform: rotate(-90deg);
+}
+
+.collapsed {
+  padding: 10px 16px;
+}
+
+.collapsed .titleLine {
+  margin-bottom: 0;
+}
+
+.tab {
+  overflow: hidden;
+  width: 12px;
+  height: 2px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: transparent;
+}
+
+.tabActive {
+  background: var(--agent-blue-500);
+  color: transparent;
+}
+
+.tabCheck {
+  display: none;
+}
+
+.header {
+  margin-bottom: 10px;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.text {
+  margin: 0;
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.description {
+  margin: 4px 0 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.multiHint {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 400;
+}
+
+.options {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 18px;
+  margin-left: 0;
+}
+
+.option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 12px;
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  text-align: left;
+  appearance: none;
+}
+
+.option:hover {
+  background: var(--accent);
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
+}
+
+.optionActive,
+.optionSelected {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.optionActive .optionLabel {
+  font-weight: 500;
+  color: var(--foreground);
+}
+
+.pointer {
+  display: none;
+}
+
+.optionNum {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 0;
+  border-radius: 50%;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 1;
+  margin-top: 1px;
+}
+
+.editIcon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-weight: 400;
+  margin-top: 1px;
+}
+
+.editIcon svg {
+  width: 14px;
+  height: 14px;
+  stroke-width: 1.25;
+}
+
+.optionActive .optionNum,
+.optionSelected .optionNum {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.optionActive .editIcon,
+.optionSelected .editIcon {
+  background: var(--primary);
+  color: var(--primary-foreground);
+}
+
+.optionContent {
+  display: flex;
+  min-width: 0;
+  flex-direction: row;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.optionLabel {
+  color: var(--foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.optionPlaceholder {
+  color: var(--muted-foreground);
+  opacity: 0.6;
+}
+
+.optionDesc {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.customInput {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  outline: none;
+}
+
+/* The "Other" row's clickable label when not editing — a real <button> so it's
+   keyboard-reachable, styled to read like the option label it replaces. */
+.customTrigger {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+
+.customTrigger:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
+}
+
+.customInput:focus {
+  border-bottom-color: var(--agent-blue-500);
+}
+
+.actions {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 16px;
+  margin-top: 24px;
+}
+
+.button {
+  height: 28px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: var(--primary);
+  color: var(--primary-foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 22px;
+  cursor: pointer;
+}
+
+.button:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.button:disabled {
+  background: var(--secondary);
+  border-color: transparent;
+  color: var(--secondary-foreground);
+  opacity: 1;
+  cursor: not-allowed;
+}
+
+.submitButton {
+  background: var(--primary);
+  color: var(--primary-foreground);
+  border-color: transparent;
+}
+
+.ignoreButton {
+  height: 28px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 22px;
+}
+
+.ignoreButton:hover {
+  color: var(--foreground);
+}

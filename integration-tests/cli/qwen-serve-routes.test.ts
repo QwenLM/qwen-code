@@ -9,18 +9,23 @@
  *
  * These exercise the daemon end-to-end without needing a working model
  * credential: they spawn a real `node packages/cli/dist/index.js serve`
- * (which itself spawns real `qwen --acp` children), then probe the HTTP
- * surface. The agent's `initialize` + `newSession` handshake works
- * without auth, so session creation, listing, cancellation, validation,
- * SSE wiring, the CORS guard, the bearer-auth guard and shutdown all
- * run here.
+ * with dummy OpenAI auth env, then probe the HTTP surface without issuing
+ * model calls. Session creation, listing, cancellation, validation, SSE
+ * wiring, the CORS guard, the bearer-auth guard and shutdown all run here.
  *
- * Tests that require an actual model call (streaming prompts, real
- * permission flows, Last-Event-ID resume across a real reconnect) live
- * in `qwen-serve-streaming.test.ts` and skip when no auth is set.
+ * Tests that require prompt streaming or real permission flows live in
+ * `qwen-serve-streaming.test.ts`, backed by the local fake OpenAI server.
  */
 import { spawn, type ChildProcess } from 'node:child_process';
-import { realpathSync } from 'node:fs';
+import {
+  mkdirSync,
+  mkdtempSync,
+  realpathSync,
+  rmSync,
+  truncateSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -29,6 +34,11 @@ import {
   DaemonHttpError,
   type DaemonSessionSummary,
 } from '@qwen-code/sdk';
+import {
+  SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+  Storage,
+  type ChatRecord,
+} from '@qwen-code/qwen-code-core';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Match the rest of the integration suite: prefer the bundled CLI
@@ -45,11 +55,61 @@ const TOKEN = 'integration-test-token';
 const REPO_ROOT = path.resolve(__dirname, '../..');
 
 let daemon: ChildProcess;
+let homeDir = '';
 let port = 0;
 let base = '';
 let client: DaemonClient;
 
+function writePersistedTranscript(
+  sessionId: string,
+  records: ChatRecord[],
+  state: 'active' | 'archived' = 'active',
+): string {
+  const qwenHome = path.join(homeDir, '.qwen');
+  const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+    new Storage(REPO_ROOT).getProjectDir(),
+  );
+  const chatsDir = path.join(
+    projectDir,
+    'chats',
+    ...(state === 'archived' ? ['archive'] : []),
+  );
+  mkdirSync(chatsDir, { recursive: true });
+  const filePath = path.join(chatsDir, `${sessionId}.jsonl`);
+  writeFileSync(
+    filePath,
+    records.map((record) => JSON.stringify(record)).join('\n') + '\n',
+    'utf8',
+  );
+  return filePath;
+}
+
+function chatRecord(
+  sessionId: string,
+  uuid: string,
+  parentUuid: string | null,
+  text: string,
+): ChatRecord {
+  const assistant = uuid.startsWith('a');
+  return {
+    uuid,
+    parentUuid,
+    sessionId,
+    timestamp: assistant
+      ? '2026-07-08T00:00:01.000Z'
+      : '2026-07-08T00:00:00.000Z',
+    type: assistant ? 'assistant' : 'user',
+    cwd: REPO_ROOT,
+    version: '1.0.0',
+    message: {
+      role: assistant ? 'model' : 'user',
+      parts: [{ text }],
+    },
+  };
+}
+
 beforeAll(async () => {
+  homeDir = mkdtempSync(path.join(tmpdir(), 'qwen-serve-routes-home-'));
   daemon = spawn(
     process.execPath,
     [
@@ -70,7 +130,37 @@ beforeAll(async () => {
       '--workspace',
       REPO_ROOT,
     ],
-    { stdio: ['ignore', 'pipe', 'pipe'] },
+    {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      // Strip the env toggles that flip conditional capability tags
+      // (`prompt_absolute_deadline`, `writer_idle_timeout`,
+      // `rate_limit`, and the pool tags via the kill switch). The
+      // capabilities baseline below assumes their default state; a
+      // dev machine exporting any of these would otherwise fail the
+      // exact-equality assertion.
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(
+            ([k]) =>
+              ![
+                'QWEN_SERVE_PROMPT_DEADLINE_MS',
+                'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS',
+                'QWEN_SERVE_RATE_LIMIT',
+                'QWEN_SERVE_NO_MCP_POOL',
+                'QWEN_SERVE_NO_PERSISTENT_REGISTRATION',
+                'QWEN_SERVE_CLIENT_MCP_OVER_WS',
+                'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+              ].includes(k),
+          ),
+        ),
+        HOME: homeDir,
+        QWEN_HOME: path.join(homeDir, '.qwen'),
+        OPENAI_API_KEY: 'fake-key',
+        OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
+        OPENAI_MODEL: 'fake-model',
+        QWEN_MODEL: 'fake-model',
+      },
+    },
   );
   // Read stdout until we see the listening line + parse the port.
   port = await new Promise<number>((resolve, reject) => {
@@ -103,9 +193,15 @@ beforeAll(async () => {
 }, 30_000);
 
 afterAll(async () => {
-  if (!daemon || daemon.exitCode !== null) return;
-  daemon.kill('SIGTERM');
-  await new Promise((r) => daemon.once('exit', r));
+  try {
+    if (!daemon || daemon.exitCode !== null) return;
+    daemon.kill('SIGTERM');
+    await new Promise((r) => daemon.once('exit', r));
+  } finally {
+    if (homeDir) {
+      rmSync(homeDir, { recursive: true, force: true });
+    }
+  }
 }, 15_000);
 
 describe('qwen serve — bearer auth (timing-safe compare)', () => {
@@ -187,17 +283,36 @@ describe('qwen serve — capabilities envelope', () => {
     // Order must match `SERVE_CAPABILITY_REGISTRY` in
     // `packages/cli/src/serve/capabilities.ts` and the unit-level
     // baseline features in `packages/cli/src/serve/server.test.ts`.
+    //
+    // Conditional tags absent under this suite's spawn flags (no
+    // `--require-auth` / `--allow-origin` / deadline env vars /
+    // rate-limit opt-in, no `--channel`, no configured batch ASR model):
+    // `require_auth`, `allow_origin`, `cdp_tunnel_over_ws`,
+    // `prompt_absolute_deadline`, `writer_idle_timeout`,
+    // `workspace_voice_transcription`, `rate_limit`, `channel_reload`.
+    // Pool tags (`mcp_workspace_pool`, `mcp_pool_restart`) ARE present
+    // because the workspace MCP pool is on by default, as are
+    // `workspace_settings`, `workspace_permissions`, `workspace_voice`,
+    // `workspace_trust`, `workspace_github_setup`, and
+    // `workspace_reload`. The CLI serve path always wires `persistSetting`, the
+    // workspace service, and route-local workspace helpers).
     expect(caps.features).toEqual([
       'health',
+      'daemon_status',
       'capabilities',
       'session_create',
       'session_scope_override',
       'session_load',
+      'session_resume',
       'unstable_session_resume',
       'session_list',
+      'session_info',
+      'session_source_metadata',
       'session_prompt',
       'session_cancel',
       'session_events',
+      'session_artifacts',
+      'session_artifacts_persistence',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',
@@ -208,25 +323,207 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_mcp',
       'workspace_skills',
       'workspace_providers',
+      'workspace_acp_preheat',
+      'workspace_acp_status',
+      'auth_provider_install',
       'workspace_memory',
+      'workspace_memory_remember',
+      'workspace_memory_forget',
+      'workspace_memory_dream',
       'workspace_agents',
+      'workspace_agent_generate',
       'workspace_env',
       'workspace_preflight',
       'session_context',
+      'session_context_usage',
       'session_supported_commands',
+      'session_tasks',
+      'session_stats',
+      'session_lsp',
+      'session_status',
       'session_close',
+      'session_archive',
       'session_metadata',
+      'session_organization',
+      'session_export',
+      'session_transcript',
+      'session_transcript_pagination',
       'mcp_guardrails',
+      'workspace_mcp_manage',
       'mcp_guardrail_events',
+      'mcp_server_runtime_mutation',
       'workspace_file_read',
       'workspace_file_bytes',
       'workspace_file_write',
       'session_approval_mode_control',
       'workspace_tool_toggle',
+      'workspace_skill_toggle',
+      'workspace_skill_manage',
+      'workspace_settings',
+      'workspace_permissions',
+      'workspace_voice',
+      'workspace_trust',
       'workspace_init',
+      'workspace_github_setup',
       'workspace_mcp_restart',
+      'session_recap',
+      'session_generation',
+      'session_btw',
+      'mcp_workspace_pool',
+      'mcp_pool_restart',
       'auth_device_flow',
+      'permission_mediation',
+      'non_blocking_prompt',
+      'session_language',
+      'session_rewind',
+      'workspace_hooks',
+      'session_hooks',
+      'workspace_extensions',
+      'session_branch',
+      'workspace_reload',
+      'channel_control',
+      'workspace_channel_observed_contacts',
+      'persistent_workspace_registration',
+      'workspace_runtime_removal',
+      'workspace_qualified_rest_core',
+      'extension_management_v2',
+      'workspace_persisted_transcript',
+      'workspace_session_export',
+      'workspace_archived_session_export',
+      'voice_transcribe',
     ]);
+  });
+});
+
+describe('qwen serve — transcript paging route', () => {
+  const getTranscript = (sessionId: string, query = '') =>
+    fetch(`${base}/session/${sessionId}/transcript${query}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+
+  it('serves persisted transcript pages through the SDK helper', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-111111111111';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'hello persisted transcript'),
+      chatRecord(sessionId, 'a1', 'u1', 'hello from replay'),
+    ]);
+
+    const first = await client.getSessionTranscriptPage(sessionId, {
+      limit: 1,
+    });
+    expect(first.sessionId).toBe(sessionId);
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursor).toBeDefined();
+    expect(first.events.length).toBeGreaterThan(0);
+    expect(first.events.every((event) => event.type === 'session_update')).toBe(
+      true,
+    );
+    expect(first.events.some((event) => 'id' in event)).toBe(false);
+
+    const second = await client.getSessionTranscriptPage(sessionId, {
+      cursor: first.nextCursor!,
+      limit: 1,
+    });
+    expect(second.sessionId).toBe(sessionId);
+    expect(second.hasMore).toBe(false);
+    expect(second.nextCursor).toBeUndefined();
+    expect(second.events.length).toBeGreaterThan(0);
+    expect(
+      second.events.every((event) => event.type === 'session_update'),
+    ).toBe(true);
+    expect(second.events.some((event) => 'id' in event)).toBe(false);
+  });
+
+  it('maps transcript request validation errors through the real daemon', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-222222222222';
+    writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'validation transcript'),
+    ]);
+
+    const invalidLimit = await getTranscript(sessionId, '?limit=0');
+    expect(invalidLimit.status).toBe(400);
+    await expect(invalidLimit.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_limit',
+    });
+
+    const invalidCursor = await getTranscript(
+      sessionId,
+      '?cursor=not-a-cursor',
+    );
+    expect(invalidCursor.status).toBe(400);
+    await expect(invalidCursor.json()).resolves.toMatchObject({
+      code: 'invalid_transcript_cursor',
+    });
+
+    const missing = await getTranscript('99999999-aaaa-bbbb-cccc-333333333333');
+    expect(missing.status).toBe(404);
+  });
+
+  it('maps archived, conflicting, and unavailable transcript snapshots to 409', async () => {
+    const archivedId = '99999999-aaaa-bbbb-cccc-444444444444';
+    const archivedRecord = chatRecord(
+      archivedId,
+      'u1',
+      null,
+      'archived transcript',
+    );
+    writePersistedTranscript(archivedId, [archivedRecord], 'archived');
+    const archived = await getTranscript(archivedId);
+    expect(archived.status).toBe(409);
+    await expect(archived.json()).resolves.toMatchObject({
+      code: 'session_archived',
+    });
+
+    const conflictId = '99999999-aaaa-bbbb-cccc-555555555555';
+    const conflictRecord = chatRecord(
+      conflictId,
+      'u1',
+      null,
+      'conflicting transcript',
+    );
+    writePersistedTranscript(conflictId, [conflictRecord]);
+    writePersistedTranscript(conflictId, [conflictRecord], 'archived');
+    const conflict = await getTranscript(conflictId);
+    expect(conflict.status).toBe(409);
+    await expect(conflict.json()).resolves.toMatchObject({
+      code: 'session_conflict',
+    });
+
+    const unavailable = await getTranscript(
+      '99999999-aaaa-bbbb-cccc-666666666666',
+      '?cursor=stale',
+    );
+    expect(unavailable.status).toBe(409);
+    await expect(unavailable.json()).resolves.toMatchObject({
+      code: 'transcript_snapshot_unavailable',
+    });
+  });
+
+  it('rejects oversized transcript snapshots with 413', async () => {
+    const sessionId = '99999999-aaaa-bbbb-cccc-777777777777';
+    const filePath = writePersistedTranscript(sessionId, [
+      chatRecord(sessionId, 'u1', null, 'oversized transcript'),
+    ]);
+    truncateSync(filePath, SESSION_TRANSCRIPT_MAX_INDEX_BYTES + 1);
+
+    const response = await getTranscript(sessionId);
+    expect(response.status).toBe(413);
+    await expect(response.json()).resolves.toMatchObject({
+      code: 'transcript_too_large',
+      maxBytes: SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
+    });
+  });
+
+  afterAll(() => {
+    // The persisted transcript fixtures above live in the daemon's project
+    // `chats/` dir. Remove them so later suites (e.g. PATCH metadata's
+    // listWorkspaceSessions readback) start from a clean session list: extra
+    // persisted sessions widen a pre-existing listing race and flake them.
+    const qwenHome = path.join(homeDir, '.qwen');
+    const projectDir = Storage.runWithRuntimeBaseDir(qwenHome, REPO_ROOT, () =>
+      new Storage(REPO_ROOT).getProjectDir(),
+    );
+    rmSync(path.join(projectDir, 'chats'), { recursive: true, force: true });
   });
 });
 
@@ -449,6 +746,46 @@ describe('qwen serve — cancel + list', () => {
   });
 });
 
+describe('qwen serve — GET /goals', () => {
+  const getGoals = async () => {
+    const res = await fetch(`${base}/goals`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+
+  it('returns an empty, versioned list when no session has a goal', async () => {
+    const { status, body } = await getGoals();
+    expect(status).toBe(200);
+    expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+  });
+
+  it('probes each live session over the bridge without reporting a goal', async () => {
+    // The real round trip: serve -> bridge -> `sessionGoalGet` ext method in
+    // the `qwen --acp` child -> back. A live session with no `/goal` must come
+    // back as "no goal" rather than an error or a phantom entry.
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    try {
+      const { status, body } = await getGoals();
+      expect(status).toBe(200);
+      // `droppedCount: 0` is the load-bearing half: it proves the ext-method
+      // probe actually reached the child. A dropped probe would also yield an
+      // empty `goals`, so that alone cannot tell success from a silent failure.
+      expect(body).toEqual({ v: 1, goals: [], droppedCount: 0 });
+    } finally {
+      await client.closeSession(session.sessionId);
+    }
+  });
+
+  it('requires the bearer token', async () => {
+    const res = await fetch(`${base}/goals`);
+    expect(res.status).toBe(401);
+  });
+});
+
 describe('qwen serve — DELETE /session/:id', () => {
   it('204 on explicit close', async () => {
     const session = await client.createOrAttachSession({
@@ -505,6 +842,85 @@ describe('qwen serve — PATCH /session/:id/metadata', () => {
       body: JSON.stringify({ displayName: 42 }),
     });
     expect(res.status).toBe(400);
+    await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — POST /session/:id/continue', () => {
+  // Real-daemon wiring check for the continuation lifecycle path
+  // (route → bridge.continueSession → control method → agent
+  // continueLastTurn). Model-free: a fresh session has no interrupted turn,
+  // so the pre-check rejects and no continuation turn is dispatched — the
+  // happy/reject path that exercises the full HTTP round-trip.
+  it('returns accepted:false on a session with no interrupted turn', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const res = await fetch(`${base}/session/${session.sessionId}/continue`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      accepted: false,
+      interruption: 'none',
+    });
+    await client.closeSession(session.sessionId);
+  });
+});
+
+describe('qwen serve — prompt clientId admission', () => {
+  // Validates the three real-daemon behaviors that DaemonSessionClient's
+  // clientId self-heal relies on (see
+  // docs/design/2026-06-24-daemon-clientid-self-heal-design.md).
+  // Model-free: prompt admission (where invalid_client_id is decided) runs
+  // before any model call, so promptNonBlocking returns 202 on acceptance
+  // without reaching the (unreachable, fake) model.
+  it('rejects an unregistered prompt clientId and re-registers via resume', async () => {
+    const session = await client.createOrAttachSession({
+      workspaceCwd: REPO_ROOT,
+      sessionScope: 'thread',
+    });
+    const prompt = { prompt: [{ type: 'text', text: 'hi' }] };
+
+    // (1) An unregistered clientId (e.g. one held across a daemon restart) is
+    //     rejected at admission with 400 invalid_client_id — the exact signal
+    //     the SDK self-heals on.
+    const rejected = await client
+      .promptNonBlocking(
+        session.sessionId,
+        prompt,
+        undefined,
+        'client-never-registered',
+      )
+      .catch((err: unknown) => err);
+    expect(rejected).toBeInstanceOf(DaemonHttpError);
+    expect((rejected as DaemonHttpError).status).toBe(400);
+    expect((rejected as DaemonHttpError).body).toMatchObject({
+      code: 'invalid_client_id',
+    });
+
+    // (2) resume re-registers and mints a fresh, valid clientId.
+    const reattached = await client.resumeSession(session.sessionId, {
+      workspaceCwd: REPO_ROOT,
+    });
+    expect(reattached.clientId).toBeTypeOf('string');
+    expect(reattached.clientId).not.toBe('client-never-registered');
+
+    // (3) Retrying admission with the fresh clientId is accepted (202),
+    //     proving reattach + retry recovers the turn end-to-end.
+    const accepted = await client.promptNonBlocking(
+      session.sessionId,
+      prompt,
+      undefined,
+      reattached.clientId,
+    );
+    expect(accepted).toMatchObject({ promptId: expect.any(String) });
+
+    // The accepted turn dispatches to the unreachable fake model
+    // asynchronously; cancel so nothing lingers past the test.
+    await client.cancel(session.sessionId, reattached.clientId).catch(() => {});
     await client.closeSession(session.sessionId);
   });
 });

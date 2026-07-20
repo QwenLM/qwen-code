@@ -30,8 +30,8 @@ export function markdownToPlainText(text: string): string {
     .replace(/_(.+?)_/g, '$1')
     .replace(/~~(.+?)~~/g, '$1')
     .replace(/^#{1,6}\s+/gm, '')
-    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, '[$1]')
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '$1 ($2)')
     .replace(/^>\s+/gm, '')
     .replace(/^[-*_]{3,}$/gm, '---')
     .replace(/^[\s]*[-*+]\s+/gm, '- ')
@@ -67,6 +67,16 @@ function isInsideAllowedDir(realPath: string, allowedDir: string): boolean {
   );
 }
 
+function trimDisplayDir(dir: string): string {
+  if (/^[a-zA-Z]:[\\/]?$/.test(dir)) return dir;
+  const trimmed = dir.replace(/[\\/]+$/, '');
+  return trimmed || dir;
+}
+
+function formatAllowedImageDirs(dirs: readonly string[]): string {
+  return Array.from(new Set(dirs.map(trimDisplayDir))).join(', ');
+}
+
 /** Image magic bytes → MIME type mapping. */
 export function detectImageMime(data: Buffer): string {
   if (
@@ -80,11 +90,17 @@ export function detectImageMime(data: Buffer): string {
   if (data[0] === 0x47 && data[1] === 0x49 && data[2] === 0x46) {
     return 'image/gif';
   }
+  // WebP is a RIFF container, so the "RIFF" prefix alone is not enough — WAV and
+  // AVI share it. The bytes at offset 8-11 must spell "WEBP" to confirm the type.
   if (
     data[0] === 0x52 &&
     data[1] === 0x49 &&
     data[2] === 0x46 &&
-    data[3] === 0x46
+    data[3] === 0x46 &&
+    data[8] === 0x57 &&
+    data[9] === 0x45 &&
+    data[10] === 0x42 &&
+    data[11] === 0x50
   ) {
     return 'image/webp';
   }
@@ -148,7 +164,9 @@ export function validateImagePath(
   ];
 
   if (!ALLOWED_DIRS.some((dir) => isInsideAllowedDir(real, dir))) {
-    throw new Error(`Image path outside allowed directories: ${real}`);
+    throw new Error(
+      `Image path outside allowed directories: ${real}. Allowed directories: ${formatAllowedImageDirs(ALLOWED_DIRS)}`,
+    );
   }
 
   // Verify magic bytes match the extension (read only first 16 bytes to

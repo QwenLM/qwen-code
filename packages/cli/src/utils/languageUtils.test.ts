@@ -48,8 +48,10 @@ import {
   isAutoLanguage,
   normalizeOutputLanguage,
   resolveOutputLanguage,
+  resolveOutputLanguageOrPreserveAuto,
   writeOutputLanguageFile,
   updateOutputLanguageFile,
+  writeOutputLanguageAndRegisterPath,
   initializeLlmOutputLanguage,
 } from './languageUtils.js';
 
@@ -103,6 +105,12 @@ describe('languageUtils', () => {
       expect(normalizeOutputLanguage('en')).toBe('English');
     });
 
+    it('should normalize "english" to "English"', () => {
+      expect(normalizeOutputLanguage('english')).toBe('English');
+      expect(normalizeOutputLanguage('English')).toBe('English');
+      expect(normalizeOutputLanguage('en-US')).toBe('English');
+    });
+
     it('should convert "zh" to "Chinese"', () => {
       expect(normalizeOutputLanguage('zh')).toBe('Chinese');
     });
@@ -133,6 +141,7 @@ describe('languageUtils', () => {
     it('should preserve explicit language names as-is', () => {
       expect(normalizeOutputLanguage('Japanese')).toBe('Japanese');
       expect(normalizeOutputLanguage('French')).toBe('French');
+      expect(normalizeOutputLanguage('french')).toBe('French');
     });
 
     it('should preserve unknown language names as-is', () => {
@@ -142,23 +151,11 @@ describe('languageUtils', () => {
   });
 
   describe('resolveOutputLanguage', () => {
-    it('should resolve "auto" to detected system language', () => {
-      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('zh');
-
-      expect(resolveOutputLanguage('auto')).toBe('Chinese');
-      expect(i18n.detectSystemLanguage).toHaveBeenCalled();
-    });
-
-    it('should resolve undefined to detected system language', () => {
-      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('ru');
-
-      expect(resolveOutputLanguage(undefined)).toBe('Russian');
-    });
-
-    it('should resolve null to detected system language', () => {
-      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('de');
-
-      expect(resolveOutputLanguage(null)).toBe('German');
+    it('should reject auto values so callers preserve auto explicitly', () => {
+      expect(() => resolveOutputLanguage('auto')).toThrow(
+        'resolveOutputLanguage does not accept auto',
+      );
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
     it('should normalize explicit locale codes', () => {
@@ -166,8 +163,28 @@ describe('languageUtils', () => {
       expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
+    it('should normalize "english"', () => {
+      expect(resolveOutputLanguage('english')).toBe('English');
+      expect(resolveOutputLanguage('en-US')).toBe('English');
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
     it('should preserve explicit language names', () => {
       expect(resolveOutputLanguage('Japanese')).toBe('Japanese');
+    });
+  });
+
+  describe('resolveOutputLanguageOrPreserveAuto', () => {
+    it('should preserve auto values', () => {
+      expect(resolveOutputLanguageOrPreserveAuto('auto')).toBe('auto');
+      expect(resolveOutputLanguageOrPreserveAuto(undefined)).toBe('auto');
+      expect(resolveOutputLanguageOrPreserveAuto(null)).toBe('auto');
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
+    it('should normalize explicit languages', () => {
+      expect(resolveOutputLanguageOrPreserveAuto('zh')).toBe('Chinese');
+      expect(resolveOutputLanguageOrPreserveAuto('english')).toBe('English');
     });
   });
 
@@ -240,6 +257,38 @@ describe('languageUtils', () => {
       expect(writtenContent).not.toContain('Prefer responding');
     });
 
+    it('should write a same-language rule for auto', () => {
+      writeOutputLanguageFile('auto');
+
+      const writtenContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      expect(writtenContent).toContain('# Output language preference: auto');
+      expect(writtenContent).toContain(
+        '<!-- qwen-code:llm-output-language: auto -->',
+      );
+      expect(writtenContent).toContain(
+        "Respond in the same language as the user's input.",
+      );
+      expect(writtenContent).toContain('## Exception');
+      expect(writtenContent).toContain(
+        "switch to the user's requested language for the remainder of the conversation",
+      );
+      expect(writtenContent).not.toContain('You MUST always respond in');
+    });
+
+    it('should write to custom targetPath when provided', () => {
+      writeOutputLanguageFile('Korean', '/proj/.qwen/output-language.md');
+
+      expect(fs.mkdirSync).toHaveBeenCalledWith('/proj/.qwen', {
+        recursive: true,
+      });
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/proj/.qwen/output-language.md',
+        expect.stringContaining('Korean'),
+        'utf-8',
+      );
+    });
+
     it('should include exception clause for explicit user language requests', () => {
       writeOutputLanguageFile('English');
 
@@ -270,13 +319,18 @@ describe('languageUtils', () => {
       vi.mocked(fs.writeFileSync).mockImplementation(() => undefined);
     });
 
-    it('should resolve "auto" and write resolved language', () => {
+    it('should preserve "auto" and write the same-language rule', () => {
       vi.mocked(i18n.detectSystemLanguage).mockReturnValue('zh');
 
       updateOutputLanguageFile('auto');
 
       const writtenContent = vi.mocked(fs.writeFileSync).mock.calls[0][1];
-      expect(writtenContent).toContain('Chinese');
+      expect(writtenContent).toContain('# Output language preference: auto');
+      expect(writtenContent).toContain(
+        "Respond in the same language as the user's input.",
+      );
+      expect(writtenContent).not.toContain('Chinese');
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
     it('should normalize locale codes and write full name', () => {
@@ -302,7 +356,7 @@ describe('languageUtils', () => {
       vi.mocked(fs.readFileSync).mockReturnValue('');
     });
 
-    it('should create file when it does not exist', () => {
+    it('should create an auto rule file when it does not exist', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
       vi.mocked(i18n.detectSystemLanguage).mockReturnValue('en');
 
@@ -311,9 +365,12 @@ describe('languageUtils', () => {
       expect(fs.mkdirSync).toHaveBeenCalled();
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
-        expect.stringContaining('English'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
         'utf-8',
       );
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
     });
 
     it('should NOT overwrite file when it already exists with valid content', () => {
@@ -344,7 +401,7 @@ describe('languageUtils', () => {
       expect(fs.writeFileSync).not.toHaveBeenCalled();
     });
 
-    it('should resolve "auto" to detected system language', () => {
+    it('should preserve "auto" as a same-language rule', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
       vi.mocked(i18n.detectSystemLanguage).mockReturnValue('zh');
 
@@ -352,16 +409,118 @@ describe('languageUtils', () => {
 
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
-        expect.stringContaining('Chinese'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
+        'utf-8',
+      );
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
+    it('should migrate an existing generated fixed-language file when setting is explicitly auto', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      vi.mocked(fs.writeFileSync).mockClear();
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(generatedFixedLanguageContent);
+
+      initializeLlmOutputLanguage('auto');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
+        'utf-8',
+      );
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
+    it('should migrate an existing generated fixed-language file when setting is empty auto value', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      vi.mocked(fs.writeFileSync).mockClear();
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(generatedFixedLanguageContent);
+
+      initializeLlmOutputLanguage('');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
+        'utf-8',
+      );
+      expect(i18n.detectSystemLanguage).not.toHaveBeenCalled();
+    });
+
+    it('should migrate generated fixed-language files after harmless template wording changes', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      const generatedWithExtraTemplateLine =
+        generatedFixedLanguageContent.replace(
+          '## Exception',
+          '- Keep the selected language stable across turns.\n\n## Exception',
+        );
+      vi.mocked(fs.writeFileSync).mockClear();
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        generatedWithExtraTemplateLine,
+      );
+
+      initializeLlmOutputLanguage('auto');
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining(
+          "Respond in the same language as the user's input.",
+        ),
         'utf-8',
       );
     });
 
-    it('should detect Chinese locale and create Chinese rule file', () => {
-      vi.mocked(fs.existsSync).mockReturnValue(false);
-      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('zh');
+    it('should preserve a manually customized fixed-language file even when setting is auto', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(
+        `# Output language preference: Chinese
+<!-- qwen-code:llm-output-language: Chinese -->
 
-      initializeLlmOutputLanguage();
+## Custom
+Always use formal tone.
+`,
+      );
+
+      initializeLlmOutputLanguage('auto');
+
+      expect(fs.writeFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should ignore migration write failures when an existing generated file is still valid', () => {
+      writeOutputLanguageFile('Chinese');
+      const generatedFixedLanguageContent = vi.mocked(fs.writeFileSync).mock
+        .calls[0][1] as string;
+      vi.mocked(fs.writeFileSync).mockClear();
+
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue(generatedFixedLanguageContent);
+      vi.mocked(fs.writeFileSync).mockImplementation(() => {
+        throw new Error('EACCES');
+      });
+
+      expect(() => initializeLlmOutputLanguage('auto')).not.toThrow();
+    });
+
+    it('should normalize Chinese locale and create Chinese rule file', () => {
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      initializeLlmOutputLanguage('zh');
 
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
@@ -370,11 +529,10 @@ describe('languageUtils', () => {
       );
     });
 
-    it('should detect Russian locale and create Russian rule file', () => {
+    it('should normalize Russian locale and create Russian rule file', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
-      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('ru');
 
-      initializeLlmOutputLanguage();
+      initializeLlmOutputLanguage('ru');
 
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
@@ -383,11 +541,10 @@ describe('languageUtils', () => {
       );
     });
 
-    it('should detect German locale and create German rule file', () => {
+    it('should normalize German locale and create German rule file', () => {
       vi.mocked(fs.existsSync).mockReturnValue(false);
-      vi.mocked(i18n.detectSystemLanguage).mockReturnValue('de');
 
-      initializeLlmOutputLanguage();
+      initializeLlmOutputLanguage('de');
 
       expect(fs.writeFileSync).toHaveBeenCalledWith(
         expect.stringContaining('output-language.md'),
@@ -477,6 +634,69 @@ describe('languageUtils', () => {
       }
 
       expect(resolvedPath).toBeUndefined();
+    });
+  });
+
+  describe('writeOutputLanguageAndRegisterPath', () => {
+    beforeEach(() => {
+      vi.mocked(fs.mkdirSync).mockImplementation(() => undefined);
+      vi.mocked(fs.writeFileSync).mockImplementation(() => undefined);
+    });
+
+    it('writes to config-bound path when available', () => {
+      const config = {
+        getOutputLanguageFilePath: vi
+          .fn()
+          .mockReturnValue('/proj/.qwen/output-language.md'),
+        setOutputLanguageFilePath: vi.fn(),
+      };
+
+      writeOutputLanguageAndRegisterPath('Chinese', config);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        '/proj/.qwen/output-language.md',
+        expect.stringContaining('Chinese'),
+        'utf-8',
+      );
+      expect(config.setOutputLanguageFilePath).not.toHaveBeenCalled();
+    });
+
+    it('writes to global default and registers path when config path is undefined', () => {
+      const config = {
+        getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
+        setOutputLanguageFilePath: vi.fn(),
+      };
+
+      writeOutputLanguageAndRegisterPath('Japanese', config);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Japanese'),
+        'utf-8',
+      );
+      expect(config.setOutputLanguageFilePath).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+      );
+    });
+
+    it('handles null config gracefully', () => {
+      writeOutputLanguageAndRegisterPath('Korean', null);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Korean'),
+        'utf-8',
+      );
+    });
+
+    it('handles undefined config gracefully', () => {
+      writeOutputLanguageAndRegisterPath('Russian', undefined);
+
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining('output-language.md'),
+        expect.stringContaining('Russian'),
+        'utf-8',
+      );
     });
   });
 });

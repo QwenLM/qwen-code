@@ -96,7 +96,9 @@ const {
       | undefined,
   },
   endTurnCallbackRef: {
-    current: undefined as ((reason?: string) => void) | undefined,
+    current: undefined as
+      | ((reason?: string, source?: string) => void)
+      | undefined,
   },
   streamChunkCallbackRef: {
     current: undefined as ((chunk: string) => void) | undefined,
@@ -224,7 +226,7 @@ vi.mock('../../services/qwenAgentManager.js', () => ({
         slashCommandNotificationCallbackRef.current = callback;
       },
     );
-    onEndTurn = vi.fn((cb: (reason?: string) => void) => {
+    onEndTurn = vi.fn((cb: (reason?: string, source?: string) => void) => {
       endTurnCallbackRef.current = cb;
     });
     onToolCall = vi.fn();
@@ -257,6 +259,8 @@ vi.mock('../../services/conversationStore.js', () => ({
       id: 'conversation-1',
       messages: [],
     });
+    addMessage = vi.fn().mockResolvedValue(undefined);
+    getCurrentConversationId = vi.fn(() => null);
   },
 }));
 
@@ -351,6 +355,7 @@ import {
   truncatePanelTitle,
   MAX_PANEL_TITLE_LENGTH,
 } from '../utils/panelTitleUtils.js';
+import { logger } from '../../utils/logger.js';
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import * as path from 'node:path';
@@ -572,6 +577,25 @@ describe('WebViewProvider.attachToView', () => {
       type: 'copyToClipboardResult',
       data: { requestId: 'copy-1', success: true },
     });
+  });
+
+  it('writes webview log messages through the extension host logger', async () => {
+    const error = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+    const { messageHandler } = await setupAttachedProvider({
+      captureMessageHandler: true,
+    });
+    const message = `render failed\n${'x'.repeat(10_000)}`;
+
+    await messageHandler?.({
+      type: 'log',
+      data: { level: 'error', message },
+    });
+
+    expect(error).toHaveBeenCalledWith(
+      '[Webview]',
+      `${message.slice(0, 10_000)}...[truncated]`.replace('\n', '\\n'),
+    );
+    error.mockRestore();
   });
 
   it('reports clipboard copy failures back to the requesting webview', async () => {
@@ -1556,6 +1580,35 @@ describe('Notification & dot indicator', () => {
     // Second endTurn (final) — should NOT fire another notification
     endTurnCallbackRef.current?.('end_turn');
     expect(mockShowInformationMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not show idle notification for background notification turns', async () => {
+    const mockPanel = {
+      active: false,
+      visible: false,
+      webview: { postMessage: vi.fn() },
+      iconPath: undefined as unknown,
+    };
+    mockGetPanel.mockReturnValue(mockPanel as never);
+    mockWindowState.focused = false;
+
+    await setupAttachedProvider();
+
+    streamChunkCallbackRef.current?.('chunk');
+    vi.advanceTimersByTime(25_000);
+    endTurnCallbackRef.current?.('end_turn', 'background_notification');
+
+    expect(mockPanel.webview.postMessage).toHaveBeenCalledWith({
+      type: 'streamEnd',
+      data: expect.objectContaining({
+        reason: 'end_turn',
+        source: 'background_notification',
+      }),
+    });
+    expect(mockShowInformationMessage).not.toHaveBeenCalledWith(
+      'Qwen Code: Waiting for your input.',
+      'Show',
+    );
   });
 
   it('does not notify when notifications setting is disabled', async () => {

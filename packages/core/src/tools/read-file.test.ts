@@ -13,15 +13,55 @@ import os from 'node:os';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import type { Config } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
+import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
+
+const visionBridgeMocks = vi.hoisted(() => ({
+  runVisionBridge: vi.fn(),
+  shouldRunVisionBridge: vi.fn(),
+}));
+
+const pdfMocks = vi.hoisted(() => ({
+  extractPDFText: vi.fn(),
+  getPDFPageCount: vi.fn(),
+  isPdftotextAvailable: vi.fn(),
+  renderPDFPagesToImages: vi.fn(),
+}));
 
 vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
 }));
+
+vi.mock(
+  '../services/visionBridge/vision-bridge-service.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('../services/visionBridge/vision-bridge-service.js')
+      >();
+    return {
+      ...actual,
+      runVisionBridge: visionBridgeMocks.runVisionBridge,
+      shouldRunVisionBridge: visionBridgeMocks.shouldRunVisionBridge,
+    };
+  },
+);
+
+vi.mock('../utils/pdf.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/pdf.js')>();
+  return {
+    ...actual,
+    extractPDFText: pdfMocks.extractPDFText,
+    getPDFPageCount: pdfMocks.getPDFPageCount,
+    isPdftotextAvailable: pdfMocks.isPdftotextAvailable,
+    renderPDFPagesToImages: pdfMocks.renderPDFPagesToImages,
+  };
+});
 
 describe('ReadFileTool', () => {
   let tempRootDir: string;
@@ -30,6 +70,24 @@ describe('ReadFileTool', () => {
   const abortSignal = new AbortController().signal;
 
   beforeEach(async () => {
+    visionBridgeMocks.runVisionBridge.mockReset();
+    visionBridgeMocks.shouldRunVisionBridge.mockReset();
+    visionBridgeMocks.shouldRunVisionBridge.mockReturnValue(false);
+    pdfMocks.extractPDFText.mockReset();
+    pdfMocks.extractPDFText.mockResolvedValue({
+      success: false,
+      error: 'No extractable text layer.',
+    });
+    pdfMocks.getPDFPageCount.mockReset();
+    pdfMocks.getPDFPageCount.mockResolvedValue(31);
+    pdfMocks.isPdftotextAvailable.mockReset();
+    pdfMocks.isPdftotextAvailable.mockResolvedValue(true);
+    pdfMocks.renderPDFPagesToImages.mockReset();
+    pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+      success: false,
+      error: 'PDF rendering unavailable.',
+    });
+
     // Create a unique temporary root directory for each test run
     tempRootDir = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'read-file-tool-root-'),
@@ -114,7 +172,7 @@ describe('ReadFileTool', () => {
       expect(typeof result).not.toBe('string');
     });
 
-    it('should allow access to files in OS temp directory', () => {
+    it('should build an invocation for files in the OS temp directory', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(os.tmpdir(), 'pr-review-context.md'),
       };
@@ -145,19 +203,51 @@ describe('ReadFileTool', () => {
         offset: -1,
       };
       expect(() => tool.build(params)).toThrow(
-        'Offset must be a non-negative number',
+        'Offset must be a non-negative integer',
       );
     });
 
-    it('should throw error if limit is zero or negative', () => {
+    it('should throw error if offset is fractional', () => {
       const params: ReadFileToolParams = {
         file_path: path.join(tempRootDir, 'test.txt'),
-        limit: 0,
+        offset: 1.5,
       };
-      expect(() => tool.build(params)).toThrow(
-        'Limit must be a positive number',
-      );
+      expect(() => tool.build(params)).toThrow('params/offset must be integer');
     });
+
+    it('should allow zero offset', () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(tempRootDir, 'test.txt'),
+        offset: 0,
+      };
+      expect(tool.build(params)).toBeDefined();
+    });
+
+    it.each([0, -1])(
+      'should throw error if limit is not positive (%s)',
+      (limit) => {
+        const params: ReadFileToolParams = {
+          file_path: path.join(tempRootDir, 'test.txt'),
+          limit,
+        };
+        expect(() => tool.build(params)).toThrow(
+          'Limit must be a positive integer',
+        );
+      },
+    );
+
+    it.each([0.5, 1.5])(
+      'should throw error if limit is fractional (%s)',
+      (limit) => {
+        const params: ReadFileToolParams = {
+          file_path: path.join(tempRootDir, 'test.txt'),
+          limit,
+        };
+        expect(() => tool.build(params)).toThrow(
+          'params/limit must be integer',
+        );
+      },
+    );
 
     it('should reject offset or limit for notebook files', () => {
       const params: ReadFileToolParams = {
@@ -210,6 +300,37 @@ describe('ReadFileTool', () => {
       const invocation = tool.build(params);
       const permission = await invocation.getDefaultPermission();
       expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the global qwen temp directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(Storage.getGlobalTempDir(), 'temp-file.txt'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return allow for paths within the user extensions directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(
+          Storage.getUserExtensionsDir(),
+          'my-ext',
+          'index.js',
+        ),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('allow');
+    });
+
+    it('should return ask for paths directly under the OS temp directory', async () => {
+      const params: ReadFileToolParams = {
+        file_path: path.join(os.tmpdir(), 'pr-review-context.md'),
+      };
+      const invocation = tool.build(params);
+      const permission = await invocation.getDefaultPermission();
+      expect(permission).toBe('ask');
     });
 
     it('should return allow for paths within the subagent transcripts dir', async () => {
@@ -350,9 +471,8 @@ describe('ReadFileTool', () => {
       });
     });
 
-    it('should return error for a file that is too large', async () => {
+    it('should read and truncate a text file larger than 10MB', async () => {
       const filePath = path.join(tempRootDir, 'largefile.txt');
-      // 11MB of content exceeds 10MB limit
       const largeContent = 'x'.repeat(11 * 1024 * 1024);
       await fsp.writeFile(filePath, largeContent, 'utf-8');
       const params: ReadFileToolParams = { file_path: filePath };
@@ -362,10 +482,28 @@ describe('ReadFileTool', () => {
       >;
 
       const result = await invocation.execute(abortSignal);
-      expect(result).toHaveProperty('error');
-      expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
-      expect(result.error?.message).toContain(
-        'File size exceeds the 10MB limit',
+      expect(result.error).toBeUndefined();
+      expect(result.returnDisplay).toBe(
+        'Read lines 1-1 of at least 1 from largefile.txt (truncated)',
+      );
+      expect(result.llmContent).toContain(
+        'Showing lines 1-1 of at least 1 total lines',
+      );
+      expect(result.llmContent).toContain('... [truncated]');
+    });
+
+    it('should propagate an aborted signal before reading', async () => {
+      const filePath = path.join(tempRootDir, 'abort.txt');
+      await fsp.writeFile(filePath, 'content', 'utf-8');
+      const invocation = tool.build({ file_path: filePath }) as ToolInvocation<
+        ReadFileToolParams,
+        ToolResult
+      >;
+      const controller = new AbortController();
+      controller.abort();
+
+      await expect(invocation.execute(controller.signal)).rejects.toThrow(
+        /abort/i,
       );
     });
 
@@ -430,6 +568,324 @@ describe('ReadFileTool', () => {
         },
       });
       expect(result.returnDisplay).toBe('Read pdf file: document.pdf');
+    });
+
+    describe('PDF vision bridge fallback', () => {
+      function createTextOnlyTool(): ReadFileTool {
+        return new ReadFileTool({
+          getFileService: () => new FileDiscoveryService(tempRootDir),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          getModel: () => 'text-only-model',
+          getEffectiveInputModalities: () => ({}),
+          getDefaultVisionBridgeModel: () => ({
+            id: 'qwen3-vl-plus',
+            baseUrl: 'https://dashscope.aliyuncs.com/v1',
+          }),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({ modalities: {} }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config);
+      }
+
+      async function readCandidate(
+        signalOverride: AbortSignal = abortSignal,
+      ): Promise<ToolResult> {
+        const pdfPath = path.join(tempRootDir, 'scanned.pdf');
+        await fsp.writeFile(pdfPath, Buffer.from('%PDF-1.7'));
+        const invocation = createTextOnlyTool().build({
+          file_path: pdfPath,
+          pages: '20-25',
+        }) as ToolInvocation<ReadFileToolParams, ToolResult>;
+        return invocation.execute(signalOverride);
+      }
+
+      function bridgeDisplay(result: ToolResult): VisionBridgeNoticeDisplay {
+        expect(result.returnDisplay).toMatchObject({
+          type: 'vision_bridge_notice',
+        });
+        return result.returnDisplay as VisionBridgeNoticeDisplay;
+      }
+
+      beforeEach(() => {
+        visionBridgeMocks.shouldRunVisionBridge.mockReturnValue(true);
+        pdfMocks.renderPDFPagesToImages.mockResolvedValue({
+          success: true,
+          images: ['20', '21', '22', '23'].map((data) => ({
+            data,
+            mimeType: 'image/jpeg',
+          })),
+          bytesTruncated: false,
+        });
+      });
+
+      it('replaces candidate images with an untrusted transcription before returning', async () => {
+        visionBridgeMocks.runVisionBridge.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [
+            {
+              text: '[Untrusted transcription]\nPage 20: heading\nPages 24-25 exist but were not transcribed; call read_file on the original PDF with a later page range to continue.',
+            },
+          ],
+          convertedCount: 4,
+          omittedCount: 0,
+          modelId: 'qwen3-vl-plus',
+          modelEndpoint: 'dashscope.aliyuncs.com',
+          egressOccurred: true,
+        });
+
+        const result = await readCandidate();
+
+        expect(result.error).toBeUndefined();
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(JSON.stringify(result.llmContent)).toContain(
+          'Untrusted transcription',
+        );
+        expect(JSON.stringify(result.llmContent)).toContain(
+          'Pages 24-25 exist but were not transcribed',
+        );
+        expect(JSON.stringify(result.llmContent)).not.toContain(
+          'pages 24-25 were not included',
+        );
+        const display = bridgeDisplay(result);
+        expect(display.summary).toContain(
+          'transcribed PDF pages 20-23; remaining pages 24-25',
+        );
+        expect(display.notice).toContain('qwen3-vl-plus');
+        expect(display.notice).toContain('dashscope.aliyuncs.com');
+        expect(visionBridgeMocks.runVisionBridge).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sourceContext: {
+              displayName: 'scanned.pdf',
+              renderedRange: { firstPage: 20, lastPage: 23 },
+              continuation: {
+                certainty: 'known',
+                firstPage: 24,
+                lastPage: 25,
+              },
+            },
+          }),
+        );
+        const sentParts = visionBridgeMocks.runVisionBridge.mock.calls[0][0]
+          .parts as Array<{ inlineData?: unknown; text?: string }>;
+        expect(sentParts).toHaveLength(4);
+        expect(sentParts.every((part) => part.inlineData)).toBe(true);
+      });
+
+      it('does not present unknown continuation pages as certain', async () => {
+        pdfMocks.getPDFPageCount.mockResolvedValue(null);
+        visionBridgeMocks.runVisionBridge.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [{ text: '[Untrusted transcription]\nPage 20: heading' }],
+          convertedCount: 4,
+          omittedCount: 0,
+          modelId: 'qwen3-vl-plus',
+          modelEndpoint: 'dashscope.aliyuncs.com',
+          egressOccurred: true,
+        });
+
+        const result = await readCandidate();
+
+        const display = bridgeDisplay(result);
+        expect(display.summary).toContain(
+          'additional pages may exist from page 24 through page 25',
+        );
+        expect(display.summary).not.toContain('remaining pages 24-25');
+        expect(visionBridgeMocks.runVisionBridge).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sourceContext: expect.objectContaining({
+              continuation: {
+                certainty: 'possible',
+                firstPage: 24,
+                requestedLastPage: 25,
+              },
+            }),
+          }),
+        );
+      });
+
+      it.each([
+        ['request failure', 'the vision model request failed'],
+        ['empty response', 'the vision model returned no description'],
+        ['timeout', 'timed out after 30000ms'],
+        ['model selection changed', 'no image-capable model is available'],
+      ])('restores the original PDF error after %s', async (_name, error) => {
+        visionBridgeMocks.runVisionBridge.mockResolvedValue({
+          applied: true,
+          status: 'failed',
+          convertedCount: 0,
+          omittedCount: 0,
+          modelId: 'qwen3-vl-plus',
+          modelEndpoint: 'dashscope.aliyuncs.com',
+          egressOccurred: true,
+          error,
+        });
+
+        const result = await readCandidate();
+
+        expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.error?.message).toBe('No extractable text layer.');
+        expect(result.llmContent).toContain('Cannot extract text from PDF');
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(result.llmContent).not.toContain('Vision bridge');
+        const display = bridgeDisplay(result);
+        expect(display.summary).toContain(
+          'rendered PDF pages 20-23; remaining pages 24-25',
+        );
+        expect(display.notice).toContain('dashscope.aliyuncs.com');
+      });
+
+      it('restores the PDF error for an unusable successful bridge result', async () => {
+        visionBridgeMocks.runVisionBridge.mockResolvedValue({
+          applied: false,
+          status: 'ok',
+          convertedCount: 4,
+          omittedCount: 0,
+          modelId: 'qwen3-vl-plus',
+          modelEndpoint: 'dashscope.aliyuncs.com',
+          egressOccurred: true,
+        });
+
+        const result = await readCandidate();
+
+        expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(bridgeDisplay(result).notice).toContain(
+          'dashscope.aliyuncs.com',
+        );
+      });
+
+      it.each([
+        [
+          'inlineData',
+          { inlineData: { data: 'unsafe', mimeType: 'application/pdf' } },
+        ],
+        [
+          'fileData',
+          {
+            fileData: {
+              fileUri: 'file:///tmp/unsafe.pdf',
+              mimeType: 'application/pdf',
+            },
+          },
+        ],
+      ])(
+        'fails closed when a successful bridge result still contains %s',
+        async (mediaKey, mediaPart) => {
+          visionBridgeMocks.runVisionBridge.mockResolvedValue({
+            applied: true,
+            status: 'ok',
+            parts: [mediaPart],
+            convertedCount: 4,
+            omittedCount: 0,
+            modelId: 'qwen3-vl-plus',
+            modelEndpoint: 'dashscope.aliyuncs.com',
+            egressOccurred: true,
+          });
+
+          const result = await readCandidate();
+
+          expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+          expect(result.llmContent).toContain('Cannot extract text from PDF');
+          expect(JSON.stringify(result.llmContent)).not.toContain(mediaKey);
+          const display = bridgeDisplay(result);
+          expect(display.notice).toContain('qwen3-vl-plus');
+          expect(display.notice).toContain('dashscope.aliyuncs.com');
+          expect(display.notice).toContain('transcription was discarded');
+          expect(display.notice).not.toContain('vision model request failed');
+        },
+      );
+
+      it('restores the PDF error when the bridge omits a rendered page', async () => {
+        visionBridgeMocks.runVisionBridge.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [{ text: '[Untrusted transcription]\nPages 20-22' }],
+          convertedCount: 3,
+          omittedCount: 1,
+          modelId: 'qwen3-vl-plus',
+          modelEndpoint: 'dashscope.aliyuncs.com',
+          egressOccurred: true,
+        });
+
+        const result = await readCandidate();
+
+        expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.llmContent).toContain('Cannot extract text from PDF');
+        expect(bridgeDisplay(result).notice).toContain(
+          'dashscope.aliyuncs.com',
+        );
+        expect(bridgeDisplay(result).notice).toContain(
+          'transcription was discarded',
+        );
+        expect(bridgeDisplay(result).notice).not.toContain(
+          'vision model request failed',
+        );
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+      });
+
+      it('restores the PDF error when the bridge throws before replacement', async () => {
+        visionBridgeMocks.runVisionBridge.mockRejectedValue(
+          new Error('network failure'),
+        );
+
+        const result = await readCandidate();
+
+        expect(result.error?.type).toBe(ToolErrorType.READ_CONTENT_FAILURE);
+        expect(result.error?.message).toBe('No extractable text layer.');
+        expect(result.llmContent).toContain('Cannot extract text from PDF');
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(bridgeDisplay(result).notice).toContain(
+          'failed before producing a transcription',
+        );
+      });
+
+      it('propagates cancellation instead of restoring a PDF error', async () => {
+        const controller = new AbortController();
+        visionBridgeMocks.runVisionBridge.mockImplementation(async () => {
+          controller.abort();
+          return {
+            applied: false,
+            status: 'skipped',
+            convertedCount: 0,
+            omittedCount: 0,
+            modelId: 'qwen3-vl-plus',
+          };
+        });
+
+        await expect(readCandidate(controller.signal)).rejects.toThrow(
+          /abort/i,
+        );
+      });
+
+      it('does not send ordinary images to the read_file bridge path', async () => {
+        const imagePath = path.join(tempRootDir, 'image.png');
+        await fsp.writeFile(
+          imagePath,
+          Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+        );
+        const invocation = createTextOnlyTool().build({
+          file_path: imagePath,
+        }) as ToolInvocation<ReadFileToolParams, ToolResult>;
+
+        const result = await invocation.execute(abortSignal);
+
+        expect(result.llmContent).toContain('Unsupported image file');
+        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(visionBridgeMocks.runVisionBridge).not.toHaveBeenCalled();
+      });
     });
 
     it('should handle binary file and skip content', async () => {
@@ -648,7 +1104,7 @@ describe('ReadFileTool', () => {
       expect(result.returnDisplay).toBe('');
     });
 
-    it('should successfully read files from OS temp directory', async () => {
+    it('should read OS temp files after the invocation is executed', async () => {
       const osTempFile = await fsp.mkdtemp(
         path.join(os.tmpdir(), 'read-file-test-'),
       );
@@ -682,6 +1138,37 @@ describe('ReadFileTool', () => {
         >;
         return invocation.execute(abortSignal);
       }
+
+      it('returns a short error when a text-only model reads a large PDF without pages', async () => {
+        const pdfPath = path.join(tempRootDir, 'large.pdf');
+        await fsp.writeFile(pdfPath, Buffer.alloc(2 * 1024 * 1024));
+        const textOnlyConfig = {
+          getFileService: () => new FileDiscoveryService(tempRootDir),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({ modalities: {} }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const textOnlyTool = new ReadFileTool(textOnlyConfig);
+
+        const result = await read({ file_path: pdfPath }, textOnlyTool);
+
+        expect(result.error?.type).toBe(ToolErrorType.FILE_TOO_LARGE);
+        expect(String(result.llmContent).length).toBeLessThan(1000);
+        expect(result.llmContent).toContain('has 31 pages');
+        expect(result.llmContent).toContain("Use the 'pages' parameter");
+      });
 
       it('returns the file_unchanged placeholder on a second full Read of an unchanged text file', async () => {
         const filePath = path.join(tempRootDir, 'note.txt');
@@ -1092,6 +1579,63 @@ describe('ReadFileTool', () => {
         };
         const expectedError = `File path '${ignoredFilePath}' is ignored by .qwenignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
+      });
+
+      it('should throw error if path is ignored by .agentignore or .aiignore', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.agentignore'),
+          'agent-secret.txt\n',
+        );
+        await fsp.writeFile(
+          path.join(tempRootDir, '.aiignore'),
+          'ai-secret.txt\n',
+        );
+        const agentIgnoredFilePath = path.join(tempRootDir, 'agent-secret.txt');
+        const aiIgnoredFilePath = path.join(tempRootDir, 'ai-secret.txt');
+        await fsp.writeFile(agentIgnoredFilePath, 'content', 'utf-8');
+        await fsp.writeFile(aiIgnoredFilePath, 'content', 'utf-8');
+
+        expect(() => tool.build({ file_path: agentIgnoredFilePath })).toThrow(
+          /\.agentignore/,
+        );
+        expect(() => tool.build({ file_path: aiIgnoredFilePath })).toThrow(
+          /\.aiignore/,
+        );
+      });
+
+      it('should throw error using configured custom ignore file display', async () => {
+        await fsp.writeFile(
+          path.join(tempRootDir, '.cursorignore'),
+          'cursor-secret.txt\n',
+        );
+        const customConfig = {
+          getFileService: () =>
+            new FileDiscoveryService(tempRootDir, ['.cursorignore']),
+          getFileSystemService: () => new StandardFileSystemService(),
+          getTargetDir: () => tempRootDir,
+          getWorkspaceContext: () => createMockWorkspaceContext(tempRootDir),
+          storage: {
+            getProjectTempDir: () => path.join(tempRootDir, '.temp'),
+            getProjectDir: () => path.join(tempRootDir, '.project'),
+            getUserSkillsDirs: () => [
+              path.join(os.homedir(), '.qwen', 'skills'),
+            ],
+          },
+          getTruncateToolOutputThreshold: () => 2500,
+          getTruncateToolOutputLines: () => 500,
+          getContentGeneratorConfig: () => ({
+            modalities: { image: true, pdf: true, audio: true, video: true },
+          }),
+          getFileReadCache: () => fileReadCache,
+          getFileReadCacheDisabled: () => false,
+        } as unknown as Config;
+        const customTool = new ReadFileTool(customConfig);
+        const ignoredFilePath = path.join(tempRootDir, 'cursor-secret.txt');
+        await fsp.writeFile(ignoredFilePath, 'content', 'utf-8');
+
+        expect(() => customTool.build({ file_path: ignoredFilePath })).toThrow(
+          /\.cursorignore/,
+        );
       });
 
       it('should throw error if file is in an ignored directory', async () => {

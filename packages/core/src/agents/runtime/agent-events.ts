@@ -22,6 +22,13 @@ import type {
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { AgentStatus } from './agent-types.js';
 
+type WithoutConfirmationCallback<T> = T extends unknown
+  ? Omit<T, 'onConfirm'>
+  : never;
+
+export type AgentConfirmationDetails =
+  WithoutConfirmationCallback<ToolCallConfirmationDetails>;
+
 // ─── Event Types ────────────────────────────────────────────
 
 export type AgentEvent =
@@ -152,9 +159,14 @@ export interface AgentApprovalRequestEvent {
   callId: string;
   name: string;
   description: string;
-  confirmationDetails: Omit<ToolCallConfirmationDetails, 'onConfirm'> & {
-    type: ToolCallConfirmationDetails['type'];
-  };
+  /**
+   * Original tool-call arguments. Use this — not `confirmationDetails`
+   * — when forwarding to a permission policy, since
+   * `confirmationDetails` is the UI-rendering shape (e.g. `fileDiff`,
+   * `command`) which differs from the raw tool arguments.
+   */
+  args: Record<string, unknown>;
+  confirmationDetails: AgentConfirmationDetails;
   respond: (
     outcome: ToolConfirmationOutcome,
     payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],

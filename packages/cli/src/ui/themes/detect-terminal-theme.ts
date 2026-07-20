@@ -44,7 +44,7 @@ function hexComponent(hex: string): number {
 export function parseOscRgb(data: string): Rgb | undefined {
   // rgb:R/G/B
   const rgbMatch =
-    /^rgba?:([0-9a-f]{1,4})\/([0-9a-f]{1,4})\/([0-9a-f]{1,4})/i.exec(data);
+    /^rgba?:([0-9a-f]{1,4})\/([0-9a-f]{1,4})\/([0-9a-f]{1,4})$/i.exec(data);
   if (rgbMatch) {
     return {
       r: hexComponent(rgbMatch[1]!),

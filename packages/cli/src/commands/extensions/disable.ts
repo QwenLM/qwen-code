@@ -8,7 +8,7 @@ import { type CommandModule } from 'yargs';
 import { SettingScope } from '../../config/settings.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
-import { getExtensionManager } from './utils.js';
+import { getExtensionManager, resolveExtensionCommandScope } from './utils.js';
 import { t } from '../../i18n/index.js';
 
 interface DisableArgs {
@@ -19,17 +19,17 @@ interface DisableArgs {
 export async function handleDisable(args: DisableArgs) {
   const extensionManager = await getExtensionManager();
   try {
-    if (args.scope?.toLowerCase() === 'workspace') {
-      extensionManager.disableExtension(args.name, SettingScope.Workspace);
-    } else {
-      extensionManager.disableExtension(args.name, SettingScope.User);
-    }
+    const scope = resolveExtensionCommandScope(args.scope);
+    const result = await extensionManager.disableExtension(args.name, scope);
     writeStdoutLine(
       t('Extension "{{name}}" successfully disabled for scope "{{scope}}".', {
         name: args.name,
         scope: args.scope || SettingScope.User,
       }),
     );
+    for (const warning of result.warnings ?? []) {
+      writeStderrLine(`${warning.code}: ${warning.error}`);
+    }
   } catch (error) {
     writeStderrLine(getErrorMessage(error));
     process.exit(1);
@@ -46,26 +46,12 @@ export const disableCommand: CommandModule = {
         type: 'string',
       })
       .option('scope', {
-        describe: t('The scope to disable the extenison in.'),
+        describe: t('The scope to disable the extension in.'),
         type: 'string',
         default: SettingScope.User,
       })
       .check((argv) => {
-        if (
-          argv.scope &&
-          !Object.values(SettingScope)
-            .map((s) => s.toLowerCase())
-            .includes((argv.scope as string).toLowerCase())
-        ) {
-          throw new Error(
-            t('Invalid scope: {{scope}}. Please use one of {{scopes}}.', {
-              scope: argv.scope as string,
-              scopes: Object.values(SettingScope)
-                .map((s) => s.toLowerCase())
-                .join(', '),
-            }),
-          );
-        }
+        resolveExtensionCommandScope(argv.scope as string | undefined);
         return true;
       }),
   handler: async (argv) => {

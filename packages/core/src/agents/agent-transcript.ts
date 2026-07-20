@@ -33,6 +33,8 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
+import type { SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { FunctionDeclaration, Content } from '@google/genai';
@@ -41,6 +43,11 @@ const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
 
 export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+/** Root dir holding every session's subagent transcripts: `<projectDir>/subagents/`. */
+export function getSubagentsRootDir(projectDir: string): string {
+  return path.join(projectDir, 'subagents');
 }
 
 /**
@@ -59,8 +66,7 @@ export function getSubagentSessionDir(
   // Sanitize sessionId defensively (UUIDs are safe; resumed/external IDs
   // could carry path-traversal bytes).
   return path.join(
-    projectDir,
-    'subagents',
+    getSubagentsRootDir(projectDir),
     sanitizeFilenameComponent(sessionId),
   );
 }
@@ -108,14 +114,72 @@ export interface AgentMeta {
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
   resolvedApprovalMode?: string;
+  /** Launch-time CLI/runtime flags that should survive process restart. */
+  persistedCliFlags?: AgentPersistedCliFlags;
   /** Canonical subagent config name used to recreate this agent. */
   subagentName?: string;
   /** UI hint preserved for resumed task rows. */
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */
   resumeCount?: number;
+  /**
+   * Nesting depth at launch time; restored on background/foreground resume
+   * via {@link normalizeResumedAgentDepth} — never trust the raw value.
+   */
+  depth?: number;
+  /**
+   * Concrete model ID this agent runs with. Persisted so a process-restart
+   * recovery can enforce per-model concurrency caps on the revive path.
+   */
+  model?: string;
   /** Last terminal error, if any. */
   lastError?: string;
+}
+
+export interface AgentPersistedCliFlags {
+  /** Mirrors resolvedApprovalMode; kept here so the restored flag set is explicit. */
+  approvalMode?: string;
+  bare?: boolean;
+  safeMode?: boolean;
+  sandbox?: SandboxConfig | null;
+  screenReader?: boolean;
+  model?: string;
+  maxSessionTurns?: number;
+  maxToolCalls?: number;
+  /**
+   * Launch-time nesting cap. Interprets the persisted `depth` — without it a
+   * nested agent launched under a lower cap would resume after restart under
+   * the new session's (or default) cap and regain spawn capacity.
+   *
+   * Always a normalized 1–100 integer when written by this codebase; the
+   * resume path still re-normalizes because the sidecar is a plain JSON
+   * file a malformed or hand-edited copy of which can carry anything.
+   */
+  maxSubagentDepth?: number;
+}
+
+/**
+ * Normalizes a persisted launch depth read from an agent sidecar before it
+ * is pinned via the `runWithAgentContext` depthOverride. The sidecar is a
+ * plain JSON file, so a malformed or hand-edited value must not mint spawn
+ * capacity: a negative depth (or `-1e309`, which parses to -Infinity) would
+ * make `canSpawnNestedAgent()` pass for every cap.
+ *
+ * Absent values return undefined (the resume frame derives its depth as a
+ * fresh launch). Anything but an integer within 0–{@link
+ * MAX_SUBAGENT_DEPTH_LIMIT} fails CLOSED to the limit: the resumed agent
+ * keeps running but cannot spawn — clamping a corrupt value down to 0 would
+ * fail open by granting full spawn capacity.
+ */
+export function normalizeResumedAgentDepth(
+  value: number | undefined,
+): number | undefined {
+  if (value == null) return undefined;
+  return Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_SUBAGENT_DEPTH_LIMIT
+    ? value
+    : MAX_SUBAGENT_DEPTH_LIMIT;
 }
 
 /**

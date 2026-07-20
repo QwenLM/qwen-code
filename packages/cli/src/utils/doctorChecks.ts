@@ -341,16 +341,7 @@ async function checkRipgrep(
   }
 }
 
-async function checkGit(context: CommandContext): Promise<DoctorCheckResult> {
-  if (context.services.git) {
-    return {
-      category: t('Git'),
-      name: t('Git'),
-      status: 'pass',
-      message: t('available'),
-    };
-  }
-  // services.git is undefined in non-interactive mode — probe the binary directly
+async function checkGit(_context: CommandContext): Promise<DoctorCheckResult> {
   const version = await getGitVersion();
   if (version === 'unknown') {
     return {

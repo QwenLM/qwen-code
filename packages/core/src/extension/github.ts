@@ -4,15 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { simpleGit } from 'simple-git';
+import { simpleGit, type SimpleGit } from 'simple-git';
 import { getErrorMessage } from '../utils/errors.js';
 import * as os from 'node:os';
 import * as https from 'node:https';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { EXTENSIONS_CONFIG_FILENAME } from './variables.js';
+import { pipeline } from 'node:stream/promises';
 import * as tar from 'tar';
-import extract from 'extract-zip';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   ExtensionUpdateState,
@@ -23,8 +22,19 @@ import {
 import type { ExtensionInstallMetadata } from '../config/config.js';
 import { checkNpmUpdate } from './npm.js';
 import { redactUrlCredentials } from './redaction.js';
+import {
+  convertGeminiOrClaudeExtension,
+  SUPPORTED_EXTENSION_MANIFESTS,
+} from './extension-converter.js';
+import { assertTarArchiveHasNoLinks } from './archive-safety.js';
+import { resolveNetworkTarget } from './network-policy.js';
+import { extractZipArchive } from './zip-extraction.js';
 
 const debugLogger = createDebugLogger('EXT_GITHUB');
+const SUPPORTED_ARCHIVE_EXTENSIONS = ['.tar.gz', '.zip'] as const;
+const ARCHIVE_DOWNLOAD_TIMEOUT_MS = 120_000;
+const ARCHIVE_DOWNLOAD_MAX_BYTES = 100 * 1024 * 1024;
+const MINIMUM_PINNED_GIT_VERSION = { major: 2, minor: 37 } as const;
 
 interface GithubReleaseData {
   assets: Asset[];
@@ -41,6 +51,43 @@ interface Asset {
 export interface GitHubDownloadResult {
   tagName: string;
   type: 'git' | 'github-release';
+}
+
+function getSupportedArchiveExtensionFromPathname(
+  pathname: string,
+): string | undefined {
+  const normalizedPathname = pathname.toLowerCase();
+  return SUPPORTED_ARCHIVE_EXTENSIONS.find((extension) =>
+    normalizedPathname.endsWith(extension),
+  );
+}
+
+function getSupportedArchiveExtension(url: string): string | undefined {
+  let pathname: string;
+  try {
+    pathname = new URL(url).pathname.toLowerCase();
+  } catch {
+    return undefined;
+  }
+  return getSupportedArchiveExtensionFromPathname(pathname);
+}
+
+export function isSupportedArchivePath(source: string): boolean {
+  return getSupportedArchiveExtensionFromPathname(source) !== undefined;
+}
+
+export function isSupportedArchiveUrl(source: string): boolean {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(source);
+  } catch {
+    return false;
+  }
+
+  return (
+    parsedUrl.protocol === 'https:' &&
+    getSupportedArchiveExtension(source) !== undefined
+  );
 }
 
 function createRedactedErrorCause(error: unknown, message: string): Error {
@@ -61,6 +108,52 @@ function getGitHubToken(): string | undefined {
   return process.env['GITHUB_TOKEN'];
 }
 
+async function assertPinnedGitSupported(): Promise<void> {
+  const version = await simpleGit().version();
+  if (
+    version.major < MINIMUM_PINNED_GIT_VERSION.major ||
+    (version.major === MINIMUM_PINNED_GIT_VERSION.major &&
+      version.minor < MINIMUM_PINNED_GIT_VERSION.minor)
+  ) {
+    throw new Error('Public extension Git installs require Git 2.37 or newer.');
+  }
+}
+
+function createPinnedGitConfig(curlResolve: string): string[] {
+  return [
+    `http.curloptResolve=${curlResolve}`,
+    'http.followRedirects=false',
+    'http.proxy=',
+    'protocol.allow=never',
+    'protocol.https.allow=always',
+  ];
+}
+
+function restrictGitEnvironment(
+  git: SimpleGit,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): SimpleGit {
+  if (networkPolicy !== 'public') return git;
+  const environment: Record<string, string> = {
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_CONFIG_GLOBAL: os.devNull,
+  };
+  for (const key of [
+    'PATH',
+    'Path',
+    'SystemRoot',
+    'SYSTEMROOT',
+    'WINDIR',
+    'TEMP',
+    'TMP',
+    'TMPDIR',
+  ]) {
+    const value = process.env[key];
+    if (value !== undefined) environment[key] = value;
+  }
+  return git.env(environment);
+}
+
 /**
  * Clones a Git repository to a specified local path.
  * @param installMetadata The metadata for the extension to install.
@@ -69,10 +162,33 @@ function getGitHubToken(): string | undefined {
 export async function cloneFromGit(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   const redactedSource = redactUrlCredentials(installMetadata.source);
   try {
-    const git = simpleGit(destination);
+    let networkConfig: string[] = [];
+    if (installMetadata.networkPolicy === 'public') {
+      if (!/^https:/i.test(installMetadata.source)) {
+        throw new Error('Public extension Git installs must use HTTPS.');
+      }
+      await assertPinnedGitSupported();
+      const networkTarget = await resolveNetworkTarget(
+        installMetadata.source,
+        installMetadata.networkPolicy,
+        signal,
+      );
+      networkConfig = networkTarget.curlResolve
+        ? createPinnedGitConfig(networkTarget.curlResolve)
+        : [];
+    }
+    const git = restrictGitEnvironment(
+      simpleGit(destination, {
+        ...(signal ? { abort: signal } : {}),
+        ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
+      }),
+      installMetadata.networkPolicy,
+    );
+    signal?.throwIfAborted();
     let sourceUrl = installMetadata.source;
     const token = getGitHubToken();
     if (token) {
@@ -101,6 +217,7 @@ export async function cloneFromGit(
       '--depth',
       '1',
     ]);
+    signal?.throwIfAborted();
 
     const remotes = await git.getRemotes(true);
     if (remotes.length === 0) {
@@ -109,12 +226,24 @@ export async function cloneFromGit(
 
     const refToFetch = installMetadata.ref || 'HEAD';
 
-    await git.fetch(remotes[0].name, refToFetch);
+    const remoteUrl = remotes[0].refs.fetch;
+    if (!remoteUrl) {
+      throw new Error(`Unable to find a fetch URL for repo ${redactedSource}`);
+    }
+    await git.fetch(remoteUrl, refToFetch);
+    signal?.throwIfAborted();
 
-    // After fetching, checkout FETCH_HEAD to get the content of the fetched ref.
-    // This results in a detached HEAD state, which is fine for this purpose.
+    // Detached HEAD is expected here — we only need the fetched content.
     await git.checkout('FETCH_HEAD');
+    signal?.throwIfAborted();
   } catch (error) {
+    if (
+      signal?.aborted &&
+      (error === signal.reason ||
+        (error instanceof Error && error.name === 'AbortError'))
+    ) {
+      signal.throwIfAborted();
+    }
     const redactedErrorMessage = redactUrlCredentials(getErrorMessage(error));
     throw new Error(
       `Failed to clone Git repository from ${redactedSource} ${redactedErrorMessage}`,
@@ -139,7 +268,10 @@ export function parseGitHubRepoForReleases(source: string): {
     );
   }
   const owner = parts[0];
-  const repo = parts[1].replace('.git', '');
+  // Strip a trailing `.git` suffix (from clone-style URLs like `owner/repo.git`)
+  // only. An unanchored replace would mangle repo names that merely contain
+  // `.git`, e.g. GitHub Pages repos named `<user>.github.io`.
+  const repo = parts[1].replace(/\.git$/, '');
 
   if (owner.startsWith('git@github.com')) {
     throw new Error(
@@ -154,28 +286,62 @@ async function fetchReleaseFromGithub(
   owner: string,
   repo: string,
   ref?: string,
+  signal?: AbortSignal,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
 ): Promise<GithubReleaseData> {
   const endpoint = ref ? `releases/tags/${ref}` : 'releases/latest';
   const url = `https://api.github.com/repos/${owner}/${repo}/${endpoint}`;
-  return await fetchJson(url);
+  return await fetchJson(url, signal, networkPolicy);
 }
 
 export async function checkForExtensionUpdate(
   extension: Extension,
   extensionManager: ExtensionManager,
+  signal?: AbortSignal,
 ): Promise<ExtensionUpdateState> {
+  signal?.throwIfAborted();
   const installMetadata = extension.installMetadata;
   if (installMetadata?.type === 'local') {
     let latestConfig: ExtensionConfig | undefined;
+    let tempDir: string | undefined;
+    let convertedDir: string | undefined;
     try {
+      let extensionDir = installMetadata.source;
+      if (isSupportedArchivePath(installMetadata.source)) {
+        tempDir = await fs.promises.mkdtemp(
+          path.join(os.tmpdir(), 'extension-archive-update-'),
+        );
+        signal?.throwIfAborted();
+        await extractArchiveFile(installMetadata.source, tempDir, signal);
+        signal?.throwIfAborted();
+        const converted = await convertGeminiOrClaudeExtension(
+          tempDir,
+          installMetadata.pluginName,
+          installMetadata.networkPolicy,
+          signal,
+        );
+        extensionDir = converted.extensionDir;
+        if (extensionDir !== tempDir) {
+          convertedDir = extensionDir;
+        }
+        signal?.throwIfAborted();
+      }
       latestConfig = extensionManager.loadExtensionConfig({
-        extensionDir: installMetadata.source,
+        extensionDir,
       });
     } catch (e) {
+      signal?.throwIfAborted();
       debugLogger.error(
         `Failed to check for update for local extension "${extension.name}". Could not load extension from source path: ${redactUrlCredentials(installMetadata.source)}. Error: ${redactUrlCredentials(getErrorMessage(e))}`,
       );
       return ExtensionUpdateState.NOT_UPDATABLE;
+    } finally {
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      if (convertedDir) {
+        await fs.promises.rm(convertedDir, { recursive: true, force: true });
+      }
     }
 
     if (!latestConfig) {
@@ -190,7 +356,53 @@ export async function checkForExtensionUpdate(
     return ExtensionUpdateState.UP_TO_DATE;
   }
   if (installMetadata?.type === 'npm') {
-    return checkNpmUpdate(installMetadata);
+    return checkNpmUpdate(installMetadata, signal);
+  }
+  if (installMetadata?.type === 'archive-url') {
+    let tempDir: string | undefined;
+    let convertedDir: string | undefined;
+    try {
+      tempDir = await fs.promises.mkdtemp(
+        path.join(os.tmpdir(), 'extension-archive-update-'),
+      );
+      await downloadFromArchiveUrl(installMetadata, tempDir, signal);
+      const converted = await convertGeminiOrClaudeExtension(
+        tempDir,
+        installMetadata.pluginName,
+        installMetadata.networkPolicy,
+        signal,
+      );
+      const extensionDir = converted.extensionDir;
+      if (extensionDir !== tempDir) {
+        convertedDir = extensionDir;
+      }
+      const latestConfig = extensionManager.loadExtensionConfig({
+        extensionDir,
+      });
+      if (!latestConfig) {
+        debugLogger.error(
+          `Failed to check for update for archive URL extension "${extension.name}". Could not load extension from source URL: ${redactUrlCredentials(installMetadata.source)}`,
+        );
+        return ExtensionUpdateState.ERROR;
+      }
+      if (latestConfig.version !== extension.version) {
+        return ExtensionUpdateState.UPDATE_AVAILABLE;
+      }
+      return ExtensionUpdateState.UP_TO_DATE;
+    } catch (error) {
+      signal?.throwIfAborted();
+      debugLogger.error(
+        `Failed to check for update for archive URL extension "${extension.name}" from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
+      );
+      return ExtensionUpdateState.ERROR;
+    } finally {
+      if (tempDir) {
+        await fs.promises.rm(tempDir, { recursive: true, force: true });
+      }
+      if (convertedDir) {
+        await fs.promises.rm(convertedDir, { recursive: true, force: true });
+      }
+    }
   }
   if (
     !installMetadata ||
@@ -202,8 +414,15 @@ export async function checkForExtensionUpdate(
   }
   try {
     if (installMetadata.type === 'git') {
-      const git = simpleGit(extension.path);
-      const remotes = await git.getRemotes(true);
+      if (installMetadata.networkPolicy === 'public') {
+        await assertPinnedGitSupported();
+      }
+      const localGit = simpleGit(
+        extension.path,
+        signal ? { abort: signal } : undefined,
+      );
+      const remotes = await localGit.getRemotes(true);
+      signal?.throwIfAborted();
       if (remotes.length === 0) {
         debugLogger.error('No git remotes found.');
         return ExtensionUpdateState.ERROR;
@@ -215,11 +434,32 @@ export async function checkForExtensionUpdate(
         );
         return ExtensionUpdateState.ERROR;
       }
-
-      // Determine the ref to check on the remote.
+      let networkConfig: string[] = [];
+      if (installMetadata.networkPolicy === 'public') {
+        const parsedRemote = new URL(remoteUrl);
+        parsedRemote.username = '';
+        parsedRemote.password = '';
+        const remoteTarget = await resolveNetworkTarget(
+          parsedRemote,
+          installMetadata.networkPolicy,
+          signal,
+        );
+        networkConfig = remoteTarget.curlResolve
+          ? createPinnedGitConfig(remoteTarget.curlResolve)
+          : [];
+      }
+      signal?.throwIfAborted();
+      const git = restrictGitEnvironment(
+        simpleGit(extension.path, {
+          ...(signal ? { abort: signal } : {}),
+          ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
+        }),
+        installMetadata.networkPolicy,
+      );
       const refToCheck = installMetadata.ref || 'HEAD';
 
       const lsRemoteOutput = await git.listRemote([remoteUrl, refToCheck]);
+      signal?.throwIfAborted();
 
       if (typeof lsRemoteOutput !== 'string' || lsRemoteOutput.trim() === '') {
         debugLogger.error(`Git ref ${refToCheck} not found.`);
@@ -228,6 +468,7 @@ export async function checkForExtensionUpdate(
 
       const remoteHash = lsRemoteOutput.split('\t')[0];
       const localHash = await git.revparse(['HEAD']);
+      signal?.throwIfAborted();
 
       if (!remoteHash) {
         debugLogger.error(
@@ -251,6 +492,8 @@ export async function checkForExtensionUpdate(
         owner,
         repo,
         installMetadata.ref,
+        signal,
+        installMetadata.networkPolicy,
       );
       if (releaseData.tag_name !== releaseTag) {
         return ExtensionUpdateState.UPDATE_AVAILABLE;
@@ -258,6 +501,7 @@ export async function checkForExtensionUpdate(
       return ExtensionUpdateState.UP_TO_DATE;
     }
   } catch (error) {
+    signal?.throwIfAborted();
     debugLogger.error(
       `Failed to check for updates for extension "${redactUrlCredentials(installMetadata.source)}": ${redactUrlCredentials(getErrorMessage(error))}`,
     );
@@ -268,109 +512,145 @@ export async function checkForExtensionUpdate(
 export async function downloadFromGitHubRelease(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
+  signal?: AbortSignal,
 ): Promise<GitHubDownloadResult> {
   const { source, ref } = installMetadata;
   const { owner, repo } = parseGitHubRepoForReleases(source);
 
-  try {
-    const releaseData = await fetchReleaseFromGithub(owner, repo, ref);
-    if (!releaseData) {
-      throw new Error(
-        `No release data found for ${owner}/${repo} at tag ${ref}`,
-      );
-    }
+  const releaseData = await fetchReleaseFromGithub(
+    owner,
+    repo,
+    ref,
+    signal,
+    installMetadata.networkPolicy,
+  );
+  if (!releaseData) {
+    throw new Error(`No release data found for ${owner}/${repo} at tag ${ref}`);
+  }
 
-    const asset = findReleaseAsset(releaseData.assets);
-    let archiveUrl: string | undefined;
-    let isTar = false;
-    let isZip = false;
-    if (asset) {
-      archiveUrl = asset.browser_download_url;
-    } else {
-      if (releaseData.tarball_url) {
-        archiveUrl = releaseData.tarball_url;
-        isTar = true;
-      } else if (releaseData.zipball_url) {
-        archiveUrl = releaseData.zipball_url;
-        isZip = true;
-      }
+  const asset = findReleaseAsset(releaseData.assets);
+  let archiveUrl: string | undefined;
+  let isTar = false;
+  let isZip = false;
+  if (asset) {
+    archiveUrl = asset.browser_download_url;
+  } else {
+    if (releaseData.tarball_url) {
+      archiveUrl = releaseData.tarball_url;
+      isTar = true;
+    } else if (releaseData.zipball_url) {
+      archiveUrl = releaseData.zipball_url;
+      isZip = true;
     }
-    if (!archiveUrl) {
-      throw new Error(
-        `No assets found for release with tag ${releaseData.tag_name}`,
-      );
-    }
-    let downloadedAssetPath = path.join(
-      destination,
-      path.basename(new URL(archiveUrl).pathname),
+  }
+  if (!archiveUrl) {
+    throw new Error(
+      `No assets found for release with tag ${releaseData.tag_name}`,
     );
-    if (isTar && !downloadedAssetPath.endsWith('.tar.gz')) {
-      downloadedAssetPath += '.tar.gz';
-    } else if (isZip && !downloadedAssetPath.endsWith('.zip')) {
-      downloadedAssetPath += '.zip';
-    }
+  }
+  let downloadedAssetPath = path.join(
+    destination,
+    path.basename(new URL(archiveUrl).pathname),
+  );
+  if (isTar && !downloadedAssetPath.endsWith('.tar.gz')) {
+    downloadedAssetPath += '.tar.gz';
+  } else if (isZip && !downloadedAssetPath.endsWith('.zip')) {
+    downloadedAssetPath += '.zip';
+  }
 
-    await downloadFile(archiveUrl, downloadedAssetPath);
-
-    await extractFile(downloadedAssetPath, destination);
-
-    // For regular github releases, the repository is put inside of a top level
-    // directory. In this case we should see exactly two file in the destination
-    // dir, the archive and the directory. If we see that, validate that the
-    // dir has a qwen extension configuration file (or gemini-extension.json
-    // which will be converted later) and then move all files from the directory
-    // up one level into the destination directory.
-    const entries = await fs.promises.readdir(destination, {
-      withFileTypes: true,
-    });
-    if (entries.length === 2) {
-      const lonelyDir = entries.find((entry) => entry.isDirectory());
-      if (lonelyDir) {
-        const hasQwenConfig = fs.existsSync(
-          path.join(destination, lonelyDir.name, EXTENSIONS_CONFIG_FILENAME),
-        );
-        const hasGeminiConfig = fs.existsSync(
-          path.join(destination, lonelyDir.name, 'gemini-extension.json'),
-        );
-        const hasMarketplaceConfig = fs.existsSync(
-          path.join(
-            destination,
-            lonelyDir.name,
-            '.claude-plugin/marketplace.json',
-          ),
-        );
-        const hasClaudePluginConfig = fs.existsSync(
-          path.join(destination, lonelyDir.name, '.claude-plugin/plugin.json'),
-        );
-        if (
-          hasQwenConfig ||
-          hasGeminiConfig ||
-          hasMarketplaceConfig ||
-          hasClaudePluginConfig
-        ) {
-          const dirPathToExtract = path.join(destination, lonelyDir.name);
-          const extractedDirFiles = await fs.promises.readdir(dirPathToExtract);
-          for (const file of extractedDirFiles) {
-            await fs.promises.rename(
-              path.join(dirPathToExtract, file),
-              path.join(destination, file),
-            );
-          }
-          await fs.promises.rmdir(dirPathToExtract);
-        }
-      }
-    }
-
-    await fs.promises.unlink(downloadedAssetPath);
-    return {
-      tagName: releaseData.tag_name,
-      type: 'github-release',
-    };
+  try {
+    await downloadFile(
+      archiveUrl,
+      downloadedAssetPath,
+      {
+        includeGitHubToken: true,
+        networkPolicy: installMetadata.networkPolicy,
+      },
+      0,
+      signal,
+    );
   } catch (error) {
     throw new Error(
       `Failed to download release from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
     );
   }
+
+  signal?.throwIfAborted();
+  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  signal?.throwIfAborted();
+
+  await fs.promises.unlink(downloadedAssetPath);
+  return {
+    tagName: releaseData.tag_name,
+    type: 'github-release',
+  };
+}
+
+export async function downloadFromArchiveUrl(
+  installMetadata: ExtensionInstallMetadata,
+  destination: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  const archiveExtension = getSupportedArchiveExtension(installMetadata.source);
+  if (!archiveExtension) {
+    throw new Error(
+      `Unsupported archive URL for extension install: ${redactUrlCredentials(installMetadata.source)}`,
+    );
+  }
+
+  const archiveName =
+    path.basename(new URL(installMetadata.source).pathname) ||
+    `extension${archiveExtension}`;
+  const downloadedAssetPath = path.join(destination, archiveName);
+
+  try {
+    await downloadFile(
+      installMetadata.source,
+      downloadedAssetPath,
+      {
+        includeGitHubToken: false,
+        networkPolicy: installMetadata.networkPolicy,
+      },
+      0,
+      signal,
+    );
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw new Error(
+      `Failed to download archive from ${redactUrlCredentials(installMetadata.source)}: ${redactUrlCredentials(getErrorMessage(error))}`,
+    );
+  }
+
+  signal?.throwIfAborted();
+  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  signal?.throwIfAborted();
+  await fs.promises.unlink(downloadedAssetPath);
+}
+
+export async function extractArchiveFile(
+  archivePath: string,
+  destination: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  if (!isSupportedArchivePath(archivePath)) {
+    throw new Error(
+      `Unsupported archive file for extension install: ${redactUrlCredentials(archivePath)}`,
+    );
+  }
+  try {
+    await extractFile(archivePath, destination, signal);
+  } catch (error) {
+    signal?.throwIfAborted();
+    throw new Error(
+      'Extension archive could not be extracted. Make sure it is a valid ' +
+        `.zip or .tar.gz file. ${getErrorMessage(error)}`,
+    );
+  }
+  signal?.throwIfAborted();
+  await flattenSingleExtensionDirectory(destination, archivePath);
+  signal?.throwIfAborted();
+  assertExtractedArchiveContainsExtensionSource(destination);
 }
 
 export function findReleaseAsset(assets: Asset[]): Asset | undefined {
@@ -410,7 +690,21 @@ export function findReleaseAsset(assets: Asset[]): Asset | undefined {
   return undefined;
 }
 
-async function fetchJson<T>(url: string): Promise<T> {
+async function fetchJson<T>(
+  url: string,
+  signal?: AbortSignal,
+  networkPolicy?: ExtensionInstallMetadata['networkPolicy'],
+): Promise<T> {
+  const timeoutError = new Error('Timed out fetching GitHub API response');
+  const timeoutController = new AbortController();
+  const hardDeadline = setTimeout(
+    () => timeoutController.abort(timeoutError),
+    ARCHIVE_DOWNLOAD_TIMEOUT_MS,
+  );
+  hardDeadline.unref();
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
   const headers: { 'User-Agent': string; Authorization?: string } = {
     'User-Agent': 'gemini-cli',
   };
@@ -418,62 +712,348 @@ async function fetchJson<T>(url: string): Promise<T> {
   if (token) {
     headers.Authorization = `token ${token}`;
   }
-  return new Promise((resolve, reject) => {
-    https
-      .get(url, { headers }, (res) => {
-        if (res.statusCode !== 200) {
-          return reject(
-            new Error(`Request failed with status code ${res.statusCode}`),
-          );
-        }
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk) => chunks.push(chunk));
-        res.on('end', () => {
-          const data = Buffer.concat(chunks).toString();
-          resolve(JSON.parse(data) as T);
-        });
-      })
-      .on('error', reject);
+  let target;
+  try {
+    target = networkPolicy
+      ? await resolveNetworkTarget(url, networkPolicy, requestSignal)
+      : { url: new URL(url) };
+    requestSignal.throwIfAborted();
+  } catch (error) {
+    clearTimeout(hardDeadline);
+    throw requestSignal.aborted ? requestSignal.reason : error;
+  }
+  return await new Promise((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(hardDeadline);
+      requestSignal.removeEventListener('abort', onAbort);
+    };
+    const finish = (value: T) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+    const fail = (error: unknown) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(requestSignal.aborted ? requestSignal.reason : error);
+    };
+    let req: ReturnType<typeof https.get> | undefined;
+    const onAbort = () => {
+      req?.destroy();
+      fail(requestSignal.reason);
+    };
+    try {
+      req = https.get(
+        url,
+        {
+          headers,
+          signal: requestSignal,
+          lookup: target.lookup,
+          ...(target.lookup ? { agent: false } : {}),
+        },
+        (res) => {
+          res.on('error', fail);
+          if (res.statusCode !== 200) {
+            res.resume();
+            return fail(
+              new Error(`Request failed with status code ${res.statusCode}`),
+            );
+          }
+          const chunks: Buffer[] = [];
+          res.on('data', (chunk) => chunks.push(chunk));
+          res.on('end', () => {
+            try {
+              finish(JSON.parse(Buffer.concat(chunks).toString()) as T);
+            } catch (error) {
+              fail(error);
+            }
+          });
+        },
+      );
+      req.on('error', fail);
+    } catch (error) {
+      fail(error);
+      return;
+    }
+    requestSignal.addEventListener('abort', onAbort, { once: true });
+    if (requestSignal.aborted) {
+      onAbort();
+    }
   });
 }
 
-async function downloadFile(url: string, dest: string): Promise<void> {
+async function downloadFile(
+  url: string,
+  dest: string,
+  options: {
+    includeGitHubToken?: boolean;
+    networkPolicy?: ExtensionInstallMetadata['networkPolicy'];
+  } = { includeGitHubToken: false },
+  redirectCount = 0,
+  signal?: AbortSignal,
+): Promise<void> {
+  if (redirectCount > 10) {
+    throw new Error('Too many redirects while downloading extension archive');
+  }
+  const timeoutError = new Error('Timed out downloading extension archive');
+  const timeoutController = new AbortController();
+  const hardDeadline = setTimeout(
+    () => timeoutController.abort(timeoutError),
+    ARCHIVE_DOWNLOAD_TIMEOUT_MS,
+  );
+  hardDeadline.unref();
+  const requestSignal = signal
+    ? AbortSignal.any([signal, timeoutController.signal])
+    : timeoutController.signal;
   const headers: { 'User-agent': string; Authorization?: string } = {
     'User-agent': 'gemini-cli',
   };
   const token = getGitHubToken();
-  if (token) {
+  if (options.includeGitHubToken === true && token) {
     headers.Authorization = `token ${token}`;
   }
+  let target;
+  try {
+    target = options.networkPolicy
+      ? await resolveNetworkTarget(url, options.networkPolicy, requestSignal)
+      : { url: new URL(url) };
+    requestSignal.throwIfAborted();
+  } catch (error) {
+    clearTimeout(hardDeadline);
+    throw requestSignal.aborted ? requestSignal.reason : error;
+  }
+  const parsedUrl = target.url;
+  if (parsedUrl.protocol !== 'https:') {
+    clearTimeout(hardDeadline);
+    throw new Error(`Unsupported download URL protocol: ${parsedUrl.protocol}`);
+  }
   return new Promise((resolve, reject) => {
-    https
-      .get(url, { headers }, (res) => {
-        if (res.statusCode === 302 || res.statusCode === 301) {
-          downloadFile(res.headers.location!, dest).then(resolve).catch(reject);
-          return;
-        }
-        if (res.statusCode !== 200) {
-          return reject(
-            new Error(`Request failed with status code ${res.statusCode}`),
-          );
-        }
-        const file = fs.createWriteStream(dest);
-        res.pipe(file);
-        file.on('finish', () => file.close(resolve as () => void));
-      })
-      .on('error', reject);
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(hardDeadline);
+      requestSignal.removeEventListener('abort', onAbort);
+    };
+    const finish = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      resolve();
+    };
+    const fail = (error: unknown) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      cleanup();
+      reject(requestSignal.aborted ? requestSignal.reason : error);
+    };
+    const onAbort = () => {
+      req.destroy();
+      fail(requestSignal.reason);
+    };
+    const req = https
+      .get(
+        url,
+        {
+          headers,
+          signal: requestSignal,
+          lookup: target.lookup,
+          ...(target.lookup ? { agent: false } : {}),
+        },
+        (res) => {
+          if (
+            res.statusCode === 301 ||
+            res.statusCode === 302 ||
+            res.statusCode === 307 ||
+            res.statusCode === 308
+          ) {
+            if (!res.headers.location) {
+              res.resume();
+              fail(new Error('Redirect response missing location header'));
+              return;
+            }
+            res.resume();
+            let redirectUrl: URL;
+            try {
+              redirectUrl = new URL(res.headers.location, url);
+            } catch (error) {
+              fail(
+                new Error(`Invalid redirect URL: ${getErrorMessage(error)}`),
+              );
+              return;
+            }
+            const redirectHost = redirectUrl.host;
+            const redirectOptions =
+              redirectHost === parsedUrl.host
+                ? options
+                : { ...options, includeGitHubToken: false };
+            cleanup();
+            downloadFile(
+              redirectUrl.toString(),
+              dest,
+              redirectOptions,
+              redirectCount + 1,
+              signal,
+            )
+              .then(finish)
+              .catch(fail);
+            return;
+          }
+          if (res.statusCode !== 200) {
+            res.resume();
+            return fail(
+              new Error(`Request failed with status code ${res.statusCode}`),
+            );
+          }
+          const file = fs.createWriteStream(dest);
+          let bytesWritten = 0;
+          res.on('data', (chunk: Buffer) => {
+            bytesWritten += chunk.length;
+            if (bytesWritten > ARCHIVE_DOWNLOAD_MAX_BYTES) {
+              res.destroy();
+              file.destroy();
+              fail(
+                new Error(
+                  `Extension archive download exceeded maximum size of ${ARCHIVE_DOWNLOAD_MAX_BYTES} bytes`,
+                ),
+              );
+            }
+          });
+          res.on('error', (error) => {
+            file.destroy();
+            fail(error);
+          });
+          file.on('error', (error) => {
+            res.destroy();
+            fail(error);
+          });
+          res.pipe(file);
+          file.on('finish', () => file.close(finish));
+        },
+      )
+      .on('error', fail);
+    if (!settled) {
+      requestSignal.addEventListener('abort', onAbort, { once: true });
+      if (requestSignal.aborted) {
+        onAbort();
+      } else {
+        req.setTimeout(ARCHIVE_DOWNLOAD_TIMEOUT_MS, () => {
+          req.destroy();
+          fail(timeoutError);
+        });
+      }
+    }
   });
 }
 
-export async function extractFile(file: string, dest: string): Promise<void> {
+export async function extractFile(
+  file: string,
+  dest: string,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
   if (file.endsWith('.tar.gz')) {
-    await tar.x({
-      file,
-      cwd: dest,
-    });
+    await assertTarArchiveHasNoLinks(file, signal);
+    signal?.throwIfAborted();
+    try {
+      await pipeline(fs.createReadStream(file), tar.x({ cwd: dest }), {
+        signal,
+      });
+    } catch (error) {
+      signal?.throwIfAborted();
+      throw error;
+    }
   } else if (file.endsWith('.zip')) {
-    await extract(file, { dir: dest });
+    await extractZipArchive(file, dest, signal);
   } else {
     throw new Error(`Unsupported file extension for extraction: ${file}`);
   }
+  signal?.throwIfAborted();
+}
+
+async function flattenSingleExtensionDirectory(
+  destination: string,
+  archivePath: string,
+) {
+  // GitHub source archives and many uploaded archives wrap content in a single
+  // top-level directory. Flatten only when that directory looks like a valid
+  // extension root or a compatible source that can be converted later.
+  const archiveNameToIgnore = getContainedArchiveName(destination, archivePath);
+  const entries = (
+    await fs.promises.readdir(destination, {
+      withFileTypes: true,
+    })
+  ).filter((entry) => entry.name !== archiveNameToIgnore);
+  if (hasSupportedExtensionSourceManifest(destination)) {
+    return;
+  }
+  if (entries.length > 2) {
+    return;
+  }
+
+  const lonelyDir = entries.find((entry) => entry.isDirectory());
+  if (!lonelyDir) {
+    return;
+  }
+
+  const rootPath = path.join(destination, lonelyDir.name);
+  if (!hasSupportedExtensionSourceManifest(rootPath)) {
+    return;
+  }
+
+  const extractedDirFiles = await fs.promises.readdir(rootPath);
+  for (const file of extractedDirFiles) {
+    const destinationPath = path.join(destination, file);
+    if (fs.existsSync(destinationPath)) {
+      throw new Error(
+        `Extension archive cannot be flattened because "${file}" exists at both the archive root and inside "${lonelyDir.name}".`,
+      );
+    }
+  }
+  for (const file of extractedDirFiles) {
+    const destinationPath = path.join(destination, file);
+    await fs.promises.rename(path.join(rootPath, file), destinationPath);
+  }
+  await fs.promises.rmdir(rootPath);
+}
+
+function getSupportedManifestList(): string {
+  return SUPPORTED_EXTENSION_MANIFESTS.join(', ');
+}
+
+function hasSupportedExtensionSourceManifest(rootPath: string): boolean {
+  return SUPPORTED_EXTENSION_MANIFESTS.some((manifestPath) =>
+    fs.existsSync(path.join(rootPath, manifestPath)),
+  );
+}
+
+function assertExtractedArchiveContainsExtensionSource(
+  destination: string,
+): void {
+  if (hasSupportedExtensionSourceManifest(destination)) {
+    return;
+  }
+
+  throw new Error(
+    'Extension archive is missing a supported extension manifest. ' +
+      `Expected one of: ${getSupportedManifestList()} at the archive root, ` +
+      'or inside a single top-level extension directory.',
+  );
+}
+
+function getContainedArchiveName(
+  destination: string,
+  archivePath: string,
+): string | undefined {
+  const resolvedDestination = path.resolve(destination);
+  const resolvedArchivePath = path.resolve(archivePath);
+  if (path.dirname(resolvedArchivePath) === resolvedDestination) {
+    return path.basename(resolvedArchivePath);
+  }
+  return undefined;
 }

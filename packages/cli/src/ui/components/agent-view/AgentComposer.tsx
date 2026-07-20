@@ -133,10 +133,9 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
     preferredEditor,
   });
 
-  // Sync agent buffer text to context so AgentTabBar can guard tab switching
+  // Sync the active agent buffer text to context.
   useEffect(() => {
     setAgentInputBufferText(buffer.text);
-    return () => setAgentInputBufferText('');
   }, [buffer.text, setAgentInputBufferText]);
 
   // When agent input is not active (agent running, completed, etc.),

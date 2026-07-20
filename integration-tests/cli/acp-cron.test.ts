@@ -87,7 +87,6 @@ function setupAcpCronTest(rig: TestRig) {
       stdio: ['pipe', 'pipe', 'pipe'],
       env: {
         ...process.env,
-        QWEN_CODE_ENABLE_CRON: '1',
       },
     },
   );
@@ -199,6 +198,19 @@ function setupAcpCronTest(rig: TestRig) {
       } catch (e) {
         sendResponse(msg.id, { message: (e as Error).message });
       }
+      return;
+    }
+
+    // JSON-RPC requires every request to get a response. Reject unknown
+    // agent->client requests (e.g. optional extension methods like
+    // craft/drainMidTurnQueue) with -32601 so the agent fails fast instead
+    // of awaiting a reply that never comes.
+    if (typeof msg.id === 'number' && typeof msg.method === 'string') {
+      send({
+        jsonrpc: '2.0',
+        id: msg.id,
+        error: { code: -32601, message: 'Method not found' },
+      });
     }
   };
 
@@ -289,9 +301,7 @@ async function initSession(
     'cron job fires and streams results via sessionUpdate after prompt returns',
     async () => {
       const rig = new TestRig();
-      rig.setup('acp-cron-e2e', {
-        settings: { experimental: { cron: true } },
-      });
+      rig.setup('acp-cron-e2e');
 
       const {
         sendRequest,

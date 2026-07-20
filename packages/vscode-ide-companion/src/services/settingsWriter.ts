@@ -7,6 +7,7 @@
  * Handles bidirectional sync between VSCode Settings and ~/.qwen/settings.json.
  */
 
+import { logger } from '../utils/logger.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -16,6 +17,7 @@ import {
   Storage,
   applyProviderInstallPlan,
   resolveMetadataKey,
+  stripRuntimeSnapshotPrefix,
   type ProviderInstallPlan,
   type ProviderSettingsAdapter,
   type ModelProvidersConfig,
@@ -189,7 +191,7 @@ function readSettings(): Record<string, unknown> {
     // caller's catch will see this; refusing to overwrite a malformed file
     // is the whole point — better than silently destroying user state by
     // treating it as `{}`.
-    console.error(
+    logger.error(
       `[settingsWriter] Failed to parse ${settingsPath}; refusing to overwrite a malformed file.`,
       err,
     );
@@ -277,9 +279,21 @@ function findOpenaiModels(
     return [];
   }
   for (const key of [AuthType.USE_OPENAI, 'use_openai']) {
-    const arr = modelProviders[key];
-    if (Array.isArray(arr) && arr.length > 0) {
-      return arr as Array<Record<string, unknown>>;
+    const entry = modelProviders[key];
+    // V4 shape: the provider value is a ModelConfig[] array.
+    if (Array.isArray(entry) && entry.length > 0) {
+      return entry as Array<Record<string, unknown>>;
+    }
+    // Read-side tolerance for a settings file still in the reverted #5089 V5
+    // shape ({ protocol, models }) that the CLI v5->v4 migration has not yet
+    // rewritten — the extension reads/writes settings.json without running
+    // that migration. The extension still writes V4 arrays; this only needs to
+    // avoid dropping existing entries when reading a not-yet-downgraded file.
+    if (typeof entry === 'object' && entry !== null && !Array.isArray(entry)) {
+      const models = (entry as Record<string, unknown>)['models'];
+      if (Array.isArray(models) && models.length > 0) {
+        return models as Array<Record<string, unknown>>;
+      }
     }
   }
   return [];
@@ -435,6 +449,10 @@ function createFileSettingsAdapter(): ProviderSettingsAdapter {
     },
 
     setValue(key: string, value: unknown): void {
+      // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
+      if (key === 'model.name' && typeof value === 'string') {
+        value = stripRuntimeSnapshotPrefix(value);
+      }
       const parts = key.split('.');
       let current = data;
       for (let i = 0; i < parts.length; i++) {
@@ -551,7 +569,7 @@ export function snapshotSettingsForRollback(): Record<string, unknown> | null {
     // Log only the error's class name (not its message) — consistent with the
     // providerMatchesCredentials guard, so the security stance holds even
     // though this catch is filesystem errors rather than user-defined fns.
-    console.warn(
+    logger.warn(
       '[settingsWriter] snapshotSettingsForRollback failed; credential rollback disabled:',
       err instanceof Error ? err.constructor.name : typeof err,
     );
@@ -587,7 +605,7 @@ export function readQwenSettingsForVSCode(): QwenSettingsForVSCode | null {
   try {
     settings = readSettings();
   } catch (error) {
-    console.error(
+    logger.error(
       '[settingsWriter] readQwenSettingsForVSCode failed; returning null:',
       error,
     );
@@ -706,7 +724,7 @@ export function clearPersistedAuth(): void {
 
     writeSettings(settings);
   } catch (error) {
-    console.error(
+    logger.error(
       '[settingsWriter] Failed to clear persisted auth credentials:',
       error,
     );

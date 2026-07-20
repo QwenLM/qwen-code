@@ -64,7 +64,7 @@ Command hooks execute commands via child processes. Input JSON is passed through
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "WriteFile",
+        "matcher": "write_file",
         "hooks": [
           {
             "type": "command",
@@ -215,7 +215,7 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "run_shell_command",
         "hooks": [
           {
             "type": "prompt",
@@ -235,43 +235,47 @@ When `ok` is `false`, Qwen Code will continue working and use the `reason` as co
 
 Hooks fire at specific points during a Qwen Code session. Different events support different matchers to filter trigger conditions.
 
-| Event                | Triggered When                            | Matcher Target                                            |
-| :------------------- | :---------------------------------------- | :-------------------------------------------------------- |
-| `PreToolUse`         | Before tool execution                     | Tool name (`WriteFile`, `ReadFile`, `Bash`, etc.)         |
-| `PostToolUse`        | After successful tool execution           | Tool name                                                 |
-| `PostToolUseFailure` | After tool execution fails                | Tool name                                                 |
-| `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                       |
-| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)          |
-| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)     |
-| `Stop`               | When Claude prepares to conclude response | None (always fires)                                       |
-| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)             |
-| `SubagentStop`       | When subagent stops                       | Agent type                                                |
-| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                |
-| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`) |
-| `PermissionRequest`  | When permission dialog is shown           | Tool name                                                 |
-| `TodoCreated`        | When a new todo item is created           | None (always fires)                                       |
-| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                       |
+| Event                | Triggered When                            | Matcher Target                                                 |
+| :------------------- | :---------------------------------------- | :------------------------------------------------------------- |
+| `PreToolUse`         | Before tool execution                     | Tool id (`write_file`, `read_file`, `run_shell_command`, etc.) |
+| `PostToolUse`        | After successful tool execution           | Tool id                                                        |
+| `PostToolUseFailure` | After tool execution fails                | Tool id                                                        |
+| `UserPromptSubmit`   | After user submits prompt                 | None (always fires)                                            |
+| `SessionStart`       | When session starts or resumes            | Source (`startup`, `resume`, `clear`, `compact`)               |
+| `SessionEnd`         | When session ends                         | Reason (`clear`, `logout`, `prompt_input_exit`, etc.)          |
+| `MessageDisplay`     | Repeatedly, as the reply streams          | None (always fires)                                            |
+| `Stop`               | When Claude prepares to conclude response | None (always fires)                                            |
+| `SubagentStart`      | When subagent starts                      | Agent type (`Bash`, `Explorer`, `Plan`, etc.)                  |
+| `SubagentStop`       | When subagent stops                       | Agent type                                                     |
+| `PreCompact`         | Before conversation compaction            | Trigger (`manual`, `auto`)                                     |
+| `Notification`       | When notifications are sent               | Type (`permission_prompt`, `idle_prompt`, `auth_success`)      |
+| `PermissionRequest`  | When permission dialog is shown           | Tool id                                                        |
+| `PermissionDenied`   | When tool permission is denied            | Tool id                                                        |
+| `TodoCreated`        | When a new todo item is created           | None (always fires)                                            |
+| `TodoCompleted`      | When a todo item is marked as completed   | None (always fires)                                            |
 
 ### Matcher Patterns
 
 `matcher` is a regular expression used to filter trigger conditions.
 
-| Event Type          | Events                                                                 | Matcher Support | Matcher Target                                           |
-| :------------------ | :--------------------------------------------------------------------- | :-------------- | :------------------------------------------------------- |
-| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest` | ✅ Regex        | Tool name: `WriteFile`, `ReadFile`, `Bash`, etc.         |
-| Subagent Events     | `SubagentStart`, `SubagentStop`                                        | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                     |
-| Session Events      | `SessionStart`                                                         | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`          |
-| Session Events      | `SessionEnd`                                                           | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.     |
-| Notification Events | `Notification`                                                         | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success` |
-| Compact Events      | `PreCompact`                                                           | ✅ Exact match  | Trigger: `manual`, `auto`                                |
-| Todo Events         | `TodoCreated`, `TodoCompleted`                                         | ❌ No           | N/A                                                      |
-| Prompt Events       | `UserPromptSubmit`                                                     | ❌ No           | N/A                                                      |
-| Stop Events         | `Stop`                                                                 | ❌ No           | N/A                                                      |
+| Event Type          | Events                                                                                     | Matcher Support | Matcher Target                                                |
+| :------------------ | :----------------------------------------------------------------------------------------- | :-------------- | :------------------------------------------------------------ |
+| Tool Events         | `PreToolUse`, `PostToolUse`, `PostToolUseFailure`, `PermissionRequest`, `PermissionDenied` | ✅ Regex        | Tool id: `write_file`, `read_file`, `run_shell_command`, etc. |
+| Subagent Events     | `SubagentStart`, `SubagentStop`                                                            | ✅ Regex        | Agent type: `Bash`, `Explorer`, etc.                          |
+| Session Events      | `SessionStart`                                                                             | ✅ Regex        | Source: `startup`, `resume`, `clear`, `compact`               |
+| Session Events      | `SessionEnd`                                                                               | ✅ Regex        | Reason: `clear`, `logout`, `prompt_input_exit`, etc.          |
+| Notification Events | `Notification`                                                                             | ✅ Exact match  | Type: `permission_prompt`, `idle_prompt`, `auth_success`      |
+| Compact Events      | `PreCompact`                                                                               | ✅ Exact match  | Trigger: `manual`, `auto`                                     |
+| Todo Events         | `TodoCreated`, `TodoCompleted`                                                             | ❌ No           | N/A                                                           |
+| Prompt Events       | `UserPromptSubmit`                                                                         | ❌ No           | N/A                                                           |
+| Stop Events         | `Stop`                                                                                     | ❌ No           | N/A                                                           |
+| Message Display     | `MessageDisplay`                                                                           | ❌ No           | N/A                                                           |
 
 **Matcher Syntax:**
 
 - Empty string `""` or `"*"` matches all events of that type
-- Standard regex syntax supported (e.g., `^Bash$`, `Read.*`, `(WriteFile|Edit)`)
+- Standard regex syntax supported (e.g., `^run_shell_command$`, `read_.*`, `(write_file|edit)`)
+- Tool hooks receive the runtime tool id in `tool_name` (for example, `write_file`). Built-in display names such as `WriteFile` and `ReadFile` are also accepted as matcher aliases for compatibility, but new configs should prefer runtime ids.
 
 **Examples:**
 
@@ -280,7 +284,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^Bash$",
+        "matcher": "^run_shell_command$",
         "hooks": [
           {
             "type": "command",
@@ -289,7 +293,7 @@ Hooks fire at specific points during a Qwen Code session. Different events suppo
         ]
       },
       {
-        "matcher": "Write.*",
+        "matcher": "write_.*",
         "hooks": [
           {
             "type": "command",
@@ -384,7 +388,8 @@ Hook output supports three categories of fields:
   "permission_mode": "default | plan | auto_edit | yolo",
   "tool_name": "name of the tool being executed",
   "tool_input": "object containing the tool's input parameters",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -394,6 +399,12 @@ Hook output supports three categories of fields:
 - `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
 - `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
 - `hookSpecificOutput.additionalContext`: additional context information
+
+The `permissionDecision` value controls whether the tool runs:
+
+- `"allow"` — run the tool without the usual approval prompt.
+- `"deny"` — block the tool; it does not execute and an error is returned to the model.
+- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
@@ -422,7 +433,8 @@ Hook output supports three categories of fields:
   "tool_name": "name of the tool that was executed",
   "tool_input": "object containing the tool's input parameters",
   "tool_response": "object containing the tool's response",
-  "tool_use_id": "unique identifier for this tool use instance"
+  "tool_use_id": "unique identifier for this tool use instance (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)"
 }
 ```
 
@@ -453,7 +465,8 @@ Hook output supports three categories of fields:
 ```json
 {
   "permission_mode": "default | plan | auto_edit | yolo",
-  "tool_use_id": "unique identifier for the tool use",
+  "tool_use_id": "unique identifier for the tool use (internal format, e.g., toolu_xxx)",
+  "tool_call_id": "original API call ID from the LLM provider (e.g., call_xxx for OpenAI/Qwen) (optional)",
   "tool_name": "name of the tool that failed",
   "tool_input": "object containing the tool's input parameters",
   "error": "error message describing the failure",
@@ -554,6 +567,33 @@ Hook output supports three categories of fields:
 
 - Standard hook output fields (typically not used for blocking)
 
+#### MessageDisplay
+
+**Purpose**: Fires repeatedly as the assistant's reply streams — before `Stop`, which fires once at the end of the turn. Useful for live narration, incremental logging, or any consumer that wants to react to the reply as it's written rather than after the fact. This is a **fire-and-forget** event - hook output and exit codes are ignored.
+
+**Event-specific fields**:
+
+```json
+{
+  "message_id": "stable id for the whole streamed message",
+  "displayed_text": "the CUMULATIVE text streamed so far for this message (not a delta)",
+  "is_final": "true on the last firing for this message, false otherwise"
+}
+```
+
+`displayed_text` is cumulative rather than a delta so hook scripts never need to reassemble chunks themselves — each firing carries the full text so far. Firing is debounced (at most every ~200ms) except for the final firing (`is_final: true`), which always fires once the message ends, so the reply's tail is never dropped waiting on the debounce window.
+
+**Delivery semantics** — what a hook script can rely on:
+
+- **Slow hooks see fewer, newer payloads.** At most one mid-stream hook execution per message is in flight at a time; while one runs, newer debounced payloads _replace_ the queued one rather than piling up behind it. A hook slower than the debounce window therefore skips intermediate snapshots — lossless, since each payload carries the full cumulative text.
+- **`is_final` is never queued behind a stale delivery.** The final payload is dispatched the moment the message ends — alongside a still-running mid-stream execution if there is one (the one exception to the one-at-a-time rule, justified the same way: the final cumulative text strictly supersedes whatever that execution is processing). Your hook always receives the `is_final` payload, and receives it before the `Stop` hook fires. One consequence for stateful hooks: when the final execution overlaps a superseded mid-stream one, their _completion_ order is unspecified — the stale execution may finish after the final one (even after `Stop`). Treat `is_final` as terminal per `message_id` and let the cumulative text win, rather than assuming the last execution to finish carries the newest state.
+- **The turn waits for `is_final` delivery to complete — but not forever.** The turn's end (and the `Stop` hook, when it fires) waits up to 5 seconds for the final delivery to finish. A hook that completes within that budget keeps the strongest guarantee: a headless run (`qwen -p ...`) exits only after the hook finished, and the `is_final` execution completes before `Stop` starts. A slower hook still receives `is_final` first — only the wait for its completion is bounded: in the terminal UI or an ACP session the execution simply finishes in the background, while a headless run exits without waiting. The hook process is not killed on exit; it is left to finish on its own, so a script chaining `qwen -p … && next-step` can observe `next-step` starting while a slow hook is still running. Hitting this timeout prints a warning on stderr.
+- **Cancellation behaviour depends on timing.** A turn cancelled _before `is_final` dispatches_ fires no `is_final` — the message is treated as abandoned, and a consumer that buffers until `is_final` should treat cancellation-silence as its flush/discard signal (e.g. a timeout fallback). The criterion is the abort signal's state at the moment the turn ends, not whether every chunk had already streamed — an abort landing in the brief gap before that check can still suppress `is_final` for a message whose text had, in practice, finished arriving. Cancelling _after `is_final` has dispatched_ (during the drain wait) is different: the still-running hook execution may be terminated mid-flight (SIGTERM), but the payload itself has already been delivered.
+- **`displayed_text` is provisional until `is_final`.** It reflects what has streamed so far; treat intermediate payloads as display state, not as authoritative final content.
+- **A tool-using turn produces multiple messages.** Each model call gets its own `message_id` with its own `is_final: true` firing: the text before a tool call is one message, the continuation after the tool result is another. Model calls that produce no displayed text (tool-call-only) fire nothing.
+
+**Note**: Fires in the terminal UI, headless (`-p`), and ACP (IDE/editor/`qwen serve`) sessions, with the same payload contract on every surface.
+
 #### Stop
 
 **Purpose**: Executed before Qwen concludes its response to provide final feedback or summaries.
@@ -563,9 +603,14 @@ Hook output supports three categories of fields:
 ```json
 {
   "stop_hook_active": "boolean indicating if stop hook is active",
-  "last_assistant_message": "the last message from the assistant"
+  "last_assistant_message": "the last message from the assistant",
+  "context_usage": "ratio of context window used (may exceed 1 when tokens exceed window; optional)",
+  "context_limit": "context window size in tokens (optional)",
+  "input_tokens": "prompt token count (may include output tokens depending on provider; optional)"
 }
 ```
+
+The `context_usage`, `context_limit`, and `input_tokens` fields allow hook scripts to observe context usage and implement custom compact strategies — for example, a script that prints a reminder to run `/compact` when usage exceeds a custom threshold.
 
 **Output Options**:
 
@@ -1061,7 +1106,7 @@ Hooks are configured in Qwen Code settings, typically in `.qwen/settings.json` o
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "^Bash$",
+        "matcher": "^run_shell_command$",
         "sequential": false,
         "hooks": [
           {
@@ -1114,7 +1159,7 @@ Only `command` type supports asynchronous execution. Setting `"async": true` run
   "hooks": {
     "PostToolUse": [
       {
-        "matcher": "WriteFile|Edit",
+        "matcher": "write_file|edit",
         "hooks": [
           {
             "type": "command",

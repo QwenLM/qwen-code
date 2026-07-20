@@ -22,8 +22,13 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   CoreToolScheduler,
+  compactToolResultDisplayForHistory,
+  convertToFunctionErrorResponse,
   createDebugLogger,
-  isAutoMemPath,
+  getToolResponseDisplayText,
+  isAnyAutoMemPath,
+  isShellProgressData,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import * as path from 'node:path';
 import { useCallback, useState, useMemo } from 'react';
@@ -32,12 +37,14 @@ import type {
   IndividualToolCallDisplay,
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
+import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
 
 const debugLogger = createDebugLogger('REACT_TOOL_SCHEDULER');
 
 export type ScheduleFn = (
   request: ToolCallRequestInfo | ToolCallRequestInfo[],
   signal: AbortSignal,
+  modelOverride?: string,
 ) => void;
 export type MarkToolsAsSubmittedFn = (callIds: string[]) => void;
 
@@ -111,11 +118,18 @@ export function useReactToolScheduler(
 
   const outputUpdateHandler: OutputUpdateHandler = useCallback(
     (toolCallId, outputChunk) => {
+      // Shell liveness heartbeats are for headless consumers; the TUI
+      // already shows a spinner and must not replace accumulated live
+      // output with a stats object.
+      if (isShellProgressData(outputChunk)) {
+        return;
+      }
+      const compactOutput = compactToolResultDisplayForHistory(outputChunk);
       setToolCallsForDisplay((prevCalls) =>
         prevCalls.map((tc) => {
           if (tc.request.callId === toolCallId && tc.status === 'executing') {
             const executingTc = tc as TrackedExecutingToolCall;
-            return { ...executingTc, liveOutput: outputChunk };
+            return { ...executingTc, liveOutput: compactOutput };
           }
           return tc;
         }),
@@ -206,10 +220,68 @@ export function useReactToolScheduler(
     (
       request: ToolCallRequestInfo | ToolCallRequestInfo[],
       signal: AbortSignal,
+      modelOverride?: string,
     ) => {
-      void scheduler.schedule(request, signal);
+      if (!modelOverride?.endsWith('\0')) {
+        void scheduler.schedule(request, signal);
+        return;
+      }
+      void (async () => {
+        try {
+          const runtimeView = await config
+            .getBaseLlmClient()
+            .resolveForModel(modelOverride.slice(0, -1), {
+              failClosed: true,
+            });
+          await scheduler.schedule(request, signal, runtimeView);
+        } catch (error) {
+          debugLogger.error(
+            `Full-turn tool scheduling failed: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+          const message =
+            'Full-turn tool scheduling failed. The tool was not executed.';
+          const requests = Array.isArray(request) ? request : [request];
+          const completedCalls: CompletedToolCall[] = requests.map(
+            (toolRequest) => {
+              const toolError = new Error(message);
+              const responseParts = convertToFunctionErrorResponse(
+                toolRequest.name,
+                toolRequest.callId,
+                message,
+                message,
+              );
+              config
+                .getChatRecordingService()
+                ?.recordToolResult(responseParts, {
+                  callId: toolRequest.callId,
+                  status: 'error',
+                  resultDisplay: message,
+                  error: toolError,
+                  errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                });
+              return {
+                status: 'error',
+                request: toolRequest,
+                response: {
+                  callId: toolRequest.callId,
+                  responseParts,
+                  resultDisplay: message,
+                  error: toolError,
+                  errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+                  contentLength: message.length,
+                },
+              };
+            },
+          );
+          setToolCallsForDisplay((prev) => [...prev, ...completedCalls]);
+          await allToolCallsCompleteHandler(completedCalls);
+          return;
+        }
+      })();
     },
-    [scheduler],
+    [allToolCallsCompleteHandler, config, scheduler],
   );
 
   const markToolsAsSubmitted: MarkToolsAsSubmittedFn = useCallback(
@@ -269,7 +341,7 @@ function detectMemoryOp(
   const filePath = args?.['file_path'] as string | undefined;
   if (!filePath) return undefined;
   const resolved = path.resolve(filePath);
-  if (!isAutoMemPath(resolved, projectRoot)) return undefined;
+  if (!isAnyAutoMemPath(resolved, projectRoot)) return undefined;
   if (WRITE_TOOLS.has(toolName)) return 'write';
   if (READ_TOOLS.has(toolName)) return 'read';
   return undefined;
@@ -325,21 +397,39 @@ export function mapToDisplay(
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
+            // Full detail for the Ctrl+O transcript (§4.9): derived from the
+            // already-persisted functionResponse parts; NOT char-capped (the
+            // bound is whatever core already applied). Consumed ONLY by the
+            // transcript's fullDetail render for collapsible (read/search/list)
+            // tools whose summary resultDisplay is just a count — so gate the
+            // extraction on `isCollapsibleTool(displayName)` to avoid storing a
+            // large (~25K char) string on every edit/write/command/agent call
+            // that the renderer would never use. Mirrors ToolMessage's
+            // `usingDetailedDisplay` gate, which also keys off the display name.
+            detailedDisplay: isCollapsibleTool(displayName)
+              ? getToolResponseDisplayText(trackedCall.response.responseParts)
+              : undefined,
             confirmationDetails: undefined,
           };
         case 'error':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'cancelled':
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),
-            resultDisplay: trackedCall.response.resultDisplay,
+            resultDisplay: compactToolResultDisplayForHistory(
+              trackedCall.response.resultDisplay,
+            ),
             confirmationDetails: undefined,
           };
         case 'awaiting_approval':
@@ -350,6 +440,7 @@ export function mapToDisplay(
             confirmationDetails: trackedCall.confirmationDetails,
           };
         case 'executing':
+          // React stores compacted live output when handling raw update chunks.
           return {
             ...baseDisplayProperties,
             status: mapCoreStatusToDisplayStatus(trackedCall.status),

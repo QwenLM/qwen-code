@@ -5,7 +5,7 @@ A reference channel plugin for Qwen Code. It connects to a WebSocket server and 
 Use this package to:
 
 - **Try out the channel plugin system** — install it as an extension and run it with the built-in mock server
-- **Use it as a starting point** — fork the source to build your own channel adapter (see the [Channel Plugin Developer Guide](../../docs/developers/channel-plugins.md))
+- **Use it as a starting point** — fork the source to build your own channel adapter (see the [Channel Plugin Developer Guide](../../../docs/developers/channel-plugins.md))
 
 ## Quick start
 
@@ -61,6 +61,15 @@ In a separate terminal:
 qwen channel start my-plugin-test
 ```
 
+Or run the same adapter under the experimental daemon-managed channel worker:
+
+```bash
+cd /path/to/your/project
+qwen serve --channel my-plugin-test
+```
+
+`qwen serve --channel` requires the channel's configured `cwd` to resolve to one registered, trusted daemon workspace. In a multi-workspace daemon, named channels are grouped into one worker per owning workspace; `--channel all` still selects only the primary workspace's channels.
+
 ### 6. Send a message
 
 ```bash
@@ -78,7 +87,7 @@ Mock Server (HTTP + WS)
   ↕ WebSocket
 MockPluginChannel (this package)
   → Envelope → ChannelBase.handleInbound()
-    → SenderGate → SessionRouter → AcpBridge.prompt()
+    → SenderGate → SessionRouter → ChannelAgentBridge.prompt()
       → qwen-code agent → model API
     ← response
   ← sendMessage() → WebSocket → Mock Server
@@ -91,8 +100,15 @@ See `src/MockPluginChannel.ts` for a working example. The key points:
 
 1. Extend `ChannelBase` and implement `connect()`, `sendMessage()`, `disconnect()`
 2. Build an `Envelope` from incoming platform messages and call `this.handleInbound(envelope)`
-3. Export a `plugin` object conforming to `ChannelPlugin`
-4. Add a `qwen-extension.json` manifest
+3. Type the adapter constructor bridge parameter as `ChannelAgentBridge`
+4. Export a `plugin` object conforming to `ChannelPlugin`
+5. Add a `qwen-extension.json` manifest
+
+`AcpBridge` is still the current standalone `qwen channel start` implementation. Plugin adapters should depend on the `ChannelAgentBridge` abstraction provided by `@qwen-code/channel-base`.
+
+Existing TypeScript plugins that explicitly type the adapter constructor or factory `bridge` parameter as `AcpBridge` should change that annotation to `ChannelAgentBridge`. JavaScript plugins are unaffected at runtime.
+
+`qwen serve --channel <name>` hosts the same plugin through a daemon-managed worker backed by `DaemonChannelBridge`. The worker is owned by `qwen serve`; stop the daemon to stop serve-managed channels.
 
 ### Features you get for free
 
@@ -101,4 +117,8 @@ See `src/MockPluginChannel.ts` for a working example. The key points:
 - **Streaming hooks** — override `onResponseChunk()` for progressive display (e.g., editing a message in-place)
 - Access control (allowlist, pairing, open), session routing, slash commands, crash recovery
 
-Full guide: [Channel Plugin Developer Guide](../../docs/developers/channel-plugins.md)
+## Lifecycle status
+
+The mock plugin protocol exposes streamed chunks and final outbound messages only. It does not model typing indicators, reactions, card updates, or any other status surface, so prompt and task lifecycle status are intentionally no-op for this example channel.
+
+Full guide: [Channel Plugin Developer Guide](../../../docs/developers/channel-plugins.md)

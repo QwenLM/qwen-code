@@ -8,6 +8,7 @@ import { describe, it, expect } from 'vitest';
 import type { HistoryItem } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import {
+  buildThoughtHeadIdMap,
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
@@ -19,13 +20,14 @@ const mk = (
 ): HistoryItem => ({ id, ...(overrides as object) }) as HistoryItem;
 
 describe('isSyntheticHistoryItem', () => {
-  it('treats info/error/warning/success/retry/notification/summary/thought as synthetic', () => {
+  it('treats info/error/warning/success/retry/vision_notice/notification/summary/thought as synthetic', () => {
     for (const type of [
       'info',
       'error',
       'warning',
       'success',
       'retry_countdown',
+      'vision_notice',
       'notification',
       'tool_use_summary',
       'gemini_thought',
@@ -118,6 +120,62 @@ describe('itemsAfterAreOnlySynthetic', () => {
       ),
     ];
     expect(itemsAfterAreOnlySynthetic(h, 0)).toBe(false);
+  });
+});
+
+describe('buildThoughtHeadIdMap', () => {
+  it('returns empty map when no gemini_thought items exist', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'hi' }, 1),
+      mk({ type: 'gemini_content', text: 'hello' }, 2),
+    ];
+    expect(buildThoughtHeadIdMap(h).size).toBe(0);
+  });
+
+  it('maps a lone thought head to its own id', () => {
+    const thought = mk({ type: 'gemini_thought', text: 'thinking...' }, 1);
+    const h: HistoryItem[] = [
+      thought,
+      mk({ type: 'gemini_content', text: 'answer' }, 2),
+    ];
+    const map = buildThoughtHeadIdMap(h);
+    expect(map.get(thought)).toBe(1);
+    expect(map.size).toBe(1);
+  });
+
+  it('maps consecutive continuations to the preceding head id', () => {
+    const head = mk({ type: 'gemini_thought', text: 'header' }, 1);
+    const c1 = mk({ type: 'gemini_thought_content', text: 'part1' }, 2);
+    const c2 = mk({ type: 'gemini_thought_content', text: 'part2' }, 3);
+    const h: HistoryItem[] = [
+      head,
+      c1,
+      c2,
+      mk({ type: 'gemini_content', text: 'answer' }, 4),
+    ];
+    const map = buildThoughtHeadIdMap(h);
+    expect(map.get(head)).toBe(1);
+    expect(map.get(c1)).toBe(1);
+    expect(map.get(c2)).toBe(1);
+  });
+
+  it('stops grouping at the first non-continuation item', () => {
+    const head1 = mk({ type: 'gemini_thought', text: 't1' }, 1);
+    const c1 = mk({ type: 'gemini_thought_content', text: 'c1' }, 2);
+    const head2 = mk({ type: 'gemini_thought', text: 't2' }, 4);
+    const c2 = mk({ type: 'gemini_thought_content', text: 'c2' }, 5);
+    const h: HistoryItem[] = [
+      head1,
+      c1,
+      mk({ type: 'gemini_content', text: 'answer' }, 3),
+      head2,
+      c2,
+    ];
+    const map = buildThoughtHeadIdMap(h);
+    expect(map.get(head1)).toBe(1);
+    expect(map.get(c1)).toBe(1);
+    expect(map.get(head2)).toBe(4);
+    expect(map.get(c2)).toBe(4);
   });
 });
 

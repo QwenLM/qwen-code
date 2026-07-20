@@ -31,6 +31,8 @@ import type {
   ChatCompressionEvent,
   InvalidChunkEvent,
   ContentRetryEvent,
+  ProtocolTagSanitizedEvent,
+  ApiRetryEvent,
   ContentRetryFailureEvent,
   ConversationFinishedEvent,
   SubagentExecutionEvent,
@@ -486,6 +488,7 @@ export class QwenLogger {
       properties: {
         prompt_id: event.prompt_id,
         prompt_length: event.prompt_length,
+        ...(event.model ? { model: event.model } : {}),
       },
     });
 
@@ -649,6 +652,7 @@ export class QwenLogger {
         model: event.model,
         prompt_id: event.prompt_id,
         auth_type: event.auth_type,
+        loop_wakeups_cancelled: event.loop_wakeups_cancelled,
       },
     });
 
@@ -958,6 +962,41 @@ export class QwenLogger {
     this.flushIfNeeded();
   }
 
+  logProtocolTagSanitizedEvent(event: ProtocolTagSanitizedEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'protocol_tag_sanitized', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        response_id: event.response_id ?? '',
+        tag_name: event.tag_name,
+        tool_call_count: event.tool_call_count,
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  // Phase 4b — HTTP-status retry from retryWithBackoff (429/5xx). Distinct from
+  // logContentRetryEvent which is fired by geminiChat's content-recovery loop.
+  logApiRetryEvent(event: ApiRetryEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'api_retry', {
+      properties: {
+        model: event.model,
+        prompt_id: event.prompt_id ?? '',
+        attempt_number: event.attempt_number,
+        error_type: event.error_type ?? 'unknown',
+        status_code:
+          event.status_code !== undefined ? String(event.status_code) : '',
+        retry_delay_ms: event.retry_delay_ms,
+        subagent_name: event.subagent_name ?? '',
+      },
+    });
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
   // arena events
   logArenaSessionStartedEvent(event: ArenaSessionStartedEvent): void {
     const rumEvent = this.createActionEvent('arena', 'arena_session_started', {
@@ -1049,7 +1088,7 @@ export class QwenLogger {
     if (!proxyUrl) return undefined;
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
-    if (proxyUrl.startsWith('http')) {
+    if (/^https?:\/\//i.test(proxyUrl)) {
       return new HttpsProxyAgent(proxyUrl);
     } else {
       throw new Error('Unsupported proxy type');

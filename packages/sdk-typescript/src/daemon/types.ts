@@ -10,7 +10,7 @@
  * These mirror the shapes emitted by `packages/cli/src/serve` but are
  * defined SDK-side to avoid an SDK→CLI dependency. The shapes are stable
  * once the capabilities envelope's `v` advances; bumping `v` is what
- * signals breaking wire changes (per design §04).
+ * signals breaking wire changes (per the design doc).
  */
 
 export type DaemonMode = 'http-bridge' | 'native';
@@ -18,6 +18,143 @@ export type DaemonMode = 'http-bridge' | 'native';
 export interface DaemonProtocolVersions {
   current: string;
   supported: string[];
+}
+
+export interface DaemonCapabilitiesLimits {
+  maxPendingPromptsPerSession?: number | null;
+  maxSessionsPerWorkspace?: number | null;
+  maxTotalSessions?: number | null;
+}
+
+export interface DaemonWorkspaceCapability {
+  id: string;
+  cwd: string;
+  primary: boolean;
+  trusted: boolean;
+  /** Whether this runtime can be removed without restarting the daemon. */
+  removable?: boolean;
+}
+
+export interface DaemonWorkspaceRemovalActivity {
+  sessions: number;
+  activePrompts: number;
+  pendingSessionStarts: number;
+  acpConnections: number;
+  memoryTasks: number;
+  channelWorkers: number;
+  voiceSessions?: number;
+}
+
+export interface DaemonWorkspaceRemovalResult {
+  removed: true;
+  workspaceId: string;
+  workspaceCwd: string;
+  forced: boolean;
+  persistedRegistrationRemoved: boolean;
+  activity: DaemonWorkspaceRemovalActivity;
+}
+
+/** In-progress Git operation detected from the repo's transient state. */
+export type DaemonGitOperation =
+  | 'merge'
+  | 'rebase'
+  | 'cherry-pick'
+  | 'revert'
+  | 'bisect';
+
+/**
+ * Current Git metadata returned from a workspace Git status route.
+ *
+ * `v: 1` daemons return only `branch`. `v: 2` daemons additionally return the
+ * enriched working-tree summary; every enriched field is optional so older
+ * clients (and non-repo / git-unavailable workspaces) degrade gracefully.
+ */
+export interface DaemonWorkspaceGitStatus {
+  v: 1 | 2;
+  workspaceCwd: string;
+  /** Branch name, short detached-HEAD hash, or null outside a Git repository. */
+  branch: string | null;
+  /** v2: HEAD is detached (branch holds the short SHA). */
+  detached?: boolean;
+  /** v2: number of staged entries. */
+  staged?: number;
+  /** v2: number of unstaged (modified) entries. */
+  unstaged?: number;
+  /** v2: number of untracked entries. */
+  untracked?: number;
+  /** v2: number of conflicted (unmerged) entries. */
+  conflicted?: number;
+  /** v2: branch has a configured upstream. */
+  hasUpstream?: boolean;
+  /** v2: commits ahead of upstream. */
+  ahead?: number;
+  /** v2: commits behind upstream. */
+  behind?: number;
+  /** v2: number of stash entries. */
+  stashCount?: number;
+  /** v2: in-progress operation (merge/rebase/cherry-pick/revert/bisect). */
+  operation?: DaemonGitOperation;
+  /** v2: epoch ms when the enriched fields were computed. */
+  computedAt?: number;
+}
+
+/** One changed file in the working-tree-vs-HEAD diff file list. */
+export interface DaemonWorkspaceGitDiffFile {
+  /** Repo-root-relative path (render after sanitizing — git allows odd bytes). */
+  path: string;
+  /** Pre-rename path when this entry is a rename; absent otherwise. `path` is
+   *  the current (post-rename) path used to fetch the per-file diff. */
+  oldPath?: string;
+  /** Lines added (`0` for binary files). */
+  added?: number;
+  /** Lines removed (`0` for binary files). */
+  removed?: number;
+  isBinary: boolean;
+  isUntracked: boolean;
+  isDeleted: boolean;
+  /** Untracked text file exceeded the read cap, so `added` is a lower bound. */
+  truncated: boolean;
+}
+
+/** File list + summary returned from `GET /workspace/git/diff`. */
+export interface DaemonWorkspaceGitDiff {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` for a non-repo / missing-HEAD / transient-state workspace. */
+  available: boolean;
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  files: DaemonWorkspaceGitDiffFile[];
+  /** `filesCount - files.length`: files dropped by the per-file cap. */
+  hiddenCount: number;
+}
+
+/** A unified-diff hunk, mirroring the `diff` library's `Hunk` over the wire. */
+export interface DaemonDiffHunk {
+  oldStart: number;
+  oldLines: number;
+  newStart: number;
+  newLines: number;
+  /** Diff lines, each prefixed with `' '`, `'+'`, or `'-'`. */
+  lines: string[];
+}
+
+/** Single-file hunks returned from `GET /workspace/git/diff/file?path=`. */
+export interface DaemonWorkspaceGitDiffHunks {
+  v: 1;
+  workspaceCwd: string;
+  /** The requested repo-root-relative path, echoed back. */
+  path: string;
+  /** `false` when the file has no diff (unchanged / binary / untracked-empty). */
+  available: boolean;
+  hunks: DaemonDiffHunk[];
+  /**
+   * Present (and `true`) when the daemon's per-file caps cut content from
+   * `hunks`, so the viewer can label the diff incomplete. Absent from older
+   * daemons and untruncated responses (additive to v=1).
+   */
+  truncated?: boolean;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */
@@ -28,39 +165,62 @@ export interface DaemonCapabilities {
    * additive to v=1; older v=1 daemons omit it.
    */
   protocolVersions?: DaemonProtocolVersions;
+  /**
+   * Qwen Code CLI/SDK version served by this daemon. Optional because this is
+   * additive to v=1; older v=1 daemons omit it.
+   */
+  qwenCodeVersion?: string;
   mode: DaemonMode;
   /**
    * Feature tags the client should gate UI off (e.g. `permission_vote`,
-   * `session_events`). Never gate UI off `mode` — see §10.
+   * `session_events`). Never gate UI off `mode`.
    */
   features: string[];
+  /**
+   * Numeric daemon limits. `null` means the daemon advertises the limit as
+   * disabled; absence means an older daemon did not advertise it.
+   */
+  limits?: DaemonCapabilitiesLimits;
   modelServices: string[];
   /**
+   * Transport protocols the daemon advertises. Clients use this to
+   * negotiate the preferred transport (e.g. `['rest-sse', 'acp-ws',
+   * 'acp-http']`). Optional because older v=1 daemons predate
+   * transport negotiation — absence implies `['rest-sse']` only.
+   */
+  transports?: readonly string[];
+  /**
    * Absolute canonical workspace path this daemon is bound to
-   * (per #3803 §02: 1 daemon = 1 workspace). Clients use this to
-   * (a) detect mismatch before posting `/session` (vs. waiting for
-   * a 400 `workspace_mismatch` response), and (b) omit `cwd` on
-   * `POST /session` — the route falls back to this path when the
-   * body has no `cwd` field. Multi-workspace deployments expose
-   * multiple daemons on different ports, each advertising its own
-   * `workspaceCwd`.
+   * as its primary workspace. Clients use this to (a) detect mismatch
+   * before posting `/session` on old single-workspace daemons, and (b)
+   * omit `cwd` on `POST /session` — the route falls back to this path
+   * when the body has no `cwd` field. Newer daemons that advertise
+   * `multi_workspace_sessions` keep this field as the primary workspace
+   * compatibility value and expose every accepted runtime in
+   * `workspaces[]`.
    *
    * Optional at the type level because the field is an additive
-   * extension to v=1 envelopes (added by #3803 §02). Daemons
-   * predating §02 still announce `v: 1` but omit this field; the
+   * extension to v=1 envelopes. Daemons
+   * predating this feature still announce `v: 1` but omit this field; the
    * protocol's "bump v only on incompatible frame changes" stance
    * (see `qwen-serve-protocol.md`) makes additive optionality the
-   * correct shape. All post-§02 daemons populate it.
+   * correct shape. All newer daemons populate it.
    *
    * **SDK consumers**: if you need the value as a non-undefined
    * `string` (e.g. to call `.startsWith()` or pass into a function
    * typed `string`), use the `requireWorkspaceCwd` helper from this
    * module — it throws `DaemonCapabilityMissingError` with an
-   * actionable "this daemon predates §02" message instead of
+   * actionable "this daemon predates workspaceCwd support" message instead of
    * letting the call site hit a cryptic
    * "Cannot read properties of undefined".
    */
   workspaceCwd?: string;
+  /**
+   * Registered workspace runtimes. Newer daemons include the primary runtime
+   * even in single-workspace mode so workspace-qualified features can address
+   * it by ID; `workspaceCwd` remains the primary cwd for old clients.
+   */
+  workspaces?: DaemonWorkspaceCapability[];
 }
 
 /**
@@ -85,7 +245,7 @@ export class DaemonCapabilityMissingError extends Error {
 
 /**
  * Assert that `caps.workspaceCwd` is populated (i.e. the daemon was
- * built post-§02) and return it as a non-undefined `string`. Throws
+ * built with workspaceCwd support) and return it as a non-undefined `string`. Throws
  * `DaemonCapabilityMissingError` otherwise so the call site gets an
  * actionable error rather than a downstream
  * `Cannot read properties of undefined`.
@@ -102,11 +262,304 @@ export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
     throw new DaemonCapabilityMissingError(
       'workspaceCwd',
       caps.workspaceCwd === ''
-        ? 'daemon returned an empty workspaceCwd (post-§02 daemon with a bug)'
-        : 'daemon predates #3803 §02 (1 daemon = 1 workspace); upgrade it',
+        ? 'daemon returned an empty workspaceCwd (newer daemon with a bug)'
+        : 'daemon predates workspaceCwd support; upgrade it',
     );
   }
   return caps.workspaceCwd;
+}
+
+/** Detail level accepted by `GET /daemon/status?detail=`. */
+export type DaemonStatusReportDetail = 'summary' | 'full';
+
+/** Overall health rollup of a daemon status report. */
+export type DaemonStatusReportLevel = 'ok' | 'warning' | 'error';
+
+export type DaemonLogMode = 'stable' | 'fallback' | 'stderr-only';
+export type DaemonLogHealth = 'ok' | 'degraded';
+export type DaemonLogIssue =
+  | 'init_failed'
+  | 'rotation_failed'
+  | 'retention_failed'
+  | 'queue_overflow'
+  | 'write_failed'
+  | 'lease_compromised';
+
+/** One triage finding surfaced by the daemon status rollup. */
+export interface DaemonStatusReportIssue {
+  code: string;
+  severity: 'warning' | 'error';
+  message: string;
+  /** Status section the issue was derived from (e.g. `workspace.mcp`). */
+  section?: string;
+}
+
+/**
+ * One independently-degraded workspace diagnostics section in a
+ * `detail=full` status report (`full.workspace.<name>`). `data` is the raw
+ * section payload (shape varies per section) — render `summary` instead.
+ */
+export interface DaemonStatusReportSection {
+  status: DaemonStatusReportLevel | 'unavailable';
+  durationMs: number;
+  summary?: Record<string, string | number | boolean | null>;
+  data?: unknown;
+  error?: { kind: 'timeout' | 'error'; message: string };
+}
+
+/** Per-session diagnostics row in a `detail=full` status report. */
+export interface DaemonStatusReportSession {
+  sessionId: string;
+  workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  subscriberCount: number;
+  attachCount: number;
+  pendingPromptCount: number;
+  pendingPermissionCount: number;
+  hasActivePrompt: boolean;
+  lastEventId: number;
+  lastSeenAt?: number;
+  currentModelId?: string;
+  currentApprovalMode?: string;
+}
+
+/**
+ * One time-bucketed sample in the Daemon Status metrics series. **Manual mirror
+ * of `packages/cli/src/serve/daemon-metrics-ring.ts` → `DaemonMetricsBucket`;
+ * keep the two field lists in sync.** Each bucket covers a fixed window: the
+ * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, the
+ * `llmApiErrors`/`llmApiRetries` counters, and `promptsCompleted` aggregate
+ * what happened *during* the window, while
+ * `activeSessions`/`activePrompts`/`queuedPrompts`/`rssBytes`/`heapUsedBytes`/
+ * `eventLoopLagP99Ms` are gauges read at seal time `t`.
+ */
+export interface DaemonMetricsSeriesBucket {
+  /** Epoch ms at which this bucket was sealed (window end). */
+  t: number;
+  /** Active sessions at seal time. */
+  activeSessions: number;
+  /** In-flight prompts at seal time (tasks running concurrently). */
+  activePrompts: number;
+  /** Prompts queued (accepted, not yet dispatched) across sessions at seal time. */
+  queuedPrompts: number;
+  /** HTTP requests completed in the window. */
+  requests: number;
+  /** Subset of `requests` returning 4xx/5xx. */
+  errors: number;
+  /** Median HTTP request duration over the window (ms); 0 when idle. */
+  latencyP50Ms: number;
+  /** p95 HTTP request duration over the window (ms); 0 when idle. */
+  latencyP95Ms: number;
+  /** Prompts that finished in the window (task throughput). */
+  promptsCompleted: number;
+  /** p95 prompt queue-wait over the window (ms); backpressure signal. */
+  promptQueueWaitP95Ms: number;
+  /** p95 end-to-end prompt duration over the window (ms). */
+  promptDurationP95Ms: number;
+  /** Median per-round LLM API round-trip over the window (ms); daemon→model,
+   *  not the client→daemon `latency*`. 0 when none. */
+  llmApiP50Ms: number;
+  /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
+  llmApiP95Ms: number;
+  /** Model API errors in the window (one per failed model API attempt);
+   *  provider-side failures, distinct from the client→daemon HTTP `errors`. */
+  llmApiErrors: number;
+  /** Automatic backoff retries in the window (one per retried attempt). */
+  llmApiRetries: number;
+  /** Process CPU utilization over the window, percent of total capacity across
+   *  all cores, clamped to [0,100]. */
+  cpuPercent: number;
+  /** Resident set size at seal time (bytes). */
+  rssBytes: number;
+  /** V8 heap used at seal time (bytes). */
+  heapUsedBytes: number;
+  /** Event-loop lag p99 over the window (ms); CPU-saturation signal. */
+  eventLoopLagP99Ms: number;
+  /** Bytes received from the ACP child over the stdio pipe in the window. */
+  pipeInBytes: number;
+  /** Bytes sent to the ACP child over the stdio pipe in the window. */
+  pipeOutBytes: number;
+  /** Active REST/SSE streams at seal time. */
+  sseConnections: number;
+  /** Active ACP WebSocket streams at seal time. */
+  wsConnections: number;
+  /** Active ACP connections at seal time. */
+  acpConnections: number;
+  /** Rate-limited (429) rejections in the window. */
+  rateLimitRejected: number;
+  /** Input (prompt) tokens burned in the window. */
+  tokensIn: number;
+  /** Output (completion) tokens burned in the window. */
+  tokensOut: number;
+  /** ACP child process CPU % at seal time (self-reported over ACP; percent of
+   *  total capacity across all cores, clamped [0,100]) — where the real LLM/tool
+   *  work runs. 0 when no child. */
+  childCpuPercent: number;
+  /** ACP child process RSS at seal time (bytes; self-reported). 0 when none. */
+  childRssBytes: number;
+}
+
+/**
+ * Status report envelope returned from `GET /daemon/status`. Fields the
+ * daemon may add over time arrive as additive optional members, mirroring
+ * the `DaemonCapabilities` convention.
+ */
+export interface DaemonStatusReport {
+  v: 1;
+  detail: DaemonStatusReportDetail;
+  generatedAt: string;
+  status: DaemonStatusReportLevel;
+  issues: DaemonStatusReportIssue[];
+  daemon: {
+    pid: number;
+    uptimeMs: number;
+    mode: DaemonMode;
+    workspaceCwd: string;
+    /** Startup timing/preheat snapshot; `preheat.status` is widened to string. */
+    startup?: {
+      processStartedAt: string;
+      listenerReadyAt?: string;
+      processToListenMs?: number;
+      runQwenServeToListenMs?: number;
+      preheat: { status: string; durationMs?: number; error?: string };
+    };
+    qwenCodeVersion?: string;
+    daemonId?: string;
+    runId?: string;
+    logMode?: DaemonLogMode;
+    logHealth?: DaemonLogHealth;
+    /** Present only in `detail=full` responses. */
+    logPath?: string;
+    /** Present only in `detail=full` responses. */
+    logIssues?: readonly DaemonLogIssue[];
+    /** Present only in `detail=full` responses. */
+    logDroppedRecords?: number;
+    /** Present only in `detail=full` responses. */
+    logDroppedBytes?: number;
+  };
+  security: {
+    tokenConfigured: boolean;
+    requireAuth: boolean;
+    loopbackBind: boolean;
+    allowOriginConfigured: boolean;
+    allowOriginMode: string;
+    sessionShellCommandEnabled: boolean;
+  };
+  limits: {
+    maxSessions: number | null;
+    maxTotalSessions: number | null;
+    maxPendingPromptsPerSession: number | null;
+    listenerMaxConnections: number | null;
+    eventRingSize: number;
+    promptDeadlineMs: number | null;
+    writerIdleTimeoutMs: number | null;
+    channelIdleTimeoutMs: number;
+    sessionIdleTimeoutMs: number;
+    acpConnectionCap: number | null;
+    compactedReplayMaxBytes: number;
+  };
+  capabilities: {
+    protocolVersions: DaemonProtocolVersions;
+    features: string[];
+  };
+  /** Present only when one daemon hosts multiple workspace runtimes. */
+  workspaces?: DaemonWorkspaceCapability[];
+  runtime: {
+    /** Present while the daemon runtime is still starting up. */
+    loading?: boolean;
+    /** Present when the daemon runtime failed to start. */
+    error?: string;
+    sessions: { active: number };
+    permissions: { pending: number; policy: string };
+    channel: { live: boolean };
+    // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
+    // widened to string to avoid coupling the wire type to the daemon's unions.
+    channelWorker: DaemonChannelWorkerSnapshot;
+    /** Present only when a multi-workspace daemon has channel workers. */
+    channelWorkers?: DaemonChannelWorkerGroupSnapshot[];
+    transport: {
+      restSseActive: number;
+      acp: {
+        enabled: boolean;
+        connections: number;
+        connectionStreams: number;
+        sessionStreams: number;
+        sseStreams: number;
+        wsStreams: number;
+        pendingClientRequests: number;
+      };
+    };
+    rateLimit: {
+      enabled: boolean;
+      rejectedSinceStart: Record<string, number>;
+    };
+    /** Optional daemon-process performance counters. */
+    perf?: {
+      eventLoop: {
+        meanMs: number;
+        p50Ms: number;
+        p99Ms: number;
+        maxMs: number;
+      };
+      promptQueueWait?: {
+        count: number;
+        meanMs: number;
+        maxMs: number;
+        lastMs: number | null;
+      };
+      pipe: {
+        inbound: { count: number; totalBytes: number; maxBytes: number };
+        outbound: { count: number; totalBytes: number; maxBytes: number };
+      };
+    };
+    /**
+     * Rolling per-interval activity series backing the Daemon Status charts
+     * (requests, latency, prompts, tokens, memory, event-loop lag over time).
+     * Optional/additive: absent on daemons predating it or before the sampler
+     * seals its first bucket. Ordered oldest→newest.
+     */
+    metrics?: {
+      series: DaemonMetricsSeriesBucket[];
+    };
+    /**
+     * Prompt/session activity counters. Optional because this is additive to
+     * v=1; daemons predating it omit the sub-object. `lastActivityAt`/
+     * `idleSinceMs` are null when the daemon has seen no activity yet.
+     */
+    activity?: {
+      activePrompts: number;
+      pendingPrompts?: number;
+      queuedPrompts?: number;
+      lastActivityAt: string | null;
+      idleSinceMs: number | null;
+    };
+    process: {
+      rss: number;
+      heapTotal: number;
+      heapUsed: number;
+      external?: number;
+      arrayBuffers?: number;
+    };
+  };
+  /** Present only when requested with `detail=full`. */
+  full?: {
+    sessions: DaemonStatusReportSession[];
+    acpConnections: Array<Record<string, unknown>>;
+    workspace: Record<string, DaemonStatusReportSection>;
+    auth: {
+      supportedDeviceFlowProviders: string[];
+      pendingDeviceFlowCount: number;
+    };
+  };
+}
+
+/** Worktree metadata returned when a session is created with worktree isolation. */
+export interface DaemonWorktreeInfo {
+  slug: string;
+  path: string;
+  branch: string;
 }
 
 /** Returned from `POST /session`. */
@@ -122,6 +575,16 @@ export interface DaemonSession {
   clientId?: string;
   /** ISO 8601 timestamp of when the session was created. */
   createdAt?: string;
+  /** True while the live session has an in-flight prompt. */
+  hasActivePrompt?: boolean;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
+  /** True iff supplied source metadata was durably written to the transcript. */
+  sourcePersisted?: boolean;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: DaemonWorktreeInfo;
 }
 
 /**
@@ -152,21 +615,425 @@ export interface DaemonSessionState {
 /** Returned from `POST /session/:id/load` and `POST /session/:id/resume`. */
 export interface DaemonRestoredSession extends DaemonSession {
   state: DaemonSessionState;
+  artifactWarnings?: string[];
+  /** Compacted events for completed turns (load only). */
+  compactedReplay?: DaemonEvent[];
+  /** Raw events since last turn boundary — current incomplete turn (load only). */
+  liveJournal?: DaemonEvent[];
+  /** True when older persisted records precede this load replay page. */
+  historyHasMore?: boolean;
+  /** Event bus watermark — used as initial SSE cursor. */
+  lastEventId?: number;
 }
 
-/** Sparse session record returned by `GET /workspace/:id/sessions`. */
+export interface BranchSessionRequest {
+  name?: string;
+}
+
+export interface DaemonBranchedSession extends DaemonRestoredSession {
+  displayName: string;
+  forkedFrom: { sessionId: string; displayName: string };
+}
+
+export interface ForkSessionRequest {
+  directive: string;
+}
+
+export interface DaemonForkSessionResult {
+  sessionId: string;
+  description: string;
+  launched: boolean;
+}
+
+/**
+ * Wire-format mirror of `BridgePendingInteraction*` in
+ * `packages/acp-bridge/src/bridgeTypes.ts`; keep fields synchronized.
+ * Session runtime interaction details returned by live session endpoints.
+ */
+export interface DaemonPendingInteractionOption {
+  optionId: string;
+  label?: string;
+  kind?: string;
+}
+
+export interface DaemonPendingPermissionInteraction {
+  requestId: string;
+  kind: 'permission';
+  createdAt: string;
+  action: {
+    type?: string;
+    title?: string;
+    content?: unknown;
+    locations?: unknown;
+    input?: unknown;
+  };
+  options: DaemonPendingInteractionOption[];
+}
+
+export interface DaemonPendingUserQuestion {
+  /** Key to use in `PermissionResponse.answers` when voting. */
+  answerKey: string;
+  header?: string;
+  question?: string;
+  options?: Array<{ label?: string; description?: string }>;
+  multiSelect?: boolean;
+  [key: string]: unknown;
+}
+
+export interface DaemonPendingUserQuestionInteraction {
+  requestId: string;
+  kind: 'user_question';
+  createdAt: string;
+  title?: string;
+  questions: DaemonPendingUserQuestion[];
+  options: DaemonPendingInteractionOption[];
+}
+
+export type DaemonPendingInteraction =
+  | DaemonPendingPermissionInteraction
+  | DaemonPendingUserQuestionInteraction;
+
+/** Wire-format mirror of the bridge's `BridgeSessionSummary`; keep fields synchronized. */
 export interface DaemonSessionSummary {
   sessionId: string;
   workspaceCwd: string;
   createdAt?: string;
+  updatedAt?: string;
   displayName?: string;
+  /** Id of the session that spawned this one (via `create_sub_session`), or
+   * absent for a top-level session. Lets a UI link a sub-session back to its
+   * parent. */
+  parentSessionId?: string;
+  /** Immutable creator attribution, absent on legacy/unattributed sessions. */
+  sourceType?: string;
+  /** Optional source-specific identifier paired with `sourceType`. */
+  sourceId?: string;
   clientCount?: number;
   hasActivePrompt?: boolean;
+  isWaitingForPermission?: boolean;
+  isWaitingForUserQuestion?: boolean;
+  pendingInteractionCount?: number;
+  hasTurnError?: boolean;
+  /** Present for live sessions in status and workspace-list responses. */
+  turnError?: {
+    message: string;
+    code?: string;
+    errorKind?: string;
+  };
+  /** Present for live sessions in status and workspace-list responses. */
+  pendingInteractions?: DaemonPendingInteraction[];
+  isArchived?: boolean;
+  isPinned?: boolean;
+  pinnedAt?: string;
+  groupId?: string | null;
+  /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
+  color?: DaemonSessionGroupPresetColor | null;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: DaemonWorktreeInfo;
+}
+
+export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
+
+export interface DaemonSessionExportResult {
+  content: string;
+  filename: string;
+  mimeType: string;
+  format: DaemonSessionExportFormat;
+}
+
+export interface DaemonSessionTranscriptPageOptions {
+  cursor?: string;
+  /** Start a newest-to-oldest page before this persisted record UUID. */
+  beforeRecordId?: string;
+  limit?: number;
+  clientId?: string;
+}
+
+export interface DaemonSessionTranscriptPage {
+  v: 1;
+  sessionId: string;
+  events: DaemonEvent[];
+  nextCursor?: string;
+  hasMore: boolean;
+  startTime?: string;
+  lastUpdated?: string;
+  partial?: true;
+  replayError?: string;
+}
+
+export type DaemonSessionArchiveState = 'active' | 'archived';
+
+export type DaemonSessionGroupPresetColor =
+  | 'red'
+  | 'orange'
+  | 'yellow'
+  | 'green'
+  | 'blue'
+  | 'purple';
+
+/** Shape hint only; the daemon validates exactly six Hex digits at runtime. */
+export type DaemonSessionGroupHexColor = `#${string}`;
+
+export type DaemonSessionGroupColor =
+  | DaemonSessionGroupPresetColor
+  | DaemonSessionGroupHexColor;
+
+export interface DaemonSessionGroup {
+  id: string;
+  name: string;
+  color: DaemonSessionGroupColor;
+  order: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DaemonSessionGroupCatalog {
+  groups: DaemonSessionGroup[];
+  colorOptions: DaemonSessionGroupPresetColor[];
+}
+
+export interface DaemonSessionGroupInput {
+  name: string;
+  color: DaemonSessionGroupColor;
+}
+
+export interface DaemonSessionGroupUpdate {
+  name?: string;
+  color?: DaemonSessionGroupColor;
+  order?: number;
+}
+
+export interface DaemonSessionOrganizationUpdate {
+  isPinned?: boolean;
+  groupId?: string | null;
+  color?: DaemonSessionGroupPresetColor | null;
+}
+
+export interface DaemonSessionOrganizationResult {
+  sessionId: string;
+  groupId: string | null;
+  isPinned: boolean;
+  pinnedAt?: string;
+  color?: DaemonSessionGroupPresetColor | null;
+  updatedAt: string;
+}
+
+export type DaemonSessionListView = 'organized';
+
+export type DaemonSessionGroupFilter =
+  | 'all'
+  | 'pinned'
+  | 'ungrouped'
+  | (string & {});
+
+export interface DaemonSessionListPageOptions {
+  pageSize?: number;
+  cursor?: string;
+  archiveState?: DaemonSessionArchiveState;
+  view?: DaemonSessionListView;
+  group?: DaemonSessionGroupFilter;
+  /**
+   * Restrict the page to sessions spawned by this parent (via
+   * `create_sub_session`), matched against each session's `parentSessionId`.
+   * Cannot be combined with `view: 'organized'`. The whole workspace is
+   * gathered and filtered before pagination, and the returned `nextCursor` is
+   * opaque and activity-based.
+   */
+  parentSessionId?: string;
+  /** Restrict the page to sessions attributed to this source type. */
+  sourceType?: string;
+  /** Restrict the page to this source identifier. Requires `sourceType`. */
+  sourceId?: string;
+}
+
+export interface DaemonSessionListPage {
+  sessions: DaemonSessionSummary[];
+  nextCursor?: string;
+  liveMergeFailed?: boolean;
+  truncated?: boolean;
+}
+
+export interface DaemonWorkspaceSessionInfo {
+  active: number;
+  archived: number;
+  total: number;
+  live?: number;
+  expensive: true;
+  cost: 'disk_scan';
+  truncated?: boolean;
+}
+
+export interface DaemonArchiveSessionsResult {
+  archived: string[];
+  alreadyArchived: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: string }>;
+}
+
+export interface DaemonUnarchiveSessionsResult {
+  unarchived: string[];
+  alreadyActive: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: string }>;
 }
 
 /** Effective mutable metadata returned from `PATCH /session/:id/metadata`. */
 export interface SessionMetadataResult {
   displayName?: string;
+}
+
+type OpenStringUnion<T extends string> = T | (string & {});
+
+/** Known artifact kinds mirrored from the daemon/core contract. */
+export type KnownDaemonSessionArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type DaemonSessionArtifactKind =
+  OpenStringUnion<KnownDaemonSessionArtifactKind>;
+
+export type KnownDaemonSessionArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export type DaemonSessionArtifactStorage =
+  OpenStringUnion<KnownDaemonSessionArtifactStorage>;
+
+export type KnownDaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
+
+export type DaemonSessionArtifactSource =
+  OpenStringUnion<KnownDaemonSessionArtifactSource>;
+
+export type KnownDaemonSessionArtifactStatus =
+  | 'available'
+  | 'missing'
+  | 'changed';
+
+export type DaemonSessionArtifactStatus =
+  OpenStringUnion<KnownDaemonSessionArtifactStatus>;
+
+export type KnownDaemonSessionArtifactRetention = 'ephemeral' | 'restorable';
+
+export type DaemonSessionArtifactRetention =
+  OpenStringUnion<KnownDaemonSessionArtifactRetention>;
+
+export type KnownDaemonSessionArtifactRestoreState =
+  | 'live'
+  | 'restored'
+  | 'unverified'
+  | 'blocked';
+
+export type DaemonSessionArtifactRestoreState =
+  OpenStringUnion<KnownDaemonSessionArtifactRestoreState>;
+
+export type KnownDaemonSessionArtifactPersistenceWarning =
+  | 'persistence_unavailable'
+  | 'metadata_only_restore'
+  | 'restore_validation_failed'
+  | 'sticky_override_active';
+
+export type DaemonSessionArtifactPersistenceWarning =
+  OpenStringUnion<KnownDaemonSessionArtifactPersistenceWarning>;
+
+export interface DaemonSessionArtifactInput {
+  kind?: KnownDaemonSessionArtifactKind;
+  storage?: Exclude<KnownDaemonSessionArtifactStorage, 'published'>;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+  retention?: KnownDaemonSessionArtifactRetention;
+  clientRetained?: boolean;
+}
+
+export interface DaemonSessionArtifact {
+  id: string;
+  kind: DaemonSessionArtifactKind;
+  storage: DaemonSessionArtifactStorage;
+  source: DaemonSessionArtifactSource;
+  status: DaemonSessionArtifactStatus;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+  retention: DaemonSessionArtifactRetention;
+  restoreState?: DaemonSessionArtifactRestoreState;
+  persistenceWarning?: DaemonSessionArtifactPersistenceWarning;
+  persistedAt?: string;
+  clientRetained: boolean;
+  createdAt: string;
+  updatedAt: string;
+  toolCallId?: string;
+  toolName?: string;
+  hookEventName?: string;
+  clientId?: string;
+}
+
+export type KnownDaemonSessionArtifactChangeAction =
+  | 'created'
+  | 'updated'
+  | 'removed';
+export type DaemonSessionArtifactChangeAction =
+  OpenStringUnion<KnownDaemonSessionArtifactChangeAction>;
+
+export type KnownDaemonSessionArtifactRemovalReason =
+  | 'eviction'
+  | 'explicit'
+  | 'unpin_to_ephemeral';
+export type DaemonSessionArtifactRemovalReason =
+  OpenStringUnion<KnownDaemonSessionArtifactRemovalReason>;
+
+export interface DaemonSessionArtifactChange {
+  action: DaemonSessionArtifactChangeAction;
+  artifactId: string;
+  artifact?: DaemonSessionArtifact;
+  reason?: DaemonSessionArtifactRemovalReason;
+}
+
+export interface DaemonSessionArtifactsEnvelope {
+  v: 1;
+  sessionId: string;
+  artifacts: DaemonSessionArtifact[];
+  generatedAt: string;
+  limits: {
+    maxArtifacts: number;
+  };
+  warnings?: string[];
+  warningDetails?: DaemonSessionArtifactWarningDetail[];
+}
+
+export interface DaemonSessionArtifactMutationResult {
+  v: 1;
+  sessionId: string;
+  changes: DaemonSessionArtifactChange[];
+  warnings?: string[];
+  warningDetails?: DaemonSessionArtifactWarningDetail[];
+}
+
+export interface DaemonSessionArtifactWarningDetail {
+  code: string;
+  operation: 'upsert' | 'remove' | 'restore' | (string & {});
+  artifactIds?: string[];
+  durability?: 'durable' | 'live_only' | 'unavailable' | (string & {});
+  retryable?: boolean;
+  message: string;
 }
 
 export type DaemonStatus =
@@ -190,9 +1057,20 @@ export const DAEMON_ERROR_KINDS = [
   'protocol_error',
   'missing_file',
   'parse_error',
-  // Issue #4175 PR 14: budget refusal under `--mcp-budget-mode=enforce`.
-  // Mirrors the serve-side `SERVE_ERROR_KINDS` addition.
+  // Budget refusal under `--mcp-budget-mode=enforce`.
   'budget_exhausted',
+  // Runtime MCP mutation routes (POST/DELETE /workspace/mcp/servers).
+  'mcp_budget_would_exceed',
+  'mcp_server_spawn_failed',
+  'invalid_config',
+  // A prompt exceeded the daemon-configured wallclock cap (or the
+  // request's own `deadlineMs`, capped at the server flag).
+  'prompt_deadline_exceeded',
+  // An SSE writer's last successful flush was older than the daemon's
+  // writer-idle deadline.
+  'writer_idle_timeout',
+  // The model response stream ended before a complete turn could be read.
+  'model_stream_interrupted',
 ] as const;
 
 export type DaemonErrorKind = (typeof DAEMON_ERROR_KINDS)[number];
@@ -229,37 +1107,70 @@ export interface DaemonWorkspaceMcpServerStatus extends DaemonStatusCell {
   mcpStatus?: DaemonMcpServerRuntimeStatus;
   transport: DaemonMcpTransport;
   disabled: boolean;
+  hasOAuthTokens?: boolean;
+  requiresAuth?: boolean;
+  approvalState?: 'pending' | 'rejected';
+  authenticationState?: 'pending' | 'succeeded' | 'failed';
+  authenticationError?: string;
+  source?: 'user' | 'project' | 'extension';
+  configOrigin?:
+    | 'user_settings'
+    | 'workspace_settings'
+    | 'project_mcp_json'
+    | 'system_settings'
+    | 'extension'
+    | 'runtime';
+  removable?: boolean;
+  config?: {
+    command?: string;
+    args?: string[];
+    httpUrl?: string;
+    url?: string;
+    cwd?: string;
+  };
   description?: string;
   extensionName?: string;
   /**
-   * Why this server is not live, when known (issue #4175 PR 14).
-   * `'config'`  — operator-disabled via `disabledMcpServers`.
-   * `'budget'`  — refused by the workspace MCP client budget
+   * Count of MCP resources (`resources/list`) this server advertises.
+   * Rides the base status so a client can show "Resources: N" and gate a
+   * resource browser without a separate fetch. Absent on older daemons;
+   * present (including `0`) on newer daemons for non-disabled servers.
+   * The full list is fetched lazily via `workspaceMcpResources()`.
+   */
+  resourceCount?: number;
+  /**
+   * Count of MCP prompts (`prompts/list`) this server advertises.
+   * Inline-only — prompts have no drill-down endpoint (they surface as
+   * slash commands). Absent on older daemons; present (including `0`) on
+   * newer daemons for non-disabled servers.
+   */
+  promptCount?: number;
+  /**
+   * Why this server is not live, when known.
+   * `'config'`  -- operator-disabled via `disabledMcpServers`.
+   * `'budget'`  -- refused by the workspace MCP client budget
    *               (snapshot also surfaces `errorKind:
    *               'budget_exhausted'`).
-   * Absent on pre-PR-14 daemons.
+   * Absent on older daemons.
    */
   disabledReason?: 'config' | 'budget';
 }
 
-/** Budget enforcement mode for MCP client guardrails (issue #4175 PR 14). */
+/** Budget enforcement mode for MCP client guardrails. */
 export type DaemonMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
- * MCP client budget status cell. Issue #4175 PR 14 v1 emits one
- * entry with `scope: 'session'` (per-session enforcement; see the
- * `scope` field doc for why). Wave 5 PR 23 shared pool will add
- * `scope: 'workspace'`. Consumers MUST tolerate unrecognized scope
- * values — drop, don't fail.
+ * MCP client budget status cell. Daemons advertising
+ * `mcp_workspace_pool` emit workspace-scoped accounting; the legacy
+ * no-pool fallback emits session-scoped accounting. Consumers MUST
+ * tolerate unrecognized scope values — drop, don't fail.
  */
 export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   kind: 'mcp_budget';
   /**
-   * **PR 14 v1 emits `'session'`** — the budget caps live MCP
-   * clients per ACP session, not per-workspace. Each session has its
-   * own `McpClientManager` (created via `acpAgent.newSessionConfig`).
-   * Wave 5 PR 23 (shared MCP pool) will introduce a workspace-scoped
-   * manager and emit `'workspace'` (or `'pool'`) cells.
+   * `'workspace'` means sessions inside the selected runtime share an
+   * MCP pool and budget. `'session'` is the legacy per-session manager
+   * used when `mcp_workspace_pool` is absent.
    *
    * The `string & {}` widening keeps IDE autocomplete + literal
    * narrowing for known scopes while allowing unknown scopes through
@@ -281,18 +1192,72 @@ export interface DaemonWorkspaceMcpStatus {
   discoveryState?: DaemonMcpDiscoveryState;
   servers: DaemonWorkspaceMcpServerStatus[];
   errors?: DaemonStatusCell[];
-  /** PR 14: live MCP client count, all transports. Absent on pre-PR-14 daemons. */
+  /** Live MCP client count, all transports. Absent on older daemons. */
   clientCount?: number;
-  /** PR 14: configured budget. Absent when no cap set. */
+  /** Configured budget. Absent when no cap set. */
   clientBudget?: number;
-  /** PR 14: active enforcement mode. Absent on pre-PR-14 daemons. */
+  /** Active enforcement mode. Absent on older daemons. */
   budgetMode?: DaemonMcpBudgetMode;
   /**
-   * PR 14: workspace-level budget cells. Empty array (not absent)
-   * on post-PR-14 daemons when no budget is configured AND mode
-   * resolves to `off`. Pre-PR-14 daemons omit the field.
+   * Workspace-level budget cells. Empty array (not absent) on newer
+   * daemons when no budget is configured AND mode resolves to `off`.
+   * Older daemons omit the field.
    */
   budgets?: DaemonMcpBudgetStatusCell[];
+}
+
+/** Response of `POST /workspace/mcp/initialize`. */
+export interface DaemonWorkspaceMcpInitializeResult {
+  /** True only when this request started a new background discovery task. */
+  accepted: boolean;
+}
+
+export interface DaemonWorkspaceMcpToolStatus {
+  name: string;
+  serverToolName?: string;
+  description?: string;
+  schema?: Record<string, unknown>;
+  annotations?: Record<string, unknown>;
+  isValid: boolean;
+  invalidReason?: string;
+}
+
+export interface DaemonWorkspaceMcpToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceMcpToolStatus[];
+  errors?: DaemonStatusCell[];
+}
+
+/**
+ * One resource advertised by an MCP server (`resources/list`). Metadata
+ * only — content is read on demand in-chat via the `@<serverName>:<uri>`
+ * reference reconstructed from the parent `serverName` + this `uri`.
+ */
+export interface DaemonWorkspaceMcpResourceStatus {
+  uri: string;
+  name?: string;
+  title?: string;
+  description?: string;
+  mimeType?: string;
+  size?: number;
+}
+
+/**
+ * Drill-down payload returned by `workspaceMcpResources(serverName)`.
+ * Mirrors `DaemonWorkspaceMcpToolsStatus`.
+ */
+export interface DaemonWorkspaceMcpResourcesStatus {
+  v: 1;
+  workspaceCwd: string;
+  serverName: string;
+  initialized: boolean;
+  acpChannelLive: boolean;
+  resources: DaemonWorkspaceMcpResourceStatus[];
+  errors?: DaemonStatusCell[];
 }
 
 export type DaemonSkillLevel = 'project' | 'user' | 'extension' | 'bundled';
@@ -303,6 +1268,8 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   description: string;
   level: DaemonSkillLevel;
   modelInvocable: boolean;
+  userInvocable?: false;
+  installedPath?: string;
   argumentHint?: string;
   model?: string;
   extensionName?: string;
@@ -316,9 +1283,23 @@ export interface DaemonWorkspaceSkillsStatus {
   errors?: DaemonStatusCell[];
 }
 
+export interface DaemonWorkspaceAcpStatusResult {
+  channelLive: boolean;
+}
+
+export interface DaemonWorkspaceAcpPreheatResult {
+  ready: boolean;
+  channelLive: boolean;
+  durationMs: number;
+  reason?: 'timeout' | 'error';
+  error?: string;
+}
+
 export interface DaemonWorkspaceProviderCurrent {
   authType?: string;
   modelId?: string;
+  baseUrl?: string;
+  fastModelId?: string;
 }
 
 export interface DaemonWorkspaceProviderModel {
@@ -327,6 +1308,14 @@ export interface DaemonWorkspaceProviderModel {
   name: string;
   description?: string | null;
   contextLimit?: number;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  baseUrl?: string;
+  envKey?: string;
   isCurrent: boolean;
   isRuntime: boolean;
 }
@@ -342,13 +1331,15 @@ export interface DaemonWorkspaceProvidersStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
+  approvalMode?: DaemonApprovalMode;
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];
 }
 
 /**
- * Issue #4175 PR 16: workspace memory snapshot returned from
+ * Workspace memory snapshot returned from
  * `GET /workspace/memory`. Mirrors the `kind / status / error?` cell
  * pattern used by mcp/skills/providers — adapters can render any of
  * the four with the same component.
@@ -409,6 +1400,101 @@ export interface DaemonWriteMemoryResult {
    * `changed: true` (the legacy contract).
    */
   changed?: boolean;
+}
+
+export type DaemonWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+
+export type DaemonWorkspaceMemoryTaskStatus =
+  | 'queued'
+  | 'running'
+  | 'completed'
+  | 'failed';
+
+export type DaemonWorkspaceMemoryRememberTaskStatus =
+  DaemonWorkspaceMemoryTaskStatus;
+
+export type DaemonWorkspaceMemoryTopic =
+  | 'user'
+  | 'feedback'
+  | 'project'
+  | 'reference';
+
+export interface DaemonWorkspaceMemoryRememberResult {
+  summary?: string;
+  filesTouched: string[];
+  touchedScopes: Array<'user' | 'project'>;
+}
+
+export interface DaemonWorkspaceMemoryRememberTask {
+  taskId: string;
+  status: DaemonWorkspaceMemoryTaskStatus;
+  contextMode: DaemonWorkspaceMemoryRememberContextMode;
+  createdAt: string;
+  updatedAt: string;
+  result?: DaemonWorkspaceMemoryRememberResult;
+  error?: {
+    code: string;
+    message: string;
+    details?: string;
+  };
+}
+
+export interface DaemonWorkspaceMemoryRememberOptions {
+  contextMode?: DaemonWorkspaceMemoryRememberContextMode;
+  clientId?: string;
+}
+
+export interface DaemonWorkspaceMemoryForgetMatch {
+  topic: DaemonWorkspaceMemoryTopic;
+  summary: string;
+  filePath: string;
+}
+
+export interface DaemonWorkspaceMemoryForgetResult {
+  summary?: string;
+  removedEntries: DaemonWorkspaceMemoryForgetMatch[];
+  touchedTopics: DaemonWorkspaceMemoryTopic[];
+  touchedScopes: Array<'user' | 'project'>;
+}
+
+export interface DaemonWorkspaceMemoryForgetTask {
+  taskId: string;
+  status: DaemonWorkspaceMemoryTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  result?: DaemonWorkspaceMemoryForgetResult;
+  error?: {
+    code: string;
+    message: string;
+    details?: string;
+  };
+}
+
+export interface DaemonWorkspaceMemoryForgetOptions {
+  clientId?: string;
+}
+
+export interface DaemonWorkspaceMemoryDreamResult {
+  summary?: string;
+  touchedTopics: DaemonWorkspaceMemoryTopic[];
+  dedupedEntries: number;
+}
+
+export interface DaemonWorkspaceMemoryDreamTask {
+  taskId: string;
+  status: DaemonWorkspaceMemoryTaskStatus;
+  createdAt: string;
+  updatedAt: string;
+  result?: DaemonWorkspaceMemoryDreamResult;
+  error?: {
+    code: string;
+    message: string;
+    details?: string;
+  };
+}
+
+export interface DaemonWorkspaceMemoryDreamOptions {
+  clientId?: string;
 }
 
 export type DaemonContentHash = `sha256:${string}`;
@@ -498,7 +1584,7 @@ export interface DaemonWorkspaceFileEditResult {
 }
 
 /**
- * Issue #4175 PR 16: subagent CRUD types. `agentType` on the wire is
+ * Subagent CRUD types. `agentType` on the wire is
  * the `name` field from the agent's frontmatter (case-insensitive);
  * `level` distinguishes project-/user-/builtin-/extension-level
  * registrations. Built-in / extension agents are read-only — POST and
@@ -579,6 +1665,12 @@ export interface DaemonCreateAgentRequest {
   background?: boolean;
 }
 
+export interface DaemonGeneratedAgentContent {
+  name: string;
+  description: string;
+  systemPrompt: string;
+}
+
 /**
  * Body of `POST /workspace/agents/:agentType`. `name` / `level` /
  * `filePath` / `isBuiltin` are intentionally omitted — agent type
@@ -605,7 +1697,7 @@ export interface DaemonAgentMutationResult {
    * `false` when the request was a no-op (every supplied field
    * already matched the existing record). The update route emits
    * the field on every response (introduced alongside the no-op
-   * short-circuit in PR 16); create responses currently omit it
+   * short-circuit); create responses currently omit it
    * because every successful create is a write — typed consumers
    * should treat `undefined` as `true` (the legacy contract). This
    * mirrors `DaemonWriteMemoryResult.changed`. Optional at the type
@@ -619,7 +1711,8 @@ export type DaemonEnvKind =
   | 'platform'
   | 'sandbox'
   | 'proxy'
-  | 'env_var';
+  | 'env_var'
+  | 'memory';
 
 export interface DaemonEnvCell extends DaemonStatusCell {
   kind: DaemonEnvKind;
@@ -667,11 +1760,76 @@ export interface DaemonWorkspacePreflightStatus {
   errors?: DaemonStatusCell[];
 }
 
+export interface DaemonWorkspaceToolStatus {
+  name: string;
+  displayName?: string;
+  description?: string;
+  enabled: boolean;
+}
+
+export interface DaemonWorkspaceToolsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: true;
+  acpChannelLive: boolean;
+  tools: DaemonWorkspaceToolStatus[];
+  errors?: DaemonStatusCell[];
+}
+
 export interface DaemonSessionContextStatus {
   v: 1;
   sessionId: string;
   workspaceCwd: string;
   state: DaemonSessionState;
+}
+
+export interface DaemonContextCategoryBreakdown {
+  systemPrompt: number;
+  builtinTools: number;
+  mcpTools: number;
+  memoryFiles: number;
+  skills: number;
+  messages: number;
+  freeSpace: number;
+  autocompactBuffer: number;
+}
+
+export interface DaemonContextToolDetail {
+  name: string;
+  tokens: number;
+}
+
+export interface DaemonContextMemoryDetail {
+  path: string;
+  tokens: number;
+}
+
+export interface DaemonContextSkillDetail {
+  name: string;
+  tokens: number;
+  loaded?: boolean;
+  bodyTokens?: number;
+}
+
+export interface DaemonSessionContextUsage {
+  modelName: string;
+  totalTokens: number;
+  contextWindowSize: number;
+  breakdown: DaemonContextCategoryBreakdown;
+  builtinTools: DaemonContextToolDetail[];
+  mcpTools: DaemonContextToolDetail[];
+  memoryFiles: DaemonContextMemoryDetail[];
+  skills: DaemonContextSkillDetail[];
+  isEstimated?: boolean;
+  showDetails?: boolean;
+}
+
+export interface DaemonSessionContextUsageStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  usage: DaemonSessionContextUsage;
+  formattedText: string;
 }
 
 export interface DaemonAvailableCommand {
@@ -688,13 +1846,278 @@ export interface DaemonSessionSupportedCommandsStatus {
   availableSkills: string[];
 }
 
+export type DaemonSessionTaskLifecycleStatus =
+  | 'running'
+  | 'paused'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export type DaemonSessionProcessTaskLifecycleStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
+
+export interface DaemonSessionAgentTaskStatus {
+  kind: 'agent';
+  id: string;
+  label: string;
+  description: string;
+  status: DaemonSessionTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  subagentType?: string;
+  isBackgrounded: boolean;
+  error?: string;
+  resumeBlockedReason?: string;
+  stats?: { totalTokens: number; toolUses: number; durationMs: number };
+  recentActivities?: Array<{ name: string; description: string; at: number }>;
+  prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one. Absent for agents
+   * launched by the top-level session. Sub-agents may spawn sub-agents
+   * (bounded by `maxSubagentDepth`); clients render the roster as a tree
+   * by correlating this against sibling `id`s.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction from the
+   * registry. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
+}
+
+export interface DaemonSessionShellTaskStatus {
+  kind: 'shell';
+  id: string;
+  label: string;
+  description: string;
+  status: DaemonSessionProcessTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  outputFile?: string;
+  command: string;
+  cwd: string;
+  pid?: number;
+  exitCode?: number;
+  error?: string;
+}
+
+export interface DaemonSessionMonitorTaskStatus {
+  kind: 'monitor';
+  id: string;
+  label: string;
+  description: string;
+  status: DaemonSessionProcessTaskLifecycleStatus;
+  startTime: number;
+  endTime?: number;
+  runtimeMs: number;
+  command: string;
+  pid?: number;
+  eventCount: number;
+  lastEventTime: number;
+  droppedLines: number;
+  exitCode?: number;
+  error?: string;
+  ownerAgentId?: string;
+}
+
+export type DaemonSessionTaskStatus =
+  | DaemonSessionAgentTaskStatus
+  | DaemonSessionShellTaskStatus
+  | DaemonSessionMonitorTaskStatus;
+
+export interface DaemonSessionTasksStatus {
+  v: 1;
+  sessionId: string;
+  now: number;
+  tasks: DaemonSessionTaskStatus[];
+}
+
+export interface DaemonLspServerStatus {
+  name: string;
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'READY' | 'FAILED';
+  languages: string[];
+  transport?: string;
+  command?: string;
+  error?: string;
+}
+
+export interface DaemonSessionLspStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  enabled: boolean;
+  configuredServers: number;
+  readyServers: number;
+  failedServers: number;
+  inProgressServers: number;
+  notStartedServers: number;
+  statusUnavailable?: true;
+  initializationError?: string;
+  servers: DaemonLspServerStatus[];
+}
+
+export interface DaemonSessionStatsModelMetrics {
+  api: {
+    totalRequests: number;
+    totalErrors: number;
+    totalLatencyMs: number;
+  };
+  tokens: {
+    prompt: number;
+    candidates: number;
+    total: number;
+    cached: number;
+    thoughts: number;
+  };
+}
+
+export interface DaemonSessionStatsToolByName {
+  count: number;
+  success: number;
+  fail: number;
+  durationMs: number;
+  decisions: {
+    accept: number;
+    reject: number;
+    modify: number;
+    auto_accept: number;
+  };
+}
+
+export interface DaemonSessionStatsSkillByName {
+  count: number;
+  success: number;
+  fail: number;
+}
+
+/** Returned from `GET /session/:id/stats`. */
+export interface DaemonSessionStatsStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  sessionStartTimeMs: number;
+  durationMs: number;
+  promptCount: number;
+  models: Record<string, DaemonSessionStatsModelMetrics>;
+  tools: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    totalDurationMs: number;
+    byName: Record<string, DaemonSessionStatsToolByName>;
+  };
+  files: {
+    totalLinesAdded: number;
+    totalLinesRemoved: number;
+  };
+  skills?: {
+    totalCalls: number;
+    totalSuccess: number;
+    totalFail: number;
+    byName: Record<string, DaemonSessionStatsSkillByName>;
+  };
+}
+
+/**
+ * Summary window the usage dashboard aggregates over (UI: Today / 7D / 30D).
+ * `week` = trailing 7 days, `month` = trailing 30 days. Mirrors the subset of
+ * core's `TimeRange` the route accepts.
+ */
+export type DaemonUsageRange = 'today' | 'week' | 'month';
+
+/**
+ * Flattened summary totals for the usage dashboard hero + breakdown tiles.
+ * Mirrors core's `UsageDashboardTotals`.
+ */
+export interface DaemonUsageDashboardTotals {
+  totalTokens: number;
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens: number;
+  thoughtsTokens: number;
+  requests: number;
+  sessions: number;
+  toolCalls: number;
+  linesAdded: number;
+  linesRemoved: number;
+  /** cachedTokens / inputTokens as a 0..1 fraction (0 when there is no input). */
+  cacheReadRate: number;
+}
+
+/** One model's token share of the range. Mirrors core's `UsageModelShare`. */
+export interface DaemonUsageModelShare {
+  model: string;
+  totalTokens: number;
+  /** cachedTokens / inputTokens, 0..1. */
+  cacheReadRate: number;
+  /** totalTokens / range total, 0..1. */
+  share: number;
+}
+
+/** One skill's invocation count over the range. Mirrors `UsageSkillCall`. */
+export interface DaemonUsageSkillCall {
+  name: string;
+  count: number;
+}
+
+/** One day's totals for the daily charts. Mirrors core's `UsageDailyPoint`. */
+export interface DaemonUsageDailyPoint {
+  date: string;
+  tokens: number;
+  sessions: number;
+}
+
+/** One heatmap cell: tokens (intensity) + cache rate. Mirrors `UsageHeatmapDay`. */
+export interface DaemonUsageHeatmapDay {
+  tokens: number;
+  /** cachedTokens / inputTokens for that day, 0..1. */
+  cacheReadRate: number;
+}
+
+/**
+ * Returned from `GET /usage/dashboard`. Aggregate local token usage across all
+ * projects, powering the Daemon Status "统计 / Usage" tab. Mirrors core's
+ * `UsageDashboard`.
+ */
+export interface DaemonUsageDashboard {
+  generatedAt: string;
+  /** The window `summary` covers; the heatmap below is always ~6 months. */
+  range: DaemonUsageRange;
+  summary: DaemonUsageDashboardTotals;
+  /** Per-model token share for the range, sorted by tokens desc. */
+  models: DaemonUsageModelShare[];
+  /** Skill invocations for the range, sorted by count desc. */
+  skills: DaemonUsageSkillCall[];
+  /** Per-day tokens + sessions across the range window. */
+  daily: DaemonUsageDailyPoint[];
+  /** Per-day cells keyed by local `YYYY-MM-DD`, trailing `heatmapDays`. */
+  heatmap: Record<string, DaemonUsageHeatmapDay>;
+  heatmapDays: number;
+}
+
 /** Returned from `POST /session/:id/model`. ACP currently allows an opaque body. */
 export interface SetModelResult {
   [key: string]: unknown;
 }
 
+/** Returned from `POST /session/:id/language`. */
+export interface SetSessionLanguageResult {
+  language: string;
+  outputLanguage: string | null;
+  refreshed: boolean;
+}
+
 /**
- * #4175 Wave 4 PR 17. Closed enumeration of session approval modes the
+ * Closed enumeration of session approval modes the
  * daemon exposes via `POST /session/:id/approval-mode`. Mirrors core's
  * `ApprovalMode` enum — the drift detector test in
  * `packages/cli/src/acp-integration/approvalMode.test.ts` walks the
@@ -729,7 +2152,7 @@ export interface DaemonApprovalModeResult {
 }
 
 /**
- * #4175 Wave 4 PR 17. Result body of `POST /workspace/tools/:name/
+ * Result body of `POST /workspace/tools/:name/
  * enable`. The `enabled` flag echoes the requested state; daemon
  * always succeeds when the bridge has a `persistDisabledTools` hook
  * (production wires it). Already-registered tools in active sessions
@@ -740,8 +2163,187 @@ export interface DaemonToolToggleResult {
   enabled: boolean;
 }
 
+export type DaemonSkillToggleActivation = 'applied' | 'deferred' | 'partial';
+
+export interface DaemonSkillToggleResult {
+  skillName: string;
+  enabled: boolean;
+  changed: boolean;
+  activation: DaemonSkillToggleActivation;
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+}
+
+export type DaemonSkillScope = 'workspace' | 'global';
+
+export type DaemonSkillInstallSource =
+  | { type: 'github'; url: string }
+  | { type: 'folder'; path: string }
+  | { type: 'zip'; contentBase64: string };
+
+export interface DaemonSkillInstallRequest {
+  name: string;
+  scope: DaemonSkillScope;
+  source: DaemonSkillInstallSource;
+}
+
+export interface DaemonSkillMutationResult {
+  skillName: string;
+  scope: DaemonSkillScope;
+  installedPath?: string;
+  deleted?: boolean;
+}
+
+export interface DaemonSettingDescriptor {
+  key: string;
+  type: string;
+  label: string;
+  category: string;
+  description?: string;
+  requiresRestart: boolean;
+  default: unknown;
+  options?: ReadonlyArray<{ value: string | number; label: string }>;
+  values: {
+    effective: unknown;
+    user?: unknown;
+    workspace?: unknown;
+  };
+}
+
+export interface DaemonWorkspaceSettingsStatus {
+  v: 1;
+  warnings?: Array<{
+    type: 'corrupted';
+    recovered: boolean;
+  }>;
+  settings: DaemonSettingDescriptor[];
+}
+
+export interface DaemonSettingUpdateResult {
+  key: string;
+  scope: 'workspace' | 'user';
+  value: unknown;
+  requiresRestart: boolean;
+}
+
+/** Identifies a configured model to remove from `modelProviders`. */
+export interface DaemonModelDeleteRequest {
+  authType: string;
+  modelId: string;
+  baseUrl?: string;
+}
+
+export interface DaemonModelDeleteResult {
+  removed: boolean;
+  clearedActiveModel: boolean;
+  /** True when a committed write targets a restart-required setting. */
+  requiresRestart?: boolean;
+}
+
+export type DaemonVoiceMode = 'hold' | 'tap';
+
+export type DaemonVoiceTransport =
+  | 'qwen-asr-chat'
+  | 'qwen-asr-realtime'
+  | 'dashscope-task-realtime';
+
+export interface DaemonVoiceModelDescriptor {
+  id: string;
+  transport: DaemonVoiceTransport;
+}
+
+export interface DaemonWorkspaceVoiceStatus {
+  v: 1;
+  workspaceCwd: string;
+  enabled: boolean;
+  mode: DaemonVoiceMode;
+  language: string;
+  voiceModel: string | null;
+  availableVoiceModels: DaemonVoiceModelDescriptor[];
+}
+
+export interface DaemonWorkspaceVoiceUpdate {
+  enabled?: boolean;
+  mode?: DaemonVoiceMode;
+  language?: string;
+  voiceModel?: string;
+}
+
+export type DaemonVoiceAudioInput = Blob | ArrayBuffer | Uint8Array;
+
+export interface DaemonWorkspaceVoiceTranscribeOptions {
+  mimeType: string;
+  voiceModel?: string;
+  clientId?: string;
+  timeoutMs?: number;
+}
+
+export interface DaemonWorkspaceVoiceTranscriptionResult {
+  v: 1;
+  text: string;
+  model: string;
+  transport: DaemonVoiceTransport;
+}
+
+export type DaemonWorkspaceTrustState = 'trusted' | 'untrusted' | 'unknown';
+
+export type DaemonWorkspaceTrustSource = 'disabled' | 'ide' | 'file' | 'none';
+
+export type DaemonWorkspaceTrustLevel =
+  | 'TRUST_FOLDER'
+  | 'TRUST_PARENT'
+  | 'DO_NOT_TRUST';
+
+export interface DaemonWorkspaceTrustStatus {
+  v: 1;
+  workspaceCwd: string;
+  folderTrustEnabled: boolean;
+  effective: {
+    state: DaemonWorkspaceTrustState;
+    source: DaemonWorkspaceTrustSource;
+  };
+  explicitTrustLevel: DaemonWorkspaceTrustLevel | null;
+  requiresDaemonRestartForChanges: true;
+}
+
+export type DaemonWorkspaceTrustDesiredState = 'trusted' | 'untrusted';
+
+export interface DaemonWorkspaceTrustChangeRequest {
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  reason?: string;
+}
+
+export interface DaemonWorkspaceTrustChangeResult {
+  accepted: boolean;
+  desiredState: DaemonWorkspaceTrustDesiredState;
+  requiresOperatorAction: true;
+}
+
+export type DaemonPermissionScope = 'user' | 'workspace';
+
+export type DaemonPermissionRuleType = 'allow' | 'ask' | 'deny';
+
+export interface DaemonPermissionRuleSet {
+  allow: string[];
+  ask: string[];
+  deny: string[];
+}
+
+export interface DaemonWorkspacePermissionScopeState {
+  path: string;
+  rules: DaemonPermissionRuleSet;
+}
+
+export interface DaemonWorkspacePermissionsStatus {
+  v: 1;
+  user: DaemonWorkspacePermissionScopeState;
+  workspace: DaemonWorkspacePermissionScopeState;
+  merged: DaemonPermissionRuleSet;
+  isTrusted: boolean;
+}
+
 /**
- * #4175 Wave 4 PR 17. Result body of `POST /workspace/init`.
+ * Result body of `POST /workspace/init`.
  *
  * - `'created'`: the target file did not exist; daemon scaffolded an
  *   empty file fresh.
@@ -750,7 +2352,7 @@ export interface DaemonToolToggleResult {
  * - `'noop'`: the target file already existed but contained only
  *   whitespace, so the daemon left it alone (no write, no on-disk
  *   change). Honors the "init only if absent" intent without
- *   requiring `force: true` (#4282 fold-in 1, wenshao H4).
+ *   requiring `force: true`.
  *
  * Note: `path` is the absolute path on the daemon host filesystem —
  * not the client's. Per the runtime-locality contract, file ops
@@ -761,8 +2363,123 @@ export interface DaemonInitWorkspaceResult {
   action: 'created' | 'overwrote' | 'noop';
 }
 
+export interface DaemonGithubSetupRequest {
+  consent: true;
+}
+
+export interface DaemonGithubSetupWorkflowResult {
+  sourcePath: string;
+  path: string;
+  status: 'written' | 'failed';
+  sizeBytes?: number;
+  error?: string;
+}
+
+export interface DaemonGithubSetupGitignoreResult {
+  path: '.gitignore';
+  status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped';
+  added?: string[];
+  error?: string;
+}
+
+export interface DaemonGithubSetupResult {
+  kind: 'github_setup';
+  workspaceCwd: string;
+  gitRepoRoot: string;
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: DaemonGithubSetupWorkflowResult[];
+  gitignore: DaemonGithubSetupGitignoreResult;
+  warnings: string[];
+  partial?: boolean;
+}
+
 /**
- * #4175 Wave 4 PR 17. Result body of `POST /workspace/mcp/:server/
+ * Returned from `POST /session/:id/recap`. The recap
+ * is a one-sentence "where did I leave off" summary generated by core's
+ * `generateSessionRecap` via a side-query against the fast model.
+ *
+ * `recap` is `null` (not absent, not an empty string) when:
+ * - the session has fewer than two dialog turns yet,
+ * - the side-query returns no extractable `<recap>...</recap>` payload,
+ * - or any underlying model error occurred (the core helper is
+ *   best-effort and never throws).
+ *
+ * The route returns 200 in all three cases; only hard errors (unknown
+ * session, ACP transport down, bridge timeout) surface as non-2xx.
+ * Pre-flight `caps.features.session_recap` before calling.
+ */
+export interface DaemonSessionRecapResult {
+  sessionId: string;
+  recap: string | null;
+}
+
+export type DaemonSessionGenerationEvent =
+  | {
+      v: 1;
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: 'fast' | 'main';
+    }
+  | { v: 1; type: 'thinking'; requestId: string }
+  | { v: 1; type: 'delta'; requestId: string; seq: number; text: string }
+  | {
+      v: 1;
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: 'fast' | 'main';
+      inputTokens?: number;
+      outputTokens?: number;
+    }
+  | { v: 1; type: 'error'; code: string; message: string };
+
+export interface DaemonSessionBtwResult {
+  sessionId: string;
+  answer: string | null;
+}
+
+/**
+ * Result body of `POST /session/:id/mid-turn-message`. `accepted` is `true`
+ * when the message was queued for the running turn (the ACP child drains it
+ * between tool batches); `false` when the session was idle, in which case the
+ * caller should send the message as a normal next-turn prompt instead.
+ */
+export interface DaemonMidTurnMessageResult {
+  accepted: boolean;
+}
+
+/**
+ * One entry in the daemon's pending prompt queue. The `state` is
+ * `'running'` for the currently dispatching prompt and `'queued'`
+ * for prompts waiting in the FIFO.
+ */
+export interface DaemonPendingPromptSummary {
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  state: 'queued' | 'running';
+  originatorClientId?: string;
+}
+
+export interface DaemonPendingPromptsResult {
+  pendingPrompts: DaemonPendingPromptSummary[];
+}
+
+export interface DaemonRemovePendingPromptResult {
+  removed: boolean;
+}
+
+export interface DaemonShellCommandResult {
+  exitCode: number | null;
+  output: string;
+  aborted: boolean;
+}
+
+/**
+ * Result body of `POST /workspace/mcp/:server/
  * restart`. Discriminated by `restarted`: `true` carries the wall-
  * clock duration of the disconnect+reconnect+rediscover sequence;
  * `false` is a soft skip with the reason. Both shapes return HTTP
@@ -779,6 +2496,113 @@ export interface DaemonInitWorkspaceResult {
  *   total has reached `clientBudget`. Caller should free a slot
  *   (disconnect another server) before retrying.
  */
+export interface DaemonReloadResponse {
+  env: { updatedKeys: string[]; removedKeys: string[] };
+  changedKeys: string[];
+  childReloaded: boolean;
+  sessionsRefreshed?: string[];
+  sessionsSkipped?: string[];
+  childError?: string;
+}
+
+/** A bounded, credential-redacted adapter startup diagnostic. */
+export interface DaemonChannelStartupFailure {
+  channel: string;
+  /** The daemon currently emits only `connect`; this is widened for evolution. */
+  phase: string;
+  code?: string;
+  message: string;
+}
+
+export interface DaemonChannelStartupAttemptFailure
+  extends DaemonChannelStartupFailure {
+  workspaceCwd: string;
+}
+
+/**
+ * Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
+ * widened to string to avoid coupling the wire type to the daemon's unions.
+ */
+export interface DaemonChannelWorkerSnapshot {
+  enabled: boolean;
+  state: string;
+  channels: string[];
+  requestedChannels?: string[];
+  pid?: number;
+  startedAt?: string;
+  exitCode?: number | null;
+  signal?: string | null;
+  error?: string;
+  restartCount?: number;
+  lastExitAt?: string;
+  lastRestartAt?: string;
+  nextRestartAt?: string;
+  lastHeartbeatAt?: string;
+  staleHeartbeatAt?: string;
+  startupFailures?: DaemonChannelStartupFailure[];
+  startupFailuresTruncated?: boolean;
+}
+
+export type DaemonChannelSelection =
+  | { mode: 'all' }
+  | { mode: 'names'; names: string[] };
+
+export type DaemonChannelControlTransition =
+  | 'idle'
+  | 'starting'
+  | 'reconciling'
+  | 'stopping'
+  | 'rolling_back';
+
+/** A channel worker snapshot annotated with its owning workspace. */
+export interface DaemonChannelWorkerGroupSnapshot
+  extends DaemonChannelWorkerSnapshot {
+  workspaceId: string;
+  workspaceCwd: string;
+  primary: boolean;
+}
+
+export interface DaemonChannelControlState {
+  enabled: boolean;
+  selection: DaemonChannelSelection | null;
+  pendingSelection?: DaemonChannelSelection;
+  transition: DaemonChannelControlTransition;
+  workers: DaemonChannelWorkerGroupSnapshot[];
+}
+
+export interface DaemonChannelSetResult {
+  changed: boolean;
+  replaced: boolean;
+  partial: boolean;
+  state: DaemonChannelControlState;
+}
+
+export interface DaemonChannelStopResult {
+  changed: boolean;
+  state: DaemonChannelControlState;
+}
+
+export interface DaemonChannelWorkerStartErrorResponse {
+  error: string;
+  code: 'channel_worker_start_failed';
+  rolledBack?: boolean;
+  rollbackError?: string;
+  state: DaemonChannelControlState;
+  startupFailures?: DaemonChannelStartupAttemptFailure[];
+  startupFailuresTruncated?: boolean;
+}
+
+/**
+ * Result of `POST /workspace/channel/reload`: the daemon restarted its channel
+ * worker group (which re-reads settings.json). `worker` is the compatible
+ * primary snapshot, or the first snapshot when only a non-primary workspace
+ * owns channels; inspect daemon status for the full multi-workspace list.
+ */
+export interface DaemonChannelReloadResult {
+  reloaded: boolean;
+  worker: DaemonChannelWorkerSnapshot;
+}
+
 export type DaemonMcpRestartResult =
   | {
       serverName: string;
@@ -789,14 +2613,122 @@ export type DaemonMcpRestartResult =
       serverName: string;
       restarted: false;
       skipped: true;
-      reason: 'in_flight' | 'disabled' | 'budget_would_exceed';
+      reason:
+        | 'in_flight'
+        | 'disabled'
+        | 'budget_would_exceed'
+        | 'authentication_required';
+    }
+  | {
+      serverName: string;
+      entries: Array<{
+        entryIndex: number;
+        restarted: boolean;
+        durationMs?: number;
+        reason?: string;
+      }>;
+    };
+
+export type DaemonMcpManageAction =
+  | 'approve'
+  | 'enable'
+  | 'disable'
+  | 'authenticate'
+  | 'clear-auth';
+
+export interface DaemonMcpManageResult {
+  serverName: string;
+  action: DaemonMcpManageAction;
+  ok: true;
+  changed?: boolean;
+  messages?: string[];
+  authUrl?: string;
+  pending?: boolean;
+}
+
+/**
+ * Structural subset of core's `MCPServerConfig` exposed
+ * on the `POST /workspace/mcp/servers` route body. Covers all wire-
+ * relevant transport fields without pulling in core-only concerns
+ * (e.g. `includeTools` / `excludeTools` filtering, `extensionName`).
+ *
+ * All fields are optional — the daemon infers transport family from
+ * whichever set of fields is populated (stdio: `command`; SSE: `url`;
+ * HTTP: `httpUrl`; WebSocket: `tcp`; SDK: `type: 'sdk'`).
+ */
+export interface MCPServerConfigShape {
+  readonly type?: 'stdio' | 'sse' | 'http' | 'websocket' | 'sdk';
+  readonly command?: string;
+  readonly args?: string[];
+  readonly env?: Record<string, string>;
+  readonly cwd?: string;
+  readonly url?: string;
+  readonly httpUrl?: string;
+  readonly headers?: Record<string, string>;
+  readonly tcp?: string;
+  readonly timeout?: number;
+  readonly discoveryTimeoutMs?: number;
+  readonly trust?: boolean;
+  readonly description?: string;
+  readonly oauth?: Record<string, unknown>;
+}
+
+/**
+ * Body of `POST /workspace/mcp/servers` — adds (or
+ * replaces) a runtime MCP server.
+ */
+export interface DaemonRuntimeMcpAddRequest {
+  readonly name: string;
+  readonly config: MCPServerConfigShape;
+  readonly displayName?: string;
+}
+
+/**
+ * Response of `POST /workspace/mcp/servers`.
+ * Discriminated union: `.skipped` is absent (or `never`) on the
+ * success branch and `true` on the soft-refuse branch. Callers
+ * narrow with `if ('skipped' in res && res.skipped)`.
+ */
+export type DaemonRuntimeMcpAddResult =
+  | {
+      readonly name: string;
+      readonly transport: DaemonMcpTransport;
+      readonly replaced: boolean;
+      readonly shadowedSettings: boolean;
+      readonly toolCount: number;
+      readonly originatorClientId: string;
+      readonly skipped?: never;
+    }
+  | {
+      readonly name: string;
+      readonly skipped: true;
+      readonly reason: 'budget_warning_only' | 'runtime_name_conflict';
+    };
+
+/**
+ * Response of `DELETE /workspace/mcp/servers/:name`.
+ * Discriminated union: `.skipped` absent on success, `true` on
+ * soft-refuse (server was not present — idempotent skip).
+ */
+export type DaemonRuntimeMcpRemoveResult =
+  | {
+      readonly name: string;
+      readonly removed: true;
+      readonly wasShadowingSettings: boolean;
+      readonly originatorClientId: string;
+      readonly skipped?: never;
+    }
+  | {
+      readonly name: string;
+      readonly skipped: true;
+      readonly reason: 'not_present';
     };
 
 /**
  * Returned from `POST /session/:id/heartbeat`. `lastSeenAt` is the
  * server-side `Date.now()` epoch (ms) the daemon stored for this
  * session. `clientId` is echoed back only when the caller supplied a
- * trusted one through `X-Qwen-Client-Id`. Older daemons (pre-PR 9) do
+ * trusted one through `X-Qwen-Client-Id`. Older daemons do
  * not expose this route — clients should pre-flight
  * `caps.features.client_heartbeat` before sending.
  */
@@ -806,18 +2738,16 @@ export interface HeartbeatResult {
   lastSeenAt: number;
 }
 
-/** Issue #4175 PR 21 — auth device-flow wire types. */
+/** Auth device-flow wire types. */
 
 export type DaemonAuthProviderId = 'qwen-oauth' | (string & {});
 
-// PR #4255 review S4: Sdk-prefixed aliases USED to be parallel literal
-// unions, which silently diverged from the canonical event-side types
-// the moment one was extended. Single-source the canonical definitions
-// from `./events.js` so a single source of truth governs both layers
+// Sdk-prefixed aliases single-source the canonical definitions from
+// `./events.js` so a single source of truth governs both layers
 // (event payloads + REST wire shapes). TypeScript handles the
 // circular type-only import cleanly because there is no runtime
 // dependency direction. Local `type X = ...` aliases (rather than a
-// re-export) make the symbols usable INSIDE this module too — required
+// re-export) make the symbols usable INSIDE this module too -- required
 // by `DaemonDeviceFlowState` / `DaemonAuthProviderStatus` below.
 import type {
   DaemonAuthDeviceFlowStatus,
@@ -885,6 +2815,89 @@ export interface DaemonAuthStatusSnapshot {
   supportedDeviceFlowProviders: DaemonAuthProviderId[];
 }
 
+export interface DaemonAuthProviderModel {
+  id: string;
+  contextWindowSize?: number;
+  enableThinking?: boolean;
+  modalities?: {
+    image?: boolean;
+    pdf?: boolean;
+    audio?: boolean;
+    video?: boolean;
+  };
+  description?: string;
+}
+
+export interface DaemonAuthProviderBaseUrlOption {
+  id: string;
+  label: string;
+  url: string;
+  documentationUrl?: string;
+  apiKeyUrl?: string;
+}
+
+export interface DaemonAuthProviderDescriptor {
+  id: string;
+  label: string;
+  description: string;
+  uiGroup?: string;
+  protocol: string;
+  protocolOptions?: string[];
+  baseUrl?: string | DaemonAuthProviderBaseUrlOption[];
+  envKey?: string;
+  models?: DaemonAuthProviderModel[];
+  modelsEditable?: boolean;
+  apiKeyPlaceholder?: string;
+  documentationUrl?: string;
+  showAdvancedConfig?: boolean;
+  uiLabels?: {
+    flowTitle?: string;
+    baseUrlStepTitle?: string;
+  };
+  steps: Array<'protocol' | 'baseUrl' | 'apiKey' | 'models' | 'advancedConfig'>;
+}
+
+export interface DaemonAuthProviderCatalog {
+  v: 1;
+  workspaceCwd: string;
+  providers: DaemonAuthProviderDescriptor[];
+  groups: Array<{
+    id: 'alibaba' | 'third-party' | 'custom';
+    label: string;
+    description: string;
+    providerIds: string[];
+  }>;
+}
+
+export interface DaemonAuthProviderInstallRequest {
+  providerId: string;
+  protocol?: string;
+  baseUrl?: string;
+  apiKey: string;
+  modelIds?: string[];
+  advancedConfig?: {
+    enableThinking?: boolean;
+    multimodal?: {
+      image?: boolean;
+      pdf?: boolean;
+      audio?: boolean;
+      video?: boolean;
+    };
+    contextWindowSize?: number;
+    maxTokens?: number;
+  };
+}
+
+export interface DaemonAuthProviderInstallResult {
+  v: 1;
+  providerId: string;
+  providerLabel: string;
+  authType: string;
+  modelId?: string;
+  baseUrl?: string;
+  message: string;
+}
+
 /** A frame in the SSE event stream. */
 export interface DaemonEvent {
   /**
@@ -902,6 +2915,10 @@ export interface DaemonEvent {
   type: string;
   /** Frame payload — opaque JSON. */
   data: unknown;
+  /** Admitted prompt identifier for events belonging to a specific turn. */
+  promptId?: string;
+  /** Envelope metadata, including daemon-emitted timestamps when available. */
+  _meta?: Record<string, unknown>;
   originatorClientId?: string;
 }
 
@@ -938,5 +2955,414 @@ export type PermissionOutcome =
 
 export interface PermissionResponse {
   outcome: PermissionOutcome;
+  /** Answers to ask_user_question, keyed by its `answerKey`. */
+  answers?: Record<string, string>;
   [key: string]: unknown;
+}
+
+export interface DaemonRewindSnapshotInfo {
+  promptId: string;
+  turnIndex: number;
+  timestamp: string;
+  diffStats: { filesChanged: number; insertions: number; deletions: number };
+}
+
+export interface DaemonRewindResult {
+  rewound: boolean;
+  targetTurnIndex: number;
+  filesChanged: string[];
+  filesFailed: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Issue #4514 T3.9: workspace + session hooks diagnostic surfaces.
+// ---------------------------------------------------------------------------
+
+/**
+ * Widened event-name union for hook events. Core's `HookEventName` is a
+ * closed enum; the `(string & {})` arm keeps SDK consumers forward-compat
+ * when the daemon returns a new event name not yet in the SDK's enum.
+ */
+export type DaemonHookEventName =
+  | 'PreToolUse'
+  | 'PostToolUse'
+  | 'PostToolUseFailure'
+  | 'PostToolBatch'
+  | 'Notification'
+  | 'UserPromptSubmit'
+  | 'UserPromptExpansion'
+  | 'SessionStart'
+  | 'Stop'
+  | 'SubagentStart'
+  | 'SubagentStop'
+  | 'PreCompact'
+  | 'PostCompact'
+  | 'SessionEnd'
+  | 'PermissionRequest'
+  | 'PermissionDenied'
+  | 'StopFailure'
+  | 'TodoCreated'
+  | 'TodoCompleted'
+  | 'InstructionsLoaded'
+  | (string & {});
+
+export type DaemonHookMatcherKind =
+  | 'toolName'
+  | 'agentType'
+  | 'trigger'
+  | 'sessionTrigger'
+  | 'error'
+  | 'notificationType'
+  | 'commandName'
+  | 'filePath';
+
+export interface DaemonHookEventMeta {
+  description: string;
+  matcherKind?: DaemonHookMatcherKind;
+}
+
+export interface DaemonCommandHookConfig {
+  type: 'command';
+  command: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  env?: Record<string, string>;
+  async?: boolean;
+  shell?: 'bash' | 'powershell';
+  statusMessage?: string;
+}
+
+export interface DaemonHttpHookConfig {
+  type: 'http';
+  url: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  headers?: Record<string, string>;
+  allowedEnvVars?: string[];
+  if?: string;
+  statusMessage?: string;
+  once?: boolean;
+}
+
+export interface DaemonFunctionHookConfig {
+  type: 'function';
+  id?: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  errorMessage?: string;
+  statusMessage?: string;
+}
+
+export interface DaemonPromptHookConfig {
+  type: 'prompt';
+  prompt: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  model?: string;
+  statusMessage?: string;
+}
+
+export interface DaemonUnknownHookConfig {
+  type: string;
+  name?: string;
+  description?: string;
+  timeout?: number;
+  statusMessage?: string;
+}
+
+export type DaemonHookConfig =
+  | DaemonCommandHookConfig
+  | DaemonHttpHookConfig
+  | DaemonFunctionHookConfig
+  | DaemonPromptHookConfig
+  | DaemonUnknownHookConfig;
+
+export type DaemonHookSource =
+  | 'project'
+  | 'user'
+  | 'system'
+  | 'extensions'
+  | 'session';
+
+export interface DaemonHookEntry {
+  kind: 'hook';
+  eventName: DaemonHookEventName;
+  config: DaemonHookConfig;
+  source: DaemonHookSource;
+  matcher?: string;
+  sequential?: boolean;
+  enabled: boolean;
+  hookId?: string;
+  skillRoot?: string;
+}
+
+export interface DaemonWorkspaceHooksStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  disabled: boolean;
+  hooks: DaemonHookEntry[];
+  events: Record<string, DaemonHookEventMeta>;
+  errors?: DaemonStatusCell[];
+}
+
+export interface DaemonSessionHooksStatus {
+  v: 1;
+  sessionId: string;
+  workspaceCwd: string;
+  disabled: boolean;
+  hooks: DaemonHookEntry[];
+  errors?: DaemonStatusCell[];
+}
+
+// ---------------------------------------------------------------------------
+// Workspace extensions diagnostic surface.
+// ---------------------------------------------------------------------------
+
+export type DaemonExtensionInstallType =
+  | 'git'
+  | 'local'
+  | 'link'
+  | 'archive-url'
+  | 'github-release'
+  | 'npm';
+
+export type DaemonExtensionOriginSource = 'QwenCode' | 'Claude' | 'Gemini';
+
+export interface DaemonExtensionCapabilities {
+  mcpServerCount: number;
+  skillCount: number;
+  agentCount: number;
+  hookCount: number;
+  commandCount: number;
+  contextFileCount: number;
+  channelCount: number;
+  hasSettings: boolean;
+}
+
+export type DaemonExtensionUpdateState =
+  | 'checking for updates'
+  | 'updated, needs restart'
+  | 'updated with warnings'
+  | 'updating'
+  | 'updated'
+  | 'update available'
+  | 'up to date'
+  | 'error'
+  | 'not updatable'
+  | 'unknown';
+
+export interface DaemonExtensionDetails {
+  mcpServers: string[];
+  commands: string[];
+  skills: string[];
+  agents: string[];
+  contextFiles: string[];
+  settings: string[];
+}
+
+export interface DaemonExtensionEntry {
+  kind: 'extension';
+  id: string;
+  name: string;
+  displayName?: string;
+  description?: string;
+  version: string;
+  isActive: boolean;
+  path: string;
+  source?: string;
+  installType?: DaemonExtensionInstallType;
+  originSource?: DaemonExtensionOriginSource;
+  ref?: string;
+  autoUpdate?: boolean;
+  updateState?: DaemonExtensionUpdateState;
+  capabilities: DaemonExtensionCapabilities;
+  details?: DaemonExtensionDetails;
+}
+
+export interface DaemonWorkspaceExtensionsStatus {
+  v: 1;
+  workspaceCwd: string;
+  initialized: boolean;
+  extensions: DaemonExtensionEntry[];
+  errors?: DaemonStatusCell[];
+}
+
+export interface ExtensionInstallRequest {
+  source: string;
+  ref?: string;
+  autoUpdate?: boolean;
+  allowPreRelease?: boolean;
+  registry?: string;
+  consent?: boolean;
+}
+
+export type ExtensionInitialActivation =
+  | { scope: 'user' }
+  | { scope: 'workspace'; workspaceId: string };
+
+export interface ExtensionManagementInstallRequest
+  extends ExtensionInstallRequest {
+  consent: true;
+  activation: ExtensionInitialActivation;
+}
+
+export type ExtensionActivationState = 'enabled' | 'disabled';
+export type ExtensionWorkspaceActivation = ExtensionActivationState | null;
+
+export interface ExtensionCatalogEntry {
+  id: string;
+  name: string;
+  version: string;
+  installType?: DaemonExtensionInstallType;
+  defaultActivation: ExtensionActivationState;
+  workspaceOverrideCount: number;
+}
+
+export interface ExtensionCatalog {
+  v: 1;
+  generation: number;
+  extensions: ExtensionCatalogEntry[];
+}
+
+export interface WorkspaceExtensionProjectionEntry {
+  extensionId: string;
+  name: string;
+  version: string;
+  defaultActivation: ExtensionActivationState;
+  workspaceActivation: ExtensionWorkspaceActivation;
+  effectiveActivation: ExtensionActivationState;
+  activationSource:
+    | 'cli_override'
+    | 'workspace_override'
+    | 'legacy_path_rule'
+    | 'default';
+}
+
+export interface WorkspaceExtensionProjection {
+  v: 1;
+  workspaceId: string;
+  workspaceCwd: string;
+  trusted: boolean;
+  desiredGeneration: number;
+  appliedGeneration: number;
+  extensions: WorkspaceExtensionProjectionEntry[];
+}
+
+export interface ExtensionInstallResponse {
+  accepted: true;
+  operationId: string;
+}
+
+export type ExtensionMutationResponse = ExtensionInstallResponse;
+
+export type ExtensionOperationState =
+  | 'queued'
+  | 'running'
+  | 'waiting_for_input'
+  | 'succeeded'
+  | 'succeeded_with_refresh_error'
+  | 'succeeded_with_warnings'
+  | 'failed';
+
+export interface ExtensionOperationResult {
+  status:
+    | 'installed'
+    | 'enabled'
+    | 'disabled'
+    | 'updated'
+    | 'uninstalled'
+    | 'checked'
+    | 'refreshed';
+  source?: string;
+  name?: string;
+  version?: string;
+  refreshed?: number;
+  failed?: number;
+  error?: string;
+  updated?: boolean;
+  reason?: string;
+  states?: Record<string, DaemonExtensionUpdateState>;
+}
+
+export interface ExtensionOperationStatus {
+  v: 1;
+  operationId: string;
+  operation: string;
+  status: ExtensionOperationState;
+  phase?: 'preparing' | 'committing' | 'reconciling';
+  createdAt: number;
+  updatedAt: number;
+  source?: string;
+  name?: string;
+  result?: ExtensionOperationResult;
+  interaction?: ExtensionPendingInteraction;
+  error?: string;
+  code?: string;
+  warnings?: Array<{
+    workspaceId?: string;
+    workspaceCwd: string;
+    code?: string;
+    error: string;
+  }>;
+}
+
+export interface ExtensionActiveOperations {
+  v: 1;
+  operations: ExtensionOperationStatus[];
+}
+
+export type ExtensionPendingInteraction =
+  | ExtensionMarketplacePluginInteraction
+  | ExtensionSettingInteraction;
+
+export interface ExtensionMarketplacePluginInteraction {
+  id: string;
+  kind: 'marketplace_plugin';
+  marketplace: { name: string };
+  plugins: Array<{
+    name: string;
+    description?: string;
+    source: string;
+    category?: string;
+    tags?: string[];
+  }>;
+}
+
+export interface ExtensionSettingInteraction {
+  id: string;
+  kind: 'setting';
+  setting: {
+    name: string;
+    description: string;
+    sensitive: boolean;
+  };
+}
+
+export type ExtensionInteractionResponse =
+  | { pluginName: string }
+  | { value: string }
+  | { cancelled: true };
+
+export interface ExtensionInteractionResponseResult {
+  accepted: true;
+}
+
+export type ExtensionScope = 'user' | 'workspace';
+
+export interface ExtensionScopeRequest {
+  scope: ExtensionScope;
+}
+
+export interface ExtensionUpdateCheckResponse {
+  states: Record<string, DaemonExtensionUpdateState>;
+}
+
+export interface ExtensionRefreshResponse {
+  refreshed: number;
+  failed: number;
 }

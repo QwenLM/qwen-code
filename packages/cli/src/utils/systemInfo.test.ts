@@ -62,11 +62,16 @@ const setExecFileError = (err: Error) => {
   }) as unknown as typeof child_process.execFile);
 };
 
-vi.mock('node:os', () => ({
-  default: {
-    release: vi.fn(),
-  },
-}));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return {
+    ...actual,
+    default: {
+      ...actual,
+      release: vi.fn(),
+    },
+  };
+});
 
 vi.mock('./version.js', () => ({
   getCliVersion: vi.fn(),

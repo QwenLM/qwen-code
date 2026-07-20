@@ -1,6 +1,6 @@
 # Tool-Use Summaries
 
-Qwen Code can generate a short, git-commit-subject-style label after each tool batch completes, summarizing what the batch accomplished. The label appears inline in the transcript and replaces the generic `Tool × N` header in compact mode.
+Qwen Code can generate a short, git-commit-subject-style label after each tool batch completes, summarizing what the batch accomplished. The label appears inline: for a completed tool group in the main view it replaces the generic `Tool × N` header; when the group is force-expanded (in the `Ctrl+O` full-detail transcript, or for error / user-initiated batches) it appears as a dim `● <label>` line below the group.
 
 This is a UX aid for parallel tool calls: when the model fans out into several `Read` + `Grep` + `Bash` calls at once, the summary tells you the intent at a glance instead of forcing you to scan the tool list.
 
@@ -8,9 +8,21 @@ The feature is enabled by default and runs silently in the background. It requir
 
 ## What You See
 
-### Full mode (default)
+### Main view (completed group)
 
-The summary appears as a dim badge line directly below the tool group:
+In the main transcript, a completed collapsible batch folds into a single labeled row — the summary replaces the generic `Tool × N` header:
+
+```
+╭──────────────────────────────────────────────╮
+│✓  Read 4 text files                          │
+╰──────────────────────────────────────────────╯
+```
+
+The full per-tool output is a keystroke away: press `Ctrl+O` to open the full-detail transcript.
+
+### Full-detail transcript (`Ctrl+O`) and force-expanded groups
+
+When a group is force-expanded — in the `Ctrl+O` transcript, or for error / user-initiated batches in the main view — each tool renders individually and the summary appears as a dim badge line below the group:
 
 ```
 ╭──────────────────────────────────────────────╮
@@ -22,19 +34,6 @@ The summary appears as a dim badge line directly below the tool group:
 
  ● Read 4 text files
 ```
-
-### Compact mode (`Ctrl+O` or `ui.compactMode: true`)
-
-The label replaces the generic `Tool × N` header in the compact one-liner:
-
-```
-╭──────────────────────────────────────────────╮
-│✓  Read txt files  · 4 tools                  │
-│Press Ctrl+O to show full tool output         │
-╰──────────────────────────────────────────────╯
-```
-
-The individual tool calls are still a keystroke away (`Ctrl+O` to toggle to full mode).
 
 ## How It Works
 
@@ -123,7 +122,7 @@ These settings can be configured in `settings.json`:
 
 Three points that tend to trip up a first read of this feature:
 
-1. **One generation per batch, shared by both display modes.** The fast-model call happens exactly once in `handleCompletedTools` when a tool batch finalizes. Toggling `Ctrl+O` afterwards does **not** trigger a new call — both modes read from the same `tool_use_summary` history entry that was captured the first time. You can flip compact mode on and off freely without extra cost.
+1. **One generation per batch, shared by both display modes.** The fast-model call happens exactly once in `handleCompletedTools` when a tool batch finalizes. Opening the `Ctrl+O` transcript afterwards does **not** trigger a new call — both the main view and the full-detail transcript read from the same `tool_use_summary` history entry that was captured the first time.
 2. **No backfill on toggle or on session resume.** A `tool_group` that completed before the feature was enabled (or before you flipped the setting on, or in a resumed session — `ChatRecordingService` does not persist summary entries) will never get a label. There is no "sweep existing history" pass. If you turn this setting on mid-session, only _future_ batches will show a label; older groups keep the default rendering with no indicator that a label is missing.
 3. **Main-agent batches only.** The trigger lives in the main session's turn loop (`useGeminiStream`), so:
    - ✅ Shell, MCP, file operations, and the `Task` / subagent tool _call itself_ (as it appears in the main batch) are summarized.
@@ -131,23 +130,20 @@ Three points that tend to trip up a first read of this feature:
 
    An outer batch that _contains_ a `Task` tool will still be labeled, but the fast model sees only the subagent tool call and its aggregated output — not the individual tool calls inside the subagent. Expect labels like `Ran research-agent` or `Delegated file search` rather than `Searched 14 files`. This is intentional — summarizing subagent internals would multiply the fast-model cost and surface noise that never shows up in the primary UI.
 
-## Recommended pairing: enable compact mode
+## Display behavior
 
-For batches of 3+ parallel tool calls, pairing this feature with `ui.compactMode: true` produces the cleanest transcript. The compact view folds the whole batch into a single labeled row (`✓  Read txt files  · 4 tools`) instead of showing every tool line plus the trailing summary. Details remain one keystroke away via `Ctrl+O`.
+The main view already folds a completed collapsible batch into a single labeled row (`✓  Read 4 text files`) — the summary does the work of the old per-tool list. For full per-tool detail, press `Ctrl+O` to open the full-detail transcript, where each tool renders individually with the summary as a trailing `● <label>` line below the group.
 
 ```json
 {
   "fastModel": "qwen3-coder-flash",
-  "ui": {
-    "compactMode": true
-  },
   "experimental": {
     "emitToolUseSummaries": true
   }
 }
 ```
 
-In full mode (the default), the summary renders as a trailing `● <label>` line below the tool group — useful for large or heterogeneous batches, but for small same-type batches (e.g. `Read × 3`) the label can read as a restatement of the visible tool lines. If that matches your usual workflow, either turn compact mode on as above, or turn the summary off entirely via `experimental.emitToolUseSummaries: false`.
+For small same-type batches (e.g. `Read × 3`) the expanded `● <label>` line can read as a restatement of the visible tool lines; if that matches your usual workflow you can turn the summary off entirely via `experimental.emitToolUseSummaries: false`.
 
 ## Monitoring
 
@@ -174,5 +170,5 @@ If you do not want the extra cost, turn the feature off via `experimental.emitTo
 
 ## Related
 
-- [Compact Mode](../configuration/settings#ui.compactMode) — toggle with `Ctrl+O`; the summary replaces the generic tool-group header when compact mode is on.
+- [Full-detail transcript](../configuration/settings#ui) — press `Ctrl+O` to open the frozen full-detail transcript; the summary replaces the generic tool-group header for completed groups in the main view.
 - [Followup Suggestions](./followup-suggestions) — another fast-model-driven UX enhancement that shares the same `fastModel` setting.

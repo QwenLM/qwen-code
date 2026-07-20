@@ -14,10 +14,9 @@
  * which wraps these controllers with a stable programmatic API.
  *
  * Controllers:
- * - SystemController: initialize, interrupt, set_model, supported_commands, get_context_usage
+ * - SystemController: initialize, interrupt, set_model, set_effort, supported_commands, get_context_usage, get_available_models, get_usage_info
  * - PermissionController: can_use_tool, set_permission_mode
  * - SdkMcpController: mcp_server_status (mcp_message handled via callback)
- * - HookController: hook_callback
  *
  * Note: mcp_message requests are NOT routed through the dispatcher. CLI MCP
  * clients send messages via SdkMcpController.createSendSdkMcpMessage() callback.
@@ -31,7 +30,6 @@ import type { IPendingRequestRegistry } from './controllers/baseController.js';
 import { SystemController } from './controllers/systemController.js';
 import { PermissionController } from './controllers/permissionController.js';
 import { SdkMcpController } from './controllers/sdkMcpController.js';
-// import { HookController } from './controllers/hookController.js';
 import type {
   CLIControlRequest,
   CLIControlResponse,
@@ -72,7 +70,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
   readonly systemController: SystemController;
   readonly permissionController: PermissionController;
   readonly sdkMcpController: SdkMcpController;
-  // readonly hookController: HookController;
 
   // Central pending request registries
   private pendingIncomingRequests: Map<string, PendingIncomingRequest> =
@@ -101,7 +98,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
       this,
       'SdkMcpController',
     );
-    // this.hookController = new HookController(context, this, 'HookController');
 
     // Listen for main abort signal
     this.abortHandler = () => {
@@ -273,7 +269,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     this.systemController.cleanup();
     this.permissionController.cleanup();
     this.sdkMcpController.cleanup();
-    // this.hookController.cleanup();
   }
 
   /**
@@ -378,9 +373,13 @@ export class ControlDispatcher implements IPendingRequestRegistry {
     switch (subtype) {
       case 'initialize':
       case 'interrupt':
+      case 'continue_last_turn':
       case 'set_model':
+      case 'set_effort':
       case 'supported_commands':
       case 'get_context_usage':
+      case 'get_available_models':
+      case 'get_usage_info':
         return this.systemController;
 
       case 'can_use_tool':
@@ -389,9 +388,6 @@ export class ControlDispatcher implements IPendingRequestRegistry {
 
       case 'mcp_server_status':
         return this.sdkMcpController;
-
-      // case 'hook_callback':
-      //   return this.hookController;
 
       default:
         throw new Error(`Unknown control request subtype: ${subtype}`);

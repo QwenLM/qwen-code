@@ -9,7 +9,11 @@ import { act } from '@testing-library/react';
 import { render } from 'ink-testing-library';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { LiveAgentPanel } from './LiveAgentPanel.js';
-import { BackgroundTaskViewStateContext } from '../../contexts/BackgroundTaskViewContext.js';
+import {
+  BackgroundTaskViewActionsContext,
+  BackgroundTaskViewStateContext,
+  type BackgroundTaskViewActions,
+} from '../../contexts/BackgroundTaskViewContext.js';
 import { ConfigContext } from '../../contexts/ConfigContext.js';
 import type {
   AgentDialogEntry,
@@ -56,6 +60,8 @@ function renderPanel(
      * about the snapshot path (panel falls back gracefully).
      */
     config?: Config;
+    livePanelFocused?: boolean;
+    actions?: Partial<BackgroundTaskViewActions>;
   } = { entries: [] },
 ) {
   const state = {
@@ -64,9 +70,25 @@ function renderPanel(
     dialogMode: options.dialogOpen ? ('list' as const) : ('closed' as const),
     dialogOpen: Boolean(options.dialogOpen),
     pillFocused: false,
-    livePanelFocused: false,
+    livePanelFocused: Boolean(options.livePanelFocused),
     livePanelSelectedIndex: 0,
   };
+  const actions = {
+    moveSelectionUp: () => false,
+    moveSelectionDown: () => false,
+    openDialog: vi.fn(),
+    closeDialog: vi.fn(),
+    enterDetail: vi.fn(),
+    exitDetail: vi.fn(),
+    cancelSelected: vi.fn(),
+    resumeSelected: async () => {},
+    enterDetailFromPanel: vi.fn(),
+    setPillFocused: vi.fn(),
+    setLivePanelFocused: vi.fn(),
+    setLivePanelSelectedIndex: vi.fn(),
+    setSelectedIndex: vi.fn(),
+    ...options.actions,
+  } as BackgroundTaskViewActions;
   // Wrap render() in act() so the panel's mount-time effect (the
   // 1s wall-clock interval) is flushed inside React's scheduler boundary
   // — silences the "update inside a test was not wrapped in act"
@@ -75,9 +97,11 @@ function renderPanel(
   act(() => {
     result = render(
       <ConfigContext.Provider value={options.config}>
-        <BackgroundTaskViewStateContext.Provider value={state}>
-          <LiveAgentPanel width={options.width} maxRows={options.maxRows} />
-        </BackgroundTaskViewStateContext.Provider>
+        <BackgroundTaskViewActionsContext.Provider value={actions}>
+          <BackgroundTaskViewStateContext.Provider value={state}>
+            <LiveAgentPanel width={options.width} maxRows={options.maxRows} />
+          </BackgroundTaskViewStateContext.Provider>
+        </BackgroundTaskViewActionsContext.Provider>
       </ConfigContext.Provider>,
     );
   });
@@ -268,13 +292,18 @@ describe('<LiveAgentPanel />', () => {
           status: 'completed',
           startTime: -12_000,
           endTime: 0,
-          stats: { totalTokens: 2400, toolUses: 5, durationMs: 12_000 },
+          stats: {
+            totalTokens: 2400,
+            outputTokens: 800,
+            toolUses: 5,
+            durationMs: 12_000,
+          },
         }),
       ],
     });
     const frame = lastFrame() ?? '';
     expect(frame).toContain('12s');
-    expect(frame).toContain('2.4k tokens');
+    expect(frame).toContain('800 tokens');
   });
 
   it('renders paused agents with the paused glyph', () => {
@@ -588,6 +617,26 @@ describe('<LiveAgentPanel />', () => {
     expect(frame).toBe('');
   });
 
+  it('releases focus when the selected terminal row has aged out (#5067)', () => {
+    const setLivePanelFocused = vi.fn();
+    const expired = agentEntry({
+      agentId: 'expired-focus-1',
+      subagentType: 'researcher',
+      description: 'researcher: already gone',
+      status: 'completed',
+      startTime: -10_000,
+      endTime: -9_000,
+    });
+
+    renderPanel({
+      entries: [expired],
+      livePanelFocused: true,
+      actions: { setLivePanelFocused },
+    });
+
+    expect(setLivePanelFocused).toHaveBeenCalledWith(false);
+  });
+
   it('drops rows where the snapshot is terminal AND has no endTime', () => {
     // Defensive: terminal status without endTime is an upstream
     // invariant violation (`complete`/`fail`/`cancel` always stamp
@@ -652,5 +701,65 @@ describe('<LiveAgentPanel />', () => {
     });
     expect(lastFrame() ?? '').toContain('researcher');
     expect(lastFrame() ?? '').toContain('snapshot-only path');
+  });
+
+  describe('nested sub-agent tree', () => {
+    it('indents a nested child with ↳ beneath its parent', () => {
+      // Snapshot order is newest-first (child registered after parent);
+      // the panel renders oldest-first with the child grouped under it.
+      const parent = agentEntry({
+        agentId: 'parent',
+        description: 'parent work',
+      });
+      const child = agentEntry({
+        agentId: 'child',
+        description: 'child work',
+        parentAgentId: 'parent',
+        depth: 1,
+      });
+      const { lastFrame } = renderPanel({ entries: [child, parent] });
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('↳ ○ child work');
+      expect(frame.indexOf('parent work')).toBeLessThan(
+        frame.indexOf('child work'),
+      );
+    });
+
+    it('groups a child under its parent past an interleaving sibling', () => {
+      // Registration order P, Q, then P's child — newest-first snapshot
+      // is [child, q, p]. The tree pass must pull the child directly
+      // beneath P instead of leaving it flat after Q.
+      const p = agentEntry({ agentId: 'p', description: 'p work' });
+      const q = agentEntry({ agentId: 'q', description: 'q work' });
+      const child = agentEntry({
+        agentId: 'c',
+        description: 'c work',
+        parentAgentId: 'p',
+        depth: 1,
+      });
+      const { lastFrame } = renderPanel({ entries: [child, q, p] });
+      const frame = lastFrame() ?? '';
+      expect(frame.indexOf('p work')).toBeLessThan(frame.indexOf('c work'));
+      expect(frame.indexOf('c work')).toBeLessThan(frame.indexOf('q work'));
+    });
+
+    it('promotes an orphaned child to root level with a from-parent note', () => {
+      // Parent already evicted: the child renders at root indent but keeps
+      // the ↳ marker and says who launched it.
+      const orphan = agentEntry({
+        agentId: 'o',
+        description: 'orphan work',
+        parentAgentId: 'gone',
+        parentName: 'researcher',
+        depth: 2,
+      });
+      const { lastFrame } = renderPanel({ entries: [orphan] });
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain('↳ ○ orphan work');
+      expect(frame).toContain('· from researcher');
+      // Root gutter only (paddingX 2 + prefix 2 = 4 cols) — no tree indent
+      // despite the launch depth of 2, which would add 4+ more columns.
+      expect(frame).not.toContain('        ↳');
+    });
   });
 });

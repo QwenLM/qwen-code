@@ -133,6 +133,35 @@ describe('AnthropicContentConverter', () => {
       ]);
     });
 
+    it('preserves ordered multi-part startup reminder user content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'user',
+            parts: [
+              { text: '<system-reminder>\ndeferred tools' },
+              { text: '<system-reminder>\nstartup context' },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: '<system-reminder>\ndeferred tools' },
+            {
+              type: 'text',
+              text: '<system-reminder>\nstartup context',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
     it('converts assistant thought parts into Anthropic thinking blocks', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
@@ -175,29 +204,6 @@ describe('AnthropicContentConverter', () => {
               },
             ],
           },
-        ],
-      });
-
-      expect(messages).toEqual([
-        {
-          role: 'assistant',
-          content: [
-            { type: 'text', text: 'preface' },
-            {
-              type: 'tool_use',
-              id: 'call-1',
-              name: 'tool_name',
-              input: { a: 1 },
-            },
-          ],
-        },
-      ]);
-    });
-
-    it('converts functionResponse parts into user tool_result messages', () => {
-      const { messages } = converter.convertGeminiRequestToAnthropic({
-        model: 'models/test',
-        contents: [
           {
             role: 'user',
             parts: [
@@ -213,25 +219,122 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      expect(messages).toEqual([
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'call-1',
-              content: 'ok',
-              cache_control: { type: 'ephemeral' },
-            },
-          ],
-        },
-      ]);
+      expect(messages[0]).toEqual({
+        role: 'assistant',
+        content: [
+          { type: 'text', text: 'preface' },
+          {
+            type: 'tool_use',
+            id: 'call-1',
+            name: 'tool_name',
+            input: { a: 1 },
+          },
+        ],
+      });
+    });
+
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  args: { query: 'P12345' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-legacy-mcp',
+                  name: 'mcp__zybio__database.query_uniprot',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+      const assistant = messages[0];
+      const toolUse = Array.isArray(assistant?.content)
+        ? assistant.content.find((block) => block.type === 'tool_use')
+        : undefined;
+
+      expect(toolUse?.type).toBe('tool_use');
+      if (toolUse?.type === 'tool_use') {
+        expect(toolUse.name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+        expect(toolUse.name).not.toContain('.');
+      }
+    });
+
+    it('converts functionResponse parts into user tool_result messages', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'tool_name',
+                  args: {},
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call-1',
+                  name: 'tool_name',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages[1]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call-1',
+            content: 'ok',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
     });
 
     it('extracts function response error field when present', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'tool_name',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -247,13 +350,14 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      expect(messages[0]).toEqual({
+      expect(messages[1]).toEqual({
         role: 'user',
         content: [
           {
             type: 'tool_result',
             tool_use_id: 'call-1',
             content: 'boom',
+            is_error: true,
             cache_control: { type: 'ephemeral' },
           },
         ],
@@ -264,6 +368,18 @@ describe('AnthropicContentConverter', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'read_file',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -281,7 +397,7 @@ describe('AnthropicContentConverter', () => {
 
       // Should create a tool result with empty string content
       // This is required because Anthropic API expects every tool use to have a corresponding result
-      expect(messages[0]).toEqual({
+      expect(messages[1]).toEqual({
         role: 'user',
         content: [
           {
@@ -298,6 +414,18 @@ describe('AnthropicContentConverter', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -321,35 +449,45 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      expect(messages).toEqual([
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'call-1',
-              content: [
-                { type: 'text', text: 'Image content' },
-                {
-                  type: 'image',
-                  source: {
-                    type: 'base64',
-                    media_type: 'image/png',
-                    data: 'base64encodeddata',
-                  },
+      expect(messages[1]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call-1',
+            content: [
+              { type: 'text', text: 'Image content' },
+              {
+                type: 'image',
+                source: {
+                  type: 'base64',
+                  media_type: 'image/png',
+                  data: 'base64encodeddata',
                 },
-              ],
-              cache_control: { type: 'ephemeral' },
-            },
-          ],
-        },
-      ]);
+              },
+            ],
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
     });
 
     it('renders non-image inlineData as a text block (avoids invalid image media_type)', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -373,10 +511,10 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      expect(messages).toHaveLength(1);
-      expect(messages[0]?.role).toBe('user');
+      expect(messages).toHaveLength(2);
+      expect(messages[1]?.role).toBe('user');
 
-      const toolResult = messages[0]?.content?.[0] as {
+      const toolResult = messages[1]?.content?.[0] as {
         type: string;
         content: Array<{ type: string; text?: string }>;
       };
@@ -397,6 +535,18 @@ describe('AnthropicContentConverter', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -420,35 +570,45 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      expect(messages).toEqual([
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'call-1',
-              content: [
-                { type: 'text', text: 'PDF content' },
-                {
-                  type: 'document',
-                  source: {
-                    type: 'base64',
-                    media_type: 'application/pdf',
-                    data: 'pdfbase64data',
-                  },
+      expect(messages[1]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call-1',
+            content: [
+              { type: 'text', text: 'PDF content' },
+              {
+                type: 'document',
+                source: {
+                  type: 'base64',
+                  media_type: 'application/pdf',
+                  data: 'pdfbase64data',
                 },
-              ],
-              cache_control: { type: 'ephemeral' },
-            },
-          ],
-        },
-      ]);
+              },
+            ],
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
     });
 
     it('converts fileData with image into image url block', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -473,34 +633,44 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      expect(messages).toEqual([
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'call-1',
-              content: [
-                { type: 'text', text: 'Image content' },
-                {
-                  type: 'image',
-                  source: {
-                    type: 'url',
-                    url: 'https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg',
-                  },
+      expect(messages[1]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call-1',
+            content: [
+              { type: 'text', text: 'Image content' },
+              {
+                type: 'image',
+                source: {
+                  type: 'url',
+                  url: 'https://upload.wikimedia.org/wikipedia/commons/a/a7/Camponotus_flavomarginatus_ant.jpg',
                 },
-              ],
-              cache_control: { type: 'ephemeral' },
-            },
-          ],
-        },
-      ]);
+              },
+            ],
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
     });
 
     it('converts fileData with PDF into document url block', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -525,34 +695,44 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      expect(messages).toEqual([
-        {
-          role: 'user',
-          content: [
-            {
-              type: 'tool_result',
-              tool_use_id: 'call-1',
-              content: [
-                { type: 'text', text: 'PDF content' },
-                {
-                  type: 'document',
-                  source: {
-                    type: 'url',
-                    url: 'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
-                  },
+      expect(messages[1]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'call-1',
+            content: [
+              { type: 'text', text: 'PDF content' },
+              {
+                type: 'document',
+                source: {
+                  type: 'url',
+                  url: 'https://assets.anthropic.com/m/1cd9d098ac3e6467/original/Claude-3-Model-Card-October-Addendum.pdf',
                 },
-              ],
-              cache_control: { type: 'ephemeral' },
-            },
-          ],
-        },
-      ]);
+              },
+            ],
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
     });
 
     it('renders unsupported fileData as a text block', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -577,7 +757,7 @@ describe('AnthropicContentConverter', () => {
         ],
       });
 
-      const toolResult = messages[0]?.content?.[0] as {
+      const toolResult = messages[1]?.content?.[0] as {
         type: string;
         content: Array<{ type: string; text?: string }>;
       };
@@ -598,6 +778,25 @@ describe('AnthropicContentConverter', () => {
       const { messages } = converter.convertGeminiRequestToAnthropic({
         model: 'models/test',
         contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call-1',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+              {
+                functionCall: {
+                  id: 'call-2',
+                  name: 'Read',
+                  args: {},
+                },
+              },
+            ],
+          },
           {
             role: 'user',
             parts: [
@@ -639,8 +838,8 @@ describe('AnthropicContentConverter', () => {
       });
 
       // Multiple tool_result blocks are emitted in order
-      expect(messages).toHaveLength(1);
-      expect(messages[0]).toEqual({
+      expect(messages).toHaveLength(2);
+      expect(messages[1]).toEqual({
         role: 'user',
         content: [
           {
@@ -676,6 +875,578 @@ describe('AnthropicContentConverter', () => {
           },
         ],
       });
+    });
+
+    it('merges consecutive assistant messages into one', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello!' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [
+            { type: 'text', text: 'Hello!' },
+            { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+          ],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'tool_result',
+              tool_use_id: 't1',
+              content: 'ok',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('merges thinking blocks before non-thinking blocks', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'thought A', thought: true, thoughtSignature: 'sigA' },
+              { text: 'text A' },
+            ],
+          },
+          {
+            role: 'model',
+            parts: [
+              { text: 'thought B', thought: true, thoughtSignature: 'sigB' },
+              { functionCall: { id: 't1', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const assistant = messages[1];
+      expect(assistant?.role).toBe('assistant');
+      const blocks = assistant?.content as Array<{ type: string }>;
+      expect(blocks[0]?.type).toBe('thinking');
+      expect(blocks[1]?.type).toBe('thinking');
+      expect(blocks[2]?.type).toBe('text');
+      expect(blocks[3]?.type).toBe('tool_use');
+    });
+
+    it('cleans orphaned tool_use blocks without matching tool_result', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { text: 'Let me help' },
+              { functionCall: { id: 'orphan', name: 'tool', args: {} } },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Hi', cache_control: { type: 'ephemeral' } },
+          ],
+        },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Let me help' }],
+        },
+      ]);
+    });
+
+    it('cleans orphaned tool_result blocks without matching tool_use', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          { role: 'model', parts: [{ text: 'Hello' }] },
+          {
+            role: 'user',
+            parts: [
+              { text: 'extra' },
+              {
+                functionResponse: {
+                  id: 'orphan',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        { role: 'user', content: [{ type: 'text', text: 'Hi' }] },
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'Hello' }],
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: 'extra',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('keeps tool results split across consecutive user messages', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [
+              { functionCall: { id: 'x', name: 'tool', args: {} } },
+              { functionCall: { id: 'y', name: 'tool', args: {} } },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'x',
+                  name: 'tool',
+                  response: { output: 'first' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'y',
+                  name: 'tool',
+                  response: { output: 'second' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(
+        (messages[1]?.content as Array<{ id?: string; type: string }>).filter(
+          (block) => block.type === 'tool_use',
+        ),
+      ).toHaveLength(2);
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 'x',
+            content: 'first',
+          },
+          {
+            type: 'tool_result',
+            tool_use_id: 'y',
+            content: 'second',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('merges users when dropping an orphan-only assistant turn', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'before' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'orphan', name: 'tool', args: {} } }],
+          },
+          { role: 'user', parts: [{ text: 'after' }] },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'before' },
+            {
+              type: 'text',
+              text: 'after',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('keeps tool results before text when merging consecutive users', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
+          },
+          { role: 'user', parts: [{ text: 'preface' }] },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages[2]).toEqual({
+        role: 'user',
+        content: [
+          {
+            type: 'tool_result',
+            tool_use_id: 't1',
+            content: 'ok',
+          },
+          {
+            type: 'text',
+            text: 'preface',
+            cache_control: { type: 'ephemeral' },
+          },
+        ],
+      });
+    });
+
+    it('drops tool results that do not lead user content', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              { text: 'preface' },
+              {
+                functionResponse: {
+                  id: 't1',
+                  name: 'tool',
+                  response: { output: 'late' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Hi' },
+            {
+              type: 'text',
+              text: 'preface',
+              cache_control: { type: 'ephemeral' },
+            },
+          ],
+        },
+      ]);
+    });
+
+    it('deduplicates tool_use blocks by id during merge', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic({
+        model: 'models/test',
+        contents: [
+          { role: 'user', parts: [{ text: 'Hi' }] },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'model',
+            parts: [{ functionCall: { id: 'dup', name: 'tool', args: {} } }],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'dup',
+                  name: 'tool',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      });
+
+      const assistant = messages[1];
+      const toolUseBlocks = (
+        assistant?.content as Array<{ type: string }>
+      ).filter((b) => b.type === 'tool_use');
+      expect(toolUseBlocks).toHaveLength(1);
+    });
+  });
+
+  describe('unsigned proxy thinking history', () => {
+    it('drops unsigned thinking while preserving visible content and signed blocks', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'First' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'unsigned', thought: true },
+                {
+                  text: 'empty signature',
+                  thought: true,
+                  thoughtSignature: '',
+                },
+                {
+                  text: 'signed',
+                  thought: true,
+                  thoughtSignature: 'real-signature',
+                },
+                { text: 'Visible answer' },
+              ],
+            },
+            { role: 'user', parts: [{ text: 'Second' }] },
+          ],
+        },
+        {
+          dropUnsignedAssistantThinking: true,
+          enableCacheControl: false,
+        },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [
+          {
+            type: 'thinking',
+            thinking: 'signed',
+            signature: 'real-signature',
+          },
+          { type: 'text', text: 'Visible answer' },
+        ],
+      });
+    });
+
+    it('drops a thinking-only turn and merges the surrounding user turns', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'First' }] },
+            {
+              role: 'model',
+              parts: [{ text: 'unsigned', thought: true }],
+            },
+            { role: 'user', parts: [{ text: 'Second' }] },
+          ],
+        },
+        {
+          dropUnsignedAssistantThinking: true,
+          enableCacheControl: false,
+        },
+      );
+
+      expect(messages).toEqual([
+        {
+          role: 'user',
+          content: [
+            { type: 'text', text: 'First' },
+            { type: 'text', text: 'Second' },
+          ],
+        },
+      ]);
+    });
+
+    it('fails locally when an unsigned thinking block belongs to a tool-use turn', () => {
+      expect(() =>
+        converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tool' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'unsigned', thought: true },
+                  { functionCall: { id: 't1', name: 'tool', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'tool',
+                      response: { output: 'ok' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
+    });
+
+    it('drops unsigned thinking from a completed tool-use turn', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Run tool' }] },
+            {
+              role: 'model',
+              parts: [
+                { text: 'unsigned', thought: true },
+                { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: 'Finished' }] },
+            { role: 'user', parts: [{ text: 'Next' }] },
+          ],
+        },
+        { dropUnsignedAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
+        role: 'assistant',
+        content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
+      });
+    });
+
+    it('fails when an earlier step in the active tool loop has unsigned thinking', () => {
+      expect(() =>
+        converter.convertGeminiRequestToAnthropic(
+          {
+            model: 'models/test',
+            contents: [
+              { role: 'user', parts: [{ text: 'Run tools' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'unsigned', thought: true },
+                  { functionCall: { id: 't1', name: 'first', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't1',
+                      name: 'first',
+                      response: { output: 'one' },
+                    },
+                  },
+                ],
+              },
+              {
+                role: 'model',
+                parts: [
+                  {
+                    text: 'signed',
+                    thought: true,
+                    thoughtSignature: 'real-signature',
+                  },
+                  { functionCall: { id: 't2', name: 'second', args: {} } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 't2',
+                      name: 'second',
+                      response: { output: 'two' },
+                    },
+                  },
+                ],
+              },
+            ],
+          },
+          { dropUnsignedAssistantThinking: true },
+        ),
+      ).toThrow('proxy omitted the thinking signature');
     });
   });
 
@@ -732,6 +1503,18 @@ describe('AnthropicContentConverter', () => {
                 },
               ],
             },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'glob',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
           ],
         },
         enableThinking,
@@ -766,6 +1549,18 @@ describe('AnthropicContentConverter', () => {
                   thoughtSignature: 'sig',
                 },
                 { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
               ],
             },
           ],
@@ -916,17 +1711,72 @@ describe('AnthropicContentConverter', () => {
                 { functionCall: { id: 't1', name: 'tool', args: {} } },
               ],
             },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
           ],
         },
         { stripAssistantThinking: true },
       );
 
-      // Both assistant turns have their thinking blocks removed.
+      // Both assistant turns have their thinking blocks removed, and the
+      // two consecutive model turns merge into a single assistant message.
       expect(messages[1]).toEqual({
         role: 'assistant',
-        content: [{ type: 'text', text: 'Hello!' }],
+        content: [
+          { type: 'text', text: 'Hello!' },
+          { type: 'tool_use', id: 't1', name: 'tool', input: {} },
+        ],
       });
-      expect(messages[2]).toEqual({
+    });
+
+    it('strips thinking after consecutive assistant turns are merged', () => {
+      const { messages } = converter.convertGeminiRequestToAnthropic(
+        {
+          model: 'models/test',
+          contents: [
+            { role: 'user', parts: [{ text: 'Hi' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  text: 'preserved before merge',
+                  thought: true,
+                  thoughtSignature: 'sig',
+                },
+              ],
+            },
+            {
+              role: 'model',
+              parts: [{ functionCall: { id: 't1', name: 'tool', args: {} } }],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
+          ],
+        },
+        { stripAssistantThinking: true },
+      );
+
+      expect(messages[1]).toEqual({
         role: 'assistant',
         content: [{ type: 'tool_use', id: 't1', name: 'tool', input: {} }],
       });
@@ -995,6 +1845,18 @@ describe('AnthropicContentConverter', () => {
                 { functionCall: { id: 't1', name: 'tool', args: {} } },
               ],
             },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
+              ],
+            },
           ],
         },
         enableThinking,
@@ -1026,6 +1888,18 @@ describe('AnthropicContentConverter', () => {
                   thoughtSignature: 'real-sig',
                 },
                 { functionCall: { id: 't1', name: 'tool', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'tool',
+                    response: { output: 'ok' },
+                  },
+                },
               ],
             },
           ],
@@ -1097,6 +1971,18 @@ describe('AnthropicContentConverter', () => {
               parts: [
                 { text: 'Let me check that' },
                 { functionCall: { id: 't1', name: 'lookup', args: {} } },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 't1',
+                    name: 'lookup',
+                    response: { output: 'ok' },
+                  },
+                },
               ],
             },
           ],

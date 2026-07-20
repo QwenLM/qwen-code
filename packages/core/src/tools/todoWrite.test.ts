@@ -456,6 +456,83 @@ describe('TodoWriteTool', () => {
       );
     });
 
+    it('should dispatch post-write completion hooks sequentially in list order for a batched completion', async () => {
+      // Regression: a single todo_write can complete several items at once, and
+      // post-write TodoCompleted hooks run side effects. They must fire one at a
+      // time, in list order, so a shared stateful/external-sync hook can't
+      // interleave across sibling items. (Promise.all dispatch would overlap.)
+      const allow: AggregatedHookResult = {
+        success: true,
+        allOutputs: [new DefaultHookOutput({ decision: 'allow' })],
+        errors: [],
+        totalDuration: 1,
+        finalOutput: new DefaultHookOutput({ decision: 'allow' }),
+      };
+      const postWriteOrder: string[] = [];
+      let activePostWrite = 0;
+      let maxConcurrentPostWrite = 0;
+      const mockHookSystem = {
+        fireTodoCreatedEvent: vi.fn().mockResolvedValue(allow),
+        fireTodoCompletedEvent: vi
+          .fn()
+          .mockImplementation(
+            async (
+              id: string,
+              _content: string,
+              _previousStatus: string,
+              _todos: TodoItem[],
+              phase: HookPhase,
+            ) => {
+              if (phase === HookPhase.PostWrite) {
+                activePostWrite++;
+                maxConcurrentPostWrite = Math.max(
+                  maxConcurrentPostWrite,
+                  activePostWrite,
+                );
+                // Yield to the event loop so overlapping dispatch would be
+                // observable as maxConcurrentPostWrite > 1.
+                await new Promise((resolve) => setTimeout(resolve, 5));
+                postWriteOrder.push(id);
+                activePostWrite--;
+              }
+              return allow;
+            },
+          ),
+      };
+      mockConfig = {
+        getSessionId: () => 'test-session-123',
+        getHookSystem: () => mockHookSystem,
+      } as unknown as Config;
+      tool = new TodoWriteTool(mockConfig);
+
+      const existingTodos = [
+        { id: '1', content: 'Task 1', status: 'in_progress' },
+        { id: '2', content: 'Task 2', status: 'in_progress' },
+      ];
+      const params: TodoWriteParams = {
+        todos: [
+          { id: '1', content: 'Task 1', status: 'completed' },
+          { id: '2', content: 'Task 2', status: 'completed' },
+        ],
+      };
+
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({ todos: existingTodos }),
+      );
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const invocation = tool.build(params);
+      const result = await invocation.execute(mockAbortSignal);
+
+      expect(result.llmContent).toContain(
+        'Todos have been modified successfully',
+      );
+      // Both completions ran their post-write side effects, in list order, and
+      // never overlapped.
+      expect(postWriteOrder).toEqual(['1', '2']);
+      expect(maxConcurrentPostWrite).toBe(1);
+    });
+
     it('should validate created todos concurrently and stop before writing when one blocks', async () => {
       let releaseSlowHook: (() => void) | undefined;
       const slowValidation = new Promise<AggregatedHookResult>((resolve) => {
@@ -645,11 +722,29 @@ describe('TodoWriteTool', () => {
     });
 
     it('should have correct display name', () => {
-      expect(tool.displayName).toBe('TodoWrite');
+      expect(tool.displayName).toBe('TodoList');
     });
 
     it('should have correct kind', () => {
       expect(tool.kind).toBe('think');
+    });
+
+    it('should describe selective, outcome-oriented task tracking', () => {
+      expect(tool.description).toContain('complex, ambiguous, or multi-phase');
+      expect(tool.description).toContain(
+        'Do not use it for simple or single-step work',
+      );
+      expect(tool.description).toContain(
+        'unless the user explicitly requests a todo list',
+      );
+      expect(tool.description).toContain('short and outcome-oriented');
+      expect(tool.description).toContain(
+        'Do not create a separate todo for every error, file, command, or minor edit',
+      );
+      expect(tool.description).not.toContain(
+        'After receiving new instructions',
+      );
+      expect(tool.description).not.toContain('When in doubt, use this tool');
     });
 
     it('should have schema with required properties', () => {

@@ -15,9 +15,15 @@ import {
   type ChatRecord,
   type AtCommandRecordPayload,
 } from './chatRecordingService.js';
+import { MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS } from '../utils/toolResultDisplayCompaction.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import type { Part } from '@google/genai';
 import type { FileDiff } from '../tools/tools.js';
+import {
+  deserializeSnapshots,
+  serializeSnapshot,
+  type FileHistorySnapshot,
+} from './fileHistoryService.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -163,6 +169,47 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('rewindRecording', () => {
+    it('preserves a resumed user turn parent when rebuilding rewind boundaries', async () => {
+      vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({
+        lastCompletedUuid: 'assistant-1',
+      } as unknown as ReturnType<Config['getResumedSessionData']>);
+      chatRecordingService = new ChatRecordingService(mockConfig);
+
+      chatRecordingService.rebuildTurnBoundaries([
+        {
+          uuid: 'user-1',
+          parentUuid: 'pre-resume-parent',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:00.000Z',
+          type: 'user',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user', parts: [{ text: 'first resumed turn' }] },
+        },
+        {
+          uuid: 'assistant-1',
+          parentUuid: 'user-1',
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:01.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'response' }] },
+          model: 'gemini-pro',
+        },
+      ]);
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 2 });
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(rewind.subtype).toBe('rewind');
+      expect(rewind.parentUuid).toBe('pre-resume-parent');
+    });
+  });
+
   describe('recordAtCommand', () => {
     it('should record @-command metadata as a system payload', async () => {
       const userParts: Part[] = [{ text: 'Hello, world!' }];
@@ -188,6 +235,250 @@ describe('ChatRecordingService', () => {
       expect(systemRecord.subtype).toBe('at_command');
       expect(systemRecord.systemPayload).toEqual(payload);
       expect(systemRecord.parentUuid).toBe(userRecord.uuid);
+    });
+  });
+
+  describe('recordFileHistorySnapshot', () => {
+    const oldSnapshot: FileHistorySnapshot = {
+      promptId: 'p1',
+      timestamp: new Date('2026-06-13T00:00:00.000Z'),
+      trackedFileBackups: {
+        'a.txt': {
+          backupFileName: 'backup-a-v1',
+          version: 1,
+          backupTime: new Date('2026-06-13T00:00:01.000Z'),
+        },
+      },
+    };
+    const updatedSnapshot: FileHistorySnapshot = {
+      promptId: 'p1',
+      timestamp: new Date('2026-06-13T00:01:00.000Z'),
+      trackedFileBackups: {
+        'a.txt': {
+          backupFileName: 'backup-a-v2',
+          version: 2,
+          backupTime: new Date('2026-06-13T00:01:01.000Z'),
+        },
+        'b.txt': {
+          backupFileName: null,
+          version: 1,
+          backupTime: new Date('2026-06-13T00:01:02.000Z'),
+        },
+      },
+    };
+    const failedSnapshot: FileHistorySnapshot = {
+      promptId: 'p2',
+      timestamp: new Date('2026-06-13T00:02:00.000Z'),
+      trackedFileBackups: {
+        'failed.txt': {
+          backupFileName: 'backup-failed-v1',
+          version: 1,
+          backupTime: new Date('2026-06-13T00:02:01.000Z'),
+          failed: true,
+        },
+        'deleted.txt': {
+          backupFileName: null,
+          version: 2,
+          backupTime: new Date('2026-06-13T00:02:02.000Z'),
+        },
+      },
+    };
+
+    it('writes a system record with the serialized snapshot payload', async () => {
+      chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('file_history_snapshot');
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('writes a batch of serialized snapshots in order', async () => {
+      chatRecordingService.recordFileHistorySnapshotBatch([
+        oldSnapshot,
+        updatedSnapshot,
+      ]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.type).toBe('system');
+      expect(record.subtype).toBe('file_history_snapshot');
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:01:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v2',
+                version: 2,
+                backupTime: '2026-06-13T00:01:01.000Z',
+              },
+              'b.txt': {
+                backupFileName: null,
+                version: 1,
+                backupTime: '2026-06-13T00:01:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('appends single-snapshot updates in order so resume can last-win', async () => {
+      chatRecordingService.recordFileHistorySnapshot(oldSnapshot);
+      chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      const first = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      expect(JSON.parse(JSON.stringify(first.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+        ],
+      });
+      expect(JSON.parse(JSON.stringify(second.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:01:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v2',
+                version: 2,
+                backupTime: '2026-06-13T00:01:01.000Z',
+              },
+              'b.txt': {
+                backupFileName: null,
+                version: 1,
+                backupTime: '2026-06-13T00:01:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('retains distinct prompt ids in one batch', async () => {
+      chatRecordingService.recordFileHistorySnapshotBatch([
+        oldSnapshot,
+        failedSnapshot,
+      ]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(JSON.parse(JSON.stringify(record.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+          {
+            promptId: 'p2',
+            timestamp: '2026-06-13T00:02:00.000Z',
+            trackedFileBackups: {
+              'failed.txt': {
+                backupFileName: 'backup-failed-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:02:01.000Z',
+                failed: true,
+              },
+              'deleted.txt': {
+                backupFileName: null,
+                version: 2,
+                backupTime: '2026-06-13T00:02:02.000Z',
+              },
+            },
+          },
+        ],
+      });
+    });
+
+    it('round-trips serialized snapshots through JSON and deserialization', () => {
+      expect(
+        deserializeSnapshots([
+          JSON.parse(JSON.stringify(serializeSnapshot(failedSnapshot))),
+        ]),
+      ).toEqual([failedSnapshot]);
+    });
+
+    it('re-records surviving snapshots after rewind on the active branch', async () => {
+      chatRecordingService.recordFileHistorySnapshot(updatedSnapshot);
+      chatRecordingService.rewindRecording(0, { truncatedCount: 1 }, [
+        oldSnapshot,
+      ]);
+      await chatRecordingService.flush();
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
+      const staleSnapshot = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      const rewind = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      const snapshots = vi.mocked(jsonl.writeLine).mock
+        .calls[2][1] as ChatRecord;
+      expect(staleSnapshot.subtype).toBe('file_history_snapshot');
+      expect(rewind.subtype).toBe('rewind');
+      expect(JSON.parse(JSON.stringify(snapshots.systemPayload))).toEqual({
+        snapshots: [
+          {
+            promptId: 'p1',
+            timestamp: '2026-06-13T00:00:00.000Z',
+            trackedFileBackups: {
+              'a.txt': {
+                backupFileName: 'backup-a-v1',
+                version: 1,
+                backupTime: '2026-06-13T00:00:01.000Z',
+              },
+            },
+          },
+        ],
+      });
     });
   });
 
@@ -317,6 +608,88 @@ describe('ChatRecordingService', () => {
     });
 
     it('should keep small file diff resultDisplay unchanged', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'edit',
+            response: { output: 'ok' },
+          },
+        },
+      ];
+      const resultDisplay: FileDiff = {
+        fileName: 'file.txt',
+        fileDiff: '--- file.txt\n+++ file.txt\n@@ -1 +1 @@\n-old\n+new',
+        originalContent: 'old',
+        newContent: 'new',
+        diffStat: {
+          model_added_lines: 1,
+          model_removed_lines: 1,
+          model_added_chars: 3,
+          model_removed_chars: 3,
+          user_added_lines: 0,
+          user_removed_lines: 0,
+          user_added_chars: 0,
+          user_removed_chars: 0,
+        },
+      };
+      const metadata = {
+        callId: 'call-1',
+        status: 'success' as const,
+        responseParts: toolResultParts,
+        resultDisplay,
+        error: undefined,
+        errorType: undefined,
+      };
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+
+      expect(record.toolCallResult?.resultDisplay).toBe(resultDisplay);
+      expect(
+        (record.toolCallResult?.resultDisplay as FileDiff).truncatedForSession,
+      ).toBeUndefined();
+    });
+
+    it('compacts large resultDisplay metadata before recording', async () => {
+      const toolResultParts: Part[] = [
+        {
+          functionResponse: {
+            id: 'call-1',
+            name: 'shell',
+            response: { output: 'result' },
+          },
+        },
+      ];
+      const metadata = {
+        callId: 'call-1',
+        status: 'success',
+        responseParts: toolResultParts,
+        resultDisplay: `head-${'x'.repeat(
+          MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+        )}-tail`,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any;
+
+      chatRecordingService.recordToolResult(toolResultParts, metadata);
+      await chatRecordingService.flush();
+
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const resultDisplay = record.toolCallResult?.resultDisplay;
+
+      expect(typeof resultDisplay).toBe('string');
+      expect((resultDisplay as string).length).toBeLessThanOrEqual(
+        MAX_RETAINED_TOOL_RESULT_DISPLAY_CHARS,
+      );
+      expect(resultDisplay).toContain('head-');
+      expect(resultDisplay).toContain('-tail');
+      expect(resultDisplay).toContain('truncated for saved session preview');
+      expect(resultDisplay).not.toContain('CLI history display');
+    });
+
+    it('records promptId on tool results when provided', async () => {
       const toolResultParts: Part[] = [
         {
           functionResponse: {
@@ -558,21 +931,129 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
-    it('a failed write does not block subsequent records', async () => {
-      // Regression guard: the inner .catch swallows fs errors and keeps
-      // the chain alive so the next record's write still runs.
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
-        new Error('simulated EACCES'),
-      );
+    it('permanently stops recording after a failed write', async () => {
+      const writeError = new Error('simulated EACCES');
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
       chatRecordingService.recordUserMessage([{ text: 'first' }]);
       chatRecordingService.recordUserMessage([{ text: 'second' }]);
-      await chatRecordingService.flush();
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'third' }],
+      });
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('scopes a write failure to the recorder instance', async () => {
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(new Error('disk full'))
+        .mockResolvedValue(undefined);
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+
+      const nextRecordingService = new ChatRecordingService(mockConfig);
+      nextRecordingService.recordUserMessage([{ text: 'new session' }]);
+      await expect(nextRecordingService.flush()).resolves.toBeUndefined();
 
       expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
-      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
-      expect(
-        (second.message as { parts: Array<{ text: string }> }).parts[0].text,
-      ).toBe('second');
+    });
+
+    it('normalizes a non-Error rejection and keeps it sticky', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce('disk full');
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+
+      let firstFailure: unknown;
+      try {
+        await chatRecordingService.flush();
+      } catch (error) {
+        firstFailure = error;
+      }
+      expect(firstFailure).toEqual(new Error('disk full'));
+      await expect(chatRecordingService.flush()).rejects.toBe(firstFailure);
+    });
+
+    it('notifies once with the failed record session id', async () => {
+      let rejectWrite!: (error: Error) => void;
+      vi.mocked(jsonl.writeLine).mockReturnValueOnce(
+        new Promise<void>((_resolve, reject) => {
+          rejectWrite = reject;
+        }),
+      );
+      const listener = vi.fn();
+      const service = new ChatRecordingService(mockConfig, listener);
+
+      service.recordUserMessage([{ text: 'first' }]);
+      service.recordUserMessage([{ text: 'queued descendant' }]);
+      vi.mocked(mockConfig.getSessionId).mockReturnValue('new-session-id');
+      const writeError = new Error('disk full');
+      rejectWrite(writeError);
+
+      await expect(service.flush()).rejects.toBe(writeError);
+      service.recordUserMessage([{ text: 'after failure' }]);
+      await expect(service.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      expect(listener).toHaveBeenCalledOnce();
+      expect(listener).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        error: writeError,
+      });
+    });
+
+    it('allows a replacement recorder to notify independently', async () => {
+      const firstListener = vi.fn();
+      const secondListener = vi.fn();
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(new Error('first failure'))
+        .mockRejectedValueOnce(new Error('second failure'));
+
+      const first = new ChatRecordingService(mockConfig, firstListener);
+      first.recordUserMessage([{ text: 'first' }]);
+      await expect(first.flush()).rejects.toThrow('first failure');
+
+      const second = new ChatRecordingService(mockConfig, secondListener);
+      second.recordUserMessage([{ text: 'second' }]);
+      await expect(second.flush()).rejects.toThrow('second failure');
+
+      expect(firstListener).toHaveBeenCalledOnce();
+      expect(secondListener).toHaveBeenCalledOnce();
+    });
+
+    it('isolates synchronous and asynchronous listener failures', async () => {
+      const unhandled: unknown[] = [];
+      const handler = (error: unknown) => unhandled.push(error);
+      process.on('unhandledRejection', handler);
+      try {
+        const syncFailure = new ChatRecordingService(mockConfig, () => {
+          throw new Error('listener threw');
+        });
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('sync observer write failure'),
+        );
+        syncFailure.recordUserMessage([{ text: 'first' }]);
+        await expect(syncFailure.flush()).rejects.toThrow(
+          'sync observer write failure',
+        );
+
+        const asyncFailure = new ChatRecordingService(mockConfig, async () => {
+          throw new Error('listener rejected');
+        });
+        vi.mocked(jsonl.writeLine).mockRejectedValueOnce(
+          new Error('async observer write failure'),
+        );
+        asyncFailure.recordUserMessage([{ text: 'second' }]);
+        await expect(asyncFailure.flush()).rejects.toThrow(
+          'async observer write failure',
+        );
+        await new Promise((resolve) => setImmediate(resolve));
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', handler);
+      }
     });
   });
 
@@ -594,13 +1075,30 @@ describe('ChatRecordingService', () => {
       });
       writeSpy.mockImplementation(() => undefined);
 
-      chatRecordingService.recordUserMessage([{ text: 'first' }]);
-      await chatRecordingService.flush();
-      chatRecordingService.recordUserMessage([{ text: 'second' }]);
-      await chatRecordingService.flush();
+      chatRecordingService.recordUserMessage([{ text: 'retry me' }]);
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+      await expect(chatRecordingService.flush()).resolves.toBeUndefined();
 
-      // ≥ rather than === leaves room for a future flush()-side retry.
+      chatRecordingService.recordUserMessage([{ text: 'retry me' }]);
+      await expect(chatRecordingService.flush()).resolves.toBeUndefined();
+
       expect(mkdirSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.parentUuid).toBeNull();
+    });
+
+    it('does not notify for a synchronous conversation-file failure', () => {
+      const listener = vi.fn();
+      const service = new ChatRecordingService(mockConfig, listener);
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+
+      service.recordUserMessage([{ text: 'retry me' }]);
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
     });
 
     it('caches after a successful mkdir so steady-state writes skip the syscall', async () => {
@@ -643,6 +1141,27 @@ describe('ChatRecordingService', () => {
       expect(jsonl.writeLine).toHaveBeenCalledTimes(3);
     });
 
+    it('refreshes the cached git branch at the attribution turn boundary', async () => {
+      vi.mocked(execSync)
+        .mockReturnValueOnce('main\n')
+        .mockReturnValueOnce('feature\n');
+
+      chatRecordingService.recordUserMessage([{ text: 'first' }]);
+      await chatRecordingService.flush();
+      chatRecordingService.recordAttributionSnapshot({
+        ...baseSnapshot,
+        promptCount: 1,
+      });
+      await chatRecordingService.flush();
+
+      const userRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[0][1] as ChatRecord;
+      const attributionRecord = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      expect(userRecord.gitBranch).toBe('main');
+      expect(attributionRecord.gitBranch).toBe('feature');
+    });
+
     // Sessions that touch many files emit a non-retry turn snapshot
     // every prompt cycle. Without dedup, repeated identical snapshots
     // (no edits, no prompt-counter change) would re-serialize the entire
@@ -676,47 +1195,150 @@ describe('ChatRecordingService', () => {
       );
     });
 
-    // A transient write failure must NOT permanently suppress future
-    // identical snapshots: if the dedup key were committed before the
-    // write, the next identical snapshot would dedup and the session
-    // would have no attribution snapshot at all.
-    it('should retry an identical snapshot after a write failure', async () => {
-      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+    it('should not retry an identical snapshot after a write failure', async () => {
+      const writeError = new Error('disk full');
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(writeError);
       chatRecordingService.recordAttributionSnapshot(baseSnapshot);
-      // Wait for the queued (failing) write to settle so the rollback runs.
-      await chatRecordingService.flush();
-      const afterFailure = vi.mocked(jsonl.writeLine).mock.calls.length;
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
 
       chatRecordingService.recordAttributionSnapshot(baseSnapshot);
-      await chatRecordingService.flush();
-      // Retry should fire, so we get a new write call.
-      expect(vi.mocked(jsonl.writeLine).mock.calls.length).toBe(
-        afterFailure + 1,
-      );
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
     });
 
-    // appendRecord is fire-and-forget for non-snapshot callers
-    // (recordUserMessage / recordAssistantTurn / recordAtCommand /
-    // ...). When jsonl.writeLine rejects, the rejection MUST be
-    // swallowed inside the service — otherwise it surfaces as an
-    // unhandled-promise-rejection in production (and as a flaky
-    // failure under vitest's --reporter=default).
-    it('should swallow async writeLine rejection for fire-and-forget callers', async () => {
+    it('should handle fire-and-forget rejection while flush reports it', async () => {
       vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
-      // Track unhandled rejections during this test.
       const unhandled: unknown[] = [];
       const handler = (err: unknown) => unhandled.push(err);
       process.on('unhandledRejection', handler);
       try {
         chatRecordingService.recordUserMessage([{ text: 'hi' }]);
-        await chatRecordingService.flush();
-        // Microtask drain to give any unhandled rejections a chance
-        // to surface before we assert.
         await new Promise((resolve) => setImmediate(resolve));
         expect(unhandled).toHaveLength(0);
+        await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
       } finally {
         process.off('unhandledRejection', handler);
       }
+    });
+
+    it('stops queued normal writes when a strict artifact write fails', async () => {
+      let rejectStrict!: (error: Error) => void;
+      const strictWrite = new Promise<void>((_resolve, reject) => {
+        rejectStrict = reject;
+      });
+      vi.mocked(jsonl.writeLine)
+        .mockImplementationOnce(() => strictWrite)
+        .mockResolvedValue(undefined);
+
+      const strict = chatRecordingService.recordSessionArtifactEvent({
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [],
+      });
+      chatRecordingService.recordUserMessage([{ text: 'after strict write' }]);
+      rejectStrict(new Error('disk full'));
+
+      await expect(strict).rejects.toThrow('disk full');
+      await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+
+      chatRecordingService.recordUserMessage([{ text: 'next message' }]);
+      await expect(
+        chatRecordingService.recordSessionArtifactSnapshot({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        }),
+      ).rejects.toThrow('disk full');
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('rejects strict artifact records after a previous strict write failed', async () => {
+      const writeError = new Error('corrupt journal');
+      vi.mocked(jsonl.writeLine)
+        .mockRejectedValueOnce(writeError)
+        .mockResolvedValue(undefined);
+
+      await expect(
+        chatRecordingService.recordSessionArtifactEvent({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        }),
+      ).rejects.toBe(writeError);
+
+      await expect(
+        chatRecordingService.recordSessionArtifactSnapshot({
+          v: 2,
+          sessionId: 'test-session-id',
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        }),
+      ).rejects.toBe(writeError);
+      await expect(chatRecordingService.flush()).rejects.toBe(writeError);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not let anchor size estimation preempt a strict writer result', async () => {
+      await chatRecordingService.recordCustomTitle('durable-title');
+      vi.mocked(jsonl.writeLine).mockClear();
+      const circular: Record<string, unknown> = {};
+      circular['self'] = circular;
+      const payload = {
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'upsert',
+            artifactId: 'artifact-1',
+            artifact: circular,
+          },
+        ],
+      } as unknown as Parameters<
+        ChatRecordingService['recordSessionArtifactEvent']
+      >[0];
+
+      await expect(
+        chatRecordingService.recordSessionArtifactEvent(payload),
+      ).resolves.toBeUndefined();
+      expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    });
+
+    it('keeps artifact journal records out of the active conversation chain', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'before artifact' }]);
+      await chatRecordingService.flush();
+
+      await chatRecordingService.recordSessionArtifactEvent({
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [],
+      });
+
+      chatRecordingService.recordUserMessage([{ text: 'after artifact' }]);
+      await chatRecordingService.flush();
+
+      const before = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      const artifact = vi.mocked(jsonl.writeLine).mock
+        .calls[1][1] as ChatRecord;
+      const after = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
+      expect(artifact.parentUuid).toBe(before.uuid);
+      expect(after.parentUuid).toBe(before.uuid);
+      expect(after.parentUuid).not.toBe(artifact.uuid);
     });
 
     // appendRecord can throw SYNCHRONOUSLY before returning a promise

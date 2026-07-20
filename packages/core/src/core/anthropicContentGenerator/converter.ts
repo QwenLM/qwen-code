@@ -25,6 +25,8 @@ import {
   convertSchema,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+import { normalizeMcpToolName } from '../../utils/tool-name-utils.js';
 
 type AnthropicMessageParam = Anthropic.MessageParam;
 // `scope: 'global'` is sent under the `prompt-caching-scope-2026-01-05` beta
@@ -42,6 +44,8 @@ type AnthropicTextBlockParam = Anthropic.TextBlockParam & {
 };
 type AnthropicContentBlockParam = Anthropic.ContentBlockParam;
 
+const debugLogger = createDebugLogger('AnthropicConverter');
+
 export interface ConvertGeminiRequestToAnthropicOptions {
   /**
    * On every assistant turn, fill in `signature: ''` on any `thinking` block
@@ -52,6 +56,13 @@ export interface ConvertGeminiRequestToAnthropicOptions {
    * Gemini-Part round trip.
    */
   normalizeAssistantThinkingSignature?: boolean;
+  /**
+   * Remove assistant thinking blocks whose opaque signature is missing or
+   * empty. Completed turns can safely omit thinking during replay. The active
+   * tool loop fails instead because Claude requires all of its thinking blocks
+   * to be passed back complete and unmodified.
+   */
+  dropUnsignedAssistantThinking?: boolean;
   /**
    * On assistant turns containing `tool_use` but lacking any thinking block,
    * prepend a synthetic empty thinking block. Required by DeepSeek's
@@ -124,7 +135,7 @@ export class AnthropicContentConverter {
     system?: AnthropicTextBlockParam[] | string;
     messages: AnthropicMessageParam[];
   } {
-    const messages: AnthropicMessageParam[] = [];
+    let messages: AnthropicMessageParam[] = [];
 
     const systemText = this.extractTextFromContentUnion(
       request.config?.systemInstruction,
@@ -143,6 +154,26 @@ export class AnthropicContentConverter {
     if (options.injectThinkingOnToolUseTurns) {
       this.injectEmptyThinkingOnToolUseTurns(messages);
     }
+
+    // Merge consecutive assistant messages and clean orphaned tool calls.
+    // When the Gemini history has consecutive model turns (e.g. from
+    // streaming chunk-level recording, max_tokens recovery, or adaptive
+    // thinking splits), processContent emits one Anthropic message per
+    // Content. The Anthropic API requires that tool_use blocks be
+    // immediately followed by tool_result blocks in the next message —
+    // consecutive assistant messages break this pairing and cause HTTP 400
+    // "tool_use ids were found without tool_result blocks immediately
+    // after". Mirrors the same functions in the OpenAI converter.
+    messages = mergeConsecutiveAssistantMessages(messages);
+    messages = cleanOrphanedToolCalls(messages);
+    messages = mergeConsecutiveAssistantMessages(messages);
+    if (options.dropUnsignedAssistantThinking) {
+      messages = this.dropUnsignedThinkingFromAssistantMessages(messages);
+    }
+    if (options.stripAssistantThinking) {
+      this.stripThinkingFromAssistantMessages(messages);
+    }
+    messages = mergeConsecutiveUserMessages(messages);
 
     // Add cache_control to enable prompt caching (if enabled). Prefer the
     // per-call override when the caller (typically the generator) passes
@@ -405,7 +436,7 @@ export class AnthropicContentConverter {
           contentBlocks.push({
             type: 'tool_use',
             id: part.functionCall.id || `tool_${toolCallIndex}`,
-            name: part.functionCall.name || '',
+            name: normalizeMcpToolName(part.functionCall.name || ''),
             input: (part.functionCall.args as Record<string, unknown>) || {},
           });
           toolCallIndex += 1;
@@ -458,6 +489,10 @@ export class AnthropicContentConverter {
       type: 'tool_result',
       tool_use_id: response.id || '',
       content,
+      ...(response.response &&
+      Object.prototype.hasOwnProperty.call(response.response, 'error')
+        ? { is_error: true }
+        : {}),
     };
   }
 
@@ -741,6 +776,77 @@ export class AnthropicContentConverter {
     }
   }
 
+  private dropUnsignedThinkingFromAssistantMessages(
+    messages: AnthropicMessageParam[],
+  ): AnthropicMessageParam[] {
+    const cleaned: AnthropicMessageParam[] = [];
+    const isUnsignedThinking = (block: AnthropicContentBlockParam) => {
+      const value = block as { type?: string; signature?: unknown };
+      return (
+        value.type === 'thinking' &&
+        (typeof value.signature !== 'string' || value.signature.length === 0)
+      );
+    };
+    const hasBlockType = (
+      message: AnthropicMessageParam,
+      type: 'tool_use' | 'tool_result',
+    ) =>
+      Array.isArray(message.content) &&
+      message.content.some(
+        (block) => (block as { type?: string }).type === type,
+      );
+    const activeToolUseTurns = new Set<number>();
+    let cursor = messages.length - 1;
+    while (cursor >= 0) {
+      let hasToolResult = false;
+      while (cursor >= 0 && messages[cursor]?.role === 'user') {
+        hasToolResult ||= hasBlockType(messages[cursor], 'tool_result');
+        cursor--;
+      }
+      const assistant = messages[cursor];
+      if (
+        !hasToolResult ||
+        !assistant ||
+        assistant.role !== 'assistant' ||
+        !hasBlockType(assistant, 'tool_use')
+      ) {
+        break;
+      }
+      activeToolUseTurns.add(cursor);
+      cursor--;
+    }
+
+    for (const [index, message] of messages.entries()) {
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) {
+        cleaned.push(message);
+        continue;
+      }
+
+      if (!message.content.some(isUnsignedThinking)) {
+        cleaned.push(message);
+        continue;
+      }
+
+      if (activeToolUseTurns.has(index)) {
+        throw new Error(
+          'Anthropic-compatible proxy omitted the thinking signature for a ' +
+            'tool-use turn that is still in progress. Configure the proxy to ' +
+            'preserve thinking signatures, or start a new session with ' +
+            'reasoning disabled.',
+        );
+      }
+
+      const filtered = message.content.filter(
+        (block) => !isUnsignedThinking(block),
+      );
+      if (filtered.length > 0) {
+        cleaned.push({ ...message, content: filtered });
+      }
+    }
+
+    return cleaned;
+  }
+
   /**
    * DeepSeek's anthropic-compatible API rejects follow-up requests when an
    * assistant turn carrying `tool_use` omits a thinking block while thinking
@@ -842,4 +948,210 @@ export class AnthropicContentConverter {
       }
     }
   }
+}
+
+/**
+ * Merge consecutive assistant messages into a single message.
+ *
+ * When the Gemini history has consecutive model turns (e.g. from streaming
+ * chunk-level recording, max_tokens recovery, or adaptive thinking splits),
+ * processContent emits one Anthropic message per Content. The Anthropic API
+ * requires that tool_use blocks be immediately followed by tool_result
+ * blocks in the next message — consecutive assistant messages break this
+ * pairing and cause HTTP 400 "tool_use ids were found without tool_result
+ * blocks immediately after".
+ *
+ * Thinking blocks must come first in Anthropic's content array, so merged
+ * blocks are reordered: all thinking blocks (from both messages) precede
+ * non-thinking blocks (text, tool_use, etc.).
+ *
+ * Mirrors the same-name function in the OpenAI converter.
+ */
+function mergeConsecutiveAssistantMessages(
+  messages: AnthropicMessageParam[],
+): AnthropicMessageParam[] {
+  const merged: AnthropicMessageParam[] = [];
+
+  for (const message of messages) {
+    if (
+      message.role === 'assistant' &&
+      merged.length > 0 &&
+      Array.isArray(message.content)
+    ) {
+      const lastMessage = merged[merged.length - 1]!;
+      if (
+        lastMessage.role === 'assistant' &&
+        Array.isArray(lastMessage.content)
+      ) {
+        const lastBlocks = lastMessage.content as AnthropicContentBlockParam[];
+        const currentBlocks = message.content as AnthropicContentBlockParam[];
+
+        const isThinking = (b: AnthropicContentBlockParam): boolean => {
+          const t = (b as { type?: string }).type;
+          return t === 'thinking' || t === 'redacted_thinking';
+        };
+
+        const seenToolUseIds = new Set<string>();
+        const combined: AnthropicContentBlockParam[] = [
+          ...lastBlocks.filter(isThinking),
+          ...currentBlocks.filter(isThinking),
+          ...lastBlocks.filter((b) => !isThinking(b)),
+          ...currentBlocks.filter((b) => !isThinking(b)),
+        ].filter((b) => {
+          const t = (b as { type?: string }).type;
+          if (t === 'tool_use') {
+            const id = (b as { id?: string }).id;
+            if (id) {
+              if (seenToolUseIds.has(id)) return false;
+              seenToolUseIds.add(id);
+            }
+          }
+          return true;
+        });
+
+        lastMessage.content = combined;
+        continue;
+      }
+    }
+    merged.push(message);
+  }
+
+  return merged;
+}
+
+/**
+ * Remove tool_use blocks that have no matching tool_result in the
+ * immediately following user message, and remove tool_result blocks that
+ * have no matching tool_use in the immediately preceding assistant message.
+ *
+ * Empty messages produced by the cleanup are dropped entirely. A subsequent
+ * mergeConsecutiveAssistantMessages call fixes any alternation issues
+ * created by dropped messages.
+ *
+ * Mirrors the same-name function in the OpenAI converter.
+ */
+function cleanOrphanedToolCalls(
+  messages: AnthropicMessageParam[],
+): AnthropicMessageParam[] {
+  const validToolUseBlocks = new WeakSet<object>();
+  const validToolResultBlocks = new WeakSet<object>();
+
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!;
+    if (message.role !== 'assistant' || !Array.isArray(message.content)) {
+      continue;
+    }
+
+    const blocks = message.content as AnthropicContentBlockParam[];
+    const toolUseBlocks = new Map<string, AnthropicContentBlockParam>();
+    for (const block of blocks) {
+      if ((block as { type?: string }).type === 'tool_use') {
+        const id = (block as { id?: string }).id;
+        if (id && !toolUseBlocks.has(id)) toolUseBlocks.set(id, block);
+      }
+    }
+    if (toolUseBlocks.size === 0) continue;
+
+    for (let j = i + 1; j < messages.length; j++) {
+      const nextMessage = messages[j];
+      if (
+        !nextMessage ||
+        nextMessage.role !== 'user' ||
+        !Array.isArray(nextMessage.content)
+      ) {
+        break;
+      }
+
+      let seenNonToolResult = false;
+      for (const block of nextMessage.content as AnthropicContentBlockParam[]) {
+        if ((block as { type?: string }).type === 'tool_result') {
+          const id = (block as { tool_use_id?: string }).tool_use_id;
+          const toolUseBlock = id ? toolUseBlocks.get(id) : undefined;
+          if (!seenNonToolResult && toolUseBlock) {
+            validToolUseBlocks.add(toolUseBlock as object);
+            validToolResultBlocks.add(block as object);
+          }
+        } else {
+          seenNonToolResult = true;
+        }
+      }
+    }
+  }
+
+  const cleaned: AnthropicMessageParam[] = [];
+  for (const message of messages) {
+    if (!Array.isArray(message.content)) {
+      cleaned.push(message);
+      continue;
+    }
+
+    const blocks = message.content as AnthropicContentBlockParam[];
+    const hasToolUse = blocks.some(
+      (b) => (b as { type?: string }).type === 'tool_use',
+    );
+    const hasToolResult = blocks.some(
+      (b) => (b as { type?: string }).type === 'tool_result',
+    );
+
+    if (!hasToolUse && !hasToolResult) {
+      cleaned.push(message);
+      continue;
+    }
+
+    const filtered = blocks.filter((b) => {
+      const t = (b as { type?: string }).type;
+      if (t === 'tool_use') {
+        const id = (b as { id?: string }).id;
+        return !id || validToolUseBlocks.has(b as object);
+      }
+      if (t === 'tool_result') {
+        const id = (b as { tool_use_id?: string }).tool_use_id;
+        return !id || validToolResultBlocks.has(b as object);
+      }
+      return true;
+    });
+
+    if (filtered.length > 0) {
+      cleaned.push({ ...message, content: filtered });
+    } else {
+      debugLogger.debug(
+        'cleanOrphanedToolCalls: dropping message with only orphaned tool blocks',
+      );
+    }
+  }
+
+  return cleaned;
+}
+
+function mergeConsecutiveUserMessages(
+  messages: AnthropicMessageParam[],
+): AnthropicMessageParam[] {
+  const merged: AnthropicMessageParam[] = [];
+
+  for (const message of messages) {
+    const lastMessage = merged[merged.length - 1];
+    if (
+      message.role === 'user' &&
+      lastMessage?.role === 'user' &&
+      Array.isArray(message.content) &&
+      Array.isArray(lastMessage.content)
+    ) {
+      const combined = [
+        ...(lastMessage.content as AnthropicContentBlockParam[]),
+        ...(message.content as AnthropicContentBlockParam[]),
+      ];
+      lastMessage.content = [
+        ...combined.filter(
+          (b) => (b as { type?: string }).type === 'tool_result',
+        ),
+        ...combined.filter(
+          (b) => (b as { type?: string }).type !== 'tool_result',
+        ),
+      ];
+      continue;
+    }
+    merged.push(message);
+  }
+
+  return merged;
 }

@@ -15,20 +15,31 @@ import {
   type UIActions,
 } from '../contexts/UIActionsContext.js';
 import { AppContext } from '../contexts/AppContext.js';
-import { CompactModeProvider } from '../contexts/CompactModeContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
+import { ToolCallStatus, StreamingState } from '../types.js';
+
+// Global compact mode was removed (#5666); type-based tool rendering no longer
+// consumes a compact-mode context.
 
 const staticPropsSpy = vi.fn();
 const staticItemsSpy = vi.fn();
 const historyItemDisplayPropsSpy = vi.fn();
 const appHeaderSpy = vi.fn();
 const scrollableListPropsSpy = vi.fn();
+// Records every <Box> render's props so tests can assert layout props
+// (e.g. the pending-region maxHeight backstop) without coupling to ink's
+// Yoga internals.
+const boxPropsSpy = vi.fn();
 
 vi.mock('ink', async () => {
   const actual = await vi.importActual<typeof import('ink')>('ink');
 
   return {
     ...actual,
+    Box: (props: React.ComponentProps<typeof actual.Box>) => {
+      boxPropsSpy(props);
+      return <actual.Box {...props} />;
+    },
     Static: ({
       children,
       items,
@@ -84,6 +95,10 @@ vi.mock('./Notifications.js', () => ({
 
 vi.mock('./DebugModeNotification.js', () => ({
   DebugModeNotification: () => <Text>DEBUG_NOTIFICATION</Text>,
+}));
+
+vi.mock('../selection/use-text-selection.js', () => ({
+  TextSelectionController: () => null,
 }));
 
 vi.mock('./shared/ScrollableList.js', async () => {
@@ -219,12 +234,14 @@ const createUIState = (overrides: Partial<UIState> = {}): UIState =>
     isHooksDialogOpen: false,
     isFeedbackDialogOpen: false,
     taskStartTokens: 0,
+    taskStartStreamingChars: 0,
+    responseCandidateTokens: 0,
     streamingResponseLengthRef: { current: 0 },
     isReceivingContent: false,
     sessionName: null,
     setSessionName: vi.fn(),
     promptSuggestion: null,
-    dismissPromptSuggestion: vi.fn(),
+    abortPromptSuggestion: vi.fn(),
     isRewindSelectorOpen: false,
     rewindEscPending: false,
     ...overrides,
@@ -238,15 +255,13 @@ const createUIActions = (): UIActions =>
 const renderMainContent = (uiState: UIState) =>
   render(
     <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-      <CompactModeProvider value={{ compactMode: false }}>
-        <UIActionsContext.Provider value={createUIActions()}>
-          <UIStateContext.Provider value={uiState}>
-            <OverflowProvider>
-              <MainContent />
-            </OverflowProvider>
-          </UIStateContext.Provider>
-        </UIActionsContext.Provider>
-      </CompactModeProvider>
+      <UIActionsContext.Provider value={createUIActions()}>
+        <UIStateContext.Provider value={uiState}>
+          <OverflowProvider>
+            <MainContent />
+          </OverflowProvider>
+        </UIStateContext.Provider>
+      </UIActionsContext.Provider>
     </AppContext.Provider>,
   );
 
@@ -277,20 +292,18 @@ describe('<MainContent />', () => {
 
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                currentModel: 'gpt-5.4',
-                historyRemountKey: 7,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              currentModel: 'gpt-5.4',
+              historyRemountKey: 7,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -427,23 +440,21 @@ describe('<MainContent />', () => {
     staticItemsSpy.mockClear();
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history: [
-                  ...history,
-                  { type: 'user' as const, id: 100, text: 'new msg' },
-                ],
-                historyRemountKey: 1,
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history: [
+                ...history,
+                { type: 'user' as const, id: 100, text: 'new msg' },
+              ],
+              historyRemountKey: 1,
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
@@ -485,21 +496,55 @@ describe('<MainContent />', () => {
     // meant to avoid.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({ history, historyRemountKey: 2 })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({ history, historyRemountKey: 2 })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(53);
+  });
+
+  it('filters out suppressed history items from rendering', async () => {
+    staticItemsSpy.mockClear();
+    historyItemDisplayPropsSpy.mockClear();
+    const history = [
+      { type: 'user' as const, id: 1, text: 'hello' },
+      {
+        type: 'gemini' as const,
+        id: 2,
+        text: 'hi',
+        display: { suppressOnRestore: true },
+      },
+      {
+        type: 'info' as const,
+        id: 3,
+        text: 'History collapsed: 1 messages hidden.',
+        display: { kind: 'collapse-summary' as const },
+      },
+    ];
+    const uiState = createUIState({ history });
+    renderMainContent(uiState);
+    expect(historyItemDisplayPropsSpy).toHaveBeenCalled();
+    const renderedHistoryItems = historyItemDisplayPropsSpy.mock.calls.map(
+      (c) => c[0].item,
+    );
+    // Unsuppressed user message and collapse-summary should render (summary has no suppressOnRestore)
+    expect(renderedHistoryItems).toHaveLength(2);
+    expect(renderedHistoryItems.find((i) => i.id === 1)).toMatchObject({
+      id: 1,
+    });
+    expect(renderedHistoryItems.find((i) => i.id === 3)).toMatchObject({
+      id: 3,
+    });
+    // Suppressed gemini item should NOT render
+    expect(renderedHistoryItems.find((i) => i.id === 2)).toBeUndefined();
   });
 
   it('does NOT reset progressive replay when only currentModel changes (PR #4119 regression guard)', async () => {
@@ -551,26 +596,155 @@ describe('<MainContent />', () => {
     // someone correctly drives the reset off the model dimension instead.
     rerender(
       <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-        <CompactModeProvider value={{ compactMode: false }}>
-          <UIActionsContext.Provider value={createUIActions()}>
-            <UIStateContext.Provider
-              value={createUIState({
-                history,
-                historyRemountKey: 1,
-                currentModel: 'model-b',
-              })}
-            >
-              <OverflowProvider>
-                <MainContent />
-              </OverflowProvider>
-            </UIStateContext.Provider>
-          </UIActionsContext.Provider>
-        </CompactModeProvider>
+        <UIActionsContext.Provider value={createUIActions()}>
+          <UIStateContext.Provider
+            value={createUIState({
+              history,
+              historyRemountKey: 1,
+              currentModel: 'model-b',
+            })}
+          >
+            <OverflowProvider>
+              <MainContent />
+            </OverflowProvider>
+          </UIStateContext.Provider>
+        </UIActionsContext.Provider>
       </AppContext.Provider>,
     );
 
     // No reset means the LAST staticItemsSpy call still received TOTAL.
     expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(TOTAL);
+  });
+
+  describe('compact mode + Static path (useTerminalBuffer=false)', () => {
+    it('skips cross-group merge in Static mode to avoid screen flash (issue #4794)', () => {
+      staticItemsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      // Two consecutive tool_groups that mergeCompactToolGroups would normally
+      // consolidate into a single item. In Static mode this merge MUST be
+      // skipped because Ink's <Static> is append-only and cannot handle
+      // item-count changes without a full clearTerminal + remount (flash).
+      const history = [
+        {
+          id: 1,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'a1',
+              name: 'bash',
+              description: 'run ls',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+        {
+          id: 2,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'b1',
+              name: 'bash',
+              description: 'run wc',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ];
+
+      // Render with compactMode=true and useTerminalBuffer=false (default Static path).
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      // 3 prefix items (header / debug / notifications) + 2 raw history items
+      // The 2 tool_groups should NOT be merged into 1.
+      expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(5);
+      // Verify both tool_group ids are present via historyItemDisplayPropsSpy.
+      const renderedIds = historyItemDisplayPropsSpy.mock.calls
+        .map((call) => call[0].item.id)
+        .filter((id) => id === 1 || id === 2);
+      expect(renderedIds).toEqual([1, 2]);
+    });
+
+    it('preserves tool_use_summary as standalone line when merge is skipped (Static mode)', () => {
+      staticItemsSpy.mockClear();
+      historyItemDisplayPropsSpy.mockClear();
+
+      // History with a tool_group followed by its tool_use_summary, then another tool_group.
+      // When merge is skipped (Static mode), absorbedCallIds returns EMPTY_ABSORBED_CALL_IDS
+      // so isSummaryAbsorbed returns false — the summary MUST pass through as a standalone
+      // item and render as `● <label>` line in HistoryItemDisplay.
+      const history = [
+        {
+          id: 1,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'a1',
+              name: 'bash',
+              description: 'run ls',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+        {
+          id: 2,
+          type: 'tool_use_summary' as const,
+          precedingToolUseIds: ['a1'],
+          summary: 'Searched in auth/',
+        },
+        {
+          id: 3,
+          type: 'tool_group' as const,
+          tools: [
+            {
+              callId: 'b1',
+              name: 'bash',
+              description: 'run wc',
+              status: ToolCallStatus.Success,
+              resultDisplay: undefined,
+              confirmationDetails: undefined,
+            },
+          ],
+        },
+      ];
+
+      render(
+        <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider value={createUIState({ history })}>
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
+        </AppContext.Provider>,
+      );
+
+      // 3 prefix items (header / debug / notifications) + 3 raw history items
+      // (tool_group + tool_use_summary + tool_group). The summary must NOT be dropped.
+      expect(staticItemsSpy.mock.calls.at(-1)?.[0]).toHaveLength(6);
+      // Verify all three history item ids are present.
+      const renderedIds = historyItemDisplayPropsSpy.mock.calls
+        .map((call) => call[0].item.id)
+        .filter((id) => id === 1 || id === 2 || id === 3);
+      expect(renderedIds).toEqual([1, 2, 3]);
+    });
   });
 
   describe('virtual viewport path (ui.useTerminalBuffer)', () => {
@@ -689,23 +863,21 @@ describe('<MainContent />', () => {
       // Flip activePtyId; identical re-render except this one streaming-state field.
       rerender(
         <AppContext.Provider value={{ version: '1.2.3', startupWarnings: [] }}>
-          <CompactModeProvider value={{ compactMode: false }}>
-            <UIActionsContext.Provider value={createUIActions()}>
-              <UIStateContext.Provider
-                value={createUIState({
-                  useTerminalBuffer: true,
-                  activePtyId: 1,
-                  history: stableHistory,
-                  pendingHistoryItems: stablePending,
-                  slashCommands: stableSlashCommands,
-                })}
-              >
-                <OverflowProvider>
-                  <MainContent />
-                </OverflowProvider>
-              </UIStateContext.Provider>
-            </UIActionsContext.Provider>
-          </CompactModeProvider>
+          <UIActionsContext.Provider value={createUIActions()}>
+            <UIStateContext.Provider
+              value={createUIState({
+                useTerminalBuffer: true,
+                activePtyId: 1,
+                history: stableHistory,
+                pendingHistoryItems: stablePending,
+                slashCommands: stableSlashCommands,
+              })}
+            >
+              <OverflowProvider>
+                <MainContent />
+              </OverflowProvider>
+            </UIStateContext.Provider>
+          </UIActionsContext.Provider>
         </AppContext.Provider>,
       );
 
@@ -717,5 +889,63 @@ describe('<MainContent />', () => {
       // The ref-based read keeps identity stable.
       expect(secondRenderItem).toBe(firstRenderItem);
     });
+  });
+
+  // #6809: the pending-region maxHeight backstop must stay ON while streaming
+  // (Responding) so streaming tables don't yank the viewport to the top
+  // (#6421), but drop in show-more mode once streaming has settled to a static
+  // confirmation (WaitingForConfirmation) so a tall diff renders every row.
+  it('gates the pending-region maxHeight backstop on streamingState (#6809)', () => {
+    const wrapperProps = () =>
+      boxPropsSpy.mock.calls
+        .map((c) => c[0])
+        .filter(
+          (p: { flexShrink?: number; overflow?: string }) =>
+            p.flexShrink === 0 && p.overflow === 'hidden',
+        );
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.Responding,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
+
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: false,
+        streamingState: StreamingState.WaitingForConfirmation,
+      }),
+    );
+    expect(
+      wrapperProps().some(
+        (p: { maxHeight?: number }) => p.maxHeight === undefined,
+      ),
+    ).toBe(true);
+
+    // Constrained mode (#6421): constrainHeight alone must engage the
+    // backstop even when not streaming, so streaming tables don't yank
+    // the viewport to the top.
+    boxPropsSpy.mockClear();
+    renderMainContent(
+      createUIState({
+        pendingHistoryItems: [{ type: 'gemini_content', text: 'x' }],
+        availableTerminalHeight: 5,
+        constrainHeight: true,
+        streamingState: StreamingState.Idle,
+      }),
+    );
+    expect(
+      wrapperProps().some((p: { maxHeight?: number }) => p.maxHeight === 5),
+    ).toBe(true);
   });
 });

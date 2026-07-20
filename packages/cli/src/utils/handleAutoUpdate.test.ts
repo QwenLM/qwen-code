@@ -14,6 +14,7 @@ import EventEmitter from 'node:events';
 import { handleAutoUpdate, setUpdateHandler } from './handleAutoUpdate.js';
 import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from '../ui/types.js';
+import os from 'node:os';
 
 vi.mock('./installationInfo.js', async () => {
   const actual = await vi.importActual('./installationInfo.js');
@@ -192,8 +193,7 @@ describe('handleAutoUpdate', () => {
     });
 
     expect(emitSpy).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Automatic update failed. Please try updating manually. (command: npm i -g @qwen-code/qwen-code@2.0.0, stderr: An error occurred)',
+      message: 'Automatic update failed. Please try updating manually.',
     });
   });
 
@@ -216,8 +216,7 @@ describe('handleAutoUpdate', () => {
     });
 
     expect(emitSpy).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Automatic update failed. Please try updating manually. (error: Spawn error)',
+      message: 'Automatic update failed. Please try updating manually.',
     });
   });
 
@@ -233,13 +232,58 @@ describe('handleAutoUpdate', () => {
     handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
 
     expect(mockSpawn).toHaveBeenCalledWith(
-      expect.stringMatching(/^(bash|cmd\.exe)$/),
-      expect.arrayContaining([
-        expect.stringMatching(/^(-c|\/c)$/),
-        'npm i -g @qwen-code/qwen-code@nightly',
-      ]),
+      process.execPath,
+      [
+        expect.stringMatching(/npm-cli\.js$/),
+        'i',
+        '-g',
+        '@qwen-code/qwen-code@nightly',
+      ],
       {
-        stdio: 'pipe',
+        stdio: ['pipe', 'ignore', 'pipe'],
+      },
+    );
+  });
+
+  it('runs npm through the active Node.js runtime on Windows', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+      isGlobal: true,
+      packageManager: PackageManager.NPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        expect.stringMatching(/npm-cli\.js$/),
+        'install',
+        '-g',
+        '@qwen-code/qwen-code@2.0.0',
+      ],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      },
+    );
+  });
+
+  it('runs non-npm package-manager updates through the shell', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('linux');
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'pnpm add -g @qwen-code/qwen-code@latest',
+      isGlobal: true,
+      packageManager: PackageManager.PNPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'pnpm add -g @qwen-code/qwen-code@2.0.0'],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
       },
     );
   });
@@ -264,7 +308,8 @@ describe('handleAutoUpdate', () => {
 
     expect(emitSpy).toHaveBeenCalledWith('update-success', {
       message:
-        'Update successful! The new version will be used on your next run.',
+        'Update successful! Please restart Qwen Code to use the new version. ' +
+        'Switching model providers before restarting may not work correctly.',
     });
   });
 });
@@ -414,6 +459,42 @@ describe('setUpdateHandler', () => {
       {
         type: MessageType.INFO,
         text: 'Update successful!',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should use default success message when update-success has no message', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-success', {});
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.INFO,
+        text:
+          'Update successful! Please restart Qwen Code to use the new version. ' +
+          'Switching model providers before restarting may not work correctly.',
+      },
+      expect.any(Number),
+    );
+
+    cleanup();
+  });
+
+  it('should use default failure message when update-failed has no message', () => {
+    const isIdleRef = { current: true };
+    const { cleanup } = setUpdateHandler(addItem, setUpdateInfo, isIdleRef);
+
+    updateEventEmitter.emit('update-failed', {});
+
+    expect(addItem).toHaveBeenCalledWith(
+      {
+        type: MessageType.ERROR,
+        text: 'Automatic update failed. Please try updating manually.',
       },
       expect.any(Number),
     );

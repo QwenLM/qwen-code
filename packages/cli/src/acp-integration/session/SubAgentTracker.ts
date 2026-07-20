@@ -20,9 +20,8 @@ import {
   ToolConfirmationOutcome,
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
-import { z } from 'zod';
 import type { SessionContext } from './types.js';
-import { ToolCallEmitter } from './emitters/ToolCallEmitter.js';
+import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
   AgentSideConnection,
@@ -30,6 +29,9 @@ import type {
 } from '@agentclientprotocol/sdk';
 import {
   buildPermissionRequestContent,
+  interactionMetaFields,
+  requestPermissionWithAbort,
+  resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
 
@@ -45,6 +47,10 @@ const debugLogger = createDebugLogger('ACP_SUBAGENT_TRACKER');
 export class SubAgentTracker {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly messageEmitter: MessageEmitter;
+  private readonly subagentMeta: {
+    parentToolCallId: string;
+    subagentType: string;
+  };
   private readonly toolStates = new Map<
     string,
     {
@@ -57,21 +63,13 @@ export class SubAgentTracker {
   constructor(
     private readonly ctx: SessionContext,
     private readonly client: AgentSideConnection,
-    private readonly parentToolCallId: string,
-    private readonly subagentType: string,
+    parentToolCallId: string,
+    subagentType: string,
+    private readonly onPermissionCancel?: () => void,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
-  }
-
-  /**
-   * Gets the subagent metadata to attach to all events.
-   */
-  private getSubagentMeta() {
-    return {
-      parentToolCallId: this.parentToolCallId,
-      subagentType: this.subagentType,
-    };
+    this.subagentMeta = { parentToolCallId, subagentType };
   }
 
   /**
@@ -146,7 +144,7 @@ export class SubAgentTracker {
         toolName: event.name,
         callId: event.callId,
         args: event.args,
-        subagentMeta: this.getSubagentMeta(),
+        subagentMeta: this.subagentMeta,
       });
     };
   }
@@ -171,7 +169,7 @@ export class SubAgentTracker {
         message: event.responseParts ?? [],
         resultDisplay: event.resultDisplay,
         args: state?.args,
-        subagentMeta: this.getSubagentMeta(),
+        subagentMeta: this.subagentMeta,
       });
 
       // Clean up state
@@ -202,9 +200,13 @@ export class SubAgentTracker {
       const { title, locations, kind } =
         this.toolCallEmitter.resolveToolMetadata(event.name, state?.args);
 
+      const permissionOptions = toPermissionOptions(fullConfirmationDetails);
+      const offeredPermissionOptions = permissionOptions.map((option) => ({
+        ...option,
+      }));
       const params: RequestPermissionRequest = {
         sessionId: this.ctx.sessionId,
-        options: toPermissionOptions(fullConfirmationDetails),
+        options: permissionOptions,
         toolCall: {
           toolCallId: event.callId,
           status: 'pending',
@@ -213,30 +215,57 @@ export class SubAgentTracker {
           locations,
           kind,
           rawInput: state?.args,
+          // Mirror the tool name so consumers can give specific tools (e.g. the
+          // Agent tool) dedicated permission UI without relying on a protocol
+          // `kind` ACP can't carry. This is the second producer path (nested
+          // sub-agent tool calls); Session.ts adds the same _meta on the primary
+          // path.
+          _meta: {
+            toolName: event.name,
+            ...interactionMetaFields(fullConfirmationDetails),
+          },
         },
       };
 
       try {
         // Request permission from client
-        const output = await this.client.requestPermission(params);
-        const outcome =
-          output.outcome.outcome === 'cancelled'
-            ? ToolConfirmationOutcome.Cancel
-            : z
-                .nativeEnum(ToolConfirmationOutcome)
-                .parse(output.outcome.optionId);
-
+        const output = await requestPermissionWithAbort(
+          this.client,
+          params,
+          abortSignal,
+        );
+        const outcome = resolvePermissionOutcome(
+          output,
+          offeredPermissionOptions,
+        );
         // Respond to subagent with the outcome
         await event.respond(outcome, {
-          answers: 'answers' in output ? output.answers : undefined,
+          answers:
+            'answers' in output
+              ? (output.answers as Record<string, string> | undefined)
+              : undefined,
         });
+        if (outcome === ToolConfirmationOutcome.Cancel) {
+          this.onPermissionCancel?.();
+        }
       } catch (error) {
         // If permission request fails, cancel the tool call
         debugLogger.error(
           `Permission request failed for subagent tool ${event.name}:`,
           error,
         );
-        await event.respond(ToolConfirmationOutcome.Cancel);
+        // Fail closed: if the client cannot answer a nested permission
+        // request, stop the parent turn instead of letting later tools run
+        // without the required user input.
+        this.onPermissionCancel?.();
+        try {
+          await event.respond(ToolConfirmationOutcome.Cancel);
+        } catch (respondError) {
+          debugLogger.error(
+            `Failed to cancel subagent tool ${event.name} after permission request failure:`,
+            respondError,
+          );
+        }
       }
     };
   }
@@ -255,7 +284,7 @@ export class SubAgentTracker {
         event.usage,
         '',
         event.durationMs,
-        this.getSubagentMeta(),
+        this.subagentMeta,
       );
     };
   }
@@ -276,6 +305,8 @@ export class SubAgentTracker {
         event.text,
         'assistant',
         event.thought ?? false,
+        undefined,
+        this.subagentMeta,
       );
     };
   }

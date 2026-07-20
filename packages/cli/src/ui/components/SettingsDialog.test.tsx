@@ -40,12 +40,6 @@ import { OUTPUT_LANGUAGE_AUTO } from '../../utils/languageUtils.js';
 const mockToggleVimEnabled = vi.fn();
 const mockSetVimMode = vi.fn();
 
-// Mock the CompactModeContext
-const mockSetCompactMode = vi.fn();
-
-// Mock the UIActionsContext
-const mockRefreshStatic = vi.fn();
-
 enum TerminalKeys {
   ENTER = '\u000D',
   TAB = '\t',
@@ -119,32 +113,19 @@ vi.mock('../contexts/VimModeContext.js', async () => {
   const actual = await vi.importActual('../contexts/VimModeContext.js');
   return {
     ...actual,
+    useVimModeState: () => ({
+      vimEnabled: false,
+      vimMode: 'INSERT' as const,
+    }),
+    useVimModeActions: () => ({
+      toggleVimEnabled: mockToggleVimEnabled,
+      setVimMode: mockSetVimMode,
+    }),
     useVimMode: () => ({
       vimEnabled: false,
       vimMode: 'INSERT' as const,
       toggleVimEnabled: mockToggleVimEnabled,
       setVimMode: mockSetVimMode,
-    }),
-  };
-});
-
-vi.mock('../contexts/CompactModeContext.js', async () => {
-  const actual = await vi.importActual('../contexts/CompactModeContext.js');
-  return {
-    ...actual,
-    useCompactMode: () => ({
-      compactMode: false,
-      setCompactMode: mockSetCompactMode,
-    }),
-  };
-});
-
-vi.mock('../contexts/UIActionsContext.js', async () => {
-  const actual = await vi.importActual('../contexts/UIActionsContext.js');
-  return {
-    ...actual,
-    useUIActions: () => ({
-      refreshStatic: mockRefreshStatic,
     }),
   };
 });
@@ -162,6 +143,7 @@ vi.mock('../../utils/languageUtils.js', async () => {
   return {
     ...actual,
     updateOutputLanguageFile: vi.fn(),
+    writeOutputLanguageAndRegisterPath: vi.fn(),
   };
 });
 
@@ -369,7 +351,7 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
-    it('wraps around when at the top of the list', async () => {
+    it('moves focus up through the search box to the tab bar', async () => {
       const settings = createMockSettings();
       const onSelect = vi.fn();
 
@@ -379,21 +361,29 @@ describe('SettingsDialog', () => {
         </KeypressProvider>,
       );
 
-      // Try to go up from first item
+      const firstKey = getDialogSettingKeys()[0];
+      const firstLabel = firstKey
+        ? (getSettingDefinition(firstKey)?.label ?? firstKey)
+        : '';
+
+      // The first item is highlighted while the list is focused.
+      expect(lastFrame()).toContain(`● ${firstLabel}`);
+
+      // ↑ from the first item moves focus to the search box: the list highlight
+      // disappears and the tab bar is not yet focused.
       act(() => {
         stdin.write(TerminalKeys.UP_ARROW);
       });
-
       await wait();
+      expect(lastFrame()).not.toContain(`● ${firstLabel}`);
+      expect(lastFrame()).not.toContain('↓ to return');
 
-      const lastKey = getDialogSettingKeys().at(-1);
-      expect(lastKey).toBeDefined();
-
-      const lastLabel = lastKey
-        ? (getSettingDefinition(lastKey)?.label ?? lastKey)
-        : '';
-
-      expect(lastFrame()).toContain(`● ${lastLabel}`);
+      // ↑ again moves up to the tab bar (which shows its focused hint).
+      act(() => {
+        stdin.write(TerminalKeys.UP_ARROW);
+      });
+      await wait();
+      expect(lastFrame()).toContain('↓ to return');
 
       unmount();
     });
@@ -463,10 +453,8 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
-    it('should sync compact mode with CompactModeContext when toggled', async () => {
+    it('should not save number settings below their configured minimum', async () => {
       vi.mocked(saveModifiedSettings).mockClear();
-      mockSetCompactMode.mockClear();
-      mockRefreshStatic.mockClear();
 
       const settings = createMockSettings();
       const onSelect = vi.fn();
@@ -479,38 +467,38 @@ describe('SettingsDialog', () => {
       const { stdin, unmount, lastFrame } = render(component);
 
       await waitFor(() => {
-        expect(lastFrame()).toContain('● Tool Approval Mode');
+        expect(lastFrame()).toContain('Settings');
       });
 
-      const dialogKeys = getDialogSettingKeys();
-      const targetIndex = dialogKeys.indexOf('ui.compactMode');
-      expect(targetIndex).toBeGreaterThan(0);
+      const cleanupPeriodIndex = getDialogSettingKeys().indexOf(
+        'general.cleanupPeriodDays',
+      );
+      expect(cleanupPeriodIndex).toBeGreaterThanOrEqual(0);
 
-      // Navigate to Compact Mode setting
-      for (let i = 0; i < targetIndex; i++) {
+      const press = async (key: string) => {
         act(() => {
-          stdin.write(TerminalKeys.DOWN_ARROW as string);
+          stdin.write(key);
         });
         await wait();
+      };
+
+      for (let i = 0; i < cleanupPeriodIndex; i++) {
+        await press(TerminalKeys.DOWN_ARROW as string);
       }
-      await waitFor(() => {
-        expect(lastFrame()).toContain('● Compact Mode');
-      });
 
-      // Toggle the setting
-      act(() => {
-        stdin.write(TerminalKeys.ENTER as string);
-      });
-      await waitFor(() => {
-        expect(
-          vi.mocked(saveModifiedSettings).mock.calls.length,
-        ).toBeGreaterThan(0);
-      });
+      await press(TerminalKeys.ENTER as string);
+      await press('-');
+      await press('1');
+      await press(TerminalKeys.ENTER as string);
 
-      // Verify compact mode context was synced
-      expect(mockSetCompactMode).toHaveBeenCalledWith(true);
-      // Verify refreshStatic was called to update rendered history
-      expect(mockRefreshStatic).toHaveBeenCalled();
+      await wait();
+
+      const cleanupPeriodCall = vi
+        .mocked(saveModifiedSettings)
+        .mock.calls.find((call) =>
+          (call[0] as Set<string>).has('general.cleanupPeriodDays'),
+        );
+      expect(cleanupPeriodCall).toBeUndefined();
 
       unmount();
     });
@@ -1355,6 +1343,249 @@ describe('SettingsDialog', () => {
       await wait();
 
       expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+
+      unmount();
+    });
+  });
+
+  describe('Config Tabs and Search', () => {
+    it('renders the tab bar with all three tabs and a search box', () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      const output = lastFrame();
+      for (const tab of ['Settings', 'Status', 'Stats']) {
+        expect(output).toContain(tab);
+      }
+      // The search box is shown with its magnifier glyph and placeholder.
+      expect(output).toContain('⌕');
+      expect(output).toContain('Search settings…');
+
+      unmount();
+    });
+
+    it('filters the settings list as the user types', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      const vimLabel = getSettingDefinition('general.vimMode')?.label ?? '';
+      const themeLabel = getSettingDefinition('ui.theme')?.label ?? '';
+      expect(vimLabel).not.toBe('');
+      expect(themeLabel).not.toBe('');
+
+      // Type "vim" one character at a time into the search box.
+      for (const ch of 'vim') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      const output = lastFrame();
+      // The query is reflected in the search box...
+      expect(output).toContain('⌕ vim');
+      // ...the matching setting stays visible...
+      expect(output).toContain(vimLabel);
+      // ...and a non-matching setting is filtered out.
+      expect(output).not.toContain(themeLabel);
+
+      unmount();
+    });
+
+    it('shows a hint when nothing matches the query', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      for (const ch of 'zzz') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      expect(lastFrame()).toContain('No settings match your search.');
+
+      unmount();
+    });
+
+    it('allows spaces so multi-word queries can be typed', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      for (const ch of 'vim mode') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      // The space is preserved in the query rather than being swallowed.
+      expect(lastFrame()).toContain('⌕ vim mode');
+
+      unmount();
+    });
+
+    it('routes digits into the search box for non-number settings', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      // The first row is a non-number setting; typing digits should filter
+      // rather than be dropped.
+      for (const ch of '8080') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+
+      expect(lastFrame()).toContain('⌕ 8080');
+
+      unmount();
+    });
+
+    it('clears the search query on Escape before closing', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      for (const ch of 'vim') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+      expect(lastFrame()).toContain('⌕ vim');
+
+      // First Escape clears the query without closing the dialog. A lone ESC
+      // is delivered with a small disambiguation delay, so poll for the result.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Search settings…');
+      });
+      expect(onSelect).not.toHaveBeenCalled();
+
+      // Second Escape closes the dialog.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+      });
+
+      unmount();
+    });
+
+    it('clears the query on Escape from the list zone before closing', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      // Type a query (focus moves to the search box), then Down to move focus
+      // into the list zone while keeping the query non-empty.
+      for (const ch of 'vim') {
+        act(() => {
+          stdin.write(ch);
+        });
+        await wait();
+      }
+      expect(lastFrame()).toContain('⌕ vim');
+      act(() => {
+        stdin.write(TerminalKeys.DOWN_ARROW);
+      });
+      await wait();
+
+      // First Escape (now handled by the list-zone path) clears the query
+      // without closing the dialog.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(lastFrame()).toContain('Search settings…');
+      });
+      expect(onSelect).not.toHaveBeenCalled();
+
+      // Second Escape closes the dialog.
+      act(() => {
+        stdin.write(TerminalKeys.ESCAPE);
+      });
+      await waitFor(() => {
+        expect(onSelect).toHaveBeenCalledWith(undefined, 'User');
+      });
+
+      unmount();
+    });
+
+    it('shows the data view when navigating to a non-Settings tab', async () => {
+      const settings = createMockSettings();
+      const onSelect = vi.fn();
+
+      const { stdin, lastFrame, unmount } = render(
+        <KeypressProvider kittyProtocolEnabled={false}>
+          <SettingsDialog settings={settings} onSelect={onSelect} />
+        </KeypressProvider>,
+      );
+
+      // From the list: Up -> search box, Up -> tab bar, Right -> "Status" tab.
+      act(() => {
+        stdin.write(TerminalKeys.UP_ARROW);
+      });
+      await wait();
+      act(() => {
+        stdin.write(TerminalKeys.UP_ARROW);
+      });
+      await wait();
+      act(() => {
+        stdin.write(TerminalKeys.RIGHT_ARROW);
+      });
+      await wait();
+
+      const output = lastFrame();
+      // Leaving the Settings tab hides its search box, and the focused tab bar
+      // shows its own navigation hint.
+      expect(output).not.toContain('Search settings…');
+      expect(output).toContain('↓ to return');
 
       unmount();
     });

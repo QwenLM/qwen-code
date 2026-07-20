@@ -1,0 +1,207 @@
+.panel {
+  position: relative;
+  width: fit-content;
+  max-width: min(100%, 560px);
+  margin: 0 auto;
+  color: var(--muted-foreground);
+  outline: none;
+}
+
+.summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  padding: 8px 18px;
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--background) 92%, transparent);
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 9%, transparent);
+  font-size: 14px;
+  line-height: 1.2;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+}
+
+.progressRing {
+  --todo-progress: 0;
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at center, var(--background) 52%, transparent 54%),
+    conic-gradient(
+      var(--agent-blue-500) calc(var(--todo-progress) * 1turn),
+      color-mix(in srgb, var(--border) 70%, transparent) 0
+    );
+}
+
+.stepText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted-foreground);
+}
+
+.statusSegmentWrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.separator {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 72%, transparent);
+}
+
+.statusSegment,
+.statusSegmentButton {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted-foreground);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.statusSegmentButton {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+}
+
+.statusSegmentButton:hover,
+.statusSegmentButton:focus-visible {
+  color: var(--foreground);
+  outline: none;
+}
+
+.fullText {
+  display: inline;
+}
+
+.compactText {
+  display: none;
+  font-variant-numeric: tabular-nums;
+}
+
+@media (max-width: 599px) {
+  .fullText {
+    display: none;
+  }
+
+  .compactText {
+    display: inline;
+  }
+
+  .summary {
+    padding: 6px 12px;
+  }
+}
+
+.detail {
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  z-index: 30;
+  display: flex;
+  width: min(560px, calc(100vw - 48px));
+  max-height: min(42vh, 360px);
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  overflow-y: auto;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--background) 96%, transparent);
+  box-shadow: 0 18px 42px color-mix(in srgb, #000 13%, transparent);
+  opacity: 0;
+  pointer-events: none;
+  transform: translate(-50%, 6px);
+  transition:
+    opacity 120ms ease,
+    transform 120ms ease;
+  backdrop-filter: blur(10px);
+}
+
+.panel:hover .detail,
+.panel:focus-within .detail {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(-50%, 0);
+}
+
+.item {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted-foreground);
+  font-size: 13px;
+}
+
+.loadingIcon {
+  width: 12px;
+  height: 12px;
+  border: 2px solid color-mix(in srgb, var(--agent-blue-500) 24%, transparent);
+  border-top-color: var(--agent-blue-500);
+  border-radius: 50%;
+  animation: todoPanelSpin 0.8s linear infinite;
+}
+
+.content {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+}
+
+.completed .icon,
+.completed .content {
+  color: var(--muted-foreground);
+}
+
+.completed .content {
+  text-decoration: line-through;
+  text-decoration-color: color-mix(
+    in srgb,
+    var(--muted-foreground) 72%,
+    transparent
+  );
+}
+
+.inProgress .icon,
+.inProgress .content {
+  color: var(--foreground);
+}
+
+.pending .icon,
+.pending .content {
+  color: var(--muted-foreground);
+}
+
+@keyframes todoPanelSpin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
+}

@@ -29,6 +29,7 @@ import { NoColorTheme } from './no-color.js';
 import process from 'node:process';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import {
+  type DetectedTheme,
   detectTerminalTheme,
   detectTerminalThemeAsync,
 } from './detect-terminal-theme.js';
@@ -43,6 +44,16 @@ export interface ThemeDisplay {
 
 export const DEFAULT_THEME: Theme = QwenDark;
 export const AUTO_THEME_NAME = 'auto';
+
+function isPathWithinDirectory(parent: string, child: string): boolean {
+  const relativePath = path.relative(parent, child);
+  return (
+    relativePath === '' ||
+    (!relativePath.startsWith(`..${path.sep}`) &&
+      relativePath !== '..' &&
+      !path.isAbsolute(relativePath))
+  );
+}
 
 class ThemeManager {
   private readonly availableThemes: Theme[];
@@ -146,6 +157,14 @@ class ThemeManager {
   private cachedAutoDetection: 'dark' | 'light' | undefined;
 
   /**
+   * Memoised synchronous detection of the terminal's background brightness,
+   * used when no async OSC 11 result is available (e.g. an explicitly
+   * configured theme, for which the startup probe never runs). Detected at
+   * most once per process.
+   */
+  private terminalBackground: DetectedTheme | undefined;
+
+  /**
    * Detects the terminal's dark/light preference (synchronous) and returns
    * the corresponding Qwen theme.
    * Used by the theme dialog for instant preview. Prefers the cached
@@ -168,6 +187,22 @@ class ThemeManager {
     this.cachedAutoDetection = detected;
     this.activeTheme = detected === 'light' ? QwenLight : QwenDark;
     debugLogger.info(`Auto-detected theme (async): ${this.activeTheme.name}`);
+  }
+
+  /**
+   * Returns the terminal's detected background brightness ('dark' | 'light').
+   *
+   * Prefers the accurate async OSC 11 result captured at startup (for 'auto'
+   * themes); otherwise falls back to a memoised synchronous heuristic
+   * (COLORFGBG → macOS appearance → default dark). Lets UI code decide whether
+   * the active theme's background matches the terminal without re-probing.
+   */
+  getTerminalBackgroundType(): DetectedTheme {
+    if (this.cachedAutoDetection) {
+      return this.cachedAutoDetection;
+    }
+    this.terminalBackground ??= detectTerminalTheme();
+    return this.terminalBackground;
   }
 
   /**
@@ -307,7 +342,7 @@ class ThemeManager {
 
       // 2. Perform security check.
       const homeDir = path.resolve(os.homedir());
-      if (!canonicalPath.startsWith(homeDir)) {
+      if (!isPathWithinDirectory(homeDir, canonicalPath)) {
         debugLogger.warn(
           `Theme file at "${themePath}" is outside your home directory. ` +
             `Only load themes from trusted sources.`,

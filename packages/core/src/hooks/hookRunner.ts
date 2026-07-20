@@ -5,13 +5,14 @@
  */
 
 import { spawn } from 'node:child_process';
-import { HookEventName, HookType } from './types.js';
+import { createHookOutput, HookEventName, HookType } from './types.js';
 import type {
   HookConfig,
   HookInput,
   HookOutput,
   HookExecutionResult,
   PreToolUseInput,
+  UserPromptExpansionInput,
   UserPromptSubmitInput,
   CommandHookConfig,
   FunctionHookContext,
@@ -486,15 +487,28 @@ export class HookRunner {
     if (hookOutput.hookSpecificOutput) {
       switch (eventName) {
         case HookEventName.UserPromptSubmit:
-          if ('additionalContext' in hookOutput.hookSpecificOutput) {
-            // For UserPromptSubmit, we could modify the prompt with additional context
+          {
             const additionalContext =
               hookOutput.hookSpecificOutput['additionalContext'];
             if (
               typeof additionalContext === 'string' &&
+              additionalContext &&
               'prompt' in modifiedInput
             ) {
               (modifiedInput as UserPromptSubmitInput).prompt +=
+                '\n\n' + additionalContext;
+            }
+          }
+          break;
+
+        case HookEventName.UserPromptExpansion:
+          {
+            const additionalContext = createHookOutput(
+              eventName,
+              hookOutput,
+            ).getAdditionalContext();
+            if (additionalContext && 'prompt' in modifiedInput) {
+              (modifiedInput as UserPromptExpansionInput).prompt +=
                 '\n\n' + additionalContext;
             }
           }

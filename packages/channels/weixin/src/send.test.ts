@@ -110,11 +110,9 @@ describe('markdownToPlainText', () => {
     );
   });
 
-  it('converts image syntax (link regex fires before image regex)', () => {
-    // In the current implementation, the link regex fires before the image regex,
-    // so `![alt](url)` becomes `!alt (url)` rather than `[alt]`
+  it('converts image syntax to alt text', () => {
     const result = markdownToPlainText('![alt](https://img.png)');
-    expect(result).toBe('!alt (https://img.png)');
+    expect(result).toBe('[alt]');
   });
 
   it('strips blockquote markers', () => {
@@ -164,9 +162,41 @@ describe('detectImageMime', () => {
     expect(detectImageMime(buf)).toBe('image/gif');
   });
 
-  it('detects WebP magic bytes (RIFF)', () => {
-    const buf = Buffer.from([0x52, 0x49, 0x46, 0x46]);
+  it('detects WebP magic bytes (RIFF....WEBP)', () => {
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x1a,
+      0x00,
+      0x00,
+      0x00, // file size (little-endian)
+      0x57,
+      0x45,
+      0x42,
+      0x50, // "WEBP"
+    ]);
     expect(detectImageMime(buf)).toBe('image/webp');
+  });
+
+  it('does not misidentify a non-WebP RIFF container (e.g. WAV) as WebP', () => {
+    // WAV is also a RIFF container; only bytes 8-11 distinguish it from WebP.
+    const buf = Buffer.from([
+      0x52,
+      0x49,
+      0x46,
+      0x46, // "RIFF"
+      0x24,
+      0x00,
+      0x00,
+      0x00, // file size
+      0x57,
+      0x41,
+      0x56,
+      0x45, // "WAVE", not "WEBP"
+    ]);
+    expect(() => detectImageMime(buf)).toThrow('Unrecognized image format');
   });
 
   it('detects JPEG magic bytes', () => {
@@ -263,6 +293,20 @@ describe('validateImagePath', () => {
 
     expect(() => validateImagePath(imagePath, [workspaceDir])).toThrow(
       'Image path outside allowed directories',
+    );
+  });
+
+  it('reports the allowed directories when a Windows image path is rejected', () => {
+    const imagePath = 'D:\\WorkGroup\\QwenCode\\002\\hello.png';
+    const workspaceDir = 'D:\\OtherProject';
+    mockRealpathSync.mockImplementation((p: string) => {
+      if (p.includes('hello.png')) return imagePath;
+      if (p.includes('OtherProject')) return workspaceDir;
+      return p;
+    });
+
+    expect(() => validateImagePath(imagePath, [workspaceDir])).toThrow(
+      `Image path outside allowed directories: ${imagePath}. Allowed directories: /tmp, ${workspaceDir}`,
     );
   });
 

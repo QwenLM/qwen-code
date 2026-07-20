@@ -23,6 +23,8 @@ export default {
   'Shell mode': 'Mode shell',
   'YOLO mode': 'Mode YOLO',
   'Auto mode': 'Mode auto',
+  'auto_mode.entry_notice':
+    "Mode auto activé.\n   Un classificateur LLM évalue chaque appel d'outil — les actions sûres sont approuvées automatiquement,\n   les actions risquées sont bloquées. Quitter : Shift+Tab ou /approval-mode default.",
   'plan mode': 'mode plan',
   'auto-accept edits': 'acceptation automatique des modifications',
   'Accepting edits': 'Acceptation des modifications',
@@ -107,7 +109,43 @@ export default {
     'Analyse le projet et crée un fichier QWEN.md personnalisé.',
   'List available Qwen Code tools. Usage: /tools [desc]':
     'Lister les outils Qwen Code disponibles. Utilisation : /tools [desc]',
-  'List available skills.': 'Lister les compétences disponibles.',
+  'Open the skills panel (browse, search, toggle, pick).':
+    'Ouvrir le panneau des compétences (parcourir, rechercher, activer, choisir).',
+  'Manage Skills': 'Gérer les compétences',
+  'Skills configuration saved.': 'Configuration des compétences enregistrée.',
+  'Skills configuration saved, but refresh failed: {{error}}. Restart to ensure the new state is applied.':
+    'Configuration des compétences enregistrée, mais le rafraîchissement a échoué : {{error}}. Redémarrez pour garantir l’application du nouvel état.',
+  'Workspace is untrusted; workspace settings are ignored by the merged config. Run /trust first to persist skills changes here, or edit ~/.qwen/settings.json directly to manage skills at user scope.':
+    'L’espace de travail n’est pas approuvé ; les paramètres de l’espace de travail sont ignorés par la configuration fusionnée. Exécutez d’abord /trust, ou modifiez directement ~/.qwen/settings.json pour gérer les compétences au niveau utilisateur.',
+  'SkillManager not available.': 'SkillManager non disponible.',
+  'Loading skills…': 'Chargement des compétences…',
+  'Failed to load skills: {{error}}':
+    'Échec du chargement des compétences : {{error}}',
+  'Failed to save skills configuration: {{error}}':
+    "Échec de l'enregistrement de la configuration des compétences : {{error}}",
+  'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.':
+    'Toutes les compétences disponibles sont désactivées. Modifiez ~/.qwen/settings.json ou .qwen/settings.json (skills.disabled) pour les réactiver.',
+  'Press esc to close.': 'Appuyez sur Échap pour fermer.',
+  '{{count}} skills · ': '{{count}} compétences · ',
+  '{{matched}} / {{total}} skills · ': '{{matched}} / {{total}} compétences · ',
+  'Space toggle · Enter pick (fill input) · Esc save & exit · workspace scope':
+    'Espace bascule · Entrée choisir (remplit l’entrée) · Échap enregistrer & quitter · portée espace de travail',
+  'Search:': 'Recherche :',
+  'type to filter…': 'tapez pour filtrer…',
+  'No skills are currently available.':
+    'Aucune compétence n’est actuellement disponible.',
+  'All available skills are locked at a higher scope (see below).':
+    'Toutes les compétences disponibles sont verrouillées à une portée supérieure (voir ci-dessous).',
+  'No skills match the search.':
+    'Aucune compétence ne correspond à la recherche.',
+  'Locked by higher-scope settings (cannot toggle here):':
+    'Verrouillées par des paramètres de portée supérieure (impossible de basculer ici) :',
+  'higher scope': 'portée supérieure',
+  '  {{name}} {{description}}  [locked: {{scope}}]':
+    '  {{name}} {{description}}  [verrouillée : {{scope}}]',
+  '↑/↓ navigate · backspace edits search':
+    '↑/↓ naviguer · Retour modifie la recherche',
+  Bundled: 'Intégrée',
   'Available Qwen Code CLI tools:': 'Outils Qwen Code CLI disponibles :',
   'No tools available': 'Aucun outil disponible',
   'View or change the approval mode for tool usage':
@@ -192,8 +230,8 @@ export default {
     'ouvrir la documentation complète de Qwen Code dans votre navigateur',
   'Configuration not available.': 'Configuration non disponible.',
   'Connect an LLM provider': 'Se connecter à un fournisseur LLM',
-  'Copy the last result or code snippet to clipboard':
-    'Copier le dernier résultat ou extrait de code dans le presse-papiers',
+  'Copy the last AI response to clipboard (/copy N for Nth-latest)':
+    'Copier la dernière réponse IA dans le presse-papiers (/copy N pour la Nième)',
 
   // ============================================================================
   // Commandes - Agents
@@ -216,6 +254,42 @@ export default {
   'Delete {{name}}': 'Supprimer {{name}}',
   'Unknown Step': 'Étape inconnue',
   'Esc to close': 'Esc pour fermer',
+  Transcript: 'Transcription',
+  'to close': 'pour fermer',
+  'to scroll': 'pour défiler',
+  'Failed to render transcript.': 'Échec du rendu de la transcription.',
+  'Read {{count}} file': 'Lu {{count}} fichier',
+  'Read {{count}} files': 'Lu {{count}} fichiers',
+  'Reading {{count}} file': 'Lecture de {{count}} fichier',
+  'Reading {{count}} files': 'Lecture de {{count}} fichiers',
+  'Edited {{count}} file': 'Modifié {{count}} fichier',
+  'Edited {{count}} files': 'Modifié {{count}} fichiers',
+  'Editing {{count}} file': 'Modification de {{count}} fichier',
+  'Editing {{count}} files': 'Modification de {{count}} fichiers',
+  'Wrote {{count}} file': 'Écrit {{count}} fichier',
+  'Wrote {{count}} files': 'Écrit {{count}} fichiers',
+  'Writing {{count}} file': 'Écriture de {{count}} fichier',
+  'Writing {{count}} files': 'Écriture de {{count}} fichiers',
+  'Searched {{count}} pattern': 'Recherché {{count}} motif',
+  'Searched {{count}} patterns': 'Recherché {{count}} motifs',
+  'Searching {{count}} pattern': 'Recherche de {{count}} motif',
+  'Searching {{count}} patterns': 'Recherche de {{count}} motifs',
+  'Listed {{count}} directory': 'Listé {{count}} répertoire',
+  'Listed {{count}} directories': 'Listé {{count}} répertoires',
+  'Listing {{count}} directory': 'Liste de {{count}} répertoire',
+  'Listing {{count}} directories': 'Liste de {{count}} répertoires',
+  'Ran {{count}} command': 'Exécuté {{count}} commande',
+  'Ran {{count}} commands': 'Exécuté {{count}} commandes',
+  'Running {{count}} command': 'Exécution de {{count}} commande',
+  'Running {{count}} commands': 'Exécution de {{count}} commandes',
+  'Ran {{count}} agent': 'Exécuté {{count}} agent',
+  'Ran {{count}} agents': 'Exécuté {{count}} agents',
+  'Running {{count}} agent': 'Exécution de {{count}} agent',
+  'Running {{count}} agents': 'Exécution de {{count}} agents',
+  'Used {{count}} tool': 'Utilisé {{count}} outil',
+  'Used {{count}} tools': 'Utilisé {{count}} outils',
+  'Using {{count}} tool': 'Utilisation de {{count}} outil',
+  'Using {{count}} tools': 'Utilisation de {{count}} outils',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter pour sélectionner, ↑↓ pour naviguer, Esc pour fermer',
   'Esc to go back': 'Esc pour revenir',
@@ -248,7 +322,7 @@ export default {
   'Open in editor': "Ouvrir dans l'éditeur",
   'Edit tools': 'Modifier les outils',
   'Edit color': 'Modifier la couleur',
-  '❌ Error:': '❌ Erreur :',
+  '✗ Error:': '✗ Erreur :',
   'Are you sure you want to delete agent "{{name}}"?':
     'Êtes-vous sûr de vouloir supprimer l\'agent "{{name}}" ?',
 
@@ -257,13 +331,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Niveau projet (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Niveau utilisateur (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Sous-agent créé avec succès !',
+  '✓ Subagent Created Successfully!': '✓ Sous-agent créé avec succès !',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Le sous-agent "{{name}}" a été enregistré au niveau {{level}}.',
   'Name: ': 'Nom : ',
   'Location: ': 'Emplacement : ',
-  '❌ Error saving subagent:':
-    '❌ Erreur lors de la sauvegarde du sous-agent :',
+  '✗ Error saving subagent:': '✗ Erreur lors de la sauvegarde du sous-agent :',
   'Warnings:': 'Avertissements :',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Le nom "{{name}}" existe déjà au niveau {{level}} - le sous-agent existant sera écrasé',
@@ -450,6 +523,7 @@ export default {
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
+  'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
   Text: 'Texte',
   JSON: 'JSON',
@@ -458,12 +532,59 @@ export default {
   'Auto Edit': 'Édition automatique',
   YOLO: 'YOLO',
   'toggle vim mode on/off': 'activer/désactiver le mode Vim',
-  'check session stats. Usage: /stats [model|tools]':
-    'vérifier les stats de session. Utilisation : /stats [modèle|outils]',
   'Show model-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques au modèle.",
   'Show tool-specific usage statistics.':
     "Afficher les statistiques d'utilisation spécifiques aux outils.",
+  'Show daily token usage statistics.':
+    "Afficher les statistiques quotidiennes d'utilisation des tokens.",
+  'Show monthly token usage statistics.':
+    "Afficher les statistiques mensuelles d'utilisation des tokens.",
+  'Export token usage statistics to CSV or JSON.':
+    "Exporter les statistiques d'utilisation des tokens en CSV ou JSON.",
+  'No usage data.': "Aucune donnée d'utilisation.",
+  '{{label}}: {{tokens}} tokens ({{requests}} requests)':
+    '{{label}} : {{tokens}} tokens ({{requests}} requêtes)',
+  'Daily token usage for {{value}}':
+    'Utilisation quotidienne des tokens pour {{value}}',
+  'Monthly token usage for {{value}}':
+    'Utilisation mensuelle des tokens pour {{value}}',
+  'Total: {{tokens}} tokens': 'Total : {{tokens}} tokens',
+  'Requests: {{requests}}': 'Requêtes : {{requests}}',
+  'Breakdown:': 'Détail :',
+  'Input: {{tokens}}': 'Entrée : {{tokens}}',
+  'Output: {{tokens}}': 'Sortie : {{tokens}}',
+  'Cached (included in Input): {{tokens}}':
+    'Cache (inclus dans l’entrée) : {{tokens}}',
+  'Thoughts: {{tokens}}': 'Raisonnement : {{tokens}}',
+  'By model:': 'Par modèle :',
+  'By auth type:': "Par type d'authentification :",
+  'By model/auth type:': "Par modèle/type d'authentification :",
+  'By source:': 'Par source :',
+  'Failed to load token usage stats: {{error}}':
+    "Échec du chargement des statistiques d'utilisation des tokens : {{error}}",
+  'Expected --format csv or --format json.':
+    '--format csv ou --format json attendu.',
+  'Expected a file path after --output.':
+    'Un chemin de fichier est attendu après --output.',
+  'Unexpected argument: {{argument}}': 'Argument inattendu : {{argument}}',
+  'Usage: /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]':
+    'Utilisation : /stats export <daily|monthly> [YYYY-MM-DD|YYYY-MM] [--format csv|json] [--output path]',
+  'Token usage export path must be within the project working directory.':
+    "Le chemin d'export de l'utilisation des tokens doit rester dans le répertoire de travail du projet.",
+  'Export target does not exist: {{path}}':
+    "La cible d'export n'existe pas : {{path}}",
+  'Cannot resolve export path within the working directory.':
+    "Impossible de résoudre le chemin d'export dans le répertoire de travail.",
+  'Could not create a temporary export file.':
+    "Impossible de créer un fichier d'export temporaire.",
+  'Token usage exported to {{format}}: {{path}}':
+    'Utilisation des tokens exportée en {{format}} : {{path}}',
+  'Failed to export token usage stats: {{error}}':
+    "Échec de l'export des statistiques d'utilisation des tokens : {{error}}",
+  'Unclosed quote in arguments.': 'Guillemet non fermé dans les arguments.',
+  'Note: generation timing (TTFT/TPS) belongs to generation metrics.':
+    'Remarque : les temps de génération (TTFT/TPS) relèvent des métriques de génération.',
   'exit the cli': 'quitter le CLI',
   'Manage workspace directories':
     "Gérer les répertoires de l'espace de travail",
@@ -541,7 +662,7 @@ export default {
     "Veuillez inclure le nom de l'extension à désinstaller comme argument positionnel.",
   'Enables an extension.': 'Active une extension.',
   'The name of the extension to enable.': "Le nom de l'extension à activer.",
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     "La portée dans laquelle activer l'extension. Si non définie, sera activée dans toutes les portées.",
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" activée avec succès pour la portée "{{scope}}".',
@@ -552,7 +673,7 @@ export default {
   'Disables an extension.': 'Désactive une extension.',
   'The name of the extension to disable.':
     "Le nom de l'extension à désactiver.",
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     "La portée dans laquelle désactiver l'extension.",
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" désactivée avec succès pour la portée "{{scope}}".',
@@ -722,6 +843,8 @@ export default {
   'After tool execution fails': "Après l'échec de l'exécution de l'outil",
   'When notifications are sent': 'Quand des notifications sont envoyées',
   'When the user submits a prompt': "Quand l'utilisateur soumet une invite",
+  'When a slash command expands into a prompt':
+    'Quand une commande slash se développe en invite',
   'When a new session is started': 'Quand une nouvelle session est démarrée',
   'Right before Qwen Code concludes its response':
     'Juste avant que Qwen Code conclue sa réponse',
@@ -746,6 +869,8 @@ export default {
     "L'entrée de la commande est du JSON avec le message et le type de notification.",
   'Input to command is JSON with original user prompt text.':
     "L'entrée de la commande est du JSON avec le texte d'invite original de l'utilisateur.",
+  'Input to command is JSON with command_name, command_args, and expanded prompt text.':
+    "L'entrée de la commande est du JSON avec command_name, command_args et le texte d'invite développé.",
   'Input to command is JSON with session start source.':
     "L'entrée de la commande est du JSON avec la source de démarrage de session.",
   'Input to command is JSON with session end reason.':
@@ -773,6 +898,8 @@ export default {
     "afficher stderr à l'utilisateur uniquement mais continuer l'appel d'outil",
   'block processing, erase original prompt, and show stderr to user only':
     "bloquer le traitement, effacer l'invite originale et afficher stderr à l'utilisateur uniquement",
+  'block expanded prompt submission and show stderr to user only':
+    "bloquer l'envoi de l'invite développée et afficher stderr uniquement à l'utilisateur",
   'stdout shown to Qwen': 'stdout affiché à Qwen',
   'show stderr to user only (blocking errors ignored)':
     "afficher stderr à l'utilisateur uniquement (erreurs bloquantes ignorées)",
@@ -818,6 +945,21 @@ export default {
   'Resume a previous session': 'Reprendre une session précédente',
   'Fork the current conversation into a new session':
     'Créer une branche de la conversation actuelle dans une nouvelle session',
+  'Spawn a background agent that inherits the full conversation':
+    'Lancer un agent en arrière-plan qui hérite de toute la conversation',
+  'Please provide a directive. Usage: /fork <directive>':
+    'Veuillez fournir une directive. Utilisation : /fork <directive>',
+  'Cannot fork while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
+    "Impossible de créer un fork pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
+  'Cannot fork before the first conversation turn.':
+    'Impossible de créer un fork avant le premier tour de conversation.',
+  'The agent tool is unavailable; cannot fork.':
+    "L'outil agent est indisponible ; impossible de créer un fork.",
+  'Failed to launch fork: {{error}}': 'Échec du lancement du fork : {{error}}',
+  'User launched a background fork via /fork: {{directive}}':
+    "L'utilisateur a lancé un fork en arrière-plan via /fork : {{directive}}",
+  'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.':
+    "Fork lancé dans un agent en arrière-plan. Il hérite de cette conversation et s'exécute sans bloquer — suivez-le dans le panneau des tâches en arrière-plan ; il fera un rapport une fois terminé.",
   'Cannot branch while a response or tool call is in progress. Wait for it to finish or resolve the pending tool call.':
     "Impossible de créer une branche pendant qu'une réponse ou un appel d'outil est en cours. Attendez la fin ou traitez l'appel d'outil en attente.",
   'No conversation to branch.':
@@ -1120,9 +1262,9 @@ export default {
     'Choisissez comment poursuivre votre session :',
   'Start new chat session': 'Démarrer une nouvelle session de chat',
   'Continue previous conversation': 'Continuer la conversation précédente',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Bon retour ! (Dernière mise à jour : {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Objectif global :',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Bon retour ! (Dernière mise à jour : {{timeAgo}})',
+  'Overall Goal:': 'Objectif global :',
   'Connect a Provider': 'Connecter un fournisseur',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Vous devez connecter un fournisseur pour continuer. Appuyez à nouveau sur Ctrl+C pour quitter.',
@@ -1185,6 +1327,12 @@ export default {
   // Boîtes de dialogue - Modèle
   // ============================================================================
   'Select Model': 'Sélectionner un modèle',
+  ' (this project)': ' (ce projet)',
+  ' (global)': ' (global)',
+  'Persist the model selection to the project settings (workspace scope)':
+    'Persister la sélection du modèle dans les paramètres du projet (étendue workspace)',
+  'Persist the model selection to the user settings (global scope)':
+    'Persister la sélection du modèle dans les paramètres utilisateur (étendue globale)',
   'API Key': 'API Key',
   '(default)': '(par défaut)',
   '(not set)': '(non défini)',
@@ -1290,8 +1438,8 @@ export default {
   // Statut MCP
   // ============================================================================
   'No MCP servers configured.': 'Aucun MCP servers configuré.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ Les MCP servers démarrent ({{count}} en initialisation)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ Les MCP servers démarrent ({{count}} en initialisation)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Remarque : Le premier démarrage peut prendre plus de temps. La disponibilité des outils se mettra à jour automatiquement.',
   'Configured MCP servers:': 'MCP servers configurés :',
@@ -1313,8 +1461,9 @@ export default {
   'Tools:': 'Outils :',
   'Parameters:': 'Paramètres :',
   'Prompts:': 'Invites :',
+  'Resources:': 'Ressources :',
   Blocked: 'Bloqué',
-  '💡 Tips:': '💡 Conseils :',
+  '★ Tips:': '★ Conseils :',
   Use: 'Utilisez',
   'to show server and tool descriptions':
     'pour afficher les descriptions des serveurs et des outils',
@@ -1407,6 +1556,21 @@ export default {
     "Aucun appel d'outil n'a été effectué dans cette session.",
   'Session start time is unavailable, cannot calculate stats.':
     "L'heure de début de session est indisponible, impossible de calculer les stats.",
+  Activity: 'Activité',
+  Efficiency: 'Efficacité',
+  Today: "Aujourd'hui",
+  'Token Trend': 'Tendance Tokens',
+  'Cache Hit Rate': 'Taux de cache',
+  'Tool Success': 'Succès outils',
+  'Tool Leaderboard': 'Classement outils',
+  Time: 'Temps',
+  Success: 'Succès',
+  Cache: 'Cache',
+  Latency: 'Latence',
+  'Code Impact': 'Impact code',
+  net: 'net',
+  streak: 'série',
+  best: 'record',
 
   // ============================================================================
   // Migration de format de commande
@@ -1417,6 +1581,30 @@ export default {
   'Found {{count}} TOML command files:':
     'Trouvé {{count}} fichiers de commande TOML :',
   'Current tasks': 'Tâches actuelles',
+  'Background tasks': 'Tâches en arrière-plan',
+  'No tasks currently running': 'Aucune tâche en cours',
+  'No entry to show.': 'Aucune entrée à afficher.',
+  'needs approval': 'nécessite une approbation',
+  'rejected — edit config to re-approve':
+    'rejeté — modifiez la configuration pour réapprouver',
+  'Background agent needs approval':
+    "L'agent en arrière-plan nécessite une approbation",
+  'Approve or deny the request above':
+    'Approuvez ou refusez la demande ci-dessus',
+  Running: 'En cours',
+  Paused: 'En pause',
+  Completed: 'Terminé',
+  Failed: 'Échec',
+  Stopped: 'Arrêté',
+  Shell: 'Shell',
+  Monitor: 'Moniteur',
+  Command: 'Commande',
+  Dream: 'Dream',
+  '[dream] memory consolidation': '[dream] consolidation de la mémoire',
+  '[dream] memory consolidation (reviewing {{count}} session)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} session)',
+  '[dream] memory consolidation (reviewing {{count}} sessions)':
+    '[dream] consolidation de la mémoire (analyse de {{count}} sessions)',
   '... and {{count}} more': '... et {{count}} de plus',
   'The TOML format is deprecated. Would you like to migrate them to Markdown format?':
     'Le format TOML est obsolète. Souhaitez-vous les migrer vers le format Markdown ?',
@@ -1724,8 +1912,8 @@ export default {
   'Select authentication method:':
     "Sélectionner la méthode d'authentification :",
   '\n=== Authentication Status ===\n': "\n=== Statut d'authentification ===\n",
-  '⚠️  No authentication method configured.\n':
-    "⚠️  Aucune méthode d'authentification configurée.\n",
+  '⚠  No authentication method configured.\n':
+    "⚠  Aucune méthode d'authentification configurée.\n",
   'Run one of the following commands to get started:\n':
     "Exécutez l'une des commandes suivantes pour commencer :\n",
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1748,8 +1936,8 @@ export default {
   '  Current Model: {{model}}': '  Modèle actuel : {{model}}',
   '  Config Version: {{version}}': '  Version de config : {{version}}',
   '  Status: API key configured\n': '  Statut : API Key configurée\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    "⚠️  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    "⚠  Méthode d'authentification : Alibaba Cloud Coding Plan (Incomplète)",
   '  Issue: API key not found in environment or settings\n':
     "  Problème : API Key introuvable dans l'environnement ou les paramètres\n",
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1764,12 +1952,10 @@ export default {
     'Mode brut non disponible. Veuillez exécuter dans un terminal interactif.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Utilisez les flèches ↑ ↓ pour naviguer, Enter pour sélectionner, Ctrl+C pour quitter)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Masquer la sortie des outils et la réflexion pour une vue plus nette (basculer avec Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Appuyez sur Ctrl+O pour afficher la sortie complète des outils',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    "Définit l'intensité de réflexion des modèles compatibles avec le raisonnement ({{tiers}}) ; mappée et limitée selon le fournisseur.",
   'Exited plan mode. Previous approval mode restored.':
     "Mode plan quitté. Mode d'approbation précédent restauré.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
@@ -1853,7 +2039,7 @@ export default {
     'Afficher le détail de l’utilisation du contexte par élément.',
 
   // === Missing key backfill ===
-  'to toggle compact mode': 'basculer le mode compact',
+  'to view transcript': 'pour voir la transcription',
   'The name of the extension to update.':
     "Le nom de l'extension à mettre à jour.",
   'Session (temporary)': 'Session (temporaire)',
@@ -1879,8 +2065,6 @@ export default {
     "Demande de copie envoyée au terminal. Si le collage est vide, copiez manuellement l'URL ci-dessus.",
   'Cannot write to terminal — copy the URL above manually.':
     "Impossible d'écrire dans le terminal — copiez manuellement l'URL ci-dessus.",
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Appuyez sur Ctrl+O pour basculer le mode compact — masquer la sortie des outils et la réflexion pour une vue plus nette.',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key invalide. Les Coding Plan API Keys commencent par "sk-sp-". Veuillez vérifier.',
   'Lock release warning': 'Avertissement de libération du verrou',
@@ -1893,10 +2077,159 @@ export default {
   '% context used': '% de contexte utilisé',
   'Context exceeds limit! Use /compress or /clear to reduce.':
     'Le contexte dépasse la limite ! Utilisez /compress ou /clear pour le réduire.',
+  // === History collapse/expand commands ===
+  'Set history to collapse by default when resuming a session':
+    'Set history to collapse by default when resuming a session',
+  'Set history to expand by default when resuming a session':
+    'Set history to expand by default when resuming a session',
+  'Expand the currently collapsed history transcript':
+    'Expand the currently collapsed history transcript',
+  'Control history display preferences and visibility':
+    'Control history display preferences and visibility',
+  'History will be collapsed by default for future resumed sessions.':
+    'History will be collapsed by default for future resumed sessions.',
+  'History will be expanded by default for future resumed sessions.':
+    'History will be expanded by default for future resumed sessions.',
+  'History is already expanded in this session.':
+    'History is already expanded in this session.',
+  'Usage: /history collapse-on-resume|expand-on-resume|expand-now':
+    'Usage: /history collapse-on-resume|expand-on-resume|expand-now',
+  'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
+    'Historique réduit : {{n}} messages masqués. Utilisez /history expand-now pour afficher.',
+
   // === Same-as-English optimization ===
   Auth: 'Authentification',
   Auto: 'Automatique',
   Tokens: 'Jetons',
   tokens: 'jetons',
   '中国 (China)': 'Chine',
+
+  // Stats Dashboard — Category 2
+  'Activity Heatmap': "Carte d'activité",
+  Less: 'Moins',
+  More: 'Plus',
+  Sessions: 'Sessions',
+  Duration: 'Durée',
+  Projects: 'Projets',
+  'Loading stats...': 'Chargement des stats...',
+  '(no data)': '(aucune donnée)',
+  d: 'j',
+  h: 'h',
+  m: 'm',
+  Input: 'Entrée',
+  Models: 'Modèles',
+  'All time': 'Tout le temps',
+  'Last 7 days': '7 derniers jours',
+  'Last 30 days': '30 derniers jours',
+  'Show usage statistics dashboard.':
+    "Afficher le tableau de bord des statistiques d'utilisation.",
+
+  // Stats Dashboard — keyboard hints (not translated)
+  'tab \xB7 esc': 'tab \xB7 esc',
+  'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc':
+    'tab \xB7 r dates \xB7 \u2190\u2192 month \xB7 esc',
+  'tab \xB7 r dates \xB7 esc': 'tab \xB7 r dates \xB7 esc',
+
+  // Stats Dashboard — missing labels
+  'API Requests': 'Requêtes API',
+  'Tool Calls': "Appels d'outils",
+  'Success rate': 'Taux de réussite',
+  'Code Changes': 'Modifications du code',
+  Tool: 'Outil',
+  reqs: 'req.',
+  in: 'ent.',
+  out: 'sort.',
+  'In/Out': 'Ent/Sort',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Vérifier les mises à jour de Qwen Code et installer si disponible',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Mise à jour de Qwen Code disponible ! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Une nouvelle version de Qwen Code est disponible ! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} est à jour !',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Échec de la vérification des mises à jour. Vérifiez votre réseau ou la configuration du registre.',
+  'Unable to check for updates: {{reason}}':
+    'Impossible de vérifier les mises à jour : {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Mise à jour réussie ! La nouvelle version sera utilisée lors de la prochaine exécution.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Mise à jour téléchargée. Elle sera appliquée après avoir quitté cette session.',
+  'Update failed: {{error}}': 'Échec de la mise à jour : {{error}}',
+  'Downloading update...': 'Téléchargement de la mise à jour...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Mise à jour réussie ! Redémarrez Qwen Code pour utiliser la nouvelle version. Changer de fournisseur de modèle avant le redémarrage peut ne pas fonctionner correctement.',
+  'Automatic update failed. Please try updating manually.':
+    'La mise à jour automatique a échoué. Essayez de mettre à jour manuellement.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Échec de la mise à jour automatique : {{error}}. Relancez le programme d’installation pour mettre à jour manuellement.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Exécution depuis un clone Git local. Veuillez mettre à jour avec "git pull".',
+  'Running via npx, update not applicable.':
+    'Exécution via npx, mise à jour non applicable.',
+  'Running via pnpx, update not applicable.':
+    'Exécution via pnpx, mise à jour non applicable.',
+  'Running via bunx, update not applicable.':
+    'Exécution via bunx, mise à jour non applicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Installé via Homebrew. Veuillez mettre à jour avec "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Installé localement. Veuillez mettre à jour via le package.json de votre projet.',
+  'Update requires sudo. Please run:':
+    'La mise à jour nécessite sudo. Veuillez exécuter :',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Installation autonome détectée. Tentative de mise à jour automatique...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Installation autonome détectée. Veuillez relancer l’installateur autonome pour mettre à jour :',
+  'Run the following to update:':
+    'Exécutez la commande suivante pour mettre à jour :',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Impossible de mettre à jour automatiquement cette installation autonome. Veuillez réinstaller depuis :',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Mise à jour manuelle requise. Veuillez réinstaller Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Cette session utilise l’image de bac à sable personnalisée {{image}}. Mettez à jour l’image et redémarrez Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Mettez à jour Qwen Code sur l’hôte, puis redémarrez le bac à sable.',
+  'The update will be installed after you exit this session.':
+    'La mise à jour sera installée après la fermeture de cette session.',
+  'Run /update to install the update on the host.':
+    'Exécutez /update pour installer la mise à jour sur l’hôte.',
+  'Run /update to install the update.':
+    'Exécutez /update pour installer la mise à jour.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis démarrez une nouvelle session pour reprendre l'enregistrement. Consultez le journal de débogage pour plus de détails.",
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    "L'enregistrement de la session s'est arrêté après un échec d'écriture. Les nouveaux messages de la session concernée ne seront pas enregistrés. Vérifiez l'espace disque et les autorisations, puis exécutez `/clear` pour démarrer une nouvelle session enregistrée. Consultez le journal de débogage pour plus de détails.",
 };

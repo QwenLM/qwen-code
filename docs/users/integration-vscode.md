@@ -18,7 +18,7 @@
 
 ### Requirements
 
-- VS Code 1.85.0 or higher
+- VS Code 1.96.0 or higher
 
 ### Installation
 
@@ -28,7 +28,7 @@ Download and install the extension from the [Visual Studio Code Extension Market
 
 ### Extension not installing
 
-- Ensure you have VS Code 1.85.0 or higher
+- Ensure you have VS Code 1.96.0 or higher
 - Check that VS Code has permission to install extensions
 - Try installing directly from the Marketplace website
 

@@ -7,9 +7,11 @@
 import {
   ExtensionManager,
   redactUrlCredentials,
+  getExtensionDisplayName,
+  getExtensionDescription,
   type Extension,
 } from '@qwen-code/qwen-code-core';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, SettingScope } from '../../config/settings.js';
 import {
   requestConsentOrFail,
   requestConsentNonInteractive,
@@ -18,21 +20,53 @@ import {
 import { isWorkspaceTrusted } from '../../config/trustedFolders.js';
 import * as os from 'node:os';
 import chalk from 'chalk';
-import { t } from '../../i18n/index.js';
+import stripAnsi from 'strip-ansi';
+import { t, getCurrentLanguage } from '../../i18n/index.js';
 
 export async function getExtensionManager(): Promise<ExtensionManager> {
   const workspaceDir = process.cwd();
   const extensionManager = new ExtensionManager({
     workspaceDir,
+    locale: getCurrentLanguage(),
     requestConsent: requestConsentOrFail.bind(
       null,
       requestConsentNonInteractive,
     ),
     requestChoicePlugin: requestChoicePluginNonInteractive,
-    isWorkspaceTrusted: !!isWorkspaceTrusted(loadSettings(workspaceDir).merged),
+    isWorkspaceTrusted:
+      isWorkspaceTrusted(loadSettings(workspaceDir).merged).isTrusted ?? true,
   });
   await extensionManager.refreshCache();
   return extensionManager;
+}
+
+const EXTENSION_COMMAND_SCOPES = [SettingScope.User, SettingScope.Workspace];
+
+function extensionCommandScopesList(): string {
+  return EXTENSION_COMMAND_SCOPES.map((s) => s.toLowerCase()).join(', ');
+}
+
+export function resolveExtensionCommandScope(
+  scope: string | undefined,
+): SettingScope {
+  if (!scope) {
+    return SettingScope.User;
+  }
+
+  const normalized = scope.toLowerCase();
+  const matched = EXTENSION_COMMAND_SCOPES.find(
+    (candidate) => candidate.toLowerCase() === normalized,
+  );
+  if (matched) {
+    return matched;
+  }
+
+  throw new Error(
+    t('Invalid scope: {{scope}}. Please use one of {{scopes}}.', {
+      scope,
+      scopes: extensionCommandScopesList(),
+    }),
+  );
 }
 
 export function extensionToOutputString(
@@ -52,7 +86,13 @@ export function extensionToOutputString(
   );
 
   const status = workspaceEnabled ? chalk.green('✓') : chalk.red('✗');
-  let output = `${inline ? '' : status} ${extension.config.name} (${extension.config.version})`;
+  const locale = getCurrentLanguage();
+  const displayLabel = getExtensionDisplayName(extension, locale);
+  let output = `${inline ? '' : status} ${displayLabel} (${extension.config.version})`;
+  const desc = getExtensionDescription(extension, locale);
+  if (desc) {
+    output += `\n ${t('Description:')} ${stripAnsi(desc)}`;
+  }
   output += `\n ${t('Path:')} ${extension.path}`;
   if (extension.installMetadata) {
     output += `\n ${t('Source:')} ${redactUrlCredentials(extension.installMetadata.source)} (${t('Type:')} ${extension.installMetadata.type})`;

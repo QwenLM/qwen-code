@@ -11,6 +11,7 @@ import { SchemaValidator } from '../utils/schemaValidator.js';
 import { type AgentStatsSummary } from '../agents/runtime/agent-statistics.js';
 import type { AnsiOutput } from '../utils/terminalSerializer.js';
 import type { PermissionDecision } from '../permissions/types.js';
+import type { VisionBridgeNoticeDisplay } from '../services/visionBridge/vision-bridge-service.js';
 
 /**
  * Represents a validated and ready-to-execute tool call.
@@ -24,6 +25,9 @@ export interface ToolInvocation<
    * The validated parameters for this specific invocation.
    */
   params: TParams;
+
+  /** Historical names accepted only when evaluating persisted permissions. */
+  readonly permissionAliases?: readonly string[];
 
   /**
    * Gets a pre-execution description of the tool operation.
@@ -50,6 +54,13 @@ export interface ToolInvocation<
    * overridden by PermissionManager rules at L4.
    */
   getDefaultPermission(): Promise<PermissionDecision>;
+
+  /**
+   * Whether this invocation must be approved through an explicit host/user
+   * interaction. Permission rules and automatic approval modes cannot satisfy
+   * this requirement.
+   */
+  requiresUserInteraction?(): boolean;
 
   /**
    * Constructs the confirmation dialog details for this invocation.
@@ -98,6 +109,10 @@ export abstract class BaseToolInvocation<
    */
   getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('allow');
+  }
+
+  requiresUserInteraction(): boolean {
+    return false;
   }
 
   /**
@@ -231,6 +246,27 @@ export abstract class DeclarativeTool<
       description: this.description,
       parametersJsonSchema: this.parameterSchema,
     };
+  }
+
+  /**
+   * Max model-facing characters for this tool's output before the scheduler
+   * spills it to disk (mirrors Claude Code's per-tool `maxResultSizeChars`).
+   *   - `undefined` → use the global truncation threshold.
+   *   - `Infinity`  → self-managed (the tool does its own size control, e.g.
+   *     ReadFile's line-based paging), exempt from scheduler char truncation.
+   * Override in subclasses to opt into a per-tool budget.
+   */
+  get maxOutputChars(): number | undefined {
+    return undefined;
+  }
+
+  /**
+   * Direction kept when this tool's oversized output is truncated: `'head'`
+   * (beginning, e.g. shell), `'tail'` (end, e.g. background agents), or
+   * `'both'` (first + last, the default).
+   */
+  get truncateKeep(): 'head' | 'tail' | 'both' {
+    return 'both';
   }
 
   /**
@@ -419,6 +455,36 @@ export function isTool(obj: unknown): obj is AnyDeclarativeTool {
   );
 }
 
+export type ToolArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type ToolArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export interface ToolArtifact {
+  kind?: ToolArtifactKind;
+  storage?: ToolArtifactStorage;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
 export interface ToolResult {
   /**
    * Content meant to be included in LLM history.
@@ -440,6 +506,13 @@ export interface ToolResult {
    * Scheduler-side path activation consumes these in addition to input fields.
    */
   resultFilePaths?: string[];
+
+  /**
+   * Structured artifacts produced by this tool call. Daemon/session surfaces
+   * consume this as metadata only; the producer remains responsible for the
+   * underlying file, URL, or managed resource lifecycle.
+   */
+  artifacts?: ToolArtifact[];
 
   /**
    * If this property is present, the tool call is considered a failure.
@@ -593,14 +666,68 @@ export interface McpToolProgressData {
   message?: string;
 }
 
+/**
+ * Structured heartbeat for silent foreground shell commands, emitted through
+ * the updateOutput channel while no display update has fired for
+ * `tools.shell.heartbeatIntervalMs` (default 10s). Carries liveness stats
+ * only — never command output — and never enters model context. Consumers
+ * that render live output (TUI, subagent views) ignore it; the ACP session
+ * and stream-json adapters forward it so headless gateways can distinguish
+ * "still running" from a dead execution chain.
+ */
+export interface ShellProgressData {
+  type: 'shell_progress';
+  /** Monotonic elapsed time since the process spawned (post-PTY-init), in ms. */
+  elapsedMs: number;
+  /** Monotonic age of the last output chunk, in ms; absent = no output yet. */
+  lastOutputAgeMs?: number;
+  /** Cumulative output stats; only present on the PTY/AnsiOutput path. */
+  totalLines?: number;
+  totalBytes?: number;
+  /** Effective timeout governing this command (including the 120s default); absent when disabled. */
+  timeoutMs?: number;
+}
+
+export function isShellProgressData(
+  display: unknown,
+): display is ShellProgressData {
+  return (
+    typeof display === 'object' &&
+    display !== null &&
+    'type' in display &&
+    (display as ShellProgressData).type === 'shell_progress'
+  );
+}
+
 export type ToolResultDisplay =
   | string
   | FileDiff
   | TodoResultDisplay
   | PlanResultDisplay
   | AgentResultDisplay
+  | TeamResultDisplay
+  | TaskListResultDisplay
   | AnsiOutputDisplay
-  | McpToolProgressData;
+  | McpToolProgressData
+  | VisionBridgeNoticeDisplay
+  | ShellProgressData;
+
+export interface TeamResultDisplay {
+  type: 'team_result';
+  teamName: string;
+  action: 'created' | 'deleted';
+  memberCount?: number;
+}
+
+export interface TaskListResultDisplay {
+  type: 'task_list';
+  tasks: Array<{
+    id: string;
+    subject: string;
+    status: string;
+    owner?: string;
+  }>;
+}
 
 export interface FileDiff {
   fileDiff: string;
@@ -653,8 +780,8 @@ export interface ToolEditConfirmationDetails {
   ) => Promise<void>;
   /**
    * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
-   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
-   * any 'allow' rule the user might add.
+   * Set when an explicit interaction or PM 'ask' rule cannot be replaced by
+   * a persisted allow rule.
    */
   hideAlwaysAllow?: boolean;
   fileName: string;
@@ -663,6 +790,12 @@ export interface ToolEditConfirmationDetails {
   originalContent: string | null;
   newContent: string;
   isModifying?: boolean;
+  /** Hide UI affordances that let the user edit the proposed content. */
+  hideModify?: boolean;
+  /** Skip opening or resolving an IDE diff for this confirmation. */
+  skipIdeDiff?: boolean;
+  /** Informational warnings to render alongside the proposed diff. */
+  warnings?: string[];
 }
 
 export interface ToolConfirmationPayload {
@@ -677,6 +810,15 @@ export interface ToolConfirmationPayload {
   permissionRules?: string[];
   // used to pass user answers from ask_user_question tool
   answers?: Record<string, string>;
+  // Replacement tool args from the host's permission policy
+  // (Anthropic stream-json `can_use_tool` returns this as
+  // `updatedInput` when sanitising a tool call before allowing
+  // it). When present and the outcome is allow, the scheduler
+  // overrides the tool's args with this object before scheduling.
+  // Cross-process callers (teammates) rely on this because they
+  // can't reach into the leader's local WaitingToolCall to mutate
+  // args directly the way the leader's same-process path does.
+  updatedInput?: Record<string, unknown>;
 }
 
 export interface ToolExecuteConfirmationDetails {
@@ -807,6 +949,7 @@ export enum Kind {
   Execute = 'execute',
   Think = 'think',
   Fetch = 'fetch',
+  Agent = 'agent',
   Other = 'other',
 }
 
