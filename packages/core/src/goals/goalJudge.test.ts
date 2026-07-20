@@ -270,6 +270,163 @@ describe('judgeGoal', () => {
     ).resolves.toMatchObject({ kind: 'met', ok: true });
   });
 
+  it('rejects evidence arrays exceeding the item limit', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'a b c d e f g h i' }] }],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'all items produced',
+        evidence: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'produce items',
+        lastAssistantText: 'a b c d e f g h i',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'not_met', ok: false });
+  });
+
+  it('excludes thought parts from evidence sources', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'model',
+          parts: [{ text: 'the answer is 42', thought: true }],
+        },
+      ],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'answer was produced',
+        evidence: ['the answer is 42'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'produce the answer',
+        lastAssistantText: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('filters invalid evidence items instead of rejecting the whole array', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'tests passing' }] }],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'tests passed',
+        evidence: ['tests passing', 'x'.repeat(501)],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'tests pass',
+        lastAssistantText: 'tests passing',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'met', ok: true });
+  });
+
+  it('accepts terminal evidence present in a function call', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'write_file',
+                args: { file_path: 'src/config.yaml', content: 'key: value' },
+              },
+            },
+          ],
+        },
+      ],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'config file was created',
+        evidence: ['src/config.yaml'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'create the config file',
+        lastAssistantText: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'met', ok: true });
+  });
+
+  it('matches evidence against raw strings in tool results', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'read_file',
+                response: { output: 'Error: file "foo.ts" not found' },
+              },
+            },
+          ],
+        } as Content,
+      ],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'the error was reported',
+        evidence: ['Error: file "foo.ts" not found'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'report the missing file',
+        lastAssistantText: '',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'met', ok: true });
+  });
+
+  it('preserves the judge reason when evidence is unverifiable', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'some output' }] }],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'the task is complete',
+        evidence: ['fabricated evidence'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    const verdict = await judgeGoal(config, {
+      condition: 'finish the task',
+      lastAssistantText: 'some output',
+      signal: new AbortController().signal,
+    });
+
+    expect(verdict).toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringContaining('the task is complete'),
+    });
+  });
+
   it('ignores thought parts when parsing the response', async () => {
     const client = makeMockClient({});
     client.generateContent.mockResolvedValue({

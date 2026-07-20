@@ -350,6 +350,16 @@ function safeStringify(value: unknown): string {
   }
 }
 
+function collectResponseStrings(value: unknown): string[] {
+  if (typeof value === 'string') return [value];
+  if (Array.isArray(value)) return value.flatMap(collectResponseStrings);
+  if (value && typeof value === 'object')
+    return Object.values(value as Record<string, unknown>).flatMap(
+      collectResponseStrings,
+    );
+  return [];
+}
+
 function lastModelTextOf(transcript: Content[]): string {
   for (let i = transcript.length - 1; i >= 0; i--) {
     const c = transcript[i];
@@ -372,8 +382,13 @@ function collectEvidenceSources(transcript: Content[]): string[] {
       ) {
         sources.push(part.text);
       }
+      if (part.functionCall) {
+        sources.push(safeStringify(part.functionCall));
+        sources.push(...collectResponseStrings(part.functionCall.args));
+      }
       if (part.functionResponse) {
         sources.push(safeStringify(part.functionResponse.response));
+        sources.push(...collectResponseStrings(part.functionResponse.response));
       }
     }
   }
@@ -437,17 +452,15 @@ function parseEvidence(value: unknown): string[] | undefined {
   if (
     !Array.isArray(value) ||
     value.length === 0 ||
-    value.length > MAX_EVIDENCE_ITEMS ||
-    value.some(
-      (item) =>
-        typeof item !== 'string' ||
-        !item.trim() ||
-        item.trim().length > MAX_EVIDENCE_LEN,
-    )
+    value.length > MAX_EVIDENCE_ITEMS
   ) {
     return undefined;
   }
-  return value.map((item) => item.trim());
+  const valid = value
+    .filter((item): item is string => typeof item === 'string')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0 && s.length <= MAX_EVIDENCE_LEN);
+  return valid.length > 0 ? valid : undefined;
 }
 
 function hasVerifiableEvidence(
@@ -467,19 +480,35 @@ function toJudgeResult(
   evidenceSources: string[],
 ): GoalJudgeOutcome {
   if (result.ok) {
-    return hasVerifiableEvidence(result.evidence, evidenceSources)
-      ? { kind: 'met', ok: true, reason: result.reason }
-      : { kind: 'not_met', ok: false, reason: UNVERIFIED_TERMINAL_REASON };
+    if (hasVerifiableEvidence(result.evidence, evidenceSources)) {
+      return { kind: 'met', ok: true, reason: result.reason };
+    }
+    debugLogger.debug(
+      `Goal judge ok=true evidence unverifiable; judge said: ${result.reason}`,
+    );
+    return {
+      kind: 'not_met',
+      ok: false,
+      reason: `${UNVERIFIED_TERMINAL_REASON} Judge reason: ${result.reason}`,
+    };
   }
   if (result.impossible) {
-    return hasVerifiableEvidence(result.evidence, evidenceSources)
-      ? {
-          kind: 'impossible',
-          ok: false,
-          reason: result.reason,
-          impossible: true,
-        }
-      : { kind: 'not_met', ok: false, reason: UNVERIFIED_TERMINAL_REASON };
+    if (hasVerifiableEvidence(result.evidence, evidenceSources)) {
+      return {
+        kind: 'impossible',
+        ok: false,
+        reason: result.reason,
+        impossible: true,
+      };
+    }
+    debugLogger.debug(
+      `Goal judge impossible evidence unverifiable; judge said: ${result.reason}`,
+    );
+    return {
+      kind: 'not_met',
+      ok: false,
+      reason: `${UNVERIFIED_TERMINAL_REASON} Judge reason: ${result.reason}`,
+    };
   }
   return { kind: 'not_met', ok: false, reason: result.reason };
 }
