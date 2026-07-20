@@ -3124,9 +3124,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               (Array.isArray(status.errors) && status.errors.length > 0))
           ) {
             finishWorkspaceMcpDiscovery(info);
-            if (hasNoChannelWork(info)) {
-              startIdleTimer(info, 'workspace MCP discovery complete');
-            }
           }
           if (status.discoveryState === 'completed') {
             info.workspaceMcpDiscoveryRequested = true;
@@ -3135,7 +3132,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           } else if (Array.isArray(status.errors) && status.errors.length > 0) {
             info.workspaceMcpDiscoveryRequested = false;
           }
-          let authenticationCompleted = false;
           for (const [
             operationId,
             serverName,
@@ -3152,12 +3148,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 info.workspaceMcpAuthenticationTimers.get(operationId);
               if (timer) clearTimeout(timer);
               info.workspaceMcpAuthenticationTimers.delete(operationId);
-              authenticationCompleted = true;
-            }
-          }
-          if (authenticationCompleted) {
-            if (hasNoChannelWork(info)) {
-              startIdleTimer(info, 'workspace MCP authentication complete');
             }
           }
           workspaceMcpStatusCache =
