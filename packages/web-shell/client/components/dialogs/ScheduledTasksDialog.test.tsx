@@ -326,7 +326,7 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
+          displayName: '\u001b[31mAlibaba Cloud\u001b[0m\u202e\u0007',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -374,8 +374,12 @@ describe('ScheduledTasksDialog editing', () => {
     click(findButtonContaining('repo-tools'));
     await flush();
 
-    expect(document.querySelector('[role="textbox"]')?.textContent).toContain(
-      'alibabacloud-compute-suite',
+    const extensionTag = document.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('Alibaba Cloud');
+    expect(extensionTag?.dataset.promptTagSerialized).toBe(
+      '@ext:alibabacloud-compute-suite',
     );
 
     click(findButton('Create'));
@@ -542,7 +546,6 @@ describe('ScheduledTasksDialog editing', () => {
         {
           id: 'ext-1',
           name: 'alibabacloud-compute-suite',
-          displayName: 'Alibaba Cloud',
           description: '',
           version: '1.0.0',
           isActive: true,
@@ -565,6 +568,11 @@ describe('ScheduledTasksDialog editing', () => {
     await flush();
     click(findButtonContaining('alibabacloud-compute-suite'));
     await flush();
+
+    const extensionTag = prompt.querySelector<HTMLElement>(
+      '[data-prompt-tag-serialized="@ext:alibabacloud-compute-suite"]',
+    );
+    expect(extensionTag?.textContent).toBe('alibabacloud-compute-suite');
 
     click(findButton('Create'));
     await flush();
