@@ -37,7 +37,7 @@ function writeInstallation(prefix: string, version: string): void {
   fs.writeFileSync(path.join(packageRoot, 'cli.js'), '');
   fs.writeFileSync(
     path.join(packageRoot, 'cli-entry.js'),
-    `process.stdout.write('${version}\\n');\n`,
+    `if (process.argv.includes('--version')) process.stdout.write('${version}\\n'); else await import('./cli.js');\n`,
   );
 }
 
@@ -78,6 +78,7 @@ describe('managed npm update', () => {
       'install',
       '--prefix',
       update.stagingDir,
+      '--global=false',
       '--no-save',
       '--package-lock=false',
       '@qwen-code/qwen-code@2.0.0',
@@ -133,9 +134,9 @@ describe('managed npm update', () => {
   });
 
   it.each([
-    ['a mismatched package', '2.0.1', undefined, 'did not match'],
-    ['a failed smoke test', '2.0.0', 'broken', 'reported version broken'],
-  ])('rejects %s', async (_name, installed, reported, error) => {
+    ['a mismatched package', '2.0.1', false, 'did not match'],
+    ['a failed smoke test', '2.0.0', true, 'Command failed'],
+  ])('rejects %s', async (_name, installed, brokenBundle, error) => {
     const root = makeTemporaryDirectory();
     const bootstrap = writeBaseInstallation(root);
     const update = prepareManagedNpmUpdate(
@@ -144,16 +145,16 @@ describe('managed npm update', () => {
       path.join(root, 'updates'),
     );
     writeInstallation(update.stagingDir, installed);
-    if (reported) {
+    if (brokenBundle) {
       fs.writeFileSync(
         path.join(
           update.stagingDir,
           'node_modules',
           '@qwen-code',
           'qwen-code',
-          'cli-entry.js',
+          'cli.js',
         ),
-        `process.stdout.write('${reported}\\n');\n`,
+        'this is not valid JavaScript !!!\n',
       );
     }
 

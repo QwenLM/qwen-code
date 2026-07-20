@@ -19,9 +19,10 @@ the exact resolved version under a directory derived from the global launcher:
 ```
 
 The version check runs npm in its global context and the staged install uses an
-empty prefix. Both bypass the current repository's `.npmrc` and inherit the
-same environment and user/global npm configuration, so the version that was
-checked is installed from the same configured registry.
+isolated prefix. The staged command forces npm's project layout, but otherwise
+both bypass the current repository's `.npmrc` and inherit the same environment
+and user/global npm configuration, so the version that was checked is installed
+from the same configured registry.
 
 The launcher resolves `QWEN_HOME` from the same home-scoped `.env` files before
 selecting a version. This keeps the bootstrap path aligned with CLI storage even

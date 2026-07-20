@@ -120,20 +120,15 @@ async function validateInstallation(
   await fsPromises.access(path.join(root, 'cli.js'));
 }
 
-async function smokeTest(prefix: string, version: string): Promise<void> {
+async function smokeTest(prefix: string): Promise<void> {
   const env = { ...process.env };
   delete env['CLI_VERSION'];
   delete env['QWEN_CODE_RELAUNCH_ARGS'];
-  const { stdout } = await execFileAsync(
+  await execFileAsync(
     process.execPath,
-    [path.join(packageDir(prefix), 'cli-entry.js'), '--version'],
+    [path.join(packageDir(prefix), 'cli-entry.js'), '--help'],
     { encoding: 'utf8', env, timeout: 10_000 },
   );
-  if (stdout.trim() !== version) {
-    throw new Error(
-      `Installed package reported version ${stdout.trim() || 'unknown'}`,
-    );
-  }
 }
 
 async function readActiveVersion(
@@ -190,6 +185,7 @@ export function prepareManagedNpmUpdate(
       'install',
       '--prefix',
       stagingDir,
+      '--global=false',
       '--no-save',
       '--package-lock=false',
       `${PACKAGE_NAME}@${version}`,
@@ -214,7 +210,7 @@ export async function activateManagedNpmUpdate(
   }
 
   await validateInstallation(update.stagingDir, version);
-  await smokeTest(update.stagingDir, version);
+  await smokeTest(update.stagingDir);
 
   const activeFile = path.join(update.launcherRoot, 'active.json');
   const release = await lockfile.lock(activeFile, {
