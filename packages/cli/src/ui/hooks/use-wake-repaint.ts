@@ -34,8 +34,8 @@ const WAKE_THRESHOLD_MS = HEARTBEAT_INTERVAL_MS * 2;
  * 2. **SIGCONT** — delivered when a stopped process is continued (`fg` after
  *    `Ctrl+Z`).  The terminal's screen buffer is likewise stale in this case.
  *
- * `repaint` must be referentially stable (e.g. `useCallback`) so an unrelated
- * re-render does not re-arm the listeners.
+ * `repaint` is read through a ref, so it does not need to be referentially
+ * stable — the listeners are armed once on mount and never re-created.
  */
 export function useWakeRepaint(repaint: () => void): void {
   const repaintRef = useRef(repaint);
