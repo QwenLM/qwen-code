@@ -2111,6 +2111,10 @@ jobs:
               exit 0
             fi
             git checkout -B "${BRANCH}" FETCH_HEAD
+            # Create the remote-tracking ref so the verification gate's
+            # `git diff --quiet "origin/${BRANCH}...${BRANCH}"` works for
+            # fork PRs the same way it does for same-repo branches.
+            git update-ref "refs/remotes/origin/${BRANCH}" "${BRANCH}"
             # Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
