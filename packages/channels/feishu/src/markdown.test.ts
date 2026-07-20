@@ -158,7 +158,7 @@ describe('Feishu markdown utilities', () => {
       const chunks = splitChunks(text);
       expect(chunks.length).toBeGreaterThan(1);
       chunks.forEach((chunk) => {
-        expect(chunk.length).toBeLessThanOrEqual(4100);
+        expect(chunk.length).toBeLessThanOrEqual(4000);
       });
     });
 
