@@ -1,0 +1,55 @@
+from __future__ import annotations
+
+from typing import Literal
+
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+
+class RunRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: Literal["QwenLM/qwen-code"] = "QwenLM/qwen-code"
+    qwen_ref: str = Field(
+        min_length=1,
+        max_length=160,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._/@+-]*$",
+    )
+    suite: str = Field(min_length=1, max_length=100)
+    trigger: Literal["release", "workflow_dispatch", "manual"]
+    release_id: int | None = None
+    github_run_id: int | None = None
+    github_run_attempt: int | None = None
+
+    @field_validator("qwen_ref")
+    @classmethod
+    def reject_revision_syntax(cls, value: str) -> str:
+        if ".." in value or "@{" in value:
+            raise ValueError("qwen_ref contains unsupported revision syntax")
+        return value
+
+
+class RunResponse(BaseModel):
+    run_id: str
+    status: str
+    status_url: str
+    deduplicated: bool = False
+
+
+class RunDetail(BaseModel):
+    run_id: str
+    repository: str
+    qwen_ref: str
+    qwen_commit: str | None
+    suite: str
+    dataset: str
+    dataset_revision: str
+    runner_mode: str
+    status: str
+    expected_instances: int
+    completed_instances: int
+    resolved_instances: int
+    error: str | None
+    created_at: str
+    started_at: str | None
+    finished_at: str | None
+    heartbeat_at: str | None

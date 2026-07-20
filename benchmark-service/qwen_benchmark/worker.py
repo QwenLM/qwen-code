@@ -1,0 +1,209 @@
+from __future__ import annotations
+
+import json
+import logging
+import time
+from collections.abc import Callable
+from typing import Any
+
+from .artifacts import Artifacts
+from .config import Settings, Suite, load_suites
+from .publisher import publish_check
+from .runner import AgentError, InfrastructureError, RunResult, SwebenchRunner
+from .store import Store
+
+
+LOGGER = logging.getLogger(__name__)
+
+
+class Worker:
+    def __init__(
+        self,
+        settings: Settings,
+        store: Store,
+        suites: dict[str, Suite],
+        runner_factory: Callable[[Callable[[], None]], SwebenchRunner] | None = None,
+    ):
+        self.settings = settings
+        self.store = store
+        self.suites = suites
+        self.runner_factory = runner_factory or (
+            lambda heartbeat: SwebenchRunner(settings, heartbeat)
+        )
+
+    def run_once(self) -> bool:
+        run = self.store.claim_run()
+        if not run:
+            return False
+        run_id = run["run_id"]
+        suite = self.suites[run["suite"]]
+        artifacts = Artifacts(self.settings.artifact_root, run_id)
+        request = json.loads(run["request_json"])
+        instances = self.store.get_instances(run_id)
+        artifacts.write_json("request.json", request)
+        artifacts.write_json(
+            "manifest.json",
+            {
+                "run_id": run_id,
+                "dataset": suite["dataset"],
+                "dataset_revision": suite["dataset_revision"],
+                "instance_ids": suite["instance_ids"],
+                "runner_mode": suite["runner_mode"],
+            },
+        )
+        self._write_status(artifacts, run_id)
+
+        runner = self.runner_factory(lambda: self.store.heartbeat(run_id))
+        try:
+            qwen_commit = runner.resolve_qwen_commit(run["qwen_ref"])
+            self.store.transition(run_id, "RUNNING_AGENT", qwen_commit=qwen_commit)
+            for instance in instances:
+                self.store.update_instance(run_id, instance["instance_id"], "RUNNING")
+            self._write_status(artifacts, run_id)
+
+            result = runner.run(
+                run_id,
+                qwen_commit,
+                suite,
+                artifacts,
+                on_grading=lambda: self._start_grading(artifacts, run_id),
+            )
+            if result.completed != len(suite["instance_ids"]):
+                raise InfrastructureError(
+                    "grader did not complete every manifest instance"
+                )
+            if result.error_ids:
+                raise InfrastructureError(
+                    f"grader returned error instances: {result.error_ids}"
+                )
+            self._record_result(run_id, suite, result)
+
+            self.store.transition(
+                run_id,
+                "UPLOADING",
+                completed_instances=result.completed,
+                resolved_instances=result.resolved,
+            )
+            summary = self._summary(run_id, result)
+            artifacts.write_json("summary.json", summary)
+            self.store.transition(
+                run_id,
+                "SUCCEEDED",
+                completed_instances=result.completed,
+                resolved_instances=result.resolved,
+            )
+            self._write_status(artifacts, run_id)
+            artifacts.write_checksums()
+            current = self.store.get_run(run_id)
+            if current:
+                try:
+                    publish_check(self.settings, current, summary)
+                except Exception as error:
+                    LOGGER.exception("result publishing failed for %s", run_id)
+                    artifacts.write_json("publisher-error.json", {"error": str(error)})
+        except AgentError as error:
+            LOGGER.exception("agent failed for %s", run_id)
+            for instance in self.store.get_instances(run_id):
+                if instance["status"] == "RUNNING":
+                    self.store.update_instance(
+                        run_id, instance["instance_id"], "AGENT_FAILED", str(error)
+                    )
+            self.store.transition(run_id, "FAILED", error=str(error))
+            artifacts.write_json("error.json", {"class": "agent", "error": str(error)})
+            self._write_status(artifacts, run_id)
+        except InfrastructureError as error:
+            LOGGER.exception("infrastructure failed for %s", run_id)
+            status = self.store.requeue_or_fail(run_id, str(error))
+            if status == "FAILED":
+                for instance in self.store.get_instances(run_id):
+                    if instance["status"] == "RUNNING":
+                        self.store.update_instance(
+                            run_id,
+                            instance["instance_id"],
+                            "INFRA_FAILED",
+                            str(error),
+                        )
+            artifacts.write_json(
+                "error.json", {"class": "infrastructure", "error": str(error)}
+            )
+            self._write_status(artifacts, run_id)
+        except Exception as error:
+            LOGGER.exception("unexpected worker failure for %s", run_id)
+            self.store.transition(run_id, "FAILED", error=str(error))
+            artifacts.write_json(
+                "error.json", {"class": "unexpected", "error": str(error)}
+            )
+            self._write_status(artifacts, run_id)
+        return True
+
+    def _start_grading(self, artifacts: Artifacts, run_id: str) -> None:
+        self.store.transition(run_id, "GRADING")
+        self._write_status(artifacts, run_id)
+
+    def _record_result(self, run_id: str, suite: Suite, result: RunResult) -> None:
+        resolved = set(result.resolved_ids)
+        unresolved = set(result.unresolved_ids)
+        errors = set(result.error_ids)
+        for instance_id in suite["instance_ids"]:
+            if instance_id in resolved:
+                status = "RESOLVED"
+            elif instance_id in unresolved:
+                status = "UNRESOLVED"
+            elif instance_id in errors:
+                status = "INFRA_FAILED"
+            else:
+                status = "INFRA_FAILED"
+            self.store.update_instance(run_id, instance_id, status)
+
+    def _summary(self, run_id: str, result: RunResult) -> dict[str, Any]:
+        run = self.store.get_run(run_id)
+        if not run:
+            raise RuntimeError(f"run disappeared: {run_id}")
+        return {
+            "run_id": run_id,
+            "repository": run["repository"],
+            "qwen_ref": run["qwen_ref"],
+            "qwen_commit": run["qwen_commit"],
+            "suite": run["suite"],
+            "dataset": run["dataset"],
+            "dataset_revision": run["dataset_revision"],
+            "expected_instances": run["expected_instances"],
+            "completed_instances": result.completed,
+            "resolved_instances": result.resolved,
+            "unresolved_instances": len(result.unresolved_ids),
+            "error_instances": len(result.error_ids),
+            "resolved_ids": result.resolved_ids,
+            "unresolved_ids": result.unresolved_ids,
+            "error_ids": result.error_ids,
+        }
+
+    def _write_status(self, artifacts: Artifacts, run_id: str) -> None:
+        run = self.store.get_run(run_id)
+        if run:
+            artifacts.write_json(
+                "status.json",
+                {
+                    "run_id": run_id,
+                    "status": run["status"],
+                    "expected_instances": run["expected_instances"],
+                    "completed_instances": run["completed_instances"],
+                    "resolved_instances": run["resolved_instances"],
+                    "heartbeat_at": run["heartbeat_at"],
+                    "error": run["error"],
+                },
+            )
+
+
+def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s %(message)s",
+    )
+    settings = Settings.from_env()
+    settings.prepare_directories()
+    store = Store(settings.database_path)
+    store.initialize()
+    worker = Worker(settings, store, load_suites())
+    while True:
+        if not worker.run_once():
+            time.sleep(settings.poll_seconds)
