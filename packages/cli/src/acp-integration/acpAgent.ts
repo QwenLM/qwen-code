@@ -109,7 +109,7 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -3398,16 +3398,27 @@ class QwenAgent implements Agent {
       const expectedCapability = this.expectedPrivateParentCapability;
       if (expectedCapability === undefined) {
         this.privateParentState = 'untrusted';
-      } else if (
-        args._meta?.[PRIVATE_PARENT_CAPABILITY_META_KEY] === expectedCapability
-      ) {
-        this.privateParentState = 'trusted';
       } else {
-        this.privateParentState = 'rejected';
-        throw RequestError.invalidParams(
-          undefined,
-          'Invalid private ACP parent capability',
-        );
+        const suppliedCapability =
+          args._meta?.[PRIVATE_PARENT_CAPABILITY_META_KEY];
+        const suppliedBuffer =
+          typeof suppliedCapability === 'string'
+            ? Buffer.from(suppliedCapability)
+            : undefined;
+        const expectedBuffer = Buffer.from(expectedCapability);
+        if (
+          suppliedBuffer !== undefined &&
+          suppliedBuffer.length === expectedBuffer.length &&
+          timingSafeEqual(suppliedBuffer, expectedBuffer)
+        ) {
+          this.privateParentState = 'trusted';
+        } else {
+          this.privateParentState = 'rejected';
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid private ACP parent capability',
+          );
+        }
       }
     }
     this.clientCapabilities = args.clientCapabilities;
