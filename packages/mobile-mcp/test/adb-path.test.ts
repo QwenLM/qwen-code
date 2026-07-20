@@ -57,3 +57,22 @@ test('resolves plain adb (no .exe) under ANDROID_HOME on non-win32', () => {
     });
   });
 });
+
+test('resolves adb.exe on the win32 fallthrough (no ANDROID_HOME, no LOCALAPPDATA)', () => {
+  // With neither ANDROID_HOME nor LOCALAPPDATA set, getAdbPath falls through
+  // to `return exeName`, which must be 'adb.exe' on win32 — guards the bare
+  // executable name the fix produces on that path.
+  const originalLocalAppData = process.env.LOCALAPPDATA;
+  delete process.env.LOCALAPPDATA;
+  try {
+    withAndroidHome('', () => {
+      withPlatform('win32', () => {
+        expect(getAdbPath()).toBe('adb.exe');
+      });
+    });
+  } finally {
+    if (originalLocalAppData !== undefined) {
+      process.env.LOCALAPPDATA = originalLocalAppData;
+    }
+  }
+});
