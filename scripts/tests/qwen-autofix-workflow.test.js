@@ -3173,6 +3173,40 @@ describe('qwen-autofix workflow', () => {
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
+    // Case D: a TIMEOUT is terminal even after an API error was streamed — the
+    // !result.timedOut guard. Uses the spawnSync + QWEN_TIMEOUT_MS override
+    // (a real 50-min timeout can't be waited on): qwen streams the error, then
+    // hangs past the 100 ms budget and is killed.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 503 upstream overloaded]\\n');",
+        'setTimeout(() => process.exit(0), 3000);',
+      ]);
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_TIMEOUT_MS: '100' },
+          timeout: 3000,
+        },
+      );
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
   });
 
   it('flags recoverable API renders without a leading status code, and skips non-recoverable ones', () => {
@@ -3201,6 +3235,21 @@ describe('qwen-autofix workflow', () => {
       ]);
       expect(runAddressReview(dir, stub).status).not.toBe(0);
       expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+    // The Qwen OAuth quota error is emitted WITHOUT the [API Error: …] wrapper
+    // (it returns early before formatting) — the standalone fallback must catch
+    // it and wrap it, or OAuth quota exhaustion strands the PR.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Qwen OAuth quota exceeded (limit: 100/min)\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '[API Error: Qwen OAuth quota exceeded',
+      );
     });
   });
 
