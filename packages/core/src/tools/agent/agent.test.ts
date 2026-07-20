@@ -2680,6 +2680,153 @@ describe('AgentTool', () => {
       );
     });
 
+    it('preserves full curated history when fork_turns is "all"', async () => {
+      // The `all` branch takes a different source path than the numeric
+      // branch: it reads curated history from getHistoryShallow(true) and
+      // passes it through selectForkHistory(history, 'all'), which returns the
+      // full history unchanged. Pin that source + full-history behavior so a
+      // regression in either would be caught.
+      const startup = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
+      };
+      const firstUser = {
+        role: 'user' as const,
+        parts: [{ text: 'first question' }],
+      };
+      const firstModel = {
+        role: 'model' as const,
+        parts: [{ text: 'first answer' }],
+      };
+      const secondUser = {
+        role: 'user' as const,
+        parts: [{ text: 'second question' }],
+      };
+      const secondModel = {
+        role: 'model' as const,
+        parts: [{ text: 'second answer' }],
+      };
+      const getHistoryShallow = vi
+        .fn()
+        .mockReturnValue([
+          startup,
+          firstUser,
+          firstModel,
+          secondUser,
+          secondModel,
+        ]);
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistoryShallow,
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+        fork_turns: 'all',
+      });
+
+      await invocation.execute();
+
+      // `all` reads curated history via getHistoryShallow(true).
+      expect(getHistoryShallow).toHaveBeenCalledWith(true);
+      // The full curated history seeds the fork verbatim (it ends with a model
+      // text message, so no synthetic tool-response/ack is appended).
+      expect(vi.mocked(AgentHeadless.create).mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({
+          initialMessages: [
+            startup,
+            firstUser,
+            firstModel,
+            secondUser,
+            secondModel,
+          ],
+        }),
+      );
+    });
+
+    it('falls back to getHistory(true) when getHistoryForForkWindow is unavailable', async () => {
+      // The numeric branch reads its bounded window via
+      // getHistoryForForkWindow?.() ?? getHistory(true). When the client does
+      // not expose getHistoryForForkWindow, the fallback must still yield a
+      // correct window. Pin the fallback so it can't silently break if
+      // getHistoryForForkWindow is removed or renamed.
+      const startup = {
+        role: 'user' as const,
+        parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
+      };
+      const firstUser = {
+        role: 'user' as const,
+        parts: [{ text: 'first question' }],
+      };
+      const firstModel = {
+        role: 'model' as const,
+        parts: [{ text: 'first answer' }],
+      };
+      const secondUser = {
+        role: 'user' as const,
+        parts: [{ text: 'second question' }],
+      };
+      const secondModel = {
+        role: 'model' as const,
+        parts: [{ text: 'second answer' }],
+      };
+      // getHistory(true) returns curated history that still carries the
+      // startup reminder; selectForkHistory strips it as a synthetic prefix.
+      const getHistory = vi
+        .fn()
+        .mockReturnValue([
+          startup,
+          firstUser,
+          firstModel,
+          secondUser,
+          secondModel,
+        ]);
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        // getHistoryShallow() (no arg) supplies the startup context;
+        // getHistoryForForkWindow is intentionally omitted to exercise the
+        // getHistory(true) fallback for the bounded window.
+        getHistoryShallow: vi
+          .fn()
+          .mockReturnValue([
+            startup,
+            firstUser,
+            firstModel,
+            secondUser,
+            secondModel,
+          ]),
+        getHistory,
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'some task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+        fork_turns: '1',
+      });
+
+      await invocation.execute();
+
+      // Fallback path was taken: the window came from getHistory(true).
+      expect(getHistory).toHaveBeenCalledWith(true);
+      // The bounded window still preserves startup + the latest real turn.
+      expect(vi.mocked(AgentHeadless.create).mock.calls[0]?.[2]).toEqual(
+        expect.objectContaining({
+          initialMessages: [startup, secondUser, secondModel],
+        }),
+      );
+    });
+
     it('caps fork turns and uses bubble approval mode', async () => {
       const mockLoadedSubagent: SubagentConfig = {
         name: 'general-purpose',
