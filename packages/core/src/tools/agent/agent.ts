@@ -758,7 +758,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level one-shot agents. Set to false to run in the foreground and return the result inline. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
+            'Defaults to true for top-level regular subagents. Set to false to run in the foreground and return the result inline. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -856,8 +856,8 @@ ${subagentDescriptions}
 
 ${
   isForkSubagentEnabled(this.config)
-    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
-    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
+    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
+    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
 }
 
 When NOT to use the Agent tool:
@@ -876,12 +876,13 @@ Usage notes:
 - Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
 - A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
+- Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.SEND_MESSAGE} with the \`task_id\` from its launch result. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level one-shot agents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agents run in the foreground. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent, so the main agent cannot independently address them as background tasks. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ${
   isForkSubagentEnabled(this.config)

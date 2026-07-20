@@ -358,6 +358,27 @@ describe('AgentTool', () => {
       expect(tool.description).toContain('run_in_background: false');
     });
 
+    it('explains how to continue reusable background agents', async () => {
+      const tool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      expect(tool.description).toContain(
+        'Reuse an existing background agent for related follow-up work',
+      );
+      expect(tool.description).toContain(
+        'send_message with the `task_id` from its launch result',
+      );
+      expect(tool.description).toContain('next tool-round boundary');
+      expect(tool.description).toContain(
+        'paused agents resume with it as their first continuation instruction',
+      );
+      expect(tool.description).toContain(
+        'completed agents are revived from their retained transcript',
+      );
+      expect(tool.description).toContain('return to their direct parent');
+      expect(tool.description).not.toContain('Top-level one-shot agents');
+    });
+
     it('requires bounded delegation and verification of subagent results', async () => {
       const tool = new AgentTool(config);
       await vi.runAllTimersAsync();
