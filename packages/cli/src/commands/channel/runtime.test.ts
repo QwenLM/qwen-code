@@ -4,6 +4,7 @@ import {
   daemonObservedContactsPath,
   daemonSessionRoutesPath,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   sessionsPath,
@@ -304,6 +305,35 @@ describe('registerPermissionRelay', () => {
     expect(channel.dispatchPermissionResolved).toHaveBeenCalledWith({
       requestId: 'req-1',
       outcome: { outcome: 'cancelled' },
+    });
+  });
+});
+
+describe('registerBackgroundResponseRelay', () => {
+  it('routes the final background response without joining the active prompt', async () => {
+    const bridge = new EventEmitter();
+    const router = {
+      getTarget: vi.fn(() => ({
+        channelName: 'telegram',
+        chatId: 'chat1',
+      })),
+    };
+    const channel = {
+      dispatchBackgroundResponse: vi.fn().mockResolvedValue(undefined),
+    };
+
+    registerBackgroundResponseRelay(
+      bridge as never,
+      router as never,
+      new Map([['telegram', channel as never]]),
+    );
+    bridge.emit('backgroundResponse', 'session-1', 'Background final answer.');
+
+    await vi.waitFor(() => {
+      expect(channel.dispatchBackgroundResponse).toHaveBeenCalledWith(
+        'session-1',
+        'Background final answer.',
+      );
     });
   });
 });

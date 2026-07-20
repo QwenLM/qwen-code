@@ -649,13 +649,16 @@ export class DaemonChannelBridge
     switch (type) {
       case 'agent_message_chunk': {
         const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
-        if (
-          typeof meta?.['parentToolCallId'] === 'string' ||
-          meta?.['qwenDiscreteMessage'] === true
-        ) {
+        if (typeof meta?.['parentToolCallId'] === 'string') {
           break;
         }
         const text = getTextContent(update['content']);
+        if (meta?.['qwenDiscreteMessage'] === true) {
+          if (meta['source'] === 'background_notification_response' && text) {
+            this.emit('backgroundResponse', sessionId, text);
+          }
+          break;
+        }
         if (text) {
           this.emit(
             meta?.['source'] === 'slash_command'

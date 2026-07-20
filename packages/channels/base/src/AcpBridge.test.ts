@@ -362,6 +362,31 @@ describe('AcpBridge', () => {
     );
   });
 
+  it('emits a completed background response separately from the active turn', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const backgroundResponses: Array<[string, string]> = [];
+    bridge.on('backgroundResponse', (sessionId, text) => {
+      backgroundResponses.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Background final answer.' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+
+    expect(backgroundResponses).toEqual([['s-1', 'Background final answer.']]);
+  });
+
   it('returns only the final slash-command output', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
