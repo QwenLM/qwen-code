@@ -1162,6 +1162,88 @@ describe('ChatRecordingService', () => {
     });
   });
 
+  describe('legacy recorder', () => {
+    it('retries directory setup after a synchronous failure', async () => {
+      const mkdirSpy = vi.spyOn(fs, 'mkdirSync');
+      mkdirSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+      mkdirSpy.mockImplementation(() => undefined);
+
+      const writeSpy = vi.spyOn(fs, 'writeFileSync');
+      writeSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+      });
+      writeSpy.mockImplementation(() => undefined);
+
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+      service.recordUserMessage([{ text: 'retry me' }]);
+      await expect(service.flush()).resolves.toBeUndefined();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      service.recordUserMessage([{ text: 'retry me' }]);
+      await expect(service.flush()).resolves.toBeUndefined();
+
+      expect(mkdirSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+      const record = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
+      expect(record.parentUuid).toBeNull();
+    });
+
+    it('does not notify for a synchronous conversation-file failure', () => {
+      const listener = vi.fn();
+      const service = new ChatRecordingService(mockConfig, listener, false);
+      vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+
+      service.recordUserMessage([{ text: 'retry me' }]);
+
+      expect(listener).not.toHaveBeenCalled();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+    });
+
+    it('caches successful directory setup', async () => {
+      const mkdirSpy = vi
+        .spyOn(fs, 'mkdirSync')
+        .mockImplementation(() => undefined);
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      service.recordUserMessage([{ text: 'first' }]);
+      await service.flush();
+      service.recordUserMessage([{ text: 'second' }]);
+      await service.flush();
+      service.recordUserMessage([{ text: 'third' }]);
+      await service.flush();
+
+      expect(mkdirSpy).toHaveBeenCalledTimes(1);
+    });
+
+    it('retries an identical attribution snapshot after a synchronous failure', async () => {
+      const snapshot = {
+        type: 'attribution-snapshot' as const,
+        version: 1,
+        surface: 'cli',
+        fileStates: {},
+        promptCount: 0,
+        promptCountAtLastCommit: 0,
+      };
+      const writeFileSpy = vi.spyOn(fs, 'writeFileSync');
+      writeFileSpy.mockImplementationOnce(() => {
+        throw Object.assign(new Error('EACCES'), { code: 'EACCES' });
+      });
+      const service = new ChatRecordingService(mockConfig, undefined, false);
+
+      service.recordAttributionSnapshot(snapshot);
+      await service.flush();
+      expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+      service.recordAttributionSnapshot(snapshot);
+      await service.flush();
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('recordAttributionSnapshot', () => {
     const baseSnapshot = {
       type: 'attribution-snapshot' as const,

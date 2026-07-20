@@ -260,6 +260,21 @@ describe('ChatRecordingService - recordCustomTitle', () => {
     expect(chatRecordingService.getCurrentTitleSource()).toBe('manual');
   });
 
+  it('allows legacy retry after a synchronous conversation-file failure', async () => {
+    const service = new ChatRecordingService(mockConfig, undefined, false);
+    vi.mocked(fs.writeFileSync).mockImplementationOnce(() => {
+      throw Object.assign(new Error('permission denied'), { code: 'EACCES' });
+    });
+
+    await expect(service.recordCustomTitle('retry-title')).resolves.toBe(false);
+    await expect(service.flush()).resolves.toBeUndefined();
+    expect(jsonl.writeLine).not.toHaveBeenCalled();
+
+    await expect(service.recordCustomTitle('retry-title')).resolves.toBe(true);
+    expect(jsonl.writeLine).toHaveBeenCalledOnce();
+    expect(service.getCurrentCustomTitle()).toBe('retry-title');
+  });
+
   it('serializes concurrent explicit titles and commits them in call order', async () => {
     let resolveFirst!: () => void;
     vi.mocked(jsonl.writeLine).mockReturnValueOnce(
