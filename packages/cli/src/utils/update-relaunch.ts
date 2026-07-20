@@ -21,7 +21,7 @@ export async function updateBeforeRelaunch(
   try {
     const [
       { checkForUpdatesDetailed },
-      { handleAutoUpdate, waitForAutoUpdate },
+      { handleAutoUpdate },
       { getInstallationInfo },
       { performStandaloneUpdate },
       { t },
@@ -59,14 +59,11 @@ export async function updateBeforeRelaunch(
         );
         return relaunchOnFailure;
       }
-      const updateProcess = handleAutoUpdate(
+      const success = await handleAutoUpdate(
         result.info,
         settings,
         projectRoot,
       );
-      const success = updateProcess
-        ? await waitForAutoUpdate(updateProcess)
-        : false;
       writeStderrLine(
         t(
           success

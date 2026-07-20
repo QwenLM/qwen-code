@@ -15,11 +15,9 @@ import lockfile from 'proper-lockfile';
 import semver from 'semver';
 
 const PACKAGE_NAME = '@qwen-code/qwen-code';
-const VERSION_PATTERN =
-  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const execFileAsync = promisify(execFile);
 
-export interface ManagedNpmUpdate {
+interface ManagedNpmUpdate {
   stagingDir: string;
   versionDir: string;
   launcherRoot: string;
@@ -29,7 +27,7 @@ export interface ManagedNpmUpdate {
 }
 
 function assertVersion(version: string): void {
-  if (!VERSION_PATTERN.test(version)) {
+  if (semver.valid(version) !== version) {
     throw new Error(`Invalid update version: ${version}`);
   }
 }
@@ -81,10 +79,7 @@ async function validateInstallation(
       `Installed package did not match ${PACKAGE_NAME}@${version}`,
     );
   }
-  await Promise.all([
-    fsPromises.access(path.join(root, 'dist', 'cli.js')),
-    fsPromises.access(path.join(root, 'scripts', 'cli-entry.js')),
-  ]);
+  await fsPromises.access(path.join(root, 'dist', 'cli.js'));
 }
 
 async function smokeTest(prefix: string, version: string): Promise<void> {

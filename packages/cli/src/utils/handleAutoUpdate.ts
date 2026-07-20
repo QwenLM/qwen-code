@@ -34,21 +34,6 @@ const UPDATE_SUCCESS_MESSAGE =
 const UPDATE_FAILED_MESSAGE =
   'Automatic update failed. Please try updating manually.';
 
-type UpdateProcess = ReturnType<typeof spawn>;
-
-const updateCompletions = new WeakMap<UpdateProcess, Promise<boolean>>();
-
-export function waitForAutoUpdate(
-  updateProcess: UpdateProcess,
-): Promise<boolean> {
-  const completion = updateCompletions.get(updateProcess);
-  if (completion) return completion;
-  return new Promise((resolve) => {
-    updateProcess.once('close', (code) => resolve(code === 0));
-    updateProcess.once('error', () => resolve(false));
-  });
-}
-
 export function handleAutoUpdate(
   info: UpdateObject | null,
   settings: LoadedSettings,
@@ -116,10 +101,19 @@ export function handleAutoUpdate(
   );
   const platform = os.platform();
   const isWindows = platform === 'win32';
-  const managedNpmUpdate =
-    installationInfo.packageManager === PackageManager.NPM
-      ? prepareManagedNpmUpdate(info.update.latest)
-      : undefined;
+  let managedNpmUpdate: ReturnType<typeof prepareManagedNpmUpdate> | undefined;
+  try {
+    managedNpmUpdate =
+      installationInfo.packageManager === PackageManager.NPM
+        ? prepareManagedNpmUpdate(info.update.latest)
+        : undefined;
+  } catch (error) {
+    debugLogger.warn('Automatic update preparation failed:', error);
+    updateEventEmitter.emit('update-failed', {
+      message: t(UPDATE_FAILED_MESSAGE),
+    });
+    return Promise.resolve(false);
+  }
   const command =
     installationInfo.packageManager === PackageManager.NPM
       ? process.execPath
@@ -139,72 +133,49 @@ export function handleAutoUpdate(
     stdio: ['pipe', 'ignore', 'pipe'],
     ...(managedNpmUpdate ? { cwd: managedNpmUpdate.stagingDir } : {}),
   });
-  let finishUpdate!: (success: boolean) => void;
-  let settled = false;
-  const completion = new Promise<boolean>((resolve) => {
-    finishUpdate = resolve;
-  });
-  updateCompletions.set(updateProcess, completion);
   let errorOutput = '';
   updateProcess.stderr.on('data', (data) => {
     errorOutput += data.toString();
   });
 
-  updateProcess.on('close', (code) => {
-    if (settled) return;
-    settled = true;
-    if (code !== 0) {
-      void (async () => {
-        if (managedNpmUpdate) {
-          await cleanupManagedNpmUpdate(managedNpmUpdate);
-        }
-        debugLogger.warn(
-          `Automatic update command failed: ${updateCommand}; stderr: ${errorOutput.trim()}`,
-        );
-        updateEventEmitter.emit('update-failed', {
-          message: t(UPDATE_FAILED_MESSAGE),
-        });
-        finishUpdate(false);
-      })();
-      return;
-    }
-    void (async () => {
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = async (error?: unknown) => {
+      if (settled) return;
+      settled = true;
       try {
+        if (error) throw error;
         if (managedNpmUpdate) {
           await activateManagedNpmUpdate(managedNpmUpdate, info.update.latest);
         }
         updateEventEmitter.emit('update-success', {
           message: t(UPDATE_SUCCESS_MESSAGE),
         });
-        finishUpdate(true);
+        resolve(true);
       } catch (error) {
-        debugLogger.warn('Automatic update activation failed:', error);
         if (managedNpmUpdate) {
           await cleanupManagedNpmUpdate(managedNpmUpdate);
         }
+        debugLogger.warn('Automatic update failed:', error);
         updateEventEmitter.emit('update-failed', {
           message: t(UPDATE_FAILED_MESSAGE),
         });
-        finishUpdate(false);
+        resolve(false);
       }
-    })();
+    };
+    updateProcess.once('close', (code) => {
+      void finish(
+        code === 0
+          ? undefined
+          : new Error(
+              `Command failed: ${updateCommand}; stderr: ${errorOutput.trim()}`,
+            ),
+      );
+    });
+    updateProcess.once('error', (error) => {
+      void finish(error);
+    });
   });
-
-  updateProcess.on('error', (err) => {
-    if (settled) return;
-    settled = true;
-    void (async () => {
-      if (managedNpmUpdate) {
-        await cleanupManagedNpmUpdate(managedNpmUpdate);
-      }
-      debugLogger.warn('Automatic update command failed to start:', err);
-      updateEventEmitter.emit('update-failed', {
-        message: t(UPDATE_FAILED_MESSAGE),
-      });
-      finishUpdate(false);
-    })();
-  });
-  return updateProcess;
 }
 
 export function setUpdateHandler(

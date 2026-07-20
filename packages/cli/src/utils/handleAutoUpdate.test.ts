@@ -11,11 +11,7 @@ import { updateEventEmitter } from './updateEventEmitter.js';
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import EventEmitter from 'node:events';
-import {
-  handleAutoUpdate,
-  setUpdateHandler,
-  waitForAutoUpdate,
-} from './handleAutoUpdate.js';
+import { handleAutoUpdate, setUpdateHandler } from './handleAutoUpdate.js';
 import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from '../ui/types.js';
 import os from 'node:os';
@@ -198,47 +194,62 @@ describe('handleAutoUpdate', () => {
   });
 
   it('should emit "update-failed" when the update process fails', async () => {
-    await new Promise<void>((resolve) => {
-      mockGetInstallationInfo.mockReturnValue({
-        updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
-        updateMessage: 'This is an additional message.',
-        isGlobal: false,
-        packageManager: PackageManager.NPM,
-      });
-
-      // Simulate failed execution
-      setTimeout(() => {
-        mockChildProcess.stderr.emit('data', 'An error occurred');
-        mockChildProcess.emit('close', 1);
-        resolve();
-      }, 0);
-
-      handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      updateMessage: 'This is an additional message.',
+      isGlobal: false,
+      packageManager: PackageManager.NPM,
     });
+    const update = handleAutoUpdate(
+      mockUpdateInfo,
+      mockSettings,
+      '/root',
+      mockSpawn,
+    )!;
+    mockChildProcess.stderr.emit('data', 'An error occurred');
+    mockChildProcess.emit('close', 1);
 
+    await expect(update).resolves.toBe(false);
     expect(emitSpy).toHaveBeenCalledWith('update-failed', {
       message: 'Automatic update failed. Please try updating manually.',
     });
   });
 
   it('should emit "update-failed" when the spawn function throws an error', async () => {
-    await new Promise<void>((resolve) => {
-      mockGetInstallationInfo.mockReturnValue({
-        updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
-        updateMessage: 'This is an additional message.',
-        isGlobal: false,
-        packageManager: PackageManager.NPM,
-      });
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      updateMessage: 'This is an additional message.',
+      isGlobal: false,
+      packageManager: PackageManager.NPM,
+    });
+    const update = handleAutoUpdate(
+      mockUpdateInfo,
+      mockSettings,
+      '/root',
+      mockSpawn,
+    )!;
+    mockChildProcess.emit('error', new Error('Spawn error'));
 
-      // Simulate an error event
-      setTimeout(() => {
-        mockChildProcess.emit('error', new Error('Spawn error'));
-        resolve();
-      }, 0);
+    await expect(update).resolves.toBe(false);
+    expect(emitSpy).toHaveBeenCalledWith('update-failed', {
+      message: 'Automatic update failed. Please try updating manually.',
+    });
+  });
 
-      handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+  it('reports managed update preparation failures', async () => {
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      isGlobal: true,
+      packageManager: PackageManager.NPM,
+    });
+    mockPrepareManagedNpmUpdate.mockImplementation(() => {
+      throw new Error('update directory is not writable');
     });
 
+    await expect(
+      handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn),
+    ).resolves.toBe(false);
+    expect(mockSpawn).not.toHaveBeenCalled();
     expect(emitSpy).toHaveBeenCalledWith('update-failed', {
       message: 'Automatic update failed. Please try updating manually.',
     });
@@ -327,7 +338,7 @@ describe('handleAutoUpdate', () => {
       isGlobal: false,
       packageManager: PackageManager.NPM,
     });
-    const updateProcess = handleAutoUpdate(
+    const update = handleAutoUpdate(
       mockUpdateInfo,
       mockSettings,
       '/root',
@@ -335,7 +346,7 @@ describe('handleAutoUpdate', () => {
     )!;
     mockChildProcess.emit('close', 0);
 
-    await expect(waitForAutoUpdate(updateProcess)).resolves.toBe(true);
+    await expect(update).resolves.toBe(true);
 
     expect(emitSpy).toHaveBeenCalledWith('update-success', {
       message:
@@ -357,7 +368,7 @@ describe('handleAutoUpdate', () => {
       throw new Error('pointer write failed');
     });
 
-    const updateProcess = handleAutoUpdate(
+    const update = handleAutoUpdate(
       mockUpdateInfo,
       mockSettings,
       '/root',
@@ -365,7 +376,7 @@ describe('handleAutoUpdate', () => {
     )!;
     mockChildProcess.emit('close', 0);
 
-    await expect(waitForAutoUpdate(updateProcess)).resolves.toBe(false);
+    await expect(update).resolves.toBe(false);
     expect(emitSpy).toHaveBeenCalledWith('update-failed', {
       message: 'Automatic update failed. Please try updating manually.',
     });
