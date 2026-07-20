@@ -2424,16 +2424,6 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
         run: |-
-          # Any non-zero exit AFTER the agent committed — a failed
-          # build/typecheck/lint/per-package test in the deterministic re-run
-          # below — leaves this step under `set -e` without writing an outcome,
-          # so OUTCOME is empty and the handoff falls through to the neutral
-          # framing, showing the agent's optimistic address-summary.md (which
-          # can cite a commit) as though it had landed. Report any such exit as
-          # a verify failure so the handoff says the change was NOT pushed. The
-          # explicit exit-1 paths already wrote outcome=failed (last-write-wins
-          # keeps it failed); the noop/success paths exit 0, so the guard skips.
-          trap 'rc=$?; if [[ "${rc}" -ne 0 ]]; then echo "outcome=failed" >> "${GITHUB_OUTPUT}"; fi' EXIT
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
@@ -2454,6 +2444,17 @@ jobs:
           # hook still runs branch code on the host).
           git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
+
+          # Record whether the agent left a commit, BEFORE any gate below can
+          # exit. The failure handoff keys its "was NOT pushed / commit
+          # discarded" wording on this, NOT on outcome=failed: an intentional
+          # agent abort (failure.md, no commit) and a pre-commit gate failure
+          # (e.g. the schema gate) never made a commit, so they must keep the
+          # neutral framing. A non-empty diff against the unmodified remote head
+          # means the agent committed.
+          if ! git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
+            echo "committed=true" >> "${GITHUB_OUTPUT}"
+          fi
 
           # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
           # no-op/unchanged return: on a stale-schema PR the agent can wrongly
@@ -2664,6 +2665,7 @@ jobs:
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          COMMITTED: '${{ steps.verify.outputs.committed }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -2798,17 +2800,15 @@ jobs:
               echo "${HEADLINE}"
               echo
               if [[ -n "${DETAIL_FILE}" ]]; then
-                if [[ "${OUTCOME}" == "failed" ]]; then
-                  # The agent's own address-summary.md can read like a success
-                  # and cite a commit SHA, but every OUTCOME=failed path skips
-                  # "Push and report" — nothing landed on the branch. Say so
-                  # before the summary, or the reader chases a commit that was
-                  # discarded with the runner. Keep the claim to "was NOT pushed"
-                  # (always true here): the four pre-gate failures — an agent
-                  # abort via failure.md, a dirty tree, an unchanged branch, a
-                  # missing address-summary.md — set outcome=failed before the
-                  # deterministic gate runs, so "did not pass the gate" would be
-                  # wrong; the specific reason is the HEADLINE + summary below.
+                if [[ "${COMMITTED}" == "true" ]]; then
+                  # The agent committed (verify recorded committed=true before
+                  # any gate could fail), but every path that reaches this
+                  # handoff skipped "Push and report" — nothing landed on the
+                  # branch. Say so before the agent's address-summary.md, which
+                  # can read like a success and cite that now-discarded commit
+                  # SHA. Keyed on committed, NOT outcome=failed: the abort/no-op
+                  # paths (failure.md, dirty tree, unchanged branch, missing
+                  # summary) made no commit and keep the neutral framing below.
                   echo "⚠️ This change was NOT pushed — any commit referenced below was made only in the runner workspace and has been discarded. What the agent reported:"
                 else
                   echo "**What I found before stopping:**"

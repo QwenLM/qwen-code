@@ -1,32 +1,42 @@
 #!/usr/bin/env bash
-# Owning-package resolver, shared by the qwen-autofix verify steps
+# Owning-workspace resolver, shared by the qwen-autofix verify steps
 # (.github/workflows/qwen-autofix.yml) so the two gates cannot drift apart.
 #
 # Reads changed file paths on stdin (one per line, e.g. the output of
 # `git diff --name-only`) and emits, sorted and unique on stdout, the OWNING
-# package of each: the nearest ancestor directory under packages/ that
-# contains a package.json.
+# npm workspace of each: the workspace whose location is the LONGEST matching
+# path prefix of the file.
 #
-# A flat `packages/<dir>` assumption is wrong for NESTED packages such as
-# packages/channels/base — the container packages/channels has no
-# package.json, so a caller that then reads `<dir>/package.json` would
-# ENOENT-crash the whole verify gate. Paths outside packages/, and paths
-# directly under packages/ with no owning package (e.g. a non-npm container
-# like packages/sdk-python), resolve to nothing and are dropped.
+# The workspace set is the authoritative `npm query .workspace` list, NOT "any
+# ancestor directory that has a package.json". Fixture/example packages such as
+# packages/cli/src/commands/extensions/examples/starter carry their own
+# package.json but are NOT workspaces — a nearest-package.json walk resolves a
+# change there to the fixture (whose test script is not Vitest), silently
+# SKIPPING packages/cli's own tests. Longest-workspace-prefix instead resolves
+# it to packages/cli. Nested workspaces (packages/channels/base) match exactly;
+# non-workspace paths (packages/sdk-python, a top-level packages/README.md, and
+# the intentionally-excluded packages/desktop) match nothing and are dropped.
 #
-# Staged to RUNNER_TEMP from the trusted base checkout (never the PR branch)
-# alongside check-settings-schema.sh, and invoked with the repository as the
-# working directory so the package.json probes hit the checked-out tree.
+# `npm query` reads node_modules, which the calling gate has installed. Staged
+# to RUNNER_TEMP from the trusted base checkout (never the PR branch) alongside
+# check-settings-schema.sh, and invoked with the repository as the working
+# directory so both `npm query` and the prefix match resolve against the tree.
 set -euo pipefail
 
-while IFS= read -r f; do
+workspaces="$(npm query .workspace --json \
+  | node -e 'let s="";process.stdin.on("data",(d)=>{s+=d}).on("end",()=>{process.stdout.write(JSON.parse(s).map((w)=>w.location).join("\n"))})')"
+
+while IFS= read -r f || [[ -n "${f}" ]]; do
   [[ -n "${f}" ]] || continue
-  d="$(dirname "${f}")"
-  while [[ "${d}" == packages/?* ]]; do
-    if [[ -f "${d}/package.json" ]]; then
-      printf '%s\n' "${d}"
-      break
+  best=''
+  while IFS= read -r w; do
+    [[ -n "${w}" ]] || continue
+    if [[ "${f}" == "${w}"/* && "${#w}" -gt "${#best}" ]]; then
+      best="${w}"
     fi
-    d="$(dirname "${d}")"
-  done
+  done <<< "${workspaces}"
+  # `if`, not `[[ ]] && printf`: an unmatched file (best empty) must leave the
+  # loop body's exit status 0, or under `set -o pipefail` a no-match on the LAST
+  # line makes `while … | sort` fail and (with `set -e`) aborts the script.
+  if [[ -n "${best}" ]]; then printf '%s\n' "${best}"; fi
 done | sort -u
