@@ -1351,9 +1351,6 @@ export function App({
     selectedWorkspaceCwdRef.current = undefined;
     setSelectedWorkspaceCwd(undefined);
   }, [selectedWorkspaceCwd, workspace.capabilities, workspaces]);
-  const [selectedWorkspaceGitBranch, setSelectedWorkspaceGitBranch] = useState<
-    string | undefined
-  >(undefined);
   // The workspace the chip's status was last fetched for. On a workspace switch
   // we clear the status immediately so the chip never shows the previous repo's
   // branch/dirty counts while the new fetch is in flight; same-workspace
@@ -2876,10 +2873,7 @@ export function App({
         modelId,
         modeId,
         workspaceCwd:
-          lockedWorkspaceCwd ??
-          selectedWorkspaceCwdRef.current ??
-          acceptedWorkspaceCwd ??
-          primaryWorkspaceCwd,
+          lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd,
         worktree: pendingWorktreeRef.current,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {

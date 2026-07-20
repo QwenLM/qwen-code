@@ -1282,6 +1282,46 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('revalidates a draft workspace before its cleanup effect runs', async () => {
+    mockConnection.sessionId = undefined;
+    const secondaryWorkspace = {
+      id: 'secondary',
+      cwd: '/work/secondary',
+      primary: false,
+      trusted: true,
+    };
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        secondaryWorkspace,
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+    });
+    // Mutate the accepted snapshot in place so the selection ref remains stale
+    // and the create-time trust guard, rather than the cleanup effect, is tested.
+    secondaryWorkspace.trusted = false;
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('primary prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/tmp/project' }),
+    );
+  });
+
   it('does not start a new chat when selecting the active workspace', async () => {
     mockConnection.workspaceCwd = '/tmp/project';
     mockWorkspace.capabilities = {
