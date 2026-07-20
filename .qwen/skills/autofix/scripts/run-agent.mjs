@@ -67,6 +67,25 @@ function writeFailure(workdir, message) {
   );
 }
 
+// Extract a RECOVERABLE model error from the captured output, or '' if none.
+// Recoverable = transient (5xx, rate limit, overload) or operator-fixable
+// config (401 bad key, 402 billing, 403 access, quota) — these self-heal once
+// the quota resets or the key/access is fixed, so the workflow retries them.
+// A 400 malformed request or a plain 404 fails identically forever and stays
+// terminal (no match). The match is single-line ([^\]\n]) so a multi-line
+// render cannot smuggle a newline into the marker or the PR-comment headline.
+const RECOVERABLE_API_ERROR =
+  /\b(?:401|402|403|429|5\d\d)\b|rate.?limit|quota|exceeded|RESOURCE_EXHAUSTED|overloaded|temporarily|too many requests|api key|\u901f\u7387\u9650\u5236|\u914d\u989d|\u670d\u52a1(?:\u7e41\u5fd9|\u4e0d\u53ef\u7528)/i;
+function recoverableApiError(output) {
+  const wrapped = output.match(/\[API Error:[^\]\n]*\]/g) || [];
+  const hit = wrapped.reverse().find((e) => RECOVERABLE_API_ERROR.test(e));
+  if (hit) return hit;
+  // Some quota errors are never wrapped in [API Error: …] (e.g. Qwen OAuth
+  // quota returns early before formatting) — catch the known standalone form.
+  const oauth = output.match(/Qwen OAuth quota exceeded[^\n]*/i);
+  return oauth ? `[API Error: ${oauth[0]}]` : '';
+}
+
 function writeHandoff(workdir, message) {
   mkdirSync(workdir, { recursive: true });
   writeFileSync(file(workdir, 'handoff.md'), `${message}\n`);
@@ -115,13 +134,9 @@ function runQwen(options, prompt) {
         ...result,
         timedOut,
         loopDetected: loopDetected || isLoopGuardOutput(outputTail),
-        // A model-side [API Error: 4xx/5xx] (access denied, quota, a 5xx)
-        // means qwen never actually evaluated the feedback — the workflow
-        // treats this as retryable rather than an evaluated handoff.
-        apiError:
-          (
-            outputTail.match(/\[API Error:\s*(?:4\d\d|5\d\d)\b[^\]]*\]/g) || []
-          ).pop() || '',
+        // A RECOVERABLE model error means qwen never evaluated the feedback —
+        // the workflow retries it rather than advancing the watermark.
+        apiError: recoverableApiError(outputTail),
       };
       if (log.destroyed) {
         resolve(payload);
@@ -238,6 +253,17 @@ if (result.error || result.signal || result.status !== 0) {
           result.apiError ? ` ${result.apiError}` : ''
         }`,
       );
+      // Only a BARE, un-evaluated API failure is retryable. A loop guard, a
+      // timeout, or an agent-written failure.md is a real verdict — leave
+      // those terminal even if an API-error string appears in the output tail.
+      // Signals the workflow to retry (sentinel ts) instead of advancing the
+      // watermark and stranding the PR.
+      if (result.apiError && !result.timedOut) {
+        writeFileSync(
+          file(options.workdir, 'agent-api-error'),
+          `${result.apiError}\n`,
+        );
+      }
     }
   } else {
     writeHandoff(
@@ -246,14 +272,6 @@ if (result.error || result.signal || result.status !== 0) {
     );
     console.error(
       `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
-    );
-  }
-  // Signal a model-API failure (the agent never evaluated the feedback) so the
-  // workflow retries instead of advancing the watermark and stranding the PR.
-  if (result.apiError) {
-    writeFileSync(
-      file(options.workdir, 'agent-api-error'),
-      `${result.apiError}\n`,
     );
   }
   process.exit(result.status ?? 1);

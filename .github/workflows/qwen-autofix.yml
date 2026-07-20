@@ -2485,7 +2485,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md agent-api-error pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -2704,7 +2704,10 @@ jobs:
             # strand the PR the way a real evaluated handoff would.
             API_ERROR_DETAIL=''
             if [[ -s "${WORKDIR}/agent-api-error" ]]; then
-              API_ERROR_DETAIL="$(head -1 "${WORKDIR}/agent-api-error")"
+              # First line only, comment-opener escaped (agent stdout can echo
+              # external PR-comment text and the marker regex spans '<!-- ... -->'
+              # happily), and capped so a long span can't bloat the headline.
+              API_ERROR_DETAIL="$(head -1 "${WORKDIR}/agent-api-error" | sed 's/<!--/<!\\-\\-/g' | cut -c1-200)"
             fi
             # If feedback was actually read (prepare ran), stamp its newest ts so
             # the watermark advances and the same feedback is not re-selected next
