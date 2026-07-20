@@ -314,10 +314,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     switch (type) {
       case 'agent_message_chunk': {
         const meta = update['_meta'] as Record<string, unknown> | undefined;
-        if (
-          typeof meta?.['parentToolCallId'] === 'string' ||
-          meta?.['qwenDiscreteMessage'] === true
-        ) {
+        if (typeof meta?.['parentToolCallId'] === 'string') {
           break;
         }
         const content = update['content'] as

@@ -1351,6 +1351,38 @@ describe('runQwenServe initializeTimeoutMs validation', () => {
       }
     }
   });
+
+  it('rejects an initializeTimeoutMs above the JS timer ceiling', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-it-')));
+    const fakeBridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    } as unknown as HttpAcpBridge;
+
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            initializeTimeoutMs: 2_147_483_648,
+          },
+          { bridge: fakeBridge },
+        ),
+      ).rejects.toThrow(/initializeTimeoutMs/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
 });
 
 // Long-lived self-signed cert (CN=localhost, SAN IP:127.0.0.1) used only

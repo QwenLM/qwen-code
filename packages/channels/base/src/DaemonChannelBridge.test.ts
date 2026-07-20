@@ -512,60 +512,6 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('excludes discrete background notifications from the daemon response', async () => {
-    const events = new EventQueue();
-    const session = createFakeSession(events);
-    session.prompt.mockImplementation(async () => {
-      events.push({
-        id: 1,
-        v: 1,
-        type: 'session_update',
-        data: {
-          sessionId: 'session-1',
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'Final answer.' },
-          },
-        },
-      });
-      events.push({
-        id: 2,
-        v: 1,
-        type: 'session_update',
-        data: {
-          sessionId: 'session-1',
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: 'Background agent "Explore" completed.',
-            },
-            _meta: {
-              source: 'background_notification',
-              qwenDiscreteMessage: true,
-            },
-          },
-        },
-      });
-      events.push(turnCompleteEvent());
-      return { stopReason: 'end_turn' };
-    });
-    const bridge = new DaemonChannelBridge({
-      cwd: '/repo',
-      sessionFactory: vi.fn().mockResolvedValue(session),
-    });
-
-    await bridge.start();
-    await bridge.newSession('/repo');
-
-    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
-      'Final answer.',
-    );
-
-    events.close();
-    bridge.stop();
-  });
-
   it('returns only the final slash-command output from the daemon', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

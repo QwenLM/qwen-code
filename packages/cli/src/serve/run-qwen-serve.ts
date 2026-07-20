@@ -2403,6 +2403,7 @@ async function runQwenServeImpl(
         `Invalid initializeTimeoutMs: ${opts.initializeTimeoutMs}. Must be a positive integer (milliseconds).`,
       );
     }
+    assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the

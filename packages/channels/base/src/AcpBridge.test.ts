@@ -324,44 +324,6 @@ describe('AcpBridge', () => {
     );
   });
 
-  it('excludes discrete background notifications from the final response', async () => {
-    const bridge = new AcpBridge({
-      cliEntryPath: '/tmp/qwen',
-      cwd: '/tmp',
-    }) as unknown as TestableAcpBridge;
-    bridge.child = { killed: false, exitCode: null };
-    bridge.connection = {
-      extMethod: vi.fn(),
-      prompt: vi.fn(async () => {
-        bridge.handleSessionUpdate({
-          sessionId: 's-1',
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: { type: 'text', text: 'Final answer.' },
-          },
-        });
-        bridge.handleSessionUpdate({
-          sessionId: 's-1',
-          update: {
-            sessionUpdate: 'agent_message_chunk',
-            content: {
-              type: 'text',
-              text: 'Background agent "Explore" completed.',
-            },
-            _meta: {
-              source: 'background_notification',
-              qwenDiscreteMessage: true,
-            },
-          },
-        });
-      }),
-    };
-
-    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
-      'Final answer.',
-    );
-  });
-
   it('returns only the final slash-command output', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',

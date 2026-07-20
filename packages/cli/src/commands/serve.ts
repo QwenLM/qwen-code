@@ -339,7 +339,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('initialize-timeout-ms', {
         type: 'number',
         description:
-          'ACP initialize handshake timeout (ms). ' + 'Default: 10000 (10 s).',
+          'ACP child request timeout, including the initialize handshake (ms). ' +
+          'Default: 10000 (10 s).',
       })
       .option('session-reap-interval-ms', {
         type: 'number',
