@@ -14,6 +14,8 @@ const cell = (value: string, fullWidth = false): FrameCell => ({
   value,
   fullWidth,
   styles: [],
+  selectable: true,
+  flowId: 1,
 });
 
 /** Build a frame from plain strings, expanding wide glyphs into cell + spacer. */
@@ -32,7 +34,26 @@ function frameFromLines(lines: string[]): ReadonlyFrame {
     return row;
   });
   const width = Math.max(0, ...cells.map((r) => r.length));
-  return { width, height: cells.length, cells };
+  return {
+    width,
+    height: cells.length,
+    cells,
+    boundaries: cells.map(() => Array.from({ length: width }, () => null)),
+  };
+}
+
+function setBoundary(
+  frame: ReadonlyFrame,
+  y: number,
+  kind: 'soft' | 'hard',
+  joiner: string,
+): void {
+  const row = frame.boundaries[y] as Array<
+    ReadonlyFrame['boundaries'][number][number]
+  >;
+  for (let x = 0; x < row.length; x++) {
+    row[x] = { kind, joiner, selectable: true, flowId: 1 };
+  }
 }
 
 describe('SelectionState', () => {
@@ -90,10 +111,39 @@ describe('getSelectedText', () => {
     expect(getSelectedText(frame, { sx: 1, sy: 0, ex: 2, ey: 0 })).toBe('中');
   });
 
-  it('trims trailing whitespace per line', () => {
+  it('preserves selectable source whitespace', () => {
     const frame = frameFromLines(['hi   ', 'bye']);
     expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
-      'hi\nbye',
+      'hi   \nbye',
+    );
+  });
+
+  it('skips non-selectable layout padding', () => {
+    const frame = frameFromLines(['hi   ']);
+    for (let x = 2; x < 5; x++) {
+      (frame.cells[0][x] as FrameCell).selectable = false;
+    }
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 0 })).toBe('hi');
+  });
+
+  it('replaces a soft visual break with its source joiner', () => {
+    const frame = frameFromLines(['hello', 'world']);
+    setBoundary(frame, 0, 'soft', ' ');
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
+      'hello world',
+    );
+  });
+
+  it('preserves hard and ambiguous visual breaks', () => {
+    const hard = frameFromLines(['hello', 'world']);
+    setBoundary(hard, 0, 'hard', '\n');
+    expect(getSelectedText(hard, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
+      'hello\nworld',
+    );
+
+    const ambiguous = frameFromLines(['hello', 'world']);
+    expect(getSelectedText(ambiguous, { sx: 0, sy: 0, ex: 4, ey: 1 })).toBe(
+      'hello\nworld',
     );
   });
 

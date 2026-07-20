@@ -9,6 +9,18 @@ import { OverflowProvider } from '../../contexts/OverflowContext.js';
 import { MaxSizedBox, setMaxSizedBoxDebugging } from './MaxSizedBox.js';
 import { Box, Text } from 'ink';
 import { describe, it, expect } from 'vitest';
+import { getScreenBuffer } from '../../selection/screen-buffer.js';
+import { getSelectedText } from '../../selection/selection-text.js';
+
+function selectedFrameText(stdout: NodeJS.WriteStream): string {
+  const frame = getScreenBuffer(stdout)!.frame!;
+  return getSelectedText(frame, {
+    sx: 0,
+    sy: 0,
+    ex: frame.width - 1,
+    ey: frame.height - 1,
+  });
+}
 
 describe('<MaxSizedBox />', () => {
   // Make sure MaxSizedBox logs errors on invalid configurations.
@@ -84,6 +96,63 @@ Line 3`);
     expect(lastFrame()).equals(`This is a
 long line
 of text`);
+  });
+
+  it('rejoins soft wraps while preserving hard row boundaries', () => {
+    const { stdout } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={5} maxHeight={10}>
+          <Box>
+            <Text wrap="wrap">hello world</Text>
+          </Box>
+          <Box>
+            <Text>next</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      'hello world\nnext',
+    );
+  });
+
+  it.each([
+    ['multiple spaces', 'hello  world'],
+    ['a tab', 'hello\tworld'],
+  ])('preserves %s when wrapping', (_name, source) => {
+    const { stdout } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={5} maxHeight={10}>
+          <Box>
+            <Text wrap="wrap">{source}</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      source,
+    );
+  });
+
+  it('excludes a gutter and synthesized continuation padding', () => {
+    const { stdout } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={8} maxHeight={10}>
+          <Box>
+            <Text wrap="truncate-end" selectable={false}>
+              {'1 '}
+            </Text>
+            <Text wrap="wrap">long content</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      'long content',
+    );
   });
 
   it('handles mixed wrapping and non-wrapping segments', () => {
