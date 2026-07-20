@@ -3003,6 +3003,8 @@ describe('qwen-autofix workflow', () => {
             DETAIL_FILE: '',
             NEWEST: '',
             API_ERROR_DETAIL: '',
+            API_ERROR_KIND: '',
+            API_AUTH_MAX_ROUNDS: '3',
             ...env,
           },
           encoding: 'utf8',
@@ -3056,6 +3058,8 @@ describe('qwen-autofix workflow', () => {
           DETAIL_FILE: '',
           NEWEST: '2026-07-16T00:00:00Z',
           API_ERROR_DETAIL: '',
+          API_ERROR_KIND: '',
+          API_AUTH_MAX_ROUNDS: '3',
           ...env,
         },
         encoding: 'utf8',
@@ -3083,6 +3087,34 @@ describe('qwen-autofix workflow', () => {
     expect(finalApi).toContain('could not reach the model');
     expect(finalApi).toContain('check the autofix model key/access');
     expect(finalApi).not.toContain('it will retry');
+    // Auth-capped budget: an auth/access error (401/402/403) never self-heals,
+    // so the workflow caps retries at API_AUTH_MAX_ROUNDS (3) instead of
+    // MAX_ROUNDS (5). At the cap the MARK_ROUND override stamps the terminal
+    // round so the scan's max-round gate skips the PR.
+    expect(
+      runMark({
+        ROUND: '1',
+        NEWEST: '2026-07-16T00:00:00Z',
+        API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+        API_ERROR_KIND: 'auth',
+      }),
+    ).toBe(`${SENTINEL}|2`); // MARK_ROUND=2 < CAUSE_MAX=3: mid-budget
+    expect(
+      runMark({
+        ROUND: '2',
+        NEWEST: '2026-07-16T00:00:00Z',
+        API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+        API_ERROR_KIND: 'auth',
+      }),
+    ).toBe(`${SENTINEL}|5`); // MARK_ROUND=3 == CAUSE_MAX: terminal, override to MAX_ROUNDS
+    const authCapped = runHeadline({
+      ROUND: '2',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+      API_ERROR_KIND: 'auth',
+    });
+    expect(authCapped).toContain('attempt 3/3');
+    expect(authCapped).toContain('check the autofix model key/access');
+    expect(authCapped).not.toContain('it will retry');
 
     // Behaviorally replay the pending-staleness jq filter against sample checks so
     // a flipped comparison (which would age out live checks → double-processing)
@@ -3389,6 +3421,9 @@ describe('qwen-autofix workflow', () => {
     for (const [render, kind] of [
       ['[API Error: 429 Too Many Requests]', 'transient'],
       ['[API Error: 503 upstream unavailable]', 'transient'],
+      ['[API Error: 速率限制，请稍后重试]', 'transient'],
+      ['[API Error: 配额不足]', 'transient'],
+      ['[API Error: 服务不可用]', 'transient'],
       ['[API Error: 403 Model access denied.]', 'auth'],
       [
         '[API Error: 404 The model does not exist or you do not have access to it]',
