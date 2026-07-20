@@ -5,7 +5,7 @@
  */
 
 import { fork, type ChildProcess } from 'node:child_process';
-import { chmodSync } from 'node:fs';
+import { chmodSync, unlinkSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -789,6 +789,37 @@ describe('SessionWriterLease', () => {
     await fs.copyFile(lockPath, reclaimPath);
 
     const replacement = await SessionWriterLease.acquire(fixture.options);
+    await replacement.release();
+  });
+
+  it('keeps the primary lock when reclaim guard cleanup is already complete', async () => {
+    const fixture = await createFixture();
+    const owner = startLeaseProcess();
+    const acquired = await requestChild(owner, {
+      type: 'acquire',
+      options: fixture.options,
+    });
+    expect(acquired).toMatchObject({ ok: true });
+    expect(acquired.ownerId).toBeDefined();
+    owner.kill('SIGKILL');
+    await waitForClose(owner);
+
+    const lockPath = getSessionWriterLockPath(
+      fixture.runtimeBaseDir,
+      fixture.options.sessionId,
+    );
+    const reclaimPath = `${lockPath}.reclaim.${encodeURIComponent(
+      acquired.ownerId!,
+    )}`;
+    const replacement = await SessionWriterLease.acquire({
+      ...fixture.options,
+      onOwnershipAcquired: () => unlinkSync(reclaimPath),
+    });
+
+    expect((await fs.lstat(lockPath)).isFile()).toBe(true);
+    await expect(
+      SessionWriterLease.acquire(fixture.options),
+    ).rejects.toBeInstanceOf(SessionWriterConflictError);
     await replacement.release();
   });
 

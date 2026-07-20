@@ -625,7 +625,7 @@ export class SessionWriterLease {
           lockRecord,
           normalizedOptions,
         );
-        await removeOwnedLock(reclaimPath, lockRecord.owner_id);
+        await removeOwnedLock(reclaimPath, lockRecord.owner_id).catch(() => {});
         return lease;
       } catch (error) {
         if (staleMoved) {

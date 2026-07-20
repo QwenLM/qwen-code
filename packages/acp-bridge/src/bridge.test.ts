@@ -12916,7 +12916,7 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('reaps the channel when an acknowledged close times out', async () => {
+    it('keeps multiplexed siblings live while one close is still draining', async () => {
       const firstCloseGate = deferred<Record<string, unknown>>();
       const handle = makeChannel({
         extMethodImpl: async (method) => {
@@ -12924,27 +12924,36 @@ describe('createAcpSessionBridge', () => {
           return firstCloseGate.promise;
         },
       });
-      const replacement = makeChannel();
       const bridge = makeBridge({
-        channelFactory: vi
-          .fn()
-          .mockResolvedValueOnce(handle.channel)
-          .mockResolvedValueOnce(replacement.channel),
+        channelFactory: async () => handle.channel,
+        sessionScope: 'thread',
         initializeTimeoutMs: 20,
       });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
 
-      await expect(
-        bridge.closeSession(session.sessionId),
-      ).rejects.toBeInstanceOf(BridgeTimeoutError);
-      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
-      expect(handle.killed).toBe(true);
-      await expect(
-        bridge.loadSession({
-          sessionId: session.sessionId,
-          workspaceCwd: WS_A,
+      const close = bridge.closeSession(first.sessionId);
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: 'qwen/control/session/close',
+          params: {
+            sessionId: first.sessionId,
+            drainTimeoutMs: 16,
+          },
         }),
-      ).resolves.toMatchObject({ sessionId: session.sessionId });
+      );
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(2);
+      expect(() =>
+        bridge.recordHeartbeat(sibling.sessionId, {
+          clientId: sibling.clientId,
+        }),
+      ).not.toThrow();
+
+      firstCloseGate.resolve({});
+      await close;
       expect(bridge.sessionCount).toBe(1);
 
       await bridge.shutdown();

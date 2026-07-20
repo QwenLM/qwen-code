@@ -4322,14 +4322,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       await notifyAgentSessionClose(entry, ci, 'closeSession', {
         throwOnFailure: true,
         requireFlush: closeOpts?.requireAgentClose === true,
-        timeoutMs: initTimeoutMs,
       });
     } catch (error) {
       // A child RequestError is a definitive close refusal: the child kept
-      // the session live, so a retry is safe. A timeout or transport failure
-      // has an unknown outcome because the uncancelled close RPC can still
-      // succeed later. Terminate that process so its leases become stale and
-      // channel-exit cleanup removes every bridge entry it owned.
+      // the session live, so a retry is safe. A transport failure has an
+      // unknown outcome because the close RPC may already have succeeded.
+      // Terminate that process so its leases become stale and channel-exit
+      // cleanup removes every bridge entry it owned.
       if (isDefinitiveAcpRequestError(error)) {
         entry.closing = false;
       } else if (ci) {
