@@ -1804,6 +1804,9 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect.any(Object),
       expect.any(Object),
       expect.any(Object),
+      {
+        privateParentCapability: undefined,
+      },
     );
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
       expect.any(Object),
