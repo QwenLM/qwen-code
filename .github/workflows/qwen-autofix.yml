@@ -1458,15 +1458,44 @@ jobs:
           # input and silently green-no-op'd all forced dispatches.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels 2> /dev/null || echo '{}')"
+              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null || echo '{}')"
+            # Same admission as the scheduled scan below. In-repo PRs fail
+            # CLOSED on a missing isCrossRepository field (`.isCrossRepository
+            # == false`, never a `// true | not` default — jq's // treats false
+            # as empty, so that form is false for EVERY input and silently
+            # green-no-op'd all forced dispatches). Fork PRs are admitted under
+            # the scan's OWN fork rules (allow-edits on; the live write+ author
+            # gate runs in the shell case just below, mirroring the scan's
+            # per-candidate permission call) so the real-time route's fork
+            # pickup is not silently discarded here.
             OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" \
               '(((.state // "") == "OPEN")
                  and (((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null))
                  and ([.labels[]?.name] | index($skip) | not)
-                 and (.isCrossRepository == false)
-                 and ((.baseRefName // "") == "main"))' <<< "${META}")"
+                 and ((.baseRefName // "") == "main")
+                 and (if (.isCrossRepository == true)
+                        then (.maintainerCanModify == true)
+                        else (.isCrossRepository == false)
+                      end))' <<< "${META}")"
+            # Fork only: the author must hold write+ RIGHT NOW (the same
+            # live-privilege rule the scan applies per candidate and
+            # review-address re-checks before pushing). In-repo PRs are gated
+            # by author/label alone.
+            if [[ "${OK}" == 'true' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
+              FORK_AUTHOR="$(jq -r '.author.login // ""' <<< "${META}")"
+              FPERM="$(gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              case "${FPERM}" in
+                admin|maintain|write)
+                  echo "🌿 forced fork PR #${FORCED_PR} admitted (author ${FORK_AUTHOR}=${FPERM})"
+                  ;;
+                *)
+                  echo "🧭 forced fork PR #${FORCED_PR} rejected: author ${FORK_AUTHOR} permission='${FPERM:-none}' below write"
+                  OK='false'
+                  ;;
+              esac
+            fi
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); fork takeover PRs are engaged by the scheduled scan, not manual dispatch"
+              echo "❌ #${FORCED_PR} is not an open main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); a fork PR additionally needs maintainer edits allowed and a live write+ author"
               echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
