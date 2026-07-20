@@ -32,6 +32,8 @@ import {
   LOOP_SENTINEL_DYNAMIC,
   TeamEventType,
   ToolConfirmationOutcome,
+  ToolNames,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
 import { EventEmitter } from 'node:events';
@@ -1204,6 +1206,94 @@ describe('runNonInteractive', () => {
         },
       }));
     }
+
+    it('isolates enter_plan_mode from headless siblings without charging skipped calls to the budget', async () => {
+      setupMetricsMock();
+      vi.mocked(mockConfig.getMaxToolCalls).mockReturnValue(1);
+      vi.mocked(mockToolRegistry.getTool).mockImplementation(
+        (name: string) =>
+          ({
+            kind:
+              name === ToolNames.READ_FILE
+                ? Kind.Read
+                : name === ToolNames.WRITE_FILE
+                  ? Kind.Edit
+                  : Kind.Other,
+          }) as unknown as ReturnType<typeof mockToolRegistry.getTool>,
+      );
+      mockCoreExecuteToolCall.mockImplementation(
+        async (
+          _config: unknown,
+          request: { callId: string; name: string },
+        ) => ({
+          responseParts: [
+            {
+              functionResponse: {
+                id: request.callId,
+                name: request.name,
+                response: { output: 'entered plan mode' },
+              },
+            },
+          ],
+          resultDisplay: 'entered plan mode',
+        }),
+      );
+
+      mockGeminiClient.sendMessageStream
+        .mockReturnValueOnce(
+          createStreamFromEvents([
+            ...toolCallEvents(
+              ['write-before-entry'],
+              ToolNames.WRITE_FILE,
+              'p-plan-boundary',
+            ),
+            ...toolCallEvents(
+              ['enter-plan'],
+              ToolNames.ENTER_PLAN_MODE,
+              'p-plan-boundary',
+            ),
+            ...toolCallEvents(
+              ['read-after-entry-1', 'read-after-entry-2'],
+              ToolNames.READ_FILE,
+              'p-plan-boundary',
+            ),
+          ]),
+        )
+        .mockReturnValueOnce(createStreamFromEvents(finishTurn));
+
+      await runNonInteractive(
+        mockConfig,
+        mockSettings,
+        'enter plan mode',
+        'p-plan-boundary',
+      );
+
+      expect(mockCoreExecuteToolCall).toHaveBeenCalledOnce();
+      expect(mockCoreExecuteToolCall.mock.calls[0][1]).toMatchObject({
+        callId: 'enter-plan',
+        name: ToolNames.ENTER_PLAN_MODE,
+      });
+      const nextTurnParts = mockGeminiClient.sendMessageStream.mock
+        .calls[1][0] as Part[];
+      expect(nextTurnParts.map((part) => part.functionResponse?.id)).toEqual([
+        'write-before-entry',
+        'enter-plan',
+        'read-after-entry-1',
+        'read-after-entry-2',
+      ]);
+      expect(nextTurnParts[0].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(nextTurnParts[1].functionResponse?.response).toEqual({
+        output: 'entered plan mode',
+      });
+      expect(nextTurnParts[2].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(nextTurnParts[3].functionResponse?.response).toEqual({
+        error: PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+    });
 
     it('runs a batch of concurrency-safe tool calls concurrently', async () => {
       setupMetricsMock();

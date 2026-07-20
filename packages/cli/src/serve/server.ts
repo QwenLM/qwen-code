@@ -195,6 +195,10 @@ import {
   registerWorkspaceGitDiffRoutes,
   registerWorkspaceQualifiedGitDiffRoutes,
 } from './routes/workspace-git-diff.js';
+import {
+  registerWorkspaceGitLogRoutes,
+  registerWorkspaceQualifiedGitLogRoutes,
+} from './routes/workspace-git-log.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
   registerWorkspaceMcpControlRoutes,
@@ -1168,6 +1172,14 @@ export function createServeApp(
     sendBridgeError,
   });
   registerWorkspaceQualifiedGitDiffRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
+  registerWorkspaceGitLogRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitLogRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
   });

@@ -525,6 +525,7 @@ jobs:
       - name: 'Stage trusted schema gate'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
 
       - name: 'Check bot credentials'
         env:
@@ -770,7 +771,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
@@ -929,7 +930,7 @@ jobs:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
@@ -1035,12 +1036,26 @@ jobs:
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
@@ -1090,7 +1105,7 @@ jobs:
           # trigger CI. The bot PAT clears both problems.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
@@ -1931,6 +1946,7 @@ jobs:
       - name: 'Stage trusted schema gate and agent runner'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -2111,6 +2127,10 @@ jobs:
               exit 0
             fi
             git checkout -B "${BRANCH}" FETCH_HEAD
+            # Create the remote-tracking ref so the verification gate's
+            # `git diff --quiet "origin/${BRANCH}...${BRANCH}"` works for
+            # fork PRs the same way it does for same-repo branches.
+            git update-ref "refs/remotes/origin/${BRANCH}" "${BRANCH}"
             # Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN
             # and fine-grained PATs are documented as NOT receiving it.
             # Prove push access NOW, before an agent round is spent, instead
@@ -2339,7 +2359,7 @@ jobs:
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
@@ -2409,6 +2429,20 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
         run: |-
+          # Record whether the agent left a commit FIRST — this is a ref-only
+          # diff, so it runs before the failure.md early-exits and covers an
+          # agent that commits and then aborts. The failure handoff keys its
+          # "was NOT pushed / commit discarded" wording on this, NOT on
+          # outcome=failed: abort / pre-commit-gate paths that never committed
+          # keep the neutral framing. `git diff --quiet` exits 1 for a real diff
+          # (committed) but 128 on a bad ref — only 1 counts as a commit, so a
+          # git error is not misreported as a discarded commit.
+          committed_rc=0
+          git diff --quiet "origin/${BRANCH}...${BRANCH}" || committed_rc=$?
+          if [[ "${committed_rc}" -eq 1 ]]; then
+            echo "committed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
@@ -2472,12 +2506,26 @@ jobs:
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
@@ -2528,7 +2576,7 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           # Surfaced in the report footer for diagnosis + attribution; a repo
           # variable (not a secret), already the agent's OPENAI_MODEL.
-          MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           # Prepare may have adopted a sibling's live round; the matrix value
           # would double-write that round's marker.
@@ -2630,6 +2678,7 @@ jobs:
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          COMMITTED: '${{ steps.verify.outputs.committed }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -2637,7 +2686,7 @@ jobs:
           JOB_STATUS: '${{ job.status }}'
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
-          MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
@@ -2764,7 +2813,19 @@ jobs:
               echo "${HEADLINE}"
               echo
               if [[ -n "${DETAIL_FILE}" ]]; then
-                echo "**What I found before stopping:**"
+                if [[ "${COMMITTED}" == "true" ]]; then
+                  # The agent committed (verify recorded committed=true before
+                  # any gate could fail), but every path that reaches this
+                  # handoff skipped "Push and report" — nothing landed on the
+                  # branch. Say so before the agent's address-summary.md, which
+                  # can read like a success and cite that now-discarded commit
+                  # SHA. Keyed on committed, NOT outcome=failed: the abort/no-op
+                  # paths (failure.md, dirty tree, unchanged branch, missing
+                  # summary) made no commit and keep the neutral framing below.
+                  echo "⚠️ This change was NOT pushed — any commit referenced below was made only in the runner workspace and has been discarded. What the agent reported:"
+                else
+                  echo "**What I found before stopping:**"
+                fi
                 # -c drops any partial multi-byte sequence a byte-level head -c may
                 # have split, so the comment body stays valid UTF-8. iconv -c still
                 # EXITS 1 when it discards a byte, which under this shell's

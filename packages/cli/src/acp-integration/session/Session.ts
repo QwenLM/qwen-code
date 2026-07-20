@@ -51,8 +51,10 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
+  findPlanModeEntryBatchBoundaryIndex,
   findRepeatedDuplicateProviderToolCall,
   markDuplicateProviderToolCallResponseSent,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -328,6 +330,13 @@ function maskApiKeyForDisplay(apiKey: string | undefined): string {
 type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
+
+function getAbortAwareEndTurnStopReason(
+  signal: AbortSignal,
+): PromptResponse['stopReason'] {
+  // Parent cancellation wins over a simultaneous terminal path.
+  return signal.aborted ? 'cancelled' : 'end_turn';
+}
 
 type RunToolResult = {
   parts: Part[];
@@ -2647,7 +2656,11 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return { stopReason: 'end_turn' };
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
                   }
                   const nextAfterTools =
                     await this.#buildNextMessageAfterToolRun(
@@ -2662,7 +2675,11 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return { stopReason: 'end_turn' };
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
                   }
                 }
               }
@@ -2722,7 +2739,7 @@ export class Session implements SessionContext {
     while (true) {
       if (pendingSend.signal.aborted) {
         this.todoStopGuard.suspend();
-        return { stopReason: 'end_turn' };
+        return { stopReason: 'cancelled' };
       }
 
       if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
@@ -3314,7 +3331,7 @@ export class Session implements SessionContext {
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
             kind: 'terminal',
-            stopReason: 'end_turn',
+            stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -3659,6 +3676,15 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
+    // Leave host-queued input in place, but preserve messages already removed
+    // by a prior timed-out drain before returning the cancellation response.
+    const midTurnParts = abortSignal.aborted
+      ? await this.#buildMidTurnParts(
+          this.#takeRecoveredMidTurnMessages(),
+          abortSignal,
+          { preserveFallbackOnAbort: true },
+        )
+      : await this.#drainMidTurnUserMessages(abortSignal);
     this.#preserveUnsentMessageHistory(
       {
         role: 'user',
@@ -3667,7 +3693,7 @@ export class Session implements SessionContext {
           ...(toolRun.loopDetected
             ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
             : []),
-          ...(await this.#drainMidTurnUserMessages(abortSignal)),
+          ...midTurnParts,
         ],
       },
       true,
@@ -3835,11 +3861,7 @@ export class Session implements SessionContext {
 
     if (this.midTurnDrainUnavailable) {
       return {
-        parts: await this.#buildMidTurnParts(
-          recovered,
-          abortSignal,
-          options.onFullTurnModel,
-        ),
+        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
       };
     }
@@ -3870,7 +3892,7 @@ export class Session implements SessionContext {
         parts: await this.#buildMidTurnParts(
           [...recovered, ...parseMidTurnDrainResponse(response)],
           abortSignal,
-          options.onFullTurnModel,
+          options,
         ),
         hasQueuedPrompt:
           isRecord(response) && response['hasQueuedPrompt'] === true,
@@ -3925,11 +3947,7 @@ export class Session implements SessionContext {
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
       return {
-        parts: await this.#buildMidTurnParts(
-          recovered,
-          abortSignal,
-          options.onFullTurnModel,
-        ),
+        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
       };
     }
@@ -3997,7 +4015,10 @@ export class Session implements SessionContext {
   async #buildMidTurnParts(
     messages: DrainedMidTurnMessage[],
     abortSignal: AbortSignal,
-    onFullTurnModel?: (model: string) => boolean,
+    options: {
+      onFullTurnModel?: (model: string) => boolean;
+      preserveFallbackOnAbort?: boolean;
+    } = {},
   ): Promise<Part[]> {
     const parts: Part[] = [];
     for (const message of messages) {
@@ -4013,13 +4034,19 @@ export class Session implements SessionContext {
                 MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
                 (signal) =>
                   this.#resolvePrompt(message.content, signal, {
-                    onFullTurnModel,
+                    onFullTurnModel: options.onFullTurnModel,
                   }),
               );
       } catch (messageError) {
-        if (abortSignal.aborted) return parts;
-        const errorMessage = this.#formatError(messageError);
-        debugLogger.warn(`Failed to resolve mid-turn message: ${errorMessage}`);
+        if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
+          return parts;
+        }
+        if (!abortSignal.aborted) {
+          const errorMessage = this.#formatError(messageError);
+          debugLogger.warn(
+            `Failed to resolve mid-turn message: ${errorMessage}`,
+          );
+        }
         rawParts = [{ text: displayText }];
         if (
           message.kind === 'structured' &&
@@ -4943,7 +4970,9 @@ export class Session implements SessionContext {
               if (toolRun.stopAfterPermissionCancel) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                await this.#emitBackgroundNotificationEndTurn(
+                  getAbortAwareEndTurnStopReason(ac.signal),
+                );
                 return;
               }
               const nextAfterTools = await this.#buildNextMessageAfterToolRun(
@@ -4954,7 +4983,9 @@ export class Session implements SessionContext {
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                await this.#emitBackgroundNotificationEndTurn(
+                  getAbortAwareEndTurnStopReason(ac.signal),
+                );
                 return;
               }
             }
@@ -4976,7 +5007,9 @@ export class Session implements SessionContext {
               )
             ).stopReason;
           }
-          await this.#emitBackgroundNotificationEndTurn(stopReason);
+          await this.#emitBackgroundNotificationEndTurn(
+            ac.signal.aborted ? 'cancelled' : stopReason,
+          );
         } catch (error) {
           if (ac.signal.aborted) {
             this.todoStopGuard.suspend();
@@ -5374,6 +5407,7 @@ export class Session implements SessionContext {
       fc: FunctionCall,
       message = PERMISSION_CANCEL_SKIP_MESSAGE,
       emitStart = true,
+      errorType?: ToolErrorType,
     ): Promise<Part> => {
       const toolName = fc.name ?? 'unknown_tool';
       const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
@@ -5391,7 +5425,7 @@ export class Session implements SessionContext {
           status: 'error',
           resultDisplay: undefined,
           error,
-          errorType: undefined,
+          errorType,
         });
         if (emitStart) {
           await this.toolCallEmitter.emitStart({
@@ -5550,6 +5584,17 @@ export class Session implements SessionContext {
         batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
       }
     }
+
+    const executableCalls = batches.flatMap((batch) =>
+      batch.kind === 'execute' ? batch.calls : [],
+    );
+    const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
+      executableCalls.map((call) => call.name),
+    );
+    const planModeEntryBoundary =
+      planModeEntryBoundaryIndex === undefined
+        ? undefined
+        : executableCalls[planModeEntryBoundaryIndex];
 
     const appendSkippedAfter = async (
       parts: Part[],
@@ -5710,6 +5755,22 @@ export class Session implements SessionContext {
         if (batch.kind === 'duplicate') {
           await emitDuplicateBatch(batch);
           parts.push(...batch.response.responseParts);
+          continue;
+        }
+        if (
+          planModeEntryBoundary &&
+          !batch.calls.includes(planModeEntryBoundary)
+        ) {
+          for (const fc of batch.calls) {
+            parts.push(
+              await recordSkippedToolCall(
+                fc,
+                PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+                true,
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+          }
           continue;
         }
         if (batch.concurrent && batch.calls.length > 1) {
