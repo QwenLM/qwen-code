@@ -1,6 +1,6 @@
 # Channels
 
-Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, WeCom, or Feishu, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
+Channels let you interact with a Qwen Code agent from messaging platforms like Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, or from code hosting platforms like GitHub, GitLab, and Gitea, instead of the terminal. You send messages from your phone or desktop chat app, and the agent responds just like it would in the CLI.
 
 ## How It Works
 
@@ -15,7 +15,7 @@ All channels share one agent process with isolated sessions per user. Each chann
 
 ## Quick Start
 
-1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [WeCom](./wecom), [Feishu](./feishu))
+1. Set up a bot on your messaging platform (see channel-specific guides: [Telegram](./telegram), [WeChat](./weixin), [QQ Bot](./qqbot), [DingTalk](./dingtalk), [WeCom](./wecom), [Feishu](./feishu), [GitHub](./github), [GitLab](./gitlab), [Gitea](./gitea))
 2. Add the channel configuration to `~/.qwen/settings.json`
 3. Run `qwen channel start` to start all channels, or `qwen channel start <name>` for a single channel
 
@@ -48,28 +48,30 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option                   | Required         | Description                                                                                                                                                            |
-| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                 |
-| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                            |
-| `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                           |
-| `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                    |
-| `botId`                  | WeCom            | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
-| `secret`                 | WeCom            | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                       |
-| `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
-| `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
-| `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
-| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                       |
-| `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
-| `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
-| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
-| `dmPolicy`               | No               | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                  |
-| `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
-| `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
-| `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
-| `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                        |
-| `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                    |
-| `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                              |
+| Option                   | Required                        | Description                                                                                                                                                                                                            |
+| ------------------------ | ------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                   | Yes                             | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `wecom`, `feishu`, `github`, `gitlab`, `gitea`, or a custom type from an extension (see [Plugins](./plugins))                                                    |
+| `token`                  | Telegram, GitHub, GitLab, Gitea | Bot token (Telegram) or API token (GitHub/GitLab/Gitea). Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat, DingTalk, WeCom, or Feishu                                              |
+| `clientId`               | DingTalk, Feishu                | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                                                                           |
+| `clientSecret`           | DingTalk, Feishu                | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                                                                    |
+| `botId`                  | WeCom                           | WeCom intelligent robot Bot ID. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                       |
+| `secret`                 | WeCom                           | WeCom intelligent robot Secret. Supports `$ENV_VAR` syntax. See [WeCom](./wecom)                                                                                                                                       |
+| `baseUrl`                | GitHub, GitLab, Gitea           | Base URL for the API. GitHub defaults to `https://api.github.com`; GitLab defaults to `https://gitlab.com`; Gitea defaults to `https://gitea.com`. Use for GitHub Enterprise, self-hosted GitLab, or self-hosted Gitea |
+| `pollInterval`           | GitHub, GitLab, Gitea           | Poll interval in milliseconds. Defaults to `60000` (60 seconds). See [Polling Channels](#polling-channels)                                                                                                             |
+| `model`                  | No                              | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                               |
+| `senderPolicy`           | No                              | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                   |
+| `allowedUsers`           | No                              | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                   |
+| `sessionScope`           | No                              | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                                                                       |
+| `cwd`                    | No                              | Working directory for the agent. Defaults to the current directory                                                                                                                                                     |
+| `instructions`           | No                              | Custom instructions prepended to the first message of each session                                                                                                                                                     |
+| `groupPolicy`            | No                              | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                                                                       |
+| `dmPolicy`               | No                              | Private/DM access: `open` (default) or `disabled` (silently drop all DMs). Useful for group-only bots                                                                                                                  |
+| `groupHistoryLimit`      | No                              | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply.                                                 |
+| `groups`                 | No                              | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                                                                     |
+| `dispatchMode`           | No                              | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                                                                         |
+| `blockStreaming`         | No                              | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                                                                        |
+| `blockStreamingChunk`    | No                              | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                                                                    |
+| `blockStreamingCoalesce` | No                              | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                                                                              |
 
 ### Sender Policy
 
@@ -324,7 +326,7 @@ Files work with any model — no multimodal support required.
 | Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)                    |
 | Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored |
 
-> QQ Bot does not process incoming media — image and sticker messages are ignored, so it has no media-handling row above.
+> QQ Bot does not process incoming media — image and sticker messages are ignored, so it has no media-handling row above. GitHub, GitLab, and Gitea channels receive issue/PR body text and comment text but do not process attached files or images.
 >
 > WeCom accepts text, images, mixed text plus images, files, videos, and voice messages (transcribed). Images are passed to the agent as attachments; files and videos are downloaded to temporary local paths. See [WeCom](./wecom#images-and-files) for details.
 
@@ -387,6 +389,48 @@ By default, the agent works for a while and then sends one large response. With 
 
 Only `blockStreaming` is required. The chunk and coalesce settings are optional and have sensible defaults.
 
+## Polling Channels
+
+GitHub, GitLab, and Gitea channels work differently from the messaging-platform channels. Instead of receiving messages in real time through webhooks or long-poll connections, they **poll** the platform's notification API at a regular interval (default: 60 seconds) and treat each notification as an inbound message.
+
+### How Polling Channels Work
+
+1. The adapter polls the platform's notification/todo API on a fixed interval
+2. Each notification is converted into a message envelope with a `chatId` (the repository) and a `threadId` (the issue or pull request)
+3. The agent processes the notification and posts its response as a comment on the issue or pull request
+4. Processed notifications are marked as read (GitHub/Gitea) or dismissed (GitLab)
+5. A **poll cursor** is persisted to `~/.qwen/channels/` so the adapter resumes from where it left off after a restart
+
+### Session Model
+
+Polling channels use a repository-per-chat, issue-per-thread model:
+
+- **`chatId`** — the repository path (e.g., `owner/repo`)
+- **`threadId`** — the issue or pull request (e.g., `issue:42` or `pr:17`)
+- **`sessionScope: thread`** is the natural fit — each issue or pull request gets its own session
+
+### Proactive Responses
+
+Polling channels support proactive sends: the agent can create new issues or post comments on existing issues/pull requests without an inbound notification. This is used for follow-up work, status updates, or review comments.
+
+### Configuration Example
+
+```json
+{
+  "channels": {
+    "my-github": {
+      "type": "github",
+      "token": "$GITHUB_TOKEN",
+      "sessionScope": "thread",
+      "cwd": "/path/to/repo",
+      "pollInterval": 30000
+    }
+  }
+}
+```
+
+See the channel-specific guides for details: [GitHub](./github), [GitLab](./gitlab), [Gitea](./gitea).
+
 ## Slash Commands
 
 Channels support slash commands. These are handled locally (no agent round-trip):
@@ -397,7 +441,7 @@ Channels support slash commands. These are handled locally (no agent round-trip)
 
 All other slash commands (e.g., `/compress`, `/summary`) are forwarded to the agent.
 
-These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu).
+These commands work on all channel types (Telegram, WeChat, QQ, DingTalk, WeCom, Feishu, GitHub, GitLab, Gitea).
 
 ## Running
 

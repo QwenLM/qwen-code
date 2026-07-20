@@ -208,3 +208,6 @@ protected override onPromptEnd(chatId: string, sessionId: string, messageId?: st
 - **Plugin example** (`packages/channels/plugin-example/`) — minimal WebSocket-based adapter, good starting point
 - **Telegram** (`packages/channels/telegram/`) — full-featured: images, files, formatting, typing indicators
 - **DingTalk** (`packages/channels/dingtalk/`) — stream-based with rich text handling
+- **GitHub** (`packages/channels/github/`) — polling adapter: polls notifications, responds as issue/PR comments. Shows the polling pattern with `sendThreadMessage`, cursor persistence, and `abortableSleep`
+- **GitLab** (`packages/channels/gitlab/`) — polling adapter: polls todos, responds as issue/MR notes
+- **Gitea** (`packages/channels/gitea/`) — polling adapter: polls notifications, responds as issue/PR comments

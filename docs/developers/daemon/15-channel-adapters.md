@@ -2,7 +2,7 @@
 
 ## Overview
 
-`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into an agent prompt and send the agent response back to the chat platform. Four concrete channels ship today: DingTalk, WeChat (Weixin), Telegram, and Feishu. They share a base layer (`packages/channels/base/`) and an adapter-facing `ChannelAgentBridge` contract.
+`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into an agent prompt and send the agent response back to the chat platform. Six IM channels and three polling-based code-hosting channels ship today: DingTalk, WeChat (Weixin), Telegram, Feishu (IM), and GitHub, GitLab, Gitea (polling). They share a base layer (`packages/channels/base/`) and an adapter-facing `ChannelAgentBridge` contract.
 
 There are two current host modes:
 
@@ -77,6 +77,9 @@ Handles common cross-cutting concerns: sender gating (allowlist / denylist), gro
 | WeChat (Weixin) | `packages/channels/weixin/src/WeixinAdapter.ts`     | iLink Bot HTTP long-poll                               | Sends via proprietary `sendText` / `sendImage` API; typing indicators.                                       |
 | Telegram        | `packages/channels/telegram/src/TelegramAdapter.ts` | Telegram Bot API long-poll (grammy)                    | Sends HTML chunks via `sendMessage`.                                                                         |
 | Feishu          | `packages/channels/feishu/src/FeishuAdapter.ts`     | Feishu/Lark Stream WebSocket (default) or HTTP webhook | Sends via Lark SDK as interactive cards; webhook mode requires `encryptKey` for HMAC signature verification. |
+| GitHub          | `packages/channels/github/src/GithubAdapter.ts`     | GitHub Notifications API polling                       | Polls notifications; responds as issue/PR comments. Uses `@octokit/rest`.                                    |
+| GitLab          | `packages/channels/gitlab/src/GitlabAdapter.ts`     | GitLab Todo Lists API polling                          | Polls todos; responds as issue/MR notes. Uses `@gitbeaker/rest`.                                             |
+| Gitea           | `packages/channels/gitea/src/GiteaAdapter.ts`       | Gitea Notifications API polling                        | Polls notifications; responds as issue/PR comments. Uses `gitea-js`.                                         |
 
 Each adapter implements:
 
@@ -94,6 +97,9 @@ Each adapter implements:
 | **WeChat**   | HTTP long-poll                  | `senderWxid` (+ optional `groupWxid`)                    | Text-only prompts with reply tokens | Same                                              |
 | **Telegram** | Bot API long-poll               | `from.id` (+ optional `chat.id` for groups)              | Inline keyboard buttons             | Same                                              |
 | **Feishu**   | WebSocket stream / HTTP webhook | `sender.open_id` (+ optional `chat_id` for groups)       | Interactive card buttons            | Same                                              |
+| **GitHub**   | Notifications API poll          | Comment/PR author login                                  | N/A (comments on issues/PRs)        | Same                                              |
+| **GitLab**   | Todo Lists API poll             | `author.username` from todo                              | N/A (notes on issues/MRs)           | Same                                              |
+| **Gitea**    | Notifications API poll          | Comment/PR author username                               | N/A (comments on issues/PRs)        | Same                                              |
 
 > **Note:** The "Permission UX" column describes each platform's native affordance, but none is wired up yet — `AcpBridge.requestPermission` currently auto-approves every request (`packages/channels/base/src/AcpBridge.ts`), and `ChannelConfig.approvalMode` is declared but not yet read. Interactive approval is planned (Phase 5).
 
@@ -180,9 +186,9 @@ Adapter `connect()` failures are reported separately from worker lifecycle error
 
 ## Dependencies
 
-- `packages/channels/base/` — `ChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`).
+- `packages/channels/base/` — `ChannelBase`, `DaemonChannelBridge`, `types.ts` (`ChannelConfig`, `Envelope`, `SessionScope`, `ChannelPlugin`), `polling-helpers.ts` (shared utilities for polling adapters).
 - `packages/sdk-typescript/src/daemon/` — `DaemonSessionClient` and friends.
-- Per-channel SDKs: `@dingtalk/stream` (DingTalk), proprietary iLink Bot HTTP (Weixin), `grammy` (Telegram).
+- Per-channel SDKs: `@dingtalk/stream` (DingTalk), proprietary iLink Bot HTTP (Weixin), `grammy` (Telegram), `@octokit/rest` (GitHub), `@gitbeaker/rest` (GitLab), `gitea-js` (Gitea).
 
 ## Configuration
 
@@ -197,7 +203,7 @@ Adapter `connect()` failures are reported separately from worker lifecycle error
 | `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                        |
 | `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                               |
 
-Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `clientId` (appId), `clientSecret` (appSecret), `verificationToken`, `encryptKey` (webhook mode)).
+Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `clientId` (appId), `clientSecret` (appSecret), `verificationToken`, `encryptKey` (webhook mode); GitHub/GitLab/Gitea: `token`, `baseUrl`, `pollInterval`).
 
 ## Caveats & Known Limits
 
@@ -206,6 +212,8 @@ Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilin
 - **Auto-approve is a deployment-side decision**, not a daemon-side one. The daemon's `permission_mediation` policy still applies; auto-approve only means the channel responds without prompting the human. Do not combine `auto` with `enforce`-grade workflows.
 - **Per-channel rate limits / message-size limits are the adapter's job.** `DaemonChannelBridge` only handles chunking; pushing past WeChat's per-message size or Telegram's flood limit is on the adapter.
 - **No DingTalk / WeChat / Telegram / Feishu reverse-call** — channels are one-way (chat → daemon → chat). The IM platform's native push path, such as a DingTalk card callback, is not wired into the bridge yet.
+- **Polling adapters (GitHub/GitLab/Gitea) use `sendThreadMessage` instead of `sendMessage`.** The base class routes proactive sends through `sendThreadMessage(chatId, threadId, text)`. Without a `threadId`, a new issue is created; with one, a comment is posted. `sendMessage` throws — polling channels do not support bare chat-target sends.
+- **Poll cursors are persisted to `~/.qwen/channels/<name>-poll-cursor.txt`.** The cursor stores the last processed timestamp and a set of IDs at that timestamp to handle same-timestamp deduplication. Corrupted cursor files are handled gracefully (reset to empty).
 
 ## References
 
@@ -219,6 +227,10 @@ Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilin
 - `packages/channels/dingtalk/src/DingtalkAdapter.ts`
 - `packages/channels/weixin/src/WeixinAdapter.ts`
 - `packages/channels/telegram/src/TelegramAdapter.ts`
+- `packages/channels/github/src/GithubAdapter.ts`
+- `packages/channels/gitlab/src/GitlabAdapter.ts`
+- `packages/channels/gitea/src/GiteaAdapter.ts`
+- `packages/channels/base/src/polling-helpers.ts`
 - `packages/channels/plugin-example/` (reference plugin scaffold)
 - Channel plugin guide: [`../channel-plugins.md`](../channel-plugins.md).
 - SDK reference: [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md).
