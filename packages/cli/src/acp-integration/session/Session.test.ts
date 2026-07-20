@@ -13258,6 +13258,100 @@ describe('Session', () => {
       };
     }
 
+    it('isolates enter_plan_mode from executable ACP siblings while preserving duplicate responses', async () => {
+      const writeExecute = vi.fn().mockResolvedValue({
+        llmContent: 'wrote',
+        returnDisplay: 'wrote',
+      });
+      const enterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'entered plan mode',
+        returnDisplay: 'entered plan mode',
+      });
+      const readExecute = vi.fn().mockResolvedValue({
+        llmContent: 'read',
+        returnDisplay: 'read',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) => {
+        const execute =
+          name === core.ToolNames.ENTER_PLAN_MODE
+            ? enterExecute
+            : name === core.ToolNames.WRITE_FILE
+              ? writeExecute
+              : readExecute;
+        return mockAllowedTool(name, execute);
+      });
+      const historyIds = new Set(['duplicate_read']);
+      vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(
+        historyIds,
+      );
+      const [duplicatePart] = core.normalizeModelToolCallIds(
+        [
+          {
+            functionCall: {
+              id: 'duplicate_read',
+              name: core.ToolNames.READ_FILE,
+              args: { file_path: 'duplicate.ts' },
+            },
+          },
+        ],
+        historyIds,
+        new Set<string>(),
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(new AbortController().signal, 'prompt-plan-boundary', [
+        {
+          id: 'write_before_entry',
+          name: core.ToolNames.WRITE_FILE,
+          args: { file_path: 'before.txt' },
+        },
+        duplicatePart.functionCall!,
+        {
+          id: 'enter_plan',
+          name: core.ToolNames.ENTER_PLAN_MODE,
+          args: {},
+        },
+        {
+          id: 'read_after_entry',
+          name: core.ToolNames.READ_FILE,
+          args: { file_path: 'after.ts' },
+        },
+      ]);
+
+      expect(writeExecute).not.toHaveBeenCalled();
+      expect(enterExecute).toHaveBeenCalledOnce();
+      expect(readExecute).not.toHaveBeenCalled();
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'write_before_entry',
+        'duplicate_read__qwen_dup_2',
+        'enter_plan',
+        'read_after_entry',
+      ]);
+      expect(result.parts[0].functionResponse?.response).toEqual({
+        error: core.PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(result.parts[1].functionResponse?.response).toEqual({
+        error: expect.stringContaining(
+          'Duplicate provider tool call id "duplicate_read"',
+        ),
+      });
+      expect(result.parts[2].functionResponse?.response).toEqual({
+        output: 'entered plan mode',
+      });
+      expect(result.parts[3].functionResponse?.response).toEqual({
+        error: core.PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+      });
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        [result.parts[0]],
+        expect.objectContaining({
+          callId: 'write_before_entry',
+          status: 'error',
+          errorType: core.ToolErrorType.EXECUTION_DENIED,
+        }),
+      );
+    });
+
     it('keeps a structured timeout as an error after a later parent abort', async () => {
       const parentController = new AbortController();
       const messageBus = {

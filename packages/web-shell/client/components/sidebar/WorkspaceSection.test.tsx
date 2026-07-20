@@ -121,7 +121,7 @@ afterEach(() => {
 });
 
 describe('WorkspaceSection git chip', () => {
-  it('renders a clickable git chip for a trusted repo and opens its diff', async () => {
+  it('renders a git chip inside a dropdown trigger for a trusted repo', async () => {
     const status: DaemonWorkspaceGitStatus = {
       v: 2,
       workspaceCwd: '/tmp/project',
@@ -136,17 +136,12 @@ describe('WorkspaceSection git chip', () => {
 
     const chip = gitChip();
     expect(chip).not.toBeNull();
-    expect(chip?.tagName).toBe('BUTTON');
+    // The chip is now a read-only OUTPUT inside a DropdownMenuTrigger
+    // (the dropdown offers "Changes" and "New Worktree Task").
+    expect(chip?.tagName).toBe('OUTPUT');
     expect(chip?.getAttribute('data-dirty')).toBe('true');
-    // Icon-only (compact) form: the branch name is not shown as inline text but
-    // stays reachable via the accessible name (the hover tooltip).
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
-
-    act(() => {
-      chip?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {
