@@ -1570,18 +1570,40 @@ export function registerSessionRoutes(
             // the expected worktrees root, then verify containment. This
             // defeats both `..` traversal and symlink escapes (e.g.
             // .qwen/worktrees/escape -> /etc). The allowed root is always
-            // derived from workspaceCwd (never from the sidecar, which is
+            // derived from the server (never from the sidecar, which is
             // attacker-writable). The canonical realTarget is passed to
             // changeSessionCwd to eliminate the TOCTOU window between
             // validation and relocation.
+            // For monorepo subdirectory workspaces, worktrees live under
+            // the repo top-level, not the workspace cwd. Try workspaceCwd
+            // first, then fall back to the git repo top-level.
             let realTarget: string | undefined;
             try {
               realTarget = fs.realpathSync(sidecar.worktreePath);
-              const realRoot = fs.realpathSync(
-                path.join(workspaceCwd, '.qwen', 'worktrees'),
-              );
-              const rel = path.relative(realRoot, realTarget);
-              if (rel.startsWith('..') || path.isAbsolute(rel)) {
+              const candidateRoots = [workspaceCwd];
+              let repoTop: string | null = null;
+              try {
+                repoTop = await new GitWorktreeService(
+                  workspaceCwd,
+                ).getRepoTopLevel();
+              } catch {
+                // Not a git repo or getRepoTopLevel unavailable.
+              }
+              if (repoTop && repoTop !== workspaceCwd) {
+                candidateRoots.push(repoTop);
+              }
+              const contained = candidateRoots.some((root) => {
+                try {
+                  const realRoot = fs.realpathSync(
+                    path.join(root, '.qwen', 'worktrees'),
+                  );
+                  const rel = path.relative(realRoot, realTarget!);
+                  return !rel.startsWith('..') && !path.isAbsolute(rel);
+                } catch {
+                  return false;
+                }
+              });
+              if (!contained) {
                 realTarget = undefined;
               }
             } catch {
