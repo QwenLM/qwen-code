@@ -2356,6 +2356,76 @@ describe('Session', () => {
       expect(observed).toBeUndefined();
     });
 
+    it('clears the root invocation context from automatic turns', async () => {
+      const rootContext: core.InvocationContextV1 = {
+        version: 1,
+        sessionId: 'test-session-id',
+        promptId: 'root-prompt-id',
+      };
+      let cronCallback: ((job: { prompt: string }) => void) | undefined;
+      const scheduler = {
+        size: 1,
+        hasPendingWork: true,
+        start: vi.fn((callback: (job: { prompt: string }) => void) => {
+          cronCallback = callback;
+        }),
+        stop: vi.fn(),
+        getExitSummary: vi.fn().mockReturnValue(undefined),
+      };
+      mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+      mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+      const observed: Array<core.InvocationContextV1 | undefined> = [];
+      mockChat.sendMessageStream = vi.fn().mockImplementation(() => {
+        observed.push(core.getInvocationContext());
+        return Promise.resolve(createEmptyStream());
+      });
+      const internals = session as unknown as {
+        cronCompletion: Promise<void> | null;
+        notificationCompletion: Promise<void> | null;
+      };
+
+      await session.prompt(
+        {
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'root prompt' }],
+        },
+        rootContext,
+      );
+
+      expect(observed).toEqual([rootContext]);
+
+      await core.runWithInvocationContext(rootContext, async () => {
+        cronCallback?.({ prompt: 'scheduled prompt' });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+        });
+        await vi.waitFor(() => {
+          expect(internals.cronCompletion).toBeNull();
+        });
+      });
+
+      const backgroundCallback = mockBackgroundTaskRegistry
+        .setNotificationCallback.mock.calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+      await core.runWithInvocationContext(rootContext, async () => {
+        backgroundCallback('done', '<task-notification />', {
+          agentId: 'agent-1',
+          status: 'completed',
+        });
+        await vi.waitFor(() => {
+          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        });
+        await vi.waitFor(() => {
+          expect(internals.notificationCompletion).toBeNull();
+        });
+      });
+
+      expect(observed).toEqual([rootContext, undefined, undefined]);
+    });
+
     it('records the latest file history snapshot after makeSnapshot', async () => {
       const latestSnapshot = {
         promptId: 'test-session-id########1',

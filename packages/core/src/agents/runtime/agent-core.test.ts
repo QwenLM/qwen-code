@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import type { FunctionDeclaration } from '@google/genai';
-import { AgentCore } from './agent-core.js';
+import { AgentCore, type ReasoningLoopResult } from './agent-core.js';
 import {
   getCurrentAgentDepth,
   getCurrentAgentId,
@@ -36,6 +36,11 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+  type InvocationContextV1,
+} from '../../utils/invocation-context.js';
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -150,6 +155,31 @@ describe('AgentCore.runInAgentFrames', () => {
 
     expect(observedView).toBeUndefined();
     expect(observedName).toBe('inherit-agent');
+  });
+
+  it('clears the parent invocation context before running the reasoning loop', async () => {
+    const core = makeCore('isolated-agent');
+    const parentContext: InvocationContextV1 = {
+      version: 1,
+      sessionId: 'parent-session',
+      promptId: 'parent-prompt',
+    };
+    let observed: InvocationContextV1 | undefined;
+    vi.spyOn(
+      core as unknown as {
+        _runReasoningLoopInner: () => Promise<ReasoningLoopResult>;
+      },
+      '_runReasoningLoopInner',
+    ).mockImplementation(async () => {
+      observed = getInvocationContext();
+      return { text: '', terminateMode: null, turnsUsed: 0 };
+    });
+
+    await runWithInvocationContext(parentContext, () =>
+      core.runReasoningLoop({} as never, [], [], new AbortController()),
+    );
+
+    expect(observed).toBeUndefined();
   });
 
   it('uses inheritedView for deferred-approval continuation when the agent owns no view', async () => {
