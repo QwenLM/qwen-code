@@ -59,6 +59,10 @@ import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -2144,13 +2148,13 @@ export async function createTransport(
     }
 
     // Normalize process.env PATH first (merge PATH+Path → single PATH on
-    // Windows), then apply server-specific overrides on top so that a server
-    // config providing its own PATH fully replaces the parent value instead of
-    // being merged with a stale case-variant.
-    const env = {
-      ...normalizePathEnvForWindows({ ...process.env }),
-      ...(mcpServerConfig.env || {}),
-    };
+    // Windows), then scrub daemon-internal env, then apply server-specific
+    // overrides on top so user-configured credentials can be passed through.
+    const env = scrubChildEnv(
+      normalizePathEnvForWindows(process.env),
+      collectSensitiveShellEnvKeys(process.env),
+      mcpServerConfig.env,
+    );
 
     const transport = new StdioClientTransport({
       command: mcpServerConfig.command,

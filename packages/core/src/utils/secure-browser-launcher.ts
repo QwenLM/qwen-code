@@ -13,6 +13,10 @@ import {
   isBrowserCommandBlocked,
   shouldAttemptBrowserLaunch,
 } from './browser.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from './child-env-scrub.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -159,12 +163,11 @@ export async function openBrowserSecurely(
   }
 
   const execOptions: Record<string, unknown> = {
-    // Don't inherit parent's environment to avoid potential issues
-    env: {
-      ...process.env,
+    // Preserve normal browser env while dropping daemon credentials.
+    env: scrubChildEnv(process.env, collectSensitiveShellEnvKeys(process.env), {
       // Ensure we're not in a shell that might interpret special characters
       SHELL: undefined,
-    },
+    }),
     // Detach the browser process so it doesn't block
     detached: true,
     stdio: 'ignore',
@@ -216,10 +219,9 @@ export async function openBrowserSecurely(
 
 async function launchDetached(command: string, args: string[]): Promise<void> {
   const spawnOptions: SpawnOptions = {
-    env: {
-      ...process.env,
+    env: scrubChildEnv(process.env, collectSensitiveShellEnvKeys(process.env), {
       SHELL: undefined,
-    },
+    }),
     detached: true,
     stdio: 'ignore',
   };

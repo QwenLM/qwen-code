@@ -2372,6 +2372,23 @@ describe('mcp-client', () => {
       });
     });
 
+    it('scrubs daemon secrets from the stdio transport environment', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_SERVER_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'user-credential',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport('test-server', { command: 'test-command' }, false);
+
+      const transportOptions = mockedTransport.mock.calls[0]?.[0];
+      expect(transportOptions?.env?.['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(transportOptions?.env?.['GH_TOKEN']).toBe('user-credential');
+    });
+
     it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       process.env = {

@@ -19,6 +19,11 @@ import { isNodeError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { fileExists, isWithinRoot } from '../utils/fileUtils.js';
 import { initRepositoryWithMainBranch } from './gitInit.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 
 const debugLogger = createDebugLogger('GIT_WORKTREE_SERVICE');
 
@@ -1384,7 +1389,11 @@ export class GitWorktreeService {
         {
           cwd: this.sourceRepoPath,
           timeout: timeoutMs,
-          env: { ...process.env, LANG: 'C', LC_ALL: 'C' },
+          env: scrubChildEnv(
+            normalizePathEnvForWindows(process.env),
+            collectSensitiveShellEnvKeys(process.env),
+            { LANG: 'C', LC_ALL: 'C' },
+          ),
         },
       );
       return { success: true };

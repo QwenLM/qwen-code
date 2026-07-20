@@ -1917,6 +1917,33 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('strips daemon secrets from the pty spawn environment', async () => {
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'server-token',
+        QWEN_DAEMON_TOKEN: 'daemon-token',
+        QWEN_CODE_SIMPLE: '1',
+        QWEN_CUSTOM_API_KEY_EXAMPLE: 'custom-provider-key',
+        OPENAI_API_KEY: 'provider-key',
+        GH_TOKEN: 'github-token',
+        SAFE_VAR: 'ok',
+      };
+
+      await simulateExecution('echo hello', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      const spawnOptions = mockPtySpawn.mock.calls[0][2];
+      expect(spawnOptions.env.QWEN_SERVER_TOKEN).toBeUndefined();
+      expect(spawnOptions.env.QWEN_DAEMON_TOKEN).toBeUndefined();
+      expect(spawnOptions.env.QWEN_CODE_SIMPLE).toBeUndefined();
+      expect(spawnOptions.env.QWEN_CUSTOM_API_KEY_EXAMPLE).toBeUndefined();
+      expect(spawnOptions.env.OPENAI_API_KEY).toBe('provider-key');
+      expect(spawnOptions.env.GH_TOKEN).toBe('github-token');
+      expect(spawnOptions.env.SAFE_VAR).toBe('ok');
+      expect(spawnOptions.env.QWEN_CODE).toBe('1');
+    });
+
     it('does not inject Unix pager defaults into Windows pty env when unset', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
@@ -3228,6 +3255,31 @@ describe('ShellExecutionService child_process fallback', () => {
 
       const spawnOptions = mockCpSpawn.mock.calls[0][2];
       expectNormalizedWindowsPathEnv(spawnOptions.env);
+    });
+
+    it('strips daemon secrets from the child_process spawn environment', async () => {
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'server-token',
+        QWEN_DAEMON_TOKEN: 'daemon-token',
+        QWEN_CODE_SIMPLE: '1',
+        QWEN_CUSTOM_API_KEY_EXAMPLE: 'custom-provider-key',
+        OPENAI_API_KEY: 'provider-key',
+        GH_TOKEN: 'github-token',
+        SAFE_VAR: 'ok',
+      };
+
+      await simulateExecution('echo hello', (cp) => cp.emit('exit', 0, null));
+
+      const spawnOptions = mockCpSpawn.mock.calls[0][2];
+      expect(spawnOptions.env.QWEN_SERVER_TOKEN).toBeUndefined();
+      expect(spawnOptions.env.QWEN_DAEMON_TOKEN).toBeUndefined();
+      expect(spawnOptions.env.QWEN_CODE_SIMPLE).toBeUndefined();
+      expect(spawnOptions.env.QWEN_CUSTOM_API_KEY_EXAMPLE).toBeUndefined();
+      expect(spawnOptions.env.OPENAI_API_KEY).toBe('provider-key');
+      expect(spawnOptions.env.GH_TOKEN).toBe('github-token');
+      expect(spawnOptions.env.SAFE_VAR).toBe('ok');
+      expect(spawnOptions.env.QWEN_CODE).toBe('1');
     });
 
     it('does not inject Unix pager defaults into Windows child_process env when unset', async () => {

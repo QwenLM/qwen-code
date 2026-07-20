@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import { createServer } from 'node:http';
 import * as https from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { describe, it, expect, vi, afterEach, afterAll } from 'vitest';
+import { describe, it, expect, vi, afterEach, beforeEach, afterAll } from 'vitest';
 import express from 'express';
 import {
   createLazyBridgeProxy,
@@ -20,6 +20,8 @@ import {
   createDisabledChannelWorkerSupervisor,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
+  scrubDaemonProcessEnv,
+  captureDaemonCredentialStore,
   type RunHandle,
   validatePolicyConfig,
   waitForRuntimeStartingForShutdown,
@@ -202,12 +204,19 @@ describe('workspace skill settings persistence', () => {
     await handle.runtimeReady;
     expect(persistDisabledSkills).toBeDefined();
 
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      'QWEN_CUSTOM_API_KEY_SKILL_TEST=workspace-key\n',
+    );
+    delete process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST'];
+
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
     ).resolves.toEqual({
       changed: true,
       disabled: ['orphan', 'review'],
     });
+    expect(process.env['QWEN_CUSTOM_API_KEY_SKILL_TEST']).toBeUndefined();
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
     ).resolves.toEqual({
@@ -8476,5 +8485,338 @@ describe('runQwenServe startup observability', () => {
     } finally {
       await handle.close();
     }
+  });
+});
+
+describe('scrubDaemonProcessEnv', () => {
+  const SCRUB_KEYS = [
+    'QWEN_SERVER_TOKEN',
+    'QWEN_DAEMON_TOKEN',
+    'QWEN_CODE_SIMPLE',
+    'QWEN_CUSTOM_API_KEY_FOO',
+    'QWEN_CUSTOM_API_KEY_BAR',
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of SCRUB_KEYS) {
+      saved[key] = process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of SCRUB_KEYS) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('removes QWEN_SERVER_TOKEN from process.env', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'test-secret';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('removes QWEN_DAEMON_TOKEN from process.env', () => {
+    process.env['QWEN_DAEMON_TOKEN'] = 'test-secret';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+  });
+
+  it('removes QWEN_CODE_SIMPLE from process.env', () => {
+    process.env['QWEN_CODE_SIMPLE'] = '1';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_CODE_SIMPLE']).toBeUndefined();
+  });
+
+  it('removes QWEN_CUSTOM_API_KEY_* from process.env', () => {
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'secret-foo';
+    process.env['QWEN_CUSTOM_API_KEY_BAR'] = 'secret-bar';
+    scrubDaemonProcessEnv();
+    expect(process.env['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+    expect(process.env['QWEN_CUSTOM_API_KEY_BAR']).toBeUndefined();
+  });
+
+  it('preserves unrelated keys', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'test-secret';
+    process.env['QWEN_CODE_SIMPLE'] = '1';
+    const pathBefore = process.env['PATH'];
+    scrubDaemonProcessEnv();
+    expect(process.env['PATH']).toBe(pathBefore);
+  });
+});
+
+describe('daemon credential store', () => {
+  // The daemon captures QWEN_CUSTOM_API_KEY_* into an in-process store
+  // before scrubbing, then installs a store-backed credential provider
+  // in core so model resolution reads from the store (not process.env).
+  // This keeps custom-provider credentials OS-invisible while preserving
+  // authentication. ACP children receive credentials via explicit env
+  // injection at the spawn boundary; shell/MCP/A2UI children never do.
+  const STORE_KEYS = [
+    'QWEN_CUSTOM_API_KEY_FOO',
+    'QWEN_CUSTOM_API_KEY_BAR',
+    'QWEN_CUSTOM_API_KEY_SHARED',
+    'QWEN_CUSTOM_API_KEY_EXISTING',
+    'QWEN_CUSTOM_API_KEY_NEW',
+    'QWEN_CUSTOM_API_KEY_REPLACE',
+    'QWEN_CUSTOM_API_KEY_DELETE',
+    'QWEN_SERVER_TOKEN',
+    'QWEN_DAEMON_TOKEN',
+    'QWEN_CODE_SIMPLE',
+    // Mixed-case variants (Windows case-insensitivity tests).
+    'qwen_custom_api_key_foo',
+    'qwen_server_token',
+  ] as const;
+  const saved: Record<string, string | undefined> = {};
+
+  beforeEach(() => {
+    for (const key of STORE_KEYS) {
+      saved[key] = process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    for (const key of STORE_KEYS) {
+      const value = saved[key];
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('captureDaemonCredentialStore captures only QWEN_CUSTOM_API_KEY_* values', () => {
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'secret-foo';
+    process.env['QWEN_SERVER_TOKEN'] = 'server-token';
+    const store = captureDaemonCredentialStore();
+    expect(store.get('QWEN_CUSTOM_API_KEY_FOO')).toBe('secret-foo');
+    expect(store.get('QWEN_SERVER_TOKEN')).toBeUndefined();
+    // Store is mutable so post-boot writes (reload/install) can update it.
+    expect(store.has('QWEN_CUSTOM_API_KEY_FOO')).toBe(true);
+    store.set('QWEN_CUSTOM_API_KEY_BAR', 'late-key');
+    expect(store.get('QWEN_CUSTOM_API_KEY_BAR')).toBe('late-key');
+  });
+
+  it('custom provider credentials are captured to store then scrubbed from process.env', () => {
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'secret-foo';
+    // Simulate daemon boot order: capture → scrub.
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+    // process.env is clean (OS-invisible).
+    expect(process.env['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+    // Store retains the credential for model resolution via the
+    // credential provider.
+    expect(store.get('QWEN_CUSTOM_API_KEY_FOO')).toBe('secret-foo');
+  });
+
+  it('daemonRuntimeBaseEnv (child/workspace base) does not contain custom credentials', () => {
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'secret-foo';
+    const pathBefore = process.env['PATH'];
+    // Daemon boot: capture → scrub → snapshot base env.
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+    const daemonRuntimeBaseEnv = Object.freeze({ ...process.env });
+    // The base env that flows to shell/MCP/A2UI children is clean.
+    expect(daemonRuntimeBaseEnv['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+    expect(daemonRuntimeBaseEnv['PATH']).toBe(pathBefore);
+    // Store retains the credential.
+    expect(store.get('QWEN_CUSTOM_API_KEY_FOO')).toBe('secret-foo');
+  });
+
+  it('ACP child env receives custom credentials via explicit injection', () => {
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'secret-foo';
+    // Daemon boot: capture → scrub → snapshot base env.
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+    const daemonRuntimeBaseEnv = Object.freeze({ ...process.env });
+    // ACP spawn injects the store into sourceEnv (3 call sites in
+    // run-qwen-serve.ts all do { ...runtimeEffectiveEnv, ...store.snapshot() }).
+    // Store takes precedence so runtime env can't override credentials.
+    // Simulate with just the base env (no settings.env overlay).
+    const acpChildSourceEnv = {
+      ...daemonRuntimeBaseEnv,
+      ...store.snapshot(),
+    };
+    expect(acpChildSourceEnv['QWEN_CUSTOM_API_KEY_FOO']).toBe('secret-foo');
+    // The daemon's own process.env remains clean.
+    expect(process.env['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+  });
+
+  it('existing read-once secret scrubbing remains unchanged', () => {
+    process.env['QWEN_SERVER_TOKEN'] = 'server-token';
+    process.env['QWEN_DAEMON_TOKEN'] = 'daemon-token';
+    process.env['QWEN_CODE_SIMPLE'] = '1';
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'secret-foo';
+
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+    const daemonRuntimeBaseEnv = Object.freeze({ ...process.env });
+
+    // Read-once daemon secrets are gone from process.env entirely.
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(process.env['QWEN_CODE_SIMPLE']).toBeUndefined();
+    // And absent from the child env too.
+    expect(daemonRuntimeBaseEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+    expect(daemonRuntimeBaseEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+    expect(daemonRuntimeBaseEnv['QWEN_CODE_SIMPLE']).toBeUndefined();
+    // Custom-provider credential is scrubbed from process.env...
+    expect(process.env['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+    // ...and from the child env...
+    expect(daemonRuntimeBaseEnv['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+    // ...but retained in the store for model resolution.
+    expect(store.get('QWEN_CUSTOM_API_KEY_FOO')).toBe('secret-foo');
+  });
+
+  it('store snapshot wins over runtime env in ACP injection (merge conflict)', () => {
+    // Simulate: boot captures key → scrub → runtime env rebuild loads
+    // settings.env which also has the key (e.g. stale overlay). The ACP
+    // injection spread order { ...runtimeEffectiveEnv, ...store.snapshot() }
+    // must ensure the store value wins so runtime overlays can't override
+    // credentials.
+    process.env['QWEN_CUSTOM_API_KEY_FOO'] = 'real-key';
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+
+    // Runtime env somehow has a different value (e.g. from .env overlay).
+    const runtimeEffectiveEnv: NodeJS.ProcessEnv = {
+      ...process.env,
+      QWEN_CUSTOM_API_KEY_FOO: 'overlay-attack',
+    };
+
+    // ACP spawn: store wins (spread last).
+    const acpChildSourceEnv = {
+      ...runtimeEffectiveEnv,
+      ...store.snapshot(),
+    };
+    expect(acpChildSourceEnv['QWEN_CUSTOM_API_KEY_FOO']).toBe('real-key');
+    expect(process.env['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+  });
+
+  it('post-boot store mutation is reflected in ACP sourceEnv (factory lifecycle)', () => {
+    // Test the real daemon pattern: the sourceEnv function is created ONCE
+    // at factory initialization time, but re-reads credentialStore.snapshot()
+    // on each invocation. So post-boot store mutations (via reload/install)
+    // reach new ACP spawns even though the factory was created before the
+    // mutation.
+    process.env['QWEN_CUSTOM_API_KEY_EXISTING'] = 'old-key';
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+    const runtimeEffectiveEnv: NodeJS.ProcessEnv = { ...process.env };
+
+    // Factory is created here — sourceEnv is a function, not a snapshot.
+    const getSourceEnv = (): NodeJS.ProcessEnv => ({
+      ...runtimeEffectiveEnv,
+      ...store.snapshot(),
+    });
+
+    // First spawn sees only the boot-captured key.
+    let env = getSourceEnv();
+    expect(env['QWEN_CUSTOM_API_KEY_EXISTING']).toBe('old-key');
+    expect(env['QWEN_CUSTOM_API_KEY_NEW']).toBeUndefined();
+
+    // Post-boot: loadEnvironment/installProvider writes a NEW key to the
+    // store (via writeEnvKey, not process.env).
+    store.set('QWEN_CUSTOM_API_KEY_NEW', 'late-key');
+
+    // Second spawn sees the new key — factory was NOT rebuilt.
+    env = getSourceEnv();
+    expect(env['QWEN_CUSTOM_API_KEY_EXISTING']).toBe('old-key');
+    expect(env['QWEN_CUSTOM_API_KEY_NEW']).toBe('late-key');
+    // process.env stays clean.
+    expect(process.env['QWEN_CUSTOM_API_KEY_EXISTING']).toBeUndefined();
+    expect(process.env['QWEN_CUSTOM_API_KEY_NEW']).toBeUndefined();
+  });
+
+  it('credential replacement in store reaches ACP sourceEnv without factory rebuild', () => {
+    process.env['QWEN_CUSTOM_API_KEY_REPLACE'] = 'original';
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+    const runtimeEffectiveEnv: NodeJS.ProcessEnv = { ...process.env };
+    const getSourceEnv = (): NodeJS.ProcessEnv => ({
+      ...runtimeEffectiveEnv,
+      ...store.snapshot(),
+    });
+
+    expect(getSourceEnv()['QWEN_CUSTOM_API_KEY_REPLACE']).toBe('original');
+
+    // Simulate reload/install replacing the key value.
+    store.set('QWEN_CUSTOM_API_KEY_REPLACE', 'replaced');
+    expect(getSourceEnv()['QWEN_CUSTOM_API_KEY_REPLACE']).toBe('replaced');
+  });
+
+  it('credential deletion in store reaches ACP sourceEnv without factory rebuild', () => {
+    process.env['QWEN_CUSTOM_API_KEY_DELETE'] = 'to-be-removed';
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+    const runtimeEffectiveEnv: NodeJS.ProcessEnv = { ...process.env };
+    const getSourceEnv = (): NodeJS.ProcessEnv => ({
+      ...runtimeEffectiveEnv,
+      ...store.snapshot(),
+    });
+
+    expect(getSourceEnv()['QWEN_CUSTOM_API_KEY_DELETE']).toBe('to-be-removed');
+
+    // Simulate provider uninstall deleting the key.
+    store.delete('QWEN_CUSTOM_API_KEY_DELETE');
+    expect(getSourceEnv()['QWEN_CUSTOM_API_KEY_DELETE']).toBeUndefined();
+  });
+
+  it('mixed-case custom keys are captured, scrubbed, and normalized to uppercase', () => {
+    // Windows: process.env is case-insensitive, keys may appear with
+    // non-standard casing. The capture pattern is case-insensitive and
+    // the store normalizes to uppercase so the canonical generated key
+    // (always uppercase) finds the value.
+    process.env['qwen_custom_api_key_foo'] = 'mixed-case-secret';
+    const store = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+
+    // process.env is scrubbed (case-insensitive pattern).
+    expect(process.env['qwen_custom_api_key_foo']).toBeUndefined();
+    expect(process.env['QWEN_CUSTOM_API_KEY_FOO']).toBeUndefined();
+
+    // Store has the value under the canonical uppercase key.
+    expect(store.get('QWEN_CUSTOM_API_KEY_FOO')).toBe('mixed-case-secret');
+    // Mixed-case lookup also works (store normalizes internally).
+    expect(store.get('qwen_custom_api_key_foo')).toBe('mixed-case-secret');
+
+    // ACP child injection uses snapshot which has uppercase keys.
+    const acpChildSourceEnv = {
+      ...process.env,
+      ...store.snapshot(),
+    };
+    expect(acpChildSourceEnv['QWEN_CUSTOM_API_KEY_FOO']).toBe(
+      'mixed-case-secret',
+    );
+  });
+
+  it('mixed-case QWEN_SERVER_TOKEN is scrubbed (Windows case-insensitivity)', () => {
+    process.env['qwen_server_token'] = 'lowercase-token';
+    scrubDaemonProcessEnv();
+    expect(process.env['qwen_server_token']).toBeUndefined();
+    expect(process.env['QWEN_SERVER_TOKEN']).toBeUndefined();
+  });
+
+  it('two daemons in the same process have isolated credential stores', () => {
+    // Simulate two concurrent daemons: each captures its own store.
+    process.env['QWEN_CUSTOM_API_KEY_SHARED'] = 'initial';
+    const storeA = captureDaemonCredentialStore();
+    const storeB = captureDaemonCredentialStore();
+    scrubDaemonProcessEnv();
+
+    // Each daemon can independently update its store (e.g. via reload).
+    storeA.set('QWEN_CUSTOM_API_KEY_SHARED', 'daemon-a-key');
+    storeB.set('QWEN_CUSTOM_API_KEY_SHARED', 'daemon-b-key');
+
+    // Provider for daemon A reads its own key.
+    const providerA = qwenCore.createCredentialProvider(storeA);
+    const providerB = qwenCore.createCredentialProvider(storeB);
+    expect(providerA.get('QWEN_CUSTOM_API_KEY_SHARED')).toBe('daemon-a-key');
+    expect(providerB.get('QWEN_CUSTOM_API_KEY_SHARED')).toBe('daemon-b-key');
+
+    // Closing daemon A (deleting its store) does not affect daemon B.
+    storeA.delete('QWEN_CUSTOM_API_KEY_SHARED');
+    expect(providerA.get('QWEN_CUSTOM_API_KEY_SHARED')).toBeUndefined();
+    expect(providerB.get('QWEN_CUSTOM_API_KEY_SHARED')).toBe('daemon-b-key');
   });
 });

@@ -21,6 +21,10 @@ import {
   type AnsiOutput,
 } from '../utils/terminalSerializer.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
 import { formatMemoryUsage } from '../utils/formatters.js';
 import { getShellContextEnvVars } from '../utils/shellContextEnv.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -763,16 +767,19 @@ export class ShellExecutionService {
         windowsVerbatimArguments: isWindows && shell === 'cmd',
         detached: !isWindows,
         windowsHide: isWindows,
-        env: {
-          ...normalizePathEnvForWindows(process.env),
-          QWEN_CODE: '1',
-          TERM: 'xterm-256color',
-          ...getShellPagerEnv(pager, {
-            includeGitPager: false,
-            platform: os.platform(),
-          }),
-          ...getShellContextEnvVars(),
-        },
+        env: scrubChildEnv(
+          normalizePathEnvForWindows(process.env),
+          collectSensitiveShellEnvKeys(process.env),
+          {
+            QWEN_CODE: '1',
+            TERM: 'xterm-256color',
+            ...getShellPagerEnv(pager, {
+              includeGitPager: false,
+              platform: os.platform(),
+            }),
+            ...getShellContextEnvVars(),
+          },
+        ),
       });
 
       const result = new Promise<ShellExecutionResult>((resolve) => {
@@ -1466,16 +1473,19 @@ export class ShellExecutionService {
         name: 'xterm',
         cols,
         rows,
-        env: {
-          ...normalizePathEnvForWindows(process.env),
-          QWEN_CODE: '1',
-          TERM: 'xterm-256color',
-          ...getShellPagerEnv(shellExecutionConfig.pager, {
-            includeGitPager: true,
-            platform: os.platform(),
-          }),
-          ...getShellContextEnvVars(),
-        },
+        env: scrubChildEnv(
+          normalizePathEnvForWindows(process.env),
+          collectSensitiveShellEnvKeys(process.env),
+          {
+            QWEN_CODE: '1',
+            TERM: 'xterm-256color',
+            ...getShellPagerEnv(shellExecutionConfig.pager, {
+              includeGitPager: true,
+              platform: os.platform(),
+            }),
+            ...getShellContextEnvVars(),
+          },
+        ),
         handleFlowControl: true,
       });
 

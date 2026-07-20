@@ -43,6 +43,11 @@ import type {
   ProviderSetupInputs,
   TelemetryRuntimeConfig,
   TelemetrySettings,
+  CredentialStore,
+} from '@qwen-code/qwen-code-core';
+import {
+  createCredentialStore,
+  createCredentialProvider,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
@@ -812,6 +817,97 @@ export interface RunQwenServeDeps {
   ) => ChannelWorkerSupervisor;
   channelServicePidfile?: ChannelServicePidfile;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
+}
+
+/**
+ * Regex matching env-var keys that must never appear in the daemon's
+ * OS-visible `process.env` after boot. On macOS a same-Uid child can
+ * discover the daemon ancestor's PID via `process.ppid` and read its
+ * environment with `ps eww`; this pattern identifies the keys to strip
+ * before that exposure window opens.
+ *
+ * `QWEN_SERVER_TOKEN` / `QWEN_DAEMON_TOKEN`: read-once bearer tokens
+ * captured into closures at boot; safe to delete.
+ *
+ * `QWEN_CODE_SIMPLE`: invocation-level bare-mode override that would
+ * silently suppress skills in children.
+ *
+ * `QWEN_CUSTOM_API_KEY_*`: user-configured custom-provider credentials.
+ * The daemon captures them into an in-process mutable store at boot,
+ * then scrubs them from `process.env`. This keeps them OS-invisible
+ * (macOS `ps eww`, Linux `/proc/<pid>/environ`). ACP children receive
+ * them via explicit env injection at the spawn boundary — the
+ * `sourceEnv` callback re-reads `credentialStore.snapshot()` on each
+ * spawn so post-boot credential updates (`.env` reload, provider
+ * install) reach newly created ACP sessions. ACP children are agent
+ * processes that call models directly; shell/MCP/A2UI children never
+ * receive these keys.
+ *
+ * Mirrors the shell-tool denylist in `child-env-scrub.ts` — kept as a
+ * separate constant so the daemon's self-scrub policy is explicit and
+ * independently auditable.
+ */
+const DAEMON_SELF_SCRUB_PATTERN =
+  /^(?:QWEN_SERVER_TOKEN|QWEN_DAEMON_TOKEN|QWEN_CODE_SIMPLE|QWEN_CUSTOM_API_KEY_.+)$/i;
+
+/**
+ * Regex matching custom-provider credential env-var keys. Used by
+ * {@link captureDaemonCredentialStore} to extract them from
+ * `process.env` into an in-process store before scrubbing.
+ *
+ * Case-insensitive to handle Windows where `process.env` is
+ * case-insensitive and keys may appear with non-standard casing.
+ */
+const DAEMON_CUSTOM_CREDENTIAL_PATTERN = /^QWEN_CUSTOM_API_KEY_.+$/i;
+
+/**
+ * Remove secret-bearing keys from the daemon's own `process.env` so
+ * they are not visible via OS process-inspection tools. Must be called
+ * AFTER all values have been read into local variables / the credential
+ * store and BEFORE `daemonRuntimeBaseEnv` is snapshotted.
+ *
+ * The pattern is case-insensitive to handle Windows where `process.env`
+ * is case-insensitive and keys may appear with non-standard casing.
+ */
+export function scrubDaemonProcessEnv(): void {
+  for (const key of Object.keys(process.env)) {
+    if (DAEMON_SELF_SCRUB_PATTERN.test(key)) {
+      delete process.env[key];
+    }
+  }
+}
+
+/**
+ * Capture `QWEN_CUSTOM_API_KEY_*` from `source` into a daemon-private
+ * mutable credential store. The store is the single source of truth for
+ * custom-provider credentials in the daemon — `loadEnvironment`/
+ * `reloadEnvironment`/`applyProviderInstallPlan` all redirect custom-key
+ * writes to it (via `credentialStore` option), and the store-backed
+ * `CredentialProvider` resolves them for model configuration without
+ * ever touching `process.env`.
+ *
+ * After capture, call {@link scrubDaemonProcessEnv} to remove the keys
+ * from `process.env`. The store is also used to explicitly inject
+ * credentials into ACP child process envs at the spawn boundary — ACP
+ * children are agent processes that call models directly and need
+ * provider credentials, same as `OPENAI_API_KEY`. Shell/MCP/A2UI
+ * children never receive them.
+ *
+ * Captured keys are normalized to uppercase by the credential store
+ * (see `normalizeCredentialKey`), so mixed-case variants on Windows are
+ * found by the canonical uppercase lookup from model configuration.
+ */
+export function captureDaemonCredentialStore(
+  source: NodeJS.ProcessEnv = process.env,
+): CredentialStore {
+  const captured: Record<string, string> = {};
+  for (const key of Object.keys(source)) {
+    if (DAEMON_CUSTOM_CREDENTIAL_PATTERN.test(key)) {
+      const value = source[key];
+      if (typeof value === 'string') captured[key] = value;
+    }
+  }
+  return createCredentialStore(captured);
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -1748,10 +1844,12 @@ async function runQwenServeImpl(
     },
   };
   preResolveServeFastPathHomeEnvOverrides();
-  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
-    ...process.env,
-  });
 
+  // Resolve the bearer token BEFORE scrubbing process.env — once read
+  // into the local variable the daemon uses it exclusively through
+  // closure (bearerAuth, createMutationGate, etc.) and never re-reads
+  // from the environment.
+  //
   // Trim both sources. Common gotcha: `export QWEN_SERVER_TOKEN=$(cat
   // token.txt)` keeps the file's trailing `\n` in the env value, so the
   // hashed-then-compared token never matches what well-behaved clients
@@ -1763,6 +1861,40 @@ async function runQwenServeImpl(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+
+  // Capture custom-provider credentials (QWEN_CUSTOM_API_KEY_*) into a
+  // daemon-private mutable store BEFORE scrubbing. The store is the single
+  // source of truth — loadEnvironment/reloadEnvironment/applyProviderInstallPlan
+  // all redirect custom-key writes to it (via credentialStore option), so
+  // keys never re-enter process.env after scrub. ACP children receive
+  // credentials via the sourceEnv callback in createSpawnChannelFactory,
+  // which re-reads credentialStore.snapshot() on each spawn so runtime
+  // credential updates reach new ACP sessions.
+  const credentialStore = captureDaemonCredentialStore();
+  // Store-backed credential provider for daemon-owned ModelsConfig instances
+  // (workspace-providers-status, voice config). Reads QWEN_CUSTOM_API_KEY_*
+  // from the in-process store (not the scrubbed process.env); all other keys
+  // fall through to process.env as usual.
+  const credentialProvider = createCredentialProvider(credentialStore);
+
+  // Remove all secret-bearing keys (bearer tokens, QWEN_CODE_SIMPLE, and
+  // QWEN_CUSTOM_API_KEY_*) from the daemon's own process.env so they are
+  // not visible via OS process-inspection tools (`ps eww` on macOS,
+  // /proc/<pid>/environ on Linux). Read-once secrets were captured into
+  // closures above; custom-provider credentials were captured into the
+  // store and are injected into ACP children via the sourceEnv callback.
+  scrubDaemonProcessEnv();
+
+  // Snapshot AFTER scrubbing — daemonRuntimeBaseEnv is clean by
+  // construction. Custom-provider credentials are absent, so
+  // buildRuntimeEnvironment() never propagates them into workspace
+  // session environments. ACP children receive them via explicit
+  // injection at the spawn boundary (see createSpawnChannelFactory
+  // sourceEnv below).
+  const daemonRuntimeBaseEnv: Readonly<NodeJS.ProcessEnv> = Object.freeze({
+    ...process.env,
+  });
+
   const sessionShellCommandEnabled =
     optsIn.enableSessionShell === true && token !== undefined;
   if (optsIn.enableSessionShell === true && token === undefined) {
@@ -2835,8 +2967,13 @@ async function runQwenServeImpl(
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
     try {
-      runtimeBootSettings =
-        settingsRuntime.settings.loadSettings(boundWorkspace);
+      runtimeBootSettings = settingsRuntime.settings.loadSettings(
+        boundWorkspace,
+        {
+          consumeCorruptionEnvVars: true,
+          credentialStore,
+        },
+      );
     } catch (err) {
       writeStderrLine(
         `qwen serve: could not read full settings for runtime startup ` +
@@ -3130,7 +3267,10 @@ async function runQwenServeImpl(
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
-      sourceEnv: runtimeEffectiveEnv,
+      sourceEnv: () => ({
+        ...runtimeEffectiveEnv,
+        ...credentialStore.snapshot(),
+      }),
       onDiagnosticLine: diagnosticSink,
       pipeHooks: {
         onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
@@ -3152,9 +3292,10 @@ async function runQwenServeImpl(
     const workspaceProvidersStatusProvider =
       runtime.createWorkspaceProvidersStatusProvider({
         env: runtimeEffectiveEnv,
+        credentialProvider,
       });
     const workspaceSkillsStatusProvider =
-      runtime.createWorkspaceSkillsStatusProvider();
+      runtime.createWorkspaceSkillsStatusProvider(credentialStore);
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
     // between the bridge (which answers the ACP child's `client_mcp/message`
     // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
@@ -3180,7 +3321,10 @@ async function runQwenServeImpl(
       enabled: boolean,
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          consumeCorruptionEnvVars: true,
+          credentialStore,
+        });
         const wsScope = fresh.forScope(WORKSPACE_SETTING_SCOPE).settings;
         const wsDisabled = wsScope.tools?.disabled;
         const current = Array.isArray(wsDisabled)
@@ -3201,7 +3345,9 @@ async function runQwenServeImpl(
       enabled: boolean,
     ) =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          credentialStore,
+        });
         const normalizedName = skillName.trim().toLowerCase();
         const disabledNames = (value: unknown): string[] =>
           Array.isArray(value)
@@ -3271,7 +3417,10 @@ async function runQwenServeImpl(
       value: unknown,
     ) =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          consumeCorruptionEnvVars: true,
+          credentialStore,
+        });
         fresh.setValue(scope, key, value);
         return fresh;
       });
@@ -3280,7 +3429,10 @@ async function runQwenServeImpl(
       writes: WorkspaceSettingsWrite[],
     ): Promise<void> =>
       withSettingsLock(workspace, async () => {
-        const fresh = settingsRuntime.settings.loadSettings(workspace);
+        const fresh = settingsRuntime.settings.loadSettings(workspace, {
+          consumeCorruptionEnvVars: true,
+          credentialStore,
+        });
         const writesByScope = new Map<
           import('../config/settings.js').SettingScope,
           number
@@ -3378,7 +3530,10 @@ async function runQwenServeImpl(
         fileSystem: createBridgeFileSystemAdapter(fsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
-            const fresh = settingsRuntime.settings.loadSettings(workspace);
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              consumeCorruptionEnvVars: true,
+              credentialStore,
+            });
             fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
           }),
       });
@@ -3394,6 +3549,7 @@ async function runQwenServeImpl(
       statusProvider,
       workspaceProvidersStatusProvider,
       workspaceSkillsStatusProvider,
+      credentialStore,
       skillInstallEnv: runtimeEffectiveEnv,
       voiceEnv: runtimeEffectiveEnv,
       isChannelLive: () => bridge.isChannelLive(),
@@ -3406,10 +3562,12 @@ async function runQwenServeImpl(
         withSettingsLock(workspace, async () => {
           const fresh = settingsRuntime.settings.loadSettings(workspace, {
             skipLoadEnvironment: true,
+            credentialStore,
           });
           const result = settingsRuntime.settings.reloadEnvironment(
             fresh.merged,
             workspace,
+            credentialStore,
           );
           let refreshedRuntimeEnv: ReturnType<
             EnvironmentRuntime['buildRuntimeEnvironment']
@@ -3582,6 +3740,7 @@ async function runQwenServeImpl(
       try {
         secondarySettings = settingsRuntime.settings.loadSettings(
           workspaceInput.cwd,
+          { consumeCorruptionEnvVars: true, credentialStore },
         );
       } catch (err) {
         writeStderrLine(
@@ -3620,7 +3779,10 @@ async function runQwenServeImpl(
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       });
       const secondaryChannelFactory = runtime.createSpawnChannelFactory({
-        sourceEnv: secondaryEnv.effectiveEnv,
+        sourceEnv: () => ({
+          ...secondaryEnv.effectiveEnv,
+          ...credentialStore.snapshot(),
+        }),
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
           onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
@@ -3695,7 +3857,10 @@ async function runQwenServeImpl(
         fileSystem: createBridgeFileSystemAdapter(secondaryBridgeFsFactory),
         persistApprovalMode: (workspace, mode) =>
           withSettingsLock(workspace, async () => {
-            const fresh = settingsRuntime.settings.loadSettings(workspace);
+            const fresh = settingsRuntime.settings.loadSettings(workspace, {
+              consumeCorruptionEnvVars: true,
+              credentialStore,
+            });
             fresh.setValue(WORKSPACE_SETTING_SCOPE, 'tools.approvalMode', mode);
           }),
       });
@@ -3714,9 +3879,11 @@ async function runQwenServeImpl(
         workspaceProvidersStatusProvider:
           runtime.createWorkspaceProvidersStatusProvider({
             env: secondaryEnv.effectiveEnv,
+            credentialProvider,
           }),
         workspaceSkillsStatusProvider:
-          runtime.createWorkspaceSkillsStatusProvider(),
+          runtime.createWorkspaceSkillsStatusProvider(credentialStore),
+        credentialStore,
         skillInstallEnv: secondaryEnv.effectiveEnv,
         voiceEnv: secondaryEnv.effectiveEnv,
         voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
@@ -3730,10 +3897,12 @@ async function runQwenServeImpl(
           withSettingsLock(workspace, async () => {
             const fresh = settingsRuntime.settings.loadSettings(workspace, {
               skipLoadEnvironment: true,
+              credentialStore,
             });
             const result = settingsRuntime.settings.reloadEnvironment(
               fresh.merged,
               workspace,
+              credentialStore,
             );
             try {
               const refreshedRuntimeEnv =
@@ -3969,7 +4138,10 @@ async function runQwenServeImpl(
     ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
-        wsSettings = settingsRuntime.settings.loadSettings(cwd);
+        wsSettings = settingsRuntime.settings.loadSettings(cwd, {
+          consumeCorruptionEnvVars: true,
+          credentialStore,
+        });
       } catch (err) {
         // Match the startup secondary-workspace path: surface why full settings
         // couldn't be read instead of silently falling back to defaults.
@@ -3995,7 +4167,10 @@ async function runQwenServeImpl(
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       });
       const wsChannelFactory = runtime.createSpawnChannelFactory({
-        sourceEnv: wsEnv.effectiveEnv,
+        sourceEnv: () => ({
+          ...wsEnv.effectiveEnv,
+          ...credentialStore.snapshot(),
+        }),
         onDiagnosticLine: diagnosticSink,
         pipeHooks: {
           onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
@@ -4069,7 +4244,10 @@ async function runQwenServeImpl(
           fileSystem: createBridgeFileSystemAdapter(wsFsFactory),
           persistApprovalMode: (workspace, mode) =>
             withSettingsLock(workspace, async () => {
-              const fresh = settingsRuntime.settings.loadSettings(workspace);
+              const fresh = settingsRuntime.settings.loadSettings(workspace, {
+                consumeCorruptionEnvVars: true,
+                credentialStore,
+              });
               fresh.setValue(
                 WORKSPACE_SETTING_SCOPE,
                 'tools.approvalMode',
@@ -4093,9 +4271,11 @@ async function runQwenServeImpl(
           workspaceProvidersStatusProvider:
             runtime.createWorkspaceProvidersStatusProvider({
               env: wsEnv.effectiveEnv,
+              credentialProvider,
             }),
           workspaceSkillsStatusProvider:
-            runtime.createWorkspaceSkillsStatusProvider(),
+            runtime.createWorkspaceSkillsStatusProvider(credentialStore),
+          credentialStore,
           skillInstallEnv: wsEnv.effectiveEnv,
           voiceEnv: wsEnv.effectiveEnv,
           voiceSettingsScope: WORKSPACE_SETTING_SCOPE,
@@ -4109,10 +4289,12 @@ async function runQwenServeImpl(
             withSettingsLock(workspace, async () => {
               const fresh = settingsRuntime.settings.loadSettings(workspace, {
                 skipLoadEnvironment: true,
+                credentialStore,
               });
               const result = settingsRuntime.settings.reloadEnvironment(
                 fresh.merged,
                 workspace,
+                credentialStore,
               );
               // Mirror the startup secondary-workspace path: rebuild the runtime
               // env snapshot and update the metadata so `.env` changes actually
@@ -4351,6 +4533,7 @@ async function runQwenServeImpl(
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
+      credentialStore,
       // The real long-running daemon keeps scheduled-task sessions resident
       // (keepalive) and reloads them on boot (rehydration). Off by default so
       // direct createServeApp embeds/tests don't spawn sessions.
@@ -4428,7 +4611,13 @@ async function runQwenServeImpl(
               resolveBaseUrl: core.resolveBaseUrl,
             });
             const plan = core.buildInstallPlan(provider, inputs);
-            const fresh = settingsRuntime.settings.loadSettings(boundWorkspace);
+            const fresh = settingsRuntime.settings.loadSettings(
+              boundWorkspace,
+              {
+                consumeCorruptionEnvVars: true,
+                credentialStore,
+              },
+            );
             const adapter =
               settingsRuntime.loadedSettingsAdapter.createLoadedSettingsAdapter(
                 fresh,
@@ -4436,6 +4625,7 @@ async function runQwenServeImpl(
             await core.applyProviderInstallPlan(plan, {
               settings: adapter,
               doRefreshAuth: false,
+              credentialStore,
             });
             core.emitDaemonLog('Auth provider installed.', {
               'qwen-code.daemon.auth.provider_id': provider.id,
@@ -4593,6 +4783,7 @@ async function runQwenServeImpl(
       const workspace = workspaceInputs[0]!;
       const settings = channelValidationSettingsRuntime.settings.loadSettings(
         workspace.cwd,
+        { consumeCorruptionEnvVars: true, credentialStore },
       );
       channelWebhookEnvByWorkspace.set(
         workspace.cwd,
@@ -4607,6 +4798,7 @@ async function runQwenServeImpl(
     const workspaces = workspaceInputs.map((workspace, index) => {
       const settings = channelValidationSettingsRuntime.settings.loadSettings(
         workspace.cwd,
+        { consumeCorruptionEnvVars: true, credentialStore },
       );
       settingsByWorkspace.set(workspace.cwd, settings);
       channelWebhookEnvByWorkspace.set(
@@ -4936,6 +5128,7 @@ async function runQwenServeImpl(
           workspaces: runtimes.map((runtime) => {
             const settings = settingsRuntime.settings.loadSettings(
               runtime.workspaceCwd,
+              { consumeCorruptionEnvVars: true, credentialStore },
             );
             settingsByWorkspace.set(runtime.workspaceCwd, settings);
             return {

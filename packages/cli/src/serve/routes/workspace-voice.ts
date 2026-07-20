@@ -9,6 +9,7 @@ import express, {
   type Request,
   type Response,
 } from 'express';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 import {
   loadSettings,
   SettingScope,
@@ -89,10 +90,15 @@ export interface WorkspaceVoiceRouteDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
-  env?: Readonly<Record<string, string | undefined>>;
   scopeOverride?: SettingScope;
   acquireVoiceLease?: () => VoiceAdmissionResult;
   transcribe?: WorkspaceVoiceTranscriber;
+  credentialStore?: CredentialStore;
+  /**
+   * Env for voice credential resolution. The daemon passes a store-merged env
+   * so QWEN_CUSTOM_API_KEY_* (scrubbed from process.env) reach the transcriber.
+   */
+  env?: Readonly<Record<string, string | undefined>>;
 }
 
 export interface WorkspaceQualifiedVoiceRouteDeps {
@@ -109,6 +115,7 @@ export interface WorkspaceQualifiedVoiceRouteDeps {
     runtime: WorkspaceRuntime,
   ) => string | undefined | null;
   invalidateServeFeaturesCache: () => void;
+  credentialStore?: CredentialStore;
 }
 
 function sendVoiceError(res: Response, err: unknown): boolean {
@@ -283,10 +290,10 @@ function requestAbortSignal(req: Request, res: Response): AbortSignal {
 }
 
 function loadVoiceSettings(deps: WorkspaceVoiceRouteDeps): LoadedSettings {
-  return loadSettings(
-    deps.boundWorkspace,
-    deps.env ? { skipLoadEnvironment: true } : true,
-  );
+  return loadSettings(deps.boundWorkspace, {
+    credentialStore: deps.credentialStore,
+    ...(deps.env ? { skipLoadEnvironment: true } : {}),
+  });
 }
 
 interface VoiceAdmissionState {
@@ -688,7 +695,8 @@ function createRuntimeVoiceDeps(
     persistSetting: deps.persistSetting,
     persistSettings: deps.persistSettings,
     transcribe: deps.transcribe,
-    ...(env ? { env } : {}),
+    ...(env ? { env: { ...env, ...deps.credentialStore?.snapshot() } } : {}),
+    credentialStore: deps.credentialStore,
     scopeOverride: SettingScope.Workspace,
     acquireVoiceLease: () => deps.acquireVoiceLease(runtime),
     broadcastSettingsChanged: (key, value, scope, clientId) => {

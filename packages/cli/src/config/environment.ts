@@ -9,6 +9,12 @@ import * as path from 'node:path';
 import * as os from 'node:os';
 import * as dotenv from 'dotenv';
 import { getErrorMessage, QWEN_DIR, Storage } from '@qwen-code/qwen-code-core';
+import {
+  type CredentialStore,
+  readEnvKey,
+  writeEnvKey,
+  deleteEnvKey,
+} from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -472,6 +478,7 @@ export function buildRuntimeEnvironment(
 export function loadEnvironment(
   settings: Settings,
   startDir: string = process.cwd(),
+  credentialStore?: CredentialStore,
 ): void {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, startDir, userLevelPaths);
@@ -494,11 +501,11 @@ export function loadEnvironment(
     for (const key in envFile.parsedEnv) {
       if (!canApplyParsedEnvKey(envFile, key, excludedVars)) continue;
 
-      const existingValue = process.env[key];
+      const existingValue = readEnvKey(key, credentialStore);
       const isEffectivelyUnset =
-        !Object.hasOwn(process.env, key) || existingValue === '';
+        existingValue === undefined || existingValue === '';
       if (isEffectivelyUnset) {
-        process.env[key] = envFile.parsedEnv[key];
+        writeEnvKey(key, envFile.parsedEnv[key]!, credentialStore);
         dotEnvSourcedKeys.add(key);
       }
       // Seed snapshot with ALL parsed keys (not just written ones)
@@ -524,11 +531,11 @@ export function loadEnvironment(
       // value is empty string — an empty export (e.g. `DASHSCOPE_API_KEY=`
       // in a Docker env file) is functionally missing yet blocks the normal
       // no-override check because Object.hasOwn returns true.
-      const existingValue = process.env[key];
+      const existingValue = readEnvKey(key, credentialStore);
       const isEffectivelyUnset =
-        !Object.hasOwn(process.env, key) || existingValue === '';
+        existingValue === undefined || existingValue === '';
       if (isEffectivelyUnset && typeof value === 'string') {
-        process.env[key] = value;
+        writeEnvKey(key, value, credentialStore);
         settingsEnvSourcedKeys.add(key);
       }
       if (
@@ -556,6 +563,7 @@ export interface EnvReloadResult {
 export function reloadEnvironment(
   settings: Settings,
   workspaceCwd: string,
+  credentialStore?: CredentialStore,
 ): EnvReloadResult {
   const userLevelPaths = getUserLevelEnvPaths();
   const envFilePaths = findEnvFiles(settings, workspaceCwd, userLevelPaths);
@@ -620,7 +628,7 @@ export function reloadEnvironment(
     ]);
     for (const key of previouslyKnown) {
       if (!allNewKeys.has(key) && !RELOAD_EXCLUDED_KEYS.has(key)) {
-        delete process.env[key];
+        deleteEnvKey(key, credentialStore);
         removedKeys.push(key);
       }
     }
@@ -632,16 +640,16 @@ export function reloadEnvironment(
   // daemon env without tracking, so the tracking-based guard would miss them.
   for (const [key, value] of newDotEnvKeys) {
     if (value === '' && newSettingsEnvKeys.has(key)) continue;
-    if (process.env[key] !== value) {
+    if (readEnvKey(key, credentialStore) !== value) {
       updatedKeys.push(key);
     }
-    process.env[key] = value;
+    writeEnvKey(key, value, credentialStore);
   }
   for (const [key, value] of newSettingsEnvKeys) {
-    if (process.env[key] !== value) {
+    if (readEnvKey(key, credentialStore) !== value) {
       updatedKeys.push(key);
     }
-    process.env[key] = value;
+    writeEnvKey(key, value, credentialStore);
   }
 
   // Update tracking sets and snapshot only when the .env file was readable.

@@ -210,6 +210,7 @@ export function createDaemonWorkspaceService(
   const {
     boundWorkspace,
     contextFilename,
+    credentialStore,
     statusProvider,
     workspaceProvidersStatusProvider,
     workspaceSkillsStatusProvider,
@@ -536,22 +537,24 @@ export function createDaemonWorkspaceService(
 
     async getWorkspaceTrustStatus(_ctx: WorkspaceRequestContext) {
       return getWorkspaceTrustStatus(
-        loadSettings(boundWorkspace).merged,
+        loadSettings(boundWorkspace, { credentialStore }).merged,
         boundWorkspace,
       );
     },
 
     async getWorkspacePermissionsStatus(_ctx: WorkspaceRequestContext) {
-      return buildPermissionSettings(loadSettings(boundWorkspace));
+      return buildPermissionSettings(
+        loadSettings(boundWorkspace, { credentialStore }),
+      );
     },
 
     async getWorkspaceVoiceStatus(_ctx: WorkspaceRequestContext) {
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(
-          boundWorkspace,
-          voiceEnv ? { skipLoadEnvironment: true } : true,
-        ),
+        loadSettings(boundWorkspace, {
+          credentialStore,
+          ...(voiceEnv ? { skipLoadEnvironment: true } : {}),
+        }),
       );
     },
 
@@ -618,11 +621,15 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const settings = loadSettings(
-        boundWorkspace,
-        voiceEnv ? { skipLoadEnvironment: true } : true,
-      );
-      validateWorkspaceVoiceState(settings, request, { env: voiceEnv });
+      const settings = loadSettings(boundWorkspace, {
+        credentialStore,
+        ...(voiceEnv ? { skipLoadEnvironment: true } : {}),
+      });
+      validateWorkspaceVoiceState(settings, request, {
+        env: credentialStore
+          ? { ...(voiceEnv ?? {}), ...credentialStore.snapshot() }
+          : voiceEnv,
+      });
       const workspaceTrusted =
         getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective
           .state === 'trusted';
@@ -691,10 +698,10 @@ export function createDaemonWorkspaceService(
 
       return buildWorkspaceVoiceStatus(
         boundWorkspace,
-        loadSettings(
-          boundWorkspace,
-          voiceEnv ? { skipLoadEnvironment: true } : true,
-        ),
+        loadSettings(boundWorkspace, {
+          credentialStore,
+          ...(voiceEnv ? { skipLoadEnvironment: true } : {}),
+        }),
       );
     },
 
@@ -730,7 +737,9 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const disabled = loadSettings(boundWorkspace).merged.skills?.disabled;
+      const disabled = loadSettings(boundWorkspace, {
+        credentialStore,
+      }).merged.skills?.disabled;
       const disabledNames = new Set(
         (Array.isArray(disabled) ? disabled : [])
           .filter((name): name is string => typeof name === 'string')

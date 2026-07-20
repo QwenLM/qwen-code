@@ -36,6 +36,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { QWEN_SERVER_TOKEN_ENV } from '../channel-worker-env.js';
 import { snapshotProcessEnv } from '../env-snapshot.js';
+import { collectSensitiveShellEnvKeys } from '@qwen-code/qwen-code-core';
 
 const A2UI_MIME = 'application/a2ui+json';
 // Standard action-tool name from the official A2UI-over-MCP guide
@@ -156,19 +157,29 @@ function buildStdioServerEnv(
   baseEnv: Readonly<Record<string, string | undefined>>,
   serverEnv: Record<string, string> | undefined,
 ): Record<string, string> {
+  // Combine the static denylist with a pattern-based sweep of the base
+  // env so QWEN_CUSTOM_API_KEY_* (and any future internal Qwen secret
+  // pattern) is stripped even if .env/settings.env re-introduced it
+  // after the daemon's boot-time self-scrub. Defense-in-depth: the
+  // daemon already removed these from process.env, but this is the
+  // final spawn boundary for stdio MCP children.
+  const scrubbed = new Set<string>(SCRUBBED_STDIO_ENV_KEYS);
+  for (const key of collectSensitiveShellEnvKeys(baseEnv)) {
+    scrubbed.add(key);
+  }
   const env: Record<string, string> = {};
   for (const [key, value] of Object.entries(baseEnv)) {
     if (
       value !== undefined &&
       !key.startsWith('BASH_FUNC_') &&
       !value.startsWith('()') &&
-      !SCRUBBED_STDIO_ENV_KEYS.has(key)
+      !scrubbed.has(key)
     ) {
       env[key] = value;
     }
   }
   const merged = { ...env, ...(serverEnv ?? {}) };
-  for (const key of SCRUBBED_STDIO_ENV_KEYS) {
+  for (const key of scrubbed) {
     delete merged[key];
   }
   return merged;

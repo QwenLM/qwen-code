@@ -11,8 +11,8 @@ import { describe, test, expect } from 'bun:test';
 import {
   detectCredentialMode,
   getEffectiveHeaderNames,
-} from '../../../../session-tools-core/src/source-helpers.ts';
-import type { CredentialInputMode } from '../../../../session-tools-core/src/types.ts';
+  type CredentialInputMode,
+} from '@craft-agent/session-tools-core';
 
 describe('detectCredentialMode', () => {
   test('should auto-upgrade to multi-header when source has headerNames', () => {

@@ -12,6 +12,10 @@ import type {
 } from '@modelcontextprotocol/sdk/types.js';
 import { homedir } from 'node:os';
 import { binaryPath } from './constants.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../../utils/child-env-scrub.js';
 
 export const DEFAULT_COMPUTER_USE_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 export const MAX_COMPUTER_USE_IDLE_TIMEOUT_MS = 2_147_483_647;
@@ -145,8 +149,11 @@ export class ComputerUseClient {
     const transport = new StdioClientTransport({
       command: this.binary,
       args: ['mcp'],
-      // Inherit env so HTTPS_PROXY / cua-driver config env flow through.
-      env: { ...process.env } as Record<string, string>,
+      // Preserve proxy / cua-driver config env, but never daemon credentials.
+      env: scrubChildEnv(
+        process.env,
+        collectSensitiveShellEnvKeys(process.env),
+      ) as Record<string, string>,
     });
     const client = new Client(
       { name: 'qwen-code-computer-use', version: '1.0.0' },

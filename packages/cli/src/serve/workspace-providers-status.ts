@@ -11,7 +11,7 @@ import {
   ModelsConfig,
   tokenLimit,
 } from '@qwen-code/qwen-code-core';
-import type { AuthType } from '@qwen-code/qwen-code-core';
+import type { AuthType, CredentialProvider } from '@qwen-code/qwen-code-core';
 import type {
   ServeWorkspaceProviderCurrent,
   ServeWorkspaceProviderModel,
@@ -44,6 +44,12 @@ export type WorkspaceProvidersStatusProvider = (
 export interface WorkspaceProvidersStatusProviderOptions {
   argv?: Partial<CliGenerationConfigInputs['argv']>;
   env?: Record<string, string | undefined>;
+  /**
+   * Store-backed credential provider for daemon-owned ModelsConfig. Reads
+   * QWEN_CUSTOM_API_KEY_* from the in-process store (not the scrubbed
+   * process.env). Omitted in non-daemon (CLI) contexts.
+   */
+  credentialProvider?: CredentialProvider;
 }
 
 export function createWorkspaceProvidersStatusProvider(
@@ -84,6 +90,7 @@ function buildWorkspaceProvidersStatus(
       initialAuthType: selectedAuthType,
       modelProvidersConfig: settings.modelProviders,
       providerProtocolConfig: settings.providerProtocol,
+      credentialProvider: options.credentialProvider,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });

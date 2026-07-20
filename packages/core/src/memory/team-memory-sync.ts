@@ -10,6 +10,10 @@ import { promisify } from 'node:util';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { findGitRoot, isGitRepository } from '../utils/gitUtils.js';
 import { getTeamAutoMemoryRoot } from './paths.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
 
 const execFileAsync = promisify(execFile);
 const debugLogger = createDebugLogger('TEAM_MEMORY_SYNC');
@@ -57,19 +61,22 @@ async function tryGit(
       encoding: 'utf8',
       timeout: GIT_TIMEOUT_MS,
       killSignal,
-      env: {
-        ...process.env,
-        // Force non-interactive git so a missing credential / askpass prompt
-        // fails fast instead of hanging session start on the network steps.
-        GIT_TERMINAL_PROMPT: '0',
-        // Non-interactive ssh, but APPEND onto a user's GIT_SSH_COMMAND rather
-        // than clobbering it — their custom identity (`-i`), proxy jump (`-J`),
-        // or port stays intact; we only add the batch guards (theirs win on any
-        // duplicate option, since ssh takes the first value).
-        GIT_SSH_COMMAND: process.env['GIT_SSH_COMMAND']
-          ? `${process.env['GIT_SSH_COMMAND']} -oBatchMode=yes -oConnectTimeout=5`
-          : 'ssh -oBatchMode=yes -oConnectTimeout=5',
-      },
+      env: scrubChildEnv(
+        process.env,
+        collectSensitiveShellEnvKeys(process.env),
+        {
+          // Force non-interactive git so a missing credential / askpass prompt
+          // fails fast instead of hanging session start on the network steps.
+          GIT_TERMINAL_PROMPT: '0',
+          // Non-interactive ssh, but APPEND onto a user's GIT_SSH_COMMAND rather
+          // than clobbering it — their custom identity (`-i`), proxy jump (`-J`),
+          // or port stays intact; we only add the batch guards (theirs win on any
+          // duplicate option, since ssh takes the first value).
+          GIT_SSH_COMMAND: process.env['GIT_SSH_COMMAND']
+            ? `${process.env['GIT_SSH_COMMAND']} -oBatchMode=yes -oConnectTimeout=5`
+            : 'ssh -oBatchMode=yes -oConnectTimeout=5',
+        },
+      ),
     });
     return stdout;
   } catch (error) {

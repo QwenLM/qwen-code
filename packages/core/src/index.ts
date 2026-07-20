@@ -46,6 +46,16 @@ export {
   resolveModelConfig,
   type ResolvedModelConfig,
   validateModelConfig,
+  type CredentialProvider,
+  type CredentialStore,
+  createCredentialStore,
+  createCredentialProvider,
+  defaultCredentialProvider,
+  resolveCredential,
+  isCustomCredentialKey,
+  readEnvKey,
+  writeEnvKey,
+  deleteEnvKey,
 } from './models/index.js';
 
 // Output formatting
@@ -470,6 +480,10 @@ export * from './followup/index.js';
 
 export * from './utils/atomicFileWrite.js';
 export * from './utils/browser.js';
+export {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from './utils/child-env-scrub.js';
 export * from './utils/bundlePaths.js';
 export * from './utils/configResolver.js';
 export * from './utils/debugLogger.js';

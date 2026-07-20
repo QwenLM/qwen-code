@@ -22,6 +22,11 @@ import { DiscoveredMCPTool } from './mcp-tool.js';
 import { parse } from 'shell-quote';
 import { ToolErrorType } from './tool-error.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
+import {
+  collectSensitiveShellEnvKeys,
+  scrubChildEnv,
+} from '../utils/child-env-scrub.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
@@ -61,7 +66,12 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     _updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
     const callCommand = this.config.getToolCallCommand()!;
-    const child = spawn(callCommand, [this.toolName]);
+    const child = spawn(callCommand, [this.toolName], {
+      env: scrubChildEnv(
+        normalizePathEnvForWindows(process.env),
+        collectSensitiveShellEnvKeys(process.env),
+      ),
+    });
     child.stdin.write(JSON.stringify(this.params));
     child.stdin.end();
 
@@ -592,7 +602,12 @@ export class ToolRegistry {
           'Tool discovery command is empty or contains only whitespace.',
         );
       }
-      const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[]);
+      const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[], {
+        env: scrubChildEnv(
+          normalizePathEnvForWindows(process.env),
+          collectSensitiveShellEnvKeys(process.env),
+        ),
+      });
       let stdout = '';
       const stdoutDecoder = new StringDecoder('utf8');
       let stderr = '';
