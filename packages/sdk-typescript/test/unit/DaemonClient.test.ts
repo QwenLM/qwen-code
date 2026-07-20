@@ -6634,6 +6634,57 @@ describe('DaemonClient', () => {
   });
 
   describe('workspace registration persistence', () => {
+    it('updates and clears workspace metadata through direct REST', async () => {
+      const { fetch, calls } = recordingFetch((req) =>
+        jsonResponse(200, {
+          id: 'workspace-id',
+          cwd: '/tmp/work space',
+          ...(JSON.parse(req.body!)['displayName'] === null
+            ? {}
+            : { displayName: 'Payments' }),
+          primary: false,
+          trusted: true,
+        }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(404, { error: 'transport route not mapped' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+
+      await expect(
+        client.updateWorkspace('workspace/id', { displayName: 'Payments' }),
+      ).resolves.toMatchObject({ displayName: 'Payments' });
+      await expect(
+        client.updateWorkspace('/tmp/work space', { displayName: null }),
+      ).resolves.not.toHaveProperty('displayName');
+
+      expect(calls.map((call) => [call.method, call.url, call.body])).toEqual([
+        [
+          'PATCH',
+          'http://daemon/workspaces/workspace%2Fid',
+          JSON.stringify({ displayName: 'Payments' }),
+        ],
+        [
+          'PATCH',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space',
+          JSON.stringify({ displayName: null }),
+        ],
+      ]);
+      expect(transportFetch).not.toHaveBeenCalled();
+    });
+
     it('forwards persistence and display name options', async () => {
       const response = {
         id: 'workspace-id',

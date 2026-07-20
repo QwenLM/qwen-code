@@ -94,12 +94,12 @@ export function registerWorkspaceManagementRoutes(
     getAcpHandle,
     runtimeRemoval,
   } = deps;
-  // Serialize runtime addition, persistence promotion/forget, and removal by
-  // canonical cwd so conflicting management mutations cannot cross their
-  // validation and persistence commit points concurrently.
+  // Serialize runtime addition, persistence promotion/forget, updates, and
+  // removal by canonical cwd so conflicting management mutations cannot cross
+  // their validation and persistence commit points concurrently.
   const inFlight = new Map<
     string,
-    'addition' | 'promotion' | 'removal' | 'forget'
+    'addition' | 'promotion' | 'removal' | 'forget' | 'update'
   >();
   let sealed = false;
   let activeOperations = 0;
@@ -119,6 +119,17 @@ export function registerWorkspaceManagementRoutes(
       code: 'daemon_shutting_down',
     });
   };
+  const attachRegistrationIds = (
+    runtime: WorkspaceRuntime,
+    registrationIds: readonly string[],
+  ): void => {
+    runtime.registrationIds ??= [];
+    for (const registrationId of registrationIds) {
+      if (!runtime.registrationIds.includes(registrationId)) {
+        runtime.registrationIds.push(registrationId);
+      }
+    }
+  };
   const restorePersistedDisplayName = async (
     runtime: WorkspaceRuntime,
     canonical: string,
@@ -132,6 +143,11 @@ export function registerWorkspaceManagementRoutes(
     const storedDisplayName = storedWorkspace
       ? snapshot.displayNames?.[workspaceRegistrationId(storedWorkspace)]
       : undefined;
+    if (storedWorkspace) {
+      attachRegistrationIds(runtime, [
+        workspaceRegistrationId(storedWorkspace),
+      ]);
+    }
     if (storedDisplayName === undefined) {
       delete runtime.displayName;
     } else {
@@ -412,6 +428,10 @@ export function registerWorkspaceManagementRoutes(
             return;
           }
           if (alreadyPersisted) {
+            attachRegistrationIds(
+              existingRuntime,
+              persistedWorkspaces.map(workspaceRegistrationId),
+            );
             const storedDisplayName = persistedWorkspaces
               .map(
                 (stored) =>
@@ -446,6 +466,11 @@ export function registerWorkspaceManagementRoutes(
               } catch {
                 // The registration is committed; diagnostics are best-effort.
               }
+            }
+            if (added) {
+              attachRegistrationIds(existingRuntime, [
+                workspaceRegistrationId(canonical),
+              ]);
             }
             if (added && hasDisplayName) {
               if (displayName === undefined) {
@@ -576,6 +601,9 @@ export function registerWorkspaceManagementRoutes(
                 }
               }
               if (persistedRecordAdded) {
+                attachRegistrationIds(runtime, [
+                  workspaceRegistrationId(canonical),
+                ]);
                 if (displayName !== undefined) {
                   runtime.displayName = displayName;
                 }
@@ -717,6 +745,112 @@ export function registerWorkspaceManagementRoutes(
     });
     return undefined;
   };
+
+  app.patch(
+    '/workspaces/:workspace',
+    mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const body = safeBody(req);
+      const unsupportedField = Object.keys(body).find(
+        (field) => field !== 'displayName',
+      );
+      if (unsupportedField) {
+        res.status(400).json({
+          error: `\`${unsupportedField}\` is not an updatable workspace field`,
+          code: 'unsupported_field',
+        });
+        return;
+      }
+      if (!Object.hasOwn(body, 'displayName')) {
+        res.status(400).json({
+          error: 'No updatable fields provided',
+          code: 'empty_patch',
+        });
+        return;
+      }
+      let displayName: string | undefined;
+      try {
+        displayName =
+          body['displayName'] === null
+            ? undefined
+            : normalizeWorkspaceDisplayName(body['displayName']);
+      } catch (err) {
+        if (!(err instanceof WorkspaceDisplayNameValidationError)) throw err;
+        res.status(400).json({
+          error: err.message,
+          code: 'invalid_display_name',
+        });
+        return;
+      }
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+      const runtime = resolveManagedRuntime(req, res);
+      if (!runtime) return;
+      if (inFlight.has(runtime.workspaceCwd)) {
+        res.status(409).json({
+          error: 'Workspace registration is in progress',
+          code: 'workspace_registration_in_progress',
+        });
+        return;
+      }
+
+      inFlight.set(runtime.workspaceCwd, 'update');
+      operationStarted();
+      try {
+        if (
+          workspaceRegistrationStore &&
+          runtime.registrationIds !== undefined &&
+          runtime.registrationIds.length > 0
+        ) {
+          try {
+            await workspaceRegistrationStore.setDisplayNameByIds(
+              runtime.registrationIds,
+              displayName,
+            );
+          } catch (err) {
+            if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
+              throw err;
+            }
+            try {
+              writeStderrLine(`qwen serve: ${err.message}`);
+            } catch {
+              // The update is committed; diagnostics are best-effort.
+            }
+          }
+        }
+        if (displayName === undefined) {
+          delete runtime.displayName;
+        } else {
+          runtime.displayName = displayName;
+        }
+        res.status(200).json({
+          id: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          ...(runtime.displayName !== undefined
+            ? { displayName: runtime.displayName }
+            : {}),
+          primary: runtime.primary,
+          trusted: runtime.trusted,
+          ...(runtimeRemoval ? { removable: runtime.removable === true } : {}),
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to persist workspace display name: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to persist workspace display name',
+          code: 'workspace_registration_store_error',
+        });
+      } finally {
+        inFlight.delete(runtime.workspaceCwd);
+        operationFinished();
+      }
+    },
+  );
 
   app.delete(
     '/workspaces/:workspace',
@@ -1122,6 +1256,11 @@ export function registerWorkspaceManagementRoutes(
             code: 'workspace_registration_not_found',
           });
           return;
+        }
+        if (runtime?.registrationIds) {
+          runtime.registrationIds = runtime.registrationIds.filter(
+            (id) => id !== registrationId,
+          );
         }
         res.json({
           removed: true,

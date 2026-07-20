@@ -127,10 +127,47 @@ describe('WorkspaceRegistrationStore', () => {
     });
   });
 
+  it('sets and clears display names for every matching registration id', async () => {
+    const home = await tempHome();
+    const store = new WorkspaceRegistrationStore('/work/primary', home);
+    const firstId = workspaceRegistrationId('/work/secondary-a');
+    const secondId = workspaceRegistrationId('/work/secondary-b');
+    const otherId = workspaceRegistrationId('/work/other');
+    await store.add('/work/secondary-a', 'First');
+    await store.add('/work/secondary-b', 'Second');
+    await store.add('/work/other', 'Other');
+
+    await expect(
+      store.setDisplayNameByIds([firstId, secondId, 'missing'], 'Shared'),
+    ).resolves.toBe(2);
+    await expect(store.read()).resolves.toMatchObject({
+      displayNames: {
+        [firstId]: 'Shared',
+        [secondId]: 'Shared',
+        [otherId]: 'Other',
+      },
+    });
+
+    await expect(store.setDisplayNameByIds([firstId, secondId])).resolves.toBe(
+      2,
+    );
+    await expect(store.read()).resolves.toMatchObject({
+      displayNames: { [otherId]: 'Other' },
+    });
+    await expect(store.setDisplayNameByIds([otherId])).resolves.toBe(1);
+    await expect(store.read()).resolves.not.toHaveProperty('displayNames');
+    await expect(
+      store.setDisplayNameByIds(['missing'], 'Ignored'),
+    ).resolves.toBe(0);
+    await expect(store.read()).resolves.not.toHaveProperty('displayNames');
+  });
+
   it('normalizes empty display names and rejects invalid values', () => {
     expect(normalizeWorkspaceDisplayName('')).toBeUndefined();
     expect(normalizeWorkspaceDisplayName('   ')).toBeUndefined();
     expect(normalizeWorkspaceDisplayName('  Workspace  ')).toBe('Workspace');
+    expect(normalizeWorkspaceDisplayName('\tWorkspace\n')).toBe('Workspace');
+    expect(normalizeWorkspaceDisplayName('\t\r\n')).toBeUndefined();
     expect(normalizeWorkspaceDisplayName('x'.repeat(256))).toBe(
       'x'.repeat(256),
     );

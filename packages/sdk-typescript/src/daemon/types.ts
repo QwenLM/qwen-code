@@ -36,6 +36,10 @@ export interface DaemonWorkspaceCapability {
   removable?: boolean;
 }
 
+export interface DaemonWorkspaceUpdate {
+  displayName: string | null;
+}
+
 export interface DaemonWorkspaceRemovalActivity {
   sessions: number;
   activePrompts: number;

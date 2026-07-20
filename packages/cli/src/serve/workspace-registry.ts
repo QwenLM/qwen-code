@@ -35,7 +35,7 @@ export interface WorkspaceRuntime {
   /** Whether this runtime may be removed without restarting the daemon. */
   readonly removable?: boolean;
   /** Persistent registration ids that restore this runtime on daemon startup. */
-  readonly registrationIds?: readonly string[];
+  registrationIds?: string[];
   readonly env: WorkspaceRuntimeEnvMetadata;
   readonly bridge: AcpSessionBridge;
   readonly workspaceService: DaemonWorkspaceService;

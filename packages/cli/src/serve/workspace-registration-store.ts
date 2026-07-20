@@ -67,7 +67,7 @@ export function normalizeWorkspaceDisplayName(
       `Workspace display name exceeds ${MAX_WORKSPACE_DISPLAY_NAME_LENGTH} characters`,
     );
   }
-  if (containsDisplayNameControlCharacter(value)) {
+  if (containsDisplayNameControlCharacter(trimmed)) {
     throw new WorkspaceDisplayNameValidationError(
       'Workspace display name contains control characters',
     );
@@ -151,6 +151,30 @@ function validateStoredDisplayName(value: unknown, label: string): string {
     throw new WorkspaceRegistrationStoreError(`${label} must not be empty`);
   }
   return displayName;
+}
+
+function setSnapshotDisplayName(
+  snapshot: WorkspaceRegistrationSnapshot,
+  registrationId: string,
+  displayName: string | undefined,
+): boolean {
+  if (displayName === undefined) {
+    if (
+      !snapshot.displayNames ||
+      !Object.hasOwn(snapshot.displayNames, registrationId)
+    ) {
+      return false;
+    }
+    delete snapshot.displayNames[registrationId];
+    if (Object.keys(snapshot.displayNames).length === 0) {
+      delete snapshot.displayNames;
+    }
+    return true;
+  }
+  if (snapshot.displayNames?.[registrationId] === displayName) return false;
+  snapshot.displayNames ??= {};
+  snapshot.displayNames[registrationId] = displayName;
+  return true;
 }
 
 function parseSnapshot(
@@ -439,6 +463,35 @@ export class WorkspaceRegistrationStore {
     return (await this.removeByIds([id])) > 0;
   }
 
+  async setDisplayNameByIds(
+    ids: readonly string[],
+    displayName?: string,
+  ): Promise<number> {
+    const normalizedDisplayName =
+      displayName === undefined
+        ? undefined
+        : normalizeWorkspaceDisplayName(displayName);
+    const requested = new Set(ids);
+    if (requested.size === 0) return 0;
+    let matched = 0;
+    await this.update((snapshot) => {
+      let changed = false;
+      for (const workspace of snapshot.workspaces) {
+        const registrationId = workspaceRegistrationId(workspace);
+        if (!requested.has(registrationId)) continue;
+        matched++;
+        changed =
+          setSnapshotDisplayName(
+            snapshot,
+            registrationId,
+            normalizedDisplayName,
+          ) || changed;
+      }
+      return changed;
+    });
+    return matched;
+  }
+
   async removeByIds(ids: readonly string[]): Promise<number> {
     const requested = new Set(ids);
     if (requested.size === 0) return 0;
@@ -454,13 +507,8 @@ export class WorkspaceRegistrationStore {
       });
       if (removed === 0) return false;
       snapshot.workspaces.splice(0, snapshot.workspaces.length, ...retained);
-      if (snapshot.displayNames) {
-        for (const registrationId of removedIds) {
-          delete snapshot.displayNames[registrationId];
-        }
-        if (Object.keys(snapshot.displayNames).length === 0) {
-          delete snapshot.displayNames;
-        }
+      for (const registrationId of removedIds) {
+        setSnapshotDisplayName(snapshot, registrationId, undefined);
       }
       return true;
     });

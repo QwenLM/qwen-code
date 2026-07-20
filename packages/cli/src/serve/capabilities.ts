@@ -296,8 +296,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Singular session shell routes resolve the owning live workspace runtime.
   multi_workspace_session_shell: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
-  // Optional presentation-only names for registered workspace runtimes.
-  // Workspace ids and canonical paths remain the routing identities.
+  // Optional presentation-only names and updates to those names for workspace
+  // runtimes. Workspace ids and canonical paths remain the routing identities.
   workspace_display_name: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
