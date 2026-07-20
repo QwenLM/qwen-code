@@ -93,7 +93,9 @@ import type {
   DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -4045,10 +4047,11 @@ export class DaemonClient {
 
   async addWorkspace(
     cwd: string,
-    options: { persist?: boolean } = {},
+    options: { persist?: boolean; displayName?: string } = {},
   ): Promise<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     persisted?: boolean;
@@ -4061,6 +4064,9 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd,
           ...(options.persist ? { persist: true } : {}),
+          ...(options.displayName !== undefined
+            ? { displayName: options.displayName }
+            : {}),
         }),
       },
       async (res) => {
@@ -4070,11 +4076,24 @@ export class DaemonClient {
         return (await res.json()) as {
           id: string;
           cwd: string;
+          displayName?: string;
           primary: boolean;
           trusted: boolean;
           persisted?: boolean;
         };
       },
+    );
+  }
+
+  async updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability> {
+    return await this.workspaceJsonRequest<DaemonWorkspaceCapability>(
+      urlEncode(workspaceSelector),
+      '',
+      'PATCH /workspaces/:workspace',
+      { method: 'PATCH', body: update, mode: 'rest' },
     );
   }
 

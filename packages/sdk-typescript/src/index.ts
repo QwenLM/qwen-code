@@ -80,6 +80,7 @@ export {
   type DaemonWorkspaceInitializedData,
   type DaemonWorkspaceInitializedEvent,
   type DaemonWorkspaceCapability,
+  type DaemonWorkspaceUpdate,
   type DaemonWorkspaceGitStatus,
   type DaemonGitOperation,
   type DaemonWorkspaceGitDiff,

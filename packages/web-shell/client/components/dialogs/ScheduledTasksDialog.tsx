@@ -28,7 +28,7 @@ import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
-import { workspaceBasename } from '../../utils/workspace';
+import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   buildCron,
@@ -1145,7 +1145,7 @@ export function ScheduledTasksDialog({
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
-                      {workspaceBasename(ws.cwd)}
+                      {workspaceLabel(ws)}
                     </option>
                   ))}
                 </select>
@@ -1460,7 +1460,7 @@ export function ScheduledTasksDialog({
                     <span className={styles.workspaceIcon} aria-hidden="true">
                       ⌂
                     </span>
-                    {workspaceBasename(task.workspaceCwd)}
+                    {workspaceLabelForCwd(task.workspaceCwd, workspaceList)}
                   </span>
                 )}
                 <span className={styles.schedulePill}>

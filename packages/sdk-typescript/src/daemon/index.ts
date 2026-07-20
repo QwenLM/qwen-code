@@ -394,6 +394,7 @@ export type {
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
   DaemonWorkspaceCapability,
+  DaemonWorkspaceUpdate,
   DaemonWorkspaceGitStatus,
   DaemonGitOperation,
   DaemonWorkspaceGitDiff,

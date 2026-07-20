@@ -901,6 +901,9 @@ const EN: Messages = {
   'sidebar.addWorkspace': 'Add workspace',
   'sidebar.addWorkspaceTitle': 'Add Workspace',
   'sidebar.addWorkspacePath': 'Directory path',
+  'sidebar.addWorkspaceDisplayName': 'Display name (optional)',
+  'sidebar.addWorkspaceDisplayNameHint':
+    'Shown in Web Shell; the directory path remains the workspace identity.',
   'sidebar.addWorkspaceRegister': 'Register',
   'sidebar.addWorkspaceCancel': 'Cancel',
   'sidebar.addWorkspaceError': 'Failed to add workspace',
@@ -3063,6 +3066,9 @@ const ZH: Messages = {
   'sidebar.addWorkspace': '添加工作区',
   'sidebar.addWorkspaceTitle': '添加工作区',
   'sidebar.addWorkspacePath': '目录路径',
+  'sidebar.addWorkspaceDisplayName': '展示名称（可选）',
+  'sidebar.addWorkspaceDisplayNameHint':
+    '用于 Web Shell 展示；目录路径仍是工作区身份。',
   'sidebar.addWorkspaceRegister': '注册',
   'sidebar.addWorkspaceCancel': '取消',
   'sidebar.addWorkspaceError': '添加工作区失败',
