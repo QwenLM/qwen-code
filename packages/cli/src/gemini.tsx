@@ -18,6 +18,7 @@ import {
   setStartupEventSink,
   createDebugLogger,
   persistSessionUsage,
+  PRIVATE_ACP_CAPABILITY_ENV,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import dns from 'node:dns';
@@ -91,7 +92,6 @@ import {
 import { getInstallationInfo } from './utils/installationInfo.js';
 
 const debugLogger = createDebugLogger('STARTUP');
-const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
 
 interface RuntimeLspReinitializeResult {
   reconcile: {

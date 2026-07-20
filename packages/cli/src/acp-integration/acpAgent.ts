@@ -41,6 +41,7 @@ import {
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
   INVOCATION_CONTEXT_META_KEY,
+  PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   parseInvocationContext,
   findExistingProviderModels,
@@ -2552,9 +2553,9 @@ export async function runAcpAgent(
 ) {
   const privateParentCapability =
     options === undefined
-      ? process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY']
+      ? process.env[PRIVATE_ACP_CAPABILITY_ENV]
       : options.privateParentCapability;
-  delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+  delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
 
   // Reverse tool channel (issue #5626, Phase 2). Runtime-MCP-add targets the
   // BOOTSTRAP (workspace-level) config's `McpClientManager` — `this.config` in

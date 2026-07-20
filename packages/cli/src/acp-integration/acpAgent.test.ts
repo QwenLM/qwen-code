@@ -164,6 +164,7 @@ vi.mock('node:stream', async (importOriginal) => {
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
   INVOCATION_CONTEXT_META_KEY: 'qwen-code/invocation',
+  PRIVATE_ACP_CAPABILITY_ENV: 'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
   PRIVATE_PARENT_CAPABILITY_META_KEY: 'qwen-code/private-parent-capability',
   parseInvocationContext: vi.fn(
     (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())

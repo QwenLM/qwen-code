@@ -25,6 +25,7 @@ import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
   INVOCATION_CONTEXT_META_KEY,
+  PRIVATE_ACP_CAPABILITY_ENV,
   PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TrustGateError,
@@ -152,8 +153,6 @@ import {
   type SessionArtifactInput,
   type SessionArtifactMutationResult,
 } from './sessionArtifacts.js';
-
-const PRIVATE_ACP_CAPABILITY_ENV = 'QWEN_CODE_PRIVATE_ACP_CAPABILITY';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
