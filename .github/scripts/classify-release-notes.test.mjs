@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -194,117 +193,6 @@ describe('release note classification', () => {
     }
   });
 
-  it('rejects invalid pull request environment before invoking gh', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
-    try {
-      const marker = join(dir, 'gh-invoked');
-      const gh = join(dir, 'gh');
-      writeFileSync(
-        gh,
-        [
-          '#!/usr/bin/env node',
-          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '1');`,
-          'process.exit(1);',
-        ].join('\n'),
-      );
-      chmodSync(gh, 0o755);
-
-      for (const env of [
-        { GITHUB_REPOSITORY: 'QwenLM/qwen-code/extra', PR_NUMBER: '1' },
-        { GITHUB_REPOSITORY: 'QwenLM/qwen-code', PR_NUMBER: 'abc' },
-      ]) {
-        assert.throws(() =>
-          execFileSync(
-            process.execPath,
-            [join(import.meta.dirname, 'classify-release-notes.mjs')],
-            {
-              env: {
-                ...process.env,
-                ...env,
-                PATH: `${dir}:${process.env.PATH}`,
-              },
-            },
-          ),
-        );
-        assert.equal(existsSync(marker), false);
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('keeps renamed production files by checking their previous paths', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
-    try {
-      const gh = join(dir, 'gh');
-      writeFileSync(
-        gh,
-        [
-          '#!/usr/bin/env node',
-          'const args = process.argv.slice(2);',
-          "if (args[0] === 'pr') { process.stdout.write(JSON.stringify({ title: 'ci: move runtime', labels: [] })); process.exit(0); }",
-          "if (args.includes('.[] | .filename, (.previous_filename // empty)')) { process.stdout.write('.github/scripts/runtime.ts\\npackages/core/src/runtime.ts\\n'); process.exit(0); }",
-          'process.exit(1);',
-        ].join('\n'),
-      );
-      chmodSync(gh, 0o755);
-
-      const decision = execFileSync(
-        process.execPath,
-        [join(import.meta.dirname, 'classify-release-notes.mjs')],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-            PATH: `${dir}:${process.env.PATH}`,
-            PR_NUMBER: '1',
-          },
-        },
-      );
-
-      assert.equal(decision, 'include\n');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('prints skip for internal CI changes through main', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
-    try {
-      const gh = join(dir, 'gh');
-      writeFileSync(
-        gh,
-        [
-          '#!/usr/bin/env node',
-          'const args = process.argv.slice(2);',
-          "if (args[0] === 'pr') { process.stdout.write(JSON.stringify({ title: 'ci: speed up checks', labels: [] })); process.exit(0); }",
-          "if (args.includes('.[] | .filename, (.previous_filename // empty)')) { process.stdout.write('.github/workflows/ci.yml\\n'); process.exit(0); }",
-          'process.exit(1);',
-        ].join('\n'),
-      );
-      chmodSync(gh, 0o755);
-
-      const decision = execFileSync(
-        process.execPath,
-        [join(import.meta.dirname, 'classify-release-notes.mjs')],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-            PATH: `${dir}:${process.env.PATH}`,
-            PR_NUMBER: '1',
-          },
-        },
-      );
-
-      assert.equal(decision, 'skip\n');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
   it('wires batch labeling and exclusion through release.yml', () => {
     const release = readFileSync(
       join(import.meta.dirname, '../workflows/release.yml'),
@@ -316,7 +204,7 @@ describe('release note classification', () => {
     );
 
     assert.match(changelog, /- 'skip-changelog-auto'/);
-    assert.match(release, /classify-release-notes\.mjs --batch/);
+    assert.match(release, /classify-release-notes\.mjs/);
     assert.match(release, /Auto-label internal CI PRs/);
     assert.match(
       release,
@@ -327,7 +215,7 @@ describe('release note classification', () => {
     assert.doesNotMatch(release, /--search "merged:/);
   });
 
-  it('batch mode adds qualifying labels and removes stale ones', () => {
+  it('updates labels and continues after a lookup failure', () => {
     const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
     try {
       const updates = join(dir, 'updates.txt');
@@ -338,6 +226,7 @@ describe('release note classification', () => {
           '#!/usr/bin/env node',
           'const args = process.argv.slice(2);',
           "if (args[0] === 'api' && args.includes('.[] | .filename, (.previous_filename // empty)')) {",
+          "  if (args.some((arg) => arg.endsWith('/pulls/11/files'))) process.exit(1);",
           "  process.stdout.write('.github/workflows/ci.yml\\n');",
           '  process.exit(0);',
           '}',
@@ -353,17 +242,18 @@ describe('release note classification', () => {
 
       const input = JSON.stringify([
         { number: 10, title: 'ci: speed up checks', labels: [] },
+        { number: 11, title: 'ci: broken lookup', labels: [] },
         {
-          number: 11,
+          number: 12,
           title: 'fix: user-visible bug',
           labels: [{ name: 'skip-changelog-auto' }],
         },
-        { number: 12, title: 'feat: new feature', labels: [] },
+        { number: 13, title: 'feat: new feature', labels: [] },
       ]);
 
-      const output = execFileSync(
+      const result = spawnSync(
         process.execPath,
-        [join(import.meta.dirname, 'classify-release-notes.mjs'), '--batch'],
+        [join(import.meta.dirname, 'classify-release-notes.mjs')],
         {
           encoding: 'utf8',
           input,
@@ -375,10 +265,12 @@ describe('release note classification', () => {
         },
       );
 
-      assert.match(output, /Labeled: 10/);
-      assert.match(output, /Unlabeled: 11/);
+      assert.equal(result.status, 0);
+      assert.match(result.stdout, /Labeled: 10/);
+      assert.match(result.stdout, /Unlabeled: 12/);
+      assert.match(result.stderr, /Failed to classify PR #11/);
       const updateContent = readFileSync(updates, 'utf8').trim();
-      assert.equal(updateContent, '10 add\n11 remove');
+      assert.equal(updateContent, '10 add\n12 remove');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

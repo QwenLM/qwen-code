@@ -72,32 +72,7 @@ function fetchFiles(repo, number) {
     .filter(Boolean);
 }
 
-function mainSingle() {
-  const repo = process.env.GITHUB_REPOSITORY || '';
-  const number = process.env.PR_NUMBER || '';
-  if (
-    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
-    !/^[1-9]\d*$/.test(number)
-  ) {
-    throw new Error(
-      'GITHUB_REPOSITORY and PR_NUMBER must identify a pull request.',
-    );
-  }
-
-  const metadata = JSON.parse(
-    execFileSync(
-      'gh',
-      ['pr', 'view', number, '--repo', repo, '--json', 'title,labels'],
-      { encoding: 'utf8' },
-    ),
-  );
-  const files = fetchFiles(repo, number);
-  process.stdout.write(
-    `${shouldAutoSkipChangelog({ ...metadata, files }) ? 'skip' : 'include'}\n`,
-  );
-}
-
-function mainBatch() {
+function main() {
   const repo = process.env.GITHUB_REPOSITORY || '';
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
     throw new Error('GITHUB_REPOSITORY must be set to owner/repo.');
@@ -161,9 +136,5 @@ if (
   process.argv[1] &&
   path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
 ) {
-  if (process.argv.includes('--batch')) {
-    mainBatch();
-  } else {
-    mainSingle();
-  }
+  main();
 }
