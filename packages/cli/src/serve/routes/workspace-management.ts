@@ -6,7 +6,7 @@
 
 import { readdir, stat } from 'node:fs/promises';
 import {
-  translateWindowsWorkspaceForPosixSandbox,
+  translateAndCheckAbsoluteWorkspacePath,
   MAX_WORKSPACE_PATH_LENGTH,
 } from '@qwen-code/acp-bridge/workspacePaths';
 import { realpathSync } from 'node:fs';
@@ -255,10 +255,10 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      // #7139: map a Windows-shaped cwd to its container bind mount before
-      // the absolute-path guard (no-op outside a POSIX container sandbox).
-      const sandboxCwd = translateWindowsWorkspaceForPosixSandbox(cwd);
-      if (!isAbsolute(sandboxCwd)) {
+      // #7139: the shared helper maps a Windows-shaped cwd to its container
+      // bind mount before the absolute-path check.
+      const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
+      if (sandboxCwd === null) {
         res.status(400).json({
           error: '`cwd` must be an absolute path',
           code: 'invalid_path',

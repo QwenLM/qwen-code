@@ -108,6 +108,25 @@ export function translateWindowsWorkspaceForPosixSandbox(
  * `cli/src/serve/fs/paths.ts` re-exports for callers still pointing
  * at the original location.
  */
+/**
+ * Single enforcement point for the workspace-ingestion ordering (#7139):
+ * the sandbox translation MUST run before the absolute-path check, because
+ * `path.isAbsolute('C:\\…')` is false on POSIX and would reject the
+ * host-shaped input before `canonicalizeWorkspace`'s own translation could
+ * ever see it. Every ingestion site calls this instead of hand-rolling the
+ * translate-then-isAbsolute pair, so a future sixth endpoint cannot forget
+ * the ordering.
+ *
+ * Returns the translated path, or null when it is not absolute — callers
+ * keep their own error surface (HTTP 400, AcpParamError, boot Error).
+ */
+export function translateAndCheckAbsoluteWorkspacePath(
+  raw: string,
+): string | null {
+  const translated = translateWindowsWorkspaceForPosixSandbox(raw);
+  return path.isAbsolute(translated) ? translated : null;
+}
+
 export function canonicalizeWorkspace(p: string): string {
   // #7139: inside a Linux container sandbox, host-shaped Windows workspace
   // paths must be mapped to their bind-mount location BEFORE resolution —

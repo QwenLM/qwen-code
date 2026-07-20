@@ -39,7 +39,7 @@ import {
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   canonicalizeWorkspace,
-  translateWindowsWorkspaceForPosixSandbox,
+  translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   AuthType,
@@ -1711,8 +1711,8 @@ export function validateAndCanonicalizeWorkspaceInput(
   // `--workspace C:\…` in host shape; translate to the bind-mount
   // location BEFORE the absolute-path guard, which would otherwise
   // reject it (`path.isAbsolute('C:\…')` is false on POSIX).
-  const workspace = translateWindowsWorkspaceForPosixSandbox(rawWorkspace);
-  if (!path.isAbsolute(workspace)) {
+  const workspace = translateAndCheckAbsoluteWorkspacePath(rawWorkspace);
+  if (workspace === null) {
     throw new Error(
       `Invalid --workspace "${workspace}": must be an absolute path.`,
     );

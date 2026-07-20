@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'node:path';
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -43,7 +42,7 @@ import {
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import {
-  translateWindowsWorkspaceForPosixSandbox,
+  translateAndCheckAbsoluteWorkspacePath,
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
@@ -326,13 +325,11 @@ export function parseOptionalWorkspaceCwd(
       `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
     );
   }
-  // #7139: map a Windows-shaped cwd to its container bind mount before
-  // the absolute-path guard (no-op outside a POSIX container sandbox).
-  const sandboxCwd = translateWindowsWorkspaceForPosixSandbox(cwd);
-  // `path.isAbsolute` (platform-aware) — same as the REST route. A bare
-  // `startsWith('/')` would reject valid Windows `C:\…`/UNC paths a client
-  // gets back from `/capabilities.workspaceCwd`.
-  if (!path.isAbsolute(sandboxCwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the (platform-aware) absolute-path check — same as
+  // the REST route.
+  const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
+  if (sandboxCwd === null) {
     throw new AcpParamError('`cwd` must be an absolute path when provided');
   }
   return sandboxCwd;

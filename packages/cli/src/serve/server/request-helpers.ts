@@ -4,10 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as path from 'node:path';
 import {
   MAX_WORKSPACE_PATH_LENGTH,
-  translateWindowsWorkspaceForPosixSandbox,
+  translateAndCheckAbsoluteWorkspacePath,
 } from '@qwen-code/acp-bridge/workspacePaths';
 import type { Request, Response } from 'express';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
@@ -146,12 +145,12 @@ export function parseOptionalWorkspaceCwd(
     });
     return undefined;
   }
-  // #7139: map a Windows-shaped cwd to its container bind mount before the
-  // absolute-path guard (no-op outside a POSIX container sandbox).
-  const cwd = hasCwd
-    ? translateWindowsWorkspaceForPosixSandbox(body['cwd'] as string)
-    : boundWorkspace;
-  if (!path.isAbsolute(cwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the absolute-path check.
+  const cwd = translateAndCheckAbsoluteWorkspacePath(
+    hasCwd ? (body['cwd'] as string) : boundWorkspace,
+  );
+  if (cwd === null) {
     res
       .status(400)
       .json({ error: '`cwd` must be an absolute path when provided' });

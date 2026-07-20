@@ -84,7 +84,7 @@ import {
 } from './bridgeErrors.js';
 import {
   canonicalizeWorkspace,
-  translateWindowsWorkspaceForPosixSandbox,
+  translateAndCheckAbsoluteWorkspacePath,
 } from './workspacePaths.js';
 import { parseSessionSource } from './session-source.js';
 import {
@@ -2850,13 +2850,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   const resolveWorkspaceKey = (rawWorkspaceCwd: string): string => {
     // #7139: host-shaped Windows paths reach the in-container bridge via
-    // clients and persisted registrations; map to the bind mount before
-    // the absolute-path guard (no-op outside a POSIX container sandbox).
+    // clients and persisted registrations; the shared helper maps them to
+    // the bind mount before the absolute-path check.
     const workspaceCwd =
-      translateWindowsWorkspaceForPosixSandbox(rawWorkspaceCwd);
-    if (!path.isAbsolute(workspaceCwd)) {
+      translateAndCheckAbsoluteWorkspacePath(rawWorkspaceCwd);
+    if (workspaceCwd === null) {
       throw new Error(
-        `workspaceCwd must be an absolute path; got "${workspaceCwd}"`,
+        `workspaceCwd must be an absolute path; got "${rawWorkspaceCwd}"`,
       );
     }
     const workspaceKey =
