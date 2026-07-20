@@ -35,6 +35,7 @@ import { SkillTool } from '../tools/skill.js';
 import { StructuredToolError } from '../tools/priorReadEnforcement.js';
 import { ToolNames, ToolNamesMigration } from '../tools/tool-names.js';
 import type {
+  CompletedToolCall,
   ExecutingToolCall,
   ToolCall,
   WaitingToolCall,
@@ -76,6 +77,8 @@ import {
   runWithInvocationContext,
   type InvocationContextV1,
 } from '../utils/invocation-context.js';
+import { getPlanModeSystemReminder } from './prompts.js';
+import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -712,6 +715,8 @@ describe('CoreToolScheduler', () => {
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
+    truncateToolOutputThreshold?: number;
+    truncateToolOutputLines?: number;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -759,8 +764,10 @@ describe('CoreToolScheduler', () => {
         getToolResultBytesWritten: () => 0,
         trackToolResultBytes: vi.fn(),
         getTruncateToolOutputThreshold: () =>
+          options.truncateToolOutputThreshold ??
           DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
-        getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+        getTruncateToolOutputLines: () =>
+          options.truncateToolOutputLines ?? DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
         getToolOutputBatchBudget: () =>
           options.toolOutputBatchBudget ?? Number.POSITIVE_INFINITY,
         getToolRegistry: () => mockToolRegistry,
@@ -862,6 +869,221 @@ describe('CoreToolScheduler', () => {
     );
 
     expect(observedContext).toEqual(invocationContext);
+  });
+
+  it('isolates enter_plan_mode as a batch boundary and preserves its full reminder', async () => {
+    const reminder = getPlanModeSystemReminder(false);
+    const writeExecute = vi.fn().mockResolvedValue({
+      llmContent: 'wrote',
+      returnDisplay: 'wrote',
+    });
+    const enterExecute = vi.fn().mockResolvedValue({
+      llmContent: reminder,
+      returnDisplay: 'Entered plan mode.',
+    });
+    const readExecute = vi.fn().mockResolvedValue({
+      llmContent: 'read',
+      returnDisplay: 'read',
+    });
+    const messageBus = {
+      request: vi.fn().mockImplementation(
+        async (request: {
+          eventName: string;
+        }): Promise<HookExecutionResponse> => ({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: `${request.eventName}-hook`,
+          success: true,
+          output: { decision: 'allow' },
+        }),
+      ),
+    };
+    const toolsByName = new Map<string, MockTool>([
+      [
+        ToolNames.WRITE_FILE,
+        new MockTool({ name: ToolNames.WRITE_FILE, execute: writeExecute }),
+      ],
+      [
+        ToolNames.ENTER_PLAN_MODE,
+        new MockTool({
+          name: ToolNames.ENTER_PLAN_MODE,
+          maxOutputChars: Number.POSITIVE_INFINITY,
+          execute: enterExecute,
+        }),
+      ],
+      [
+        ToolNames.READ_FILE,
+        new MockTool({ name: ToolNames.READ_FILE, execute: readExecute }),
+      ],
+    ]);
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        messageBus,
+        disableHooks: false,
+        truncateToolOutputThreshold: 1,
+        truncateToolOutputLines: 1,
+        toolOutputBatchBudget: 1,
+      });
+    const runtimeView = {
+      contentGenerator: {},
+      contentGeneratorConfig: { model: 'vision-agent' },
+    } as RuntimeContentGeneratorView;
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'write-before-entry',
+          name: ToolNames.WRITE_FILE,
+          args: { file_path: 'before.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-boundary',
+        },
+        {
+          callId: 'enter-plan',
+          name: ToolNames.ENTER_PLAN_MODE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-boundary',
+        },
+        {
+          callId: 'read-after-entry',
+          name: ToolNames.READ_FILE,
+          args: { file_path: 'after.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-plan-boundary',
+        },
+      ],
+      new AbortController().signal,
+      runtimeView,
+    );
+
+    expect(ensureTool).toHaveBeenCalledOnce();
+    expect(ensureTool).toHaveBeenCalledWith(ToolNames.ENTER_PLAN_MODE);
+    expect(writeExecute).not.toHaveBeenCalled();
+    expect(enterExecute).toHaveBeenCalledOnce();
+    expect(readExecute).not.toHaveBeenCalled();
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls.map((call) => call.request.callId)).toEqual([
+      'write-before-entry',
+      'enter-plan',
+      'read-after-entry',
+    ]);
+    expect(completedCalls.map((call) => call.status)).toEqual([
+      'error',
+      'success',
+      'error',
+    ]);
+    const [writeCall, enterCall, readCall] = completedCalls;
+    expect(writeCall.response.error?.message).toBe(
+      PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+    );
+    expect(writeCall.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+    expect(
+      enterCall.response.responseParts[0]?.functionResponse?.response?.[
+        'output'
+      ],
+    ).toBe(reminder);
+    expect(readCall.response.error?.message).toBe(
+      PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+    );
+    expect(readCall.response.errorType).toBe(ToolErrorType.EXECUTION_DENIED);
+
+    const postBatchRequest = messageBus.request.mock.calls.find(
+      ([request]) => request.eventName === 'PostToolBatch',
+    )?.[0];
+    expect(
+      postBatchRequest.input.tool_calls.map(
+        (call: { status: string }) => call.status,
+      ),
+    ).toEqual(['error', 'success', 'error']);
+    expect(
+      (
+        scheduler as unknown as {
+          runtimeContentGeneratorViews: Map<
+            string,
+            RuntimeContentGeneratorView
+          >;
+        }
+      ).runtimeContentGeneratorViews.size,
+    ).toBe(0);
+  });
+
+  it('keeps siblings suppressed when enter_plan_mode itself fails', async () => {
+    const enterExecute = vi.fn().mockResolvedValue({
+      llmContent: 'Failed to enter plan mode: transition failed',
+      returnDisplay: 'Failed to enter plan mode: transition failed',
+      error: {
+        message: 'Failed to enter plan mode: transition failed',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const writeExecute = vi.fn().mockResolvedValue({
+      llmContent: 'wrote',
+      returnDisplay: 'wrote',
+    });
+    const { scheduler, ensureTool, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            ToolNames.ENTER_PLAN_MODE,
+            new MockTool({
+              name: ToolNames.ENTER_PLAN_MODE,
+              execute: enterExecute,
+            }),
+          ],
+          [
+            ToolNames.WRITE_FILE,
+            new MockTool({
+              name: ToolNames.WRITE_FILE,
+              execute: writeExecute,
+            }),
+          ],
+        ]),
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'failed-entry',
+          name: ToolNames.ENTER_PLAN_MODE,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-entry',
+        },
+        {
+          callId: 'write-after-failed-entry',
+          name: ToolNames.WRITE_FILE,
+          args: { file_path: 'blocked.txt' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-entry',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+    expect(ensureTool).toHaveBeenCalledOnce();
+    expect(enterExecute).toHaveBeenCalledOnce();
+    expect(writeExecute).not.toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as CompletedToolCall[];
+    expect(completedCalls.map((call) => call.status)).toEqual([
+      'error',
+      'error',
+    ]);
+    expect(completedCalls[0].response.error?.message).toBe(
+      'Failed to enter plan mode: transition failed',
+    );
+    expect(completedCalls[1].response.error?.message).toBe(
+      PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+    );
   });
 
   it('keeps interaction-required tools awaiting approval despite YOLO and an allow hook', async () => {

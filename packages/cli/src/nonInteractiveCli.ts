@@ -39,6 +39,7 @@ import {
   ApprovalMode,
   ToolConfirmationOutcome,
   createDuplicateProviderToolCallResponse,
+  findPlanModeEntryBatchBoundaryIndex,
   isSystemReminderContent,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
@@ -46,6 +47,8 @@ import {
   canonicalToolName,
   parsePositiveIntegerEnv,
   partitionByConcurrencySafety,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+  ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import type { Content, Part, PartListUnion } from '@google/genai';
 import type { CLIUserMessage, PermissionMode } from './nonInteractive/types.js';
@@ -1167,6 +1170,13 @@ export async function runNonInteractive(
             (r) => r.name === ToolNames.STRUCTURED_OUTPUT,
           );
         }
+        const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
+          requestsToExecute.map((request) => request.name),
+        );
+        const planModeEntryBoundary =
+          planModeEntryBoundaryIndex === undefined
+            ? undefined
+            : requestsToExecute[planModeEntryBoundaryIndex];
         const executedRequests = new Set<ToolCallRequestInfo>(
           respondedRequests,
         );
@@ -1333,6 +1343,30 @@ export async function runNonInteractive(
           return false;
         };
 
+        const finalizePlanModeEntrySiblingSkip = (
+          requestInfo: ToolCallRequestInfo,
+        ): void => {
+          const error = new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE);
+          const responseParts: Part[] = [
+            {
+              functionResponse: {
+                id: requestInfo.callId,
+                name: requestInfo.name,
+                response: { error: error.message },
+              },
+            },
+          ];
+          adapter.emitToolResult(requestInfo, {
+            callId: requestInfo.callId,
+            responseParts,
+            resultDisplay: error.message,
+            error,
+            errorType: ToolErrorType.EXECUTION_DENIED,
+          });
+          executedRequests.add(requestInfo);
+          toolResponseParts.push(...responseParts);
+        };
+
         const maxToolConcurrency = parsePositiveIntegerEnv(
           process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
           10,
@@ -1355,6 +1389,13 @@ export async function runNonInteractive(
             }> = [];
             const inFlight = new Set<Promise<void>>();
             for (const requestInfo of batch.calls) {
+              if (
+                planModeEntryBoundary &&
+                requestInfo !== planModeEntryBoundary
+              ) {
+                finalizePlanModeEntrySiblingSkip(requestInfo);
+                continue;
+              }
               if (!isBudgetExempt(requestInfo)) {
                 budgetEnforcer.tickToolCall();
               }
@@ -1420,6 +1461,13 @@ export async function runNonInteractive(
             // Sequential batch (a single tool, or a side-effecting tool):
             // identical to the pre-parallelisation behaviour.
             for (const requestInfo of batch.calls) {
+              if (
+                planModeEntryBoundary &&
+                requestInfo !== planModeEntryBoundary
+              ) {
+                finalizePlanModeEntrySiblingSkip(requestInfo);
+                continue;
+              }
               if (!isBudgetExempt(requestInfo)) {
                 budgetEnforcer.tickToolCall();
               }

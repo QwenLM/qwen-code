@@ -52,8 +52,10 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
+  findPlanModeEntryBatchBoundaryIndex,
   findRepeatedDuplicateProviderToolCall,
   markDuplicateProviderToolCallResponseSent,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -5400,6 +5402,7 @@ export class Session implements SessionContext {
       fc: FunctionCall,
       message = PERMISSION_CANCEL_SKIP_MESSAGE,
       emitStart = true,
+      errorType?: ToolErrorType,
     ): Promise<Part> => {
       const toolName = fc.name ?? 'unknown_tool';
       const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
@@ -5417,7 +5420,7 @@ export class Session implements SessionContext {
           status: 'error',
           resultDisplay: undefined,
           error,
-          errorType: undefined,
+          errorType,
         });
         if (emitStart) {
           await this.toolCallEmitter.emitStart({
@@ -5576,6 +5579,17 @@ export class Session implements SessionContext {
         batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
       }
     }
+
+    const executableCalls = batches.flatMap((batch) =>
+      batch.kind === 'execute' ? batch.calls : [],
+    );
+    const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
+      executableCalls.map((call) => call.name),
+    );
+    const planModeEntryBoundary =
+      planModeEntryBoundaryIndex === undefined
+        ? undefined
+        : executableCalls[planModeEntryBoundaryIndex];
 
     const appendSkippedAfter = async (
       parts: Part[],
@@ -5736,6 +5750,22 @@ export class Session implements SessionContext {
         if (batch.kind === 'duplicate') {
           await emitDuplicateBatch(batch);
           parts.push(...batch.response.responseParts);
+          continue;
+        }
+        if (
+          planModeEntryBoundary &&
+          !batch.calls.includes(planModeEntryBoundary)
+        ) {
+          for (const fc of batch.calls) {
+            parts.push(
+              await recordSkippedToolCall(
+                fc,
+                PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+                true,
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+          }
           continue;
         }
         if (batch.concurrent && batch.calls.length > 1) {
