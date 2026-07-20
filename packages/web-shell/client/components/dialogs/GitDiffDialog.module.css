@@ -4,35 +4,6 @@
   min-height: 50vh;
 }
 
-.tabBar {
-  display: flex;
-  gap: 2px;
-  padding: 0 0 8px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 8px;
-}
-
-.tab {
-  padding: 4px 12px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
-
-.tab:hover {
-  background: var(--subtle-bg);
-}
-
-.tabActive {
-  color: inherit;
-  font-weight: 500;
-  background: var(--subtle-bg);
-}
-
 .placeholder {
   padding: 24px 12px;
   text-align: center;

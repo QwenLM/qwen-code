@@ -9,7 +9,6 @@ import {
   useEffect,
   useRef,
   useState,
-  type MouseEvent,
   type ReactNode,
 } from 'react';
 import { CheckIcon, CopyIcon } from 'lucide-react';
@@ -25,20 +24,21 @@ import styles from './GitLogDialog.module.css';
 
 const PAGE_SIZE = 50;
 
-function timeAgo(timestamp: number, now: number): string {
+function timeAgo(timestamp: number, now: number, language: string): string {
   const seconds = Math.max(0, Math.floor(now - timestamp));
-  if (seconds < 60) return 'just now';
+  const formatter = new Intl.RelativeTimeFormat(language, { numeric: 'auto' });
+  if (seconds < 60) return formatter.format(0, 'second');
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
+  if (minutes < 60) return formatter.format(-minutes, 'minute');
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
+  if (hours < 24) return formatter.format(-hours, 'hour');
   const days = Math.floor(hours / 24);
-  if (days < 7) return `${days}d ago`;
+  if (days < 7) return formatter.format(-days, 'day');
   const weeks = Math.floor(days / 7);
-  if (weeks < 5) return `${weeks}w ago`;
+  if (weeks < 5) return formatter.format(-weeks, 'week');
   const months = Math.floor(days / 30);
-  if (months < 12) return `${months}mo ago`;
-  return `${Math.max(1, Math.floor(days / 365))}y ago`;
+  if (months < 12) return formatter.format(-months, 'month');
+  return formatter.format(-Math.max(1, Math.floor(days / 365)), 'year');
 }
 
 function parseRefs(refs: string): { label: string; isHead: boolean }[] {
@@ -65,7 +65,7 @@ function CommitRow({
   now: number;
 }) {
   const { client } = useWorkspace();
-  const { t } = useI18n();
+  const { language, t } = useI18n();
   const [open, setOpen] = useState(false);
   const [detail, setDetail] = useState<DaemonGitCommitDetail | null>(null);
   const [loading, setLoading] = useState(false);
@@ -73,8 +73,7 @@ function CommitRow({
   const [copied, setCopied] = useState(false);
   const cancelledRef = useRef(false);
 
-  const copySha = (e: MouseEvent) => {
-    e.stopPropagation();
+  const copySha = () => {
     void navigator.clipboard
       .writeText(entry.sha)
       .then(() => {
@@ -138,7 +137,7 @@ function CommitRow({
           {detail.body && (
             <pre className={styles.commitBody}>{detail.body}</pre>
           )}
-          {detail.files && detail.files.length > 0 && (
+          {detail.files && (
             <div className={styles.fileStats}>
               <div className={styles.fileStatHeader}>
                 {t('gitLog.files', {
@@ -180,62 +179,54 @@ function CommitRow({
 
   return (
     <div className={styles.commitRow}>
-      <button
-        type="button"
-        className={styles.commitHeader}
-        onClick={toggle}
-        aria-expanded={open}
-        aria-label={`${entry.shortSha} ${entry.subject}`}
-      >
-        {isMerge && <span className={styles.mergeIcon}>⎇</span>}
-        <span className={styles.commitSha} title={entry.sha}>
-          {entry.shortSha}
-        </span>
-        <span
+      <div className={styles.commitHeader}>
+        <button
+          type="button"
+          className={styles.commitToggle}
+          onClick={toggle}
+          aria-expanded={open}
+        >
+          {isMerge && <span className={styles.mergeIcon}>⎇</span>}
+          <span className={styles.commitSha} title={entry.sha}>
+            {entry.shortSha}
+          </span>
+          <span className={styles.commitSubject}>{entry.subject}</span>
+          {refs.length > 0 && (
+            <span className={styles.commitRefs}>
+              {refs.map((r) => (
+                <span
+                  key={r.label}
+                  className={`${styles.refTag}${r.isHead ? ` ${styles.refHead}` : ''}`}
+                >
+                  {r.label}
+                </span>
+              ))}
+            </span>
+          )}
+          <span className={styles.commitMeta}>
+            {entry.authorName} · {timeAgo(entry.authorDate, now, language)}
+          </span>
+        </button>
+        <button
+          type="button"
           className={styles.copyBtn}
-          tabIndex={0}
           onClick={copySha}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter' || e.key === ' ') {
-              e.preventDefault();
-              e.stopPropagation();
-              copySha(e as unknown as MouseEvent);
-            }
-          }}
-          aria-label={`Copy ${entry.shortSha}`}
+          aria-label={t('gitLog.copySha', { sha: entry.shortSha })}
         >
           {copied ? <CheckIcon size={12} /> : <CopyIcon size={12} />}
-        </span>
-        <span className={styles.commitSubject}>{entry.subject}</span>
-        {refs.length > 0 && (
-          <span className={styles.commitRefs}>
-            {refs.map((r) => (
-              <span
-                key={r.label}
-                className={`${styles.refTag}${r.isHead ? ` ${styles.refHead}` : ''}`}
-              >
-                {r.label}
-              </span>
-            ))}
-          </span>
-        )}
-        <span className={styles.commitMeta}>
-          {entry.authorName} · {timeAgo(entry.authorDate, now)}
-        </span>
-      </button>
+        </button>
+      </div>
       {detailBody}
     </div>
   );
 }
 
-export function GitLogDialog({
+export function GitLogContent({
   workspaceCwd,
-  onClose,
-  onOpenDiff,
+  onSubtitleChange,
 }: {
   workspaceCwd: string;
-  onClose: () => void;
-  onOpenDiff?: () => void;
+  onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { client } = useWorkspace();
   const { t } = useI18n();
@@ -245,6 +236,7 @@ export function GitLogDialog({
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadMoreError, setLoadMoreError] = useState(false);
   const [now, setNow] = useState(Date.now() / 1000);
+  const nextSkipRef = useRef(0);
 
   useEffect(() => {
     const id = setInterval(() => setNow(Date.now() / 1000), 60_000);
@@ -256,11 +248,15 @@ export function GitLogDialog({
     setLoading(true);
     setError(false);
     setLoadMoreError(false);
+    nextSkipRef.current = 0;
     client
       .workspaceByCwd(workspaceCwd)
       .workspaceGitLog(PAGE_SIZE, 0)
       .then((result) => {
-        if (!cancelled) setLog(result);
+        if (!cancelled) {
+          nextSkipRef.current = result.entries.length;
+          setLog(result);
+        }
       })
       .catch(() => {
         if (!cancelled) setError(true);
@@ -278,17 +274,21 @@ export function GitLogDialog({
     setLoadingMore(true);
     client
       .workspaceByCwd(workspaceCwd)
-      .workspaceGitLog(PAGE_SIZE, log.entries.length)
+      .workspaceGitLog(PAGE_SIZE, nextSkipRef.current)
       .then((result) => {
-        setLog((prev) =>
-          prev
-            ? {
-                ...prev,
-                entries: [...prev.entries, ...result.entries],
-                hasMore: result.hasMore,
-              }
-            : result,
-        );
+        nextSkipRef.current += result.entries.length;
+        setLog((prev) => {
+          if (!prev) return result;
+          const existing = new Set(prev.entries.map((entry) => entry.sha));
+          return {
+            ...prev,
+            entries: [
+              ...prev.entries,
+              ...result.entries.filter((entry) => !existing.has(entry.sha)),
+            ],
+            hasMore: result.hasMore,
+          };
+        });
       })
       .catch(() => {
         setLoadMoreError(true);
@@ -301,6 +301,10 @@ export function GitLogDialog({
   const subtitle = log?.available
     ? t('gitLog.subtitle', { count: log.entries.length })
     : undefined;
+
+  useEffect(() => {
+    onSubtitleChange?.(subtitle);
+  }, [onSubtitleChange, subtitle]);
 
   let body: ReactNode;
   if (loading) {
@@ -344,38 +348,25 @@ export function GitLogDialog({
     );
   }
 
+  return <div className={styles.content}>{body}</div>;
+}
+
+export function GitLogDialog({
+  workspaceCwd,
+  onClose,
+}: {
+  workspaceCwd: string;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
   return (
     <DialogShell
       title={t('gitLog.title')}
-      subtitle={subtitle}
       size="xl"
       allowFullscreen
       onClose={onClose}
     >
-      <div className={styles.content}>
-        {onOpenDiff && (
-          <div className={styles.tabBar} role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected={false}
-              className={styles.tab}
-              onClick={onOpenDiff}
-            >
-              {t('gitDiff.title')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected
-              className={`${styles.tab} ${styles.tabActive}`}
-            >
-              {t('gitLog.title')}
-            </button>
-          </div>
-        )}
-        {body}
-      </div>
+      <GitLogContent workspaceCwd={workspaceCwd} />
     </DialogShell>
   );
 }

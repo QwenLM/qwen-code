@@ -142,6 +142,22 @@ describe('workspace Git log routes', () => {
     });
   });
 
+  it('clamps a zero limit to one', async () => {
+    fetchGitLogMock.mockResolvedValue({ entries: [], hasMore: false });
+    const app = express();
+    registerWorkspaceGitLogRoutes(app, {
+      boundWorkspace: '/work/main',
+      sendBridgeError,
+    });
+
+    await request(app).get('/workspace/git/log?limit=0');
+
+    expect(fetchGitLogMock).toHaveBeenCalledWith('/work/main', {
+      limit: 1,
+      skip: 0,
+    });
+  });
+
   it('returns commit detail for a valid sha', async () => {
     fetchGitCommitDetailMock.mockResolvedValue({
       ...ENTRY,

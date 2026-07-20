@@ -509,21 +509,22 @@ async function synthesizeUntrackedHunk(
  * Binary files use `-` for both counts. Only the first `MAX_FILES` entries are
  * retained in `perFileStats`; totals account for every entry.
  */
-export function parseGitNumstat(stdout: string): GitDiffResult {
-  // Drop the trailing empty chunk from the terminating NUL.
+interface NumstatEntry {
+  path: string;
+  oldPath?: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+function forEachNumstatEntry(
+  stdout: string,
+  visit: (entry: NumstatEntry) => void,
+): void {
   const tokens = stdout.split('\0');
   if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
 
-  let added = 0;
-  let removed = 0;
-  let validFileCount = 0;
-  const perFileStats = new Map<string, PerFileStats>();
-
-  // Rename entries span three tokens ({counts}, oldPath, newPath). When we
-  // see an empty path in the counts token we stash the counts here and
-  // consume the next two tokens as the rename pair.
-  let pending: { added: number; removed: number; isBinary: boolean } | null =
-    null;
+  let pending: Omit<NumstatEntry, 'path' | 'oldPath'> | null = null;
   let renameOld: string | null = null;
 
   for (const token of tokens) {
@@ -532,42 +533,46 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
         renameOld = token;
         continue;
       }
-      // Key by the current (post-rename) path so the single-file endpoint can
-      // address it; carry the old path for display. Keying by the synthetic
-      // `old => new` string sent a nonexistent literal path to git, so renamed
-      // rows could never expand.
-      commitEntry(
-        token,
-        pending.added,
-        pending.removed,
-        pending.isBinary,
-        renameOld,
-      );
+      visit({ ...pending, path: token, oldPath: renameOld });
       pending = null;
       renameOld = null;
       continue;
     }
 
-    // Index-based parse — `split('\t')` is unsafe because `-z` preserves
-    // literal tabs inside filenames.
     const firstTab = token.indexOf('\t');
     if (firstTab < 0) continue;
     const secondTab = token.indexOf('\t', firstTab + 1);
     if (secondTab < 0) continue;
     const addStr = token.slice(0, firstTab);
     const remStr = token.slice(firstTab + 1, secondTab);
-    const filePath = token.slice(secondTab + 1);
+    const path = token.slice(secondTab + 1);
     const isBinary = addStr === '-' || remStr === '-';
-    const fileAdded = isBinary ? 0 : parseInt(addStr, 10) || 0;
-    const fileRemoved = isBinary ? 0 : parseInt(remStr, 10) || 0;
+    const added = isBinary ? 0 : parseInt(addStr, 10) || 0;
+    const removed = isBinary ? 0 : parseInt(remStr, 10) || 0;
 
-    if (filePath === '') {
-      // Rename header — wait for oldPath and newPath tokens.
-      pending = { added: fileAdded, removed: fileRemoved, isBinary };
+    if (path === '') {
+      pending = { added, removed, isBinary };
       continue;
     }
-    commitEntry(filePath, fileAdded, fileRemoved, isBinary);
+    visit({ path, added, removed, isBinary });
   }
+}
+
+export function parseGitNumstat(stdout: string): GitDiffResult {
+  let added = 0;
+  let removed = 0;
+  let validFileCount = 0;
+  const perFileStats = new Map<string, PerFileStats>();
+
+  forEachNumstatEntry(stdout, (entry) => {
+    commitEntry(
+      entry.path,
+      entry.added,
+      entry.removed,
+      entry.isBinary,
+      entry.oldPath,
+    );
+  });
 
   function commitEntry(
     filePath: string,
@@ -1604,55 +1609,19 @@ export async function fetchGitCommitDetail(
   let linesRemoved = 0;
 
   if (numstatRaw) {
-    const tokens = numstatRaw.split('\0').filter((t) => t.length > 0);
-    // Rename entries span three tokens ({counts with empty path}, oldPath,
-    // newPath) under `-z`, mirroring parseGitNumstat. Without this a `git mv`
-    // is recorded with an empty path (and its counts double-lost), so
-    // filesCount / linesAdded / linesRemoved understate the commit.
-    let pending: { added: number; removed: number; isBinary: boolean } | null =
-      null;
-    let oldPathSeen = false;
-    const record = (
-      path: string,
-      added: number,
-      removed: number,
-      isBinary: boolean,
-    ) => {
+    forEachNumstatEntry(numstatRaw, (entry) => {
       filesCount++;
-      linesAdded += added;
-      linesRemoved += removed;
+      linesAdded += entry.added;
+      linesRemoved += entry.removed;
       if (files.length < MAX_FILES) {
-        files.push({ path, added, removed, isBinary });
+        files.push({
+          path: entry.path,
+          added: entry.added,
+          removed: entry.removed,
+          isBinary: entry.isBinary,
+        });
       }
-    };
-    for (const token of tokens) {
-      if (pending) {
-        if (!oldPathSeen) {
-          oldPathSeen = true; // this token is oldPath; the next is newPath
-          continue;
-        }
-        record(token, pending.added, pending.removed, pending.isBinary);
-        pending = null;
-        oldPathSeen = false;
-        continue;
-      }
-      const firstTab = token.indexOf('\t');
-      if (firstTab < 0) continue;
-      const secondTab = token.indexOf('\t', firstTab + 1);
-      if (secondTab < 0) continue;
-      const addStr = token.slice(0, firstTab);
-      const remStr = token.slice(firstTab + 1, secondTab);
-      const filePath = token.slice(secondTab + 1);
-      const isBinary = addStr === '-' || remStr === '-';
-      const fileAdded = isBinary ? 0 : parseInt(addStr, 10) || 0;
-      const fileRemoved = isBinary ? 0 : parseInt(remStr, 10) || 0;
-      if (filePath === '') {
-        // Rename header — the next two tokens are oldPath then newPath.
-        pending = { added: fileAdded, removed: fileRemoved, isBinary };
-        continue;
-      }
-      record(filePath, fileAdded, fileRemoved, isBinary);
-    }
+    });
   }
 
   return {

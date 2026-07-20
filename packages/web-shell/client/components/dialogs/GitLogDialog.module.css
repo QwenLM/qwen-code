@@ -4,35 +4,6 @@
   min-height: 50vh;
 }
 
-.tabBar {
-  display: flex;
-  gap: 2px;
-  padding: 0 0 8px;
-  border-bottom: 1px solid var(--border);
-  margin-bottom: 8px;
-}
-
-.tab {
-  padding: 4px 12px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  cursor: pointer;
-  font: inherit;
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
-
-.tab:hover {
-  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
-}
-
-.tabActive {
-  color: inherit;
-  font-weight: 500;
-  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
-}
-
 .placeholder {
   padding: 24px 12px;
   text-align: center;
@@ -50,20 +21,27 @@
 
 .commitHeader {
   display: flex;
+  align-items: stretch;
+  width: 100%;
+}
+
+.commitHeader:hover {
+  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
+}
+
+.commitToggle {
+  display: flex;
   align-items: baseline;
   gap: 8px;
-  width: 100%;
-  padding: 8px 10px;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 4px 8px 10px;
   background: transparent;
   border: 0;
   cursor: pointer;
   font: inherit;
   text-align: left;
   color: inherit;
-}
-
-.commitHeader:hover {
-  background: var(--subtle-bg, rgba(128, 128, 128, 0.06));
 }
 
 .commitSha {
@@ -77,7 +55,8 @@
   flex-shrink: 0;
   display: inline-flex;
   align-items: center;
-  padding: 1px;
+  align-self: stretch;
+  padding: 0 10px 0 6px;
   border: 0;
   border-radius: 3px;
   background: transparent;
@@ -87,7 +66,8 @@
   transition: opacity 0.15s;
 }
 
-.commitHeader:hover .copyBtn {
+.commitHeader:hover .copyBtn,
+.copyBtn:focus-visible {
   opacity: 1;
 }
 

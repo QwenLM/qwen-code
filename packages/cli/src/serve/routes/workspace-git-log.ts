@@ -91,19 +91,14 @@ function buildCommitDetail(
 function parsePagination(req: Request): { limit: number; skip: number } {
   const rawLimit = req.query['limit'];
   const rawSkip = req.query['skip'];
+  const parsedLimit =
+    typeof rawLimit === 'string' ? parseInt(rawLimit, 10) : NaN;
+  const parsedSkip = typeof rawSkip === 'string' ? parseInt(rawSkip, 10) : NaN;
   const limit = Math.min(
-    Math.max(
-      typeof rawLimit === 'string'
-        ? parseInt(rawLimit, 10) || DEFAULT_LOG_LIMIT
-        : DEFAULT_LOG_LIMIT,
-      1,
-    ),
+    Math.max(Number.isNaN(parsedLimit) ? DEFAULT_LOG_LIMIT : parsedLimit, 1),
     MAX_LOG_LIMIT,
   );
-  const skip = Math.max(
-    typeof rawSkip === 'string' ? parseInt(rawSkip, 10) || 0 : 0,
-    0,
-  );
+  const skip = Math.max(Number.isNaN(parsedSkip) ? 0 : parsedSkip, 0);
   return { limit, skip };
 }
 

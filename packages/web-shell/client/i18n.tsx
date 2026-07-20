@@ -62,6 +62,7 @@ const EN: Messages = {
     `${v?.count ?? 0} files · +${v?.added ?? 0} −${v?.removed ?? 0}`,
   'gitLog.detailError': 'Failed to load commit details',
   'gitLog.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
+  'gitLog.copySha': (v) => `Copy commit ${v?.sha ?? ''}`,
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -2213,6 +2214,7 @@ const ZH: Messages = {
     `${v?.count ?? 0} 个文件 · +${v?.added ?? 0} −${v?.removed ?? 0}`,
   'gitLog.detailError': '加载提交详情失败',
   'gitLog.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
+  'gitLog.copySha': (v) => `复制提交 ${v?.sha ?? ''}`,
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via

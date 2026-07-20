@@ -37,13 +37,13 @@ const { GitLogDialog } = await import('./GitLogDialog');
 let container: HTMLDivElement;
 let root: Root;
 
-function mount(workspaceCwd = '/repo') {
+function mount(workspaceCwd = '/repo', language: 'en' | 'zh-CN' = 'en') {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <GitLogDialog workspaceCwd={workspaceCwd} onClose={vi.fn()} />
       </I18nProvider>,
     );
@@ -94,8 +94,18 @@ describe('GitLogDialog', () => {
     expect(workspaceGitLog).toHaveBeenCalledWith(50, 0);
     expect(document.body.textContent).toContain('first change');
     expect(document.body.textContent).toContain('Ada');
-    // authorDate is ~120s in the past → the timeAgo branch renders "2m ago".
-    expect(document.body.textContent).toContain('2m ago');
+    expect(document.body.textContent).toContain('2 minutes ago');
+  });
+
+  it('localizes relative time and the copy action', async () => {
+    workspaceGitLog.mockResolvedValue(logPayload([entry()]));
+    mount('/repo', 'zh-CN');
+    await flush();
+
+    expect(document.body.textContent).toContain('2分钟前');
+    expect(
+      document.body.querySelector('button[aria-label^="复制提交"]'),
+    ).toBeTruthy();
   });
 
   it('shows the loading placeholder before the first page resolves', async () => {
@@ -148,6 +158,36 @@ describe('GitLogDialog', () => {
     expect(document.body.textContent).toContain('older');
   });
 
+  it('deduplicates overlapping pages while advancing the server offset', async () => {
+    const duplicate = entry({ subject: 'duplicate' });
+    workspaceGitLog
+      .mockResolvedValueOnce(logPayload([duplicate], true))
+      .mockResolvedValueOnce(
+        logPayload([duplicate, entry({ subject: 'older' })], true),
+      )
+      .mockResolvedValueOnce(logPayload([], false));
+    mount();
+    await flush();
+
+    const loadMore = () =>
+      Array.from(document.body.querySelectorAll('button')).find(
+        (button) => button.textContent === 'Load more',
+      ) as HTMLButtonElement;
+    await act(async () => {
+      loadMore().click();
+    });
+    await flush();
+    await act(async () => {
+      loadMore().click();
+    });
+    await flush();
+
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(2, 50, 1);
+    expect(workspaceGitLog).toHaveBeenNthCalledWith(3, 50, 3);
+    expect(document.body.textContent?.match(/duplicate/g)).toHaveLength(1);
+    expect(document.body.textContent).toContain('older');
+  });
+
   it('surfaces a load-more failure instead of failing silently', async () => {
     workspaceGitLog
       .mockResolvedValueOnce(logPayload([entry()], true))
@@ -193,6 +233,33 @@ describe('GitLogDialog', () => {
     expect(workspaceGitCommitDetail).toHaveBeenCalledWith(e.sha);
     expect(document.body.textContent).toContain('the full body');
     expect(document.body.textContent).toContain('src/x.ts');
+  });
+
+  it('shows zero-file stats when an empty commit expands', async () => {
+    const e = entry({ subject: 'empty commit' });
+    workspaceGitLog.mockResolvedValue(logPayload([e]));
+    workspaceGitCommitDetail.mockResolvedValue({
+      ...e,
+      available: true,
+      body: '',
+      files: [],
+      filesCount: 0,
+      linesAdded: 0,
+      linesRemoved: 0,
+      hiddenCount: 0,
+    });
+    mount();
+    await flush();
+
+    const row = document.body.querySelector(
+      'button[aria-expanded="false"]',
+    ) as HTMLButtonElement;
+    await act(async () => {
+      row.click();
+    });
+    await flush();
+
+    expect(document.body.textContent).toContain('0 files · +0 −0');
   });
 
   it('shows an error when an expanded commit reports available:false', async () => {

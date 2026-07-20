@@ -357,14 +357,12 @@ function DiffFileRow({
   );
 }
 
-export function GitDiffDialog({
+export function GitDiffContent({
   workspaceCwd,
-  onClose,
-  onOpenLog,
+  onSubtitleChange,
 }: {
   workspaceCwd: string;
-  onClose: () => void;
-  onOpenLog?: () => void;
+  onSubtitleChange?: (subtitle: string | undefined) => void;
 }) {
   const { t } = useI18n();
   const { client } = useWorkspace();
@@ -402,6 +400,10 @@ export function GitDiffDialog({
         })
       : undefined;
 
+  useEffect(() => {
+    onSubtitleChange?.(subtitle);
+  }, [onSubtitleChange, subtitle]);
+
   let body: ReactNode;
   if (loading) {
     body = <div className={styles.placeholder}>{t('gitDiff.loading')}</div>;
@@ -433,38 +435,25 @@ export function GitDiffDialog({
     );
   }
 
+  return <div className={styles.content}>{body}</div>;
+}
+
+export function GitDiffDialog({
+  workspaceCwd,
+  onClose,
+}: {
+  workspaceCwd: string;
+  onClose: () => void;
+}) {
+  const { t } = useI18n();
   return (
     <DialogShell
       title={t('gitDiff.title')}
-      subtitle={subtitle}
       size="xl"
       allowFullscreen
       onClose={onClose}
     >
-      <div className={styles.content}>
-        {onOpenLog && (
-          <div className={styles.tabBar} role="tablist">
-            <button
-              type="button"
-              role="tab"
-              aria-selected
-              className={`${styles.tab} ${styles.tabActive}`}
-            >
-              {t('gitDiff.title')}
-            </button>
-            <button
-              type="button"
-              role="tab"
-              aria-selected={false}
-              className={styles.tab}
-              onClick={onOpenLog}
-            >
-              {t('gitLog.title')}
-            </button>
-          </div>
-        )}
-        {body}
-      </div>
+      <GitDiffContent workspaceCwd={workspaceCwd} />
     </DialogShell>
   );
 }
