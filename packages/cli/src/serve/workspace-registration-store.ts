@@ -61,7 +61,8 @@ export function normalizeWorkspaceDisplayName(
       'Workspace display name must be a string',
     );
   }
-  if (value.length > MAX_WORKSPACE_DISPLAY_NAME_LENGTH) {
+  const trimmed = value.trim();
+  if (trimmed.length > MAX_WORKSPACE_DISPLAY_NAME_LENGTH) {
     throw new WorkspaceDisplayNameValidationError(
       `Workspace display name exceeds ${MAX_WORKSPACE_DISPLAY_NAME_LENGTH} characters`,
     );
@@ -71,7 +72,6 @@ export function normalizeWorkspaceDisplayName(
       'Workspace display name contains control characters',
     );
   }
-  const trimmed = value.trim();
   return trimmed.length === 0 ? undefined : trimmed;
 }
 

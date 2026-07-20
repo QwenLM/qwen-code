@@ -134,6 +134,9 @@ describe('WorkspaceRegistrationStore', () => {
     expect(normalizeWorkspaceDisplayName('x'.repeat(256))).toBe(
       'x'.repeat(256),
     );
+    expect(normalizeWorkspaceDisplayName(`${'x'.repeat(256)} `)).toBe(
+      'x'.repeat(256),
+    );
     for (const invalid of [
       'x'.repeat(257),
       'line\nbreak',

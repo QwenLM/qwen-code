@@ -340,6 +340,29 @@ describe('POST /workspaces', () => {
     expect(runtime.displayName).toBe('Promoted name');
   });
 
+  it('clears a process-local name when promoting with an empty name', async () => {
+    const runtime = makeRuntime(REAL_DIR, { displayName: 'Old name' });
+    const add = vi.fn().mockResolvedValue(true);
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add,
+        read: vi.fn().mockResolvedValue({ workspaces: [] }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: '   ',
+    });
+
+    expect(res.status).toBe(200);
+    expect(add).toHaveBeenCalledWith(REAL_DIR);
+    expect(res.body).not.toHaveProperty('displayName');
+    expect(runtime.displayName).toBeUndefined();
+  });
+
   it('uses the stored name when another daemon wins a promotion race', async () => {
     const runtime = makeRuntime(REAL_DIR, { displayName: 'Old name' });
     const registrationId = workspaceRegistrationId(REAL_DIR);
@@ -369,6 +392,33 @@ describe('POST /workspaces', () => {
     expect(add).toHaveBeenCalledWith(REAL_DIR, 'Requested name');
     expect(res.body.displayName).toBe('Stored winner');
     expect(runtime.displayName).toBe('Stored winner');
+  });
+
+  it('clears a stale name when another daemon persists no name', async () => {
+    const runtime = makeRuntime(REAL_DIR, { displayName: 'Old name' });
+    const add = vi.fn().mockResolvedValue(false);
+    const read = vi
+      .fn()
+      .mockResolvedValueOnce({ workspaces: [] })
+      .mockResolvedValueOnce({ workspaces: [REAL_DIR] });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add,
+        read,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: 'Requested name',
+    });
+
+    expect(res.status).toBe(200);
+    expect(add).toHaveBeenCalledWith(REAL_DIR, 'Requested name');
+    expect(res.body).not.toHaveProperty('displayName');
+    expect(runtime.displayName).toBeUndefined();
   });
 
   it('does not change a runtime name when promotion persistence fails', async () => {
@@ -505,6 +555,32 @@ describe('POST /workspaces', () => {
     expect(res.body.persisted).toBe(true);
     expect(res.body.displayName).toBe('Stored name');
     expect(runtime.displayName).toBe('Stored name');
+    expect(add).not.toHaveBeenCalled();
+  });
+
+  it('clears a process-local name when the persisted record has no name', async () => {
+    const runtime = makeRuntime(REAL_DIR, {
+      displayName: 'Process-local name',
+    });
+    const add = vi.fn();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      workspaceRegistrationStore: {
+        add,
+        read: vi.fn().mockResolvedValue({ workspaces: [REAL_DIR] }),
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app).post('/workspaces').send({
+      cwd: REAL_DIR,
+      persist: true,
+      displayName: 'Renamed',
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.persisted).toBe(true);
+    expect(res.body).not.toHaveProperty('displayName');
+    expect(runtime.displayName).toBeUndefined();
     expect(add).not.toHaveBeenCalled();
   });
 
