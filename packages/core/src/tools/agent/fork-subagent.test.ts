@@ -92,6 +92,10 @@ describe('selectForkHistory', () => {
     ]);
   });
 
+  it('returns empty when no real user turns exist after the synthetic prefix', () => {
+    expect(selectForkHistory([startup], 1)).toEqual([]);
+  });
+
   it('does not count or inherit a compacted-history prefix for a numeric window', () => {
     const compactedSummary: Content = {
       role: 'user',
