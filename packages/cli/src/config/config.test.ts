@@ -1780,6 +1780,26 @@ describe('loadCliConfig', () => {
         'DASHSCOPE_API_KEY',
       );
     });
+
+    it('disables web search in safe mode', async () => {
+      process.argv = ['node', 'script.js', '--safe-mode'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
+        argv,
+      );
+      expect(config.getWebSearchSettings()).toBeUndefined();
+    });
+
+    it('disables web search in bare mode', async () => {
+      process.argv = ['node', 'script.js', '--bare'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { tools: { webSearch: { enabled: true, model: 'qwen3.6-plus' } } },
+        argv,
+      );
+      expect(config.getWebSearchSettings()).toBeUndefined();
+    });
   });
 });
 
