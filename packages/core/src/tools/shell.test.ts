@@ -3022,7 +3022,10 @@ describe('ShellTool', () => {
         const truncationModule = await import('../utils/truncation.js');
         const spy = vi
           .spyOn(truncationModule, 'truncateToolOutput')
-          .mockResolvedValue({ content: 'unused', outputFile: undefined });
+          .mockImplementation(async (_config, _toolName, content) => ({
+            content,
+            outputFile: undefined,
+          }));
         try {
           const invocation = shellTool.build({
             command: 'find /',
@@ -3047,7 +3050,7 @@ describe('ShellTool', () => {
               previewChars: 4000,
             }),
           );
-          expect(result.persistedOutputFiles).toEqual([]);
+          expect(result.persistedOutputFiles).toBeUndefined();
         } finally {
           spy.mockRestore();
         }
