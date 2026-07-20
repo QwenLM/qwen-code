@@ -40,7 +40,7 @@ export const ScreenReaderAppLayout: React.FC = () => {
 
   return (
     <Box flexDirection="column" width="90%" height="100%">
-      {uiState.updateInfo && (
+      {!uiState.dialogsVisible && uiState.updateInfo && (
         <UpdateNotification message={uiState.updateInfo.message} />
       )}
       <Notifications />
