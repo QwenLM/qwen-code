@@ -270,6 +270,14 @@ export interface BridgeForkAgentResult {
 
 export interface ChangeSessionCwdRequest {
   path: string;
+  /**
+   * Server-controlled containment roots. When present, the agent-side
+   * sessionCd handler verifies (after its own realpath) that the
+   * canonical target is under one of these roots. Only set by the
+   * daemon's worktree create/restore paths; direct user cd omits this
+   * field, preserving existing behavior.
+   */
+  allowedRoots?: string[];
 }
 
 export interface ChangeSessionCwdResult {
@@ -722,6 +730,17 @@ export interface AcpSessionBridge {
     req: ChangeSessionCwdRequest,
     context?: BridgeClientRequestContext,
   ): Promise<ChangeSessionCwdResult>;
+
+  /**
+   * Set worktree metadata on an existing session entry. Used when
+   * restoring a worktree session after daemon restart — the sidecar
+   * file provides the metadata, and this populates the in-memory entry
+   * so `getSessionSummary` returns it.
+   */
+  setSessionWorktree(
+    sessionId: string,
+    worktree: { slug: string; path: string; branch: string },
+  ): void;
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same

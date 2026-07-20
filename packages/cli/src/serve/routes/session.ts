@@ -5,6 +5,7 @@
  */
 
 import * as crypto from 'node:crypto';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
   APPROVAL_MODES,
@@ -23,6 +24,7 @@ import {
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
   writeWorktreeSession,
+  readWorktreeSession,
   type ApprovalMode,
   type SessionGroupColor,
   type SessionGroupPresetColor,
@@ -1376,8 +1378,28 @@ export function registerSessionRoutes(
       // before any subsequent prompt is processed.
       if (worktreeMeta) {
         try {
+          // Compute allowed roots for the sessionCd containment check.
+          // Narrow to <root>/.qwen/worktrees (not the whole repo) so a
+          // symlink .qwen/worktrees/task -> <repo>/src is rejected.
+          const createAllowedRoots = [
+            path.join(workspaceCwd, '.qwen', 'worktrees'),
+          ];
+          let createRepoTop: string | null = null;
+          try {
+            createRepoTop = await new GitWorktreeService(
+              workspaceCwd,
+            ).getRepoTopLevel();
+          } catch {
+            // Not a git repo or getRepoTopLevel unavailable.
+          }
+          if (createRepoTop && createRepoTop !== workspaceCwd) {
+            createAllowedRoots.push(
+              path.join(createRepoTop, '.qwen', 'worktrees'),
+            );
+          }
           await runtime.bridge.changeSessionCwd(session.sessionId, {
             path: worktreeMeta.path,
+            allowedRoots: createAllowedRoots,
           });
           await writeWorktreeSessionMarker(
             worktreeMeta.path,
@@ -1550,6 +1572,93 @@ export function registerSessionRoutes(
               });
           }
           return;
+        }
+        // Restore worktree isolation. Read the sidecar AFTER load/resume
+        // so we inherit the ACP layer's verdict: #restoreWorktreeOnResume
+        // clears the sidecar on dead-worktree / containment-failure paths,
+        // so a post-read naturally skips those cases. On the healthy path
+        // the sidecar is untouched and we relocate + populate the entry.
+        // Note: the !res.writable early-return above skips this restore;
+        // a client that disconnects mid-load leaves the session parked in
+        // the main workspace (pre-existing shape, low frequency).
+        if (!session.worktree) {
+          const sidecar = await readWorktreeSession(
+            new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
+          ).catch(() => null);
+          if (sidecar) {
+            // Defense-in-depth: resolve symlinks on both the target and
+            // the expected worktrees root, then verify containment. This
+            // defeats both `..` traversal and symlink escapes (e.g.
+            // .qwen/worktrees/escape -> /etc). The allowed root is always
+            // derived from the server (never from the sidecar, which is
+            // attacker-writable). The canonical realTarget is passed to
+            // changeSessionCwd to eliminate the TOCTOU window between
+            // validation and relocation.
+            // For monorepo subdirectory workspaces, worktrees live under
+            // the repo top-level, not the workspace cwd. Try workspaceCwd
+            // first, then fall back to the git repo top-level.
+            let realTarget: string | undefined;
+            const candidateRoots = [
+              path.join(workspaceCwd, '.qwen', 'worktrees'),
+            ];
+            try {
+              realTarget = fs.realpathSync(sidecar.worktreePath);
+              let repoTop: string | null = null;
+              try {
+                repoTop = await new GitWorktreeService(
+                  workspaceCwd,
+                ).getRepoTopLevel();
+              } catch {
+                // Not a git repo or getRepoTopLevel unavailable.
+              }
+              if (repoTop && repoTop !== workspaceCwd) {
+                candidateRoots.push(path.join(repoTop, '.qwen', 'worktrees'));
+              }
+              const contained = candidateRoots.some((root) => {
+                try {
+                  const realRoot = fs.realpathSync(root);
+                  const rel = path.relative(realRoot, realTarget!);
+                  return !rel.startsWith('..') && !path.isAbsolute(rel);
+                } catch {
+                  return false;
+                }
+              });
+              if (!contained) {
+                realTarget = undefined;
+              }
+            } catch {
+              realTarget = undefined;
+            }
+            if (!realTarget) {
+              daemonLog?.warn('worktree sidecar path failed containment', {
+                sessionId,
+                path: sidecar.worktreePath,
+              });
+            } else {
+              const wt = {
+                slug: sidecar.slug,
+                path: realTarget,
+                branch: sidecar.worktreeBranch,
+              };
+              try {
+                await runtime.bridge.changeSessionCwd(sessionId, {
+                  path: wt.path,
+                  allowedRoots: candidateRoots,
+                });
+                runtime.bridge.setSessionWorktree(sessionId, wt);
+                session.worktree = wt;
+              } catch (restoreErr) {
+                daemonLog?.warn('worktree restore failed on load/resume', {
+                  sessionId,
+                  worktreePath: wt.path,
+                  error:
+                    restoreErr instanceof Error
+                      ? restoreErr.message
+                      : String(restoreErr),
+                });
+              }
+            }
+          }
         }
         res.status(200).json(session);
       } catch (err) {
