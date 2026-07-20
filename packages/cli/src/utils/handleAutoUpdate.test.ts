@@ -14,6 +14,7 @@ import EventEmitter from 'node:events';
 import { handleAutoUpdate, setUpdateHandler } from './handleAutoUpdate.js';
 import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from '../ui/types.js';
+import os from 'node:os';
 
 vi.mock('./installationInfo.js', async () => {
   const actual = await vi.importActual('./installationInfo.js');
@@ -231,11 +232,56 @@ describe('handleAutoUpdate', () => {
     handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
 
     expect(mockSpawn).toHaveBeenCalledWith(
-      expect.stringMatching(/^(bash|cmd\.exe)$/),
-      expect.arrayContaining([
-        expect.stringMatching(/^(-c|\/c)$/),
-        'npm i -g @qwen-code/qwen-code@nightly',
-      ]),
+      process.execPath,
+      [
+        expect.stringMatching(/npm-cli\.js$/),
+        'i',
+        '-g',
+        '@qwen-code/qwen-code@nightly',
+      ],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      },
+    );
+  });
+
+  it('runs npm through the active Node.js runtime on Windows', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+      isGlobal: true,
+      packageManager: PackageManager.NPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        expect.stringMatching(/npm-cli\.js$/),
+        'install',
+        '-g',
+        '@qwen-code/qwen-code@2.0.0',
+      ],
+      {
+        stdio: ['pipe', 'ignore', 'pipe'],
+      },
+    );
+  });
+
+  it('runs non-npm package-manager updates through the shell', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('linux');
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'pnpm add -g @qwen-code/qwen-code@latest',
+      isGlobal: true,
+      packageManager: PackageManager.PNPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+
+    expect(mockSpawn).toHaveBeenCalledWith(
+      'bash',
+      ['-c', 'pnpm add -g @qwen-code/qwen-code@2.0.0'],
       {
         stdio: ['pipe', 'ignore', 'pipe'],
       },

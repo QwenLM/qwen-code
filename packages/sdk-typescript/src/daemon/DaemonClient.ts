@@ -463,6 +463,15 @@ export interface CreateSessionRequest {
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * Create the session in an isolated git worktree. The daemon creates
+   * a worktree under `<repoRoot>/.qwen/worktrees/<slug>` and relocates
+   * the session's working directory into it. Pass `{}` for an
+   * auto-generated slug, or `{ slug: 'my-task' }` for a named one.
+   * Requires the workspace to be a git repository. Worktree sessions
+   * are always created with `sessionScope: 'thread'`.
+   */
+  worktree?: { slug?: string };
 }
 
 export interface RestoreSessionRequest {
@@ -1096,29 +1105,22 @@ export class DaemonClient {
       timeoutMs !== undefined
         ? `?timeoutMs=${encodeURIComponent(timeoutMs)}`
         : '';
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/acp/preheat${suffix}`,
-      { method: 'POST', headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /workspace/acp/preheat');
-        }
-        return (await res.json()) as DaemonWorkspaceAcpPreheatResult;
+    return await this.jsonRequest<DaemonWorkspaceAcpPreheatResult>(
+      `/workspace/acp/preheat${suffix}`,
+      'POST /workspace/acp/preheat',
+      {
+        method: 'POST',
+        timeoutMs: serverBudgetMs + 2_000,
+        mode: 'rest',
       },
-      serverBudgetMs + 2_000,
     );
   }
 
   async workspaceAcpStatus(): Promise<DaemonWorkspaceAcpStatusResult> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/acp/status`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/acp/status');
-        }
-        return (await res.json()) as DaemonWorkspaceAcpStatusResult;
-      },
+    return await this.jsonRequest<DaemonWorkspaceAcpStatusResult>(
+      '/workspace/acp/status',
+      'GET /workspace/acp/status',
+      { mode: 'rest' },
     );
   }
 
@@ -1997,6 +1999,7 @@ export class DaemonClient {
             ? { sourceType: req.sourceType }
             : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.worktree !== undefined ? { worktree: req.worktree } : {}),
         }),
       },
       async (res) => {
@@ -4199,10 +4202,11 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+  workspaceGit(cwd?: string): Promise<DaemonWorkspaceGitStatus> {
+    const suffix = cwd ? `/git?cwd=${encodeURIComponent(cwd)}` : '/git';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
       this.workspaceSelector,
-      '/git',
+      suffix,
       'GET /workspaces/:workspace/git',
       { mode: 'rest' },
     );

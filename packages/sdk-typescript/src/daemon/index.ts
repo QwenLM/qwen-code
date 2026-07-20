@@ -427,6 +427,7 @@ export type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
+  DaemonWorktreeInfo,
   DaemonSessionExportFormat,
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,

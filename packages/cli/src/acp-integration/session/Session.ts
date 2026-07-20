@@ -18,6 +18,7 @@ import type {
   Config,
   GeminiChat,
   ToolCallConfirmationDetails,
+  ToolConfirmationPayload,
   ToolResult,
   ToolResultDisplay,
   ShellProgressData,
@@ -50,8 +51,10 @@ import {
   convertToFunctionErrorResponse,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
+  findPlanModeEntryBatchBoundaryIndex,
   findRepeatedDuplicateProviderToolCall,
   markDuplicateProviderToolCallResponseSent,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -93,7 +96,12 @@ import {
   getEffectivePermissionForConfirmation,
   needsConfirmation,
   isPlanModeBlocked,
+  decoratePlanModeShellConfirmation,
+  evaluatePlanModeShellPolicy,
+  validatePlanModeShellApproval,
+  validatePlanModeShellContext,
   abortGoalForStopHookCap,
+  getStopHookContinuationReason,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
   evaluateAutoMode,
@@ -178,7 +186,6 @@ import type {
   AgentSideConnection,
 } from '@agentclientprotocol/sdk';
 import { SettingScope, type LoadedSettings } from '../../config/settings.js';
-import { z } from 'zod';
 import {
   insertAfterFunctionResponses,
   normalizePartList,
@@ -239,6 +246,8 @@ import { SubAgentTracker } from './SubAgentTracker.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
+  requestPermissionWithAbort,
+  resolvePermissionOutcome,
   toPermissionOptions,
 } from './permissionUtils.js';
 import {
@@ -2847,7 +2856,7 @@ export class Session implements SessionContext {
           stopOutput?.isBlockingDecision() ||
           stopOutput?.shouldStopExecution()
         ) {
-          externalReason = stopOutput.getEffectiveReason();
+          externalReason = getStopHookContinuationReason(stopOutput);
           stopHookIterationCount++;
           stopHookReasons = [...stopHookReasons, externalReason];
           stopHookCount = response.stopHookCount ?? 1;
@@ -5367,6 +5376,7 @@ export class Session implements SessionContext {
       fc: FunctionCall,
       message = PERMISSION_CANCEL_SKIP_MESSAGE,
       emitStart = true,
+      errorType?: ToolErrorType,
     ): Promise<Part> => {
       const toolName = fc.name ?? 'unknown_tool';
       const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
@@ -5384,7 +5394,7 @@ export class Session implements SessionContext {
           status: 'error',
           resultDisplay: undefined,
           error,
-          errorType: undefined,
+          errorType,
         });
         if (emitStart) {
           await this.toolCallEmitter.emitStart({
@@ -5543,6 +5553,17 @@ export class Session implements SessionContext {
         batches.push({ kind: 'execute', concurrent: isAgent, calls: [fc] });
       }
     }
+
+    const executableCalls = batches.flatMap((batch) =>
+      batch.kind === 'execute' ? batch.calls : [],
+    );
+    const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
+      executableCalls.map((call) => call.name),
+    );
+    const planModeEntryBoundary =
+      planModeEntryBoundaryIndex === undefined
+        ? undefined
+        : executableCalls[planModeEntryBoundaryIndex];
 
     const appendSkippedAfter = async (
       parts: Part[],
@@ -5703,6 +5724,22 @@ export class Session implements SessionContext {
         if (batch.kind === 'duplicate') {
           await emitDuplicateBatch(batch);
           parts.push(...batch.response.responseParts);
+          continue;
+        }
+        if (
+          planModeEntryBoundary &&
+          !batch.calls.includes(planModeEntryBoundary)
+        ) {
+          for (const fc of batch.calls) {
+            parts.push(
+              await recordSkippedToolCall(
+                fc,
+                PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+                true,
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+          }
           continue;
         }
         if (batch.concurrent && batch.calls.length > 1) {
@@ -5980,14 +6017,19 @@ export class Session implements SessionContext {
         { recordInvalidToolParams: true },
       );
     }
+    const policyToolName = tool.name;
+    const originalPolicyRequestArgs =
+      policyToolName === ToolNames.SHELL || policyToolName === ToolNames.MONITOR
+        ? structuredClone(args)
+        : args;
 
-    const toolSpan = startToolSpan(toolName, {
+    const toolSpan = startToolSpan(policyToolName, {
       'tool.call_id': callId,
       // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
       // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
       // matching daemon/ACP tool spans during the migration window.
       call_id: callId,
-      tool_name: toolName,
+      tool_name: policyToolName,
     });
     let spanSuccess = false;
 
@@ -5995,7 +6037,7 @@ export class Session implements SessionContext {
       return await runInToolSpanContext(toolSpan, async () => {
         // ---- L1: Tool enablement check ----
         const pm = this.config.getPermissionManager?.();
-        if (pm && !(await pm.isToolEnabled(toolName))) {
+        if (pm && !(await pm.isToolEnabled(policyToolName))) {
           return earlyErrorResponse(
             new Error(`Tool "${toolName}" is disabled.`),
             toolName,
@@ -6035,7 +6077,7 @@ export class Session implements SessionContext {
         const toolUseId = generateToolUseId();
 
         // Get approval mode for hook context (defined outside try for catch block access)
-        const approvalMode = this.config.getApprovalMode();
+        let approvalMode = this.config.getApprovalMode();
 
         let toolBuildSucceeded = false;
         try {
@@ -6088,14 +6130,14 @@ export class Session implements SessionContext {
           // AUTO_EDIT auto-approval is handled HERE, same as coreToolScheduler.
           // The VS Code extension is just a UI layer for requestPermission.
           const isAskUserQuestionTool =
-            toolName === ToolNames.ASK_USER_QUESTION;
+            policyToolName === ToolNames.ASK_USER_QUESTION;
 
           // ---- L3→L4: Shared permission flow ----
-          const toolParams = invocation.params as Record<string, unknown>;
+          let toolParams = invocation.params as Record<string, unknown>;
           const flowResult = await evaluatePermissionFlow(
             this.config,
             invocation,
-            toolName,
+            policyToolName,
             toolParams,
           );
           const {
@@ -6107,7 +6149,12 @@ export class Session implements SessionContext {
           } = flowResult;
 
           // ---- L5: ApprovalMode overrides ----
+          approvalMode = this.config.getApprovalMode();
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
+          const isPlanShellCall =
+            isPlanMode &&
+            (policyToolName === ToolNames.SHELL ||
+              policyToolName === ToolNames.MONITOR);
 
           if (finalPermission === 'deny') {
             return earlyErrorResponse(
@@ -6115,6 +6162,58 @@ export class Session implements SessionContext {
               toolName,
             );
           }
+
+          let planShellAmbientWorkingDirectory: string | undefined;
+          if (isPlanShellCall) {
+            const directory = toolParams['directory'];
+            planShellAmbientWorkingDirectory =
+              typeof directory === 'string' && directory.length > 0
+                ? undefined
+                : this.config.getTargetDir();
+            invocation.params = {
+              ...structuredClone(invocation.params),
+              directory:
+                typeof directory === 'string' && directory.length > 0
+                  ? directory
+                  : planShellAmbientWorkingDirectory,
+            };
+            toolParams = invocation.params as Record<string, unknown>;
+          }
+
+          const planShellDecision = isPlanShellCall
+            ? await evaluatePlanModeShellPolicy({
+                config: this.config,
+                toolName: policyToolName,
+                requestArgs: originalPolicyRequestArgs,
+                invocationParams: toolParams,
+                permissionContext: pmCtx,
+                ambientWorkingDirectory: planShellAmbientWorkingDirectory,
+                signal: activeToolAbortSignal,
+              })
+            : ({ classification: 'not-applicable' } as const);
+          if (planShellDecision.classification !== 'not-applicable') {
+            const initialPlanShellError = await validatePlanModeShellContext({
+              config: this.config,
+              decision: planShellDecision,
+              requestArgs: args,
+              invocationParams: invocation.params as Record<string, unknown>,
+              signal: activeToolAbortSignal,
+            });
+            if (initialPlanShellError) {
+              return earlyErrorResponse(
+                new Error(initialPlanShellError),
+                toolName,
+              );
+            }
+          }
+          if (planShellDecision.classification === 'write') {
+            return earlyErrorResponse(
+              new Error(planShellDecision.writeBlockMessage),
+              toolName,
+            );
+          }
+          const planShellRequiresConfirmation =
+            planShellDecision.classification === 'unknown';
 
           // Explicit allow (user rule matched, or tool's L3 default is 'allow')
           // is authoritative for ordinary calls. In AUTO, protected
@@ -6126,18 +6225,20 @@ export class Session implements SessionContext {
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
             (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(toolName, this.config));
+              shouldClassifyAllShellForAutoMode(policyToolName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
           );
           if (finalPermission === 'allow' && forceAutoReviewForAllow) {
             debugLogger.info(
-              `Auto mode: L4 allow overridden by protected-write guard for ${toolName}`,
+              `Auto mode: L4 allow overridden by protected-write guard for ${policyToolName}`,
             );
           }
           let autoModeAllowed =
-            finalPermission === 'allow' && !forceAutoReviewForAllow;
+            finalPermission === 'allow' &&
+            !forceAutoReviewForAllow &&
+            !planShellRequiresConfirmation;
           if (autoModeAllowed && approvalMode === ApprovalMode.AUTO) {
             this.config.setAutoModeDenialState(
               recordAllow(this.config.getAutoModeDenialState()),
@@ -6153,7 +6254,7 @@ export class Session implements SessionContext {
           if (
             !autoModeAllowed &&
             !requiresUserInteraction &&
-            shouldRunAutoModeForCall(approvalMode, toolName)
+            shouldRunAutoModeForCall(approvalMode, policyToolName)
           ) {
             const denialState = this.config.getAutoModeDenialState();
             const fallback = shouldFallback(denialState);
@@ -6192,7 +6293,7 @@ export class Session implements SessionContext {
               this.config,
               decision,
               outcome,
-              toolName,
+              policyToolName,
               toolParams,
               callId,
               abortSignal,
@@ -6203,7 +6304,7 @@ export class Session implements SessionContext {
                 break;
               case 'blocked':
                 debugLogger.warn(
-                  `Auto mode blocked (${outcome.reason}): tool=${toolName}, ` +
+                  `Auto mode blocked (${outcome.reason}): tool=${policyToolName}, ` +
                     formatDenialStateLog(denialState),
                 );
                 return earlyErrorResponse(
@@ -6262,19 +6363,56 @@ export class Session implements SessionContext {
           if (
             !autoModeAllowed &&
             needsConfirmation(
-              confirmationPermission,
+              planShellRequiresConfirmation ? 'ask' : confirmationPermission,
               approvalMode,
-              toolName,
+              policyToolName,
               requiresUserInteraction,
             )
           ) {
-            confirmationDetails =
-              await invocation.getConfirmationDetails(abortSignal);
+            confirmationDetails = await invocation.getConfirmationDetails(
+              activeToolAbortSignal,
+            );
+
+            if (planShellDecision.classification !== 'not-applicable') {
+              const preDisplayPlanShellError =
+                await validatePlanModeShellContext({
+                  config: this.config,
+                  decision: planShellDecision,
+                  requestArgs: args,
+                  invocationParams: invocation.params as Record<
+                    string,
+                    unknown
+                  >,
+                  signal: activeToolAbortSignal,
+                });
+              if (preDisplayPlanShellError) {
+                return earlyErrorResponse(
+                  new Error(preDisplayPlanShellError),
+                  toolName,
+                );
+              }
+            }
+
+            try {
+              confirmationDetails = decoratePlanModeShellConfirmation(
+                planShellDecision,
+                confirmationDetails,
+              );
+            } catch {
+              if (planShellDecision.classification === 'unknown') {
+                return earlyErrorResponse(
+                  new Error(planShellDecision.noApprovalMessage),
+                  toolName,
+                );
+              }
+              throw new Error('Unable to prepare shell confirmation.');
+            }
 
             // Centralised rule injection (for display and persistence)
             injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
             if (
+              planShellDecision.classification === 'not-applicable' &&
               isPlanModeBlocked(
                 isPlanMode,
                 isExitPlanModeTool,
@@ -6299,9 +6437,11 @@ export class Session implements SessionContext {
             if (hooksEnabled && messageBus) {
               const hookResult = await firePermissionRequestHook(
                 messageBus,
-                toolName,
+                policyToolName,
                 args,
                 String(approvalMode),
+                undefined,
+                activeToolAbortSignal,
               );
 
               if (
@@ -6310,18 +6450,49 @@ export class Session implements SessionContext {
               ) {
                 hookHandled = true;
                 if (hookResult.shouldAllow) {
-                  if (hookResult.updatedInput) {
-                    args = hookResult.updatedInput;
-                    invocation.params =
-                      hookResult.updatedInput as typeof invocation.params;
-                  }
+                  if (planShellDecision.classification !== 'not-applicable') {
+                    const approval = await validatePlanModeShellApproval({
+                      config: this.config,
+                      decision: planShellDecision,
+                      requestArgs: args,
+                      invocationParams: invocation.params as Record<
+                        string,
+                        unknown
+                      >,
+                      signal: activeToolAbortSignal,
+                      outcome: ToolConfirmationOutcome.ProceedOnce,
+                      payload: hookResult.updatedInput
+                        ? { updatedInput: hookResult.updatedInput }
+                        : undefined,
+                    });
+                    await confirmationDetails.onConfirm(
+                      approval.outcome,
+                      approval.payload,
+                    );
+                    if (approval.outcome === ToolConfirmationOutcome.Cancel) {
+                      return earlyErrorResponse(
+                        new Error(
+                          approval.payload?.cancelMessage ??
+                            planShellDecision.noApprovalMessage,
+                        ),
+                        toolName,
+                      );
+                    }
+                    recordAutoModeFallbackResolution(approval.outcome);
+                  } else {
+                    if (hookResult.updatedInput) {
+                      args = hookResult.updatedInput;
+                      invocation.params =
+                        hookResult.updatedInput as typeof invocation.params;
+                    }
 
-                  await confirmationDetails.onConfirm(
-                    ToolConfirmationOutcome.ProceedOnce,
-                  );
-                  recordAutoModeFallbackResolution(
-                    ToolConfirmationOutcome.ProceedOnce,
-                  );
+                    await confirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
+                    recordAutoModeFallbackResolution(
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
+                  }
                 } else {
                   return earlyErrorResponse(
                     new Error(
@@ -6345,6 +6516,26 @@ export class Session implements SessionContext {
               // Auto-approve, skip requestPermission.
               // didRequestPermission stays false → emitStart below.
             } else if (!hookHandled) {
+              if (planShellDecision.classification !== 'not-applicable') {
+                const finalPreDisplayPlanShellError =
+                  await validatePlanModeShellContext({
+                    config: this.config,
+                    decision: planShellDecision,
+                    requestArgs: args,
+                    invocationParams: invocation.params as Record<
+                      string,
+                      unknown
+                    >,
+                    signal: activeToolAbortSignal,
+                  });
+                if (finalPreDisplayPlanShellError) {
+                  return earlyErrorResponse(
+                    new Error(finalPreDisplayPlanShellError),
+                    toolName,
+                  );
+                }
+              }
+
               // Show permission dialog via ACP requestPermission
               didRequestPermission = true;
               const content =
@@ -6353,7 +6544,7 @@ export class Session implements SessionContext {
               // Map tool kind, using switch_mode for exit_plan_mode per ACP spec
               const mappedKind = this.toolCallEmitter.mapToolKind(
                 tool.kind,
-                toolName,
+                policyToolName,
               );
 
               if (hooksEnabled && messageBus) {
@@ -6365,9 +6556,16 @@ export class Session implements SessionContext {
                 );
               }
 
+              const permissionOptions = toPermissionOptions(
+                confirmationDetails,
+                pmForcedAsk,
+              );
+              const offeredPermissionOptions = permissionOptions.map(
+                (option) => ({ ...option }),
+              );
               const params: RequestPermissionRequest = {
                 sessionId: this.sessionId,
-                options: toPermissionOptions(confirmationDetails, pmForcedAsk),
+                options: permissionOptions,
                 toolCall: {
                   toolCallId: callId,
                   status: 'pending',
@@ -6386,10 +6584,12 @@ export class Session implements SessionContext {
                   },
                 },
               };
-              const stopAfterPermissionCancel = () => {
+              const stopAfterPermissionCancel = (message?: string) => {
                 onStopAfterPermissionCancel?.();
                 return earlyErrorResponse(
-                  new Error(`Tool "${toolName}" was canceled by the user.`),
+                  new Error(
+                    message ?? `Tool "${toolName}" was canceled by the user.`,
+                  ),
                   toolName,
                   { stopAfterPermissionCancel: true },
                 );
@@ -6400,17 +6600,17 @@ export class Session implements SessionContext {
               };
               let outcome: ToolConfirmationOutcome;
               try {
-                output = (await this.client.requestPermission(
+                output = (await requestPermissionWithAbort(
+                  this.client,
                   params,
+                  activeToolAbortSignal,
                 )) as RequestPermissionResponse & {
                   answers?: Record<string, string>;
                 };
-                outcome =
-                  output.outcome.outcome === 'cancelled'
-                    ? ToolConfirmationOutcome.Cancel
-                    : z
-                        .nativeEnum(ToolConfirmationOutcome)
-                        .parse(output.outcome.optionId);
+                outcome = resolvePermissionOutcome(
+                  output,
+                  offeredPermissionOptions,
+                );
               } catch (error) {
                 debugLogger.error(
                   `Permission request failed for tool ${toolName}:`,
@@ -6429,9 +6629,13 @@ export class Session implements SessionContext {
                 onStopAfterPermissionCancel?.();
                 const permissionFailureMessage = isExitPlanModeTool
                   ? 'The host could not present plan-exit approval. Plan mode remains active; use the host mode selector or /plan exit to leave plan mode.'
-                  : `Permission request failed for "${toolName}": ${this.#formatError(
-                      error,
-                    )}`;
+                  : planShellDecision.classification === 'unknown'
+                    ? `Plan mode could not complete approval for this shell command: ${this.#formatError(
+                        error,
+                      )}. The command was not run; Plan mode remains active.`
+                    : `Permission request failed for "${toolName}": ${this.#formatError(
+                        error,
+                      )}`;
                 return earlyErrorResponse(
                   new Error(permissionFailureMessage),
                   toolName,
@@ -6439,12 +6643,32 @@ export class Session implements SessionContext {
                 );
               }
 
+              let confirmationPayload: ToolConfirmationPayload | undefined = {
+                answers: output.answers,
+              };
+              if (planShellDecision.classification !== 'not-applicable') {
+                const approval = await validatePlanModeShellApproval({
+                  config: this.config,
+                  decision: planShellDecision,
+                  requestArgs: args,
+                  invocationParams: invocation.params as Record<
+                    string,
+                    unknown
+                  >,
+                  signal: activeToolAbortSignal,
+                  outcome,
+                  payload: confirmationPayload,
+                });
+                outcome = approval.outcome;
+                confirmationPayload = approval.payload;
+              }
               recordAutoModeFallbackResolution(outcome);
 
               try {
-                await confirmationDetails.onConfirm(outcome, {
-                  answers: output.answers,
-                });
+                await confirmationDetails.onConfirm(
+                  outcome,
+                  confirmationPayload,
+                );
               } catch (error) {
                 if (outcome !== ToolConfirmationOutcome.Cancel) {
                   throw error;
@@ -6470,7 +6694,7 @@ export class Session implements SessionContext {
                   confirmationDetails,
                   this.config.getOnPersistPermissionRule?.(),
                   this.config.getPermissionManager?.(),
-                  { answers: output.answers },
+                  confirmationPayload,
                 );
               }
 
@@ -6488,7 +6712,9 @@ export class Session implements SessionContext {
                   // cancellation reason (plain errorResponse leaves it unset,
                   // which makes endToolSpan fall back to the generic 'tool
                   // error' message) and the declined call is still recorded.
-                  return stopAfterPermissionCancel();
+                  return stopAfterPermissionCancel(
+                    confirmationPayload?.cancelMessage,
+                  );
                 case ToolConfirmationOutcome.ProceedOnce:
                 case ToolConfirmationOutcome.ProceedAlways:
                 case ToolConfirmationOutcome.ProceedAlwaysProject:
@@ -6526,7 +6752,7 @@ export class Session implements SessionContext {
           if (hooksEnabledForTool && messageBusForTool) {
             const preHookResult = await firePreToolUseHook(
               messageBusForTool,
-              toolName,
+              policyToolName,
               args,
               toolUseId,
               permissionMode,
@@ -6708,7 +6934,7 @@ export class Session implements SessionContext {
             };
             const postHookResult = await firePostToolUseHook(
               messageBusForTool,
-              toolName,
+              policyToolName,
               args,
               toolResponse,
               toolUseId,
@@ -6751,7 +6977,7 @@ export class Session implements SessionContext {
             const failureHookResult = await firePostToolUseFailureHook(
               messageBusForTool,
               toolUseId,
-              toolName,
+              policyToolName,
               args,
               toolResult.error?.message ?? 'Tool execution was cancelled',
               isInterrupt,
@@ -6869,7 +7095,7 @@ export class Session implements SessionContext {
             const failureHookResult = await firePostToolUseFailureHook(
               messageBusForError,
               toolUseId,
-              toolName,
+              policyToolName,
               args,
               error.message,
               isInterrupt,

@@ -184,6 +184,45 @@ describe('useMessageQueue', () => {
       expect(result.current.messageQueue).toEqual(['/model']);
     });
 
+    it('drains goal commands during an active turn', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('steer now');
+        result.current.addMessage('/goal clear');
+        result.current.addMessage('/model');
+        result.current.addMessage('/goal replace the active goal');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue();
+      });
+
+      expect(drained).toEqual([
+        'steer now',
+        '/goal clear',
+        '/goal replace the active goal',
+      ]);
+      expect(result.current.messageQueue).toEqual(['/model']);
+    });
+
+    it('leaves goal commands queued at the idle boundary', () => {
+      const { result } = renderHook(() => useMessageQueue());
+
+      act(() => {
+        result.current.addMessage('/goal clear');
+      });
+
+      let drained: string[] = [];
+      act(() => {
+        drained = result.current.drainQueue(true);
+      });
+
+      expect(drained).toEqual([]);
+      expect(result.current.messageQueue).toEqual(['/goal clear']);
+    });
+
     it('returns an empty array when the queue contains only slash commands', () => {
       const { result } = renderHook(() => useMessageQueue());
 

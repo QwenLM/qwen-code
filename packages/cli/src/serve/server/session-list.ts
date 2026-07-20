@@ -7,6 +7,7 @@
 import {
   SessionService,
   SessionOrganizationError,
+  readWorktreeSession,
   type SessionArchiveState,
   type SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
@@ -272,6 +273,34 @@ function encodeMetadataSessionCursor(
   ).toString('base64url');
 }
 
+/**
+ * Enrich persisted session summaries with worktree metadata from sidecar
+ * files so the ⑂ badge survives daemon restarts. Shared by all three
+ * listing paths (default, organized, metadata-filtered).
+ */
+async function enrichWorktreeSidecars(
+  bySessionId: Map<string, BridgeSessionSummary>,
+  sessionService: SessionService,
+  archiveState: SessionArchiveState = 'active',
+): Promise<void> {
+  for (const [sessionId, summary] of bySessionId) {
+    if (summary.worktree) continue;
+    const sidecar = await readWorktreeSession(
+      sessionService.getWorktreeSessionPathForArchiveState(
+        sessionId,
+        archiveState,
+      ),
+    ).catch(() => null);
+    if (sidecar) {
+      summary.worktree = {
+        slug: sidecar.slug,
+        path: sidecar.worktreePath,
+        branch: sidecar.worktreeBranch,
+      };
+    }
+  }
+}
+
 function toSummary(item: {
   sessionId: string;
   cwd: string;
@@ -491,6 +520,8 @@ async function listOrganizedWorkspaceSessionsForResponse(
     );
   }
 
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
+
   if (
     readOptions.mergeLive !== false &&
     archiveState !== 'archived' &&
@@ -605,6 +636,8 @@ async function listWorkspaceSessionsByMetadataForResponse(
   for (const session of persisted.sessions) {
     bySessionId.set(session.sessionId, session);
   }
+
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
 
   let liveMergeFailed = false;
   if (readOptions.mergeLive !== false && archiveState !== 'archived') {
@@ -748,6 +781,8 @@ export async function listWorkspaceSessionsForResponse(
   for (const item of persisted.items) {
     bySessionId.set(item.sessionId, toSummary(item));
   }
+
+  await enrichWorktreeSidecars(bySessionId, sessionService, archiveState);
 
   if (archiveState === 'archived' || readOptions.mergeLive === false) {
     const sessions = [...bySessionId.values()];
