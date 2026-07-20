@@ -1546,7 +1546,10 @@ const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
 const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 const LOAD_OLDER_HISTORY_THRESHOLD_PX = 48;
-export const VIRTUAL_SCROLL_THRESHOLD = 200;
+// Web-shell rows are heavy (full Markdown + Shiki code blocks), and collapsed
+// turns keep their children mounted at zero height, so the DOM cost grows much
+// faster than the item count. Virtualize well before the list gets large.
+export const VIRTUAL_SCROLL_THRESHOLD = 50;
 const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
 export function shouldUseVirtualScroll(
