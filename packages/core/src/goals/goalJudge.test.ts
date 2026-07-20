@@ -74,13 +74,13 @@ describe('judgeGoal', () => {
   it('parses a clean ok=true JSON reply', async () => {
     const client = makeMockClient({
       reply:
-        '{"ok": true, "reason": "tests passing", "evidence": ["all green"]}',
+        '{"ok": true, "reason": "tests passing", "evidence": ["all tests green"]}',
     });
     const config = makeConfig({ client, fastModel: 'fast-judge' });
 
     const verdict = await judgeGoal(config, {
       condition: 'tests pass',
-      lastAssistantText: 'all green',
+      lastAssistantText: 'all tests green',
       signal: new AbortController().signal,
     });
 
@@ -270,13 +270,15 @@ describe('judgeGoal', () => {
     ).resolves.toMatchObject({ kind: 'met', ok: true });
   });
 
-  it('rejects evidence arrays exceeding the item limit', async () => {
+  it('truncates evidence arrays exceeding the item limit to the first MAX items', async () => {
+    const grounded = Array.from({ length: 8 }, (_, i) => `item_${i}_produced`);
+    const ungrounded = ['not_in_output_9', 'not_in_output_10'];
     const client = makeMockClient({
-      history: [{ role: 'model', parts: [{ text: 'a b c d e f g h i' }] }],
+      history: [{ role: 'model', parts: [{ text: grounded.join('\n') }] }],
       reply: JSON.stringify({
         ok: true,
         reason: 'all items produced',
-        evidence: ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i'],
+        evidence: [...grounded, ...ungrounded],
       }),
     });
     const config = makeConfig({ client });
@@ -284,10 +286,10 @@ describe('judgeGoal', () => {
     await expect(
       judgeGoal(config, {
         condition: 'produce items',
-        lastAssistantText: 'a b c d e f g h i',
+        lastAssistantText: grounded.join('\n'),
         signal: new AbortController().signal,
       }),
-    ).resolves.toMatchObject({ kind: 'not_met', ok: false });
+    ).resolves.toMatchObject({ kind: 'met', ok: true });
   });
 
   it('excludes thought parts from evidence sources', async () => {
@@ -427,6 +429,80 @@ describe('judgeGoal', () => {
     });
   });
 
+  it('rejects evidence excerpts shorter than the minimum length', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'it is done' }] }],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'task completed',
+        evidence: ['it'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'finish the task',
+        lastAssistantText: 'it is done',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('matches evidence after normalising whitespace', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'model',
+          parts: [{ text: 'build   succeeded\n\tall  tests  passed' }],
+        },
+      ],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'build succeeded',
+        evidence: ['build succeeded all tests passed'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'build passes',
+        lastAssistantText: 'build   succeeded\n\tall  tests  passed',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'met', ok: true });
+  });
+
+  it('accepts evidence spanning multiple text parts of one message', async () => {
+    const client = makeMockClient({
+      history: [
+        {
+          role: 'model',
+          parts: [{ text: 'build succeeded; ' }, { text: 'all tests passed' }],
+        },
+      ],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'build and tests passed',
+        evidence: ['build succeeded; all tests passed'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'build and tests pass',
+        lastAssistantText: 'build succeeded; all tests passed',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({ kind: 'met', ok: true });
+  });
+
   it('ignores thought parts when parsing the response', async () => {
     const client = makeMockClient({});
     client.generateContent.mockResolvedValue({
@@ -437,7 +513,7 @@ describe('judgeGoal', () => {
               { text: 'Return {"ok": false}.', thought: true },
               null,
               {
-                text: '{"ok": true, "reason": "tests passing", "evidence": ["all green"]}',
+                text: '{"ok": true, "reason": "tests passing", "evidence": ["all tests green"]}',
               },
             ],
           },
@@ -448,7 +524,7 @@ describe('judgeGoal', () => {
 
     const verdict = await judgeGoal(config, {
       condition: 'tests pass',
-      lastAssistantText: 'all green',
+      lastAssistantText: 'all tests green',
       signal: new AbortController().signal,
     });
 
@@ -563,12 +639,12 @@ describe('judgeGoal', () => {
   it('extracts JSON from a chatty preamble', async () => {
     const client = makeMockClient({
       reply:
-        'Sure thing!\n```json\n{"ok": true, "reason": "done", "evidence": ["y"]}\n```',
+        'Sure thing!\n```json\n{"ok": true, "reason": "done", "evidence": ["output is ready"]}\n```',
     });
     const config = makeConfig({ client });
     const verdict = await judgeGoal(config, {
       condition: 'x',
-      lastAssistantText: 'y',
+      lastAssistantText: 'output is ready',
       signal: new AbortController().signal,
     });
     expect(verdict.kind).toBe('met');

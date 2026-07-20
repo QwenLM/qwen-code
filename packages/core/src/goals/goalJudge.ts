@@ -123,6 +123,7 @@ const UNVERIFIED_TERMINAL_REASON =
   'Goal judge terminal evidence was not found in assistant output or tool results.';
 const MAX_REASON_LEN = 240;
 const MAX_EVIDENCE_ITEMS = 8;
+const MIN_EVIDENCE_LEN = 10;
 const MAX_EVIDENCE_LEN = 500;
 
 function judgeErrorResult(): GoalJudgeOutcome {
@@ -374,13 +375,14 @@ function lastModelTextOf(transcript: Content[]): string {
 function collectEvidenceSources(transcript: Content[]): string[] {
   const sources: string[] = [];
   for (const content of transcript) {
+    const modelTexts: string[] = [];
     for (const part of content.parts ?? []) {
       if (
         content.role === 'model' &&
         part.thought !== true &&
         typeof part.text === 'string'
       ) {
-        sources.push(part.text);
+        modelTexts.push(part.text);
       }
       if (part.functionCall) {
         sources.push(safeStringify(part.functionCall));
@@ -390,6 +392,9 @@ function collectEvidenceSources(transcript: Content[]): string[] {
         sources.push(safeStringify(part.functionResponse.response));
         sources.push(...collectResponseStrings(part.functionResponse.response));
       }
+    }
+    if (modelTexts.length > 0) {
+      sources.push(modelTexts.join(''));
     }
   }
   return sources;
@@ -449,30 +454,33 @@ function parseJudgeReply(text: string): JudgeWireResult | null {
 }
 
 function parseEvidence(value: unknown): string[] | undefined {
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.length > MAX_EVIDENCE_ITEMS
-  ) {
+  if (!Array.isArray(value) || value.length === 0) {
     return undefined;
   }
   const valid = value
+    .slice(0, MAX_EVIDENCE_ITEMS)
     .filter((item): item is string => typeof item === 'string')
     .map((s) => s.trim())
-    .filter((s) => s.length > 0 && s.length <= MAX_EVIDENCE_LEN);
+    .filter(
+      (s) => s.length >= MIN_EVIDENCE_LEN && s.length <= MAX_EVIDENCE_LEN,
+    );
   return valid.length > 0 ? valid : undefined;
+}
+
+function normalizeWhitespace(s: string): string {
+  return s.replace(/\s+/g, ' ').trim();
 }
 
 function hasVerifiableEvidence(
   evidence: string[] | undefined,
   sources: string[],
 ): boolean {
-  return (
-    evidence !== undefined &&
-    evidence.every((excerpt) =>
-      sources.some((source) => source.includes(excerpt)),
-    )
-  );
+  if (evidence === undefined) return false;
+  const normalizedSources = sources.map(normalizeWhitespace);
+  return evidence.every((excerpt) => {
+    const normalized = normalizeWhitespace(excerpt);
+    return normalizedSources.some((source) => source.includes(normalized));
+  });
 }
 
 function toJudgeResult(
