@@ -1086,7 +1086,7 @@ describe('noFollow option — symlink protection', () => {
     expect(await fs.readFile(real, 'utf-8')).toBe('ORIGINAL');
   });
 
-  it('atomicWriteFile: noFollow EXDEV rechecks the commit guard after unlink', async () => {
+  it('atomicWriteFile: noFollow EXDEV completes the replacement after unlink', async () => {
     const target = path.join(tmpDir, 'generation-closed.txt');
     await fs.writeFile(target, 'ORIGINAL');
     const exdevRename = async () => {
@@ -1101,22 +1101,20 @@ describe('noFollow option — symlink protection', () => {
     };
     const openSpy = vi.fn(fs.open);
 
-    await expect(
-      atomicWriteFile(
-        target,
-        'NEW',
-        {
-          noFollow: true,
-          assertCanCommit: () => {
-            if (!canCommit) throw new Error('generation closed');
-          },
+    await atomicWriteFile(
+      target,
+      'NEW',
+      {
+        noFollow: true,
+        assertCanCommit: () => {
+          if (!canCommit) throw new Error('generation closed');
         },
-        { rename: exdevRename, unlink, open: openSpy },
-      ),
-    ).rejects.toThrow('generation closed');
+      },
+      { rename: exdevRename, unlink, open: openSpy },
+    );
 
-    expect(openSpy).not.toHaveBeenCalled();
-    expect(fsSync.existsSync(target)).toBe(false);
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(await fs.readFile(target, 'utf-8')).toBe('NEW');
   });
 
   it('atomicWriteFileSync: noFollow EXDEV fallback also refuses to follow symlinks', () => {

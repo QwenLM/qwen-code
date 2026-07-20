@@ -1192,14 +1192,9 @@ export class AcpDispatcher {
       : undefined;
     try {
       assertGenerationOpen?.();
-    } catch {
+    } catch (error) {
       if (id !== undefined) {
-        conn.sendConn(
-          error(id, -32003, 'Workspace runtime is not active.', {
-            errorKind: 'workspace_runtime_unavailable',
-            httpStatus: 503,
-          }),
-        );
+        conn.sendConn(rpcErrorFrame(id, error));
       }
       return;
     }
