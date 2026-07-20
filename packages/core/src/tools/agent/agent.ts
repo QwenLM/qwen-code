@@ -3234,104 +3234,134 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               }
             }
 
-            await bgSubagent.execute(
-              turnContextState,
-              turnAbortController.signal,
-            );
+            let executionContextState = turnContextState;
+            let initialExternalInputs:
+              | readonly AgentExternalInput[]
+              | undefined;
+            while (true) {
+              await bgSubagent.execute(
+                executionContextState,
+                turnAbortController.signal,
+                initialExternalInputs
+                  ? { resetStats: false, initialExternalInputs }
+                  : undefined,
+              );
 
-            let stopHookWarning: string | undefined;
-            if (hookSystem && !turnAbortController.signal.aborted) {
-              stopHookWarning = await this.runSubagentStopHookLoop(bgSubagent, {
-                agentId: hookOpts.agentId,
-                agentType: hookOpts.agentType,
-                transcriptPath: jsonlPath,
-                resolvedMode,
-                signal: turnAbortController.signal,
-              });
-            }
+              let stopHookWarning: string | undefined;
+              if (hookSystem && !turnAbortController.signal.aborted) {
+                stopHookWarning = await this.runSubagentStopHookLoop(
+                  bgSubagent,
+                  {
+                    agentId: hookOpts.agentId,
+                    agentType: hookOpts.agentType,
+                    transcriptPath: jsonlPath,
+                    resolvedMode,
+                    signal: turnAbortController.signal,
+                  },
+                );
+              }
 
-            // Report terminate mode: only GOAL counts as success. CANCELLED
-            // keeps the 'cancelled' status so the model sees task_stop's
-            // effect accurately (with any partial result attached). ERROR,
-            // MAX_TURNS, TIMEOUT, and SHUTDOWN are surfaced as failures so
-            // the parent model (and the UI) don't treat incomplete runs as
-            // completed.
-            //
-            // Snapshot the span-relevant terminal state and PUBLISH IT
-            // FIRST — if the worktree cleanup / registry update / patch
-            // throws, telemetry must still see the subagent's actual
-            // outcome (review wenshao @ #4410).
-            const terminateMode = bgSubagent.getTerminateMode();
-            const subagentRawText = bgSubagent.getFinalText();
-            recordSpanOutcome(
-              deriveSubagentOutcomeMetadata({
+              // Report terminate mode: only GOAL counts as success. CANCELLED
+              // keeps the 'cancelled' status so the model sees task_stop's
+              // effect accurately (with any partial result attached). ERROR,
+              // MAX_TURNS, TIMEOUT, and SHUTDOWN are surfaced as failures so
+              // the parent model (and the UI) don't treat incomplete runs as
+              // completed.
+              const terminateMode = bgSubagent.getTerminateMode();
+              const subagentRawText = bgSubagent.getFinalText();
+              const spanOutcome = deriveSubagentOutcomeMetadata({
                 terminateMode,
                 signalAborted: turnAbortController.signal.aborted,
                 resultSummaryPresent: Boolean(
                   subagentRawText && subagentRawText.length > 0,
                 ),
-              }),
-            );
+              });
+              const mayRemainResident =
+                terminateMode === AgentTerminateMode.GOAL && residentRegistered;
 
-            const wtSuffix = formatWorktreeSuffix(
-              await cleanupWorktreeIsolation(),
-            );
-            const modelVisibleText = toModelVisibleSubagentResult(
-              subagentRawText,
-              terminateMode,
-            );
-            const finalText =
-              appendStopHookBlockingCapWarning(
-                terminateMode === AgentTerminateMode.GOAL
-                  ? modelVisibleText ||
-                      '(subagent produced no model-visible output)'
-                  : modelVisibleText,
-                stopHookWarning,
-              ) + wtSuffix;
-            const completionStats = getCompletionStats();
-            if (terminateMode === AgentTerminateMode.GOAL) {
-              keepResident = residentRegistered && !needsAutoPermissionLease();
-              if (!keepResident) {
-                registry.unregisterResidentAgent(hookOpts.agentId);
-                residentRegistered = false;
+              // Non-resident turns keep publishing telemetry before worktree
+              // cleanup so a cleanup failure cannot hide the model outcome.
+              if (!mayRemainResident) {
+                recordSpanOutcome(spanOutcome);
               }
-              registry.complete(hookOpts.agentId, finalText, completionStats);
-              patchAgentMeta(metaPath, {
-                status: 'completed',
-                lastUpdatedAt: new Date().toISOString(),
-                lastError: undefined,
-              });
-            } else if (
-              terminateMode === AgentTerminateMode.CANCELLED ||
-              terminateMode === AgentTerminateMode.SHUTDOWN
-            ) {
-              // SHUTDOWN is grouped with CANCELLED in the span taxonomy
-              // (deriveSubagentOutcomeMetadata); align the registry side
-              // so dashboards don't see span=cancelled / registry=failed
-              // mismatch on graceful arena/team-session shutdown.
-              // wenshao @ #4410.
-              registry.finalizeCancelled(
-                hookOpts.agentId,
-                finalText,
-                completionStats,
+              const wtSuffix = formatWorktreeSuffix(
+                await cleanupWorktreeIsolation(),
               );
-              persistBackgroundCancellation(
-                metaPath,
-                registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
-                  'cancelled',
+              if (mayRemainResident) {
+                if (residentRegistered && !needsAutoPermissionLease()) {
+                  const claimedInputs = registry.claimPendingInputsForResident(
+                    hookOpts.agentId,
+                    residentController,
+                  );
+                  if (claimedInputs.length > 0) {
+                    executionContextState = new ContextState();
+                    executionContextState.set('hook_context', '');
+                    initialExternalInputs = claimedInputs;
+                    continue;
+                  }
+                }
+                recordSpanOutcome(spanOutcome);
+              }
+
+              const modelVisibleText = toModelVisibleSubagentResult(
+                subagentRawText,
+                terminateMode,
               );
-            } else {
-              registry.fail(
-                hookOpts.agentId,
-                finalText || `Agent terminated with mode: ${terminateMode}`,
-                completionStats,
-              );
-              patchAgentMeta(metaPath, {
-                status: 'failed',
-                lastUpdatedAt: new Date().toISOString(),
-                lastError:
+              const finalText =
+                appendStopHookBlockingCapWarning(
+                  terminateMode === AgentTerminateMode.GOAL
+                    ? modelVisibleText ||
+                        '(subagent produced no model-visible output)'
+                    : modelVisibleText,
+                  stopHookWarning,
+                ) + wtSuffix;
+              const completionStats = getCompletionStats();
+              if (terminateMode === AgentTerminateMode.GOAL) {
+                keepResident =
+                  residentRegistered && !needsAutoPermissionLease();
+                if (!keepResident) {
+                  registry.unregisterResidentAgent(hookOpts.agentId);
+                  residentRegistered = false;
+                }
+                registry.complete(hookOpts.agentId, finalText, completionStats);
+                patchAgentMeta(metaPath, {
+                  status: 'completed',
+                  lastUpdatedAt: new Date().toISOString(),
+                  lastError: undefined,
+                });
+              } else if (
+                terminateMode === AgentTerminateMode.CANCELLED ||
+                terminateMode === AgentTerminateMode.SHUTDOWN
+              ) {
+                // SHUTDOWN is grouped with CANCELLED in the span taxonomy
+                // (deriveSubagentOutcomeMetadata); align the registry side
+                // so dashboards don't see span=cancelled / registry=failed
+                // mismatch on graceful arena/team-session shutdown.
+                // wenshao @ #4410.
+                registry.finalizeCancelled(
+                  hookOpts.agentId,
+                  finalText,
+                  completionStats,
+                );
+                persistBackgroundCancellation(
+                  metaPath,
+                  registry.get(hookOpts.agentId)?.persistedCancellationStatus ??
+                    'cancelled',
+                );
+              } else {
+                registry.fail(
+                  hookOpts.agentId,
                   finalText || `Agent terminated with mode: ${terminateMode}`,
-              });
+                  completionStats,
+                );
+                patchAgentMeta(metaPath, {
+                  status: 'failed',
+                  lastUpdatedAt: new Date().toISOString(),
+                  lastError:
+                    finalText || `Agent terminated with mode: ${terminateMode}`,
+                });
+              }
+              break;
             }
           } catch (error) {
             // Publish first — same reason as the success path.

@@ -4274,6 +4274,7 @@ describe('AgentTool', () => {
       wakeExternalInputWaiters: ReturnType<typeof vi.fn>;
       appendActivity: ReturnType<typeof vi.fn>;
       registerResidentAgent: ReturnType<typeof vi.fn>;
+      claimPendingInputsForResident: ReturnType<typeof vi.fn>;
       unregisterResidentAgent: ReturnType<typeof vi.fn>;
       restartCompletedAgent: ReturnType<typeof vi.fn>;
     };
@@ -4330,6 +4331,7 @@ describe('AgentTool', () => {
         wakeExternalInputWaiters: vi.fn(),
         appendActivity: vi.fn(),
         registerResidentAgent: vi.fn(),
+        claimPendingInputsForResident: vi.fn().mockReturnValue([]),
         unregisterResidentAgent: vi.fn().mockReturnValue(true),
         restartCompletedAgent: vi.fn().mockReturnValue(restartedEntry),
       };
@@ -4597,6 +4599,79 @@ describe('AgentTool', () => {
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
       expect(mockSubagentDispose).not.toHaveBeenCalled();
+    });
+
+    it('runs inputs queued during the finishing hook before publishing completion', async () => {
+      let releaseStopHook: (() => void) | undefined;
+      const stopHookGate = new Promise<void>((resolve) => {
+        releaseStopHook = resolve;
+      });
+      let markStopHookStarted: (() => void) | undefined;
+      const stopHookStarted = new Promise<void>((resolve) => {
+        markStopHookStarted = resolve;
+      });
+      const hookSystem = {
+        fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+        fireSubagentStopEvent: vi
+          .fn()
+          .mockImplementationOnce(async () => {
+            markStopHookStarted?.();
+            await stopHookGate;
+            return undefined;
+          })
+          .mockResolvedValue(undefined),
+      };
+      (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
+        .fn()
+        .mockReturnValue(hookSystem);
+      mockRegistry.claimPendingInputsForResident
+        .mockReturnValueOnce([
+          'late message',
+          {
+            kind: 'notification',
+            text: '<task-notification>ready</task-notification>',
+          },
+        ])
+        .mockReturnValue([]);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+      await stopHookStarted;
+
+      expect(mockRegistry.complete).not.toHaveBeenCalled();
+      releaseStopHook?.();
+
+      await vi.waitFor(() => {
+        expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(1);
+      });
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1];
+      expect(
+        mockRegistry.claimPendingInputsForResident,
+      ).toHaveBeenNthCalledWith(
+        1,
+        expect.stringContaining('monitor-'),
+        resident,
+      );
+      expect(vi.mocked(mockAgent.execute).mock.calls[1]?.[2]).toEqual({
+        resetStats: false,
+        initialExternalInputs: [
+          'late message',
+          {
+            kind: 'notification',
+            text: '<task-notification>ready</task-notification>',
+          },
+        ],
+      });
+      expect(hookSystem.fireSubagentStopEvent).toHaveBeenCalledTimes(2);
+      expect(mockRegistry.restartCompletedAgent).not.toHaveBeenCalled();
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
     });
 
     it('does not retain an agent whose frontmatter hooks are globally registered', async () => {

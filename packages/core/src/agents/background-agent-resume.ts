@@ -15,7 +15,10 @@ import {
   AgentEventType,
   type AgentToolCallEvent,
 } from './runtime/agent-events.js';
-import { AgentTerminateMode } from './runtime/agent-types.js';
+import {
+  AgentTerminateMode,
+  type AgentExternalInput,
+} from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import {
   getSubagentSessionDir,
@@ -989,60 +992,88 @@ export class BackgroundAgentResumeService {
             }
           }
 
-          await subagent.execute(turnContextState, turnAbortController.signal);
-
-          let stopHookWarning: string | undefined;
-          if (hookSystem && !turnAbortController.signal.aborted) {
-            stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
-              agentId: meta.agentId,
-              agentType: meta.agentType,
-              transcriptPath: outputFile,
-              resolvedMode,
-              signal: turnAbortController.signal,
-            });
-          }
-
-          const terminateMode = subagent.getTerminateMode();
-          const modelVisibleText = toModelVisibleSubagentResult(
-            subagent.getFinalText(),
-            terminateMode,
-          );
-          const finalText = appendStopHookBlockingCapWarning(
-            terminateMode === AgentTerminateMode.GOAL
-              ? modelVisibleText ||
-                  '(subagent produced no model-visible output)'
-              : modelVisibleText,
-            stopHookWarning,
-          );
-          const stats = getCompletionStats(subagent, liveToolCallCount);
-          if (terminateMode === AgentTerminateMode.GOAL) {
-            keepResident = residentRegistered && !needsAutoPermissionLease();
-            if (!keepResident) {
-              registry.unregisterResidentAgent(meta.agentId);
-              residentRegistered = false;
-            }
-            registry.complete(meta.agentId, finalText, stats);
-            patchAgentMeta(metaPath, {
-              status: 'completed',
-              lastUpdatedAt: new Date().toISOString(),
-              lastError: undefined,
-            });
-          } else if (terminateMode === AgentTerminateMode.CANCELLED) {
-            registry.finalizeCancelled(meta.agentId, finalText, stats);
-            persistBackgroundCancellation(
-              metaPath,
-              registry.get(meta.agentId)?.persistedCancellationStatus ??
-                'cancelled',
+          let executionContextState = turnContextState;
+          let initialExternalInputs: readonly AgentExternalInput[] | undefined;
+          while (true) {
+            await subagent.execute(
+              executionContextState,
+              turnAbortController.signal,
+              initialExternalInputs
+                ? { resetStats: false, initialExternalInputs }
+                : undefined,
             );
-          } else {
-            const failureText =
-              finalText || `Agent terminated with mode: ${terminateMode}`;
-            registry.fail(meta.agentId, failureText, stats);
-            patchAgentMeta(metaPath, {
-              status: 'failed',
-              lastUpdatedAt: new Date().toISOString(),
-              lastError: failureText,
-            });
+
+            let stopHookWarning: string | undefined;
+            if (hookSystem && !turnAbortController.signal.aborted) {
+              stopHookWarning = await this.runSubagentStopHookLoop(subagent, {
+                agentId: meta.agentId,
+                agentType: meta.agentType,
+                transcriptPath: outputFile,
+                resolvedMode,
+                signal: turnAbortController.signal,
+              });
+            }
+
+            const terminateMode = subagent.getTerminateMode();
+            if (
+              terminateMode === AgentTerminateMode.GOAL &&
+              residentRegistered &&
+              !needsAutoPermissionLease()
+            ) {
+              const claimedInputs = registry.claimPendingInputsForResident(
+                meta.agentId,
+                residentController,
+              );
+              if (claimedInputs.length > 0) {
+                executionContextState = new ContextState();
+                executionContextState.set('hook_context', '');
+                initialExternalInputs = claimedInputs;
+                continue;
+              }
+            }
+
+            const modelVisibleText = toModelVisibleSubagentResult(
+              subagent.getFinalText(),
+              terminateMode,
+            );
+            const finalText = appendStopHookBlockingCapWarning(
+              terminateMode === AgentTerminateMode.GOAL
+                ? modelVisibleText ||
+                    '(subagent produced no model-visible output)'
+                : modelVisibleText,
+              stopHookWarning,
+            );
+            const stats = getCompletionStats(subagent, liveToolCallCount);
+            if (terminateMode === AgentTerminateMode.GOAL) {
+              keepResident = residentRegistered && !needsAutoPermissionLease();
+              if (!keepResident) {
+                registry.unregisterResidentAgent(meta.agentId);
+                residentRegistered = false;
+              }
+              registry.complete(meta.agentId, finalText, stats);
+              patchAgentMeta(metaPath, {
+                status: 'completed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: undefined,
+              });
+            } else if (terminateMode === AgentTerminateMode.CANCELLED) {
+              registry.finalizeCancelled(meta.agentId, finalText, stats);
+              persistBackgroundCancellation(
+                metaPath,
+                registry.get(meta.agentId)?.persistedCancellationStatus ??
+                  'cancelled',
+              );
+            } else {
+              const failureText =
+                finalText || `Agent terminated with mode: ${terminateMode}`;
+              registry.fail(meta.agentId, failureText, stats);
+              patchAgentMeta(metaPath, {
+                status: 'failed',
+                lastUpdatedAt: new Date().toISOString(),
+                lastError: failureText,
+              });
+            }
+            break;
           }
         } catch (error) {
           const errorMessage =

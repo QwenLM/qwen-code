@@ -756,6 +756,21 @@ export class BackgroundTaskRegistry {
     return resident.continue(message);
   }
 
+  claimPendingInputsForResident(
+    agentId: string,
+    resident: ResidentBackgroundAgent,
+  ): AgentExternalInput[] {
+    const entry = this.agents.get(agentId);
+    if (
+      entry?.status !== 'running' ||
+      this.residentAgents.get(agentId) !== resident ||
+      !entry.pendingMessages?.length
+    ) {
+      return [];
+    }
+    return entry.pendingMessages.splice(0);
+  }
+
   unregisterResidentAgent(
     agentId: string,
     resident?: ResidentBackgroundAgent,

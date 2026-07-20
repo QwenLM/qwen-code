@@ -206,7 +206,10 @@ export class AgentHeadless {
   async execute(
     context: ContextState,
     externalSignal?: AbortSignal,
-    options: { resetStats?: boolean } = {},
+    options: {
+      resetStats?: boolean;
+      initialExternalInputs?: readonly AgentExternalInput[];
+    } = {},
   ): Promise<void> {
     if (this.executing) {
       throw new Error(
@@ -223,7 +226,12 @@ export class AgentHeadless {
     }
 
     try {
-      await this.executeTurn(context, externalSignal, !resetStats);
+      await this.executeTurn(
+        context,
+        externalSignal,
+        !resetStats,
+        options.initialExternalInputs,
+      );
     } finally {
       this.executing = false;
     }
@@ -233,6 +241,7 @@ export class AgentHeadless {
     context: ContextState,
     externalSignal?: AbortSignal,
     preserveStats = false,
+    initialExternalInputs?: readonly AgentExternalInput[],
   ): Promise<void> {
     const initialMessagesOverride = context.get('initial_messages_override') as
       | Content[]
@@ -246,7 +255,20 @@ export class AgentHeadless {
     const initialTaskText = String(
       (context.get('task_prompt') as string) ?? 'Get Started!',
     );
-    if (isContinuation) {
+    const claimedExternalInputs =
+      isContinuation && initialExternalInputs?.length
+        ? initialExternalInputs
+        : undefined;
+    if (claimedExternalInputs) {
+      for (const input of claimedExternalInputs) {
+        this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
+          subagentId: this.core.subagentId,
+          kind: typeof input === 'string' ? 'message' : input.kind,
+          text: typeof input === 'string' ? input : input.text,
+          timestamp: Date.now(),
+        });
+      }
+    } else if (isContinuation) {
       this.core.eventEmitter.emit(AgentEventType.EXTERNAL_MESSAGE, {
         subagentId: this.core.subagentId,
         kind: 'message',
@@ -285,9 +307,14 @@ export class AgentHeadless {
         ? [
             {
               role: 'user' as const,
-              parts: [
-                { text: `${EXTERNAL_MESSAGE_PREFIX} ${initialTaskText}` },
-              ],
+              parts: claimedExternalInputs
+                ? claimedExternalInputs.map((input) => ({
+                    text:
+                      typeof input === 'string'
+                        ? `${EXTERNAL_MESSAGE_PREFIX} ${input}`
+                        : input.text,
+                  }))
+                : [{ text: `${EXTERNAL_MESSAGE_PREFIX} ${initialTaskText}` }],
             },
           ]
         : initialMessagesOverride && initialMessagesOverride.length > 0

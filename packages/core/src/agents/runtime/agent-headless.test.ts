@@ -605,6 +605,68 @@ describe('subagent.ts', () => {
         });
       });
 
+      it('should preserve claimed external input order and source kind on a continuation', async () => {
+        const { config, toolRegistry } = await createMockConfig();
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop']),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+        const externalMessages: Array<{
+          kind?: 'message' | 'notification';
+          text: string;
+        }> = [];
+        scope.getEventEmitter().on(AgentEventType.EXTERNAL_MESSAGE, (event) => {
+          externalMessages.push({ kind: event.kind, text: event.text });
+        });
+
+        const initialContext = new ContextState();
+        initialContext.set('task_prompt', 'Initial task');
+        await scope.execute(initialContext);
+        scope.getCore().recordToolCallStats('first_attempt_tool', true, 25);
+
+        const continuationContext = new ContextState();
+        continuationContext.set('task_prompt', 'ignored fallback');
+        await scope.execute(continuationContext, undefined, {
+          resetStats: false,
+          initialExternalInputs: [
+            'first message',
+            {
+              kind: 'notification',
+              text: '<task-notification>ready</task-notification>',
+            },
+            'third message',
+          ],
+        });
+
+        expect(GeminiChat).toHaveBeenCalledTimes(1);
+        expect(toolRegistry.warmAll).toHaveBeenCalledTimes(1);
+        expect(mockSendMessageStream.mock.calls[1][1].message).toEqual([
+          { text: '[Message from parent agent]: first message' },
+          { text: '<task-notification>ready</task-notification>' },
+          { text: '[Message from parent agent]: third message' },
+        ]);
+        expect(externalMessages).toEqual([
+          { kind: 'message', text: 'first message' },
+          {
+            kind: 'notification',
+            text: '<task-notification>ready</task-notification>',
+          },
+          { kind: 'message', text: 'third message' },
+        ]);
+        expect(scope.getExecutionSummary()).toMatchObject({
+          rounds: 2,
+          totalToolCalls: 1,
+          successfulToolCalls: 1,
+        });
+      });
+
       it('should preserve statistics for continuation work in the same logical turn', async () => {
         const { config } = await createMockConfig();
         mockSendMessageStream.mockImplementation(

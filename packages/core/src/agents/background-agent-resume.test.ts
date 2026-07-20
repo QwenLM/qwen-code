@@ -1513,6 +1513,10 @@ describe('BackgroundAgentResumeService', () => {
 
     let releaseExecute: (() => void) | undefined;
     const execute = vi.fn(
+      (_context?: unknown, _signal?: AbortSignal, _options?: unknown) =>
+        Promise.resolve(),
+    );
+    execute.mockImplementationOnce(
       () =>
         new Promise<void>((resolve) => {
           releaseExecute = resolve;
@@ -1549,12 +1553,17 @@ describe('BackgroundAgentResumeService', () => {
     await Promise.all([first, second]);
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
+      expect(execute).toHaveBeenCalledTimes(2);
+    });
+    expect(execute.mock.calls[1]?.[2]).toEqual({
+      resetStats: false,
+      initialExternalInputs: ['second message'],
     });
     const provider = subagent.setExternalMessageProvider.mock.calls[0]?.[0] as
       | (() => string[])
       | undefined;
     expect(provider).toBeDefined();
-    expect(provider?.()).toEqual(['second message']);
+    expect(provider?.()).toEqual([]);
   });
 
   it('routes owned monitor notifications into a resumed agent queue', async () => {
@@ -2411,8 +2420,33 @@ describe('BackgroundAgentResumeService', () => {
     });
     registry.complete(agentId, 'All done');
 
+    let releaseStopHook: (() => void) | undefined;
+    const stopHookGate = new Promise<void>((resolve) => {
+      releaseStopHook = resolve;
+    });
+    let markStopHookStarted: (() => void) | undefined;
+    const stopHookStarted = new Promise<void>((resolve) => {
+      markStopHookStarted = resolve;
+    });
+    const hookSystem = {
+      fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+      fireSubagentStopEvent: vi
+        .fn()
+        .mockImplementationOnce(async () => {
+          markStopHookStarted?.();
+          await stopHookGate;
+          return undefined;
+        })
+        .mockResolvedValue(undefined),
+    };
+    const notification = vi.fn();
+    registry.setNotificationCallback(notification);
     const execute = vi.fn(
-      async (_context: { get: (key: string) => unknown }) => undefined,
+      async (
+        _context: { get: (key: string) => unknown },
+        _signal?: AbortSignal,
+        _options?: unknown,
+      ) => undefined,
     );
     const subagent = {
       execute,
@@ -2428,26 +2462,49 @@ describe('BackgroundAgentResumeService', () => {
     };
 
     const dispose = vi.fn().mockResolvedValue(undefined);
-    const { service, subagentManager } = createService();
+    const { service, subagentManager } = createService({ hookSystem });
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
       dispose,
     });
 
-    const revived = await service.reviveCompletedBackgroundAgent(
+    const revive = service.reviveCompletedBackgroundAgent(
       agentId,
       'now write the summary',
     );
+    await stopHookStarted;
+    expect(registry.get(agentId)?.status).toBe('running');
+    expect(notification).not.toHaveBeenCalled();
+    expect(registry.queueMessage(agentId, 'late message')).toBe(true);
+    expect(
+      registry.queueExternalInput(agentId, {
+        kind: 'notification',
+        text: '<task-notification>ready</task-notification>',
+      }),
+    ).toBe(true);
+    releaseStopHook?.();
+    const revived = await revive;
 
     expect(revived).toBeDefined();
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
-    expect(execute).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => {
+      expect(execute).toHaveBeenCalledTimes(2);
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
     const contextArg = execute.mock.calls[0]?.[0];
     expect(contextArg).toBeDefined();
     expect(contextArg?.get('task_prompt')).toBe('now write the summary');
-    await vi.waitFor(() => {
-      expect(registry.get(agentId)?.status).toBe('completed');
+    expect(execute.mock.calls[1]?.[2]).toEqual({
+      resetStats: false,
+      initialExternalInputs: [
+        'late message',
+        {
+          kind: 'notification',
+          text: '<task-notification>ready</task-notification>',
+        },
+      ],
     });
+    expect(notification).toHaveBeenCalledTimes(1);
     const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
     expect(meta.resumeCount).toBe(1);
     expect(fs.statSync(sessionDir).mtime.getTime()).toBeGreaterThan(
@@ -2459,11 +2516,11 @@ describe('BackgroundAgentResumeService', () => {
     );
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
-      expect(execute).toHaveBeenCalledTimes(2);
+      expect(execute).toHaveBeenCalledTimes(3);
       expect(registry.get(agentId)?.status).toBe('completed');
     });
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
-    const hotContextArg = execute.mock.calls[1]?.[0];
+    const hotContextArg = execute.mock.calls[2]?.[0];
     expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
     expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);
     expect(dispose).not.toHaveBeenCalled();

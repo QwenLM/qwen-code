@@ -268,6 +268,38 @@ describe('BackgroundTaskRegistry', () => {
       ).toBe(false);
     });
 
+    it('claims pending inputs only for the current running resident', () => {
+      registry.register(makeRegistration('resident-1'));
+      const resident = makeResident();
+      const staleResident = makeResident();
+      registry.registerResidentAgent('resident-1', resident);
+      registry.queueMessage('resident-1', 'first');
+      registry.queueExternalInput('resident-1', {
+        kind: 'notification',
+        text: '<task-notification />',
+      });
+      registry.queueMessage('resident-1', 'third');
+
+      expect(
+        registry.claimPendingInputsForResident('resident-1', staleResident),
+      ).toEqual([]);
+      expect(
+        registry.claimPendingInputsForResident('resident-1', resident),
+      ).toEqual([
+        'first',
+        { kind: 'notification', text: '<task-notification />' },
+        'third',
+      ]);
+      expect(
+        registry.claimPendingInputsForResident('resident-1', resident),
+      ).toEqual([]);
+
+      registry.complete('resident-1', 'done');
+      expect(
+        registry.claimPendingInputsForResident('resident-1', resident),
+      ).toEqual([]);
+    });
+
     it('disposes a replaced resident without letting its stale handle remove the replacement', () => {
       registry.register(makeRegistration('resident-1'));
       const first = makeResident();
