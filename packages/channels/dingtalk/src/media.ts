@@ -62,8 +62,12 @@ export async function downloadMedia(
       return null;
     }
 
-    // Step 2: Download the actual file
-    const fileResp = await fetch(downloadUrl);
+    // Step 2: Download the actual file. Bound the request so a stalled CDN
+    // connection can't hang the streaming loop below indefinitely (matches
+    // the Feishu adapter).
+    const fileResp = await fetch(downloadUrl, {
+      signal: AbortSignal.timeout(30_000),
+    });
     if (!fileResp.ok) {
       process.stderr.write(
         `[DingTalk] downloadMedia file fetch failed: HTTP ${fileResp.status}\n`,
@@ -74,6 +78,9 @@ export async function downloadMedia(
     const MAX_DOWNLOAD_BYTES = 50 * 1024 * 1024; // 50 MB
     const contentLength = fileResp.headers.get('content-length');
     if (contentLength && parseInt(contentLength, 10) > MAX_DOWNLOAD_BYTES) {
+      // Release the connection instead of letting the unread body pin it
+      // until GC.
+      await fileResp.body?.cancel();
       process.stderr.write(
         `[DingTalk] downloadMedia rejected: size ${contentLength} exceeds ${MAX_DOWNLOAD_BYTES} byte limit\n`,
       );

@@ -64,8 +64,9 @@ describe('downloadMedia (DingTalk)', () => {
     expect(result?.mimeType).toBe('image/png');
   });
 
-  it('rejects a Content-Length exceeding 50MB', async () => {
+  it('rejects a Content-Length exceeding 50MB and releases the connection', async () => {
     const largeSize = 60 * 1024 * 1024; // 60 MB
+    const bodyCancel = vi.fn();
     const fileResp = {
       ok: true,
       headers: {
@@ -73,6 +74,7 @@ describe('downloadMedia (DingTalk)', () => {
           key === 'content-length' ? largeSize.toString() : null,
       },
       body: {
+        cancel: bodyCancel,
         getReader: () => ({
           read: vi.fn().mockResolvedValue({ done: true, value: undefined }),
           cancel: vi.fn(),
@@ -87,6 +89,7 @@ describe('downloadMedia (DingTalk)', () => {
     const result = await downloadMedia('code', 'robot', 'token');
 
     expect(result).toBeNull();
+    expect(bodyCancel).toHaveBeenCalled();
   });
 
   it('rejects a stream exceeding 50MB with no Content-Length header', async () => {
