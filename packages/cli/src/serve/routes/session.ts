@@ -1493,13 +1493,6 @@ export function registerSessionRoutes(
         return;
       }
       try {
-        // Pre-read the worktree sidecar BEFORE loadSession/resumeSession.
-        // The ACP layer's #restoreWorktreeOnResume may clear the sidecar
-        // during load (dead worktree, containment failure), so we capture
-        // the metadata here while it still exists.
-        const preReadSidecar = await readWorktreeSession(
-          new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
-        ).catch(() => null);
         const session = await archiveCoordinator.runSharedMany(
           [sessionId],
           async () => {
@@ -1559,33 +1552,40 @@ export function registerSessionRoutes(
           }
           return;
         }
-        // Restore worktree isolation using the sidecar pre-read before
-        // loadSession/resumeSession (the ACP layer's
-        // #restoreWorktreeOnResume may have cleared it during load).
-        // The ACP layer already handles containment validation, liveness
-        // checking, stale-sidecar cleanup, and the pendingWorktreeNotice.
-        // Here we only relocate the cwd and populate the bridge entry.
-        if (!session.worktree && preReadSidecar) {
-          const wt = {
-            slug: preReadSidecar.slug,
-            path: preReadSidecar.worktreePath,
-            branch: preReadSidecar.worktreeBranch,
-          };
-          try {
-            await runtime.bridge.changeSessionCwd(sessionId, {
-              path: wt.path,
-            });
-            runtime.bridge.setSessionWorktree(sessionId, wt);
-            Object.assign(session, { worktree: wt });
-          } catch (restoreErr) {
-            daemonLog?.warn('worktree restore failed on load/resume', {
-              sessionId,
-              worktreePath: wt.path,
-              error:
-                restoreErr instanceof Error
-                  ? restoreErr.message
-                  : String(restoreErr),
-            });
+        // Restore worktree isolation. Read the sidecar AFTER load/resume
+        // so we inherit the ACP layer's verdict: #restoreWorktreeOnResume
+        // clears the sidecar on dead-worktree / containment-failure paths,
+        // so a post-read naturally skips those cases. On the healthy path
+        // the sidecar is untouched and we relocate + populate the entry.
+        // Note: the !res.writable early-return above skips this restore;
+        // a client that disconnects mid-load leaves the session parked in
+        // the main workspace (pre-existing shape, low frequency).
+        if (!session.worktree) {
+          const sidecar = await readWorktreeSession(
+            new SessionService(workspaceCwd).getWorktreeSessionPath(sessionId),
+          ).catch(() => null);
+          if (sidecar) {
+            const wt = {
+              slug: sidecar.slug,
+              path: sidecar.worktreePath,
+              branch: sidecar.worktreeBranch,
+            };
+            try {
+              await runtime.bridge.changeSessionCwd(sessionId, {
+                path: wt.path,
+              });
+              runtime.bridge.setSessionWorktree(sessionId, wt);
+              session.worktree = wt;
+            } catch (restoreErr) {
+              daemonLog?.warn('worktree restore failed on load/resume', {
+                sessionId,
+                worktreePath: wt.path,
+                error:
+                  restoreErr instanceof Error
+                    ? restoreErr.message
+                    : String(restoreErr),
+              });
+            }
           }
         }
         res.status(200).json(session);

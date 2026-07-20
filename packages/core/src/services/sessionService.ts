@@ -381,21 +381,12 @@ export class SessionService {
       return true;
     }
 
-    const status = await readRuntimeStatus(
-      this.storage.getRuntimeStatusPath(sessionId),
-    );
-    if (
-      status?.sessionId === sessionId &&
-      getProjectHash(status.workDir) === this.projectHash
-    ) {
-      return true;
-    }
-
     // Worktree sessions record cwd as the worktree path
     // (<repoRoot>/.qwen/worktrees/<slug>), which has a different project
     // hash. Infer the repo root from the path and check its hash. This
     // is durable — it doesn't depend on the sidecar file, which is
-    // transient and cleared when the worktree is removed.
+    // transient and cleared when the worktree is removed. Pure string
+    // ops, so check before the file-read runtime status below.
     const worktreesMarker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
     const markerIdx = recordCwd.indexOf(worktreesMarker);
     if (markerIdx > 0) {
@@ -404,7 +395,14 @@ export class SessionService {
         return true;
       }
     }
-    return false;
+
+    const status = await readRuntimeStatus(
+      this.storage.getRuntimeStatusPath(sessionId),
+    );
+    return (
+      status?.sessionId === sessionId &&
+      getProjectHash(status.workDir) === this.projectHash
+    );
   }
 
   /**
