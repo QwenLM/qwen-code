@@ -34,6 +34,7 @@ interface AddWorkspaceDialogProps {
    * surfaces matching subdirectories in a listbox under the input.
    */
   onSuggest?: (prefix: string) => Promise<WorkspacePathSuggestions>;
+  persistenceSupported?: boolean;
 }
 
 const HINT_ID = 'add-workspace-hint';
@@ -51,6 +52,7 @@ export function AddWorkspaceDialog({
   onAdd,
   displayNameEnabled = false,
   onSuggest,
+  persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
   const [path, setPath] = useState('');

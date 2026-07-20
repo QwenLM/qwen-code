@@ -90,6 +90,12 @@ import type {
   WorkspaceRuntime,
 } from './workspace-registry.js';
 import {
+  isManagedScratchChild,
+  prepareManagedScratchRoot,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from './managed-scratch-workspace.js';
+import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
@@ -2831,6 +2837,21 @@ async function runQwenServeImpl(
         cliVersionPromise,
       ]);
     cliVersion = resolvedCliVersion;
+    let managedScratchRoot: ManagedScratchRoot | undefined;
+    try {
+      // Root acceptance is fail-closed and happens only after every startup
+      // workspace (including restored registrations) has been resolved.
+      managedScratchRoot = prepareManagedScratchRoot(
+        path.join(core.Storage.getGlobalQwenDir(), 'scratch-workspaces'),
+        workspaceInputs.map((workspace) => workspace.cwd),
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: managed scratch workspaces are unavailable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -3966,7 +3987,19 @@ async function runQwenServeImpl(
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     const createDynamicWorkspaceRuntime = async (
       cwd: string,
+      options: { provenance: WorkspaceRuntimeProvenance },
     ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      // HTTP clients cannot choose provenance. This second boundary prevents a
+      // future caller from granting managed trust to an arbitrary directory.
+      if (
+        options.provenance === 'managed-scratch' &&
+        (!managedScratchRoot ||
+          !isManagedScratchChild(cwd, managedScratchRoot.canonicalRoot))
+      ) {
+        throw new Error(
+          'Managed scratch runtime must use an accepted direct child directory',
+        );
+      }
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd);
@@ -3979,12 +4012,14 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
-      const trusted = wsSettings
-        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-            wsSettings.merged,
-            cwd,
-          ).effective.state === 'trusted'
-        : false;
+      const trusted =
+        options.provenance === 'managed-scratch' ||
+        (wsSettings
+          ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+              wsSettings.merged,
+              cwd,
+            ).effective.state === 'trusted'
+          : false);
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
       const wsHash = core.hashDaemonWorkspace(cwd);
       const wsFsFactory = runtime.resolveBridgeFsFactory({
@@ -4343,6 +4378,7 @@ async function runQwenServeImpl(
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
+      managedScratchRoot,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       voiceCoordinator: workspaceVoiceCoordinator,

@@ -80,7 +80,6 @@ import {
 } from '../ui/dropdown-menu';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
-import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import {
@@ -248,6 +247,7 @@ interface WebShellSidebarProps {
    * trusted workspace's folder header, where a live git chip fires it on click.
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  onOpenAddWorkspace?: () => void;
   workspaces?: DaemonWorkspaceCapability[];
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
@@ -437,6 +437,7 @@ export function WebShellSidebar({
   selectedWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
+  onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
@@ -612,7 +613,6 @@ export function WebShellSidebar({
   const [projectExpanded, setProjectExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceRemovalCandidate, setWorkspaceRemovalCandidate] =
     useState<DaemonWorkspaceCapability | null>(null);
   const [workspaceRemovalActivity, setWorkspaceRemovalActivity] =
@@ -3476,15 +3476,13 @@ export function WebShellSidebar({
                   >
                     <SearchIcon />
                   </button>
-                  {!lockedWorkspaceCwd && (
+                  {!lockedWorkspaceCwd && onOpenAddWorkspace && (
                     <button
                       className={styles.projectsHeaderAction}
                       type="button"
                       title={t('sidebar.addWorkspace')}
                       aria-label={t('sidebar.addWorkspace')}
-                      onClick={() => {
-                        setShowAddWorkspaceDialog(true);
-                      }}
+                      onClick={onOpenAddWorkspace}
                     >
                       <PlusIcon />
                     </button>

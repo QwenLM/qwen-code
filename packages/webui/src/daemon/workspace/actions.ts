@@ -874,6 +874,15 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    /** Applies the standard mutation timeout without retrying the POST. */
+    async addScratchWorkspace() {
+      const client = requireClient(getClient, 'Add scratch workspace failed');
+      return withActionTimeout(
+        client.addScratchWorkspace(),
+        'Add scratch workspace timed out',
+      );
+    },
+
     async suggestWorkspacePaths(prefix) {
       const client = requireClient(getClient, 'Suggest workspace paths failed');
       const result = await withActionTimeout(

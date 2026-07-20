@@ -44,6 +44,12 @@ type ChatEditorTestProps = {
   placeholderText?: string;
   workspaces?: Array<{ id: string; cwd: string }>;
   atWorkspaceCwd?: string;
+  selectedWorkspaceCwd?: string;
+  onSelectWorkspace?: (cwd: string | undefined) => void;
+  onCreateScratchWorkspace?: () => void;
+  onOpenExistingWorkspace?: () => void;
+  scratchWorkspaceSupported?: boolean;
+  existingFolderWorkspaceSupported?: boolean;
 };
 
 const {
@@ -113,6 +119,7 @@ const {
         workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
       },
       client: workspaceClient,
+      refreshCapabilities: vi.fn(),
     },
     mockWorkspaceActions: {
       loadSkillsStatus,
@@ -122,6 +129,9 @@ const {
       loadMcpStatus: vi.fn().mockResolvedValue({ servers: [] }),
       loadMcpTools: vi.fn().mockResolvedValue([]),
       loadMcpResources: vi.fn().mockResolvedValue([]),
+      addWorkspace: vi.fn(),
+      addScratchWorkspace: vi.fn(),
+      suggestWorkspacePaths: vi.fn(),
     },
     mockMcp: {
       initialize: vi.fn().mockResolvedValue({ accepted: true }),
@@ -227,6 +237,15 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
 }));
 
 vi.mock('@qwen-code/sdk/daemon', () => ({
+  DaemonHttpError: class DaemonHttpError extends Error {
+    constructor(
+      readonly status: number,
+      readonly body: unknown,
+      message: string,
+    ) {
+      super(message);
+    }
+  },
   DAEMON_GOAL_STATUS_SENTINEL_PREFIX: 'qwen-goal-status:',
   isDaemonTurnError: () => false,
 }));
@@ -922,6 +941,10 @@ beforeEach(() => {
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
+  mockWorkspace.refreshCapabilities.mockReset();
+  mockWorkspace.refreshCapabilities.mockResolvedValue(
+    mockWorkspace.capabilities,
+  );
   mockWorkspace.client.workspaceByCwd.mockClear();
   testState.prompt = 'hello';
   testState.inputAnnotations = undefined;
@@ -974,6 +997,9 @@ beforeEach(() => {
   mockWorkspaceActions.loadMcpStatus.mockResolvedValue({ servers: [] });
   mockWorkspaceActions.loadMcpTools.mockResolvedValue([]);
   mockWorkspaceActions.loadMcpResources.mockResolvedValue([]);
+  mockWorkspaceActions.addWorkspace.mockReset();
+  mockWorkspaceActions.addScratchWorkspace.mockReset();
+  mockWorkspaceActions.suggestWorkspacePaths.mockReset();
   mockMcp.initialize.mockClear();
   mockMcp.initialize.mockResolvedValue({ accepted: true });
   mockMcp.reloadConfig.mockClear();
@@ -1034,6 +1060,248 @@ describe('App session callbacks', () => {
       'secondary',
       '/work/secondary',
     );
+  });
+
+  it('creates scratch once, accepts refreshed capabilities, and opens a fresh chat', async () => {
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'scratch_workspace_registration',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    let resolveScratch!: (value: {
+      id: string;
+      cwd: string;
+      primary: boolean;
+      trusted: boolean;
+      persisted: false;
+    }) => void;
+    mockWorkspaceActions.addScratchWorkspace.mockReturnValue(
+      new Promise((resolve) => {
+        resolveScratch = resolve;
+      }),
+    );
+    const accepted = {
+      features: ['scratch_workspace_registration'],
+      workspaces: [
+        ...mockWorkspace.capabilities.workspaces,
+        {
+          id: 'scratch',
+          cwd: '/managed/scratch-Ab3',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    mockWorkspace.refreshCapabilities.mockResolvedValue(accepted);
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+    });
+    expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledOnce();
+    await act(async () => {
+      resolveScratch({
+        id: 'scratch',
+        cwd: '/managed/scratch-Ab3',
+        primary: false,
+        trusted: true,
+        persisted: false,
+      });
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledOnce();
+    expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
+      '/managed/scratch-Ab3',
+    );
+  });
+
+  it('retries only capability refresh after a committed scratch cannot reconcile', async () => {
+    mockWorkspace.capabilities = {
+      features: ['scratch_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const result = {
+      id: 'scratch',
+      cwd: '/managed/scratch-retry',
+      primary: false,
+      trusted: true,
+      persisted: false as const,
+    };
+    const accepted = {
+      features: ['scratch_workspace_registration'],
+      workspaces: [...mockWorkspace.capabilities.workspaces, { ...result }],
+    };
+    mockWorkspaceActions.addScratchWorkspace.mockResolvedValue(result);
+    mockWorkspace.refreshCapabilities
+      .mockRejectedValueOnce(new Error('refresh failed'))
+      .mockResolvedValueOnce(accepted);
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+      await vi.waitFor(() => {
+        expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledOnce();
+      });
+    });
+    act(() => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+    });
+    expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledOnce();
+
+    const refreshButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Refresh workspace list');
+    await act(async () => {
+      refreshButton?.click();
+      await vi.waitFor(() => {
+        expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledTimes(2);
+        expect(mockSessionActions.clearSession).toHaveBeenCalledOnce();
+      });
+    });
+
+    expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledOnce();
+  });
+
+  it('locks scratch creation after an unknown outcome until acknowledged', async () => {
+    mockWorkspace.capabilities = {
+      features: ['scratch_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.addScratchWorkspace.mockRejectedValue(
+      new Error('Add scratch workspace timed out'),
+    );
+    mockWorkspace.refreshCapabilities.mockResolvedValue(
+      mockWorkspace.capabilities,
+    );
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledOnce();
+        expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledOnce();
+      });
+    });
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+    });
+
+    expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledOnce();
+    expect(document.body.textContent).toContain('I checked the workspace list');
+  });
+
+  it('falls back to primary when the draft workspace becomes untrusted', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const view = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+    });
+    expect(testState.latestChatEditorProps?.selectedWorkspaceCwd).toBe(
+      '/work/secondary',
+    );
+
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: false,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    view.rerender();
+    await flush();
+
+    expect(
+      testState.latestChatEditorProps?.selectedWorkspaceCwd,
+    ).toBeUndefined();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('primary prompt');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/tmp/project' }),
+    );
+  });
+
+  it('does not start a new chat when selecting the active workspace', async () => {
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.(undefined);
+    });
+
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
   });
 
   it('creates new sessions in the locked workspace without a selector', async () => {

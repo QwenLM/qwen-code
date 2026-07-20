@@ -29,7 +29,7 @@ import {
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -122,6 +122,8 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
+import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { Button } from './components/ui/button';
 import {
   WebShellSidebar,
   type WebShellSidebarBranding,
@@ -1301,6 +1303,33 @@ export function App({
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const dynamicWorkspaceRegistrationSupported =
+    workspace.capabilities?.features?.includes(
+      'dynamic_workspace_registration',
+    ) === true;
+  const persistentWorkspaceRegistrationSupported =
+    workspace.capabilities?.features?.includes(
+      'persistent_workspace_registration',
+    ) === true;
+  const scratchWorkspaceRegistrationSupported =
+    workspace.capabilities?.features?.includes(
+      'scratch_workspace_registration',
+    ) === true;
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
+  const workspaceMutationTokenRef = useRef<symbol | null>(null);
+  const workspaceSwitchTokenRef = useRef<symbol | null>(null);
+  type ScratchOutcomeState = 'clear' | 'refreshing' | 'awaiting-ack';
+  const scratchOutcomeUnknownRef = useRef<ScratchOutcomeState>('clear');
+  const committedScratchCwdRef = useRef<string | undefined>(undefined);
+  const [scratchOutcomeUnknown, setScratchOutcomeUnknown] =
+    useState<ScratchOutcomeState>('clear');
+  // The ref is the synchronous authority: a second click can arrive before
+  // React commits the disabled state rendered from its state mirror.
+  const setScratchOutcome = useCallback((state: ScratchOutcomeState) => {
+    scratchOutcomeUnknownRef.current = state;
+    setScratchOutcomeUnknown(state);
+  }, []);
   // Phase 4: the workspace picked for the *next* new session on multi-workspace
   // daemons. Kept in a ref too because session creation is lazy (first prompt),
   // so the ensureSessionForPrompt callback must read the latest value.
@@ -1311,6 +1340,19 @@ export function App({
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
     DaemonWorkspaceGitStatus | undefined
+  >(undefined);
+
+  useEffect(() => {
+    if (!workspace.capabilities || !selectedWorkspaceCwd) return;
+    const selected = workspaces.find(
+      (entry) => entry.cwd === selectedWorkspaceCwd,
+    );
+    if (selected?.trusted) return;
+    selectedWorkspaceCwdRef.current = undefined;
+    setSelectedWorkspaceCwd(undefined);
+  }, [selectedWorkspaceCwd, workspace.capabilities, workspaces]);
+  const [selectedWorkspaceGitBranch, setSelectedWorkspaceGitBranch] = useState<
+    string | undefined
   >(undefined);
   // The workspace the chip's status was last fetched for. On a workspace switch
   // we clear the status immediately so the chip never shows the previous repo's
@@ -2821,6 +2863,13 @@ export function App({
       const primaryWorkspaceCwd = workspaces.find(
         (entry) => entry.primary,
       )?.cwd;
+      const requestedWorkspaceCwd = selectedWorkspaceCwdRef.current;
+      const acceptedWorkspaceCwd = requestedWorkspaceCwd
+        ? workspaces.find(
+            (entry) =>
+              entry.cwd === requestedWorkspaceCwd && entry.trusted === true,
+          )?.cwd
+        : undefined;
       await createAndAttachSessionForPrompt({
         sessionActions: sessionActions as typeof sessionActions &
           SessionActionsWithCreate,
@@ -2829,6 +2878,7 @@ export function App({
         workspaceCwd:
           lockedWorkspaceCwd ??
           selectedWorkspaceCwdRef.current ??
+          acceptedWorkspaceCwd ??
           primaryWorkspaceCwd,
         worktree: pendingWorktreeRef.current,
         onSessionCreated: onSessionCreatedRef.current,
@@ -3021,6 +3071,8 @@ export function App({
     agentsDialogMode !== null ||
     showMemoryDialog ||
     showAuthDialog ||
+    showAddWorkspaceDialog ||
+    scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
     // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
@@ -3975,6 +4027,177 @@ export function App({
       sessionActions,
     ],
   );
+  /**
+   * Serializes workspace intent. An active session keeps its owner and is
+   * replaced by a fresh chat; a draft only changes its next-session target.
+   */
+  const switchWorkspace = useCallback(
+    async (
+      workspaceCwd: string | undefined,
+      acceptedWorkspaces: readonly DaemonWorkspaceCapability[] = workspaces,
+    ) => {
+      if (workspaceSwitchTokenRef.current) return;
+      const token = Symbol('workspace-switch');
+      workspaceSwitchTokenRef.current = token;
+      try {
+        const primaryCwd = acceptedWorkspaces.find(
+          (entry) => entry.primary,
+        )?.cwd;
+        const targetCwd = workspaceCwd ?? primaryCwd;
+        if (workspaceCwd) {
+          const target = acceptedWorkspaces.find(
+            (entry) => entry.cwd === workspaceCwd,
+          );
+          if (!target?.trusted) return;
+        }
+        if (connectionRef.current.sessionId) {
+          if (connectionRef.current.workspaceCwd === targetCwd) return;
+          await createNewSession(workspaceCwd);
+          return;
+        }
+        selectedWorkspaceCwdRef.current = workspaceCwd;
+        setSelectedWorkspaceCwd(workspaceCwd);
+      } finally {
+        if (workspaceSwitchTokenRef.current === token) {
+          workspaceSwitchTokenRef.current = null;
+        }
+      }
+    },
+    [createNewSession, workspaces],
+  );
+
+  /** Refreshes once and switches only from the accepted capability snapshot. */
+  const reconcileAddedWorkspace = useCallback(
+    async (canonicalCwd: string): Promise<boolean> => {
+      try {
+        const capabilities = await workspace.refreshCapabilities?.();
+        const acceptedWorkspaces = capabilities?.workspaces ?? [];
+        const added = acceptedWorkspaces.find(
+          (entry) => entry.cwd === canonicalCwd,
+        );
+        if (added?.trusted) {
+          await switchWorkspace(
+            added.primary ? undefined : added.cwd,
+            acceptedWorkspaces,
+          );
+        }
+        return capabilities !== undefined;
+      } catch (error) {
+        reportError(error, 'Failed to refresh the workspace list');
+        return false;
+      }
+    },
+    [reportError, switchWorkspace, workspace],
+  );
+
+  /** Registers an existing directory through the shared mutation lane. */
+  const handleAddWorkspace = useCallback(
+    async (cwd: string, persist: boolean) => {
+      if (workspaceMutationTokenRef.current) return;
+      const token = Symbol('workspace-mutation');
+      workspaceMutationTokenRef.current = token;
+      setWorkspaceMutationBusy(true);
+      try {
+        const effectivePersist =
+          persistentWorkspaceRegistrationSupported === true && persist;
+        const result = await workspaceActions.addWorkspace(cwd, {
+          persist: effectivePersist,
+        });
+        if (effectivePersist && result.persisted !== true) {
+          throw new Error(t('sidebar.addWorkspacePersistenceError'));
+        }
+        await reconcileAddedWorkspace(result.cwd);
+      } finally {
+        if (workspaceMutationTokenRef.current === token) {
+          workspaceMutationTokenRef.current = null;
+          setWorkspaceMutationBusy(false);
+        }
+      }
+    },
+    [
+      persistentWorkspaceRegistrationSupported,
+      reconcileAddedWorkspace,
+      t,
+      workspaceActions,
+    ],
+  );
+
+  /**
+   * Reconciles either a known committed cwd or an unknown POST outcome. Known
+   * commits may switch; unknown outcomes require explicit user acknowledgement.
+   */
+  const refreshScratchOutcome = useCallback(async () => {
+    setScratchOutcome('refreshing');
+    try {
+      const capabilities = await workspace.refreshCapabilities?.();
+      if (!capabilities) return;
+      const acceptedWorkspaces = capabilities.workspaces ?? [];
+      const committedCwd = committedScratchCwdRef.current;
+      if (committedCwd) {
+        const added = acceptedWorkspaces.find(
+          (entry) => entry.cwd === committedCwd,
+        );
+        if (added?.trusted) {
+          await switchWorkspace(
+            added.primary ? undefined : added.cwd,
+            acceptedWorkspaces,
+          );
+        }
+        committedScratchCwdRef.current = undefined;
+        setScratchOutcome('clear');
+      } else {
+        setScratchOutcome('awaiting-ack');
+      }
+    } catch (error) {
+      reportError(error, 'Failed to refresh the workspace list');
+    }
+  }, [reportError, setScratchOutcome, switchWorkspace, workspace]);
+
+  /**
+   * Creates at most one scratch directory per intent and locks further POSTs
+   * whenever timeout, transport failure, or refresh leaves the result unclear.
+   */
+  const handleCreateScratchWorkspace = useCallback(async () => {
+    if (
+      scratchOutcomeUnknownRef.current !== 'clear' ||
+      workspaceMutationTokenRef.current
+    ) {
+      return;
+    }
+    const token = Symbol('workspace-mutation');
+    workspaceMutationTokenRef.current = token;
+    setWorkspaceMutationBusy(true);
+    try {
+      const result = await workspaceActions.addScratchWorkspace();
+      const reconciled = await reconcileAddedWorkspace(result.cwd);
+      if (!reconciled) {
+        committedScratchCwdRef.current = result.cwd;
+        setScratchOutcome('refreshing');
+      }
+    } catch (error) {
+      const definitelyRejected =
+        error instanceof DaemonHttpError && error.status < 500;
+      if (definitelyRejected) {
+        reportError(error, t('sidebar.addWorkspaceError'));
+      } else {
+        committedScratchCwdRef.current = undefined;
+        setScratchOutcome('refreshing');
+        await refreshScratchOutcome();
+      }
+    } finally {
+      if (workspaceMutationTokenRef.current === token) {
+        workspaceMutationTokenRef.current = null;
+        setWorkspaceMutationBusy(false);
+      }
+    }
+  }, [
+    reconcileAddedWorkspace,
+    refreshScratchOutcome,
+    reportError,
+    setScratchOutcome,
+    t,
+    workspaceActions,
+  ]);
   useEffect(
     () => () => {
       if (composerTextDebounceRef.current) {
@@ -6421,6 +6644,52 @@ export function App({
               />
             </DialogShell>
           )}
+          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
+            <AddWorkspaceDialog
+              onClose={() => setShowAddWorkspaceDialog(false)}
+              onAdd={handleAddWorkspace}
+              onSuggest={(prefix) =>
+                workspaceActions.suggestWorkspacePaths(prefix)
+              }
+              persistenceSupported={
+                persistentWorkspaceRegistrationSupported
+              }
+            />
+          )}
+          {scratchOutcomeUnknown !== 'clear' && (
+            <DialogShell
+              title={t('sidebar.scratchOutcomeUnknownTitle')}
+              size="md"
+              dismissible={false}
+              onClose={() => undefined}
+            >
+              <div className="flex flex-col gap-4">
+                <p>{t('sidebar.scratchOutcomeUnknown')}</p>
+                <ul className="max-h-48 overflow-y-auto text-sm text-muted-foreground">
+                  {workspaces.map((entry) => (
+                    <li key={entry.id}>{entry.cwd}</li>
+                  ))}
+                </ul>
+                <div className="flex justify-end">
+                  {scratchOutcomeUnknown === 'refreshing' ? (
+                    <Button
+                      type="button"
+                      onClick={() => void refreshScratchOutcome()}
+                    >
+                      {t('sidebar.scratchOutcomeRefresh')}
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      onClick={() => setScratchOutcome('clear')}
+                    >
+                      {t('sidebar.scratchOutcomeAcknowledge')}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </DialogShell>
+          )}
 
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
@@ -6508,6 +6777,11 @@ export function App({
                   onSelectWorkspace={setSelectedWorkspaceCwd}
                   onOpenGitDiff={(workspaceCwd) =>
                     setGitDialog({ workspaceCwd, view: 'diff' })
+                  }
+                  onOpenAddWorkspace={
+                    dynamicWorkspaceRegistrationSupported
+                      ? () => setShowAddWorkspaceDialog(true)
+                      : undefined
                   }
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
@@ -7331,12 +7605,13 @@ export function App({
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           workspaces={
-                            !lockedWorkspaceCwd && workspaces.length > 1
+                            !lockedWorkspaceCwd
                               ? workspaces.map((entry) => ({
                                     id: entry.id,
                                     cwd: entry.cwd,
                                     label: workspaceLabel(entry),
                                     primary: entry.primary,
+                                    trusted: entry.trusted,
                                   }))
                               : undefined
                           }
@@ -7350,9 +7625,7 @@ export function App({
                                 : connection.workspaceCwd
                               : selectedWorkspaceCwd
                           }
-                          workspaceSelectionDisabled={Boolean(
-                            connection.sessionId,
-                          )}
+                          workspaceSelectionDisabled={false}
                           atWorkspaceCwd={
                             lockedWorkspaceCwd ??
                             (connection.sessionId
@@ -7361,9 +7634,21 @@ export function App({
                                 workspaces.find((entry) => entry.primary)?.cwd))
                           }
                           onSelectWorkspace={(cwd) => {
-                            selectedWorkspaceCwdRef.current = cwd;
-                            setSelectedWorkspaceCwd(cwd);
+                            void switchWorkspace(cwd);
                           }}
+                          scratchWorkspaceSupported={
+                            scratchWorkspaceRegistrationSupported
+                          }
+                          existingFolderWorkspaceSupported={
+                            dynamicWorkspaceRegistrationSupported
+                          }
+                          workspaceMutationBusy={workspaceMutationBusy}
+                          onCreateScratchWorkspace={() => {
+                            void handleCreateScratchWorkspace();
+                          }}
+                          onOpenExistingWorkspace={() =>
+                            setShowAddWorkspaceDialog(true)
+                          }
                           onChatWidthModeChange={handleChatWidthModeChange}
                           sessionName={sessionDisplayName}
                           dialogOpen={
