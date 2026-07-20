@@ -2315,7 +2315,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [rc:\(.id)] \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
             echo
             echo "## Issue-level comments"
@@ -2544,7 +2544,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -2616,6 +2616,42 @@ jobs:
               git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"
             else
               git push --no-verify origin "${BRANCH}"
+            fi
+            # Resolve the review threads whose findings the agent actually
+            # IMPLEMENTED, so a human re-reviewing sees only what is still open
+            # instead of re-reading every thread to work out what was handled.
+            # The agent cannot do this itself - its sandbox carries no token -
+            # so it records the inline-comment ids it implemented and this step,
+            # which already holds the PAT, maps each to its thread. Findings it
+            # DECLINED or deferred are deliberately left open. Best-effort
+            # throughout: a resolve failure must never fail a good push.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+              THREADS_JSON="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
+                query($owner:String!,$name:String!,$pr:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$pr){
+                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}}}
+                    }
+                  }
+                }' --jq '.data.repository.pullRequest.reviewThreads.nodes' 2> /dev/null || echo '[]')"
+              RESOLVED_N=0
+              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
+                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
+                thread_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(.isResolved | not)
+                     | select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].id // ""' <<< "${THREADS_JSON}")"
+                [[ -n "${thread_id}" ]] || continue
+                if gh api graphql -f threadId="${thread_id}" -f query='
+                  mutation($threadId:ID!){
+                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
+                  }' > /dev/null 2>&1; then
+                  RESOLVED_N=$(( RESOLVED_N + 1 ))
+                else
+                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
+                fi
+              done < "${WORKDIR}/resolved-comments.txt"
+              echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
             fi
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
