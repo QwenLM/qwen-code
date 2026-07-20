@@ -53,7 +53,11 @@ function execGhWithRetry(args: string[], options: { input?: string }): string {
         .trim();
     } catch (err) {
       if (attempt < MAX_RETRIES && isTransientGhError(err)) {
-        sleepSync(BASE_DELAY_MS * (attempt + 1));
+        const delay = BASE_DELAY_MS * (attempt + 1);
+        process.stderr.write(
+          `gh transient error (attempt ${attempt + 1}/${MAX_RETRIES}), retrying in ${delay}ms…\n`,
+        );
+        sleepSync(delay);
         continue;
       }
       throw err;
@@ -114,7 +118,11 @@ export function gh(...args: string[]): string {
 
 /**
  * Run `gh` with `input` on its stdin. Returns stdout, trimmed.
- * Retries automatically on transient GitHub errors (HTTP 5xx).
+ *
+ * Unlike `gh()`, this does NOT retry on transient errors: the only caller
+ * (`submit.ts`) POSTs a review, which is not idempotent — a retry after a
+ * proxy-level 502/503 could duplicate the review if GitHub already processed
+ * the original request.
  *
  * Exists so a caller can send bytes it already holds in memory instead of a
  * pathname `gh` would re-open. Passing `--input <file>` re-reads the file at
@@ -124,7 +132,16 @@ export function gh(...args: string[]): string {
  * closes that window: the bytes checked are the bytes posted.
  */
 export function ghWithInput(input: string, ...args: string[]): string {
-  return execGhWithRetry(args, { input });
+  return (
+    execFileSync('gh', args, {
+      encoding: 'utf8',
+      maxBuffer: 64 * 1024 * 1024,
+      env: ghEnv(),
+      input,
+    }) as string
+  )
+    .replace(/\r\n/g, '\n')
+    .trim();
 }
 
 /**
@@ -236,8 +253,8 @@ export function ensureAuthenticated(): void {
     try {
       execFileSync('gh', ['auth', 'status'], { stdio: 'pipe', env: ghEnv() });
       return;
-    } catch {
-      if (attempt === 0) {
+    } catch (err) {
+      if (attempt === 0 && (err as NodeJS.ErrnoException).code !== 'ENOENT') {
         sleepSync(2_000);
         continue;
       }

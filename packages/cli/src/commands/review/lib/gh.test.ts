@@ -123,7 +123,8 @@ describe('gh() transient-error retry', () => {
     setGhHost(undefined);
   });
 
-  it('retries on HTTP 503 and succeeds', () => {
+  it('retries on HTTP 503 and succeeds, logging to stderr', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     mockExecFileSync
       .mockImplementationOnce(() => {
         throw ghError(
@@ -135,6 +136,10 @@ describe('gh() transient-error retry', () => {
     const result = gh('api', 'repos/o/r/pulls/1');
     expect(result).toBe('{"ok":true}');
     expect(mockExecFileSync).toHaveBeenCalledTimes(2);
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('retrying in 3000ms'),
+    );
+    stderrSpy.mockRestore();
   });
 
   it('retries up to MAX_RETRIES (2) then throws', () => {
@@ -184,31 +189,31 @@ describe('gh() transient-error retry', () => {
   });
 });
 
-describe('ghWithInput() transient-error retry', () => {
-  let atomsWaitSpy: MockInstance<typeof Atomics.wait>;
-
+describe('ghWithInput() does NOT retry (non-idempotent POST)', () => {
   beforeEach(() => {
     mockExecFileSync.mockReset();
-    atomsWaitSpy = vi.spyOn(Atomics, 'wait').mockReturnValue('ok');
   });
 
-  afterEach(() => {
-    atomsWaitSpy.mockRestore();
+  it('throws immediately on HTTP 500 without retrying', () => {
+    mockExecFileSync.mockImplementationOnce(() => {
+      throw ghError('Internal Server Error (HTTP 500)');
+    });
+
+    expect(() =>
+      ghWithInput('{"body":"review"}', 'api', '--input', '-'),
+    ).toThrow(/Internal Server Error/);
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1);
   });
 
-  it('retries on HTTP 500 and passes input through', () => {
-    mockExecFileSync
-      .mockImplementationOnce(() => {
-        throw ghError('Internal Server Error (HTTP 500)');
-      })
-      .mockReturnValueOnce('{"id":1}\n');
+  it('passes input through on success', () => {
+    mockExecFileSync.mockReturnValueOnce('{"id":1}\n');
 
     const result = ghWithInput('{"body":"review"}', 'api', '--input', '-');
     expect(result).toBe('{"id":1}');
-    expect(mockExecFileSync).toHaveBeenCalledTimes(2);
-    // The second call should include the input option
-    const secondCall = mockExecFileSync.mock.calls[1]!;
-    expect(secondCall[2]).toHaveProperty('input', '{"body":"review"}');
+    expect(mockExecFileSync.mock.calls[0]![2]).toHaveProperty(
+      'input',
+      '{"body":"review"}',
+    );
   });
 });
 
@@ -246,5 +251,19 @@ describe('ensureAuthenticated() transient retry', () => {
       'gh CLI is not authenticated. Run `gh auth login` and retry.',
     );
     expect(mockExecFileSync).toHaveBeenCalledTimes(2); // 1 initial + 1 retry
+  });
+
+  it('does not retry when gh is not installed (ENOENT)', () => {
+    const enoent = new Error('spawn gh ENOENT') as NodeJS.ErrnoException;
+    enoent.code = 'ENOENT';
+    mockExecFileSync.mockImplementation(() => {
+      throw enoent;
+    });
+
+    expect(() => ensureAuthenticated()).toThrow(
+      'gh CLI is not authenticated. Run `gh auth login` and retry.',
+    );
+    expect(mockExecFileSync).toHaveBeenCalledTimes(1); // no retry
+    expect(atomsWaitSpy).not.toHaveBeenCalled();
   });
 });
