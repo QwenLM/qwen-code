@@ -331,6 +331,12 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
+function getAbortAwareEndTurnStopReason(
+  signal: AbortSignal,
+): PromptResponse['stopReason'] {
+  return signal.aborted ? 'cancelled' : 'end_turn';
+}
+
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
@@ -2650,9 +2656,9 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                     return {
-                      stopReason: pendingSend.signal.aborted
-                        ? 'cancelled'
-                        : 'end_turn',
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
                     };
                   }
                   const nextAfterTools =
@@ -2668,7 +2674,11 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return { stopReason: 'end_turn' };
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
                   }
                 }
               }
@@ -3320,10 +3330,7 @@ export class Session implements SessionContext {
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
             kind: 'terminal',
-            stopReason:
-              toolRun.stopAfterPermissionCancel && pendingSend.signal.aborted
-                ? 'cancelled'
-                : 'end_turn',
+            stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -3668,6 +3675,11 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
+    // Leave queued input with the host instead of delaying the required
+    // cancellation response on a mid-turn drain that may time out.
+    const midTurnParts = abortSignal.aborted
+      ? []
+      : await this.#drainMidTurnUserMessages(abortSignal);
     this.#preserveUnsentMessageHistory(
       {
         role: 'user',
@@ -3676,7 +3688,7 @@ export class Session implements SessionContext {
           ...(toolRun.loopDetected
             ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
             : []),
-          ...(await this.#drainMidTurnUserMessages(abortSignal)),
+          ...midTurnParts,
         ],
       },
       true,
@@ -4953,7 +4965,7 @@ export class Session implements SessionContext {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
                 await this.#emitBackgroundNotificationEndTurn(
-                  ac.signal.aborted ? 'cancelled' : 'end_turn',
+                  getAbortAwareEndTurnStopReason(ac.signal),
                 );
                 return;
               }
@@ -4965,7 +4977,9 @@ export class Session implements SessionContext {
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                await this.#emitBackgroundNotificationEndTurn(
+                  getAbortAwareEndTurnStopReason(ac.signal),
+                );
                 return;
               }
             }

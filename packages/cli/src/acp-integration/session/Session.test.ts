@@ -10452,6 +10452,7 @@ describe('Session', () => {
       expect(onConfirmSpy).toHaveBeenCalledWith(
         core.ToolConfirmationOutcome.Cancel,
       );
+      expect(mockClient.extMethod).not.toHaveBeenCalled();
       expect(executeSpy).not.toHaveBeenCalled();
     });
 
@@ -13167,8 +13168,9 @@ describe('Session', () => {
       });
 
       it('preserves parent cancellation during Stop-hook permission', async () => {
+        const execute = vi.fn();
         mockToolRegistry.getTool.mockReturnValue(
-          mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, vi.fn()),
+          mockConfirmingTool(core.ToolNames.ASK_USER_QUESTION, execute),
         );
         vi.mocked(mockClient.requestPermission).mockImplementationOnce(
           () => new Promise(() => {}),
@@ -13210,6 +13212,7 @@ describe('Session', () => {
         await session.cancelPendingPrompt();
 
         await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+        expect(execute).not.toHaveBeenCalled();
       });
 
       it('ends background notification processing after cancelled ask_user_question', async () => {
