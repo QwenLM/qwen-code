@@ -656,9 +656,25 @@ describe('qwen-autofix workflow', () => {
     expect(
       runRecheck(pr({ labels: [{ name: 'autofix/skip' }] })).out,
     ).toContain('stale=true');
-    // Fork heads: manageable ONLY with takeover + allow-edits + a fork
-    // author who holds write+ LIVE; anything less discards.
+    // Fork heads: manageable with allow-edits + a fork author who holds write+
+    // LIVE, PLUS either the takeover label (non-bot forks) OR bot authorship
+    // (the bot's own fork needs no label). Anything less discards.
+    // A bot fork with no allow-edits still discards.
     expect(runRecheck(pr({ isCrossRepository: true })).passed).toBe(false);
+    // The bot's OWN fork with allow-edits is eligible WITHOUT a label — the
+    // author check already exempts the bot, and the fork chain no longer
+    // demands a label for it. (head repo matches the HEAD_REPO env.)
+    const botFork = pr({
+      isCrossRepository: true,
+      maintainerCanModify: true,
+      headRepositoryOwner: { login: 'maint-fork' },
+      headRepository: { name: 'qwen-code' },
+    });
+    expect(runRecheck(botFork).passed).toBe(true);
+    // Remove allow-edits and the same bot fork discards (cannot push).
+    expect(runRecheck({ ...botFork, maintainerCanModify: false }).passed).toBe(
+      false,
+    );
     const forkPr = pr({
       isCrossRepository: true,
       maintainerCanModify: true,
@@ -1036,54 +1052,72 @@ describe('qwen-autofix workflow', () => {
     // Rotation: offset 1 starts one past the newest, wrapping — so the
     // oldest tail is reached within pool/budget scans instead of never.
     expect(pick([pr(1), pr(2)], [], 1)).toEqual(['1', '2']);
-    // Fork takeover candidates are admitted separately: allow-edits and no
-    // skip label filter in jq; the author's live write+ gate runs in bash.
+    // Fork candidates are unioned from TWO sources: the bot's own forks
+    // (bot-prs.json is --author AUTOFIX_BOT, so a fork there is the bot's own
+    // work and needs NO label) and takeover-LABELED forks (takeover-prs.json,
+    // any eligible author). Both require allow-edits and no skip; the author's
+    // live write+ gate runs in bash.
     const forkSel = reviewScanJob
       .match(
-        /done < <\(jq -r --arg skip "\$\{SKIP_LABEL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/takeover-prs\.json"\)/,
+        /done < <\(jq -rs --arg skip "\$\{SKIP_LABEL\}" '([\s\S]*?)' \\\n\s+"\$\{WORKDIR\}\/bot-prs\.json" "\$\{WORKDIR\}\/takeover-prs\.json"\)/,
       )?.[1]
       ?.replace(/\n {14}/g, '\n');
     expect(forkSel).toBeTruthy();
     const forkRows = execFileSync(
       'jq',
-      ['-r', '--arg', 'skip', 'autofix/skip', forkSel],
+      ['-rs', '--arg', 'skip', 'autofix/skip', forkSel],
       {
         encoding: 'utf8',
-        input: JSON.stringify([
-          {
-            number: 9,
-            isCrossRepository: true,
-            maintainerCanModify: true,
-            labels: [{ name: 'autofix/takeover' }],
-            author: { login: 'maint-a' },
-          },
-          {
-            number: 8,
-            isCrossRepository: true,
-            maintainerCanModify: false,
-            labels: [{ name: 'autofix/takeover' }],
-            author: { login: 'maint-b' },
-          },
-          {
-            number: 7,
-            isCrossRepository: true,
-            maintainerCanModify: true,
-            labels: [{ name: 'autofix/takeover' }, { name: 'autofix/skip' }],
-            author: { login: 'maint-c' },
-          },
-          {
-            number: 6,
-            isCrossRepository: false,
-            maintainerCanModify: true,
-            labels: [{ name: 'autofix/takeover' }],
-            author: { login: 'maint-d' },
-          },
-        ]),
+        input:
+          // bot-prs.json (all --author qwen-code-dev-bot)
+          JSON.stringify([
+            {
+              number: 20,
+              isCrossRepository: true,
+              maintainerCanModify: true,
+              labels: [], // no label — admitted anyway, it's the bot's own fork
+              author: { login: 'qwen-code-dev-bot' },
+            },
+            {
+              number: 19,
+              isCrossRepository: true,
+              maintainerCanModify: false, // no allow-edits — the bot cannot push
+              labels: [],
+              author: { login: 'qwen-code-dev-bot' },
+            },
+            {
+              number: 18,
+              isCrossRepository: false, // in-repo bot PR — not a fork candidate
+              maintainerCanModify: true,
+              labels: [],
+              author: { login: 'qwen-code-dev-bot' },
+            },
+          ]) +
+          // takeover-prs.json (--label autofix/takeover)
+          JSON.stringify([
+            {
+              number: 9,
+              isCrossRepository: true,
+              maintainerCanModify: true,
+              labels: [{ name: 'autofix/takeover' }],
+              author: { login: 'maint-a' },
+            },
+            {
+              number: 7,
+              isCrossRepository: true,
+              maintainerCanModify: true,
+              labels: [{ name: 'autofix/takeover' }, { name: 'autofix/skip' }],
+              author: { login: 'maint-c' },
+            },
+          ]),
       },
     )
       .trim()
       .split('\n');
-    expect(forkRows).toEqual(['9\tmaint-a']);
+    // unique_by(.number) sorts ascending: the labeled human fork (#9) and the
+    // bot's own unlabeled fork (#20); #19 (no allow-edits), #18 (in-repo), and
+    // #7 (skip) are dropped.
+    expect(forkRows).toEqual(['9\tmaint-a', '20\tqwen-code-dev-bot']);
     expect(reviewScanJob).toContain('fork takeover candidate #${FPR} admitted');
     // Fork plumbing: the target carries its head repo; prepare fetches the
     // fork branch (origin has no copy) and the report pushes back via
