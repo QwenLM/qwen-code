@@ -46,6 +46,9 @@ describe('ci failure patrol workflow', () => {
     );
     expect(validate.id).toBe('decisions');
     expect(validate.run).not.toContain('test -s');
+    // A timeout kill can leave a non-empty but unparseable file; the validate
+    // step must reject it so the act job never receives corrupt JSON.
+    expect(validate.run).toContain('JSON.parse');
 
     // Downstream work is gated on decisions EXISTING, not merely on the job
     // having survived - otherwise a no-decision cycle looks actionable.
@@ -63,16 +66,16 @@ describe('ci failure patrol workflow', () => {
     );
   });
 
-  it('reports an empty classifier result instead of failing the patrol', () => {
+  it('reports an empty or corrupt classifier result instead of failing the patrol', () => {
     const validate = yml.jobs.classify.steps.find(
       (s) => s.name === 'Validate patrol decisions',
     );
-    const run = (writeDecisions) => {
+    const run = (content) => {
       const dir = mkdtempSync(join(tmpdir(), 'patrol-'));
       const out = join(dir, 'gh_output');
       writeFileSync(out, '');
-      if (writeDecisions) {
-        writeFileSync(join(dir, 'ci-flaky-decisions.json'), '{"decisions":[]}');
+      if (content !== null) {
+        writeFileSync(join(dir, 'ci-flaky-decisions.json'), content);
       }
       let status = 0;
       try {
@@ -88,11 +91,15 @@ describe('ci failure patrol workflow', () => {
       return { status, result };
     };
     // Decisions present -> act downstream.
-    expect(run(true)).toMatchObject({ status: 0 });
-    expect(run(true).result).toContain('has_decisions=true');
+    expect(run('{"decisions":[]}')).toMatchObject({ status: 0 });
+    expect(run('{"decisions":[]}').result).toContain('has_decisions=true');
     // Classifier timed out and wrote nothing -> still exit 0, just no work.
-    expect(run(false)).toMatchObject({ status: 0 });
-    expect(run(false).result).toContain('has_decisions=false');
+    expect(run(null)).toMatchObject({ status: 0 });
+    expect(run(null).result).toContain('has_decisions=false');
+    // Classifier killed mid-write -> partial JSON is not actionable.
+    const partial = run('{"decisions": [{"pr": 123, "action": "rer');
+    expect(partial).toMatchObject({ status: 0 });
+    expect(partial.result).toContain('has_decisions=false');
   });
 
   it('keeps classifier credentials isolated and PAT writes explicit', () => {

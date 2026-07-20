@@ -107,14 +107,17 @@ jobs:
         if: "${{ steps.scan.outputs.target_found == 'true' }}"
         run: |-
           # No decisions is a legitimate outcome now that the classifier can
-          # time out without taking the job with it. Report it and let the run
-          # finish cleanly so the next tick retries, rather than failing the
-          # patrol and skipping the act job that reruns real flakes.
-          if [[ -s "${WORKDIR}/ci-flaky-decisions.json" ]]; then
+          # time out without taking the job with it. A timeout can also kill
+          # the process mid-write, leaving a non-empty but unparseable file,
+          # so validate JSON syntax alongside the size check. Report the
+          # result and let the run finish cleanly so the next tick retries,
+          # rather than failing the patrol and skipping the act job that
+          # reruns real flakes.
+          if [[ -s "${WORKDIR}/ci-flaky-decisions.json" ]] && node -e "JSON.parse(require('fs').readFileSync(process.argv[1],'utf8'))" "${WORKDIR}/ci-flaky-decisions.json" 2>/dev/null; then
             echo 'has_decisions=true' >> "${GITHUB_OUTPUT}"
           else
             echo 'has_decisions=false' >> "${GITHUB_OUTPUT}"
-            echo "::warning::patrol classifier produced no decisions this cycle; nothing to act on"
+            echo "::warning::patrol classifier produced no valid decisions this cycle; nothing to act on"
           fi
 
       - name: 'Upload patrol input and decisions'
