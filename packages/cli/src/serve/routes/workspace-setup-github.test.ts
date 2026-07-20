@@ -447,6 +447,34 @@ describe('POST /workspace/setup-github', () => {
     );
   });
 
+  it('does not let workspace settings disable fallback trust checks', async () => {
+    await writeJson(path.join(h.scratch, 'home', 'settings.json'), {
+      proxy: 'http://user-proxy.example:8080',
+      security: { folderTrust: { enabled: true } },
+    });
+    await writeJson(
+      path.join(h.workspace, SETTINGS_DIRECTORY_NAME, 'settings.json'),
+      {
+        proxy: 'http://workspace-proxy.example:8080',
+        security: { folderTrust: { enabled: false } },
+      },
+    );
+    setupGithubMocks.setupGithub.mockResolvedValueOnce(setupResult());
+
+    const res = await request(h.app)
+      .post('/workspace/setup-github')
+      .set('Host', loopbackHost())
+      .set('Authorization', 'Bearer secret')
+      .send({ consent: true });
+
+    expect(res.status).toBe(200);
+    expect(setupGithubMocks.setupGithub).toHaveBeenCalledWith(
+      expect.objectContaining({
+        proxy: 'http://user-proxy.example:8080',
+      }),
+    );
+  });
+
   it('uses workspace proxy settings after trust is established', async () => {
     await writeJson(path.join(h.scratch, 'home', 'settings.json'), {
       proxy: 'http://user-proxy.example:8080',

@@ -3528,6 +3528,7 @@ export class AcpDispatcher {
             return;
           }
           await fs.writeTextOverwrite(resolved, params['content'] as string);
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true, path: p });
           return;
         }
@@ -3570,6 +3571,7 @@ export class AcpDispatcher {
             params['oldText'] as string,
             params['newText'] as string,
           );
+          assertGenerationOpen?.();
           this.replyConn(conn, id, { ok: true, path: p, ...result } as unknown);
           return;
         }

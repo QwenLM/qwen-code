@@ -16,7 +16,7 @@ import {
   type SetupGithubFileOps,
   type SetupGithubResult,
 } from '../../services/setup-github.js';
-import { loadSettings } from '../../config/settings.js';
+import { loadSettings, type Settings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { applyReadHeaders } from './workspace-file-read.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
@@ -386,8 +386,10 @@ export function resolveSetupGithubProxy(
   });
   const trusted =
     workspaceTrusted ??
-    getWorkspaceTrustStatus(settings.merged, boundWorkspace).effective.state ===
-      'trusted';
+    getWorkspaceTrustStatus(
+      settingsForSetupGithubTrust(settings),
+      boundWorkspace,
+    ).effective.state === 'trusted';
   const settingsProxy = trusted
     ? settings.merged.proxy
     : settings.user.settings.proxy ||
@@ -400,6 +402,22 @@ export function resolveSetupGithubProxy(
     env['HTTP_PROXY'] ||
     env['http_proxy']
   );
+}
+
+function settingsForSetupGithubTrust(
+  settings: ReturnType<typeof loadSettings>,
+): Settings {
+  const userFolderTrust = settings.user.settings.security?.folderTrust;
+  const systemFolderTrust = settings.system.settings.security?.folderTrust;
+  if (!userFolderTrust && !systemFolderTrust) return {};
+  return {
+    security: {
+      folderTrust: {
+        ...systemFolderTrust,
+        ...userFolderTrust,
+      },
+    },
+  };
 }
 
 function requestAbortSignal(req: Request, res: Response): AbortSignal {

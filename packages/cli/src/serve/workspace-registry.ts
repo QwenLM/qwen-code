@@ -452,6 +452,7 @@ export function createWorkspaceRegistry(
     completeDrain: (runtime) => {
       const entry = entryForRuntime(runtime);
       if (!entry || runtime.primary || entry.state !== 'draining') return;
+      entry.current?.guard.close();
       entry.state = 'removed';
       byCwd.delete(runtime.workspaceCwd);
       byId.delete(runtime.workspaceId);

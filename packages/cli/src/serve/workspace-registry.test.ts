@@ -423,9 +423,11 @@ describe('createWorkspaceRegistry', () => {
       workspaceId: 'ws-primary',
       primary: true,
     });
+    const generationGuard = createWorkspaceGenerationGuard();
     const secondary = makeRuntime('/work/secondary', {
       workspaceId: 'ws-secondary',
       removable: true,
+      generationGuard,
     });
     const sessionOwnerIndex = createWorkspaceSessionOwnerIndex();
     sessionOwnerIndex.register('session-secondary', secondary.workspaceCwd);
@@ -448,6 +450,8 @@ describe('createWorkspaceRegistry', () => {
     expect(registry.beginDrain(secondary)).toBe(true);
     registry.completeDrain(secondary);
     expect(registry.listManaged()).toEqual([primary]);
+    expect(generationGuard.closed).toBe(true);
+    expect(() => generationGuard.assertOpen()).toThrow(/no longer active/);
     expect(sessionOwnerIndex.getWorkspaceCwds('session-secondary')).toEqual([]);
 
     const replacement = makeRuntime('/work/secondary', {
