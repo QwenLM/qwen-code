@@ -18,6 +18,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import {
   MAX_WORKSPACE_SKILL_NAME_LENGTH,
   WorkspaceSkillManagementError,
@@ -28,6 +29,7 @@ import {
 
 interface RegisterWorkspaceSkillsRoutesDeps {
   workspaceRuntime: WorkspaceRuntime;
+  workspaceRegistry?: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
   sendBridgeError: SendBridgeError;
@@ -35,6 +37,76 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+}
+
+type WorkspaceSkillActivation = 'deferred' | 'reconciling';
+
+function scheduleSkillsConfiguration(
+  runtimes: readonly WorkspaceRuntime[],
+): WorkspaceSkillActivation {
+  let reconciling = false;
+  for (const runtime of runtimes) {
+    try {
+      if (
+        getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).reconcileSkillsConfiguration() === 'reconciling'
+      ) {
+        reconciling = true;
+      }
+    } catch {
+      // Durable configuration is already committed; activation is best-effort.
+    }
+  }
+  return reconciling ? 'reconciling' : 'deferred';
+}
+
+function affectedSkillRuntimes(
+  runtime: WorkspaceRuntime,
+  scope: WorkspaceSkillScope,
+  registry?: WorkspaceRegistry,
+): readonly WorkspaceRuntime[] {
+  return scope === 'global'
+    ? (registry?.listManaged() ?? [runtime])
+    : [runtime];
+}
+
+function invalidateSkillsInventory(
+  runtimes: readonly WorkspaceRuntime[],
+): void {
+  for (const runtime of runtimes) {
+    try {
+      runtime.workspaceService.invalidateWorkspaceSkillsStatus();
+    } catch {
+      // Durable configuration is already committed; invalidation is best-effort.
+    }
+  }
+}
+
+function rejectQualifiedGlobalScope(
+  scope: WorkspaceSkillScope,
+  res: Response,
+): boolean {
+  if (scope !== 'global') return false;
+  res.status(400).json({
+    error:
+      'Global Skill scope must be changed through /workspace/config/skills',
+    code: 'global_scope_requires_singular_owner',
+  });
+  return true;
+}
+
+function rejectSingularWorkspaceScope(
+  scope: WorkspaceSkillScope,
+  res: Response,
+): boolean {
+  if (scope !== 'workspace') return false;
+  res.status(400).json({
+    error:
+      'Workspace Skill scope must be changed through /workspaces/:workspace/config/skills',
+    code: 'workspace_scope_requires_qualified_workspace',
+  });
+  return true;
 }
 
 function parseSkillToggleRequest(
@@ -164,6 +236,20 @@ export function registerWorkspaceSkillsRoutes(
   const buildWorkspaceCtx = createBuildWorkspaceCtx(
     deps.workspaceRuntime.workspaceCwd,
   );
+  app.get('/workspace/config/skills', async (_req, res) => {
+    const configRoute = 'GET /workspace/config/skills';
+    try {
+      res
+        .status(200)
+        .json(
+          await deps.workspaceRuntime.workspaceService.getWorkspaceSkillsConfigStatus(
+            buildWorkspaceCtx(configRoute),
+          ),
+        );
+    } catch (error) {
+      deps.sendBridgeError(res, error, { route: configRoute });
+    }
+  });
   const route = 'POST /workspace/skills/:name/enable';
   app.post(
     '/workspace/skills/install',
@@ -181,7 +267,18 @@ export function registerWorkspaceSkillsRoutes(
             buildWorkspaceCtx(installRoute, clientId),
             input,
           );
-        res.status(200).json(result);
+        const runtimes = affectedSkillRuntimes(
+          deps.workspaceRuntime,
+          input.scope,
+          deps.workspaceRegistry,
+        );
+        if (input.scope === 'global') {
+          invalidateSkillsInventory(runtimes);
+        }
+        res.status(200).json({
+          ...result,
+          activation: scheduleSkillsConfiguration(runtimes),
+        });
       } catch (err) {
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: installRoute });
@@ -213,7 +310,18 @@ export function registerWorkspaceSkillsRoutes(
             skillName,
             scope,
           );
-        res.status(200).json(result);
+        const runtimes = affectedSkillRuntimes(
+          deps.workspaceRuntime,
+          scope,
+          deps.workspaceRegistry,
+        );
+        if (scope === 'global') {
+          invalidateSkillsInventory(runtimes);
+        }
+        res.status(200).json({
+          ...result,
+          activation: scheduleSkillsConfiguration(runtimes),
+        });
       } catch (err) {
         if (!sendSkillManagementError(res, err))
           deps.sendBridgeError(res, err, { route: deleteRoute });
@@ -236,9 +344,86 @@ export function registerWorkspaceSkillsRoutes(
             input.skillName,
             input.enabled,
           );
-        res.status(200).json(result);
+        res.status(200).json({
+          ...result,
+          activation: scheduleSkillsConfiguration([deps.workspaceRuntime]),
+        });
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspace/config/skills/install',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const input = parseSkillInstallRequest(req, res, deps.safeBody);
+      if (!input) return;
+      if (rejectSingularWorkspaceScope(input.scope, res)) return;
+      const installRoute = 'POST /workspace/config/skills/install';
+      try {
+        const result =
+          await deps.workspaceRuntime.workspaceService.installWorkspaceSkill(
+            buildWorkspaceCtx(installRoute),
+            input,
+          );
+        const runtimes = affectedSkillRuntimes(
+          deps.workspaceRuntime,
+          input.scope,
+          deps.workspaceRegistry,
+        );
+        if (input.scope === 'global') {
+          invalidateSkillsInventory(runtimes);
+        }
+        res.status(200).json({
+          ...result,
+          activation: scheduleSkillsConfiguration(runtimes),
+        });
+      } catch (err) {
+        if (!sendSkillManagementError(res, err))
+          deps.sendBridgeError(res, err, { route: installRoute });
+      }
+    },
+  );
+  app.delete(
+    '/workspace/config/skills/:name',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const rawSkillName = req.params['name'];
+      const scope = parseDeleteScope(req, res);
+      if (!rawSkillName || !scope) return;
+      if (rejectSingularWorkspaceScope(scope, res)) return;
+      let skillName: string;
+      try {
+        skillName = validateWorkspaceSkillName(rawSkillName);
+      } catch (error) {
+        sendSkillManagementError(res, error);
+        return;
+      }
+      const deleteRoute = 'DELETE /workspace/config/skills/:name';
+      try {
+        const result =
+          await deps.workspaceRuntime.workspaceService.deleteWorkspaceSkill(
+            buildWorkspaceCtx(deleteRoute),
+            skillName,
+            scope,
+          );
+        const runtimes = affectedSkillRuntimes(
+          deps.workspaceRuntime,
+          scope,
+          deps.workspaceRegistry,
+        );
+        if (scope === 'global') {
+          invalidateSkillsInventory(runtimes);
+        }
+        res.status(200).json({
+          ...result,
+          activation: scheduleSkillsConfiguration(runtimes),
+        });
+      } catch (err) {
+        if (!sendSkillManagementError(res, err))
+          deps.sendBridgeError(res, err, { route: deleteRoute });
       }
     },
   );
@@ -251,6 +436,26 @@ export function registerWorkspaceQualifiedSkillsRoutes(
     'mutate' | 'safeBody' | 'sendBridgeError'
   > & { workspaceRegistry: WorkspaceRegistry },
 ): void {
+  app.get('/workspaces/:workspace/config/skills', async (req, res) => {
+    const runtime = resolveWorkspaceRuntimeFromParam(
+      deps.workspaceRegistry,
+      req,
+      res,
+    );
+    if (!runtime) return;
+    const configRoute = 'GET /workspaces/:workspace/config/skills';
+    try {
+      res
+        .status(200)
+        .json(
+          await runtime.workspaceService.getWorkspaceSkillsConfigStatus(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(configRoute),
+          ),
+        );
+    } catch (error) {
+      deps.sendBridgeError(res, error, { route: configRoute });
+    }
+  });
   const route = 'POST /workspaces/:workspace/skills/:name/enable';
   app.post(
     '/workspaces/:workspace/skills/install',
@@ -264,6 +469,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
       const input = parseSkillInstallRequest(req, res, deps.safeBody);
       if (!input) return;
+      if (rejectQualifiedGlobalScope(input.scope, res)) return;
       const clientId = parseAndValidateWorkspaceClientId(
         req,
         res,
@@ -272,10 +478,22 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       if (clientId === null) return;
       const installRoute = 'POST /workspaces/:workspace/skills/install';
       try {
-        const result = await runtime.workspaceService.installWorkspaceSkill(
-          createBuildWorkspaceCtx(runtime.workspaceCwd)(installRoute, clientId),
-          input,
-        );
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runManagementOperation(async () => {
+          const installed =
+            await runtime.workspaceService.installWorkspaceSkill(
+              createBuildWorkspaceCtx(runtime.workspaceCwd)(
+                installRoute,
+                clientId,
+              ),
+              input,
+            );
+          return {
+            ...installed,
+            activation: scheduleSkillsConfiguration([runtime]),
+          };
+        });
         res.status(200).json(result);
       } catch (err) {
         if (!sendSkillManagementError(res, err))
@@ -296,6 +514,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       const rawSkillName = req.params['name'];
       const scope = parseDeleteScope(req, res);
       if (!rawSkillName || !scope) return;
+      if (rejectQualifiedGlobalScope(scope, res)) return;
       let skillName: string;
       try {
         skillName = validateWorkspaceSkillName(rawSkillName);
@@ -311,11 +530,22 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       if (clientId === null) return;
       const deleteRoute = 'DELETE /workspaces/:workspace/skills/:name';
       try {
-        const result = await runtime.workspaceService.deleteWorkspaceSkill(
-          createBuildWorkspaceCtx(runtime.workspaceCwd)(deleteRoute, clientId),
-          skillName,
-          scope,
-        );
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runManagementOperation(async () => {
+          const deleted = await runtime.workspaceService.deleteWorkspaceSkill(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(
+              deleteRoute,
+              clientId,
+            ),
+            skillName,
+            scope,
+          );
+          return {
+            ...deleted,
+            activation: scheduleSkillsConfiguration([runtime]),
+          };
+        });
         res.status(200).json(result);
       } catch (err) {
         if (!sendSkillManagementError(res, err))
@@ -342,14 +572,139 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       );
       if (clientId === null) return;
       try {
-        const result = await runtime.workspaceService.setWorkspaceSkillEnabled(
-          createBuildWorkspaceCtx(runtime.workspaceCwd)(route, clientId),
-          input.skillName,
-          input.enabled,
-        );
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runManagementOperation(async () => {
+          const updated =
+            await runtime.workspaceService.setWorkspaceSkillEnabled(
+              createBuildWorkspaceCtx(runtime.workspaceCwd)(route, clientId),
+              input.skillName,
+              input.enabled,
+            );
+          return {
+            ...updated,
+            activation: scheduleSkillsConfiguration([runtime]),
+          };
+        });
         res.status(200).json(result);
       } catch (err) {
         deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
+    '/workspaces/:workspace/config/skills/install',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const input = parseSkillInstallRequest(req, res, deps.safeBody);
+      if (!input) return;
+      if (rejectQualifiedGlobalScope(input.scope, res)) return;
+      const configRoute = 'POST /workspaces/:workspace/config/skills/install';
+      try {
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runManagementOperation(async () => {
+          const installed =
+            await runtime.workspaceService.installWorkspaceSkill(
+              createBuildWorkspaceCtx(runtime.workspaceCwd)(configRoute),
+              input,
+            );
+          return {
+            ...installed,
+            activation: scheduleSkillsConfiguration([runtime]),
+          };
+        });
+        res.status(200).json(result);
+      } catch (err) {
+        if (!sendSkillManagementError(res, err)) {
+          deps.sendBridgeError(res, err, { route: configRoute });
+        }
+      }
+    },
+  );
+  app.delete(
+    '/workspaces/:workspace/config/skills/:name',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const rawSkillName = req.params['name'];
+      const scope = parseDeleteScope(req, res);
+      if (!rawSkillName || !scope) return;
+      if (rejectQualifiedGlobalScope(scope, res)) return;
+      let skillName: string;
+      try {
+        skillName = validateWorkspaceSkillName(rawSkillName);
+      } catch (error) {
+        sendSkillManagementError(res, error);
+        return;
+      }
+      const configRoute = 'DELETE /workspaces/:workspace/config/skills/:name';
+      try {
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runManagementOperation(async () => {
+          const deleted = await runtime.workspaceService.deleteWorkspaceSkill(
+            createBuildWorkspaceCtx(runtime.workspaceCwd)(configRoute),
+            skillName,
+            scope,
+          );
+          return {
+            ...deleted,
+            activation: scheduleSkillsConfiguration([runtime]),
+          };
+        });
+        res.status(200).json(result);
+      } catch (err) {
+        if (!sendSkillManagementError(res, err)) {
+          deps.sendBridgeError(res, err, { route: configRoute });
+        }
+      }
+    },
+  );
+  app.post(
+    '/workspaces/:workspace/config/skills/:name/enable',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const input = parseSkillToggleRequest(req, res, deps.safeBody);
+      if (!input) return;
+      const configRoute =
+        'POST /workspaces/:workspace/config/skills/:name/enable';
+      try {
+        const result = await getWorkspaceRuntimeCoordinator(
+          runtime,
+        ).runManagementOperation(async () => {
+          const updated =
+            await runtime.workspaceService.setWorkspaceSkillEnabled(
+              createBuildWorkspaceCtx(runtime.workspaceCwd)(configRoute),
+              input.skillName,
+              input.enabled,
+            );
+          return {
+            ...updated,
+            activation: scheduleSkillsConfiguration([runtime]),
+          };
+        });
+        res.status(200).json(result);
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route: configRoute });
       }
     },
   );

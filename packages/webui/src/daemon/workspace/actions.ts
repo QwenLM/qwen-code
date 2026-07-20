@@ -396,36 +396,81 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async loadSkillsStatus() {
-      const client = requireClient(getClient, 'Load skills failed');
+    async loadSkillsConfigStatus() {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load skills configuration failed',
+      );
       return withActionTimeout(
-        client.workspaceSkills(),
-        'Load skills timed out',
+        client.workspaceConfigSkills(),
+        'Load skills configuration timed out',
       );
     },
 
+    async loadSkillsStatus(runtimeStatus) {
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load skills failed',
+      );
+      const [catalog, runtime] = await withActionTimeout(
+        Promise.all([
+          client.workspaceRuntimeSkills(),
+          runtimeStatus
+            ? Promise.resolve(runtimeStatus)
+            : client.workspaceRuntimeStatus().catch(() => undefined),
+        ]),
+        'Load skills timed out',
+      );
+      const capability = runtime?.capabilities.skills;
+      return {
+        ...catalog,
+        runtimeState: capability?.state,
+        coordinatorRuntimeEpoch: runtime?.runtimeEpoch,
+        capabilityRuntimeEpoch: capability?.runtimeEpoch,
+        runtimeCatalogEpoch: catalog.runtimeEpoch,
+        runtimeCatalogInitialized: catalog.initialized,
+        runtimeCatalogSource: catalog.source,
+        runtimeSkills: catalog.skills,
+      };
+    },
+
     async setWorkspaceSkillEnabled(skillName, enabled) {
-      const client = requireClient(getClient, 'Set skill enabled failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Set skill enabled failed',
+      );
       return withActionTimeout(
-        client.setWorkspaceSkillEnabled(skillName, enabled),
+        client.setWorkspaceConfigSkillEnabled(skillName, enabled),
         'Set skill enabled timed out',
       );
     },
 
     async installWorkspaceSkill(request) {
       const client = requireClient(getClient, 'Install skill failed');
-      return withActionTimeout(
-        client.installWorkspaceSkill(request),
-        'Install skill timed out',
-      );
+      const operation =
+        request.scope === 'workspace'
+          ? client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .installWorkspaceConfigSkill({ ...request, scope: 'workspace' })
+          : client.installWorkspaceConfigSkill({
+              ...request,
+              scope: 'global',
+            });
+      return withActionTimeout(operation, 'Install skill timed out');
     },
 
     async deleteWorkspaceSkill(skillName, scope) {
       const client = requireClient(getClient, 'Delete skill failed');
-      return withActionTimeout(
-        client.deleteWorkspaceSkill(skillName, scope),
-        'Delete skill timed out',
-      );
+      const operation =
+        scope === 'workspace'
+          ? client
+              .workspaceByCwd(requireWorkspaceCwd(getWorkspaceCwd))
+              .deleteWorkspaceConfigSkill(skillName, 'workspace')
+          : client.deleteWorkspaceConfigSkill(skillName, scope);
+      return withActionTimeout(operation, 'Delete skill timed out');
     },
 
     async loadExtensionsStatus() {
@@ -441,12 +486,28 @@ export function createDaemonWorkspaceActions({
     },
 
     async loadToolsStatus() {
-      const client = requireClient(getClient, 'Load tools failed');
-      return withActionTimeout(client.workspaceTools(), 'Load tools timed out');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Load tools failed',
+      );
+      await withActionTimeout(
+        ensureRuntimeCapability(client, 'tools'),
+        'Prepare tools timed out',
+        WORKSPACE_RUNTIME_ACTION_TIMEOUT_MS,
+      );
+      return withActionTimeout(
+        client.workspaceRuntimeTools(),
+        'Load tools timed out',
+      );
     },
 
     async setWorkspaceToolEnabled(toolName, enabled) {
-      const client = requireClient(getClient, 'Set tool enabled failed');
+      const client = requireWorkspaceClient(
+        getClient,
+        getWorkspaceCwd,
+        'Set tool enabled failed',
+      );
       return withActionTimeout(
         client.setWorkspaceToolEnabled(toolName, enabled),
         'Set tool enabled timed out',

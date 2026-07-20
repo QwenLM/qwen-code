@@ -724,6 +724,37 @@ describe('createDaemonWorkspaceService', () => {
       );
     });
 
+    it('reads Skills config inventory locally even while a child is live', async () => {
+      const queryWorkspaceStatus = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        source: 'live',
+        skills: [{ kind: 'skill', status: 'ok', name: 'runtime-only' }],
+      });
+      const workspaceSkillsStatusProvider = vi.fn().mockResolvedValue({
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [{ kind: 'skill', status: 'ok', name: 'configured' }],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          isChannelLive: () => true,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      const result = await svc.getWorkspaceSkillsConfigStatus(makeCtx());
+
+      expect(result.source).toBe('config');
+      expect(result.skills.map((skill) => skill.name)).toEqual(['configured']);
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+
     it('getWorkspaceSkillsStatus idle fallback returns correct envelope', async () => {
       const queryWorkspaceStatus = vi
         .fn()
@@ -749,6 +780,8 @@ describe('createDaemonWorkspaceService', () => {
         v: 1,
         workspaceCwd: '/ws',
         initialized: true,
+        runtimeEpoch: 3,
+        source: 'live' as const,
         skills: [
           {
             kind: 'skill',
@@ -773,6 +806,8 @@ describe('createDaemonWorkspaceService', () => {
       // Channel live: authoritative skills from the ACP child, cached.
       const first = await svc.getWorkspaceSkillsStatus(makeCtx());
       expect(first.initialized).toBe(true);
+      expect(first.runtimeEpoch).toBe(3);
+      expect(first.source).toBe('live');
       expect(first.skills.map((s) => s.name)).toEqual(['review']);
 
       // Channel reaped: queryWorkspaceStatus falls back to the empty idle
@@ -781,6 +816,8 @@ describe('createDaemonWorkspaceService', () => {
       channelLive = false;
       const second = await svc.getWorkspaceSkillsStatus(makeCtx());
       expect(second.initialized).toBe(true);
+      expect(second.runtimeEpoch).toBe(3);
+      expect(second.source).toBe('cache');
       expect(second.skills.map((s) => s.name)).toEqual(['review']);
     });
 
@@ -790,12 +827,14 @@ describe('createDaemonWorkspaceService', () => {
           v: 1,
           workspaceCwd: '/ws',
           initialized: true,
+          source: 'live' as const,
           skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
         },
         {
           v: 1,
           workspaceCwd: '/ws',
           initialized: true,
+          source: 'live' as const,
           skills: [
             { kind: 'skill', status: 'ok', name: 'review' },
             { kind: 'skill', status: 'ok', name: 'plan' },
@@ -820,6 +859,7 @@ describe('createDaemonWorkspaceService', () => {
         v: 1,
         workspaceCwd: '/ws',
         initialized: true,
+        source: 'live' as const,
         skills: [
           {
             kind: 'skill',
@@ -844,9 +884,11 @@ describe('createDaemonWorkspaceService', () => {
         .mockImplementation((_m: string, idle: () => unknown) =>
           Promise.resolve(channelLive ? liveStatus : idle()),
         );
-      const workspaceSkillsStatusProvider = vi
-        .fn()
-        .mockResolvedValue(localStatus);
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue(localStatus),
+        { invalidate },
+      );
       const svc = createDaemonWorkspaceService(
         makeDeps({
           queryWorkspaceStatus,
@@ -861,6 +903,7 @@ describe('createDaemonWorkspaceService', () => {
 
       const result = await svc.getWorkspaceSkillsStatus(makeCtx());
       expect(result.skills).toEqual([]);
+      expect(invalidate).toHaveBeenCalledWith('/ws');
       expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
     });
 
@@ -905,6 +948,7 @@ describe('createDaemonWorkspaceService', () => {
         v: 1,
         workspaceCwd: '/ws',
         initialized: true,
+        source: 'live' as const,
         skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
       };
       let channelLive = true;
@@ -940,6 +984,7 @@ describe('createDaemonWorkspaceService', () => {
         v: 1,
         workspaceCwd: '/ws',
         initialized: true,
+        source: 'live' as const,
         skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
       };
       const queryWorkspaceStatus = vi.fn().mockResolvedValue(liveStatus);
@@ -963,6 +1008,7 @@ describe('createDaemonWorkspaceService', () => {
         v: 1,
         workspaceCwd: '/ws',
         initialized: true,
+        source: 'live' as const,
         skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
       };
       let shouldThrow = false;
@@ -1329,14 +1375,34 @@ describe('createDaemonWorkspaceService', () => {
         v: 1,
         workspaceCwd: '/workspace',
         initialized: true,
+        source: 'live',
         skills: [skill],
       });
-
-    it('uses the canonical skill name and refreshes every active session', async () => {
-      const invalidate = vi.fn();
-      const workspaceSkillsStatusProvider = Object.assign(vi.fn(), {
-        invalidate,
+    const makeSkillDeps = (
+      overrides: Partial<DaemonWorkspaceServiceDeps> = {},
+      skills: Array<Record<string, unknown>> = [skillStatus()],
+    ) =>
+      makeDeps({
+        workspaceSkillsStatusProvider: vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          skills,
+        }),
+        ...overrides,
       });
+
+    it('uses the canonical skill name and leaves activation to the coordinator', async () => {
+      const invalidate = vi.fn();
+      const workspaceSkillsStatusProvider = Object.assign(
+        vi.fn().mockResolvedValue({
+          v: 1,
+          workspaceCwd: '/workspace',
+          initialized: true,
+          skills: [skillStatus()],
+        }),
+        { invalidate },
+      );
       const persistDisabledSkills = vi.fn().mockResolvedValue({
         changed: true,
         disabled: ['review'],
@@ -1347,7 +1413,7 @@ describe('createDaemonWorkspaceService', () => {
       });
       const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           workspaceSkillsStatusProvider,
           persistDisabledSkills,
@@ -1369,16 +1435,13 @@ describe('createDaemonWorkspaceService', () => {
         false,
       );
       expect(invalidate).toHaveBeenCalledWith('/workspace');
-      expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
-        'qwen/control/workspace/skills/refresh',
-        { cwd: '/workspace' },
-      );
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
       expect(result).toEqual({
         skillName: 'review',
         enabled: false,
         changed: true,
-        activation: 'applied',
-        sessionsRefreshed: 2,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
         sessionsFailed: 0,
       });
       expect(publishWorkspaceEvent).toHaveBeenCalledWith({
@@ -1392,10 +1455,37 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
+    it('validates mutations against config when the live Catalog is stale', async () => {
+      const queryWorkspaceStatus = statusQuery(
+        skillStatus({ name: 'old-runtime-skill' }),
+      );
+      const persistDisabledSkills = vi.fn().mockResolvedValue({
+        changed: true,
+        disabled: ['review'],
+      });
+      const svc = createDaemonWorkspaceService(
+        makeSkillDeps({
+          queryWorkspaceStatus,
+          persistDisabledSkills,
+          isChannelLive: () => true,
+        }),
+      );
+
+      await expect(
+        svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
+      ).resolves.toMatchObject({ skillName: 'review', changed: true });
+      expect(persistDisabledSkills).toHaveBeenCalledWith(
+        '/workspace',
+        'review',
+        false,
+      );
+      expect(queryWorkspaceStatus).not.toHaveBeenCalled();
+    });
+
     it('publishes the reduced disabled list when enabling a skill', async () => {
       const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
@@ -1415,7 +1505,7 @@ describe('createDaemonWorkspaceService', () => {
       ).resolves.toMatchObject({
         skillName: 'review',
         enabled: true,
-        activation: 'applied',
+        activation: 'deferred',
       });
       expect(publishWorkspaceEvent).toHaveBeenCalledWith({
         type: 'settings_changed',
@@ -1428,9 +1518,9 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('reports partial activation when a session refresh fails', async () => {
+    it('does not infer activation from session refresh results', async () => {
       const svc = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
@@ -1447,16 +1537,16 @@ describe('createDaemonWorkspaceService', () => {
       await expect(
         svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
       ).resolves.toMatchObject({
-        activation: 'partial',
-        sessionsRefreshed: 1,
-        sessionsFailed: 1,
+        activation: 'deferred',
+        sessionsRefreshed: 0,
+        sessionsFailed: 0,
       });
     });
 
     it('defers refresh when no child exists or the child closes mid-refresh', async () => {
       const noChildCommand = vi.fn();
       const noChild = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
@@ -1476,7 +1566,7 @@ describe('createDaemonWorkspaceService', () => {
       expect(noChildCommand).not.toHaveBeenCalled();
 
       const closedChild = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
@@ -1501,7 +1591,7 @@ describe('createDaemonWorkspaceService', () => {
 
     it('defers refresh when the child reports no session', async () => {
       const svc = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
@@ -1523,17 +1613,18 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('reports partial activation on an unexpected refresh error', async () => {
+    it('does not call the ACP refresh path from the persistence service', async () => {
+      const invokeWorkspaceCommand = vi
+        .fn()
+        .mockRejectedValue(new Error('network timeout'));
       const svc = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
             disabled: ['review'],
           }),
-          invokeWorkspaceCommand: vi
-            .fn()
-            .mockRejectedValue(new Error('network timeout')),
+          invokeWorkspaceCommand,
           isChannelLive: () => true,
         }),
       );
@@ -1541,17 +1632,18 @@ describe('createDaemonWorkspaceService', () => {
       await expect(
         svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
       ).resolves.toMatchObject({
-        activation: 'partial',
+        activation: 'deferred',
         sessionsRefreshed: 0,
-        sessionsFailed: 1,
+        sessionsFailed: 0,
       });
+      expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
     });
 
     it('does not refresh or publish an idempotent mutation', async () => {
       const invokeWorkspaceCommand = vi.fn();
       const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: false,
@@ -1565,7 +1657,7 @@ describe('createDaemonWorkspaceService', () => {
 
       await expect(
         svc.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
-      ).resolves.toMatchObject({ changed: false, activation: 'applied' });
+      ).resolves.toMatchObject({ changed: false, activation: 'deferred' });
       expect(invokeWorkspaceCommand).not.toHaveBeenCalled();
       expect(publishWorkspaceEvent).not.toHaveBeenCalled();
     });
@@ -1573,7 +1665,7 @@ describe('createDaemonWorkspaceService', () => {
     it('rejects unknown, hidden, and inactive extension skills before persisting', async () => {
       const persistDisabledSkills = vi.fn();
       const unknown = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills,
         }),
@@ -1583,12 +1675,15 @@ describe('createDaemonWorkspaceService', () => {
       ).rejects.toBeInstanceOf(WorkspaceSkillNotFoundError);
 
       const hidden = createDaemonWorkspaceService(
-        makeDeps({
-          queryWorkspaceStatus: statusQuery(
-            skillStatus({ userInvocable: false }),
-          ),
-          persistDisabledSkills,
-        }),
+        makeSkillDeps(
+          {
+            queryWorkspaceStatus: statusQuery(
+              skillStatus({ userInvocable: false }),
+            ),
+            persistDisabledSkills,
+          },
+          [skillStatus({ userInvocable: false })],
+        ),
       );
       await expect(
         hidden.setWorkspaceSkillEnabled(makeCtx(), 'review', false),
@@ -1597,16 +1692,25 @@ describe('createDaemonWorkspaceService', () => {
       });
 
       const inactive = createDaemonWorkspaceService(
-        makeDeps({
-          queryWorkspaceStatus: statusQuery(
+        makeSkillDeps(
+          {
+            queryWorkspaceStatus: statusQuery(
+              skillStatus({
+                status: 'disabled',
+                level: 'extension',
+                extensionName: 'review-ext',
+              }),
+            ),
+            persistDisabledSkills,
+          },
+          [
             skillStatus({
               status: 'disabled',
               level: 'extension',
               extensionName: 'review-ext',
             }),
-          ),
-          persistDisabledSkills,
-        }),
+          ],
+        ),
       );
       await expect(
         inactive.setWorkspaceSkillEnabled(makeCtx(), 'review', true),
@@ -1620,7 +1724,7 @@ describe('createDaemonWorkspaceService', () => {
       const invokeWorkspaceCommand = vi.fn();
       const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
-        makeDeps({
+        makeSkillDeps({
           queryWorkspaceStatus: statusQuery(),
           persistDisabledSkills: vi
             .fn()
@@ -1720,7 +1824,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('returns ready without preheating when the channel is already live', async () => {
+    it('renews the idle window when the channel is already live', async () => {
       const preheatAcpChild = vi.fn().mockResolvedValue(undefined);
       const svc = createDaemonWorkspaceService(
         makeDeps({ isChannelLive: () => true, preheatAcpChild }),
@@ -1729,7 +1833,7 @@ describe('createDaemonWorkspaceService', () => {
       const result = await svc.preheatAcpChild(makeCtx());
 
       expect(result).toMatchObject({ ready: true, channelLive: true });
-      expect(preheatAcpChild).not.toHaveBeenCalled();
+      expect(preheatAcpChild).toHaveBeenCalledOnce();
     });
 
     it('returns an error when ACP preheat is unavailable', async () => {

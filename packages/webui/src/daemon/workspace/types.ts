@@ -394,7 +394,10 @@ export interface DaemonWorkspaceActions {
   }): Promise<DaemonUsageDashboard>;
 
   // Skills
-  loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;
+  loadSkillsConfigStatus(): Promise<DaemonWorkspaceSkillsStatus>;
+  loadSkillsStatus(
+    runtimeStatus?: DaemonWorkspaceRuntimeStatus,
+  ): Promise<DaemonWorkspaceSkillsViewStatus>;
   setWorkspaceSkillEnabled(
     skillName: string,
     enabled: boolean,
