@@ -384,10 +384,6 @@ function collectEvidenceSources(transcript: Content[]): string[] {
       ) {
         modelTexts.push(part.text);
       }
-      if (part.functionCall) {
-        sources.push(safeStringify(part.functionCall));
-        sources.push(...collectResponseStrings(part.functionCall.args));
-      }
       if (part.functionResponse) {
         sources.push(safeStringify(part.functionResponse.response));
         sources.push(...collectResponseStrings(part.functionResponse.response));
@@ -454,17 +450,27 @@ function parseJudgeReply(text: string): JudgeWireResult | null {
 }
 
 function parseEvidence(value: unknown): string[] | undefined {
-  if (!Array.isArray(value) || value.length === 0) {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > MAX_EVIDENCE_ITEMS
+  ) {
     return undefined;
   }
-  const valid = value
-    .slice(0, MAX_EVIDENCE_ITEMS)
-    .filter((item): item is string => typeof item === 'string')
-    .map((s) => s.trim())
-    .filter(
-      (s) => s.length >= MIN_EVIDENCE_LEN && s.length <= MAX_EVIDENCE_LEN,
-    );
-  return valid.length > 0 ? valid : undefined;
+  const trimmed = value.map((item) =>
+    typeof item === 'string' ? item.trim() : null,
+  );
+  if (
+    trimmed.some(
+      (s) =>
+        s === null ||
+        s.length < MIN_EVIDENCE_LEN ||
+        s.length > MAX_EVIDENCE_LEN,
+    )
+  ) {
+    return undefined;
+  }
+  return trimmed as string[];
 }
 
 function normalizeWhitespace(s: string): string {

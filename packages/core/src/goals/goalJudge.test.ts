@@ -270,7 +270,7 @@ describe('judgeGoal', () => {
     ).resolves.toMatchObject({ kind: 'met', ok: true });
   });
 
-  it('truncates evidence arrays exceeding the item limit to the first MAX items', async () => {
+  it('rejects evidence arrays exceeding the item limit', async () => {
     const grounded = Array.from({ length: 8 }, (_, i) => `item_${i}_produced`);
     const ungrounded = ['not_in_output_9', 'not_in_output_10'];
     const client = makeMockClient({
@@ -289,7 +289,7 @@ describe('judgeGoal', () => {
         lastAssistantText: grounded.join('\n'),
         signal: new AbortController().signal,
       }),
-    ).resolves.toMatchObject({ kind: 'met', ok: true });
+    ).resolves.toMatchObject({ kind: 'not_met', ok: false });
   });
 
   it('excludes thought parts from evidence sources', async () => {
@@ -321,7 +321,7 @@ describe('judgeGoal', () => {
     });
   });
 
-  it('filters invalid evidence items instead of rejecting the whole array', async () => {
+  it('rejects the whole evidence array when any item is invalid', async () => {
     const client = makeMockClient({
       history: [{ role: 'model', parts: [{ text: 'tests passing' }] }],
       reply: JSON.stringify({
@@ -338,10 +338,38 @@ describe('judgeGoal', () => {
         lastAssistantText: 'tests passing',
         signal: new AbortController().signal,
       }),
-    ).resolves.toMatchObject({ kind: 'met', ok: true });
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
   });
 
-  it('accepts terminal evidence present in a function call', async () => {
+  it('rejects a terminal verdict when any evidence item is ungrounded', async () => {
+    const client = makeMockClient({
+      history: [{ role: 'model', parts: [{ text: 'build succeeded' }] }],
+      reply: JSON.stringify({
+        ok: true,
+        reason: 'build and deploy done',
+        evidence: ['build succeeded', 'deployed to production'],
+      }),
+    });
+    const config = makeConfig({ client });
+
+    await expect(
+      judgeGoal(config, {
+        condition: 'build and deploy',
+        lastAssistantText: 'build succeeded',
+        signal: new AbortController().signal,
+      }),
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
+  });
+
+  it('rejects evidence grounded only in function call arguments', async () => {
     const client = makeMockClient({
       history: [
         {
@@ -370,7 +398,11 @@ describe('judgeGoal', () => {
         lastAssistantText: '',
         signal: new AbortController().signal,
       }),
-    ).resolves.toMatchObject({ kind: 'met', ok: true });
+    ).resolves.toMatchObject({
+      kind: 'not_met',
+      ok: false,
+      reason: expect.stringMatching(/evidence/i),
+    });
   });
 
   it('matches evidence against raw strings in tool results', async () => {
