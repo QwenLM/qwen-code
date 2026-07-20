@@ -349,10 +349,10 @@ export function createDaemonWorkspaceService(
         durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       });
 
-      if (channelLive()) {
-        return finish({ ready: true, channelLive: true });
-      }
       if (!preheatAcpChildOnBridge) {
+        if (channelLive()) {
+          return finish({ ready: true, channelLive: true });
+        }
         return finish({
           ready: false,
           channelLive: false,
@@ -409,6 +409,9 @@ export function createDaemonWorkspaceService(
             err instanceof TimeoutError
               ? 'ACP preheat did not complete before the timeout'
               : 'ACP preheat failed',
+          ...(err instanceof TimeoutError && !live
+            ? { backgroundInProgress: true }
+            : {}),
         });
       }
 

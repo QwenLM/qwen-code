@@ -604,6 +604,29 @@ describe('DELETE /workspaces/:workspace', () => {
     expect(deps.workspaceRegistry.beginDrain).not.toHaveBeenCalled();
   });
 
+  it('blocks non-force removal during zero-session workspace runtime work', async () => {
+    const runtime = makeRuntime(REAL_DIR);
+    Object.assign(runtime.bridge, {
+      hasActiveWorkspaceWork: () => true,
+    });
+    const runtimeRemoval = createRemovalController();
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([runtime]),
+      runtimeRemoval,
+    });
+
+    const res = await request(app).delete(
+      `/workspaces/${encodeURIComponent(runtime.workspaceId)}`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({
+      code: 'workspace_busy',
+      activity: { sessions: 0, workspaceRuntime: 1 },
+    });
+    expect(runtimeRemoval.beginDrain).not.toHaveBeenCalled();
+  });
+
   it('blocks non-force removal while a Voice operation is active', async () => {
     const runtime = makeRuntime(REAL_DIR);
     const runtimeRemoval = createRemovalController();

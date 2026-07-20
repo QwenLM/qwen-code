@@ -1773,11 +1773,13 @@ describe('createDaemonWorkspaceService', () => {
         ready: false,
         channelLive: false,
         reason: 'timeout',
+        backgroundInProgress: true,
       });
       expect(retry).toMatchObject({
         ready: false,
         channelLive: false,
         reason: 'timeout',
+        backgroundInProgress: true,
       });
       expect(preheatAcpChild).toHaveBeenCalledOnce();
       expect(mockWriteStderrLine).toHaveBeenCalledWith(

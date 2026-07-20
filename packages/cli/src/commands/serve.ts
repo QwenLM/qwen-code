@@ -280,8 +280,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'boolean',
         default: true,
         description:
-          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
-          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'HTTP bridge mode: start each workspace `qwen --acp` child on demand. ' +
+          'Stage 2 native in-process mode is ' +
           'not yet implemented; this flag will become opt-in then.',
       })
       .option('mcp-client-budget', {
@@ -332,8 +332,8 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       .option('channel-idle-timeout-ms', {
         type: 'number',
         description:
-          'Milliseconds to keep ACP child alive after last session closes. ' +
-          '0 or unset = immediate kill (default).',
+          'Compatibility auto-reap delay for an idle workspace ACP child. ' +
+          'Positive integer; unset = disabled.',
       })
       .option('session-reap-interval-ms', {
         type: 'number',

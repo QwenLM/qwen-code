@@ -122,8 +122,7 @@ export interface FakeAgentOpts {
   /**
    * Custom `newSession` handler. Default returns a synthesized id (see
    * `newSession` below). Used by tests that need to exercise the
-   * doSpawn newSession-failure path (e.g. throwing to cover the
-   * `isDying`-mark-then-kill cleanup).
+   * doSpawn newSession-failure path while keeping the workspace channel live.
    */
   newSessionImpl?: (
     p: NewSessionRequest,

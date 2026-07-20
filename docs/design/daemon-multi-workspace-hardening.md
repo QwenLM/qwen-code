@@ -23,14 +23,14 @@ fallback when resolution fails.
 
 ## Failure semantics
 
-| State                        | Required behavior                                                                                                                                                                                                                                                                                  |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Unknown workspace or session | Fail closed with the route's stable mismatch/not-found response. Do not probe or execute against primary.                                                                                                                                                                                          |
-| Untrusted workspace          | Reject runtime-backed execution and mutation. An untrusted secondary may use only explicitly documented read-only surfaces, including bounded filesystem and persisted catalog/transcript reads, without starting ACP or writing repair state. Legacy primary preheat does not authorize requests. |
-| Ambiguous live-session owner | Return a server error because dispatch cannot be made safely. Execute on no bridge.                                                                                                                                                                                                                |
-| Bootstrapping runtime        | Keep process-global liveness responsive; runtime-backed work waits for or reports the declared startup failure. Deep health returns `503` with a reason while aggregation is unavailable.                                                                                                          |
-| Draining runtime             | Refuse new work with the stable draining response. A non-forced removal rolls back with `workspace_busy` if activity exists; a forced removal requests termination and bounded cleanup of active resources. The runtime remains in daemon-global accounting until removal completes.               |
-| Removed runtime              | Treat it as unknown. It must disappear from capabilities, routing, and health aggregation before the same workspace can be re-added. Cleanup after the persistence commit point is best-effort; failures are logged and do not restore routing.                                                    |
+| State                        | Required behavior                                                                                                                                                                                                                                                                                         |
+| ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Unknown workspace or session | Fail closed with the route's stable mismatch/not-found response. Do not probe or execute against primary.                                                                                                                                                                                                 |
+| Untrusted workspace          | Reject runtime-backed execution and mutation. An untrusted secondary may use only explicitly documented read-only surfaces, including bounded filesystem and persisted catalog/transcript reads, without starting ACP or writing repair state. Primary compatibility routing does not authorize requests. |
+| Ambiguous live-session owner | Return a server error because dispatch cannot be made safely. Execute on no bridge.                                                                                                                                                                                                                       |
+| Bootstrapping runtime        | Keep process-global liveness responsive; runtime-backed work waits for or reports the declared startup failure. Deep health returns `503` with a reason while aggregation is unavailable.                                                                                                                 |
+| Draining runtime             | Refuse new work with the stable draining response. A non-forced removal rolls back with `workspace_busy` if activity exists; a forced removal requests termination and bounded cleanup of active resources. The runtime remains in daemon-global accounting until removal completes.                      |
+| Removed runtime              | Treat it as unknown. It must disappear from capabilities, routing, and health aggregation before the same workspace can be re-added. Cleanup after the persistence commit point is best-effort; failures are logged and do not restore routing.                                                           |
 
 ## Invariants
 
@@ -40,11 +40,10 @@ fallback when resolution fails.
   be absolute and canonicalize to a registered runtime.
 - Each active workspace runtime owns its environment snapshot, bridge, workspace
   services, filesystem/trust boundary, Voice state, and ACP/MCP resource
-  boundary. Production attempts to preheat the primary bridge for compatibility
-  and retries on first use after a preheat failure. A trusted secondary starts
-  its ACP child on demand and, when `mcp_workspace_pool` is enabled, owns the
-  pool inside that child; an untrusted secondary must not start either. Primary
-  preheat does not bypass route trust gates. A
+  boundary. Every trusted workspace starts its ACP child on first runtime-backed
+  use and, when `mcp_workspace_pool` is enabled, owns the pool inside that child;
+  an untrusted workspace must not start either. Primary compatibility routing
+  does not bypass route trust gates. A
   process-global Voice coordinator enforces the shared admission cap while
   tracking leases by owning runtime. Same-named environment keys must not cross
   runtimes, and a workspace overlay must not mutate the parent process

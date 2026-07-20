@@ -31,7 +31,10 @@ import type {
   MidTurnQueueEntry,
   PendingPromptEntry,
 } from './bridgeTypes.js';
-import { SERVE_CONTROL_EXT_METHODS } from './status.js';
+import {
+  SERVE_CONTROL_EXT_METHODS,
+  SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS,
+} from './status.js';
 import type {
   ClientMcpMessageSender,
   CreateSubSessionHandler,
@@ -630,6 +633,10 @@ export class BridgeClient implements Client {
       sessionId: string,
       event: BridgeGenerationNotificationEvent,
     ) => void,
+    private readonly onWorkspaceMcpAuthenticationCompleted?: (
+      operationId: string,
+      serverName: string,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -1227,6 +1234,21 @@ export class BridgeClient implements Client {
     method: string,
     params: Record<string, unknown>,
   ): Promise<void> {
+    if (
+      method ===
+      SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS.mcpAuthenticationCompleted
+    ) {
+      const operationId = params['operationId'];
+      const serverName = params['serverName'];
+      if (
+        params['v'] === 1 &&
+        typeof operationId === 'string' &&
+        typeof serverName === 'string'
+      ) {
+        this.onWorkspaceMcpAuthenticationCompleted?.(operationId, serverName);
+      }
+      return;
+    }
     if (method === 'qwen/notify/session/generation/event') {
       const sessionId = params['sessionId'];
       const requestId = params['requestId'];

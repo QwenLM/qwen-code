@@ -63,7 +63,7 @@ Pick the path that matches your goal:
 ## Glossary
 
 - **ACP** - Agent Client Protocol. JSON-RPC over stdio spoken between the daemon bridge and the ACP child process. This is not the HTTP protocol that clients use against the daemon.
-- **ACP child** - the `qwen --acp` child that hosts one workspace's agent runtime. Production attempts to preheat the primary bridge and retries on first use after failure; a trusted secondary starts its child on demand, while an untrusted secondary does not. The owning bridge multiplexes sessions and clients onto that child.
+- **ACP child** - the `qwen --acp` child that hosts one workspace's agent runtime. Every trusted workspace starts its child on the first runtime command or Session; an untrusted workspace does not. The owning bridge multiplexes sessions and clients onto that child.
 - **acp-bridge** - the `@qwen-code/acp-bridge` package (`packages/acp-bridge/`). Owns session multiplexing, the permission mediator, the event bus, and the channel factory.
 - **BridgeClient** - `packages/acp-bridge/src/bridgeClient.ts`. Wraps one ACP `ClientSideConnection`, and handles `requestPermission`, `sendPrompt`, and `cancelSession`.
 - **Channel factory** - pluggable strategy for spawning or attaching to an ACP child. The default `spawnChannel` runs `qwen --acp` as a subprocess; `inMemoryChannel` runs it in-process for tests.
