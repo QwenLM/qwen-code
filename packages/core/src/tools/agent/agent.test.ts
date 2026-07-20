@@ -412,6 +412,23 @@ describe('AgentTool', () => {
       );
     });
 
+    it('documents that working_dir takes precedence over isolation', () => {
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          working_dir: {
+            description?: string;
+          };
+        };
+      };
+
+      expect(properties.properties.working_dir.description).toContain(
+        'isolation is ignored',
+      );
+      expect(properties.properties.working_dir.description).not.toContain(
+        'Mutually exclusive',
+      );
+    });
+
     it('does not advertise "fork" in the enum, even when interactive', async () => {
       // `fork` is intentionally omitted from the enum so the model is not
       // steered to fork result-bearing work; it stays valid via validation.

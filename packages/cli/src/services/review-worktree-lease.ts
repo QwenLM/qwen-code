@@ -11,8 +11,20 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { basename, isAbsolute, join, relative, resolve } from 'node:path';
+import { createDebugLogger } from '@qwen-code/qwen-code-core';
+import { REVIEW_TMP_DIR, reviewBranch } from '../commands/review/lib/paths.js';
 
 const LEASE_PREFIX = 'qwen-review-lease-';
+const GIT_TIMEOUT_MS = 120_000;
+const debugLogger = createDebugLogger('REVIEW_WORKTREE_LEASE');
+
+function gitOptions() {
+  return {
+    stdio: 'ignore' as const,
+    timeout: GIT_TIMEOUT_MS,
+    env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
+  };
+}
 
 interface ReviewWorktreeLease {
   sessionId: string;
@@ -24,7 +36,7 @@ interface ReviewWorktreeLease {
 }
 
 function leaseDirectory(repositoryRoot: string): string {
-  return join(repositoryRoot, '.qwen', 'tmp');
+  return join(repositoryRoot, REVIEW_TMP_DIR);
 }
 
 function leasePath(repositoryRoot: string, target: string): string {
@@ -79,24 +91,31 @@ function readLease(path: string): ReviewWorktreeLease | null {
       return null;
     }
     return value;
-  } catch {
+  } catch (error) {
+    debugLogger.debug(`Failed to read review lease ${path}:`, error);
     return null;
   }
 }
 
 function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
   const prMatch = /^pr-(\d+)$/.exec(lease.target);
-  if (!prMatch || lease.branch !== `qwen-review/pr-${prMatch[1]}`) return false;
+  if (!prMatch || lease.branch !== reviewBranch(prMatch[1])) {
+    debugLogger.debug(`Rejected invalid review lease ${lease.target}`);
+    return false;
+  }
 
   const repositoryRoot = resolve(lease.repositoryRoot);
   const worktreePath = resolve(lease.worktreePath);
-  const reviewTmpRoot = resolve(repositoryRoot, '.qwen', 'tmp');
+  const reviewTmpRoot = resolve(repositoryRoot, REVIEW_TMP_DIR);
   const worktreeRelative = relative(reviewTmpRoot, worktreePath);
   if (
     worktreeRelative === '' ||
     worktreeRelative.startsWith('..') ||
     isAbsolute(worktreeRelative)
   ) {
+    debugLogger.debug(
+      `Rejected review lease outside ${REVIEW_TMP_DIR}: ${worktreePath}`,
+    );
     return false;
   }
 
@@ -104,15 +123,25 @@ function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
     execFileSync(
       'git',
       ['-C', repositoryRoot, 'worktree', 'remove', worktreePath, '--force'],
-      { stdio: 'ignore' },
+      gitOptions(),
     );
-  } catch {
-    rmSync(worktreePath, { recursive: true, force: true });
+  } catch (error) {
+    debugLogger.debug(
+      `Git failed to remove review worktree ${lease.target}:`,
+      error,
+    );
     try {
-      execFileSync('git', ['-C', repositoryRoot, 'worktree', 'prune'], {
-        stdio: 'ignore',
-      });
-    } catch {
+      rmSync(worktreePath, { recursive: true, force: true });
+      execFileSync(
+        'git',
+        ['-C', repositoryRoot, 'worktree', 'prune'],
+        gitOptions(),
+      );
+    } catch (fallbackError) {
+      debugLogger.debug(
+        `Fallback failed to remove review worktree ${lease.target}:`,
+        fallbackError,
+      );
       return false;
     }
   }
@@ -129,10 +158,16 @@ function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
         '--quiet',
         `refs/heads/${lease.branch}`,
       ],
-      { stdio: 'ignore' },
+      gitOptions(),
     );
   } catch (error) {
-    if ((error as { status?: unknown }).status !== 1) return false;
+    if ((error as { status?: unknown }).status !== 1) {
+      debugLogger.debug(
+        `Failed to inspect review branch ${lease.branch}:`,
+        error,
+      );
+      return false;
+    }
     branchExists = false;
   }
   if (branchExists) {
@@ -140,11 +175,13 @@ function removeLeaseWorktree(lease: ReviewWorktreeLease): boolean {
       execFileSync(
         'git',
         ['-C', repositoryRoot, 'branch', '-D', lease.branch],
-        {
-          stdio: 'ignore',
-        },
+        gitOptions(),
       );
-    } catch {
+    } catch (error) {
+      debugLogger.debug(
+        `Failed to delete review branch ${lease.branch}:`,
+        error,
+      );
       return false;
     }
   }
@@ -177,7 +214,7 @@ export function cleanupReviewWorktreeLeases(params: {
         rmSync(path, { force: true });
       }
     }
-  } catch {
-    return;
+  } catch (error) {
+    debugLogger.debug('Failed to clean up review worktree leases:', error);
   }
 }

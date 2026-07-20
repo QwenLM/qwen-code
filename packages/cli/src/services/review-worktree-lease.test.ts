@@ -2,7 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -166,6 +173,32 @@ describe('review worktree leases', () => {
     });
 
     expect(existsSync(worktree)).toBe(true);
+    expect(
+      existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
+    ).toBe(true);
+  });
+
+  it('does not remove a path outside the review temp directory', () => {
+    const root = createRepository();
+    const outside = join(root, 'keep-me');
+    mkdirSync(outside);
+    writeFileSync(join(outside, 'marker'), 'keep');
+    createReviewWorktreeLease({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      target: 'pr-1',
+      repositoryRoot: root,
+      worktreePath: outside,
+      branch: 'qwen-review/pr-1',
+    });
+
+    cleanupReviewWorktreeLeases({
+      sessionId: 'session-a',
+      promptId: 'prompt-parent',
+      repositoryRoot: root,
+    });
+
+    expect(readFileSync(join(outside, 'marker'), 'utf8')).toBe('keep');
     expect(
       existsSync(join(root, '.qwen', 'tmp', 'qwen-review-lease-pr-1.json')),
     ).toBe(true);
