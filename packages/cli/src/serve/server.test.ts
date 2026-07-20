@@ -164,10 +164,14 @@ const mockWt = vi.hoisted(() => ({
 }));
 vi.mock('node:fs', async (importOriginal) => {
   const original = await importOriginal<typeof import('node:fs')>();
+  const wrapped = ((p: fs.PathLike) =>
+    mockWt.realpath
+      ? mockWt.realpath(String(p))
+      : original.realpathSync(p)) as typeof original.realpathSync;
+  wrapped.native = original.realpathSync.native;
   return {
     ...original,
-    realpathSync: (p: fs.PathLike) =>
-      mockWt.realpath ? mockWt.realpath(String(p)) : original.realpathSync(p),
+    realpathSync: wrapped,
   };
 });
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {

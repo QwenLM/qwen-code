@@ -1569,22 +1569,25 @@ export function registerSessionRoutes(
             // Defense-in-depth: resolve symlinks on both the target and
             // the expected worktrees root, then verify containment. This
             // defeats both `..` traversal and symlink escapes (e.g.
-            // .qwen/worktrees/escape -> /etc). Uses sidecar.originalCwd
-            // (repo root at creation) as the expected root, falling back
-            // to workspaceCwd for monorepo subdirectory workspaces.
-            let contained = false;
+            // .qwen/worktrees/escape -> /etc). The allowed root is always
+            // derived from workspaceCwd (never from the sidecar, which is
+            // attacker-writable). The canonical realTarget is passed to
+            // changeSessionCwd to eliminate the TOCTOU window between
+            // validation and relocation.
+            let realTarget: string | undefined;
             try {
-              const realTarget = fs.realpathSync(sidecar.worktreePath);
-              const root = sidecar.originalCwd || workspaceCwd;
+              realTarget = fs.realpathSync(sidecar.worktreePath);
               const realRoot = fs.realpathSync(
-                path.join(root, '.qwen', 'worktrees'),
+                path.join(workspaceCwd, '.qwen', 'worktrees'),
               );
               const rel = path.relative(realRoot, realTarget);
-              contained = !rel.startsWith('..') && !path.isAbsolute(rel);
+              if (rel.startsWith('..') || path.isAbsolute(rel)) {
+                realTarget = undefined;
+              }
             } catch {
-              contained = false;
+              realTarget = undefined;
             }
-            if (!contained) {
+            if (!realTarget) {
               daemonLog?.warn('worktree sidecar path failed containment', {
                 sessionId,
                 path: sidecar.worktreePath,
@@ -1592,7 +1595,7 @@ export function registerSessionRoutes(
             } else {
               const wt = {
                 slug: sidecar.slug,
-                path: sidecar.worktreePath,
+                path: realTarget,
                 branch: sidecar.worktreeBranch,
               };
               try {
