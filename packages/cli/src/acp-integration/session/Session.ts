@@ -2649,7 +2649,11 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return { stopReason: 'end_turn' };
+                    return {
+                      stopReason: pendingSend.signal.aborted
+                        ? 'cancelled'
+                        : 'end_turn',
+                    };
                   }
                   const nextAfterTools =
                     await this.#buildNextMessageAfterToolRun(
@@ -3316,7 +3320,10 @@ export class Session implements SessionContext {
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
             kind: 'terminal',
-            stopReason: 'end_turn',
+            stopReason:
+              toolRun.stopAfterPermissionCancel && pendingSend.signal.aborted
+                ? 'cancelled'
+                : 'end_turn',
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -4945,7 +4952,9 @@ export class Session implements SessionContext {
               if (toolRun.stopAfterPermissionCancel) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                await this.#emitBackgroundNotificationEndTurn(
+                  ac.signal.aborted ? 'cancelled' : 'end_turn',
+                );
                 return;
               }
               const nextAfterTools = await this.#buildNextMessageAfterToolRun(
