@@ -49,7 +49,7 @@ const EN: Messages = {
   'gitDiff.collapse': (v) => `Hide changes for ${v?.path ?? 'file'}`,
   'worktree.welcomeTitle': 'Worktree isolated session',
   'worktree.welcomeDesc':
-    'Changes are made in a separate copy of the repo and won't affect your main branch',
+    "Changes are made in a separate copy of the repo and won't affect your main branch",
   'gitLog.title': 'History',
   'gitLog.subtitle': (v) => `${v?.count ?? 0} commits`,
   'gitLog.loading': 'Loading history…',
