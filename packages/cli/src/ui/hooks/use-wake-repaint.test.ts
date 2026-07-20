@@ -60,6 +60,37 @@ describe('useWakeRepaint', () => {
     expect(repaint).toHaveBeenCalledTimes(1);
   });
 
+  it('does not double-repaint when the heartbeat follows a SIGCONT', () => {
+    const { repaint } = setup();
+
+    // Advance past the first normal tick so lastTick is established.
+    act(() => vi.advanceTimersByTime(HEARTBEAT_MS));
+
+    // Suspend + resume via SIGCONT.
+    vi.setSystemTime(Date.now() + WAKE_THRESHOLD_MS + 1_000);
+    act(() => {
+      process.emit('SIGCONT');
+    });
+    expect(repaint).toHaveBeenCalledTimes(1);
+
+    // The next heartbeat should see a small gap (SIGCONT reset lastTick).
+    act(() => vi.advanceTimersByTime(HEARTBEAT_MS));
+    expect(repaint).toHaveBeenCalledTimes(1); // still 1, not 2
+  });
+
+  it('unrefs the heartbeat timer so it does not keep the process alive', () => {
+    const unrefSpy = vi.fn();
+    vi.spyOn(globalThis, 'setInterval').mockReturnValue({
+      unref: unrefSpy,
+      [Symbol.toPrimitive]: () => 0,
+    } as unknown as ReturnType<typeof setInterval>);
+
+    renderHook(() => useWakeRepaint(vi.fn()));
+
+    expect(unrefSpy).toHaveBeenCalledTimes(1);
+    vi.restoreAllMocks();
+  });
+
   it('does not repaint on SIGCONT after unmount', () => {
     const { repaint, view } = setup();
 
