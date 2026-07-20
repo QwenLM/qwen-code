@@ -7,6 +7,7 @@ import {
   nextFireTime,
   parseCron,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries,
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
@@ -62,7 +63,10 @@ function isFileExistsError(err: unknown): boolean {
 function channelMemoryOptions(
   getBridge: () => AcpBridge,
   cwd: string,
-): Pick<ChannelBaseOptions, 'channelMemory' | 'memoryIntentClassifier'> {
+): Pick<
+  ChannelBaseOptions,
+  'channelMemory' | 'memoryIntentClassifier' | 'channelMemoryRecallObserver'
+> {
   return {
     channelMemory: {
       readChannelMemory,
@@ -77,6 +81,7 @@ function channelMemoryOptions(
       getBridge,
       cwd,
     ),
+    channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
   };
 }
 

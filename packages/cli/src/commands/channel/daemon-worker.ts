@@ -6,6 +6,7 @@ import {
   getChannelMemoryRevision,
   listChannelMemoryEntries,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries,
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
@@ -505,6 +506,7 @@ export async function runChannelDaemonWorker(
               bridgeFacade,
               config.cwd,
             ),
+            channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
             observedContacts: {
               observe: (channelName, observation) => {
                 observedContacts.observe(channelName, observation);
