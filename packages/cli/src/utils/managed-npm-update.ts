@@ -53,7 +53,7 @@ function readBaseInstallation(bootstrapPath: string): {
 } {
   const manifest = JSON.parse(
     fs.readFileSync(
-      path.join(path.dirname(path.dirname(bootstrapPath)), 'package.json'),
+      path.join(path.dirname(bootstrapPath), 'package.json'),
       'utf8',
     ),
   ) as { name?: unknown; version?: unknown };
@@ -79,7 +79,7 @@ async function validateInstallation(
       `Installed package did not match ${PACKAGE_NAME}@${version}`,
     );
   }
-  await fsPromises.access(path.join(root, 'dist', 'cli.js'));
+  await fsPromises.access(path.join(root, 'cli.js'));
 }
 
 async function smokeTest(prefix: string, version: string): Promise<void> {
@@ -88,7 +88,7 @@ async function smokeTest(prefix: string, version: string): Promise<void> {
   delete env['QWEN_CODE_RELAUNCH_ARGS'];
   const { stdout } = await execFileAsync(
     process.execPath,
-    [path.join(packageDir(prefix), 'scripts', 'cli-entry.js'), '--version'],
+    [path.join(packageDir(prefix), 'cli-entry.js'), '--version'],
     { encoding: 'utf8', env, timeout: 10_000 },
   );
   if (stdout.trim() !== version) {

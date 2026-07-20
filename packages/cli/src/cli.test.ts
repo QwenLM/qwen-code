@@ -505,11 +505,11 @@ describe('bootstrap import boundaries', () => {
     expect(output).toBe(`${expectedVersion}\n`);
   });
 
-  it('launches the active managed npm version without replacing the running package', () => {
+  it('launches the active managed npm version with an empty home directory', () => {
     const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-managed-npm-'));
     const entryDir = path.join(tempDir, 'bootstrap');
     const entryPath = path.join(entryDir, 'cli-entry.mjs');
-    const qwenHome = path.join(tempDir, 'home');
+    const qwenHome = path.join(tempDir, '.qwen');
     try {
       mkdirSync(entryDir, { recursive: true });
       copyFileSync('../../scripts/cli-entry.js', entryPath);
@@ -526,7 +526,7 @@ describe('bootstrap import boundaries', () => {
         '@qwen-code',
         'qwen-code',
       );
-      mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
+      mkdirSync(packageRoot, { recursive: true });
       writeFileSync(
         path.join(entryDir, 'cli.js'),
         "process.stdout.write('old version\\n');\n",
@@ -546,7 +546,7 @@ describe('bootstrap import boundaries', () => {
         }),
       );
       writeFileSync(
-        path.join(packageRoot, 'dist', 'cli.js'),
+        path.join(packageRoot, 'cli.js'),
         'process.stdout.write(JSON.stringify({ managed: process.env.QWEN_CODE_MANAGED_NPM_UPDATE, launcher: process.env.QWEN_CODE_CLI, args: process.argv.slice(2) }));\n',
       );
       mkdirSync(launcherRoot, { recursive: true });
@@ -561,12 +561,23 @@ describe('bootstrap import boundaries', () => {
         }),
       );
 
+      const childEnv: NodeJS.ProcessEnv = {
+        ...process.env,
+        HOME: '',
+        USERPROFILE: '',
+        HOMEDRIVE: '',
+        HOMEPATH: '',
+        TMPDIR: tempDir,
+        TEMP: tempDir,
+        TMP: tempDir,
+      };
+      delete childEnv['QWEN_HOME'];
       const output = execFileSync(
         process.execPath,
         [entryPath, '--prompt', 'hello'],
         {
           encoding: 'utf8',
-          env: { ...process.env, QWEN_HOME: qwenHome },
+          env: childEnv,
         },
       );
 
@@ -587,8 +598,7 @@ describe('bootstrap import boundaries', () => {
         execFileSync(process.execPath, [entryPath, '--prompt', 'hello'], {
           encoding: 'utf8',
           env: {
-            ...process.env,
-            QWEN_HOME: qwenHome,
+            ...childEnv,
             QWEN_CODE_MANAGED_NPM_UPDATE: 'true',
           },
         }),

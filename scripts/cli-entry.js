@@ -9,7 +9,7 @@
 /**
  * Production bin entry wrapper.
  *
- * For most commands: launches dist/cli.js with --expose-gc so that
+ * For most commands: launches the bundled CLI with --expose-gc so that
  * global.gc() is available for the memory-pressure monitor's critical-tier
  * cleanup.
  *
@@ -64,7 +64,7 @@ const { existsSync, readFileSync, realpathSync, statSync } = await import(
   'node:fs'
 );
 const { createHash } = await import('node:crypto');
-const { homedir } = await import('node:os');
+const { homedir, tmpdir } = await import('node:os');
 const { fileURLToPath, pathToFileURL } = await import('node:url');
 const { delimiter, dirname, join, parse, resolve, sep } = await import(
   'node:path'
@@ -75,7 +75,10 @@ const currentEntryPath = realpathSync(fileURLToPath(import.meta.url));
 
 function resolveQwenHome() {
   const configured = process.env['QWEN_HOME'];
-  if (!configured) return join(homedir(), '.qwen');
+  if (!configured) {
+    const home = homedir();
+    return join(home || tmpdir(), '.qwen');
+  }
   if (configured === '~') return homedir();
   if (configured.startsWith('~/') || configured.startsWith('~\\')) {
     return resolve(homedir(), configured.slice(2));
@@ -124,7 +127,7 @@ function getManagedNpmInstallation() {
     );
     const packageJsonPath = join(packageRoot, 'package.json');
     const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-    const cliPath = join(packageRoot, 'dist', 'cli.js');
+    const cliPath = join(packageRoot, 'cli.js');
     if (
       pkg.name !== '@qwen-code/qwen-code' ||
       pkg.version !== active.version ||
@@ -152,7 +155,7 @@ function getManagedNpmInstallation() {
 // Assignment, not `||=`: an inherited value is another session's CLI — an outer
 // qwen shelling out to this one — and honouring it re-creates the exact skew above,
 // one level up. Each entry stamps itself, so nested sessions each call their own
-// build. Nothing downstream overwrites this: the spawn below runs dist/cli.js,
+// build. Nothing downstream overwrites this: the spawn below runs the bundled CLI,
 // which never re-executes this wrapper, and the post-update relaunch re-enters
 // through the launcher's own wrapper — which stamps the updated entry, as it must.
 //

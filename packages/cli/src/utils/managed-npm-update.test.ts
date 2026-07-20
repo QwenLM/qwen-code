@@ -29,15 +29,14 @@ function writeInstallation(prefix: string, version: string): void {
     '@qwen-code',
     'qwen-code',
   );
-  fs.mkdirSync(path.join(packageRoot, 'dist'), { recursive: true });
-  fs.mkdirSync(path.join(packageRoot, 'scripts'), { recursive: true });
+  fs.mkdirSync(packageRoot, { recursive: true });
   fs.writeFileSync(
     path.join(packageRoot, 'package.json'),
     JSON.stringify({ name: '@qwen-code/qwen-code', version }),
   );
-  fs.writeFileSync(path.join(packageRoot, 'dist', 'cli.js'), '');
+  fs.writeFileSync(path.join(packageRoot, 'cli.js'), '');
   fs.writeFileSync(
-    path.join(packageRoot, 'scripts', 'cli-entry.js'),
+    path.join(packageRoot, 'cli-entry.js'),
     `process.stdout.write('${version}\\n');\n`,
   );
 }
@@ -50,7 +49,7 @@ function writeBaseInstallation(root: string, version = '1.0.0'): string {
     '@qwen-code',
     'qwen-code',
   );
-  const bootstrap = path.join(packageRoot, 'scripts', 'cli-entry.js');
+  const bootstrap = path.join(packageRoot, 'cli-entry.js');
   fs.mkdirSync(path.dirname(bootstrap), { recursive: true });
   fs.writeFileSync(
     path.join(packageRoot, 'package.json'),
@@ -136,7 +135,6 @@ describe('managed npm update', () => {
           'node_modules',
           '@qwen-code',
           'qwen-code',
-          'scripts',
           'cli-entry.js',
         ),
         `process.stdout.write('${reported}\\n');\n`,
