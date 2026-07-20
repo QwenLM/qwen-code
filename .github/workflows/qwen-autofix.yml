@@ -264,21 +264,53 @@ jobs:
               if [[ "${EVENT_NAME}" == 'schedule' ]]; then
                 DO_ISSUE=true
               fi
-              # Real-time review triggers: only process in-repo bot PRs with
-              # reviews from trusted senders (collaborators or the review bot).
-              # This prevents arbitrary commenters from forcing expensive
+              # Real-time review triggers: process the SAME managed set the
+              # scheduled scan does, so feedback is picked up seconds after the
+              # review instead of waiting for a schedule GitHub throttles hard
+              # (the */10 cron actually lands every 40-70min on this repo).
+              # Reviews must come from trusted senders (collaborators or the
+              # review bot) so arbitrary commenters cannot force expensive
               # review-scan runs. Only pull_request_review:submitted triggers
-              # (not per-comment events) to avoid redundant runs on multi-comment
-              # reviews.
+              # (not per-comment events) to avoid redundant runs on
+              # multi-comment reviews.
               if [[ "${EVENT_NAME}" == 'pull_request_review' ]]; then
                 DO_ISSUE=false
-                if [[ "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
-                  echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
-                elif [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
-                  echo "🧭 review event ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
-                elif [[ "${PR_BASE_REF}" != "main" ]]; then
+                pr_is_managed=false
+                if [[ "${PR_BASE_REF}" != "main" ]]; then
                   echo "🧭 review event ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                elif [[ "${PR_HEAD_REPO}" == "${REPO}" ]]; then
+                  if [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
+                    pr_is_managed=true
+                  else
+                    echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
+                  fi
                 else
+                  # Fork PR. The scheduled scan already admits these for
+                  # takeover, so real-time pickup applies the SAME admission
+                  # (allow-edits on, and either the bot's own fork or an
+                  # explicit TAKEOVER_LABEL) rather than making the takeover
+                  # PRs — the ones a maintainer is actively waiting on — sit
+                  # through a throttled schedule. This event runs in BASE-repo
+                  # context, and review-address independently re-verifies
+                  # allow-edits, a live write+ author and a matching live head
+                  # repo before it touches the branch, so this only decides
+                  # WHEN that same gated work happens, never whether it may.
+                  fork_meta=''
+                  if fork_meta="$(gh pr view "${PR_NUMBER_EVENT}" --repo "${REPO}" --json labels,maintainerCanModify 2> /dev/null)"; then
+                    fork_allows_edits="$(jq -r '.maintainerCanModify == true' <<< "${fork_meta}")"
+                    fork_has_takeover="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${fork_meta}")"
+                    if [[ "${fork_allows_edits}" != 'true' ]]; then
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits"
+                    elif [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" || "${fork_has_takeover}" == 'true' ]]; then
+                      pr_is_managed=true
+                    else
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} is neither ${AUTOFIX_BOT}'s own fork nor ${TAKEOVER_LABEL}-labeled"
+                    fi
+                  else
+                    echo "🧭 review event ignored: could not read fork PR #${PR_NUMBER_EVENT} metadata"
+                  fi
+                fi
+                if [[ "${pr_is_managed}" == 'true' ]]; then
                   # Verify the reviewer/commenter is trusted (prompt-injection gate).
                   sender_permission=''
                   sender_is_trusted=false
