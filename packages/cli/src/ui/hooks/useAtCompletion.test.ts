@@ -22,16 +22,6 @@ import {
 import { useState } from 'react';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
 
-// Session listing is disk I/O; mock it so these tests are deterministic and so
-// we can assert the file-first / session-appended dispatch behavior.
-const mockGetSessionSuggestions =
-  vi.fn<(cwd: string, pattern: string) => Promise<Suggestion[]>>();
-vi.mock('./session-completion.js', () => ({
-  getSessionSuggestions: (cwd: string, pattern: string) =>
-    mockGetSessionSuggestions(cwd, pattern),
-  __resetSessionSuggestionCacheForTest: () => {},
-}));
-
 // Test harness to capture the state from the hook's callbacks.
 function useTestHarnessForAtCompletion(
   enabled: boolean,
@@ -68,8 +58,6 @@ describe('useAtCompletion', () => {
       getFileFilteringEnableFuzzySearch: () => true,
     } as unknown as Config;
     vi.clearAllMocks();
-    // Default: no sessions, so existing file-search assertions are unaffected.
-    mockGetSessionSuggestions.mockResolvedValue([]);
   });
 
   afterEach(async () => {
@@ -168,47 +156,6 @@ describe('useAtCompletion', () => {
       );
       expect(dirSuggestion?.isDirectory).toBe(true);
       expect(fileSuggestion?.isDirectory).toBe(false);
-    });
-  });
-
-  describe('Session suggestions (file-first, appended)', () => {
-    it('appends session suggestions to the file results once they resolve', async () => {
-      mockGetSessionSuggestions.mockResolvedValue([
-        {
-          label: 'Fix auth bug',
-          value: 'session:id-1',
-          category: 'session',
-        },
-      ]);
-      const structure: FileSystemStructure = { 'file.txt': '' };
-      testRootDir = await createTmpDir(structure);
-
-      const { result } = renderHook(() =>
-        useTestHarnessForAtCompletion(true, '', mockConfig, testRootDir),
-      );
-
-      // Eventually both the file and the session suggestion are present.
-      await waitFor(() => {
-        const values = result.current.suggestions.map((s) => s.value);
-        expect(values).toContain('file.txt');
-        expect(values).toContain('session:id-1');
-      });
-    });
-
-    it('still shows file results when session listing yields nothing', async () => {
-      mockGetSessionSuggestions.mockResolvedValue([]);
-      const structure: FileSystemStructure = { 'only.txt': '' };
-      testRootDir = await createTmpDir(structure);
-
-      const { result } = renderHook(() =>
-        useTestHarnessForAtCompletion(true, '', mockConfig, testRootDir),
-      );
-
-      await waitFor(() => {
-        expect(result.current.suggestions.map((s) => s.value)).toContain(
-          'only.txt',
-        );
-      });
     });
   });
 

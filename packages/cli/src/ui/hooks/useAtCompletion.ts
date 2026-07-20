@@ -503,38 +503,18 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
           isDirectory: p.endsWith('/'),
           category: 'file' as const,
         }));
-
-        // Dispatch files + MCP IMMEDIATELY so the dropdown appears at file-search
-        // speed. The session listing (disk I/O) is appended in a SECOND dispatch
-        // once it resolves — a few ms later — rather than blocking the first
-        // render. Both dispatches re-check abort/cancel to avoid stale results.
+        const sessionSuggestions = await sessionPromise;
+        if (controller.signal.aborted || cancelled) {
+          return;
+        }
         dispatch({
           type: 'SEARCH_SUCCESS',
-          payload: [...mcpSuggestions, ...fileSuggestions],
+          payload: [
+            ...mcpSuggestions,
+            ...sessionSuggestions,
+            ...fileSuggestions,
+          ],
         });
-
-        sessionPromise
-          .then((sessionSuggestions) => {
-            if (
-              controller.signal.aborted ||
-              cancelled ||
-              sessionSuggestions.length === 0
-            ) {
-              return;
-            }
-            dispatch({
-              type: 'SEARCH_SUCCESS',
-              payload: [
-                ...mcpSuggestions,
-                ...sessionSuggestions,
-                ...fileSuggestions,
-              ],
-            });
-          })
-          .catch(() => {
-            // getSessionSuggestions already swallows listing failures; this is a
-            // belt-and-suspenders guard so a rejected promise never surfaces.
-          });
       } catch (error) {
         if (!(error instanceof Error && error.name === 'AbortError')) {
           // A file-search failure shouldn't swallow non-file matches we already
