@@ -18,6 +18,7 @@ import {
   computeModelListVersion,
   getDefaultModelIds,
   PROVIDER_METADATA_NS,
+  providerMatchesCredentials,
   resolveBaseUrl,
   resolveMetadataKey,
   resolveOwnsModel,
@@ -257,6 +258,14 @@ export function useProviderUpdates(
         if (previousModelStillAvailable) {
           delete installPlan.modelSelection;
         }
+        const activeConfig = config.getContentGeneratorConfig();
+        const updatesActiveProvider =
+          activeConfig.authType === providerCfg.protocol &&
+          providerMatchesCredentials(
+            providerCfg,
+            activeConfig.baseUrl,
+            activeConfig.apiKeyEnvKey,
+          );
 
         await applyProviderInstallPlan(installPlan, {
           settings: createLoadedSettingsAdapter(settings),
@@ -265,8 +274,9 @@ export function useProviderUpdates(
             config
               .getModelsConfig()
               .syncAfterAuthRefresh(authType, modelId, baseUrl),
-          refreshAuth: (authType) => config.refreshAuth(authType),
-          doRefreshAuth: false,
+          ...(updatesActiveProvider && {
+            refreshAuth: (authType) => config.refreshAuth(authType),
+          }),
         });
 
         const activeModel = config.getModel();

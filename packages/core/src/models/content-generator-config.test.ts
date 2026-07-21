@@ -210,6 +210,24 @@ describe('buildAgentContentGeneratorConfig', () => {
         'https://registry.example.com',
       );
     });
+
+    it('does not inherit mandatory thinking from another same-provider model', () => {
+      const config = createMockConfig(
+        { ...parentConfig, thinkingMandatory: true },
+        {
+          ...resolvedModel,
+          authType: 'openai' as ResolvedModelConfig['authType'],
+        },
+      );
+
+      const result = buildAgentContentGeneratorConfig(
+        config,
+        'registry-model-id',
+        { authType: 'openai' },
+      );
+
+      expect(result.thinkingMandatory).toBeUndefined();
+    });
   });
 
   describe('edge cases', () => {
