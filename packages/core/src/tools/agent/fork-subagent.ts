@@ -1,36 +1,26 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
-import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
 /**
- * Fork subagent availability gate.
- *
- * Fork is available in interactive sessions. Non-interactive sessions
- * (e.g. `qwen -p`, SDK headless, CI/CD) lack a terminal UI for fork progress
- * display and permission prompts, which can cause hangs or silent failures.
- *
  * Forking is an explicit choice — the caller selects it with
  * `subagent_type: "fork"`. Omitting `subagent_type` always resolves to the
  * general-purpose subagent, never a fork. Regular top-level subagents run in
  * the background by default; callers can set `run_in_background: false` for an
- * inline result. When fork is unavailable, an explicit `subagent_type: "fork"`
- * falls back to the general-purpose subagent.
+ * inline result. Forks are available in both interactive and headless
+ * sessions; headless forks use the background registry so the caller waits for
+ * completion and non-interactive permission policy is applied.
  */
-export function isForkSubagentEnabled(config: Config): boolean {
-  return config.isInteractive();
-}
-
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
 export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
 
 export const FORK_AGENT = {
   name: FORK_SUBAGENT_TYPE,
   description:
-    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"` (only in interactive sessions). Runs detached in the background; you are notified when it completes.',
+    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"`. Runs detached in the background; you are notified when it completes.',
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',

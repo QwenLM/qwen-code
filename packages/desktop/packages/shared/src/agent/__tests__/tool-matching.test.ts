@@ -695,10 +695,9 @@ describe('extractToolResults', () => {
     expect(events[0]).toMatchObject({ type: 'tool_result', toolUseId: 'toolu_agent' })
   })
 
-  it('does NOT emit task_backgrounded for an omitted-flag fork Agent', () => {
-    // Mirrors core's `!isForkRequested` guard: a `subagent_type: "fork"`
-    // fallback stays foreground, so no background event even with an agentId
-    // in the result.
+  it('does not infer fork background status from args alone', () => {
+    // An arbitrary result containing an agentId is not sufficient evidence of
+    // the effective runtime mode.
     toolIndex.register('toolu_fork_agent', 'Agent', {
       _intent: 'Handle a detached chore',
       prompt: 'Handle the detached chore',
@@ -715,6 +714,31 @@ describe('extractToolResults', () => {
     expect(events[0]).toMatchObject({
       type: 'tool_result',
       toolUseId: 'toolu_fork_agent',
+    })
+  })
+
+  it('detects a registry-backed headless fork from the runtime result', () => {
+    toolIndex.register('toolu_fork_agent', 'Agent', {
+      _intent: 'Handle a detached chore',
+      prompt: 'Handle the detached chore',
+      subagent_type: 'fork',
+      run_in_background: false,
+    })
+
+    const blocks: ContentBlock[] = [
+      makeToolResultBlock(
+        'toolu_fork_agent',
+        'Background agent launched successfully.\nagentId: fork_agent_xyz',
+      ),
+    ]
+
+    const events = extractToolResults(blocks, null, undefined, toolIndex)
+
+    expect(events).toHaveLength(2)
+    expect(events[1]).toMatchObject({
+      type: 'task_backgrounded',
+      toolUseId: 'toolu_fork_agent',
+      taskId: 'fork_agent_xyz',
     })
   })
 
