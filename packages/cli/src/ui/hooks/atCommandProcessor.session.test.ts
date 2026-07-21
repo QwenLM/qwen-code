@@ -173,4 +173,26 @@ describe('handleAtCommand @session:', () => {
       '@session:Ambiguous',
     );
   });
+
+  it('survives a filesystem error during title lookup', async () => {
+    mockFindSessionsByTitle.mockRejectedValue(
+      Object.assign(new Error('EACCES'), { code: 'EACCES' }),
+    );
+    const result = await handleAtCommand({
+      query: '@session:Some\\ Title',
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 5,
+      signal: abortController.signal,
+    });
+    expect(result.shouldProceed).toBe(true);
+    const joined = JSON.stringify(result.processedQuery);
+    expect(joined).toContain('@session:Some Title');
+    expect(
+      result.toolDisplays?.some(
+        (d) => d.name === 'Referenced Session' && d.status !== undefined,
+      ),
+    ).toBe(true);
+  });
 });

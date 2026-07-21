@@ -641,9 +641,14 @@ export async function resolveAtCommandQuery({
 
     let sessionId = ref.id;
     if (!sessionId && ref.title) {
-      const matches = await new SessionService(
-        config.getProjectRoot(),
-      ).findSessionsByTitle(ref.title);
+      let matches: Array<{ sessionId: string }> = [];
+      try {
+        matches = await new SessionService(
+          config.getProjectRoot(),
+        ).findSessionsByTitle(ref.title);
+      } catch {
+        // title scan failure → fall through to the not-found path
+      }
       if (matches.length === 1) {
         sessionId = matches[0].sessionId;
       } else {
@@ -669,9 +674,28 @@ export async function resolveAtCommandQuery({
       }
     }
 
+    if (!sessionId) {
+      const reason = `Session reference "@${originalAtPath.substring(1)}" could not be resolved.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(ref.title ?? ref.id ?? originalAtPath),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session "${ref.title ?? ref.id ?? ''}"`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
+
     const resolved = await new SessionReferenceService(
       config.getProjectRoot(),
-    ).resolve(sessionId!, ref.title ? { title: ref.title } : {});
+    ).resolve(sessionId, ref.title ? { title: ref.title } : {});
 
     if ('notFound' in resolved) {
       const reason = `Session "${sessionId}" not found in this project.`;
@@ -679,7 +703,7 @@ export async function resolveAtCommandQuery({
       scopedMentionEntries.push({
         originalAtPath,
         part: { text: '' },
-        label: buildSessionRef(sessionId!),
+        label: buildSessionRef(sessionId),
         display: {
           callId,
           name: 'Referenced Session',
@@ -695,7 +719,7 @@ export async function resolveAtCommandQuery({
     scopedMentionEntries.push({
       originalAtPath,
       part: { text: resolved.text },
-      label: buildSessionRef(sessionId!),
+      label: buildSessionRef(sessionId),
       display: {
         callId,
         name: 'Referenced Session',

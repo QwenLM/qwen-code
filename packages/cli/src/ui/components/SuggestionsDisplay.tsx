@@ -47,13 +47,22 @@ interface SuggestionsDisplayProps {
   availableCategories?: Array<SuggestionCategory | 'all'>;
 }
 
-const CATEGORY_LABEL: Record<SuggestionCategory | 'all', string> = {
-  all: 'All',
-  file: 'Files',
-  session: 'Sessions',
-  mcp: 'MCP',
-  extension: 'Extensions',
-};
+function categoryLabel(cat: SuggestionCategory | 'all'): string {
+  switch (cat) {
+    case 'all':
+      return t('All');
+    case 'file':
+      return t('Files');
+    case 'session':
+      return t('Sessions');
+    case 'mcp':
+      return 'MCP';
+    case 'extension':
+      return t('Extensions');
+    default:
+      return cat;
+  }
+}
 
 export { MAX_WIDTH };
 
@@ -173,7 +182,7 @@ export function SuggestionsDisplay({
                   }
                   backgroundColor={active ? theme.text.accent : undefined}
                 >
-                  {` ${CATEGORY_LABEL[cat]} `}
+                  {` ${categoryLabel(cat)} `}
                 </Text>
               </Box>
             );
