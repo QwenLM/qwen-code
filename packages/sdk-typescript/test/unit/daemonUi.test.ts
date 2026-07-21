@@ -2943,6 +2943,26 @@ describe('daemon UI time schema (PR-B)', () => {
     });
   });
 
+  it.each([1_780_905_333_596, '2026-06-08T07:55:33.596Z'])(
+    'extracts transcript-page timestamp %s',
+    (timestamp) => {
+      const events = normalizeDaemonEvent({
+        v: 1,
+        type: 'session_update',
+        data: {
+          timestamp,
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      } as never);
+
+      expect(events[0]).toMatchObject({
+        type: 'user.text.delta',
+        serverTimestamp: 1_780_905_333_596,
+      });
+    },
+  );
+
   it('backfills serverTimestamp onto an existing text block', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = reduceDaemonTranscriptEvents(

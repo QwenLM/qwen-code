@@ -3679,7 +3679,11 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('renders bounded replay truncation from the loaded snapshot without resync', async () => {
+  it('uses bounded replay truncation to enable history pagination without rendering it', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
     const session = createMockSession({
       replaySnapshot: {
         compactedReplay: [
@@ -3702,6 +3706,7 @@ describe('DaemonSessionProvider', () => {
               update: {
                 sessionUpdate: 'agent_message_chunk',
                 content: { type: 'text', text: 'retained replay' },
+                _meta: { 'qwen.session.recordId': 'record-retained' },
               },
             },
           },
@@ -3712,10 +3717,12 @@ describe('DaemonSessionProvider', () => {
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
     let awaitingResync = false;
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
       awaitingResync = useDaemonTranscriptState().awaitingResync;
+      history = useDaemonTranscriptHistory();
       return null;
     }
 
@@ -3723,21 +3730,89 @@ describe('DaemonSessionProvider', () => {
       autoConnect: true,
       reconnectDelayMs: 1,
       maxReconnectDelayMs: 1,
+      historyPageSize: 25,
     });
     await act(async () => {
       await flushPromises();
     });
 
     expect(awaitingResync).toBe(false);
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'assistant',
+        text: 'retained replay',
+      }),
+    ]);
+    expect(history?.hasMore).toBe(true);
+    await act(async () => history?.loadMore());
+    expect(sdkMocks.getSessionTranscriptPage).toHaveBeenCalledWith(
+      session.sessionId,
+      {
+        beforeRecordId: 'record-retained',
+        limit: 25,
+        clientId: session.clientId,
+      },
+    );
+  });
+
+  it('renders bounded replay truncation when no pagination anchor is available', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      workspaceCwd: '/mock-workspace',
+      features: ['session_transcript_pagination'],
+    });
+    const session = createMockSession({
+      replaySnapshot: {
+        compactedReplay: [
+          {
+            v: 1,
+            type: 'history_truncated',
+            data: {
+              reason: 'replay_window_exceeded',
+              truncatedEvents: 4,
+              retainedEvents: 1,
+              maxBytes: 512,
+              fullTranscriptAvailable: true,
+            },
+          },
+          {
+            id: 5,
+            v: 1,
+            type: 'session_update',
+            data: {
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: 'retained replay' },
+              },
+            },
+          },
+        ],
+        liveJournal: [],
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      history = useDaemonTranscriptHistory();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      historyPageSize: 25,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(history?.hasMore).toBe(false);
     expect(blocks).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
           kind: 'status',
           text: expect.stringContaining('History truncated'),
-        }),
-        expect.objectContaining({
-          kind: 'assistant',
-          text: 'retained replay',
         }),
       ]),
     );

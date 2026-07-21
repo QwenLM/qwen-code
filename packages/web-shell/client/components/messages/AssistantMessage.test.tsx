@@ -28,6 +28,7 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -140,10 +141,16 @@ describe('AssistantMessage thinking logic', () => {
     );
 
     expect(container.textContent).toContain('Thinking 2s');
+    expect(container.textContent).not.toContain('private chain of thought');
 
     const toggle = container.querySelector<HTMLButtonElement>('button');
     act(() => toggle?.parentElement?.click());
     expect(toggle?.getAttribute('aria-expanded')).toBe('true');
+    expect(container.textContent).toContain('private chain of thought');
+
+    act(() => toggle?.parentElement?.click());
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(container.textContent).not.toContain('private chain of thought');
   });
 
   it('only translates completed thinking and reuses the in-memory result', async () => {
@@ -378,6 +385,32 @@ describe('AssistantMessage thinking logic', () => {
     );
 
     expect(container.querySelector('button[title="翻译"]')).toBeNull();
+  });
+});
+
+describe('AssistantMessage streaming markdown', () => {
+  it('limits intermediate renders and flushes final content immediately', () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const tree = (content: string, isStreaming: boolean) => (
+      <I18nProvider language="en">
+        <AssistantMessage content={content} isStreaming={isStreaming} />
+      </I18nProvider>
+    );
+
+    act(() => root.render(tree('first', true)));
+    act(() => root.render(tree('first second', true)));
+    expect(container.textContent).toContain('first');
+    expect(container.textContent).not.toContain('second');
+
+    act(() => vi.advanceTimersByTime(80));
+    expect(container.textContent).toContain('first second');
+
+    act(() => root.render(tree('first second final', false)));
+    expect(container.textContent).toContain('first second final');
+    mounted.push({ root, container });
   });
 });
 

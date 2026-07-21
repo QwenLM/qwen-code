@@ -71,6 +71,8 @@ export interface SplitViewProps {
   workspaceCwd?: string;
   /** Restart each pane's SSE event stream after an accepted prompt. */
   restartSseOnPrompt?: boolean;
+  /** Persisted transcript records requested per page by each pane. */
+  historyPageSize?: number;
 }
 
 /**
@@ -93,6 +95,7 @@ export function SplitView({
   includeOtherWorkspaces = true,
   workspaceCwd,
   restartSseOnPrompt,
+  historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
 }: SplitViewProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -478,7 +481,7 @@ export function SplitView({
                     // tab's panes) for the same session, so the attachments don't
                     // collide on one client identity.
                     clientId={`split-pane:${instanceId}:${sessionId}`}
-                    historyPageSize={WEB_SHELL_HISTORY_PAGE_SIZE}
+                    historyPageSize={historyPageSize}
                     maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
                     suppressOwnUserEcho
                     restartEventStreamOnPrompt={restartSseOnPrompt}

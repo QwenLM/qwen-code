@@ -346,11 +346,8 @@ describe('WebShellTranscript DOM integration', () => {
     );
     const toggle = container.querySelector('[data-testid="toggle-u1"]');
     const row = toggle?.closest('[role="button"]');
-    const reasoning = Array.from(container.querySelectorAll('*')).find(
-      (element) => element.textContent === 'Hidden reasoning',
-    );
     expect(row?.getAttribute('aria-expanded')).toBe('false');
-    expect(reasoning?.closest('[data-collapsed="true"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('Hidden reasoning');
 
     act(() => {
       row?.dispatchEvent(
@@ -358,7 +355,7 @@ describe('WebShellTranscript DOM integration', () => {
       );
     });
     expect(row?.getAttribute('aria-expanded')).toBe('true');
-    expect(reasoning?.closest('[data-collapsed="true"]')).toBeNull();
+    expect(container.textContent).toContain('Hidden reasoning');
   });
 
   it('suppresses session and goal events while preserving their text', () => {

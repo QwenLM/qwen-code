@@ -348,10 +348,6 @@
   transition: grid-template-rows 180ms ease;
 }
 
-.thinkingExpandedCollapsed {
-  grid-template-rows: 0fr;
-}
-
 .thinkingExpandedInner {
   min-height: 0;
   overflow: hidden;

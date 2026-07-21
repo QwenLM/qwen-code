@@ -28,6 +28,8 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   clientId?: string;
   /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
   restartSseOnPrompt?: boolean;
+  /** Persisted transcript records requested per page. Defaults to 100; valid range is 1–500. */
+  historyPageSize?: number;
 }
 
 function resolveBaseUrl(baseUrl: string | undefined): string {
@@ -92,6 +94,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
     lockWorkspaceCwd,
     clientId,
     restartSseOnPrompt,
+    historyPageSize,
     ...webShellProps
   } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
@@ -112,6 +115,7 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
           lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
           restartSseOnPrompt={restartSseOnPrompt}
+          historyPageSize={historyPageSize}
           webShellProps={webShellProps}
         />
       </DaemonWorkspaceProvider>

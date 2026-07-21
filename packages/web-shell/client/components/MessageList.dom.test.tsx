@@ -9,6 +9,7 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
+import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
@@ -203,6 +204,15 @@ function mount(
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
     onLoadOlderHistory?: () => Promise<void>;
+    transcriptBlockCount?: number;
+    transcriptActivity?: {
+      getSnapshot(): {
+        lastEventId?: number;
+        blocks?: { readonly length: number };
+      };
+      subscribe(listener: () => void): () => void;
+    };
+    onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
@@ -226,6 +236,9 @@ function mount(
             loadingOlderHistory={opts.loadingOlderHistory}
             historyCapacityReached={opts.historyCapacityReached}
             onLoadOlderHistory={opts.onLoadOlderHistory}
+            transcriptBlockCount={opts.transcriptBlockCount}
+            transcriptActivity={opts.transcriptActivity}
+            onReloadTranscript={opts.onReloadTranscript}
             isResponding={opts.isResponding}
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
           />
@@ -272,9 +285,7 @@ const assistantActions = (c: HTMLElement, id: string) =>
     .querySelector(`[data-testid="msg-${id}"]`)
     ?.getAttribute('data-assistant-actions');
 const isCollapsed = (c: HTMLElement, id: string) =>
-  c
-    .querySelector(`[data-testid="msg-${id}"]`)
-    ?.closest('[data-collapsed="true"]') !== null;
+  c.querySelector(`[data-testid="msg-${id}"]`) === null;
 const queryToggle = (c: HTMLElement, turnId: string) =>
   c.querySelector(`[data-testid="toggle-${turnId}"]`) as HTMLElement | null;
 const toggle = (c: HTMLElement, turnId: string) =>
@@ -313,6 +324,44 @@ const simpleTurns = (count: number): Message[] =>
   }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    let lastEventId = 10;
+    let notifyActivity = () => undefined;
+    mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      transcriptActivity: {
+        getSnapshot: () => ({ lastEventId }),
+        subscribe: (listener) => {
+          notifyActivity = listener;
+          return () => undefined;
+        },
+      },
+      onReloadTranscript,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+      lastEventId++;
+      notifyActivity();
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    lastEventId++;
+    notifyActivity();
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+  });
+
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')]);
     expect(has(c, 'u1')).toBe(true);

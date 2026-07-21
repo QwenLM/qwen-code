@@ -337,7 +337,7 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionSummary[]>;
   loadSession(
     sessionId: string,
-    options?: { workspaceCwd?: string },
+    options?: { workspaceCwd?: string; signal?: AbortSignal },
   ): Promise<void>;
   resumeSession(
     sessionId: string,
@@ -471,4 +471,5 @@ export interface PendingSessionLoad {
   timeout: ReturnType<typeof setTimeout>;
   resolve: () => void;
   reject: (error: unknown) => void;
+  signal?: AbortSignal;
 }

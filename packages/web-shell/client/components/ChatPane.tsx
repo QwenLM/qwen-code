@@ -20,6 +20,7 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../i18n';
+import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from '../constants/sessions';
 import { useMessages } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
@@ -155,6 +156,20 @@ export function ChatPane({
   ]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
+  const reloadTranscript = useCallback(
+    async (signal: AbortSignal) => {
+      if (!connection.sessionId) return;
+      await actions.loadSession(connection.sessionId, {
+        workspaceCwd: connection.workspaceCwd,
+        signal,
+      });
+    },
+    [actions, connection.sessionId, connection.workspaceCwd],
+  );
+  const transcriptReloadSupported =
+    connection.capabilities?.features.includes(
+      SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
   const {
     followupState,
@@ -544,6 +559,11 @@ export function ChatPane({
           loadingOlderHistory={transcriptHistory.loading}
           historyCapacityReached={transcriptHistory.capacityReached}
           onLoadOlderHistory={transcriptHistory.loadMore}
+          transcriptBlockCount={blocks.length}
+          transcriptActivity={store}
+          onReloadTranscript={
+            transcriptReloadSupported ? reloadTranscript : undefined
+          }
           isResponding={isResponding}
           workspaceCwd={connection.workspaceCwd || ''}
           hideSessionTimeline

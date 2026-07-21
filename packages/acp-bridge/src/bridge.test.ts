@@ -2918,6 +2918,87 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('refreshes an attached load from a bounded persisted page', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'latest prompt' },
+                _meta: { 'qwen.session.recordId': 'record-latest' },
+              },
+            },
+          ],
+          hasMore: true,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      params: {
+        cwd: WS_A,
+        sessionId: loaded.sessionId,
+        direction: 'backward',
+        limit: 100,
+      },
+    });
+    expect(refreshed).toMatchObject({
+      attached: true,
+      historyHasMore: true,
+      lastEventId: loaded.lastEventId,
+      compactedReplay: [
+        {
+          type: 'session_update',
+          data: {
+            content: { type: 'text', text: 'latest prompt' },
+          },
+        },
+      ],
+      liveJournal: [],
+    });
+
+    await bridge.shutdown();
+  });
+
   it('restores artifacts from response-mode load replay when no snapshot is available', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
