@@ -8,6 +8,7 @@ import { vi, describe, it, expect, beforeEach } from 'vitest';
 import {
   checkForUpdates,
   checkForUpdatesDetailed,
+  classifyUpdateCheckError,
   fetchGlobalNpmUpdateInfo,
   FETCH_TIMEOUT_MS,
   isGlobalNpmInstallation,
@@ -632,5 +633,47 @@ describe('checkForUpdates', () => {
         expect(result.error.message).toMatch(/for (nightly|latest)/);
       }
     });
+  });
+
+  describe('timeout budget (#7049)', () => {
+    it('allows at least 5 seconds for slow registries', () => {
+      expect(FETCH_TIMEOUT_MS).toBeGreaterThanOrEqual(5000);
+    });
+  });
+});
+
+describe('classifyUpdateCheckError', () => {
+  it('classifies UpdateCheckTimeoutError as timeout', () => {
+    expect(classifyUpdateCheckError(new UpdateCheckTimeoutError(5000))).toBe(
+      'timeout',
+    );
+  });
+
+  it.each([
+    'ENOTFOUND',
+    'ECONNREFUSED',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'ENETUNREACH',
+  ])('classifies %s errors as offline', (code) => {
+    const error = new Error(`request failed`) as NodeJS.ErrnoException;
+    error.code = code;
+    expect(classifyUpdateCheckError(error)).toBe('offline');
+  });
+
+  it('classifies network codes embedded in the message as offline', () => {
+    // npm child-process failures surface the code inside stderr text only.
+    expect(
+      classifyUpdateCheckError(
+        new Error('npm error code ENOTFOUND\nnpm error network'),
+      ),
+    ).toBe('offline');
+  });
+
+  it('classifies other errors as registry', () => {
+    expect(classifyUpdateCheckError(new Error('404 Not Found'))).toBe(
+      'registry',
+    );
+    expect(classifyUpdateCheckError('not-an-error')).toBe('registry');
   });
 });

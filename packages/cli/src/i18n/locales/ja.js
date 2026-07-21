@@ -1912,8 +1912,6 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
   'Unable to check for updates: {{reason}}':
     'アップデートを確認できません: {{reason}}',
   'Update successful! The new version will be used on your next run.':

@@ -2146,8 +2146,6 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Eine neue Version von Qwen Code ist verfügbar! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} ist aktuell!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Suche nach Updates fehlgeschlagen. Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
   'Unable to check for updates: {{reason}}':
     'Updates können nicht geprüft werden: {{reason}}',
   'Update successful! The new version will be used on your next run.':
