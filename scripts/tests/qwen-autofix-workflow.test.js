@@ -3570,6 +3570,89 @@ describe('qwen-autofix workflow', () => {
     expect(failed.stdout).toContain('Bad credentials');
   });
 
+  it('resolves only the review threads whose findings it implemented', () => {
+    // A human re-reviewing should see what is still OPEN, not re-read every
+    // thread to work out what the bot handled. The agent cannot resolve threads
+    // itself (its sandbox carries no token), so it records the inline-comment
+    // ids it implemented and the push step maps each to its thread.
+    const lines = workflow.split('\n');
+    const i = lines.findIndex((l) =>
+      l.includes('resolved-comments.txt" ]]; then'),
+    );
+    const j = lines.findIndex(
+      (l, k) => k > i && l.trim().startsWith('echo "🧵 resolved'),
+    );
+    expect(i).toBeGreaterThan(-1);
+    const block = lines.slice(i, j + 2).join('\n');
+    // feedback.md must carry the handle the agent echoes back.
+    expect(workflow).toContain('- [rc:\\(.id)]');
+
+    const dir = mkdtempSync(join(tmpdir(), 'resolve-'));
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    const resolvedLog = join(dir, 'resolved.log');
+    writeFileSync(resolvedLog, '');
+    writeFileSync(
+      join(dir, 'threads.json'),
+      JSON.stringify({
+        nodes: [
+          {
+            id: 'T_open_1',
+            isResolved: false,
+            comments: { nodes: [{ databaseId: 111 }] },
+          },
+          {
+            id: 'T_open_2',
+            isResolved: false,
+            comments: { nodes: [{ databaseId: 222 }] },
+          },
+          {
+            id: 'T_done',
+            isResolved: true,
+            comments: { nodes: [{ databaseId: 333 }] },
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      }),
+    );
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'if [[ "$*" == *mutation* ]]; then',
+        '  for a in "$@"; do [[ "$a" == threadId=* ]] && printf "%s\\n" "${a#threadId=}" >> "$RESOLVED_LOG"; done',
+        '  exit 0',
+        'fi',
+        'cat "$THREADS_FIXTURE"',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    // 111 was implemented; 333's thread is already resolved; 999 matches
+    // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    const out = execFileSync('bash', ['-c', `set -euo pipefail\n${block}`], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        WORKDIR: dir,
+        REPO: 'QwenLM/qwen-code',
+        PR: '7308',
+        RESOLVED_LOG: resolvedLog,
+        THREADS_FIXTURE: join(dir, 'threads.json'),
+      },
+      encoding: 'utf8',
+    });
+    const resolved = readFileSync(resolvedLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    expect(resolved).toEqual(['T_open_1']);
+    expect(resolved).not.toContain('T_open_2'); // declined stays open
+    expect(resolved).not.toContain('T_done'); // already resolved
+    expect(out).toContain('resolved 1 review thread');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('replays the handoff decision and terminal-round transitions under bash', () => {
     // The agent step is bounded below the 120-minute job timeout so a runaway
     // agent fails the STEP, not the job, leaving the always() report step time to
