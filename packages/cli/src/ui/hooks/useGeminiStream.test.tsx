@@ -1381,8 +1381,7 @@ describe('useGeminiStream', () => {
       queuedPrompt,
     );
     const queuedPromptAddItemIndex = mockAddItem.mock.calls.findIndex(
-      ([item]) =>
-        item.type === MessageType.NOTIFICATION && item.text === queuedPrompt,
+      ([item]) => item.type === MessageType.USER && item.text === queuedPrompt,
     );
     expect(queuedPromptAddItemIndex).toBeGreaterThanOrEqual(0);
     expect(recordMidTurnUserMessage.mock.invocationCallOrder[0]).toBeLessThan(
@@ -1392,7 +1391,7 @@ describe('useGeminiStream', () => {
       recordMidTurnUserMessage.mock.invocationCallOrder[0],
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: true },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(
@@ -1469,7 +1468,7 @@ describe('useGeminiStream', () => {
     expect(steerInput?.parts).toEqual([{ text: steeredPrompt }]);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: true },
       expect.any(Number),
     );
     steerInput?.accept();
@@ -1478,7 +1477,7 @@ describe('useGeminiStream', () => {
       steeredPrompt,
     );
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: true },
       expect.any(Number),
     );
   });
@@ -1791,7 +1790,7 @@ describe('useGeminiStream', () => {
     expect(steerInput).toBeUndefined();
     expect(restoreSteer).toHaveBeenCalledWith([steeredPrompt]);
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: steeredPrompt },
+      { type: MessageType.USER, text: steeredPrompt, sentToModel: true },
       expect.any(Number),
     );
   });
@@ -2666,7 +2665,7 @@ describe('useGeminiStream', () => {
     expect(resolveSignal?.aborted).toBe(true);
     expect(recordMidTurnUserMessage).not.toHaveBeenCalled();
     expect(mockAddItem).not.toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: true },
       expect.any(Number),
     );
     expect(mockSendMessageStream).not.toHaveBeenCalled();
@@ -2871,7 +2870,7 @@ describe('useGeminiStream', () => {
     });
 
     expect(mockAddItem).toHaveBeenCalledWith(
-      { type: MessageType.NOTIFICATION, text: queuedPrompt },
+      { type: MessageType.USER, text: queuedPrompt, sentToModel: true },
       expect.any(Number),
     );
     expect(mockSendMessageStream).toHaveBeenCalledWith(

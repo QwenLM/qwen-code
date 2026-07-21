@@ -2535,7 +2535,11 @@ export const useGeminiStream = (
               .getChatRecordingService?.()
               ?.recordMidTurnUserMessage(parts, message);
             addItem(
-              { type: MessageType.NOTIFICATION, text: message },
+              {
+                type: MessageType.USER,
+                text: message,
+                sentToModel: true,
+              } as HistoryItemWithoutId,
               Date.now(),
             );
           }
