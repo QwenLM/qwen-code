@@ -407,7 +407,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
-        returnDisplay: getDisplayFromParts(transformedParts),
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
@@ -487,7 +490,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
-        returnDisplay: getDisplayFromParts(transformedParts),
+        returnDisplay: getDisplayFromPartsWithPersistedOutput(
+          transformedParts,
+          truncated.persistedOutputFiles,
+        ),
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
     } catch (error) {
@@ -810,6 +816,17 @@ function getDisplayFromParts(parts: Part[]): string {
   }
 
   return displayParts.join('\n');
+}
+
+function getDisplayFromPartsWithPersistedOutput(
+  parts: Part[],
+  persistedOutputFiles: string[] | undefined,
+): string {
+  const display = getDisplayFromParts(parts);
+  if (!persistedOutputFiles?.length) return display;
+
+  const paths = persistedOutputFiles.map((file) => `- ${file}`).join('\n');
+  return `${display}\nOutput too long and was saved to:\n${paths}`;
 }
 
 /** Visible for testing */
