@@ -1356,6 +1356,29 @@ describe('FeishuChannel', () => {
         'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
       );
     });
+
+    it('classifies proactive network failures as transient', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockRejectedValueOnce(
+        new Error('socket token=secret'),
+      );
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: network error',
+        }),
+      );
+    });
   });
 
   describe('onPromptEnd: error recovery branches', () => {

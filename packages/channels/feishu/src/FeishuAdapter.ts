@@ -766,18 +766,18 @@ export class FeishuChannel extends ChannelBase {
           }
         }
       } catch (err) {
-        if (
-          throwOnFailure &&
-          err instanceof Error &&
-          err.message.startsWith('Feishu sendMessage failed:')
-        ) {
+        if (throwOnFailure && err instanceof ChannelProactiveDeliveryError) {
           throw err;
         }
         process.stderr.write(
           `[Feishu:${this.name}] sendMessage error: ${err}\n`,
         );
         if (throwOnFailure) {
-          throw err;
+          throw new ChannelProactiveDeliveryError(
+            'transient',
+            'Feishu sendMessage failed: network error',
+            { cause: err },
+          );
         }
       }
     }
