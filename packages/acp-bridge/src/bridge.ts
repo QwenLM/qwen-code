@@ -83,7 +83,10 @@ import {
   SessionBusyError,
   InvalidRewindTargetError,
 } from './bridgeErrors.js';
-import { canonicalizeWorkspace } from './workspacePaths.js';
+import {
+  canonicalizeWorkspace,
+  translateAndCheckAbsoluteWorkspacePath,
+} from './workspacePaths.js';
 import { parseSessionSource } from './session-source.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
@@ -2906,10 +2909,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return entry.transportClosedReject;
   };
 
-  const resolveWorkspaceKey = (workspaceCwd: string): string => {
-    if (!path.isAbsolute(workspaceCwd)) {
+  const resolveWorkspaceKey = (rawWorkspaceCwd: string): string => {
+    // #7139: host-shaped Windows paths reach the in-container bridge via
+    // clients and persisted registrations; the shared helper maps them to
+    // the bind mount before the absolute-path check.
+    const workspaceCwd =
+      translateAndCheckAbsoluteWorkspacePath(rawWorkspaceCwd);
+    if (workspaceCwd === null) {
       throw new Error(
-        `workspaceCwd must be an absolute path; got "${workspaceCwd}"`,
+        `workspaceCwd must be an absolute path; got "${rawWorkspaceCwd}"`,
       );
     }
     const workspaceKey =

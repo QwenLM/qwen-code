@@ -4,7 +4,6 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import path from 'node:path';
 import {
   APPROVAL_MODES,
   type ApprovalMode,
@@ -43,6 +42,10 @@ import {
 } from '../auth/device-flow.js';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import { parseSessionSource } from '@qwen-code/acp-bridge';
+import {
+  translateAndCheckAbsoluteWorkspacePath,
+  canonicalizeWorkspace,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
@@ -53,7 +56,6 @@ import {
   SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
 } from '@qwen-code/acp-bridge/sessionArtifacts';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
 import {
@@ -353,7 +355,9 @@ function parseOptionalSafeIntegerInRange(
  * Closes the body-amplification DoS the REST code documents. Returns the
  * bound workspace when omitted.
  */
-function parseOptionalWorkspaceCwd(
+// Exported for the sandbox-translation wiring test — this is the entry
+// point for every ACP JSON-RPC `cwd` (#7139).
+export function parseOptionalWorkspaceCwd(
   params: Record<string, unknown>,
   boundWorkspace: string,
 ): string {
@@ -369,13 +373,14 @@ function parseOptionalWorkspaceCwd(
       `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
     );
   }
-  // `path.isAbsolute` (platform-aware) — same as the REST route. A bare
-  // `startsWith('/')` would reject valid Windows `C:\…`/UNC paths a client
-  // gets back from `/capabilities.workspaceCwd`.
-  if (!path.isAbsolute(cwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the (platform-aware) absolute-path check — same as
+  // the REST route.
+  const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
+  if (sandboxCwd === null) {
     throw new AcpParamError('`cwd` must be an absolute path when provided');
   }
-  return cwd;
+  return sandboxCwd;
 }
 
 /** Validate a `session/prompt` body before it reaches the bridge/agent. */
