@@ -2682,6 +2682,14 @@ jobs:
           : > "${GATE_LOG}"
           reject_fix() {
             echo "❌ ${1}"
+            # Declare the verdict FIRST. The handoff routes on outcome=, and an
+            # empty outcome on a failed job means "the gate never reached a
+            # verdict" — i.e. a crash, which is RETRIED. So a rejection that
+            # dies while writing its detail file would be re-attempted forever
+            # instead of reported once. A detail we cannot write is a degraded
+            # message; it must never cost the verdict, hence this order and the
+            # non-fatal write below.
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
             {
               echo "**${1}**"
               echo
@@ -2691,8 +2699,8 @@ jobs:
               echo '````'
               tail -c 3000 "${GATE_LOG}" 2> /dev/null
               echo '````'
-            } > "${WORKDIR}/gate-rejection.md"
-            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            } > "${WORKDIR}/gate-rejection.md" ||
+              echo "::warning::could not write the gate rejection detail; the verdict stands."
             exit 1
           }
           run_check() {

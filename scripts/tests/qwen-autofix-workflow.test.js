@@ -3378,6 +3378,46 @@ describe('qwen-autofix workflow', () => {
     }
     expect(status).not.toBe(0);
     expect(readFileSync(out, 'utf8')).toContain('outcome=failed');
+    // The verdict must be declared BEFORE the detail file is written, and the
+    // write must be non-fatal. An empty outcome on a failed job reads as "the
+    // gate never reached a verdict" — a CRASH, which is retried — so a
+    // rejection that died writing its detail would be re-attempted forever
+    // instead of reported once. Drive it with an unwritable WORKDIR: the
+    // detail is lost, the verdict is not.
+    //
+    // The ordering is asserted STATICALLY as the primary guard, because the
+    // behavioural half is not portable: bash 3.2 suspends set -e through a
+    // `||`-invoked function and bash 5 does not, so the wrong order runs
+    // clean on macOS and aborts on a Linux runner. That is precisely how this
+    // shipped green locally and red in CI, so the guard must not depend on
+    // which bash the reviewer happens to have.
+    expect(helper.indexOf('outcome=failed')).toBeLessThan(
+      helper.indexOf('gate-rejection.md'),
+    );
+    // ...and the detail write is non-fatal, so it cannot abort before exit 1.
+    expect(helper).toMatch(/gate-rejection\.md" \|\|\n/);
+    const outNoDir = join(dir, 'gh_output_nodir');
+    writeFileSync(outNoDir, '');
+    let degraded = 0;
+    try {
+      execFileSync(
+        'bash',
+        ['-c', `set -eo pipefail\n${helper}\nfalse || reject_fix 'boom'`],
+        {
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: outNoDir,
+            WORKDIR: join(dir, 'does', 'not', 'exist'),
+          },
+          encoding: 'utf8',
+          stdio: 'pipe',
+        },
+      );
+    } catch (e) {
+      degraded = e.status;
+    }
+    expect(degraded).not.toBe(0);
+    expect(readFileSync(outNoDir, 'utf8')).toContain('outcome=failed');
     rmSync(dir, { recursive: true, force: true });
   });
 
