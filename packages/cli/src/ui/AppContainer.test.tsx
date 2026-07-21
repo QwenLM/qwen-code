@@ -8,6 +8,16 @@ const { writeTerminalTitleSpy } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
 }));
 
+const { mockRemoteInputState } = vi.hoisted(() => ({
+  mockRemoteInputState: {
+    current: null as {
+      setSubmitFn: ReturnType<typeof vi.fn>;
+      notifyIdle: ReturnType<typeof vi.fn>;
+      setConfirmationHandler: ReturnType<typeof vi.fn>;
+    } | null,
+  },
+}));
+
 vi.mock('../utils/windowTitle.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../utils/windowTitle.js')>();
@@ -21,6 +31,10 @@ vi.mock('../utils/windowTitle.js', async (importOriginal) => {
     },
   };
 });
+
+vi.mock('../remoteInput/RemoteInputContext.js', () => ({
+  useRemoteInput: () => mockRemoteInputState.current,
+}));
 
 import {
   describe,
@@ -219,6 +233,7 @@ describe('AppContainer State Management', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockRemoteInputState.current = null;
 
     // Initialize mock stdout for terminal title tests
     mockStdout = { write: vi.fn() };
@@ -1144,6 +1159,67 @@ describe('AppContainer State Management', () => {
 
       expect(mockSubmitQuery).toHaveBeenCalledWith('/model');
       expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('defers remote prompts until initialization and applies prompt reminders', async () => {
+      let releaseInitialize!: () => void;
+      vi.spyOn(mockConfig, 'initialize').mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          releaseInitialize = resolve;
+        }),
+      );
+      vi.spyOn(
+        mockConfig,
+        'consumePendingRecoveredAgentsNotice',
+      ).mockReturnValueOnce('Use list_agents to inspect restored agents.');
+
+      const addMessage = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      let submitRemote: ((text: string) => boolean | void) | undefined;
+      const setSubmitFn = vi.fn((fn: typeof submitRemote) => {
+        submitRemote = fn;
+      });
+      mockRemoteInputState.current = {
+        setSubmitFn,
+        notifyIdle: vi.fn(),
+        setConfirmationHandler: vi.fn(),
+      };
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await vi.waitFor(() => expect(submitRemote).toBeDefined());
+      expect(submitRemote?.('continue the review')).toBe(false);
+      expect(addMessage).not.toHaveBeenCalled();
+
+      await act(async () => {
+        releaseInitialize();
+        await Promise.resolve();
+      });
+      await vi.waitFor(
+        () => expect(submitRemote?.('continue the review')).toBe(true),
+        { timeout: 5000 },
+      );
+      expect(setSubmitFn).toHaveBeenCalledTimes(1);
+      expect(addMessage).toHaveBeenCalledWith(
+        '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
+          '</system-reminder>\n\ncontinue the review',
+      );
     });
 
     it('injects a recovered-agents reminder into the next ordinary prompt once', () => {

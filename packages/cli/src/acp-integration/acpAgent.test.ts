@@ -12887,6 +12887,46 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
+  it('keeps the existing session when replacement preflight fails', async () => {
+    bindRestoreMocks({ sessionExists: true });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const existingSession = lastSessionMock;
+
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(
+      new Error('load replacement failed'),
+    );
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).rejects.toThrow('load replacement failed');
+
+    vi.mocked(loadCliConfig).mockRejectedValueOnce(
+      new Error('resume replacement failed'),
+    );
+    await expect(
+      agent.unstable_resumeSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).rejects.toThrow('resume replacement failed');
+
+    expect(existingSession?.dispose).not.toHaveBeenCalled();
+    expect(lastSessionMock).toBe(existingSession);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('unstable_resumeSession throws resourceNotFound when the persisted session is missing', async () => {
     bindRestoreMocks({ sessionExists: false });
     const { agent, agentPromise } = await spawnAgent();

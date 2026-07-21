@@ -743,10 +743,6 @@ export class BackgroundAgentResumeService {
     if (!existing || existing.status !== 'paused') {
       return existing;
     }
-    if (existing.resumeBlockedReason) {
-      return undefined;
-    }
-
     const metaPath = existing.metaPath;
     const outputFile = existing.outputFile;
     if (!metaPath || !outputFile) {
@@ -755,6 +751,10 @@ export class BackgroundAgentResumeService {
 
     const meta = readAgentMeta(metaPath);
     if (!meta) {
+      return undefined;
+    }
+    if (meta.isolation === 'worktree') {
+      existing.resumeBlockedReason = ISOLATED_AGENT_CONTINUATION_BLOCKED_REASON;
       return undefined;
     }
 

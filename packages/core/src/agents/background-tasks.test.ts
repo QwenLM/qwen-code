@@ -1038,15 +1038,31 @@ describe('BackgroundTaskRegistry', () => {
 
     registry.trackAgentExecution(second);
     resolveFirst();
-    await Promise.resolve();
+    await vi.waitFor(() => expect(abortAll).toHaveBeenCalledTimes(2));
     expect(settled).toBe(false);
 
     rejectSecond(new Error('expected test rejection'));
     await wait;
     expect(settled).toBe(true);
-    expect(abortAll).toHaveBeenCalledTimes(2);
     expect(abortAll).toHaveBeenNthCalledWith(1, { notify: false });
     expect(abortAll).toHaveBeenNthCalledWith(2, { notify: false });
+  });
+
+  it('bounds the wait when an aborted agent execution never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      registry.trackAgentExecution(new Promise<void>(() => {}));
+
+      const wait = registry.abortAllAndWait({ notify: false });
+      const rejection = await expect(wait).rejects.toThrow(
+        'Background agents did not stop within 5000ms.',
+      );
+
+      await vi.advanceTimersByTimeAsync(5000);
+      await rejection;
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('abortAll({ notify: false }) suppresses terminal notifications from old tasks', () => {

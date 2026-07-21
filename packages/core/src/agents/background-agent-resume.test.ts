@@ -611,6 +611,20 @@ describe('BackgroundAgentResumeService', () => {
       resumeBlockedReason: 'Subagent "deleted-agent" is no longer available.',
     });
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('deleted-agent');
+
+    subagentManager.loadSubagent.mockResolvedValueOnce({
+      name: 'deleted-agent',
+      color: 'cyan',
+    });
+    subagentManager.createAgentHeadless.mockRejectedValueOnce(
+      new Error('stop after target resolution'),
+    );
+
+    await expect(
+      service.resumeBackgroundAgent(agentId, 'continue'),
+    ).resolves.toBeUndefined();
+    expect(subagentManager.loadSubagent).toHaveBeenCalledTimes(2);
+    expect(registry.get(agentId)?.resumeBlockedReason).toBeUndefined();
   });
 
   it('keeps paused tasks resumable when they only carry a stale lastError', async () => {

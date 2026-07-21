@@ -597,6 +597,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const [currentModel, setCurrentModel] = useState(() => config.getModel());
 
   const [isConfigInitialized, setConfigInitialized] = useState(false);
+  const configInitializedRef = useRef(false);
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
@@ -862,6 +863,7 @@ export const AppContainer = (props: AppContainerProps) => {
           }
         }
       }
+      configInitializedRef.current = true;
       setConfigInitialized(true);
       profileCheckpoint('input_enabled');
       // Profile finalize is intentionally NOT here. With PR-A's background
@@ -2046,14 +2048,7 @@ export const AppContainer = (props: AppContainerProps) => {
   midTurnDrainRef.current = drainQueue;
   midTurnRestoreRef.current = restoreMessages;
 
-  // Connect remote input watcher to submitQuery for bidirectional sync.
-  // When an external process writes a command to the input-file,
-  // the watcher calls submitQuery as if the user typed it in the TUI.
   const remoteInput = useRemoteInput();
-  useEffect(() => {
-    if (!remoteInput) return;
-    remoteInput.setSubmitFn((text: string) => submitQuery(text));
-  }, [remoteInput, submitQuery]);
 
   // Notify remote input watcher when TUI becomes idle so it can
   // retry queued commands that were deferred while TUI was busy.
@@ -2396,6 +2391,18 @@ export const AppContainer = (props: AppContainerProps) => {
       settings.merged.ui?.disableWorkflowKeywordTrigger,
     ],
   );
+
+  // Route remote prompts through the same preprocessing as typed input so
+  // session-scoped reminders cannot be skipped. Returning false keeps input
+  // queued until initialization (including agent restore) has completed.
+  useEffect(() => {
+    if (!remoteInput) return;
+    remoteInput.setSubmitFn((text: string) => {
+      if (!configInitializedRef.current) return false;
+      handleFinalSubmit(text);
+      return true;
+    });
+  }, [handleFinalSubmit, remoteInput]);
 
   const handleArenaModelsSelected = useCallback(
     (models: string[]) => {

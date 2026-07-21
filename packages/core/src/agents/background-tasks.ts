@@ -1083,9 +1083,35 @@ export class BackgroundTaskRegistry {
   async abortAllAndWait(
     options: BackgroundTaskCancelOptions = {},
   ): Promise<void> {
+    const deadline = Date.now() + CANCEL_GRACE_MS;
     while (this.agentExecutions.size > 0) {
       this.abortAll(options);
-      await Promise.allSettled([...this.agentExecutions]);
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        throw new Error(
+          `Background agents did not stop within ${CANCEL_GRACE_MS}ms.`,
+        );
+      }
+
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await Promise.race([
+          Promise.allSettled([...this.agentExecutions]),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(
+              () =>
+                reject(
+                  new Error(
+                    `Background agents did not stop within ${CANCEL_GRACE_MS}ms.`,
+                  ),
+                ),
+              remainingMs,
+            );
+          }),
+        ]);
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
     }
   }
 

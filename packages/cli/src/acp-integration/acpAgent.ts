@@ -3854,7 +3854,6 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
-    await this.closeStoredSession(params.sessionId);
     // Adopt into the "latest loaded" cache only once the session is
     // confirmed — a failed probe for a stale id must not repoint
     // agent-level readers at this request's workspace.
@@ -4020,7 +4019,6 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
-    await this.closeStoredSession(params.sessionId);
     this.settings = settings;
 
     const config = await this.newSessionConfig(
