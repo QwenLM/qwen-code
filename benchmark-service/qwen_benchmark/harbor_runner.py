@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import signal
@@ -15,6 +16,7 @@ from .runner import AgentError, InfrastructureError, RunResult
 
 
 VERSION_RE = re.compile(r"^v?(?P<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$")
+LOGGER = logging.getLogger(__name__)
 
 
 def qwen_version_from_ref(qwen_ref: str) -> str:
@@ -155,10 +157,23 @@ class HarborRunner:
             "--registry",
             self.settings.npm_registry,
         ]
+        env = os.environ.copy()
+        env["NPM_CONFIG_REGISTRY"] = self.settings.npm_registry
+        env.setdefault("NPM_CONFIG_CACHE", "/srv/qwen-benchmark/cache/npm")
         last_error = "npm release not found"
         while True:
-            result = subprocess.run(command, text=True, capture_output=True, timeout=60)
-            if result.returncode == 0:
+            try:
+                result = subprocess.run(
+                    command,
+                    text=True,
+                    capture_output=True,
+                    timeout=60,
+                    env=env,
+                )
+            except subprocess.TimeoutExpired:
+                last_error = "npm view timed out after 60 seconds"
+                result = None
+            if result is not None and result.returncode == 0:
                 try:
                     metadata = json.loads(result.stdout)
                 except json.JSONDecodeError as error:
@@ -173,11 +188,17 @@ class HarborRunner:
                 if not integrity:
                     raise InfrastructureError("npm metadata is missing dist.integrity")
                 return metadata
-            last_error = (result.stderr or result.stdout).strip()[-1000:]
+            if result is not None:
+                last_error = (result.stderr or result.stdout).strip()[-1000:]
             if time.monotonic() >= deadline:
                 raise InfrastructureError(
                     f"Qwen Code npm release {version} is unavailable: {last_error}"
                 )
+            LOGGER.warning(
+                "Qwen Code npm release %s is not visible yet; retrying: %s",
+                version,
+                last_error,
+            )
             self.heartbeat()
             time.sleep(min(30, max(self.settings.npm_wait_seconds, 1)))
 
