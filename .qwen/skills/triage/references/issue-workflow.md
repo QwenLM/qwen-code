@@ -6,6 +6,17 @@ Triage a GitHub issue. Shared rules in `SKILL.md` — read those first.
 comment; Stage 2 appends results to the same comment via `gh api PATCH`.
 Key points only — no verbose prose.
 
+Before drafting the comment, read the model selected by the workflow and reuse
+that exact value in the signature:
+
+```bash
+TRIAGE_MODEL="$(printenv OPENAI_MODEL || true)"
+[ -n "$TRIAGE_MODEL" ] || TRIAGE_MODEL="unknown"
+```
+
+Replace `<TRIAGE_MODEL>` below with the captured value; never post the
+placeholder literally.
+
 ```markdown
 <!-- qwen-triage stage=1 -->
 
@@ -23,7 +34,7 @@ Key points only — no verbose prose.
 - **下一步**: <一句话动作>
 </details>
 
---- Qwen Code
+— _Qwen Code · <TRIAGE_MODEL>_
 ```
 
 ## Stage 1: Intake Gate

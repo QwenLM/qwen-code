@@ -12,6 +12,10 @@ const prWorkflow = readFileSync(
   '.qwen/skills/triage/references/pr-workflow.md',
   'utf8',
 );
+const issueWorkflow = readFileSync(
+  '.qwen/skills/triage/references/issue-workflow.md',
+  'utf8',
+);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -39,6 +43,16 @@ function job(name) {
 }
 
 describe('qwen-triage tmux workflow', () => {
+  it('includes the active model in issue triage signatures', () => {
+    expect(issueWorkflow).toContain(
+      'TRIAGE_MODEL="$(printenv OPENAI_MODEL || true)"',
+    );
+    expect(issueWorkflow).toContain('TRIAGE_MODEL="unknown"');
+    expect(issueWorkflow).toContain('— _Qwen Code · <TRIAGE_MODEL>_');
+    expect(issueWorkflow).toContain('never post the\nplaceholder literally');
+    expect(issueWorkflow).not.toContain('--- Qwen Code');
+  });
+
   it('uses the existing on-hold label for behavior-neutral maintenance PRs', () => {
     expect(prWorkflow).toContain(
       'Behavior-neutral maintenance stop (non-maintainer PRs only)',
