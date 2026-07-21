@@ -255,6 +255,59 @@ describe('GitlabChannel', () => {
     expect(env.metadata).toContain('Branch: feature-branch');
   });
 
+  it('includes metadata for slash command todos', async () => {
+    const bridge = mockBridge();
+
+    mockTodosAll.mockResolvedValueOnce([
+      {
+        id: 5,
+        action_name: 'mentioned',
+        target_type: 'Issue',
+        target: { title: 'Bug report', iid: 1 },
+        target_url: 'https://gitlab.com/owner/repo/-/issues/1',
+        body: '/review please',
+        state: 'pending',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        project: {
+          name: 'repo',
+          path_with_namespace: 'owner/repo',
+        },
+        author: { name: 'Alice', username: 'alice' },
+      },
+    ]);
+    mockTodoDone.mockResolvedValueOnce({});
+
+    const channel = new GitlabChannel('test', baseConfig, bridge);
+    const envelopes: unknown[] = [];
+    const origHandleInbound = (
+      channel as unknown as {
+        handleInbound: (e: unknown) => Promise<void>;
+      }
+    ).handleInbound.bind(channel);
+    (
+      channel as unknown as {
+        handleInbound: (e: unknown) => Promise<void>;
+      }
+    ).handleInbound = async (e: unknown) => {
+      envelopes.push(e);
+      await origHandleInbound(e);
+    };
+
+    await channel.connect();
+    await vi.waitFor(() => expect(envelopes.length).toBe(1), {
+      timeout: 2000,
+    });
+    channel.disconnect();
+
+    const env = envelopes[0] as { text: string; metadata?: string };
+    expect(env.text).toContain('/review please');
+    expect(env.metadata).toContain(
+      'URL: https://gitlab.com/owner/repo/-/issues/1',
+    );
+    expect(env.metadata).toContain('Title: Bug report');
+  });
+
   it('sendThreadMessage creates note on issue', async () => {
     mockIssueNotesCreate.mockResolvedValueOnce({});
 
@@ -352,7 +405,7 @@ describe('GitlabChannel', () => {
     expect(mockIssuesCreate).not.toHaveBeenCalled();
   });
 
-  it('replies error on handleInbound failure and skips cursor advance when done() fails', async () => {
+  it('replies error on handleInbound failure and advances cursor even when done() fails', async () => {
     const bridge = mockBridge();
     (bridge as Record<string, unknown>).prompt = vi
       .fn()
@@ -395,7 +448,7 @@ describe('GitlabChannel', () => {
       'Sorry, something went wrong processing your message.',
     );
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('');
+    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
   });
 
   it('fetches all pages of todos', async () => {

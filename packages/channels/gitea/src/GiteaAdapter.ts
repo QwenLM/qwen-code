@@ -61,8 +61,12 @@ export class GiteaChannel extends ChannelBase {
     }
     this.abortController = new AbortController();
     const { signal } = this.abortController;
-    const { data: user } = await this.client.user.userGetCurrent();
-    this.botUsername = user.login ?? null;
+    try {
+      const { data: user } = await this.client.user.userGetCurrent();
+      this.botUsername = user.login ?? null;
+    } catch {
+      // bot username unavailable — isReplyToBot will be conservative
+    }
     const gen = ++this.pollGeneration;
     this.runPollLoop(signal, gen).catch((err) => {
       if (!signal.aborted && gen === this.pollGeneration) {
@@ -323,7 +327,6 @@ export class GiteaChannel extends ChannelBase {
         ).test(body)
       : false;
 
-    const isCommand = /^\/[a-zA-Z0-9_:-]+/.test(content);
     return {
       channelName: this.name,
       senderId: senderUsername,
@@ -332,7 +335,7 @@ export class GiteaChannel extends ChannelBase {
       threadId: extracted ? `${extracted.type}:${extracted.number}` : undefined,
       messageId: String(notification.id),
       text: content,
-      metadata: !isCommand ? metadata : undefined,
+      metadata,
       isGroup: true,
       isMentioned,
       isReplyToBot: false,

@@ -350,7 +350,6 @@ export class GithubChannel extends ChannelBase {
         ? stripBotMention(body, this.botUsername)
         : (body ?? '');
 
-    const isCommand = /^\/[a-zA-Z0-9_:-]+/.test(content);
     return {
       channelName: this.name,
       senderId: senderLogin,
@@ -359,7 +358,7 @@ export class GithubChannel extends ChannelBase {
       threadId: extracted ? `${extracted.type}:${extracted.number}` : undefined,
       messageId: notification.id,
       text: content,
-      metadata: !isCommand ? metadata : undefined,
+      metadata,
       isGroup: true,
       isMentioned: MENTION_REASONS.has(notification.reason),
       isReplyToBot:

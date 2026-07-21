@@ -128,8 +128,8 @@ export interface Envelope {
   alreadyPrefixed?: true;
   /**
    * Platform-specific metadata (type, title, URL, etc.) appended to the prompt
-   * when forwarding to the agent. Kept separate from `text` so slash commands
-   * parse cleanly without metadata corrupting their arguments.
+   * when forwarding to the agent. Kept separate from `text` — slash command
+   * parsing operates on `text` only, so metadata never interferes with it.
    */
   metadata?: string;
 }

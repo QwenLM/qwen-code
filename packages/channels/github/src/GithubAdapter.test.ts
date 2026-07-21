@@ -329,6 +329,63 @@ describe('GithubChannel', () => {
     expect((envelopes[0] as { senderId: string }).senderId).toBe('pr-author');
   });
 
+  it('includes metadata for slash command comments', async () => {
+    const bridge = mockBridge();
+
+    mockPaginate.mockResolvedValueOnce([
+      {
+        id: '10',
+        reason: 'mention',
+        unread: true,
+        subject: {
+          title: 'Add feature',
+          url: 'https://api.github.com/repos/owner/repo/issues/7',
+          latest_comment_url:
+            'https://api.github.com/repos/owner/repo/issues/comments/99',
+          type: 'Issue',
+        },
+        repository: {
+          full_name: 'owner/repo',
+          html_url: 'https://github.com/owner/repo',
+        },
+        updated_at: '2026-01-01T00:00:00Z',
+      },
+    ]);
+    mockGetComment.mockResolvedValueOnce({
+      data: { user: { login: 'commenter' }, body: '/review please' },
+    });
+    mockMarkThreadAsRead.mockResolvedValueOnce({});
+
+    const channel = new GithubChannel('test', baseConfig, bridge);
+    const envelopes: unknown[] = [];
+    const origHandleInbound = (
+      channel as unknown as {
+        handleInbound: (e: unknown) => Promise<void>;
+      }
+    ).handleInbound.bind(channel);
+    (
+      channel as unknown as {
+        handleInbound: (e: unknown) => Promise<void>;
+      }
+    ).handleInbound = async (e: unknown) => {
+      envelopes.push(e);
+      await origHandleInbound(e);
+    };
+
+    await channel.connect();
+    await vi.waitFor(() => expect(envelopes.length).toBe(1), {
+      timeout: 2000,
+    });
+    channel.disconnect();
+
+    const env = envelopes[0] as { text: string; metadata?: string };
+    expect(env.text).toContain('/review please');
+    expect(env.metadata).toContain(
+      'URL: https://github.com/owner/repo/issues/7',
+    );
+    expect(env.metadata).toContain('Title: Add feature');
+  });
+
   it('sendThreadMessage creates comment on issue', async () => {
     mockCreateComment.mockResolvedValueOnce({ data: { id: 1 } });
 

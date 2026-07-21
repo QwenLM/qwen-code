@@ -217,15 +217,14 @@ export class GitlabChannel extends ChannelBase {
           }
         }
       }
+      this.advanceCursor(updatedAt, tid);
       try {
         await this.gitlab.TodoLists.done({ todoId: todo.id });
       } catch (err) {
         process.stderr.write(
           `[GitLab:${this.name}] failed to dismiss todo ${todo.id}: ${err instanceof Error ? err.message : err}\n`,
         );
-        continue;
       }
-      this.advanceCursor(updatedAt, tid);
     }
   }
 
@@ -272,8 +271,6 @@ export class GitlabChannel extends ChannelBase {
       ...(sourceBranch ? [`Branch: ${sourceBranch}`] : []),
     ].join('\n');
     const content = todo.body ? stripMentions(todo.body) : '';
-    const isCommand = /^\/[a-zA-Z0-9_:-]+/.test(content);
-
     return {
       channelName: this.name,
       senderId: author.username,
@@ -282,7 +279,7 @@ export class GitlabChannel extends ChannelBase {
       threadId:
         targetIid !== undefined ? `${typePrefix}:${targetIid}` : undefined,
       text: content,
-      metadata: !isCommand ? metadata : undefined,
+      metadata,
       isGroup: true,
       isMentioned: MENTION_ACTIONS.has(todo.action_name),
       isReplyToBot: false,

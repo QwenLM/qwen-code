@@ -257,6 +257,65 @@ describe('GiteaChannel', () => {
     expect(env.metadata).toContain('Branch: feature-branch');
   });
 
+  it('includes metadata for slash command comments', async () => {
+    mockNotifyGetList.mockResolvedValueOnce({
+      data: [
+        {
+          id: 2,
+          reason: 'mention',
+          unread: true,
+          subject: {
+            title: 'Bug report',
+            type: 'Issue',
+            url: 'https://gitea.com/api/v1/repos/owner/repo/issues/1',
+            latest_comment_url:
+              'https://gitea.com/api/v1/repos/owner/repo/issues/comments/99',
+            html_url: 'https://gitea.com/owner/repo/issues/1',
+          },
+          repository: {
+            full_name: 'owner/repo',
+            html_url: 'https://gitea.com/owner/repo',
+          },
+          updated_at: '2026-01-01T00:00:00Z',
+        },
+      ],
+    });
+    mockGetComment.mockResolvedValueOnce({
+      data: { user: { login: 'commenter' }, body: '/review please' },
+    });
+    mockNotifyReadThread.mockResolvedValueOnce({});
+
+    const bridge = mockBridge();
+    const channel = new GiteaChannel('test', baseConfig, bridge);
+    const envelopes: unknown[] = [];
+    const origHandleInbound = (
+      channel as unknown as {
+        handleInbound: (e: unknown) => Promise<void>;
+      }
+    ).handleInbound.bind(channel);
+    (
+      channel as unknown as {
+        handleInbound: (e: unknown) => Promise<void>;
+      }
+    ).handleInbound = async (e: unknown) => {
+      envelopes.push(e);
+      await origHandleInbound(e);
+    };
+
+    await channel.connect();
+    await vi.waitFor(() => expect(envelopes.length).toBe(1), {
+      timeout: 2000,
+    });
+    channel.disconnect();
+
+    const env = envelopes[0] as { text: string; metadata?: string };
+    expect(env.text).toContain('/review please');
+    expect(env.metadata).toContain(
+      'URL: https://gitea.com/owner/repo/issues/1',
+    );
+    expect(env.metadata).toContain('Title: Bug report');
+  });
+
   it('sendThreadMessage creates comment on issue', async () => {
     mockCreateComment.mockResolvedValueOnce({ data: { id: 1 } });
 
@@ -382,15 +441,16 @@ describe('GiteaChannel', () => {
     expect(env.isMentioned).toBe(true);
   });
 
-  it('throws on connect when bot identity is unavailable', async () => {
+  it('connects successfully when bot identity is unavailable', async () => {
     mockUserGetCurrent.mockRejectedValueOnce(new Error('forbidden'));
+    mockNotifyGetList.mockResolvedValueOnce([]);
     const bridge = mockBridge();
 
     const channel = new GiteaChannel('test', baseConfig, bridge);
-    await expect(channel.connect()).rejects.toThrow();
+    await channel.connect();
     channel.disconnect();
 
-    expect(mockNotifyGetList).not.toHaveBeenCalled();
+    expect(mockNotifyGetList).toHaveBeenCalled();
   });
 
   it('sets isMentioned true when bot username is mentioned in body', async () => {
