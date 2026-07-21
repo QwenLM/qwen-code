@@ -12,6 +12,7 @@ import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  realUserPromptTexts,
 } from './historyUtils.js';
 
 const mk = (
@@ -202,5 +203,33 @@ describe('findLastUserItemIndex', () => {
       mk({ type: 'user', text: 'steer', sentToModel: false }, 2),
     ];
     expect(findLastUserItemIndex(h)).toBe(0);
+  });
+});
+
+describe('realUserPromptTexts', () => {
+  it('returns texts of real user prompts oldest-first', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'first' }, 1),
+      mk({ type: 'gemini_content', text: 'reply' }, 2),
+      mk({ type: 'user', text: 'second' }, 3),
+    ];
+    expect(realUserPromptTexts(h)).toEqual(['first', 'second']);
+  });
+
+  it('excludes steer messages with sentToModel false', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'real' }, 1),
+      mk({ type: 'user', text: 'steer', sentToModel: false }, 2),
+    ];
+    expect(realUserPromptTexts(h)).toEqual(['real']);
+  });
+
+  it('excludes empty and whitespace-only prompts', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: '' }, 1),
+      mk({ type: 'user', text: '   ' }, 2),
+      mk({ type: 'user', text: 'valid' }, 3),
+    ];
+    expect(realUserPromptTexts(h)).toEqual(['valid']);
   });
 });

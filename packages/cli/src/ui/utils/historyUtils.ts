@@ -128,6 +128,19 @@ export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   return -1;
 }
 
+/** Texts of real (non-steer) user prompts in `history`, oldest-first. */
+export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
+  return history
+    .filter(
+      (item): item is HistoryItem & { type: 'user'; text: string } =>
+        item.type === 'user' &&
+        item.sentToModel !== false &&
+        typeof item.text === 'string' &&
+        item.text.trim() !== '',
+    )
+    .map((item) => item.text);
+}
+
 /**
  * Map every thought item to the id of its group's `gemini_thought` head.
  *
