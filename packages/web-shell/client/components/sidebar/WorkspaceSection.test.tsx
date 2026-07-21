@@ -167,13 +167,26 @@ describe('WorkspaceSection git chip', () => {
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
 
-    // The chip itself is a read-only OUTPUT; the wrapping button is what opens
-    // the Changes view. Click it to prove the onClick handler is actually wired
-    // — a miswire (e.g. a deleted onClick) would otherwise go undetected.
-    const button = chip?.closest('button');
-    expect(button).not.toBeNull();
+    // The chip itself is a read-only OUTPUT; the wrapping trigger opens a
+    // dropdown with the Changes action. Click the trigger then the menu item
+    // to prove the onClick handler is actually wired.
+    const trigger = chip?.closest('[role="button"]');
+    expect(trigger).not.toBeNull();
     act(() => {
-      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      trigger?.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true }),
+      );
+      trigger?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const menuItem = document.querySelector<HTMLElement>('[role="menuitem"]');
+    expect(menuItem).not.toBeNull();
+    act(() => {
+      menuItem?.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true }),
+      );
+      menuItem?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
+      menuItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
   });
