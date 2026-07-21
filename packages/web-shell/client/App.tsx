@@ -1321,25 +1321,34 @@ export function App({
   const [sessionWorktree, setSessionWorktree] = useState<
     { slug: string; path: string; branch: string } | undefined
   >(undefined);
-  // Restore worktree info from the server when switching to an existing session.
+  // Bumped on every user-initiated session switch so the async worktree
+  // restore can tell apart "user switched away" from "connection.sessionId
+  // transiently cycled through other sessions during the reconnect loop".
+  const worktreeGenRef = useRef(0);
+  // Restore worktree info from the server when switching to an existing
+  // session. The effect intentionally does NOT cancel in-flight fetches on
+  // cleanup: connection.sessionId can cycle through several sessions during
+  // the DaemonSessionProvider reconnection loop, and cancelling would
+  // discard the one response we actually need. Instead, the generation
+  // counter guards against stale writes after a user-initiated switch.
   useEffect(() => {
     const sid = connection.sessionId;
     if (!sid) {
       setSessionWorktree(undefined);
       return;
     }
-    let cancelled = false;
+    const gen = worktreeGenRef.current;
     workspace.client
       .sessionStatus(sid)
       .then((summary) => {
-        if (!cancelled) setSessionWorktree(summary.worktree);
+        if (worktreeGenRef.current === gen && summary.worktree) {
+          setSessionWorktree(summary.worktree);
+        }
       })
       .catch(() => {
-        if (!cancelled) setSessionWorktree(undefined);
+        // Non-live sessions 404 here; the sidecar-enriched session list
+        // in the sidebar still shows the worktree badge.
       });
-    return () => {
-      cancelled = true;
-    };
   }, [connection.sessionId, workspace.client]);
   // Active workspace: the connected session's workspace, else the workspace
   // picked for the next session (locked / selected / primary). Computed once
@@ -3959,6 +3968,7 @@ export function App({
         ]);
         // Clear after successful clearSession — if it rejects, the old
         // session's worktree state is preserved.
+        worktreeGenRef.current += 1;
         setSessionWorktree(undefined);
         return true;
       } catch (error) {
@@ -4169,6 +4179,7 @@ export function App({
       setSidebarSwitchingSessionId(sessionId);
       pendingWorktreeRef.current = undefined;
       setWorktreePending(false);
+      worktreeGenRef.current += 1;
       setSessionWorktree(undefined);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
