@@ -25,7 +25,7 @@ owns the model-driven decisions, code changes, and pre-commit verification.
 - Keep changes minimal and scoped. No drive-by refactors.
 - Run required verification commands before committing. Use only these trusted
   project commands: `npm run build`, `npm run typecheck`, `npm run lint`,
-  focused Vitest runs for touched package or integration tests, and
+  focused Vitest runs for touched packages or integration tests, and
   `npm run generate:settings-schema` when a settings source changed (see the
   generated-artifact rule below). If a command fails, fix the cause and rerun
   it. Do not commit while a required runnable check is failing.
@@ -140,11 +140,11 @@ Implement the selected issue in the checked-out repository:
 5. For TypeScript changes, read the relevant type definitions and preserve
    strict nullability; do not assume optional fields are present.
 6. Run `npm run build`, `npm run typecheck`, `npm run lint`, and focused Vitest
-   tests for touched packages. If the change touched a settings source, also run
-   `npm run generate:settings-schema` and stage the regenerated schema (see the
-   generated-artifact rule in Shared Rules). Keep fixing and rerunning runnable
-   checks until they pass. If a required runnable check remains failing, write
-   `<workdir>/failure.md` and stop.
+   tests for touched packages or integration tests. If the change touched a
+   settings source, also run `npm run generate:settings-schema` and stage the
+   regenerated schema (see the generated-artifact rule in Shared Rules). Keep
+   fixing and rerunning runnable checks until they pass. If a required runnable
+   check remains failing, write `<workdir>/failure.md` and stop.
 7. Re-read the full diff as a skeptical reviewer.
 8. Ensure `git status --short` shows only intended files, then create one
    Conventional Commit, e.g. `fix(core): summary (#<issue>)`.
@@ -188,9 +188,10 @@ Finish with exactly one outcome:
 
 - Made a change: re-read the full diff as a skeptical reviewer, run
   `npm run build`, `npm run typecheck`, `npm run lint`, and focused Vitest
-  tests for touched packages (plus `npm run generate:settings-schema`, staging
-  the regenerated schema, if a settings source changed), commit once only after
-  they pass, then write `<workdir>/address-summary.md` with each feedback point,
+  tests for touched packages or integration tests (plus
+  `npm run generate:settings-schema`, staging the regenerated schema, if a
+  settings source changed), commit once only after they pass, then write
+  `<workdir>/address-summary.md` with each feedback point,
   decision, changes, conflict notes, and verification results (bilingual per
   Shared Rules). Also write `<workdir>/resolved-comments.txt`: one inline
   comment id per line — the `rc:<id>` handle shown in `feedback.md` — for each
