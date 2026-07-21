@@ -1470,9 +1470,8 @@ export function KeypressProvider({
       });
       readline.emitKeypressEvents(keypressStream, rl);
       keypressStream.on('keypress', handleKeypress);
-      // Also keep stdin keypress for fallback / direct keypress emits (e.g.
-      // terminals that don't use bracketed paste, or test mocks that emit
-      // keypress directly on stdin).
+      // Test-only: mocks emit keypress directly on stdin; in production,
+      // all keypresses arrive via keypressStream.
       stdin.on('keypress', handleKeypress);
       stdin.on('data', handleStdinData);
     }
