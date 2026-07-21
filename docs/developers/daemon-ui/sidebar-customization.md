@@ -165,8 +165,8 @@ sidebar={{
 ```
 
 **Note:** `'scheduledTasks'` and `'goals'` have been moved to the primary
-navigation area (②) and are now always visible. They are no longer controlled
-by `footer.items`.
+navigation area (②) and are shown by default. They are controlled by `primaryNav.items` instead of
+`footer.items`.
 
 ### Other top-level options
 
@@ -195,7 +195,7 @@ sidebar={{
 ```
 
 When hidden, the session list entries and archived sessions are still shown —
-only the header row with its action buttons is removed.
+the header row with its action buttons and the session search bar are removed.
 
 ### Session Row Actions — `sessionActions`
 
@@ -209,16 +209,24 @@ type WebShellSidebarSessionActionItem =
   | 'pin' // 📌 Pin/Unpin (inline button)
   | 'archive'; // 📦 Archive (inline button)
 
+/** Subset with working inline (hover-button) handlers. */
+type WebShellSidebarSessionInlineActionItem =
+  | 'pin'
+  | 'archive'
+  | 'rename'
+  | 'export'
+  | 'delete';
+
 interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[]; // which actions to show (default: all)
-  inlineItems?: readonly WebShellSidebarSessionActionItem[]; // which items appear as inline buttons (default: ['pin', 'archive'])
+  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[]; // which items appear as inline buttons (default: ['pin', 'archive'])
 }
 ```
 
 Controls which action buttons appear on session rows:
 
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
-- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin', 'archive']`. Any known action item can be used as an inline button — it will use its built-in icon, label, and click handler. If an item has no built-in icon, text is used instead.
+- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin', 'archive']`. Only items with working inline handlers can be used: `'pin'`, `'archive'`, `'rename'`, `'export'`, `'delete'`. `'details'` and `'group'` are dropdown-only.
 
 **Visibility priority**: Both `items` AND the item's built-in condition AND `inlineItems` must all pass for the inline button to show. For example, `delete` as inline requires `items` to include `'delete'` AND `inlineItems` to include `'delete'`.
 
@@ -236,7 +244,7 @@ their capability condition and `items` include them.
 ```tsx
 sidebar={{
   sessionActions: {
-    items: ['details', 'rename', 'export', 'delete'],  // dropdown items
+    items: ['details', 'rename', 'export', 'delete', 'pin'],  // which actions to show (master control)
     inlineItems: ['pin', 'delete'],  // pin + delete as inline buttons
   },
 }}

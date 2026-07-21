@@ -2662,28 +2662,30 @@ export function WebShellSidebar({
                     ) : !attentionLabel ? (
                       <span className={styles.sessionTime}>{time}</span>
                     ) : null}
-                    {readOnly && canMutateSessionArchive(session) && (
-                      <div
-                        className={styles.sessionActions}
-                        onClick={(event) => event.stopPropagation()}
-                        onKeyDown={(event) => event.stopPropagation()}
-                      >
-                        <button
-                          className={styles.sessionActionButton}
-                          type="button"
-                          disabled={busy || isCurrent}
-                          aria-label={t('sidebar.archive')}
-                          title={
-                            isCurrent
-                              ? t('sidebar.archiveCurrentDisabled')
-                              : t('sidebar.archive')
-                          }
-                          onClick={() => handleArchive(session)}
+                    {readOnly &&
+                      canMutateSessionArchive(session) &&
+                      sessionActionItems.has('archive') && (
+                        <div
+                          className={styles.sessionActions}
+                          onClick={(event) => event.stopPropagation()}
+                          onKeyDown={(event) => event.stopPropagation()}
                         >
-                          <ArchiveIcon />
-                        </button>
-                      </div>
-                    )}
+                          <button
+                            className={styles.sessionActionButton}
+                            type="button"
+                            disabled={busy || isCurrent}
+                            aria-label={t('sidebar.archive')}
+                            title={
+                              isCurrent
+                                ? t('sidebar.archiveCurrentDisabled')
+                                : t('sidebar.archive')
+                            }
+                            onClick={() => handleArchive(session)}
+                          >
+                            <ArchiveIcon />
+                          </button>
+                        </div>
+                      )}
                     {!readOnly && (
                       <div
                         className={styles.sessionActions}
@@ -3908,7 +3910,7 @@ export function WebShellSidebar({
             )}
           >
             <div className={styles.footerPrimary}>
-              {typeof footer === 'object' && footer.render?.()}
+              {footer && typeof footer === 'object' && footer.render?.()}
               {footerItems.has('settings') && (
                 <button
                   className={styles.footerButton}
