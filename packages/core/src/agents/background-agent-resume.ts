@@ -627,6 +627,12 @@ export class BackgroundAgentResumeService {
       return undefined;
     }
 
+    const resumeModel =
+      existing.model ??
+      meta.model ??
+      meta.persistedCliFlags?.model ??
+      this.config.getModel();
+
     const bgAbortController = new AbortController();
 
     try {
@@ -641,6 +647,7 @@ export class BackgroundAgentResumeService {
         stats: undefined,
         recentActivities: [],
         pendingMessages: [...(existing.pendingMessages ?? [])],
+        model: resumeModel,
       });
     } catch (error) {
       const errorMessage =
@@ -697,7 +704,12 @@ export class BackgroundAgentResumeService {
         await createApprovalModeOverride(
           this.config,
           resolvedApprovalMode as ApprovalMode,
-          { persistedCliFlags: meta.persistedCliFlags },
+          {
+            persistedCliFlags: {
+              ...meta.persistedCliFlags,
+              model: resumeModel,
+            },
+          },
         );
       // Mirror the launch path's permission-bubbling gate (agent.ts): an
       // agent whose definition uses `approvalMode: bubble` surfaces
@@ -794,6 +806,7 @@ export class BackgroundAgentResumeService {
             promptConfigOverrides: {
               initialMessages: resumeHistory,
             },
+            modelConfigOverrides: { model: resumeModel },
           });
         subagent = result.subagent;
         subagentDispose = result.dispose;
@@ -818,9 +831,14 @@ export class BackgroundAgentResumeService {
         status: 'running',
         lastUpdatedAt: new Date().toISOString(),
         resolvedApprovalMode,
+        persistedCliFlags: {
+          ...meta.persistedCliFlags,
+          model: resumeModel,
+        },
         subagentName: target.agentName,
         agentColor: target.subagentConfig?.color ?? meta.agentColor,
         resumeCount: nextResumeCount,
+        model: resumeModel,
         lastError: undefined,
       });
 
@@ -841,6 +859,7 @@ export class BackgroundAgentResumeService {
         prompt: recovery.initialPrompt ?? existing.prompt,
         recentActivities: [],
         pendingMessages,
+        model: resumeModel,
       };
       const entry = registry.register(registration, {
         suppressRegisterCallback: true,

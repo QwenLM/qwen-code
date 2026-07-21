@@ -33,6 +33,22 @@ describe('useBranchCommand', () => {
   let setSessionName: ReturnType<typeof vi.fn>;
   let remount: ReturnType<typeof vi.fn>;
   let addItem: ReturnType<typeof vi.fn>;
+  let backgroundTaskRegistry: {
+    hasRunningTasks: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let monitorRegistry: {
+    getRunning: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let backgroundShellRegistry: {
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let workflowRunRegistry: {
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let config: any;
@@ -85,6 +101,22 @@ describe('useBranchCommand', () => {
     setSessionName = vi.fn();
     remount = vi.fn();
     addItem = vi.fn();
+    backgroundTaskRegistry = {
+      hasRunningTasks: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    };
+    monitorRegistry = {
+      getRunning: vi.fn().mockReturnValue([]),
+      reset: vi.fn(),
+    };
+    backgroundShellRegistry = {
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    };
+    workflowRunRegistry = {
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    };
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
       getSessionService: () => ({
@@ -96,9 +128,77 @@ describe('useBranchCommand', () => {
       }),
       getChatRecordingService: () => ({ finalize, flush }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
+      getBackgroundTaskRegistry: () => backgroundTaskRegistry,
+      getMonitorRegistry: () => monitorRegistry,
+      getBackgroundShellRegistry: () => backgroundShellRegistry,
+      getWorkflowRunRegistry: () => workflowRunRegistry,
       startNewSession: startNewSessionConfig,
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
+  });
+
+  it('does not branch while the current session has running background work', async () => {
+    backgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
+    expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('Stop the current session'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('clears terminal background state after branch initialization succeeds', async () => {
+    const order: string[] = [];
+    backgroundTaskRegistry.reset.mockImplementation(() => order.push('reset'));
+    startNewSessionConfig.mockImplementation(() => order.push('switch'));
+    config.getGeminiClient = () => ({
+      initialize: vi.fn(async () => {
+        order.push('initialize');
+      }),
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(order).toEqual(['switch', 'initialize', 'reset']);
+    expect(backgroundTaskRegistry.reset).toHaveBeenCalledOnce();
+    expect(monitorRegistry.reset).toHaveBeenCalledOnce();
+    expect(backgroundShellRegistry.reset).toHaveBeenCalledOnce();
+    expect(workflowRunRegistry.reset).toHaveBeenCalledOnce();
+  });
+
+  it('preserves terminal background state when branch initialization rolls back', async () => {
+    const initialize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('branch init failed'))
+      .mockResolvedValueOnce(undefined);
+    config.getGeminiClient = () => ({ initialize });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(2);
+    expect(startNewSessionConfig.mock.calls[1]?.[0]).toBe(
+      '12345678-aaaa-bbbb-cccc-dddddddddddd',
+    );
+    expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();
+    expect(monitorRegistry.reset).not.toHaveBeenCalled();
+    expect(backgroundShellRegistry.reset).not.toHaveBeenCalled();
+    expect(workflowRunRegistry.reset).not.toHaveBeenCalled();
   });
 
   it('persists and reloads the title before switching core or UI', async () => {

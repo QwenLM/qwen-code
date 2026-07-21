@@ -2465,6 +2465,7 @@ describe('BackgroundAgentResumeService', () => {
 
     const dispose = vi.fn().mockResolvedValue(undefined);
     const { service, subagentManager, config } = createService({ hookSystem });
+    const getModel = vi.spyOn(config, 'getModel').mockReturnValue('model-a');
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
       dispose,
@@ -2488,7 +2489,16 @@ describe('BackgroundAgentResumeService', () => {
     const revived = await revive;
 
     expect(revived).toBeDefined();
+    expect(revived?.model).toBe('model-a');
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+    const [, runtimeConfig, createOptions] =
+      subagentManager.createAgentHeadless.mock.calls[0]!;
+    expect((runtimeConfig as Config).getModel()).toBe('model-a');
+    expect(createOptions).toEqual(
+      expect.objectContaining({
+        modelConfigOverrides: { model: 'model-a' },
+      }),
+    );
     await vi.waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(2);
       expect(registry.get(agentId)?.status).toBe('completed');
@@ -2509,10 +2519,13 @@ describe('BackgroundAgentResumeService', () => {
     expect(notification).toHaveBeenCalledTimes(1);
     const meta = JSON.parse(fs.readFileSync(metaPath, 'utf8'));
     expect(meta.resumeCount).toBe(1);
+    expect(meta.model).toBe('model-a');
+    expect(meta.persistedCliFlags.model).toBe('model-a');
     expect(fs.statSync(sessionDir).mtime.getTime()).toBeGreaterThan(
       oldSessionMtime.getTime(),
     );
 
+    getModel.mockReturnValue('model-b');
     expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
       true,
     );
@@ -2522,6 +2535,7 @@ describe('BackgroundAgentResumeService', () => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+    expect((runtimeConfig as Config).getModel()).toBe('model-a');
     const hotContextArg = execute.mock.calls[2]?.[0];
     expect(hotContextArg?.get('task_prompt')).toBe('tighten the summary');
     expect(readAgentMeta(metaPath)?.resumeCount).toBe(2);

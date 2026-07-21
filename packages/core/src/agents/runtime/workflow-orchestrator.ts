@@ -535,12 +535,10 @@ function reportTokens(
  * "not available in this build" signal), and always disposes the
  * per-agent registry/hooks in `finally`.
  *
- * Why opts.model goes into `SubagentConfig.model` (not
- * `modelConfigOverrides`): `SubagentManager.buildRuntimeContentGeneratorView`
- * (subagent-manager.ts:945) consults `SubagentConfig.model` to decide
- * whether to build a dedicated ContentGenerator for a different provider
- * — `modelConfigOverrides` would only swap the model name within the
- * existing provider's runtime view.
+ * Why opts.model goes into `SubagentConfig.model`: the declarative selector
+ * remains the authoritative source for an explicitly requested provider and
+ * lets `SubagentManager.buildRuntimeContentGeneratorView` preserve that route
+ * when a caller also supplies effective model overrides.
  *
  * Why disallowed-floor is augmented on `SubagentConfig.disallowedTools`
  * (not via `toolConfigOverride`): augmenting before `convertToRuntimeConfig`

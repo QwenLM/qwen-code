@@ -2781,7 +2781,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         subagentRuntimeConfig.getShouldAvoidPermissionPrompts = () =>
           !shouldBubble;
         if (subagentModelId) {
-          subagentRuntimeConfig.getModel = () => subagentModelId;
+          const launchModel = subagentModelId;
+          subagentRuntimeConfig.getModel = () => launchModel;
         }
       }
 
@@ -2824,7 +2825,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const result = await this.subagentManager.createAgentHeadless(
           subagentConfig,
           subagentRuntimeConfig as Config,
-          { eventEmitter: backgroundEventEmitter ?? this.eventEmitter },
+          {
+            eventEmitter: backgroundEventEmitter ?? this.eventEmitter,
+            ...(shouldRunInBackground && subagentModelId
+              ? { modelConfigOverrides: { model: subagentModelId } }
+              : {}),
+          },
         );
         subagent = result.subagent;
         subagentDispose = result.dispose;
@@ -3058,7 +3064,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           persistedCliFlags: capturePersistedCliFlags(
             this.config,
             resolvedApprovalMode,
-            bgSubagent.getCore().modelConfig.model,
+            subagentModelId,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,

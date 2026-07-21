@@ -10860,6 +10860,13 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(recording.flush).toHaveBeenCalledOnce();
     expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
     expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(
+      (
+        vi.mocked(Session).mock.results.at(-1)?.value as
+          | { dispose: ReturnType<typeof vi.fn> }
+          | undefined
+      )?.dispose,
+    ).not.toHaveBeenCalled();
 
     await expect(
       agent.extMethod('qwen/control/session/close', {
@@ -10870,6 +10877,13 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(recording.flush).toHaveBeenCalledTimes(2);
     expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
     expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(
+      (
+        vi.mocked(Session).mock.results.at(-1)?.value as
+          | { dispose: ReturnType<typeof vi.fn> }
+          | undefined
+      )?.dispose,
+    ).not.toHaveBeenCalled();
 
     await expect(
       agent.extMethod('qwen/control/session/close', {
@@ -10880,6 +10894,13 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(recording.flush).toHaveBeenCalledTimes(3);
     expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
     expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(
+      (
+        vi.mocked(Session).mock.results.at(-1)?.value as
+          | { dispose: ReturnType<typeof vi.fn> }
+          | undefined
+      )?.dispose,
+    ).toHaveBeenCalledOnce();
     expect(
       (
         agent as unknown as {

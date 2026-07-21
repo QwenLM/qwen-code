@@ -4417,7 +4417,7 @@ describe('AgentTool', () => {
         expect.any(String),
         expect.objectContaining({
           persistedCliFlags: expect.objectContaining({
-            model: 'subagent-model',
+            model: 'parent-model',
           }),
         }),
       );
@@ -4426,6 +4426,7 @@ describe('AgentTool', () => {
     });
 
     it('pins an inherited model for resident continuations', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
       vi.mocked(config.getModel).mockReturnValue('model-a');
       vi.mocked(mockAgent.getCore).mockReturnValue({
         modelConfig: {},
@@ -4444,13 +4445,28 @@ describe('AgentTool', () => {
       const runtimeConfig = vi.mocked(mockSubagentManager.createAgentHeadless)
         .mock.calls[0]?.[1] as Config;
       expect(runtimeConfig.getModel()).toBe('model-a');
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        expect.anything(),
+        runtimeConfig,
+        expect.objectContaining({
+          modelConfigOverrides: { model: 'model-a' },
+        }),
+      );
       expect(mockRegistry.register).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'model-a' }),
         expect.any(Object),
       );
+      expect(writeMetaSpy).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.objectContaining({
+          model: 'model-a',
+          persistedCliFlags: expect.objectContaining({ model: 'model-a' }),
+        }),
+      );
 
       vi.mocked(config.getModel).mockReturnValue('model-b');
       expect(runtimeConfig.getModel()).toBe('model-a');
+      writeMetaSpy.mockRestore();
     });
 
     it('stores sanitized background results in the registry', async () => {

@@ -815,13 +815,13 @@ export class SubagentManager {
       const toolConfig =
         options?.toolConfigOverride ?? runtimeConfig.toolConfig;
 
-      // When the model selector specifies a different provider, build a
-      // dedicated ContentGenerator + view so the subagent talks to the
-      // right API without affecting the parent process. The view is
+      // Build a dedicated ContentGenerator view for either a declarative
+      // model selector or a caller-pinned effective model. The view is
       // applied via AsyncLocalStorage when the agent runs.
       const runtimeView = await this.buildRuntimeContentGeneratorView(
         config,
         runtimeContext,
+        options?.modelConfigOverrides?.model,
       );
 
       const { context: subagentContext, cleanup } =
@@ -1004,11 +1004,10 @@ export class SubagentManager {
   }
 
   /**
-   * When a subagent's model selector resolves to a concrete model, build a
-   * dedicated ContentGenerator and the view the agent runtime should publish
-   * via AsyncLocalStorage during the run. Returns `undefined` when no
-   * override is needed — including `inherit`, an unset `fast` selector, or
-   * any selector that fails to resolve to a configured model.
+   * When a subagent's model selector or caller-pinned effective model resolves
+   * to a concrete model, build a dedicated ContentGenerator and the view the
+   * agent runtime should publish via AsyncLocalStorage during the run. Returns
+   * `undefined` when neither source resolves to a concrete model.
    *
    * FileReadCache isolation and tool-registry rebuilding are handled
    * separately in {@link buildSubagentContextOverride} — every subagent
@@ -1018,8 +1017,16 @@ export class SubagentManager {
   private async buildRuntimeContentGeneratorView(
     config: SubagentConfig,
     base: Config,
+    effectiveModelOverride?: string,
   ): Promise<RuntimeContentGeneratorView | undefined> {
-    const resolvedModel = this.resolveModelOverride(config.model, base);
+    const configuredModel = this.resolveModelOverride(config.model, base);
+    const overriddenModel = effectiveModelOverride?.trim()
+      ? resolveModelId(effectiveModelOverride, buildModelIdContext(base))
+      : undefined;
+    const resolvedModel =
+      configuredModel?.modelId === overriddenModel?.modelId
+        ? configuredModel
+        : (overriddenModel ?? configuredModel);
     if (!resolvedModel) {
       return undefined;
     }

@@ -2120,6 +2120,53 @@ bad`);
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
       });
 
+      it('should pin an inherited effective model to its launch provider', async () => {
+        const config = { ...agentConfig, model: 'inherit' };
+        const launchGenerator = { generateContentStream: vi.fn() };
+        mockCreateContentGenerator.mockResolvedValue(launchGenerator);
+
+        await manager.createAgentHeadless(config, mockConfig, {
+          modelConfigOverrides: { model: 'parent-model' },
+        });
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'parent-model',
+            authType: AuthType.USE_OPENAI,
+            apiKey: 'parent-key',
+          }),
+          mockConfig,
+        );
+        const { modelConfig, runtimeView } = destructureAgentHeadlessCall(
+          mockAgentHeadlessCreate.mock.calls[0],
+        );
+        expect(modelConfig).toEqual(
+          expect.objectContaining({ model: 'parent-model' }),
+        );
+        expect(runtimeView).toEqual(
+          expect.objectContaining({
+            contentGenerator: launchGenerator,
+            contentGeneratorConfig: expect.objectContaining({
+              model: 'parent-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+          }),
+        );
+
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          model: 'model-b',
+          authType: AuthType.USE_ANTHROPIC,
+          apiKey: 'replacement-key',
+        });
+        expect(runtimeView?.contentGenerator).toBe(launchGenerator);
+        expect(runtimeView?.contentGeneratorConfig).toEqual(
+          expect.objectContaining({
+            model: 'parent-model',
+            authType: AuthType.USE_OPENAI,
+          }),
+        );
+      });
+
       it('should NOT create a new ContentGenerator when model is omitted', async () => {
         await manager.createAgentHeadless(agentConfig, mockConfig);
 
