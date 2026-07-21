@@ -383,6 +383,7 @@ export function resolveSetupGithubProxy(
   const settings = loadSettings(boundWorkspace, {
     skipLoadEnvironment: true,
     skipWorkspaceSettings: workspaceTrusted === false,
+    workspaceTrusted,
   });
   const trusted =
     workspaceTrusted ??

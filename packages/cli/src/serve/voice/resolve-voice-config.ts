@@ -85,14 +85,18 @@ export function loadDaemonVoiceContext(
       ? {
           skipLoadEnvironment: true,
           skipWorkspaceSettings: options.workspaceTrusted === false,
+          workspaceTrusted: options.workspaceTrusted,
         }
       : options.workspaceTrusted === false
         ? {
             consumeCorruptionEnvVars: true,
             skipLoadEnvironment: true,
             skipWorkspaceSettings: true,
+            workspaceTrusted: false,
           }
-        : true,
+        : options.workspaceTrusted === true
+          ? { workspaceTrusted: true }
+          : true,
   );
   const voiceModel = readVoiceModel(settings);
   if (!voiceModel) {

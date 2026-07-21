@@ -664,6 +664,7 @@ export interface LoadSettingsOptions {
   consumeCorruptionEnvVars?: boolean;
   skipLoadEnvironment?: boolean;
   skipWorkspaceSettings?: boolean;
+  workspaceTrusted?: boolean;
 }
 
 export function loadSettings(
@@ -977,11 +978,13 @@ export function loadSettings(
     userSettings,
   );
   const isTrusted =
+    opts.workspaceTrusted ??
     isWorkspaceTrusted(
       initialTrustCheckSettings as Settings,
       undefined,
       realWorkspaceDir,
-    ).isTrusted ?? true;
+    ).isTrusted ??
+    true;
 
   // Create a temporary merged settings object to pass to loadEnvironment.
   const tempMergedSettings = mergeSettings(

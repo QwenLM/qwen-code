@@ -164,6 +164,7 @@ function isWorkspaceVoiceTranscriptionAvailable(
       loadSettings(boundWorkspace, {
         skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
         skipWorkspaceSettings: !workspaceTrusted,
+        workspaceTrusted,
       }),
       { env },
     );

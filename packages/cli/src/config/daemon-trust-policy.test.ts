@@ -49,13 +49,13 @@ describe('daemon trust policy', () => {
     ideContextStore.clear();
   });
 
-  it('uses system folder trust over user and evaluates file rules', async () => {
+  it('uses user folder trust over system', async () => {
     installFiles({
       '/config/user.json': JSON.stringify({
-        security: { folderTrust: { enabled: false } },
+        security: { folderTrust: { enabled: true } },
       }),
       '/config/system.json': JSON.stringify({
-        security: { folderTrust: { enabled: true } },
+        security: { folderTrust: { enabled: false } },
       }),
       '/config/trusted.json': JSON.stringify({
         '/work': TrustLevel.TRUST_FOLDER,
@@ -73,13 +73,33 @@ describe('daemon trust policy', () => {
     });
   });
 
-  it('uses system defaults when user and system do not configure folder trust', async () => {
+  it('does not use system defaults for the initial trust gate', async () => {
     installFiles({
       '/config/user.json': '{}',
       '/config/system.json': '{}',
       '/config/system-defaults.json': JSON.stringify({
         security: { folderTrust: { enabled: true } },
       }),
+      '/config/trusted.json': JSON.stringify({
+        '/work': TrustLevel.TRUST_FOLDER,
+      }),
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+    expect(snapshot.folderTrustEnabled).toBe(false);
+    expect(
+      evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
+    ).toMatchObject({
+      state: 'trusted',
+      targetTrusted: true,
+      source: 'disabled',
+    });
+  });
+
+  it('migrates legacy folder trust settings before evaluation', async () => {
+    installFiles({
+      '/config/user.json': JSON.stringify({ folderTrust: true }),
+      '/config/system.json': '{}',
       '/config/trusted.json': JSON.stringify({
         '/work': TrustLevel.TRUST_FOLDER,
       }),
@@ -94,6 +114,42 @@ describe('daemon trust policy', () => {
       targetTrusted: true,
       source: 'file',
     });
+  });
+
+  it('confirms a missing trusted-folders file before treating it as empty', async () => {
+    const files = {
+      '/config/user.json': JSON.stringify({
+        security: { folderTrust: { enabled: true } },
+      }),
+      '/config/system.json': '{}',
+      '/config/trusted.json': JSON.stringify({
+        '/work': TrustLevel.TRUST_FOLDER,
+      }),
+    };
+    installFiles(files);
+    const lstat = mockedFs.lstat.getMockImplementation();
+    let firstTrustedFoldersRead = true;
+    mockedFs.lstat.mockImplementation(async (filePath) => {
+      if (
+        String(filePath) === '/config/trusted.json' &&
+        firstTrustedFoldersRead
+      ) {
+        firstTrustedFoldersRead = false;
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      }
+      return lstat!(filePath);
+    });
+
+    const snapshot = await readDaemonTrustPolicySnapshot();
+
+    expect(snapshot.trustedFolders).toEqual({
+      '/work': TrustLevel.TRUST_FOLDER,
+    });
+    expect(
+      mockedFs.lstat.mock.calls.filter(
+        ([filePath]) => String(filePath) === '/config/trusted.json',
+      ),
+    ).toHaveLength(2);
   });
 
   it('fails closed when system defaults are malformed', async () => {

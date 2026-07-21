@@ -64,7 +64,10 @@ describe('loadDaemonVoiceContext', () => {
     const { loadDaemonVoiceContext } = await import(
       './resolve-voice-config.js'
     );
-    const context = loadDaemonVoiceContext('/work/voice', { env: injectedEnv });
+    const context = loadDaemonVoiceContext('/work/voice', {
+      env: injectedEnv,
+      workspaceTrusted: true,
+    });
 
     expect(context.voiceModel).toBe('qwen3-asr-flash');
     expect(context.env).toBe(injectedEnv);
@@ -87,6 +90,7 @@ describe('loadDaemonVoiceContext', () => {
     expect(mocks.loadSettings).toHaveBeenCalledWith('/work/voice', {
       skipLoadEnvironment: true,
       skipWorkspaceSettings: false,
+      workspaceTrusted: true,
     });
   });
 
@@ -115,6 +119,7 @@ describe('loadDaemonVoiceContext', () => {
     expect(mocks.loadSettings).toHaveBeenCalledWith('/work/voice', {
       skipLoadEnvironment: true,
       skipWorkspaceSettings: true,
+      workspaceTrusted: false,
     });
   });
 });

@@ -2190,16 +2190,16 @@ describe('runQwenServe runtime startup failures', () => {
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-trust-race-')),
     );
     const bootSnapshot = {
-      revision: 'boot-trusted',
-      folderTrustEnabled: false,
+      revision: 'boot-untrusted',
+      folderTrustEnabled: true,
       ideTrust: undefined,
       trustedFolders: {},
     } as Awaited<
       ReturnType<typeof trustPolicyRuntime.readDaemonTrustPolicySnapshot>
     >;
     const reconciledSnapshot = {
-      revision: 'reconciled-untrusted',
-      folderTrustEnabled: true,
+      revision: 'reconciled-trusted',
+      folderTrustEnabled: false,
       ideTrust: undefined,
       trustedFolders: {},
     } as Awaited<
@@ -2208,6 +2208,7 @@ describe('runQwenServe runtime startup failures', () => {
     vi.spyOn(trustPolicyRuntime, 'readDaemonTrustPolicySnapshot')
       .mockResolvedValueOnce(bootSnapshot)
       .mockResolvedValue(reconciledSnapshot);
+    const loadSettings = vi.spyOn(settingsRuntime, 'loadSettings');
     const bootBridge = makeRuntimeBridge();
     const reconciledBridge = makeRuntimeBridge();
     vi.spyOn(acpBridge, 'createAcpSessionBridge')
@@ -2239,6 +2240,10 @@ describe('runQwenServe runtime startup failures', () => {
       expect(bootBridge.shutdown).toHaveBeenCalledTimes(1);
       expect(bootBridge.preheat).not.toHaveBeenCalled();
       expect(reconciledBridge.preheat).toHaveBeenCalledTimes(1);
+      expect(loadSettings).toHaveBeenCalledWith(
+        tmpDir,
+        expect.objectContaining({ workspaceTrusted: true }),
+      );
     } finally {
       await handle.close();
     }
