@@ -192,6 +192,7 @@ export interface UnarchiveSessionsOptions {
 
 export interface SessionServiceOptions {
   onWarning?: (message: string) => void;
+  runtimeBaseDir?: string;
 }
 
 /**
@@ -323,7 +324,7 @@ export class SessionService {
   private readonly onWarning: ((message: string) => void) | undefined;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
-    this.storage = new Storage(cwd);
+    this.storage = new Storage(cwd, options.runtimeBaseDir);
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
     this.onWarning = options.onWarning;
@@ -379,6 +380,24 @@ export class SessionService {
   ): Promise<boolean> {
     if (getProjectHash(recordCwd) === this.projectHash) {
       return true;
+    }
+
+    // Worktree sessions record cwd as the worktree path
+    // (<repoRoot>/.qwen/worktrees/<slug>), which has a different project
+    // hash. Infer the repo root from the path and check its hash. This
+    // is durable — it doesn't depend on the sidecar file, which is
+    // transient and cleared when the worktree is removed. Pure string
+    // ops, so check before the file-read runtime status below.
+    // Use lastIndexOf to handle nested worktrees: for
+    // /repo/.qwen/worktrees/parent/.qwen/worktrees/child, the innermost
+    // marker gives repoRoot = /repo/.qwen/worktrees/parent (the workspace).
+    const worktreesMarker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
+    const markerIdx = recordCwd.lastIndexOf(worktreesMarker);
+    if (markerIdx > 0) {
+      const repoRoot = recordCwd.substring(0, markerIdx);
+      if (getProjectHash(repoRoot) === this.projectHash) {
+        return true;
+      }
     }
 
     const status = await readRuntimeStatus(

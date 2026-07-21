@@ -59,17 +59,11 @@ export async function updateBeforeRelaunch(
         );
         return relaunchOnFailure;
       }
-      const updateProcess = handleAutoUpdate(
+      const success = await handleAutoUpdate(
         result.info,
         settings,
         projectRoot,
       );
-      const success = updateProcess
-        ? await new Promise<boolean>((resolve) => {
-            updateProcess.once('close', (code) => resolve(code === 0));
-            updateProcess.once('error', () => resolve(false));
-          })
-        : false;
       writeStderrLine(
         t(
           success

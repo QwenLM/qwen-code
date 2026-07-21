@@ -2,6 +2,10 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '../../utils/environmentContext.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
@@ -20,7 +24,7 @@ export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
 export const FORK_AGENT = {
   name: FORK_SUBAGENT_TYPE,
   description:
-    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"`. Runs detached in the background; you are notified when it completes.',
+    'Fork yourself — inherits parent conversation context. Selected explicitly via `subagent_type: "fork"`. Runs detached in the background; you are notified when it completes.',
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
@@ -59,6 +63,34 @@ export function isInForkExecution(): boolean {
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
 
+export type ForkTurns = 'all' | `${number}`;
+export type NormalizedForkTurns = 'all' | number;
+
+export function normalizeForkTurns(
+  forkTurns: ForkTurns | undefined,
+): NormalizedForkTurns {
+  return forkTurns === undefined || forkTurns === 'all'
+    ? 'all'
+    : Number(forkTurns);
+}
+
+function isSystemReminderPart(content: Content, partIndex: number): boolean {
+  const part = content.parts?.[partIndex];
+  return part
+    ? isSystemReminderContent({ role: 'user', parts: [part] })
+    : false;
+}
+
+function isRealUserTurn(content: Content): boolean {
+  if (content.role !== 'user' || !content.parts?.length) return false;
+  return content.parts.some((part, index) => {
+    if (part.functionResponse || isSystemReminderPart(content, index)) {
+      return false;
+    }
+    return typeof part.text !== 'string' || part.text.trim().length > 0;
+  });
+}
+
 /**
  * Build functionResponse parts for every open function call in a model message.
  *
@@ -88,6 +120,51 @@ export function buildFunctionResponseParts(
       response: { output: placeholderOutput },
     },
   }));
+}
+
+/**
+ * Select parent conversation history for a fork.
+ *
+ * A turn is a real user prompt, not a function response or a pure structural
+ * reminder. A bounded selection omits synthetic prefixes; the caller can
+ * reattach startup context that the fork still needs.
+ */
+export function selectForkHistory(
+  history: Content[],
+  forkTurns: NormalizedForkTurns,
+): Content[] {
+  let selected = history;
+
+  if (typeof forkTurns === 'number') {
+    // includeCompressed is load-bearing here. getHistoryForForkWindow strips
+    // the startup reminder with includeCompressed:false, so a post-compression
+    // summary prefix can still lead this history. Detecting it here keeps that
+    // synthetic summary from being counted as a real user turn — which would
+    // consume one of the requested turns and seed the fork with a prefix it
+    // should not inherit.
+    const syntheticPrefixLength = getStartupContextLength(history, {
+      includeCompressed: true,
+    });
+    const realUserTurnIndexes: number[] = [];
+    for (let index = syntheticPrefixLength; index < history.length; index++) {
+      const content = history[index]!;
+      if (isRealUserTurn(content)) {
+        realUserTurnIndexes.push(index);
+      }
+    }
+
+    if (realUserTurnIndexes.length === 0) {
+      selected = [];
+    } else {
+      selected = history.slice(
+        realUserTurnIndexes[
+          Math.max(0, realUserTurnIndexes.length - forkTurns)
+        ],
+      );
+    }
+  }
+
+  return structuredClone(selected);
 }
 
 /**

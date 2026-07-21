@@ -12,6 +12,7 @@ import {
   SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
+  SessionWriterError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
@@ -66,6 +67,15 @@ export type SendBridgeError = (
   err: unknown,
   ctx?: BridgeErrorContext,
 ) => void;
+
+const SESSION_WRITER_ERROR_MESSAGES = {
+  session_writer_conflict:
+    'This session is already open in another Qwen process.',
+  session_writer_lost: 'Write ownership for this session was lost.',
+  session_transcript_changed:
+    'The session transcript changed outside its active writer.',
+  session_writer_unavailable: 'Session write ownership could not be verified.',
+} as const;
 
 function bridgeErrorExtraContext(
   ctx: BridgeErrorContext | undefined,
@@ -158,6 +168,14 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof SessionWriterError) {
+    res.status(err.httpStatus).json({
+      error: err.message,
+      code: err.errorKind,
+      errorKind: err.errorKind,
+    });
+    return;
+  }
   if (err instanceof WorkspaceSkillNotFoundError) {
     res.status(404).json({
       error: err.message,
@@ -546,6 +564,26 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (
+        kind === 'session_writer_conflict' ||
+        kind === 'session_writer_lost' ||
+        kind === 'session_transcript_changed'
+      ) {
+        res.status(409).json({
+          error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_writer_unavailable') {
+        res.status(503).json({
+          error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
       if (kind === 'mcp_budget_would_exceed') {
         const d = data as { serverName?: string };
         res.status(409).json({
