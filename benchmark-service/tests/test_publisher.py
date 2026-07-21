@@ -30,13 +30,22 @@ def test_publish_updates_the_triggering_release(monkeypatch, tmp_path: Path) -> 
     def response(method: str, url: str, **kwargs):
         calls.append((method, url, kwargs.get("json")))
         if method == "get":
-            return httpx.Response(200, json={"body": "Original notes"})
-        return httpx.Response(201 if method == "post" else 200, json={})
+            return httpx.Response(
+                200,
+                json={"body": "Original notes"},
+                request=httpx.Request(method.upper(), url),
+            )
+        return httpx.Response(
+            201 if method == "post" else 200,
+            json={},
+            request=httpx.Request(method.upper(), url),
+        )
 
     monkeypatch.setattr("qwen_benchmark.publisher.httpx.get", lambda url, **kwargs: response("get", url, **kwargs))
     monkeypatch.setattr("qwen_benchmark.publisher.httpx.patch", lambda url, **kwargs: response("patch", url, **kwargs))
     monkeypatch.setattr("qwen_benchmark.publisher.httpx.post", lambda url, **kwargs: response("post", url, **kwargs))
     run = {
+        "run_id": "qwen-bench-test",
         "repository": "QwenLM/qwen-code",
         "qwen_commit": "a" * 40,
         "suite": "swebench_verified_harbor_smoke",

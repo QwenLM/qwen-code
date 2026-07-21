@@ -25,6 +25,8 @@ def settings(tmp_path: Path) -> Settings:
         poll_seconds=1,
         github_token="test-github-token",
         release_poll_suite="swebench_verified_harbor_smoke",
+        harbor_binary=tmp_path / "venv/bin/harbor",
+        harbor_jobs_root=tmp_path / "harbor/jobs",
     )
 
 

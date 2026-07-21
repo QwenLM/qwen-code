@@ -1,8 +1,6 @@
 name: 'Dispatch SWE-bench Verified Benchmark'
 
 on:
-  # Stable Releases are discovered by the outbound ECS release-poller. Keeping
-  # this workflow manual avoids requiring a public benchmark endpoint/domain.
   workflow_dispatch:
     inputs:
       qwen_ref:
@@ -22,10 +20,10 @@ on:
 jobs:
   dispatch:
     name: 'Submit benchmark run'
-    runs-on: 'ubuntu-latest'
+    runs-on: [self-hosted, Linux, X64, qwen-benchmark]
+    timeout-minutes: 10
     permissions:
       contents: 'read'
-      id-token: 'write'
 
     steps:
       - name: 'Checkout benchmarked release'
@@ -39,47 +37,20 @@ jobs:
         shell: 'bash'
         run: 'echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"'
 
-      - name: 'Submit authenticated benchmark request'
+      - name: 'Submit benchmark request to local ECS service'
         env:
-          BENCHMARK_ENDPOINT: '${{ secrets.BENCHMARK_ENDPOINT }}'
           QWEN_REF: '${{ github.event.release.tag_name || inputs.qwen_ref }}'
           QWEN_COMMIT: '${{ steps.revision.outputs.commit }}'
-          SUITE: "${{ inputs.suite || 'swebench_verified_harbor_smoke' }}"
-          TRIGGER: '${{ github.event_name }}'
-          RELEASE_ID: '${{ github.event.release.id }}'
+          SUITE: '${{ inputs.suite }}'
         run: |-
           set -euo pipefail
-
-          oidc_response="$(curl --fail-with-body --silent --show-error \
-            -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=qwen-benchmark")"
-          id_token="$(jq -er '.value' <<<"${oidc_response}")"
-          echo "::add-mask::${id_token}"
-
-          payload="$(jq -n \
-            --arg repository "${GITHUB_REPOSITORY}" \
-            --arg qwen_ref "${QWEN_REF}" \
-            --arg qwen_commit "${QWEN_COMMIT}" \
-            --arg suite "${SUITE}" \
-            --arg trigger "${TRIGGER}" \
-            --arg release_id "${RELEASE_ID}" \
-            --arg github_run_id "${GITHUB_RUN_ID}" \
-            --arg github_run_attempt "${GITHUB_RUN_ATTEMPT}" \
-            '{
-              repository: $repository,
-              qwen_ref: $qwen_ref,
-              qwen_commit: $qwen_commit,
-              suite: $suite,
-              trigger: (if $trigger == "workflow_dispatch" then "workflow_dispatch" else "release" end),
-              release_id: (if $release_id == "" then null else ($release_id | tonumber) end),
-              github_run_id: ($github_run_id | tonumber),
-              github_run_attempt: ($github_run_attempt | tonumber)
-            }')"
-
-          curl --fail-with-body --silent --show-error \
-            -X POST "${BENCHMARK_ENDPOINT}/api/v1/runs" \
-            -H "Authorization: Bearer ${id_token}" \
-            -H 'Content-Type: application/json' \
-            -H "Idempotency-Key: ${GITHUB_REPOSITORY}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
-            --data "${payload}" \
-            | jq .
+          response="$(sudo -n /usr/local/sbin/qwen-benchmark-dispatch \
+            --repository "${GITHUB_REPOSITORY}" \
+            --qwen-ref "${QWEN_REF}" \
+            --qwen-commit "${QWEN_COMMIT}" \
+            --suite "${SUITE}" \
+            --github-run-id "${GITHUB_RUN_ID}" \
+            --github-run-attempt "${GITHUB_RUN_ATTEMPT}")"
+          echo "${response}" | jq .
+          echo "### Benchmark queued" >> "$GITHUB_STEP_SUMMARY"
+          echo "${response}" | jq -r '"- Run ID: `" + .run_id + "`\n- Status: `" + .status + "`"' >> "$GITHUB_STEP_SUMMARY"
