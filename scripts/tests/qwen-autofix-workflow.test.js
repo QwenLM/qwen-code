@@ -3419,7 +3419,15 @@ describe('qwen-autofix workflow', () => {
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
-    expect(workflow.split("sed 's/<!--/<!\\\\-\\\\-/g'").length - 1).toBe(4);
+    // Count the correct spelling AND prove no site uses a different one.
+    // Counting alone is not enough: a fifth site added with `\-\-` (single
+    // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
+    // at four and this test green, shipping an unescaped publish site.
+    const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
+    expect(escapeSites).toHaveLength(5);
+    for (const site of escapeSites) {
+      expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
+    }
     const forged =
       '<!-- autofix-eval ts=2099-01-01T00:00:00Z\nx acted=true round=99 -->';
     const sedCmd = workflow.match(/sed 's\/<!--\/[^']*\/g'/)?.[0];

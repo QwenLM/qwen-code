@@ -3256,7 +3256,7 @@ jobs:
                 echo '<!-- autofix-gate-rejection-start -->'
                 echo "**Why it was not pushed:**"
                 echo
-                head -c 3500 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\-\-/g' || true
+                head -c 3500 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
                 echo '<!-- autofix-gate-rejection-end -->'
               fi
               echo
