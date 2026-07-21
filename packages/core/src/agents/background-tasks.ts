@@ -1198,8 +1198,10 @@ export class BackgroundTaskRegistry {
     options: BackgroundTaskCancelOptions = {},
   ): Promise<void> {
     const deadline = Date.now() + CANCEL_GRACE_MS;
-    while (this.agentExecutions.size > 0) {
+    while (true) {
       this.abortAll(options);
+      if (this.agentExecutions.size === 0) return;
+
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
         throw new Error(

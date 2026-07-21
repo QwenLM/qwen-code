@@ -1352,6 +1352,47 @@ describe('BackgroundTaskRegistry', () => {
     expect(abortAll).toHaveBeenNthCalledWith(2, { notify: false });
   });
 
+  it('disposes an idle resident when no agent execution is tracked', async () => {
+    const resident: ResidentBackgroundAgent = {
+      continue: vi.fn(() => true),
+      dispose: vi.fn(),
+    };
+    registry.register(
+      makeRegistration('idle-resident', { status: 'completed' }),
+    );
+    registry.registerResidentAgent('idle-resident', resident);
+
+    await registry.abortAllAndWait({ notify: false });
+
+    expect(resident.dispose).toHaveBeenCalledOnce();
+    expect(registry.continueResidentAgent('idle-resident', 'continue')).toBe(
+      false,
+    );
+  });
+
+  it('disposes a resident registered while waiting for an execution to settle', async () => {
+    let resolveExecution!: () => void;
+    const execution = new Promise<void>((resolve) => {
+      resolveExecution = resolve;
+    });
+    registry.trackAgentExecution(execution);
+
+    const wait = registry.abortAllAndWait({ notify: false });
+    const resident: ResidentBackgroundAgent = {
+      continue: vi.fn(() => true),
+      dispose: vi.fn(),
+    };
+    registry.register(
+      makeRegistration('late-resident', { status: 'completed' }),
+    );
+    registry.registerResidentAgent('late-resident', resident);
+
+    resolveExecution();
+    await wait;
+
+    expect(resident.dispose).toHaveBeenCalledOnce();
+  });
+
   it('bounds the wait when an aborted agent execution never settles', async () => {
     vi.useFakeTimers();
     try {
