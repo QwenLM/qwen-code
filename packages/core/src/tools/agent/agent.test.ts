@@ -670,6 +670,47 @@ describe('AgentTool', () => {
       ).toMatch(/working_dir/i);
     });
 
+    it('accepts an empty working_dir with worktree isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts a whitespace-only working_dir with worktree isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '   ',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('normalizes an empty working_dir before creating an isolated invocation', () => {
+      const params = {
+        ...validParams,
+        working_dir: '',
+        isolation: 'worktree' as const,
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+
+      const invocation = (
+        agentTool as AgentTool & {
+          createInvocation(params: AgentParams): {
+            params: AgentParams;
+          };
+        }
+      ).createInvocation(params);
+
+      expect(invocation.params.working_dir).toBeUndefined();
+      expect(invocation.params.isolation).toBe('worktree');
+    });
+
     it('accepts redundant worktree isolation when working_dir is set', () => {
       expect(
         agentTool.validateToolParams({

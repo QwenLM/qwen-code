@@ -1045,6 +1045,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
+    if (
+      params.isolation === 'worktree' &&
+      typeof params.working_dir === 'string' &&
+      params.working_dir.trim().length === 0
+    ) {
+      params.working_dir = undefined;
+    }
+
     if (params.working_dir !== undefined) {
       if (
         typeof params.working_dir !== 'string' ||
