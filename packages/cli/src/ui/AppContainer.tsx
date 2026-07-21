@@ -2026,7 +2026,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
+  // Block the model toggle only when the user is viewing an agent tab that
+  // has an active embedded-shell PTY (whose own Ctrl+F needs priority). A
+  // background agent's PTY must not block the toggle on the main chat.
   agentViewActiveShellPtyRef.current =
+    agentViewState.activeView !== 'main' &&
     agentViewState.agentViewHasActiveShellPty;
   const {
     dialogOpen: bgTasksDialogOpen,
@@ -3798,8 +3802,8 @@ export const AppContainer = (props: AppContainerProps) => {
           })
           .catch((err) => {
             debugLogger.debug(`toggle-${action.type} failed`, err);
-            // Clear ref — failed toggle likely means model is gone or auth is
-            // invalid; retrying would loop. Next Ctrl+F shows "Already on".
+            // Clear ref — after a failed toggle the return path is unreliable;
+            // the next Ctrl+F will attempt a fresh forward toggle.
             previousModelRef.current = null;
             historyManager.addItem(
               {
