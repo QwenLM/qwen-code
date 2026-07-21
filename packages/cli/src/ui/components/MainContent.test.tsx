@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { MainContent } from './MainContent.js';
+import { SCROLL_TO_ITEM_END } from './shared/VirtualizedList.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import {
   UIActionsContext,
@@ -767,6 +768,40 @@ describe('<MainContent />', () => {
       expect(lastFrame()).toContain('APP_HEADER:1.2.3');
       // Items reach VP via renderItem
       expect(lastFrame()).toMatch(/VP_ITEM:1[\s\S]*VP_ITEM:2/);
+    });
+
+    it('anchors to the top on a fresh session so the banner is not pushed to the bottom', () => {
+      scrollableListPropsSpy.mockClear();
+
+      // Fresh session: banner + a startup notice, but no conversation turn.
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [{ id: 1, type: 'info', text: 'Tips: try /help' }],
+        }),
+      );
+
+      expect(
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].initialScrollIndex,
+      ).toBe(0);
+    });
+
+    it('scrolls to the end once a conversation turn exists', () => {
+      scrollableListPropsSpy.mockClear();
+
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer: true,
+          history: [
+            { id: 1, type: 'info', text: 'Tips: try /help' },
+            { id: 2, type: 'user', text: 'hello' },
+          ],
+        }),
+      );
+
+      expect(
+        scrollableListPropsSpy.mock.calls.at(-1)?.[0].initialScrollIndex,
+      ).toBe(SCROLL_TO_ITEM_END);
     });
 
     it('keeps ShowMoreLines reachable in VP mode (regression of OverflowProvider misplacement)', () => {
