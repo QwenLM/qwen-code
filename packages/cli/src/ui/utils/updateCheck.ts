@@ -52,6 +52,7 @@ const NETWORK_ERROR_CODES = [
   'ENOTFOUND',
   'ECONNREFUSED',
   'EAI_AGAIN',
+  'ETIMEDOUT',
   'ENETUNREACH',
 ];
 
@@ -65,6 +66,7 @@ const NETWORK_ERROR_CODES = [
 export function classifyUpdateCheckError(
   error: unknown,
 ): UpdateCheckFailureReason {
+  if (error instanceof UpdateCheckTimeoutError) return 'timeout';
   if (error instanceof Error) {
     const errors = [error];
     if (error.cause instanceof Error) errors.push(error.cause);
@@ -75,16 +77,6 @@ export function classifyUpdateCheckError(
           error.message.includes(code),
       );
 
-    if (
-      errors.some((error) => error instanceof UpdateCheckTimeoutError) ||
-      ('killed' in error &&
-        error.killed === true &&
-        'signal' in error &&
-        error.signal === 'SIGTERM') ||
-      matchesCode('ETIMEDOUT')
-    ) {
-      return 'timeout';
-    }
     if (NETWORK_ERROR_CODES.some(matchesCode)) return 'offline';
   }
   return 'registry';

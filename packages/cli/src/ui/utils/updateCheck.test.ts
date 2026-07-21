@@ -649,31 +649,17 @@ describe('classifyUpdateCheckError', () => {
     );
   });
 
-  it('classifies execFile timeouts as timeout', () => {
-    const error = Object.assign(new Error('Command failed: npm view'), {
-      code: null,
-      killed: true,
-      signal: 'SIGTERM',
-    });
-
-    expect(classifyUpdateCheckError(error)).toBe('timeout');
+  it.each([
+    'ENOTFOUND',
+    'ECONNREFUSED',
+    'EAI_AGAIN',
+    'ETIMEDOUT',
+    'ENETUNREACH',
+  ])('classifies %s errors as offline', (code) => {
+    const error = new Error(`request failed`) as NodeJS.ErrnoException;
+    error.code = code;
+    expect(classifyUpdateCheckError(error)).toBe('offline');
   });
-
-  it('classifies ETIMEDOUT errors as timeout', () => {
-    const error = new Error('request failed') as NodeJS.ErrnoException;
-    error.code = 'ETIMEDOUT';
-
-    expect(classifyUpdateCheckError(error)).toBe('timeout');
-  });
-
-  it.each(['ENOTFOUND', 'ECONNREFUSED', 'EAI_AGAIN', 'ENETUNREACH'])(
-    'classifies %s errors as offline',
-    (code) => {
-      const error = new Error(`request failed`) as NodeJS.ErrnoException;
-      error.code = code;
-      expect(classifyUpdateCheckError(error)).toBe('offline');
-    },
-  );
 
   it('classifies network codes embedded in the message as offline', () => {
     // npm child-process failures surface the code inside stderr text only.
