@@ -113,6 +113,47 @@ describe('qwen resolve workflow', () => {
     'utf8',
   );
 
+  it('serialises /resolve against the autofix conflict path on the same PR head', () => {
+    // Both jobs merge the base branch and push to the PR's head. They live in
+    // different workflows, so a per-workflow concurrency name guards each only
+    // against itself. Observed on #7355: /resolve pushed at 03:51, the autofix
+    // leg pushed at 04:05 and was rejected `fetch first`, throwing away a full
+    // agent run. GitHub concurrency groups are repository-scoped, so an
+    // IDENTICAL prefix in both files is what makes them mutually exclusive.
+    const autofix = readFileSync(
+      path.join(repoRoot, '.github/workflows/qwen-autofix.yml'),
+      'utf8',
+    );
+    const groupOf = (text, jobName) =>
+      job(text, jobName).match(
+        /\n {4}concurrency:\n {6}group: '([a-z-]+?)-\$\{\{/,
+      )?.[1];
+
+    const resolveLock = groupOf(workflow, 'resolve-pr');
+    const autofixLock = groupOf(autofix, 'review-address');
+    expect(resolveLock).toBeTruthy();
+    // The invariant: renaming one side alone silently re-opens the race, and
+    // nothing else in the suite would notice.
+    expect(autofixLock).toBe(resolveLock);
+
+    // Each side must still key the group on the PR number — a shared prefix
+    // with a per-run suffix would serialise nothing.
+    expect(job(workflow, 'resolve-pr')).toContain(
+      `group: '${resolveLock}-\${{ github.event.issue.number || github.event.inputs.pr_number }}'`,
+    );
+    expect(job(autofix, 'review-address')).toContain(
+      `group: '${autofixLock}-\${{ matrix.target.pr }}'`,
+    );
+    // Queue, never cancel: the loser of the race must run after the winner and
+    // re-check, not be discarded (or discard the winner's in-flight work).
+    for (const [text, name] of [
+      [workflow, 'resolve-pr'],
+      [autofix, 'review-address'],
+    ]) {
+      expect(job(text, name)).toContain('cancel-in-progress: false');
+    }
+  });
+
   it('uses the existing PR command workflow', () => {
     expect(
       existsSync(
