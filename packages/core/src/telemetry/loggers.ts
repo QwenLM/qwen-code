@@ -1393,6 +1393,7 @@ export function logMemoryRecallDelivery(
   if (!isTelemetrySdkInitialized()) return;
 
   const attributes: LogAttributes = {
+    ...getCommonAttributes(config),
     'event.name': EVENT_MEMORY_RECALL_DELIVERY,
     'event.timestamp': event['event.timestamp'],
     phase: event.phase,

@@ -223,6 +223,7 @@ describe('loggers', () => {
       expect(mockLogger.emit).toHaveBeenCalledWith({
         body: 'Memory recall delivery: phase=refined. delivery_point=discarded. Selected 2 doc(s).',
         attributes: {
+          'session.id': 'test-session-id',
           'event.name': EVENT_MEMORY_RECALL_DELIVERY,
           'event.timestamp': '2025-01-01T00:00:00.000Z',
           phase: 'refined',
@@ -233,8 +234,9 @@ describe('loggers', () => {
           latency_ms: 123,
         },
       });
-      expect(mockLogger.emit.mock.calls[0][0].attributes).not.toHaveProperty(
+      expect(mockLogger.emit.mock.calls[0][0].attributes).toHaveProperty(
         'session.id',
+        'test-session-id',
       );
       expect(metrics.recordMemoryRecallDeliveryMetrics).toHaveBeenCalledWith(
         config,
@@ -247,7 +249,7 @@ describe('loggers', () => {
         },
       );
       expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
-        /query|hash|content|filePath|projectPath|session|message|raw_error|secret/i,
+        /query|hash|content|filePath|projectPath|message|raw_error|secret/i,
       );
     });
 
