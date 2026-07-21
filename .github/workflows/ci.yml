@@ -127,17 +127,58 @@ jobs:
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
 
+  provision_test_runners:
+    name: 'Provision test runner ${{ matrix.runner }}'
+    if: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.linux_runner == 'test' }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: ['1', '2', '3']
+    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen-test']
+    steps:
+      - name: 'Install Node.js 22.x system-wide'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+
+          if command -v node >/dev/null 2>&1 && [[ "$(node -p 'process.versions.node.split(".")[0]')" == "22" ]]; then
+            echo "Node $(node -v) / npm $(npm -v) is already installed."
+            exit 0
+          fi
+
+          sudo -n true
+          setup_script="${RUNNER_TEMP}/nodesource-setup.sh"
+          curl --fail --silent --show-error --location --retry 5 \
+            https://deb.nodesource.com/setup_22.x > "${setup_script}"
+          sudo -E bash "${setup_script}"
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
+
+          command -v node
+          command -v npm
+          node -v
+          npm -v
+
   #
   # Test: Node
   #
   test:
     name: 'Test (ubuntu-latest, Node 22.x)'
-    needs: 'classify_pr'
+    needs:
+      - 'classify_pr'
+      - 'provision_test_runners'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
     # Not on push: the merge queue already tested the merged tree, so a
     # post-merge re-run on `main` would be redundant.
-    if: "${{ !cancelled() && github.event_name != 'push' }}"
+    if: |-
+      ${{
+        always() &&
+        !cancelled() &&
+        github.event_name != 'push' &&
+        (needs.provision_test_runners.result == 'success' ||
+         github.event_name != 'workflow_dispatch' ||
+         github.event.inputs.linux_runner != 'test')
+      }}
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     timeout-minutes: 60
     outputs:
