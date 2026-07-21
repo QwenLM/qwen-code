@@ -121,7 +121,10 @@ import type {
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
-import { isChannelDeliveryError } from './channel-delivery-ipc.js';
+import {
+  ChannelDeliveryError,
+  isChannelDeliveryError,
+} from './channel-delivery-ipc.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -4432,6 +4435,18 @@ async function runQwenServeImpl(
           );
         }
         return channelWorkerManager.enqueueWebhookTask(task);
+      },
+      deliverChannelMessage: async (workspaceCwd, request) => {
+        if (!channelWorkerManager) {
+          throw new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            'Channel worker is not running.',
+          );
+        }
+        return channelWorkerManager.deliverChannelMessage(
+          workspaceCwd,
+          request,
+        );
       },
       reloadChannelWorker,
       getPerfSnapshot: () => ({

@@ -99,6 +99,7 @@ import {
   registerScheduledTasksRoutes,
   registerWorkspaceQualifiedScheduledTasksRoutes,
 } from './routes/scheduled-tasks.js';
+import { registerChannelNotifyRoutes } from './routes/channel-notify.js';
 import { registerGoalsRoutes } from './routes/goals.js';
 import { registerUsageStatsRoutes } from './routes/usage-stats.js';
 import {
@@ -215,6 +216,10 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './routes/workspace-skills.js';
 import { registerChannelWebhookRoutes } from './routes/channel-webhooks.js';
+import type {
+  ChannelDeliveryAccepted,
+  ChannelDeliveryRequest,
+} from './channel-delivery-ipc.js';
 import {
   parseChannelWebhookConfigLenient,
   type parseChannelWebhookConfig,
@@ -423,6 +428,10 @@ export interface ServeAppDeps {
   ) => Promise<ChannelWorkerSetResult>;
   stopChannelWorker?: () => Promise<ChannelWorkerStopResult>;
   enqueueChannelWebhookTask?: ChannelWorkerSupervisor['enqueueWebhookTask'];
+  deliverChannelMessage?: (
+    workspaceCwd: string,
+    request: ChannelDeliveryRequest,
+  ) => Promise<ChannelDeliveryAccepted>;
   channelWebhookConfigSources?: readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigSources?: () => readonly ChannelWebhookConfigSource[];
   getChannelWebhookConfigVersion?: () => number;
@@ -1144,6 +1153,14 @@ export function createServeApp(
     maxTotalSessions: opts.maxTotalSessions,
     maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
     languageCodes,
+  });
+
+  registerChannelNotifyRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    deliverChannelMessage: deps.deliverChannelMessage,
   });
 
   registerWorkspaceStatusRoutes(app, {

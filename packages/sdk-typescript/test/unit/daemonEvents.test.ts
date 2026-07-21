@@ -36,6 +36,81 @@ describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
 });
 
 describe('daemon event schema', () => {
+  it('recognizes sanitized channel delivery result events', () => {
+    const delivered: DaemonEvent = {
+      id: 1,
+      v: 1,
+      type: 'channel_delivery_result',
+      promptId: 'prompt-1',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+    const failed: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_worker_unavailable',
+        error: 'Channel worker is not running.',
+      },
+    };
+
+    expect(asKnownDaemonEvent(delivered)).toBe(delivered);
+    expect(asKnownDaemonEvent(failed)).toBe(failed);
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain('channel_delivery_result');
+  });
+
+  it('rejects malformed or unsanitized channel delivery results', () => {
+    const base = {
+      id: 1,
+      v: 1 as const,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    };
+
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, target: { id: 'secret' } },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, text: 'secret final answer' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, status: 'failed' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        ...base,
+        data: { ...base.data, source: 'scheduled' },
+      }),
+    ).toBeUndefined();
+  });
+
   it('recognizes pending prompt queue events', () => {
     const added: DaemonEvent = {
       id: 10,

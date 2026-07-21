@@ -54,7 +54,7 @@ The daemon binds the workspace when constructing each ACP bridge. A child may re
 
 ## Reliability and privacy
 
-This V1 has no persistence, startup replay, historical scan, retry, or idempotency guarantee. Existing tasks without delivery never send. Existing scheduler catch-up behavior is unchanged; a catch-up execution sends only when that task already contains delivery metadata.
+This V1 has no persistence, startup replay, historical scan, retry, or idempotency guarantee. Existing tasks without delivery never send. Existing scheduler catch-up behavior is unchanged. Normal executions carry delivery only when the task already contains it; the synthetic historical missed-one-shot batch explicitly clears delivery so enabling Channel later cannot create a burst of old alerts.
 
 Delivery result events and logs include correlation identifiers, source, status, and sanitized error data. They never include message text, target IDs, credentials, or webhook secrets. `delivered` means the adapter accepted the send, not that a user read it.
 

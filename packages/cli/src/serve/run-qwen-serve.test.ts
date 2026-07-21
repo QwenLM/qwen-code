@@ -5578,6 +5578,9 @@ describe('runQwenServe channel worker supervisor', () => {
       enqueueWebhookTask: vi
         .fn()
         .mockRejectedValue(new Error('Channel worker is not running.')),
+      deliverChannelMessage: vi
+        .fn()
+        .mockRejectedValue(new Error('Channel worker is not running.')),
     };
   }
 
@@ -5629,6 +5632,7 @@ describe('runQwenServe channel worker supervisor', () => {
       channels: ['telegram'],
     });
     worker.enqueueWebhookTask.mockResolvedValueOnce({ accepted: true });
+    worker.deliverChannelMessage.mockResolvedValueOnce({ delivered: true });
     const originalCreateServeApp = serverModule.createServeApp;
     let capturedDeps:
       | Parameters<typeof serverModule.createServeApp>[2]
@@ -5670,6 +5674,16 @@ describe('runQwenServe channel worker supervisor', () => {
         capturedDeps!.enqueueChannelWebhookTask!(task),
       ).resolves.toEqual({ accepted: true });
       expect(worker.enqueueWebhookTask).toHaveBeenCalledWith(task);
+      const delivery = {
+        deliveryId: 'delivery-1',
+        channelName: 'telegram',
+        target: { type: 'user' as const, id: 'user-1' },
+        text: 'CI failed',
+      };
+      await expect(
+        capturedDeps!.deliverChannelMessage!(tmpDir, delivery),
+      ).resolves.toEqual({ delivered: true });
+      expect(worker.deliverChannelMessage).toHaveBeenCalledWith(delivery);
     } finally {
       await handle.close();
     }
@@ -5711,6 +5725,14 @@ describe('runQwenServe channel worker supervisor', () => {
           targetRef: 'default',
           title: 'CI failed',
           payload: { runId: 123 },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
+      await expect(
+        capturedDeps!.deliverChannelMessage!(tmpDir, {
+          deliveryId: 'delivery-1',
+          channelName: 'telegram',
+          target: { type: 'user', id: 'user-1' },
+          text: 'CI failed',
         }),
       ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
     } finally {
