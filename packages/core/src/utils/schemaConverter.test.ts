@@ -260,6 +260,7 @@ describe('relaxSchemaForFunctionCalling', () => {
     // called $schema / $id / additionalProperties must survive the walk.
     const schema = {
       $schema: 'http://json-schema.org/draft-07/schema#',
+      $id: 'https://example.com/tool.schema.json',
       type: 'object',
       properties: {
         $schema: { type: 'string' },
@@ -274,13 +275,15 @@ describe('relaxSchemaForFunctionCalling', () => {
     };
     const relaxed = relaxSchemaForFunctionCalling(schema) as {
       $schema?: unknown;
+      $id?: unknown;
       properties: Record<string, unknown>;
       required: string[];
       additionalProperties?: unknown;
       $defs: Record<string, unknown>;
     };
-    // Keyword-level $schema dropped; property-level names all intact.
+    // Keyword-level $schema AND $id dropped; property-level names intact.
     expect(relaxed.$schema).toBeUndefined();
+    expect(relaxed.$id).toBeUndefined();
     expect(Object.keys(relaxed.properties)).toEqual([
       '$schema',
       '$id',
