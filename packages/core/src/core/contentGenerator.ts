@@ -30,6 +30,7 @@ import {
   StrictMissingModelIdError,
 } from '../models/modelConfigErrors.js';
 import { PROVIDER_SOURCED_FIELDS } from '../models/constants.js';
+import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import type { ReasoningEffort } from './reasoning-effort.js';
 
 /**
@@ -367,6 +368,11 @@ export async function createContentGenerator(
   if (!authType) {
     throw new Error('ContentGeneratorConfig must have an authType');
   }
+
+  // Provider constructors below synchronously build undici-backed fetch
+  // options; load undici here so it stays out of the eager startup closure
+  // (issue #7264).
+  await preloadRuntimeFetchModule();
 
   let baseGenerator: ContentGenerator;
 

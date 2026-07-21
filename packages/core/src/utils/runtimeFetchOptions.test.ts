@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from 'vitest';
 
 // Hoist mockWarn and mockConsoleError so they're available to both the vi.mock and test cases
 const { mockWarn, mockConsoleError } = vi.hoisted(() => ({
@@ -59,12 +67,19 @@ import {
   extractHostnameFromProxyUrl,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
   redactProxyError,
   resetDispatcherCache,
 } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
+
+// The sync option builders require undici to be preloaded (issue #7264);
+// vi.mock('undici') intercepts the dynamic import, so this loads the mock.
+beforeAll(async () => {
+  await preloadRuntimeFetchModule();
+});
 
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {

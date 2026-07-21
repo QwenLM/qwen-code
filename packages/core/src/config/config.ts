@@ -11,9 +11,6 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-// External dependencies
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
-
 // Types
 import type {
   ContentGenerator,
@@ -168,6 +165,7 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
+import { loadUndici } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -1845,6 +1843,7 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
+  private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
@@ -2236,9 +2235,22 @@ export class Config {
       // `--proxy` / `settings.proxy` value (resolved by `getProxy()`)
       // overrides env `http(s)_proxy`; `NO_PROXY` continues to come from the
       // environment. See issue #3696 (local MCP + corporate proxy).
-      setGlobalDispatcher(
-        new EnvHttpProxyAgent({ httpProxy: proxyUrl, httpsProxy: proxyUrl }),
-      );
+      //
+      // undici loads behind a dynamic import to keep it out of the eager
+      // startup closure (issue #7264); initialize() awaits this promise so
+      // the dispatcher is installed before any network activity.
+      this.proxyDispatcherReady = loadUndici()
+        .then(({ EnvHttpProxyAgent, setGlobalDispatcher }) => {
+          setGlobalDispatcher(
+            new EnvHttpProxyAgent({
+              httpProxy: proxyUrl,
+              httpsProxy: proxyUrl,
+            }),
+          );
+        })
+        .catch((error) => {
+          this.debugLogger.error('Failed to install proxy dispatcher:', error);
+        });
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -2331,6 +2343,7 @@ export class Config {
     options?: ConfigInitializeOptions,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
+    await this.proxyDispatcherReady;
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
