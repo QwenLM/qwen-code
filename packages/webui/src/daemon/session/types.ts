@@ -412,7 +412,16 @@ export interface DaemonSessionActions {
   ): Promise<{ cancelled: boolean }>;
   clearGoal(): Promise<{ cleared: boolean; condition?: string }>;
   getStats(): Promise<DaemonSessionStatsStatus>;
-  loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope>;
+  /**
+   * Loads the session's artifacts. `silent: true` suppresses the
+   * error-severity notice on failure (the error is still thrown) — for
+   * automatic/background refreshes whose callers handle errors locally
+   * and where a transient fetch failure is not actionable by the user
+   * (#7427).
+   */
+  loadArtifacts(options?: {
+    silent?: boolean;
+  }): Promise<DaemonSessionArtifactsEnvelope>;
   branchSession(
     name?: string,
   ): Promise<{ sessionId: string; displayName: string }>;

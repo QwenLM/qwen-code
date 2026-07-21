@@ -68,7 +68,10 @@ export function useSessionArtifacts(): SessionArtifactsState {
     }
     setLoading(true);
     try {
-      const result = await actions.loadArtifacts();
+      // silent: every trigger of this refresh is automatic (mount,
+      // prompt->idle, artifactsVersion); errors land in local state below
+      // and last-good artifacts are preserved — no toast (#7427).
+      const result = await actions.loadArtifacts({ silent: true });
       if (requestIdRef.current !== requestId) return;
       loadedSessionIdRef.current = sessionId;
       setArtifacts(result.artifacts);

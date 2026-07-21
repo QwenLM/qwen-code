@@ -151,6 +151,42 @@ describe('useSessionArtifacts', () => {
     ]);
   });
 
+  // Regression for #7427: automatic refreshes are silent — the action is
+  // asked not to toast, errors land in local state, and last-good
+  // artifacts stay visible.
+  it('passes silent and keeps last-good artifacts when a refresh fails', async () => {
+    const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
+    sdkMock.actions.loadArtifacts
+      .mockReturnValueOnce(initialLoad.promise)
+      .mockRejectedValueOnce(new TypeError('Failed to fetch'));
+
+    await renderHookHost();
+    await act(async () => {
+      initialLoad.resolve({ artifacts: [artifact('kept-artifact')] });
+      await initialLoad.promise;
+    });
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'kept-artifact',
+    ]);
+
+    sdkMock.artifactsVersion = 1;
+    await rerenderHookHost();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    // Every call is a background refresh and must opt out of the toast.
+    for (const call of sdkMock.actions.loadArtifacts.mock.calls) {
+      expect(call[0]).toEqual({ silent: true });
+    }
+    // The failure lands in local error state; last-good data survives.
+    expect(latestState?.error).toContain('Failed to fetch');
+    expect(latestState?.artifacts.map((item) => item.id)).toEqual([
+      'kept-artifact',
+    ]);
+    expect(latestState?.loading).toBe(false);
+  });
+
   it('keeps current artifacts visible while refreshing the same session', async () => {
     const initialLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();
     const refreshLoad = deferred<{ artifacts: DaemonSessionArtifact[] }>();

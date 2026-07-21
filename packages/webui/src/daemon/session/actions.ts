@@ -1172,7 +1172,9 @@ export function createDaemonSessionActions({
       }
     },
 
-    async loadArtifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+    async loadArtifacts(options?: {
+      silent?: boolean;
+    }): Promise<DaemonSessionArtifactsEnvelope> {
       const session = requireSessionForAction(
         addNotice,
         sessionRef.current,
@@ -1185,6 +1187,14 @@ export function createDaemonSessionActions({
           'Load artifacts timed out',
         );
       } catch (error) {
+        // Background refreshes (mount / prompt->idle / artifactsVersion)
+        // opt out of the toast: a transient fetch failure on an automatic
+        // poll is noise the user cannot act on, and the calling hook keeps
+        // its own error state + last-good artifacts (#7427). Same
+        // best-effort-and-silent philosophy as enqueueMidturnMessage.
+        if (options?.silent) {
+          throw error instanceof Error ? error : new Error(String(error));
+        }
         throw dispatchActionError(
           addNotice,
           'Load artifacts failed',

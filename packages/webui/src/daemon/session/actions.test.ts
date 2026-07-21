@@ -427,6 +427,43 @@ describe('createDaemonSessionActions', () => {
     }
   });
 
+  // Regression for #7427: background artifact refreshes opt out of the
+  // error toast; the default path keeps it.
+  it('suppresses the failure notice for silent loadArtifacts', async () => {
+    const session = createMockSession('session-a') as ReturnType<
+      typeof createMockSession
+    > & { artifacts?: ReturnType<typeof vi.fn> };
+    session.artifacts = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    const addNotice = vi.fn((notice) => notice);
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.loadArtifacts({ silent: true })).rejects.toThrow(
+      'Failed to fetch',
+    );
+    expect(addNotice).not.toHaveBeenCalled();
+  });
+
+  it('keeps the failure notice for default loadArtifacts', async () => {
+    const session = createMockSession('session-a') as ReturnType<
+      typeof createMockSession
+    > & { artifacts?: ReturnType<typeof vi.fn> };
+    session.artifacts = vi.fn(async () => {
+      throw new TypeError('Failed to fetch');
+    });
+    const addNotice = vi.fn((notice) => notice);
+    const { actions } = createActionsHarness({ addNotice, session });
+
+    await expect(actions.loadArtifacts()).rejects.toThrow('Failed to fetch');
+    expect(addNotice).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'error',
+        code: 'daemon.load_artifacts.failed',
+      }),
+    );
+  });
+
   it('rejects attachSession when no session exists', async () => {
     const { actions } = createActionsHarness();
 
