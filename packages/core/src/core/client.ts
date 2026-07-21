@@ -436,6 +436,10 @@ export class GeminiClient {
     return chat.getHistoryShallow?.(curated) ?? chat.getHistory(curated);
   }
 
+  getHistoryForForkWindow(): Content[] {
+    return this.getChat().getHistoryForForkWindow();
+  }
+
   getHistoryTail(count: number, curated: boolean = false): Content[] {
     return this.getChat().getHistoryTail(count, curated);
   }

@@ -38,6 +38,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import { InputFormat } from '../output/types.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
@@ -2654,6 +2655,85 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
+    });
+
+    it.each([
+      ['interactive', { interactive: true }],
+      ['ACP', { experimentalZedIntegration: true }],
+      ['stream-json', { inputFormat: InputFormat.STREAM_JSON }],
+    ] as const)(
+      'registers user-interaction tools in %s sessions',
+      async (_mode, params) => {
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+        expect(registeredNames).toContain(ToolNames.ENTER_PLAN_MODE);
+        expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
+      },
+    );
+
+    it('registers ask_user_question but not plan tools in SDK mode with interaction support', async () => {
+      // ask_user_question is gated only by the resolved interaction mode, while
+      // enter_plan_mode/exit_plan_mode are additionally gated by !sdkMode. Guard
+      // this asymmetry so a future symmetric `!this.sdkMode` on the question gate
+      // cannot silently drop the tool from SDK-mode interactive sessions.
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: true,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('does not register user-interaction tools in plain headless sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('keeps exit_plan_mode available for plan-required teammate filtering', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
     it('does not register artifact tools when artifacts are disabled', async () => {
@@ -6726,6 +6806,20 @@ describe('BaseLlmClient Lifecycle', () => {
       config.getContentGenerator(),
       config,
     );
+  });
+
+  it('clears per-model generators when provider config is reloaded', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: { model: 'gemini-flash', apiKey: 'test-key' },
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    const llmService = config.getBaseLlmClient();
+    config.reloadModelProvidersConfig({});
+
+    expect(llmService.clearPerModelGeneratorCache).toHaveBeenCalledOnce();
   });
 });
 

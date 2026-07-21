@@ -1863,6 +1863,8 @@ describe('buildRoleBrief — every agent, not just the territory ones', () => {
     expect(p).toContain('/x/qwen-review-pr-6766-context.md');
     // The empty scope is a complete answer, and it needs evidence to be one.
     expect(p).toContain('scope empty');
+    expect(p).toContain('motivating evidence');
+    expect(p).toContain('fixes, closes, resolves, or implements');
   });
 
   it('refuses Agent 0 on a plan with no pull request in it', () => {

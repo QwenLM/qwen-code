@@ -31,6 +31,7 @@ describe('checkForUpdates', () => {
     vi.resetAllMocks();
     // Clear DEV environment variable before each test
     delete process.env['DEV'];
+    delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE'];
   });
 
   afterEach(() => {
@@ -277,6 +278,26 @@ describe('checkForUpdates', () => {
       ),
     ).resolves.toBe(false);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it('uses the global npm registry for managed background updates', async () => {
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE'] = 'true';
+    const run = vi.fn();
+    const canonicalize = vi.fn();
+
+    await expect(
+      isGlobalNpmInstallation(
+        '/home/user/.qwen/updates/npm/versions/2.0.0/dist/cli.js',
+        run as unknown as NonNullable<
+          Parameters<typeof isGlobalNpmInstallation>[1]
+        >,
+        canonicalize as unknown as NonNullable<
+          Parameters<typeof isGlobalNpmInstallation>[2]
+        >,
+      ),
+    ).resolves.toBe(true);
+    expect(run).not.toHaveBeenCalled();
+    expect(canonicalize).not.toHaveBeenCalled();
   });
 
   it('resolves a bin symlink before matching the npm package path', async () => {

@@ -39,6 +39,7 @@ import type { TeamContext } from '../agents/team/types.js';
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import { GeminiClient } from '../core/client.js';
+import { resolveInteractionMode } from '../core/prompts.js';
 import {
   AuthType,
   createContentGenerator,
@@ -3131,6 +3132,7 @@ export class Config {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.baseLlmClient?.clearPerModelGeneratorCache();
   }
 
   /**
@@ -6645,17 +6647,22 @@ export class Config {
       const { TodoWriteTool } = await import('../tools/todoWrite.js');
       return new TodoWriteTool(this);
     });
-    await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
-      const { AskUserQuestionTool } = await import(
-        '../tools/askUserQuestion.js'
-      );
-      return new AskUserQuestionTool(this);
-    });
-    if (!this.sdkMode) {
+    const supportsUserInteraction = resolveInteractionMode(this) !== 'headless';
+    if (supportsUserInteraction) {
+      await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+        const { AskUserQuestionTool } = await import(
+          '../tools/askUserQuestion.js'
+        );
+        return new AskUserQuestionTool(this);
+      });
+    }
+    if (!this.sdkMode && (supportsUserInteraction || options?.forSubAgent)) {
       await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
         const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
         return new ExitPlanModeTool(this);
       });
+    }
+    if (!this.sdkMode && supportsUserInteraction) {
       await registerLazy(ToolNames.ENTER_PLAN_MODE, async () => {
         const { EnterPlanModeTool } = await import('../tools/enterPlanMode.js');
         return new EnterPlanModeTool(this);

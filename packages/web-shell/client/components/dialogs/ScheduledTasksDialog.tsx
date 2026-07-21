@@ -24,10 +24,11 @@ import type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceSkillStatus,
 } from '@qwen-code/sdk/daemon';
+import { sanitizeDisplayText } from '../../hooks/useAtMentionMenu';
 import { useI18n } from '../../i18n';
 import { getComposerTagIconUrl } from '../../utils/composerTag';
 import { cssUrlValue } from '../../utils/cssUrlVar';
-import { workspaceBasename } from '../../utils/workspace';
+import { workspaceLabel, workspaceLabelForCwd } from '../../utils/workspace';
 import { DialogShell } from './DialogShell';
 import {
   buildCron,
@@ -141,6 +142,7 @@ interface PromptReferenceItem {
   id: string;
   kind: PromptTagKind;
   label: string;
+  tagLabel?: string;
   description?: string;
   insertText: string;
 }
@@ -254,21 +256,25 @@ function appendPromptText(root: HTMLElement, text: string) {
   if (text) root.appendChild(document.createTextNode(text));
 }
 
-function setPromptEditorText(root: HTMLElement, text: string) {
+function setPromptEditorText(
+  root: HTMLElement,
+  text: string,
+  removeLabel: string,
+) {
   clearPromptEditor(root);
   if (!text) return;
   const lines = text.split('\n');
   lines.forEach((line, index) => {
     if (index > 0) root.appendChild(document.createElement('br'));
-    appendPromptLine(root, line);
+    appendPromptLine(root, line, removeLabel);
   });
 }
 
-function normalizePromptEditor(root: HTMLElement): string {
+function normalizePromptEditor(root: HTMLElement, removeLabel: string): string {
   let next = textFromPromptEditor(root);
   if (next.length > MAX_PROMPT_LENGTH) {
     next = next.slice(0, MAX_PROMPT_LENGTH);
-    setPromptEditorText(root, next);
+    setPromptEditorText(root, next, removeLabel);
   } else if (next.trim().length === 0) {
     clearPromptEditor(root);
     next = '';
@@ -296,7 +302,10 @@ function selectedPromptText(root: HTMLElement): {
   };
 }
 
-function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
+function makePromptTagElement(
+  item: PromptReferenceItem,
+  removeLabel: string,
+): HTMLElement {
   const tag = document.createElement('span');
   tag.className = styles.promptTag;
   tag.contentEditable = 'false';
@@ -313,12 +322,24 @@ function makePromptTagElement(item: PromptReferenceItem): HTMLElement {
 
   const value = document.createElement('span');
   value.className = styles.promptTagValue;
-  value.textContent = item.label;
+  value.textContent = item.tagLabel ?? item.label;
   tag.appendChild(value);
+
+  const remove = document.createElement('span');
+  remove.className = styles.promptTagRemove;
+  remove.setAttribute('role', 'button');
+  remove.tabIndex = -1;
+  remove.dataset.promptTagRemove = '';
+  remove.setAttribute('aria-label', `${removeLabel} ${item.label}`);
+  tag.appendChild(remove);
   return tag;
 }
 
-function appendPromptLine(root: HTMLElement, line: string) {
+function appendPromptLine(
+  root: HTMLElement,
+  line: string,
+  removeLabel: string,
+) {
   let cursor = 0;
   PROMPT_REFERENCE_TOKEN.lastIndex = 0;
   for (const match of line.matchAll(PROMPT_REFERENCE_TOKEN)) {
@@ -328,15 +349,19 @@ function appendPromptLine(root: HTMLElement, line: string) {
     if (!item) continue;
     appendPromptText(root, line.slice(cursor, index));
     appendPromptText(root, prefix);
-    root.appendChild(makePromptTagElement(item));
+    root.appendChild(makePromptTagElement(item, removeLabel));
     cursor = index + matched.length;
   }
   appendPromptText(root, line.slice(cursor));
 }
 
-function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {
+function insertPromptTagElement(
+  root: HTMLElement,
+  item: PromptReferenceItem,
+  removeLabel: string,
+) {
   const selection = window.getSelection();
-  const tag = makePromptTagElement(item);
+  const tag = makePromptTagElement(item, removeLabel);
   const spacer = document.createTextNode(' ');
 
   if (textFromPromptEditor(root).trim().length === 0) {
@@ -357,6 +382,26 @@ function insertPromptTagElement(root: HTMLElement, item: PromptReferenceItem) {
   selection?.addRange(range);
 }
 
+function removePromptTag(tag: HTMLElement) {
+  const parent = tag.parentElement;
+  const previous = tag.previousSibling;
+  const next = tag.nextSibling;
+  tag.remove();
+
+  if (
+    next?.nodeType === Node.TEXT_NODE &&
+    /^[ \u00a0]/.test(next.textContent ?? '')
+  ) {
+    next.textContent = (next.textContent ?? '').slice(1);
+  } else if (
+    previous?.nodeType === Node.TEXT_NODE &&
+    /[ \u00a0]$/.test(previous.textContent ?? '')
+  ) {
+    previous.textContent = (previous.textContent ?? '').slice(0, -1);
+  }
+  parent?.normalize();
+}
+
 function PromptReferenceEditor({
   value,
   label,
@@ -372,27 +417,36 @@ function PromptReferenceEditor({
   insertItem: PromptReferenceItem | null;
   onInserted: () => void;
 }) {
+  const { t } = useI18n();
+  const removeLabel = t('scheduledTasks.reference.remove');
   const editorRef = useRef<HTMLDivElement | null>(null);
   const lastAppliedValueRef = useRef('');
+  const lastAppliedRemoveLabelRef = useRef('');
 
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor) return;
-    if (value === lastAppliedValueRef.current) return;
-    setPromptEditorText(editor, value);
+    if (
+      value === lastAppliedValueRef.current &&
+      removeLabel === lastAppliedRemoveLabelRef.current
+    ) {
+      return;
+    }
+    setPromptEditorText(editor, value, removeLabel);
     lastAppliedValueRef.current = value;
-  }, [value]);
+    lastAppliedRemoveLabelRef.current = removeLabel;
+  }, [removeLabel, value]);
 
   useEffect(() => {
     const editor = editorRef.current;
     if (!editor || !insertItem) return;
-    insertPromptTagElement(editor, insertItem);
+    insertPromptTagElement(editor, insertItem, removeLabel);
     const next = textFromPromptEditor(editor);
     lastAppliedValueRef.current = next;
     onChange(next);
     editor.focus();
     onInserted();
-  }, [insertItem, onChange, onInserted]);
+  }, [insertItem, onChange, onInserted, removeLabel]);
 
   return (
     <div className={styles.promptEditorWrap}>
@@ -404,8 +458,29 @@ function PromptReferenceEditor({
         aria-label={label}
         aria-multiline="true"
         aria-placeholder={placeholder}
+        onMouseDown={(event) => {
+          if (
+            event.target instanceof Element &&
+            event.target.closest('[data-prompt-tag-remove]')
+          ) {
+            event.preventDefault();
+          }
+        }}
+        onClick={(event) => {
+          if (!(event.target instanceof Element)) return;
+          const remove = event.target.closest('[data-prompt-tag-remove]');
+          const tag = remove?.closest<HTMLElement>(
+            '[data-prompt-tag-serialized]',
+          );
+          if (!tag || !event.currentTarget.contains(tag)) return;
+          removePromptTag(tag);
+          const next = normalizePromptEditor(event.currentTarget, removeLabel);
+          lastAppliedValueRef.current = next;
+          onChange(next);
+          event.currentTarget.focus();
+        }}
         onInput={(event) => {
-          const next = normalizePromptEditor(event.currentTarget);
+          const next = normalizePromptEditor(event.currentTarget, removeLabel);
           lastAppliedValueRef.current = next;
           onChange(next);
         }}
@@ -435,7 +510,7 @@ function PromptReferenceEditor({
           event.preventDefault();
           event.clipboardData.setData('text/plain', selected.text);
           selected.selection.deleteFromDocument();
-          const next = normalizePromptEditor(event.currentTarget);
+          const next = normalizePromptEditor(event.currentTarget, removeLabel);
           lastAppliedValueRef.current = next;
           onChange(next);
         }}
@@ -730,6 +805,9 @@ export function ScheduledTasksDialog({
               id: extension.id || extension.name,
               kind,
               label: extension.name,
+              tagLabel:
+                sanitizeDisplayText(extension.displayName ?? '') ||
+                extension.name,
               description: extensionDescription(extension),
               insertText: `@ext:${escapeAtReferenceText(extension.name)} `,
             }));
@@ -1037,6 +1115,11 @@ export function ScheduledTasksDialog({
                 maxHeight: referencePickerPosition.maxHeight,
               } as CSSProperties
             }
+            onWheel={(event) => {
+              // Stop before Radix's document-level scroll lock cancels it.
+              event.stopPropagation();
+            }}
+            onTouchMove={(event) => event.stopPropagation()}
           >
             {referenceLoading ? (
               <div className={styles.referenceEmpty}>
@@ -1140,7 +1223,7 @@ export function ScheduledTasksDialog({
                 >
                   {operableWorkspaces.map((ws) => (
                     <option key={ws.id} value={workspaceActionId(ws) ?? ''}>
-                      {workspaceBasename(ws.cwd)}
+                      {workspaceLabel(ws)}
                     </option>
                   ))}
                 </select>
@@ -1455,7 +1538,7 @@ export function ScheduledTasksDialog({
                     <span className={styles.workspaceIcon} aria-hidden="true">
                       ⌂
                     </span>
-                    {workspaceBasename(task.workspaceCwd)}
+                    {workspaceLabelForCwd(task.workspaceCwd, workspaceList)}
                   </span>
                 )}
                 <span className={styles.schedulePill}>
