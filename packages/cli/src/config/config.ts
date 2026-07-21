@@ -2062,9 +2062,14 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
-    customSkillDirs: (settings.skills?.directories ?? [])
-      .filter((d): d is string => typeof d === 'string' && d.trim().length > 0)
-      .map((d) => d.trim()),
+    customSkillDirs:
+      bareMode || safeMode
+        ? undefined
+        : (settings.skills?.directories ?? [])
+            .filter(
+              (d): d is string => typeof d === 'string' && d.trim().length > 0,
+            )
+            .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).
