@@ -199,6 +199,25 @@ export function relaxSchemaForFunctionCalling(
       ) {
         continue;
       }
+      // `properties` / `$defs` / `definitions` are name->schema MAPS: their
+      // keys are property/definition names, not JSON Schema keywords. A
+      // property literally named `$schema` or `additionalProperties` must
+      // survive — only the VALUES are schemas to relax.
+      if (
+        (key === 'properties' || key === '$defs' || key === 'definitions') &&
+        typeof value === 'object' &&
+        value !== null &&
+        !Array.isArray(value)
+      ) {
+        const map: Record<string, unknown> = {};
+        for (const [mapKey, mapValue] of Object.entries(
+          value as Record<string, unknown>,
+        )) {
+          map[mapKey] = relax(mapValue);
+        }
+        target[key] = map;
+        continue;
+      }
       target[key] = relax(value);
     }
     return target;

@@ -255,6 +255,48 @@ describe('relaxSchemaForFunctionCalling', () => {
     expect(relaxed.additionalProperties.additionalProperties).toBeUndefined();
   });
 
+  it('never treats property names as schema keywords', () => {
+    // `properties` keys are names, not keywords: a property literally
+    // called $schema / $id / additionalProperties must survive the walk.
+    const schema = {
+      $schema: 'http://json-schema.org/draft-07/schema#',
+      type: 'object',
+      properties: {
+        $schema: { type: 'string' },
+        $id: { type: 'string' },
+        additionalProperties: { type: 'boolean' },
+      },
+      required: ['$schema', '$id', 'additionalProperties'],
+      additionalProperties: false,
+      $defs: {
+        $schema: { type: 'number' },
+      },
+    };
+    const relaxed = relaxSchemaForFunctionCalling(schema) as {
+      $schema?: unknown;
+      properties: Record<string, unknown>;
+      required: string[];
+      additionalProperties?: unknown;
+      $defs: Record<string, unknown>;
+    };
+    // Keyword-level $schema dropped; property-level names all intact.
+    expect(relaxed.$schema).toBeUndefined();
+    expect(Object.keys(relaxed.properties)).toEqual([
+      '$schema',
+      '$id',
+      'additionalProperties',
+    ]);
+    expect(relaxed.required).toEqual([
+      '$schema',
+      '$id',
+      'additionalProperties',
+    ]);
+    // All properties required -> the constraint keyword stays.
+    expect(relaxed.additionalProperties).toBe(false);
+    // $defs is a name map too.
+    expect(Object.keys(relaxed.$defs)).toEqual(['$schema']);
+  });
+
   it('does not mutate the input schema', () => {
     const input = {
       type: 'object',
