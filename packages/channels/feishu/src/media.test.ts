@@ -101,8 +101,9 @@ describe('downloadMedia', () => {
     expect(result).toBeNull();
   });
 
-  it('should reject Content-Length exceeding 50MB', async () => {
+  it('should reject Content-Length exceeding 50MB and release the body', async () => {
     const largeSize = 60 * 1024 * 1024; // 60 MB
+    const bodyCancel = vi.fn();
     const mockResponse = {
       ok: true,
       headers: {
@@ -112,6 +113,7 @@ describe('downloadMedia', () => {
         },
       },
       body: {
+        cancel: bodyCancel,
         getReader: () => ({
           read: vi.fn().mockResolvedValue({ done: true, value: undefined }),
           cancel: vi.fn(),
@@ -124,6 +126,9 @@ describe('downloadMedia', () => {
     const result = await downloadMedia('om_msg', 'file_key', 'file', 'token');
 
     expect(result).toBeNull();
+    // The oversized body is cancelled to release the connection instead of
+    // being left dangling until GC.
+    expect(bodyCancel).toHaveBeenCalled();
   });
 
   it('should reject stream exceeding 50MB', async () => {
@@ -149,6 +154,49 @@ describe('downloadMedia', () => {
 
     expect(result).toBeNull();
     expect(cancelMock).toHaveBeenCalled();
+  });
+
+  it('awaits reader.cancel() so a failing stream teardown is caught, not leaked', async () => {
+    const chunkSize = 10 * 1024 * 1024; // 10 MB per read; crosses 50MB on the 6th
+    const mockData = new Uint8Array(chunkSize);
+    // A stream whose cancel() rejects during teardown. Because the fixed code
+    // AWAITS reader.cancel(), this rejection propagates into downloadMedia's
+    // own catch (logging "downloadMedia error: …"). With the previous
+    // un-awaited call the rejection floated free as an unhandled rejection and
+    // the code instead ran the "rejected: actual size exceeds" branch — so
+    // asserting on which branch logged deterministically pins the await.
+    const cancelMock = vi
+      .fn()
+      .mockRejectedValue(new Error('reader teardown failed'));
+    const mockResponse = {
+      ok: true,
+      headers: {
+        get: () => null, // no content-length -> exercise the stream-size path
+      },
+      body: {
+        getReader: () => ({
+          read: vi.fn().mockResolvedValue({ done: false, value: mockData }),
+          cancel: cancelMock,
+        }),
+      },
+    };
+
+    fetchSpy.mockResolvedValueOnce(mockResponse as unknown as Response);
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const result = await downloadMedia('om_msg', 'file_key', 'file', 'token');
+
+      expect(result).toBeNull();
+      expect(cancelMock).toHaveBeenCalledTimes(1);
+      const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(logged).toContain('downloadMedia error');
+      expect(logged).toContain('reader teardown failed');
+    } finally {
+      stderrSpy.mockRestore();
+    }
   });
 
   it('should return null when response body is null', async () => {
