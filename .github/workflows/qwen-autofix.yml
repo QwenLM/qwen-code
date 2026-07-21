@@ -114,6 +114,16 @@ env:
   # MAX_ROUNDS so the actionable "check the model key" message lands in an
   # hour instead of a day. Transient (429/5xx) errors keep the full budget.
   API_AUTH_MAX_ROUNDS: '3'
+  # Checks the "wait for checks to settle" gate does NOT wait for. The gate
+  # exists so a FAILED check can be read as feedback, which is why build/test/
+  # lint are still waited for. `review-pr` is the LLM code review: its output
+  # is a REVIEW, delivered by its own real-time pull_request_review trigger and
+  # counted by the review path — the check conclusion carries nothing the loop
+  # acts on. Blocking on it bought nothing and cost a median 49 minutes per
+  # round (p90 123, max 158, over 32 completed runs), during which the PR was
+  # invisible to the scan even when it already had unaddressed feedback.
+  # Names must match job ids in qwen-code-pr-review.yml; a test pins that.
+  NON_BLOCKING_CHECKS: '["review-pr"]'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
@@ -1775,10 +1785,12 @@ jobs:
             # startedAt is the only staleness clock: a check blocks only if it
             # started within the bound; one with no startedAt (queued, not yet
             # running) is not blocking (the next scan re-checks once it starts).
-            HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" '
+            HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" \
+              --argjson nonblocking "${NON_BLOCKING_CHECKS}" '
               [ .[]
                 | select((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | select((.name // "") as $n | ($nonblocking | index($n)) == null)
                 | select((.startedAt // $cut) > $cut) ]
               | length > 0
             ' <<< "${CHECKS_JSON}")"
