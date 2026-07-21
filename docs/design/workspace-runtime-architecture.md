@@ -754,8 +754,8 @@ Catalog GET 始终保持只读，不以“页面加载”为理由启动 ACP。
 4. `ensureRuntime()` 在当前 epoch 完成 MCP discovery 后才把 MCP 标为 ready；请求预算耗尽后
    后台继续，页面通过 operation/status polling 观察终态，而不是只 reload 一次。
 5. Catalog 为空、not_started、starting、stale 和 error 在页面上可区分。
-6. OAuth 在零 Session 时可完成；不同 workspace/server 的并发由 daemon-global lane
-   串行化，不会抢占 callback。
+6. OAuth 在零 Session 时可完成；任一工作区存在进行中的认证时，其他
+   workspace/server 的认证请求由 daemon-global lane 明确拒绝，不会抢占 callback。
 7. auth operation 在 waiting_for_input 期间不会因最后一个 Session 关闭而被回收。
 8. ACP 重启后不会用旧 epoch 的 completed cache 跳过 discovery。
 9. User scope 变更会失效并通知所有受影响工作区，不只通知 primary UI。
