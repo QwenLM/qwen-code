@@ -413,19 +413,6 @@ export const MainContent = () => {
       uiState.availableTerminalHeight ?? 0,
     );
 
-    // Anchor the initial view to the top until there is an actual conversation
-    // turn. On a fresh session the list holds only the banner plus startup
-    // notices (tips / MOTD / info), which is length > 1 — so keying the anchor
-    // off length alone made it scroll-to-end and pin the banner to the bottom
-    // of the viewport, leaving the top half of the VP screen blank. Once the
-    // user submits (or a response streams in) we resume scroll-to-end so the
-    // latest output stays in view.
-    const hasConversationTurn =
-      pendingHistoryItems.length > 0 ||
-      visibleHistory.some(
-        (item) => item.type === 'user' || item.type === 'user_shell',
-      );
-
     return (
       <OverflowProvider>
         <ScrollableList
@@ -435,7 +422,9 @@ export const MainContent = () => {
           renderItem={renderVirtualItem}
           estimatedItemHeight={virtualEstimatedItemHeight}
           keyExtractor={virtualKeyExtractor}
-          initialScrollIndex={hasConversationTurn ? SCROLL_TO_ITEM_END : 0}
+          initialScrollIndex={
+            allVirtualItems.length <= 1 ? 0 : SCROLL_TO_ITEM_END
+          }
           isStaticItem={virtualIsStaticItem}
           containerHeight={scrollContainerHeight}
           showScrollbar={showScrollbar}
