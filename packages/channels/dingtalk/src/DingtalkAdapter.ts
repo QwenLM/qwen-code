@@ -7,6 +7,7 @@ import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
+  ChannelProactiveDeliveryError,
   isTerminalTaskLifecycleType,
   sanitizeLogText,
   sanitizeSenderName,
@@ -502,6 +503,16 @@ export class DingtalkChannel extends ChannelBase {
     );
   }
 
+  protected override supportsProactiveDeliveryTarget(
+    target: SessionTarget,
+  ): boolean {
+    return (
+      typeof target.isGroup === 'boolean' &&
+      target.threadId === undefined &&
+      this.isStableTargetId(target.chatId)
+    );
+  }
+
   protected override supportsProactiveWebhookTarget(
     target: SessionTarget,
   ): boolean {
@@ -609,8 +620,10 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] proactive send error (${targetKind}, ${chunkLabel}): ${err}${cause ? ` (${cause})` : ''}\n`,
         );
-        throw new Error(
-          `DingTalk proactive send failed: ${err instanceof Error ? err.message : String(err)}`,
+        throw new ChannelProactiveDeliveryError(
+          'transient',
+          'DingTalk proactive send failed: network error',
+          { cause: err },
         );
       }
       if (resp.status === 401 && attempt === 0) {
@@ -624,8 +637,11 @@ export class DingtalkChannel extends ChannelBase {
         process.stderr.write(
           `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
         );
-        throw new Error(
-          `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
+        throw new ChannelProactiveDeliveryError(
+          resp.status === 408 || resp.status === 429 || resp.status >= 500
+            ? 'transient'
+            : 'permanent',
+          `DingTalk proactive send failed: HTTP ${resp.status}`,
         );
       }
       if (target.isGroup === false) {
@@ -636,7 +652,8 @@ export class DingtalkChannel extends ChannelBase {
           process.stderr.write(
             `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid JSON response\n`,
           );
-          throw new Error(
+          throw new ChannelProactiveDeliveryError(
+            'transient',
             'DingTalk proactive send failed: invalid JSON response',
           );
         }
@@ -644,7 +661,8 @@ export class DingtalkChannel extends ChannelBase {
           process.stderr.write(
             `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): invalid direct recipient\n`,
           );
-          throw new Error(
+          throw new ChannelProactiveDeliveryError(
+            'permanent',
             'DingTalk proactive send failed: invalid direct recipient',
           );
         }
@@ -652,7 +670,8 @@ export class DingtalkChannel extends ChannelBase {
           process.stderr.write(
             `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): direct recipient rate limited\n`,
           );
-          throw new Error(
+          throw new ChannelProactiveDeliveryError(
+            'transient',
             'DingTalk proactive send failed: direct recipient rate limited',
           );
         }

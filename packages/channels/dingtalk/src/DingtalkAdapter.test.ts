@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
+  ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
   Envelope,
   SessionTarget,
@@ -91,6 +92,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     '@qwen-code/channel-base',
   );
   return {
+    ChannelProactiveDeliveryError: real.ChannelProactiveDeliveryError,
     ChannelBase: class {
       protected config: Record<string, unknown>;
       protected name: string;
@@ -2193,6 +2195,7 @@ describe('DingtalkChannel proactive send', () => {
   function proactive(channel: DingtalkChannelInstance) {
     return channel as unknown as {
       supportsProactiveTarget(target: SessionTarget): boolean;
+      supportsProactiveDeliveryTarget(target: SessionTarget): boolean;
       supportsProactiveWebhookTarget(target: SessionTarget): boolean;
       pushProactive(target: SessionTarget, text: string): Promise<void>;
     };
@@ -2272,6 +2275,15 @@ describe('DingtalkChannel proactive send', () => {
     ).toBe(false);
   });
 
+  it('keeps loop targets group-only while direct delivery accepts users', () => {
+    const channel = proactive(createChannel());
+
+    expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
+    expect(channel.supportsProactiveTarget(directTarget)).toBe(false);
+    expect(channel.supportsProactiveDeliveryTarget(groupTarget)).toBe(true);
+    expect(channel.supportsProactiveDeliveryTarget(directTarget)).toBe(true);
+  });
+
   it('sends proactive group messages through the robot API', async () => {
     const channel = proactive(createChannel());
     const { sendCalls, tokenCalls } = stubProactiveFetch();
@@ -2329,8 +2341,11 @@ describe('DingtalkChannel proactive send', () => {
         ),
     );
 
-    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
-      'DingTalk proactive send failed: invalid direct recipient',
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
+      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+        disposition: 'permanent',
+        message: 'DingTalk proactive send failed: invalid direct recipient',
+      }),
     );
   });
 
@@ -2347,8 +2362,12 @@ describe('DingtalkChannel proactive send', () => {
         ),
     );
 
-    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
-      'DingTalk proactive send failed: direct recipient rate limited',
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
+      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+        disposition: 'transient',
+        message:
+          'DingTalk proactive send failed: direct recipient rate limited',
+      }),
     );
   });
 
@@ -2430,15 +2449,18 @@ describe('DingtalkChannel proactive send', () => {
     expect(directSendCalls()).toHaveLength(1);
   });
 
-  it('surfaces API detail in the error and log on failure', async () => {
+  it('keeps API detail in logs and classifies the propagated failure', async () => {
     const channel = proactive(createChannel());
     const writeSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
     stubProactiveFetch(() => new Response('perm denied', { status: 403 }));
 
-    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
-      'DingTalk proactive send failed: HTTP 403 perm denied',
+    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toEqual(
+      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+        disposition: 'permanent',
+        message: 'DingTalk proactive send failed: HTTP 403',
+      }),
     );
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
@@ -2456,8 +2478,11 @@ describe('DingtalkChannel proactive send', () => {
       throw new Error('connection reset');
     });
 
-    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
-      'DingTalk proactive send failed: connection reset',
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
+      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+        disposition: 'transient',
+        message: 'DingTalk proactive send failed: network error',
+      }),
     );
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');

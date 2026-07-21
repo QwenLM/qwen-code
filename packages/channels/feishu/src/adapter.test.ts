@@ -21,6 +21,7 @@ import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
   SessionTarget,
 } from '@qwen-code/channel-base';
@@ -1284,7 +1285,12 @@ describe('FeishuChannel', () => {
           },
           'hello',
         ),
-      ).rejects.toThrow('Feishu sendMessage failed: HTTP 500');
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: HTTP 500',
+        }),
+      );
 
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('sendMessage failed: HTTP 500'),
@@ -1322,6 +1328,33 @@ describe('FeishuChannel', () => {
         }),
       );
       fetchSpy.mockRestore();
+    });
+
+    it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'chat', id: 'oc_group' },
+        'group result',
+      );
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'user', id: 'ou_user' },
+        'direct result',
+      );
+
+      expect(fetchSpy.mock.calls[0]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+      );
+      expect(fetchSpy.mock.calls[1]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
+      );
     });
   });
 
