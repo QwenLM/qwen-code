@@ -3256,6 +3256,8 @@ jobs:
                 echo '<!-- autofix-gate-rejection-start -->'
                 echo "**Why it was not pushed:**"
                 echo
+                # Must stay >= reject_fix's tail -c 3000 + label + two four-backtick
+                # fences (~3.1 KB), or the closing fence is silently truncated.
                 head -c 3500 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
                 echo '<!-- autofix-gate-rejection-end -->'
               fi
