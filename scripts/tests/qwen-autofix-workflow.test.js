@@ -2166,6 +2166,10 @@ describe('qwen-autofix workflow', () => {
     // `labeled` event, so a scan that instead required a fresh engage marker
     // would silently make this message wrong. Pin the fact it depends on.
     expect(refused.body).toContain('no re-labelling');
+    // The "no re-labelling" promise carries one caveat: a co-present
+    // autofix/skip would opt the PR out of the scan, so the message names
+    // it rather than making a promise contradictory input would break.
+    expect(refused.body).toContain('unless it also carries');
     expect(reviewScanJob).toContain('--label "${TAKEOVER_LABEL}"');
     expect(reviewScanJob).toContain('--base main');
     // The one ack whose entire job is to explain silence must not itself be
