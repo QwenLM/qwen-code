@@ -104,6 +104,7 @@ import {
   getStopHookContinuationReason,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
+  decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
   isApproveOutcome,
@@ -6248,8 +6249,8 @@ export class Session implements SessionContext {
 
           // Explicit allow (user rule matched, or tool's L3 default is 'allow')
           // is authoritative for ordinary calls. In AUTO, protected
-          // self-modification writes must still reach the classifier/fail-closed
-          // path so allow rules cannot bypass AUTO mode's safety boundary.
+          // self-modification writes must still reach the classifier/manual
+          // fallback path so allow rules cannot bypass AUTO mode review.
           // Also resets the denialTracking streak so a following
           // classifier-eligible call doesn't surprise the user with a manual
           // prompt right after an allow-rule call just worked.
@@ -6275,7 +6276,8 @@ export class Session implements SessionContext {
               recordAllow(this.config.getAutoModeDenialState()),
             );
           }
-          let wasAutoModeDenialFallback = false;
+          let wasAutoModeManualFallback = false;
+          let autoModeFallbackMessage: string | undefined;
 
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
@@ -6344,10 +6346,11 @@ export class Session implements SessionContext {
                 );
               case 'fallback':
                 // Drop through to the manual-approval flow below.
-                wasAutoModeDenialFallback = isDenialFallbackReason(
-                  outcome.reason,
-                );
-                if (wasAutoModeDenialFallback) {
+                wasAutoModeManualFallback =
+                  isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable';
+                autoModeFallbackMessage = outcome.message;
+                if (wasAutoModeManualFallback) {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
@@ -6366,12 +6369,12 @@ export class Session implements SessionContext {
           const recordAutoModeFallbackResolution = (
             outcome: ToolConfirmationOutcome,
           ) => {
-            // Reset AUTO-mode fallback counters when approval resolves a prompt
-            // raised because denialTracking forced fallback. This covers both ACP
-            // requestPermission and PermissionRequest hook approvals.
+            // Reset AUTO-mode fallback counters when approval resolves a
+            // recovery prompt. This covers both ACP requestPermission and
+            // PermissionRequest hook approvals.
             if (
               approvalMode === ApprovalMode.AUTO &&
-              wasAutoModeDenialFallback &&
+              wasAutoModeManualFallback &&
               isApproveOutcome(outcome)
             ) {
               const before = this.config.getAutoModeDenialState();
@@ -6403,6 +6406,13 @@ export class Session implements SessionContext {
             confirmationDetails = await invocation.getConfirmationDetails(
               activeToolAbortSignal,
             );
+
+            if (autoModeFallbackMessage) {
+              confirmationDetails = decorateClassifierUnavailableConfirmation(
+                confirmationDetails,
+                autoModeFallbackMessage,
+              );
+            }
 
             if (planShellDecision.classification !== 'not-applicable') {
               const preDisplayPlanShellError =
@@ -6693,6 +6703,12 @@ export class Session implements SessionContext {
                 outcome = approval.outcome;
                 confirmationPayload = approval.payload;
               }
+              const shouldSwitchToDefault =
+                outcome ===
+                ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault;
+              if (shouldSwitchToDefault) {
+                outcome = ToolConfirmationOutcome.ProceedOnce;
+              }
               recordAutoModeFallbackResolution(outcome);
 
               try {
@@ -6709,6 +6725,11 @@ export class Session implements SessionContext {
                   error,
                 );
                 return stopAfterPermissionCancel();
+              }
+
+              if (shouldSwitchToDefault) {
+                this.config.setApprovalMode(ApprovalMode.DEFAULT);
+                await this.sendCurrentModeUpdateNotification();
               }
 
               // Persist permission rules when user explicitly chose "Always Allow".
@@ -6738,6 +6759,10 @@ export class Session implements SessionContext {
               }
 
               switch (outcome) {
+                case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
+                  throw new Error(
+                    'Switch-to-Default outcome must be normalized before execution.',
+                  );
                 case ToolConfirmationOutcome.Cancel:
                   // Route through earlyErrorResponse so spanError carries the
                   // cancellation reason (plain errorResponse leaves it unset,
