@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import type { WorkspaceRuntime } from './workspace-registry.js';
+import { getErrorMessage as message } from '../utils/errors.js';
 import type { WorkspaceRequestContext } from './workspace-service/types.js';
 
 const MCP_POLL_INTERVAL_MS = 250;
@@ -44,10 +45,6 @@ function requestContext(
   return { route, workspaceCwd: runtime.workspaceCwd };
 }
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -55,7 +52,11 @@ function wait(ms: number): Promise<void> {
   });
 }
 
-class WorkspaceRuntimeStillStartingError extends Error {}
+class WorkspaceRuntimeStillStartingError extends Error {
+  constructor() {
+    super('Workspace runtime is still starting');
+  }
+}
 
 async function waitUntilDeadline<T>(
   operation: Promise<T>,

@@ -1397,6 +1397,43 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(h.getWorkspaceSkillsStatus).not.toHaveBeenCalled();
   });
 
+  it('preserves JSON-RPC messages in capability and operation errors', async () => {
+    const h = makeRuntime();
+    h.setLive(true);
+    h.invokeWorkspaceCommand.mockRejectedValueOnce({
+      code: -32603,
+      message: 'Skill refresh failed',
+    });
+    const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
+
+    expect(coordinator.reconcileSkillsConfiguration()).toBe('reconciling');
+    await vi.waitFor(() => {
+      expect(coordinator.status().capabilities.skills).toMatchObject({
+        state: 'error',
+        error: {
+          code: 'skills_reconcile_failed',
+          message: 'Skill refresh failed',
+        },
+      });
+    });
+
+    let operationId: string | undefined;
+    await expect(
+      coordinator.runMcpOperation('docs', 'enable', async (id) => {
+        operationId = id;
+        throw { code: -32603, message: 'MCP mutation failed' };
+      }),
+    ).rejects.toEqual({ code: -32603, message: 'MCP mutation failed' });
+    expect(operationId).toBeDefined();
+    expect(coordinator.operationStatus(operationId!)).toMatchObject({
+      state: 'failed',
+      error: {
+        code: 'mcp_operation_failed',
+        message: 'MCP mutation failed',
+      },
+    });
+  });
+
   it('bounds retained terminal operation history', async () => {
     const h = makeRuntime();
     const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);

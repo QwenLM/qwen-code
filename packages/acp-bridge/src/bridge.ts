@@ -1469,13 +1469,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   function startIdleTimer(ci: ChannelInfo, context?: string): void {
     if (channelInfo !== ci || ci.isDying) return;
-    if (ci.sessionSpawnResetPending && hasNoChannelWork(ci)) {
+    if (ci.sessionSpawnResetPending && hasNoChannelWorkForReset(ci)) {
       ci.sessionSpawnResetPending = false;
       cancelIdleTimer();
       void killChannelWithLog(ci, 'newSession timeout');
       return;
     }
-    if (ci.sessionRestoreResetPending && hasNoChannelWork(ci)) {
+    if (ci.sessionRestoreResetPending && hasNoChannelWorkForReset(ci)) {
       ci.sessionRestoreResetPending = false;
       cancelIdleTimer();
       void killChannelWithLog(ci, 'session restore timeout');
@@ -1510,6 +1510,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     );
   }
 
+  function hasNoChannelWorkForReset(ci: ChannelInfo): boolean {
+    // A timed-out observer releases its withWorkspaceControl count while the
+    // physical request stays tracked. Resetting the channel settles that
+    // request without allowing another physical request to overlap it.
+    let physicalRequestCount = 0;
+    for (const requests of ci.workspacePhysicalRequests.values()) {
+      physicalRequestCount += requests.size;
+    }
+    return (
+      ci.sessionIds.size === 0 &&
+      ci.pendingRestoreIds.size === 0 &&
+      ci.workspaceControlInFlight <= physicalRequestCount &&
+      !ci.workspaceMcpDiscoveryInFlight &&
+      ci.workspaceMcpAuthenticationOperations.size === 0 &&
+      ci.sessionSpawnsInFlight === 0
+    );
+  }
+
+  function shouldStartIdleTimer(ci: ChannelInfo): boolean {
+    return (
+      hasNoChannelWork(ci) ||
+      ((ci.sessionSpawnResetPending || ci.sessionRestoreResetPending) &&
+        hasNoChannelWorkForReset(ci))
+    );
+  }
+
   function beginWorkspaceMcpDiscovery(ci: ChannelInfo): void {
     workspaceMcpStatusCache = undefined;
     workspaceMcpStatusCacheEpoch = undefined;
@@ -1523,7 +1549,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       ci.workspaceMcpDiscoveryTimer = undefined;
       ci.workspaceMcpDiscoveryInFlight = false;
       ci.workspaceMcpDiscoveryRequested = false;
-      if (hasNoChannelWork(ci)) {
+      if (shouldStartIdleTimer(ci)) {
         startIdleTimer(ci, 'workspace MCP discovery timeout');
       }
     }, MCP_RESTART_TIMEOUT_MS);
@@ -1584,7 +1610,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         0,
         ci.workspaceControlInFlight - 1,
       );
-      if (channelInfo === ci && !ci.isDying && hasNoChannelWork(ci)) {
+      if (channelInfo === ci && !ci.isDying && shouldStartIdleTimer(ci)) {
         startIdleTimer(ci, context);
       }
     });
@@ -2568,16 +2594,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     } finally {
       ci.sessionSpawnsInFlight = Math.max(0, ci.sessionSpawnsInFlight - 1);
-      if (!sessionRegistered && hasNoChannelWork(ci) && !ci.isDying) {
+      if (!sessionRegistered && shouldStartIdleTimer(ci) && !ci.isDying) {
         startIdleTimer(ci, 'newSession failure');
-      } else if (sessionRemovedDuringInitialization && hasNoChannelWork(ci)) {
+      } else if (
+        sessionRemovedDuringInitialization &&
+        shouldStartIdleTimer(ci)
+      ) {
         if (!ci.isDying) {
           startIdleTimer(
             ci,
             `approval-mode initialization failure "${initializedSessionId}"`,
           );
         }
-      } else if (sessionRegistered && hasNoChannelWork(ci) && !ci.isDying) {
+      } else if (sessionRegistered && shouldStartIdleTimer(ci) && !ci.isDying) {
         startIdleTimer(
           ci,
           `session orphaned during initialization "${initializedSessionId}"`,
@@ -4284,7 +4313,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // tombstone + delete `earlyEvents[id]`.
         ci?.client.markSessionClosed(req.sessionId);
       }
-      if (ci && hasNoChannelWork(ci) && !ci.isDying) {
+      if (ci && shouldStartIdleTimer(ci) && !ci.isDying) {
         startIdleTimer(ci, `${action} failure "${req.sessionId}"`);
       }
     });
@@ -4415,7 +4444,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     } catch {
       /* no active prompt or session already torn down */
     }
-    if (ci && hasNoChannelWork(ci)) {
+    if (ci && shouldStartIdleTimer(ci)) {
       if (!ci.isDying) {
         startIdleTimer(ci, `closeSession "${sessionId}"`);
       }
@@ -7436,12 +7465,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         return remaining;
       };
+      const channelLabel = `${SERVE_CONTROL_EXT_METHODS.workspaceMcpManage} channel`;
+      const channelTimeoutMs = remainingOperationMs(channelLabel);
       const info = await withTimeout(
         ensureChannel(),
-        remainingOperationMs(
-          `${SERVE_CONTROL_EXT_METHODS.workspaceMcpManage} channel`,
-        ),
-        `${SERVE_CONTROL_EXT_METHODS.workspaceMcpManage} channel`,
+        channelTimeoutMs,
+        channelLabel,
       );
       touchActivity();
       const authenticationOperationId =
@@ -7898,7 +7927,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // Start the workspace idle policy only after every physical lease has
       // drained. `pendingRestoreIds` covers in-flight `session/load` and
       // `session/resume` calls that have not registered in `sessionIds` yet.
-      if (ci && hasNoChannelWork(ci)) {
+      if (ci && shouldStartIdleTimer(ci)) {
         if (!ci.isDying) {
           startIdleTimer(ci, `killSession "${sessionId}"`);
         }

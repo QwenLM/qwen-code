@@ -234,6 +234,26 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('does not start a channel after the MCP deadline already expired', async () => {
+    const channelFactory = vi.fn(async () => {
+      throw new Error('orphaned channel spawn');
+    });
+    const bridge = makeBridge({ channelFactory });
+
+    await expect(
+      bridge.manageMcpServer(
+        'aone',
+        'authenticate',
+        undefined,
+        'operation-1',
+        Date.now() - 1,
+      ),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    expect(channelFactory).not.toHaveBeenCalled();
+
+    await bridge.shutdown();
+  });
+
   it('does not send MCP management after its deadline expires on a warm channel', async () => {
     vi.useFakeTimers();
     const handle = makeChannel();
@@ -4343,6 +4363,50 @@ describe('createAcpSessionBridge', () => {
         workspaceCwd: WS_A,
       }),
     ).resolves.toMatchObject({ sessionId: 'restored-after-timeout' });
+    expect(channelFactory).toHaveBeenCalledTimes(2);
+
+    await bridge.shutdown();
+  });
+
+  it('replaces a timed-out restore channel with an unobserved physical request', async () => {
+    const first = makeChannel({
+      loadSessionImpl: () => new Promise<LoadSessionResponse>(() => {}),
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh
+          ? new Promise(() => {})
+          : {},
+    });
+    const second = makeChannel({
+      loadSessionImpl: () => ({ configOptions: [] }),
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(first.channel)
+      .mockResolvedValueOnce(second.channel);
+    const bridge = makeBridge({ channelFactory, initializeTimeoutMs: 25 });
+    await bridge.preheat();
+
+    await expect(
+      bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        {},
+        { timeoutMs: 25 },
+      ),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    await expect(
+      bridge.loadSession({
+        sessionId: 'timed-out-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    await vi.waitFor(() => expect(first.killed).toBe(true));
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'restored-on-fresh-channel',
+        workspaceCwd: WS_A,
+      }),
+    ).resolves.toMatchObject({ sessionId: 'restored-on-fresh-channel' });
     expect(channelFactory).toHaveBeenCalledTimes(2);
 
     await bridge.shutdown();

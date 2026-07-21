@@ -18,6 +18,7 @@ import {
 } from './workspace-runtime-mcp-operations.js';
 import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
+import { getErrorMessage as message } from '../utils/errors.js';
 import type { WorkspaceRequestContext } from './workspace-service/types.js';
 
 const DEFAULT_PREPARE_TIMEOUT_MS = 60_000;
@@ -62,10 +63,6 @@ function requestContext(
   route: string,
 ): WorkspaceRequestContext {
   return { route, workspaceCwd: runtime.workspaceCwd };
-}
-
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function wait(ms: number): Promise<void> {
