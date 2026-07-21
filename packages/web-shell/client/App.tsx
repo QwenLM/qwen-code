@@ -4109,7 +4109,10 @@ export function App({
         if (effectivePersist && result.persisted !== true) {
           throw new Error(t('sidebar.addWorkspacePersistenceError'));
         }
-        await reconcileAddedWorkspace(result.cwd);
+        const reconciled = await reconcileAddedWorkspace(result.cwd);
+        if (!reconciled) {
+          throw new Error(t('sidebar.addWorkspaceRefreshError'));
+        }
       } finally {
         if (workspaceMutationTokenRef.current === token) {
           workspaceMutationTokenRef.current = null;

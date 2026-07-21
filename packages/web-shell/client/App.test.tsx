@@ -1304,6 +1304,42 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('surfaces an inline error when an added folder cannot refresh capabilities', async () => {
+    const added = {
+      id: 'payments',
+      cwd: '/tmp/payments',
+      primary: false,
+      trusted: true,
+    };
+    mockWorkspace.capabilities = {
+      features: ['dynamic_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.addWorkspace.mockResolvedValue(added);
+    mockWorkspace.refreshCapabilities.mockRejectedValueOnce(
+      new Error('refresh failed'),
+    );
+    renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onOpenExistingWorkspace?.();
+    });
+
+    await expect(
+      testState.latestAddWorkspaceDialogProps?.onAdd('/tmp/payments', false),
+    ).rejects.toThrow(
+      'Workspace added, but the workspace list could not be refreshed',
+    );
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledOnce();
+  });
+
   it('retries only capability refresh after a committed scratch cannot reconcile', async () => {
     mockWorkspace.capabilities = {
       features: ['scratch_workspace_registration'],
@@ -1517,6 +1553,39 @@ describe('App session callbacks', () => {
     });
 
     expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
+
+  it('starts a fresh chat when an active session selects a different trusted workspace', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    mockSessionActions.clearSession.mockClear();
+    await act(async () => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.clearSession).toHaveBeenCalled();
+      });
+    });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
   });
 
   it('creates new sessions in the locked workspace without a selector', async () => {

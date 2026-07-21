@@ -154,7 +154,7 @@ export function DialogShell({
       event.target === event.currentTarget;
     backdropPressStartedRef.current = false;
     backdropPressEndedRef.current = false;
-    if (shouldClose) onClose();
+    if (shouldClose && dismissible) onClose();
   };
 
   const themeClass =
@@ -197,7 +197,7 @@ export function DialogShell({
               return;
             }
             event.preventDefault();
-            onCloseRef.current();
+            if (dismissible) onCloseRef.current();
           }}
           onOpenAutoFocus={(event) => {
             event.preventDefault();
