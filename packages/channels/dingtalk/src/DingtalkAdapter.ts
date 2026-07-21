@@ -1307,9 +1307,11 @@ export class DingtalkChannel extends ChannelBase {
       const content = this.extractContent(data);
       let cleanText = content.text;
 
-      // Strip first @mention (the bot) from text, keep other @mentions intact
+      // Strip first @mention (the bot) from text, keep other @mentions intact.
+      // Anchor to start-of-string so @ symbols inside URLs or emails
+      // (e.g. git@host:path) are not accidentally stripped (#7396).
       if (isMentioned) {
-        cleanText = cleanText.replace(/@[^\s\p{Cf}]+/u, '').trim();
+        cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
       }
 
       // Extract quoted message context

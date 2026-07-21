@@ -1571,6 +1571,92 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
+  it('preserves @ in git URLs and emails when stripping bot mention (#7396)', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm1',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: {
+          content: '@qwen-code 重复： git@example.com:group/repo.git',
+        },
+      }),
+      headers: { messageId: 'm1' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '重复： git@example.com:group/repo.git',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('does not strip @ in URLs when bot mention is absent from text (#7396)', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'm2',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        text: {
+          content: '重复： git@example.com:group/repo.git',
+        },
+      }),
+      headers: { messageId: 'm2' },
+    } as unknown as DWClientDownStream;
+
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+    writeSpy.mockRestore();
+
+    const handleInbound = (
+      channel as unknown as {
+        handleInbound: ReturnType<typeof vi.fn>;
+      }
+    ).handleInbound;
+
+    // When the bot @mention is not in the text (DingTalk already stripped it),
+    // the regex must NOT eat the @ in the git URL.
+    expect(handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '重复： git@example.com:group/repo.git',
+        isMentioned: true,
+      }),
+    );
+  });
+
   it('ignores non-string message metadata when logging parsed JSON', () => {
     const channel = createChannel();
     const downstream = {
