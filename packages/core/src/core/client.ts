@@ -715,7 +715,7 @@ export class GeminiClient {
   }
 
   private cancelPendingMemoryPrefetch(
-    discardReason: MemoryRecallDiscardReason = 'superseded',
+    discardReason: MemoryRecallDiscardReason,
   ): void {
     const handle = this.pendingMemoryPrefetch;
     if (!handle) return;
@@ -751,7 +751,12 @@ export class GeminiClient {
       }
       this.logMemoryPrefetchDelivery(handle, deliveryPoint, result);
     } else {
-      this.logMemoryPrefetchDelivery(handle, 'discarded', result);
+      this.logMemoryPrefetchDelivery(
+        handle,
+        'discarded',
+        result,
+        'no_relevant_results',
+      );
     }
     return result;
   }
@@ -2553,6 +2558,11 @@ export class GeminiClient {
         for await (const event of resultStream) {
           if (event.type === GeminiEventType.ToolCallRequest) {
             hasToolCalls = true;
+          } else if (
+            event.type === GeminiEventType.Retry ||
+            event.type === GeminiEventType.ModelFallback
+          ) {
+            hasToolCalls = false;
           }
           if (messageDisplay && event.type === GeminiEventType.Content) {
             messageDisplay.addChunk(event.value);

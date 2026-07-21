@@ -1415,6 +1415,5 @@ export function logMemoryRecallDelivery(
     delivery_point: event.delivery_point,
     ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
     strategy: event.strategy,
-    docs_selected: event.docs_selected,
   });
 }

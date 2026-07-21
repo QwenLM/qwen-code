@@ -1122,7 +1122,6 @@ export function recordMemoryRecallDeliveryMetrics(
     delivery_point: MemoryRecallDeliveryPoint;
     discard_reason?: MemoryRecallDiscardReason;
     strategy: 'none' | 'heuristic' | 'model';
-    docs_selected: number;
   },
 ): void {
   if (!isMetricsInitialized) return;

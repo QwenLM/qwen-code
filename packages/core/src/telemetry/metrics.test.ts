@@ -859,7 +859,6 @@ describe('Telemetry Metrics', () => {
         delivery_point: 'discarded',
         discard_reason: 'reset',
         strategy: 'model',
-        docs_selected: 3,
       });
 
       const expectedAttrs = {

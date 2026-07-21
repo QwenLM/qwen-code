@@ -244,7 +244,6 @@ describe('loggers', () => {
           delivery_point: 'discarded',
           discard_reason: 'reset',
           strategy: 'model',
-          docs_selected: 2,
         },
       );
       expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
@@ -271,7 +270,6 @@ describe('loggers', () => {
           phase: 'refined',
           delivery_point: 'tool_result',
           strategy: 'model',
-          docs_selected: 2,
         },
       );
     });

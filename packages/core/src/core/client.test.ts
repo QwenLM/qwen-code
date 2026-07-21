@@ -4709,7 +4709,7 @@ hello
       );
       const [, deliveryEvent] = vi.mocked(logMemoryRecallDelivery).mock
         .calls[0];
-      expect(deliveryEvent.discard_reason).toBeUndefined();
+      expect(deliveryEvent.discard_reason).toBe('no_relevant_results');
     });
 
     it('should inject auto-memory on first ToolResult when recall settles after UserQuery', async () => {

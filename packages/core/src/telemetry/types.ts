@@ -1473,7 +1473,7 @@ export type MemoryRecallDiscardReason =
   | 'reset'
   | 'abort'
   | 'shutdown'
-  | 'superseded';
+  | 'no_relevant_results';
 
 export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
   'event.name': 'qwen-code.memory.recall.delivery';
