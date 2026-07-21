@@ -957,11 +957,12 @@ export class BackgroundAgentResumeService {
       let currentAbortController: AbortController | undefined =
         bgAbortController;
       let currentTurnPromise: Promise<void> | undefined;
+      let runtimeCleanupPromise: Promise<void> | undefined;
       let hotResumeCount = nextResumeCount;
       let residentRegistered = false;
 
       const runtimeCleanup = () => {
-        if (runtimeDisposed) return;
+        if (runtimeCleanupPromise) return runtimeCleanupPromise;
         runtimeDisposed = true;
         registry.unregisterResidentAgent(meta.agentId, residentController);
         residentRegistered = false;
@@ -970,22 +971,25 @@ export class BackgroundAgentResumeService {
         cleanupApprovalBridge?.();
         cleanupOwnedMonitorNotifications?.();
         cleanupJsonl?.();
-        void agentConfig
-          .getToolRegistry()
-          .stop()
-          .catch(() => {});
-        void subagentDispose?.().catch(() => {});
+        runtimeCleanupPromise = Promise.allSettled([
+          agentConfig.getToolRegistry().stop(),
+          subagentDispose?.() ?? Promise.resolve(),
+        ]).then(() => undefined);
+        return runtimeCleanupPromise;
       };
 
       const requestRuntimeDisposal = () => {
-        if (disposeRequested || runtimeDisposed) return;
+        if (disposeRequested || runtimeDisposed) {
+          return runtimeCleanupPromise;
+        }
         disposeRequested = true;
         registry.unregisterResidentAgent(meta.agentId, residentController);
         residentRegistered = false;
         currentAbortController?.abort();
         if (!turnRunning) {
-          runtimeCleanup();
+          return runtimeCleanup();
         }
+        return undefined;
       };
 
       const runBody = async (
@@ -1131,7 +1135,7 @@ export class BackgroundAgentResumeService {
           turnRunning = false;
           restoreParentPM();
           if (!keepResident || disposeRequested) {
-            runtimeCleanup();
+            await runtimeCleanup();
           }
         }
       };
@@ -1169,11 +1173,11 @@ export class BackgroundAgentResumeService {
             return false;
           }
           if (agentConfig.getWorkingDir() !== residentWorkingDir) {
-            requestRuntimeDisposal();
+            registry.disposeResidentAgent(meta.agentId, residentController);
             return false;
           }
           if (needsAutoPermissionLease()) {
-            requestRuntimeDisposal();
+            registry.disposeResidentAgent(meta.agentId, residentController);
             return false;
           }
 

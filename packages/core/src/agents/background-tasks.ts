@@ -444,7 +444,7 @@ export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
  */
 export interface ResidentBackgroundAgent {
   continue(message: string): boolean;
-  dispose(): void;
+  dispose(): void | Promise<void>;
 }
 
 type MessageWaiter = () => void;
@@ -789,7 +789,17 @@ export class BackgroundTaskRegistry {
     if (!current || (resident && current !== resident)) return false;
     this.residentAgents.delete(agentId);
     try {
-      current.dispose();
+      const cleanup = current.dispose();
+      if (cleanup) {
+        this.trackAgentExecution(
+          cleanup.catch((error) => {
+            debugLogger.error(
+              `Failed to dispose resident background agent ${agentId}:`,
+              error,
+            );
+          }),
+        );
+      }
     } catch (error) {
       debugLogger.error(
         `Failed to dispose resident background agent ${agentId}:`,

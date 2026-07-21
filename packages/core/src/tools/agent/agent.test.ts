@@ -4276,6 +4276,7 @@ describe('AgentTool', () => {
       registerResidentAgent: ReturnType<typeof vi.fn>;
       claimPendingInputsForResident: ReturnType<typeof vi.fn>;
       unregisterResidentAgent: ReturnType<typeof vi.fn>;
+      disposeResidentAgent: ReturnType<typeof vi.fn>;
       restartCompletedAgent: ReturnType<typeof vi.fn>;
       trackAgentExecution: ReturnType<typeof vi.fn>;
     };
@@ -4334,6 +4335,15 @@ describe('AgentTool', () => {
         registerResidentAgent: vi.fn(),
         claimPendingInputsForResident: vi.fn().mockReturnValue([]),
         unregisterResidentAgent: vi.fn().mockReturnValue(true),
+        disposeResidentAgent: vi.fn(
+          (
+            _agentId: string,
+            resident?: { dispose: () => void | Promise<void> },
+          ) => {
+            resident?.dispose();
+            return true;
+          },
+        ),
         restartCompletedAgent: vi.fn().mockReturnValue(restartedEntry),
         trackAgentExecution: vi.fn(),
       };
@@ -4567,6 +4577,11 @@ describe('AgentTool', () => {
     });
 
     it('keeps runtime resources while idle and cleans them when disposed', async () => {
+      let resolveDispose!: () => void;
+      const disposeGate = new Promise<void>((resolve) => {
+        resolveDispose = resolve;
+      });
+      mockSubagentDispose.mockReturnValueOnce(disposeGate);
       const params: AgentParams = {
         description: 'Start monitor',
         prompt: 'Watch for changes',
@@ -4594,10 +4609,16 @@ describe('AgentTool', () => {
       expect(mockSubagentDispose).not.toHaveBeenCalled();
 
       const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
-        | { dispose: () => void }
+        | { dispose: () => void | Promise<void> }
         | undefined;
       expect(resident).toBeDefined();
-      resident?.dispose();
+      const cleanup = resident?.dispose();
+      expect(cleanup).toBeInstanceOf(Promise);
+      const cleanupPromise = cleanup as Promise<void>;
+      let cleanupSettled = false;
+      void cleanupPromise.then(() => {
+        cleanupSettled = true;
+      });
 
       await vi.waitFor(() => {
         expect(
@@ -4613,6 +4634,11 @@ describe('AgentTool', () => {
         );
       });
       expect(mockSubagentDispose).toHaveBeenCalledOnce();
+      expect(cleanupSettled).toBe(false);
+
+      resolveDispose();
+      await cleanupPromise;
+      expect(cleanupSettled).toBe(true);
     });
 
     it('continues a completed background agent on the same runtime', async () => {

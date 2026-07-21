@@ -3172,11 +3172,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         let currentAbortController: AbortController | undefined =
           bgAbortController;
         let currentTurnPromise: Promise<void> | undefined;
+        let runtimeCleanupPromise: Promise<void> | undefined;
         let hotContinuationCount = 0;
         let residentRegistered = false;
 
         const cleanupRuntime = () => {
-          if (runtimeDisposed) return;
+          if (runtimeCleanupPromise) return runtimeCleanupPromise;
           runtimeDisposed = true;
           registry.unregisterResidentAgent(
             hookOpts.agentId,
@@ -3188,15 +3189,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           cleanupApprovalBridge?.();
           cleanupOwnedMonitorNotifications();
           cleanupJsonl?.();
-          void agentConfig
-            .getToolRegistry()
-            .stop()
-            .catch(() => {});
-          void bgSubagentDispose?.().catch(() => {});
+          runtimeCleanupPromise = Promise.allSettled([
+            agentConfig.getToolRegistry().stop(),
+            bgSubagentDispose?.() ?? Promise.resolve(),
+          ]).then(() => undefined);
+          return runtimeCleanupPromise;
         };
 
         const requestRuntimeDisposal = () => {
-          if (disposeRequested || runtimeDisposed) return;
+          if (disposeRequested || runtimeDisposed) {
+            return runtimeCleanupPromise;
+          }
           disposeRequested = true;
           registry.unregisterResidentAgent(
             hookOpts.agentId,
@@ -3205,8 +3208,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           residentRegistered = false;
           currentAbortController?.abort();
           if (!turnRunning) {
-            cleanupRuntime();
+            return cleanupRuntime();
           }
+          return undefined;
         };
 
         // Fire-and-forget: start the subagent without blocking the parent.
@@ -3437,7 +3441,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             turnRunning = false;
             restoreParentPM();
             if (!keepResident || disposeRequested) {
-              cleanupRuntime();
+              await cleanupRuntime();
             }
           }
         };
@@ -3486,11 +3490,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               return false;
             }
             if (agentConfig.getWorkingDir() !== residentWorkingDir) {
-              requestRuntimeDisposal();
+              registry.disposeResidentAgent(
+                hookOpts.agentId,
+                residentController,
+              );
               return false;
             }
             if (needsAutoPermissionLease()) {
-              requestRuntimeDisposal();
+              registry.disposeResidentAgent(
+                hookOpts.agentId,
+                residentController,
+              );
               return false;
             }
 

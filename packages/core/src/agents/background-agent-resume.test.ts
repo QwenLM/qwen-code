@@ -2463,7 +2463,11 @@ describe('BackgroundAgentResumeService', () => {
       getFinalText: () => 'iterated',
     };
 
-    const dispose = vi.fn().mockResolvedValue(undefined);
+    let resolveDispose!: () => void;
+    const disposeGate = new Promise<void>((resolve) => {
+      resolveDispose = resolve;
+    });
+    const dispose = vi.fn(() => disposeGate);
     const { service, subagentManager, config } = createService({ hookSystem });
     const trackAgentExecution = vi.spyOn(registry, 'trackAgentExecution');
     const getModel = vi.spyOn(config, 'getModel').mockReturnValue('model-a');
@@ -2549,6 +2553,16 @@ describe('BackgroundAgentResumeService', () => {
     );
     expect(registry.continueResidentAgent(agentId, 'again')).toBe(false);
     expect(dispose).toHaveBeenCalledTimes(1);
+
+    let cleanupSettled = false;
+    const cleanup = registry.abortAllAndWait({ notify: false }).then(() => {
+      cleanupSettled = true;
+    });
+    await Promise.resolve();
+    expect(cleanupSettled).toBe(false);
+    resolveDispose();
+    await cleanup;
+    expect(cleanupSettled).toBe(true);
 
     registry.reset();
 

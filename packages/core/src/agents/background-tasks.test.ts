@@ -1352,22 +1352,35 @@ describe('BackgroundTaskRegistry', () => {
     expect(abortAll).toHaveBeenNthCalledWith(2, { notify: false });
   });
 
-  it('disposes an idle resident when no agent execution is tracked', async () => {
+  it('waits for an idle resident async cleanup to settle', async () => {
+    let resolveCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      resolveCleanup = resolve;
+    });
     const resident: ResidentBackgroundAgent = {
       continue: vi.fn(() => true),
-      dispose: vi.fn(),
+      dispose: vi.fn(() => cleanup),
     };
     registry.register(
       makeRegistration('idle-resident', { status: 'completed' }),
     );
     registry.registerResidentAgent('idle-resident', resident);
 
-    await registry.abortAllAndWait({ notify: false });
+    let settled = false;
+    const wait = registry.abortAllAndWait({ notify: false }).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
 
     expect(resident.dispose).toHaveBeenCalledOnce();
+    expect(settled).toBe(false);
     expect(registry.continueResidentAgent('idle-resident', 'continue')).toBe(
       false,
     );
+
+    resolveCleanup();
+    await wait;
+    expect(settled).toBe(true);
   });
 
   it('disposes a resident registered while waiting for an execution to settle', async () => {
