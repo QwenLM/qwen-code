@@ -2846,12 +2846,19 @@ describe('AgentTool', () => {
       );
     });
 
-    it('falls back to getHistory(true) when getHistoryForForkWindow is unavailable', async () => {
+    it('falls back to uncurated getHistory() when getHistoryForForkWindow is unavailable', async () => {
       // The numeric branch reads its bounded window via
-      // getHistoryForForkWindow?.() ?? getHistory(true). When the client does
+      // getHistoryForForkWindow?.() ?? getHistory(). When the client does
       // not expose getHistoryForForkWindow, the fallback must still yield a
       // correct window. Pin the fallback so it can't silently break if
       // getHistoryForForkWindow is removed or renamed.
+      //
+      // The fallback deliberately uses *uncurated* history: curated history
+      // (getHistory(true)) coalesces the startup reminder into the first user
+      // turn, defeating getStartupContextLength and duplicating startup once
+      // the startupContext prefix is prepended. Uncurated history keeps the
+      // startup reminder as its own pure entry (the separate entries below),
+      // which selectForkHistory strips cleanly.
       const startup = {
         role: 'user' as const,
         parts: [{ text: '<system-reminder>\nstartup\n</system-reminder>' }],
@@ -2872,8 +2879,8 @@ describe('AgentTool', () => {
         role: 'model' as const,
         parts: [{ text: 'second answer' }],
       };
-      // getHistory(true) returns curated history that still carries the
-      // startup reminder; selectForkHistory strips it as a synthetic prefix.
+      // getHistory() returns uncurated history where the startup reminder is
+      // its own pure entry; selectForkHistory strips it as a synthetic prefix.
       const getHistory = vi
         .fn()
         .mockReturnValue([
@@ -2886,7 +2893,7 @@ describe('AgentTool', () => {
       vi.mocked(config.getGeminiClient).mockReturnValue({
         // getHistoryShallow() (no arg) supplies the startup context;
         // getHistoryForForkWindow is intentionally omitted to exercise the
-        // getHistory(true) fallback for the bounded window.
+        // uncurated getHistory() fallback for the bounded window.
         getHistoryShallow: vi
           .fn()
           .mockReturnValue([
@@ -2913,8 +2920,8 @@ describe('AgentTool', () => {
 
       await invocation.execute();
 
-      // Fallback path was taken: the window came from getHistory(true).
-      expect(getHistory).toHaveBeenCalledWith(true);
+      // Fallback path was taken: the window came from uncurated getHistory().
+      expect(getHistory).toHaveBeenCalledWith();
       // The bounded window still preserves startup + the latest real turn.
       expect(vi.mocked(AgentHeadless.create).mock.calls[0]?.[2]).toEqual(
         expect.objectContaining({

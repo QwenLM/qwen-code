@@ -1560,8 +1560,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         rawHistory = [
           ...structuredClone(startupContext),
           ...selectForkHistory(
+            // Fallback uses *uncurated* history, not getHistory(true). Curation
+            // (extractCuratedHistory) coalesces the leading startup reminder
+            // into the first real user turn, so getStartupContextLength can no
+            // longer detect it as a pure prefix — selectForkHistory would then
+            // leave the startup text embedded in the first turn while the
+            // startupContext above prepends it again, duplicating startup.
+            // Uncurated history keeps the startup reminder as its own pure
+            // entry, which selectForkHistory strips cleanly.
             geminiClient.getHistoryForForkWindow?.() ??
-              geminiClient.getHistory(true),
+              geminiClient.getHistory(),
             forkTurns,
           ),
         ];
