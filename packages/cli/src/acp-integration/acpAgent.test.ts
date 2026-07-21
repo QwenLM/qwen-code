@@ -849,6 +849,7 @@ import { buildAuthMethods } from './authMethods.js';
 import {
   CHANNEL_STARTUP_PROFILE_META_KEY,
   CHANNEL_STARTUP_PROFILE_VERSION,
+  PROMPT_CANCEL_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
@@ -1478,6 +1479,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         rewindToTurn: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
+        cancelPendingPrompt: ReturnType<typeof vi.fn>;
+        prompt: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
       }
@@ -1681,6 +1684,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         _meta: { keep: true },
       },
       invocation,
+      expect.any(AbortSignal),
     );
     mockConnectionState.resolve();
     await agentPromise;
@@ -1764,6 +1768,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         _meta: { keep: true },
       },
       undefined,
+      expect.any(AbortSignal),
     );
     mockConnectionState.resolve();
     await agentPromise;
@@ -2630,6 +2635,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         waitForCloseGateToRelease: vi.fn().mockResolvedValue(undefined),
         waitForActiveTurnsToSettle: vi.fn().mockResolvedValue(undefined),
         cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+        prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
         assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
         dispose: vi.fn(),
         emitGoalStatus: vi.fn(),
@@ -2740,6 +2746,58 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(
       lastSessionMock?.releaseTodoStopGuardQueuedPromptWait,
     ).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('acknowledges prompt cancellation after the tracked prompt settles', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    let finishPrompt: ((value: unknown) => void) | undefined;
+    lastSessionMock?.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finishPrompt = resolve;
+        }),
+    );
+    const prompt = agent.prompt({ sessionId, prompt: [] });
+
+    await vi.waitFor(() => expect(lastSessionMock?.prompt).toHaveBeenCalled());
+    const cancellationSignal = lastSessionMock?.prompt.mock.calls[0]?.[2] as
+      | AbortSignal
+      | undefined;
+
+    let cancellationSettled = false;
+    const cancellation = agent
+      .extMethod(PROMPT_CANCEL_METHOD, { sessionId })
+      .finally(() => {
+        cancellationSettled = true;
+      });
+    await vi.waitFor(() => expect(cancellationSignal?.aborted).toBe(true));
+    expect(cancellationSettled).toBe(false);
+    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
+
+    finishPrompt?.({ stopReason: 'cancelled' });
+    await expect(cancellation).resolves.toEqual({ cancelled: true });
+    await prompt;
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('acknowledges cancellation as a no-op when no prompt call is active', async () => {
+    const sessionId = '11111111-1111-1111-1111-111111111111';
+    await setupSessionMocks(sessionId);
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod(PROMPT_CANCEL_METHOD, { sessionId }),
+    ).resolves.toEqual({ cancelled: false });
+    expect(lastSessionMock?.cancelPendingPrompt).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;

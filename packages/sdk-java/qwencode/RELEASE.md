@@ -1,6 +1,51 @@
 # Release Notes
 
-### Changes in 0.0.2-alpha
+## Changes in 0.1.0-alpha
+
+### Summary
+
+This release adds the Java 11 daemon transport to the existing `com.alibaba:qwencode-sdk` artifact. The new `com.alibaba.qwen.code.daemon` API uses `POST` admission watermarks and resumable SSE to avoid returning truncated prompt output as success. The legacy stdio API remains available.
+
+### Compatibility
+
+- Minimum Java version: 11
+- Java 8 users must remain on `0.0.3-alpha`
+- Applications now select their own SLF4J provider; Logback is test-only
+- Fastjson2 and Jackson Core remain implementation dependencies and are absent from daemon public API signatures
+- Use the qwen-code build released from the same source revision as the SDK; the daemon must contain [#7386](https://github.com/QwenLM/qwen-code/pull/7386), [#7400](https://github.com/QwenLM/qwen-code/pull/7400), and this release's acknowledged admission cancellation plus FIFO cancel-drain fence
+
+### Reliability contract
+
+- Prompt, create, permission, cancel, heartbeat, detach, and delete mutations are not retried automatically
+- HTTP 408 and 5xx responses to those mutations remain outcome-unknown
+- SSE uses identity encoding, replay cursors, ordered callbacks, duplicate suppression, gap detection, and bounded reconnect
+- JSON decoding rejects non-standard syntax and duplicate object keys
+- Finite HTTP response bodies and SSE observation are independently deadline-bound
+- Session creation fails before mutation unless REST and `session_scope_override` are advertised
+- A requested daemon prompt deadline fails before mutation unless `prompt_absolute_deadline` is advertised
+- When the daemon advertises `client_heartbeat`, open sessions send periodic
+  heartbeat mutations until detach or destroy
+- Only a matching `turn_complete` or `turn_error` is terminal
+- A cooperative cancellation is `turn_complete` with `stopReason=cancelled`; an agent or provider failure during cancellation can instead produce `turn_error`, so callers wait for and inspect the formal terminal
+- When cancellation, deadline, teardown, and agent settlement race, the daemon's first formal terminal wins; callers must not infer the outcome from the last control mutation they sent
+- Missing terminal, resync, session death, observer failure, timeout, and reconnect exhaustion fail closed
+- `close()` attempts detach at most once; only `destroySession()` sends DELETE
+
+### Known alpha limits
+
+The SDK does not promise exactly-once prompt execution across daemon restarts, automatic epoch recovery, snapshot/resync, persisted cursors, or true prompt-ID-targeted cancellation. Creation-time model selection is omitted because the current daemon reports rejection only through an SSE event emitted before the create response. An ambiguous create may leave an unidentified session until the daemon reaps it.
+
+### Maven configuration
+
+```xml
+<dependency>
+    <groupId>com.alibaba</groupId>
+    <artifactId>qwencode-sdk</artifactId>
+    <version>0.1.0-alpha</version>
+</dependency>
+```
+
+## Changes in 0.0.2-alpha
 
 ### Summary
 
@@ -24,7 +69,7 @@ January 14, 2026
 </dependency>
 ```
 
-### Changes in 0.0.1-alpha
+## Changes in 0.0.1-alpha
 
 ### Summary
 
@@ -76,17 +121,15 @@ January 5, 2026
 
 ### Known Issues
 
-1. **CLI Bundling**: From v0.1.1, the CLI is bundled with the SDK, eliminating the need for separate CLI installation. However, users upgrading from earlier versions should remove any standalone CLI installations to avoid conflicts.
+1. **Memory Management**: Long-running sessions with extensive streaming content may consume significant memory. Proper session cleanup using `session.close()` is essential.
 
-2. **Memory Management**: Long-running sessions with extensive streaming content may consume significant memory. Proper session cleanup using `session.close()` is essential.
+2. **Thread Pool Configuration**: The legacy stdio API's default thread pool configuration (30 core, 100 max threads) may need adjustment based on application load and concurrent session requirements.
 
-3. **Thread Pool Configuration**: The default thread pool configuration (30 core, 100 max threads) may need adjustment based on application load and concurrent session requirements.
+3. **Timeout Configuration**: Legacy stdio users experiencing timeout issues should adjust the `turnTimeout` and `messageTimeout` values in `TransportOptions` based on their specific use cases.
 
-4. **Timeout Configuration**: Users experiencing timeout issues should adjust the `turnTimeout` and `messageTimeout` values in `TransportOptions` based on their specific use cases.
+4. **Permission Mode Confusion**: The different legacy stdio permission modes (default, plan, auto-edit, yolo) may cause confusion for new users. Clear documentation and examples are needed to guide users in selecting appropriate permission modes.
 
-5. **Permission Mode Confusion**: The different permission modes (default, plan, auto-edit, yolo) may cause confusion for new users. Clear documentation and examples are needed to guide users in selecting appropriate permission modes.
-
-6. **Environment Variable Limitations**: Environment variables passed to the CLI process may have platform-specific limitations on length and character sets.
+5. **Environment Variable Limitations**: Environment variables passed to the legacy stdio CLI process may have platform-specific limitations on length and character sets.
 
 ### Maven Build Configuration
 
@@ -94,14 +137,14 @@ The project uses Maven for build management with the following key plugins and c
 
 #### Compiler Plugin
 
-- Source and Target: Java 1.8
+- Compiler release: Java 11
 - Encoding: UTF-8
 
 #### Dependencies
 
-- Logging: ch.qos.logback:logback-classic
+- Logging API: org.slf4j:slf4j-api
 - Utilities: org.apache.commons:commons-lang3
-- JSON Processing: com.alibaba.fastjson2:fastjson2
+- JSON Processing: Fastjson2 for encoding and Jackson Core for strict decoding
 - Testing: JUnit 5 (org.junit.jupiter:junit-jupiter)
 
 #### Build Plugins
@@ -113,19 +156,18 @@ The project uses Maven for build management with the following key plugins and c
 - **Javadoc Plugin**: Generates and attaches Javadoc JARs
 - **GPG Plugin**: Signs artifacts for secure publishing to Maven Central
 
-#### Distribution Management
+#### Publishing
 
-- Snapshot Repository: https://central.sonatype.com/repository/maven-snapshots/
-- Release Repository: https://central.sonatype.org/service/local/staging/deploy/maven2/
+- Releases: Sonatype Central Publisher Portal through the official Maven plugin
 
 ### Deployment Instructions
 
-To deploy a new version of the SDK:
+To release this version of the SDK:
 
-1. Update the version in `pom.xml`
-2. Run `mvn clean deploy` to build and deploy to Maven Central
-3. Ensure GPG signing keys are properly configured
-4. Verify the deployment in the Sonatype staging repository
+1. Merge the version and release notes to protected `main`.
+2. Run the `Release Java SDK` workflow in dry-run mode.
+3. Approve the protected production environment and rerun with dry-run disabled.
+4. The workflow first pins the verified source with an immutable tag, then signs and publishes the artifacts, waits for Maven Central availability, and creates the GitHub Release. A failed publish can safely resume from the matching tag commit even if `main` has advanced.
 
 ### Future Enhancements
 
