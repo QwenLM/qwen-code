@@ -17,7 +17,7 @@ const AGENTIX_TRAINING_TIMEOUT_ENV = 'QWEN_AGENTIX_TRAINING_TIMEOUT_MS';
 const DEFAULT_TRAINING_TIMEOUT_MS = 10 * 60 * 1000;
 const debugLogger = createDebugLogger('AGENTIX_MEMORY_TRAINER');
 
-let activeTraining: Promise<string> | null = null;
+const activeTrainingBySession = new Map<string, Promise<string>>();
 
 export function isAgentixAutoTrainingEnabled(): boolean {
   return process.env[AGENTIX_AUTO_TRAIN_ENV]?.trim() === '1';
@@ -116,13 +116,17 @@ export async function refreshAgentixMemory(
   sessionId: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (!activeTraining) {
-    activeTraining = trainAndSnapshot(sessionId, signal).finally(() => {
-      activeTraining = null;
-    });
-  } else {
-    debugLogger.debug('Reusing the active Agentix training pass.');
+  const activeTraining = activeTrainingBySession.get(sessionId);
+  if (activeTraining) {
+    debugLogger.debug(
+      `Reusing the active Agentix training pass for ${sessionId}.`,
+    );
+    return activeTraining;
   }
 
-  return activeTraining;
+  const training = trainAndSnapshot(sessionId, signal).finally(() => {
+    activeTrainingBySession.delete(sessionId);
+  });
+  activeTrainingBySession.set(sessionId, training);
+  return training;
 }

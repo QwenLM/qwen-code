@@ -57,6 +57,40 @@ describe('Agentix memory trainer', () => {
     ]);
   });
 
+  it('coalesces concurrent refreshes for the same session only', async () => {
+    await Promise.all([
+      refreshAgentixMemory('session-1'),
+      refreshAgentixMemory('session-1'),
+    ]);
+
+    expect(execFileMock).toHaveBeenCalledTimes(3);
+    expect(
+      execFileMock.mock.calls.filter((call) => call[0] === process.execPath),
+    ).toHaveLength(1);
+    expect(
+      execFileMock.mock.calls.filter(
+        (call) => call[0] === '/test/qwen-agentix',
+      ),
+    ).toHaveLength(2);
+  });
+
+  it('keeps concurrent refreshes isolated across sessions', async () => {
+    await Promise.all([
+      refreshAgentixMemory('session-1'),
+      refreshAgentixMemory('session-2'),
+    ]);
+
+    expect(execFileMock).toHaveBeenCalledTimes(6);
+    expect(
+      execFileMock.mock.calls.filter((call) => call[0] === process.execPath),
+    ).toHaveLength(2);
+    expect(
+      execFileMock.mock.calls.filter(
+        (call) => call[0] === '/test/qwen-agentix',
+      ),
+    ).toHaveLength(4);
+  });
+
   it('is disabled unless explicitly enabled by the launcher', () => {
     expect(isAgentixAutoTrainingEnabled()).toBe(true);
     vi.stubEnv('QWEN_AGENTIX_AUTO_TRAIN', '0');

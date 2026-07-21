@@ -9,7 +9,7 @@ does not contain, import, or inspect the private memory sidecar implementation.
 - Preserves complete curated Qwen history when a conversation has no snapshot.
 - Keeps only the active turn after a valid snapshot assumes cross-turn context.
 - Supports an opt-in external training and snapshot refresh during compression.
-- Coalesces concurrent training requests and fails back to retained history.
+- Coalesces concurrent training requests per session and fails back to retained history.
 - Adds tests for zero-state behavior, snapshot isolation, failure handling, and
   standard Qwen compression.
 
@@ -30,7 +30,8 @@ published `qwen-agentix` interface.
 
 Automatic memory refresh is opt-in with `QWEN_AGENTIX_AUTO_TRAIN=1`. Qwen then
 invokes only the configured external commands and reads their published
-snapshot; it does not access sidecar internals.
+snapshot; it does not access sidecar internals. Training is coalesced per
+session, so one chat cannot block a different chat's refresh.
 
 ## Validation
 
