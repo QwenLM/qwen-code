@@ -43,10 +43,16 @@ import {
   SessionService,
   stripTerminalControlSequences,
   MAX_JOBS,
+  type CronTaskDelivery,
   type DurableCronTask,
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
+import {
+  parseChannelDelivery,
+  type PublicChannelDelivery,
+} from '../channel-delivery.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import {
   requireTrustedWorkspaceRuntime,
@@ -187,6 +193,7 @@ interface ScheduledTaskView {
   nextRunAt: number | null;
   sessionId: string | null;
   runs: CronTaskRun[];
+  delivery?: CronTaskDelivery;
 }
 
 /** Next scheduled fire (epoch ms) for an enabled task, or null when the task
@@ -229,6 +236,7 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     // Absent runs (tool-created / never-fired) normalizes to [] so the client
     // never special-cases undefined.
     runs: Array.isArray(task.runs) ? task.runs : [],
+    ...(task.delivery !== undefined ? { delivery: task.delivery } : {}),
   };
 }
 
@@ -369,6 +377,16 @@ function registerScheduledTaskCrudRoutes(
       });
       return;
     }
+    let delivery: PublicChannelDelivery | undefined;
+    if (body['delivery'] !== undefined) {
+      try {
+        delivery = parseChannelDelivery(body['delivery']);
+      } catch (err) {
+        if (!isChannelDeliveryError(err)) throw err;
+        res.status(400).json({ error: err.message, code: err.code });
+        return;
+      }
+    }
     const removedField = findRemovedTaskField(body);
     if (removedField) {
       res.status(400).json(removedFieldError(removedField));
@@ -448,6 +466,7 @@ function registerScheduledTaskCrudRoutes(
       // minute the task was created — same guard cronScheduler.create uses.
       lastFiredAt: now - (now % 60_000),
       enabled,
+      ...(delivery !== undefined ? { delivery } : {}),
       ...(boundSessionId !== undefined ? { sessionId: boundSessionId } : {}),
       ...(nameResult.value !== undefined ? { name: nameResult.value } : {}),
     };

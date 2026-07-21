@@ -163,6 +163,44 @@ describe('scheduled-tasks routes', () => {
     expect(list.body.tasks[0].id).toBe(res.body.id);
   });
 
+  it('creates and persists a task with channel delivery', async () => {
+    const delivery = {
+      kind: 'channel',
+      target: {
+        channelName: 'dingtalk',
+        type: 'user',
+        id: 'user-1',
+      },
+    };
+
+    const res = await create({
+      cron: '30 12 * * 1-5',
+      prompt: 'summarize the day',
+      delivery,
+    });
+
+    expect(res.status).toBe(201);
+    expect(res.body.delivery).toEqual(delivery);
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].delivery).toEqual(delivery);
+  });
+
+  it('rejects malformed delivery before creating a task session', async () => {
+    const res = await create({
+      cron: '30 12 * * 1-5',
+      prompt: 'summarize the day',
+      delivery: {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'user', id: 'user-1' },
+      },
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('channel_delivery_invalid');
+    expect(h.bridge.spawned).toEqual([]);
+  });
+
   it('binds a created task to a freshly minted session', async () => {
     const res = await create({ cron: '0 9 * * *', prompt: 'p' });
     expect(res.status).toBe(201);
