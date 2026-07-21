@@ -641,4 +641,24 @@ describe('Storage – runtime base dir async context isolation', () => {
     expect(a).toBe(path.join(cwdA, '.qwen-a'));
     expect(b).toBe(path.join(cwdB, '.qwen-b'));
   });
+
+  it('pins an instance to the runtime dir where it was created', () => {
+    const cwd = path.resolve('workspace', 'pinned');
+    const runtimeDir = path.join(cwd, '.qwen-a');
+    const storage = Storage.runWithRuntimeBaseDir(
+      '.qwen-a',
+      cwd,
+      () => new Storage(cwd),
+    );
+
+    Storage.runWithRuntimeBaseDir('.qwen-b', cwd, () => {
+      expect(storage.getRuntimeBaseDir()).toBe(runtimeDir);
+      expect(storage.getProjectDir()).toContain(
+        path.join(runtimeDir, 'projects'),
+      );
+      expect(storage.getProjectTempDir()).toContain(
+        path.join(runtimeDir, 'tmp'),
+      );
+    });
+  });
 });

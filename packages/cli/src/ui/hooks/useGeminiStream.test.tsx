@@ -33,6 +33,8 @@ import {
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -96,6 +98,23 @@ const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
 const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
+const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
+const mockUseDualOutput = vi.hoisted(() => vi.fn());
+const mockDualOutput = vi.hoisted(() => ({
+  startAssistantMessage: vi.fn(),
+  processEvent: vi.fn(),
+  finalizeAssistantMessage: vi.fn(),
+  emitToolResult: vi.fn(),
+  emitUserMessage: vi.fn(),
+}));
+
+vi.mock('../../services/review-worktree-lease.js', () => ({
+  cleanupReviewWorktreeLeases: mockCleanupReviewWorktreeLeases,
+}));
+
+vi.mock('../../dualOutput/DualOutputContext.js', () => ({
+  useDualOutput: mockUseDualOutput,
+}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -292,6 +311,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
+    mockCleanupReviewWorktreeLeases.mockReset();
+    mockUseDualOutput.mockReset().mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -6761,6 +6782,50 @@ describe('useGeminiStream', () => {
           mockSendMessageStream.mock.calls[0][3].modelOverride,
         ).toBeUndefined();
       });
+
+      // Regression for #7156: progress setState calls issued from inside a
+      // background subagent's AsyncLocalStorage frame can batch with the
+      // notification trigger into one React commit, so the drain effect
+      // executes on a stack that still carries the subagent's frame. The
+      // drained turn — and every async continuation it starts — then
+      // resolves Config.getModel() to the subagent's runtime view and the
+      // main session switches onto the subagent's model. The drain effect
+      // must therefore run via runOutsideAgentContext. This test drives the
+      // notification callback from inside an agent frame (bypassing the
+      // producer-side guard in BackgroundTaskRegistry.emitNotification) and
+      // fails if the consumer-side wrapping is removed.
+      it('drains a notification outside a background agent ALS frame', async () => {
+        renderTestHook();
+        const callback = mockBackgroundShellRegistry.setNotificationCallback
+          .mock.calls[0][0] as (displayText: string, modelText: string) => void;
+
+        let capturedRuntimeView: unknown = 'unset';
+        mockSendMessageStream.mockImplementationOnce(() => {
+          capturedRuntimeView = getRuntimeContentGenerator();
+          return (async function* () {})();
+        });
+
+        const subagentView = {
+          contentGenerator: {},
+          contentGeneratorConfig: { model: 'small-default' },
+        } as never;
+        // The whole act() flush runs inside the agent frame, mirroring the
+        // contaminated React commit from the issue.
+        await runWithRuntimeContentGenerator(subagentView, async () => {
+          await act(async () => {
+            callback(
+              'Background shell "npm test" completed.',
+              '<task-notification>completed</task-notification>',
+            );
+          });
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Notification,
+        });
+        expect(capturedRuntimeView).toBeUndefined();
+      });
     });
   });
 
@@ -8323,7 +8388,8 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('should commit thought to history on UserCancelled', async () => {
+    it('should commit thought and finalize dual output on UserCancelled', async () => {
+      mockUseDualOutput.mockReturnValue(mockDualOutput);
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -8349,6 +8415,41 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         ),
+      );
+      expect(mockDualOutput.startAssistantMessage).toHaveBeenCalledOnce();
+      expect(mockDualOutput.finalizeAssistantMessage).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
+    });
+
+    it('should clean up review lease when the stream throws', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial',
+          };
+          throw new Error('stream blew up');
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('error query');
+      });
+
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
       );
     });
 
@@ -9426,6 +9527,13 @@ describe('useGeminiStream', () => {
           typeof result.current.loopDetectionConfirmationRequest?.onComplete,
         ).toBe('function');
       });
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
     });
 
     it('should disable loop detection and show message when user selects "disable"', async () => {

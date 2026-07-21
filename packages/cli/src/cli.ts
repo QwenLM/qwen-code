@@ -339,6 +339,17 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  const managedUpdateVersion =
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+  if (managedUpdateVersion) {
+    delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+    const { installManagedNpmUpdate } = await import(
+      './utils/managed-npm-update.js'
+    );
+    await installManagedNpmUpdate(managedUpdateVersion);
+    return;
+  }
+
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
 
