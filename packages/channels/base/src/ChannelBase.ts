@@ -4465,9 +4465,7 @@ export abstract class ChannelBase {
     }
 
     if (envelope.metadata) {
-      promptText = promptText
-        ? `${promptText}\n\n${envelope.metadata}`
-        : envelope.metadata;
+      promptText += `\n\n${sanitizePromptText(envelope.metadata)}`;
     }
 
     // Resolve dispatch mode: per-group override → channel config → default

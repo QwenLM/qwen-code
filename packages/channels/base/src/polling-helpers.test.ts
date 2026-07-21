@@ -350,6 +350,15 @@ describe('stripBotMention', () => {
       'hello please fix',
     );
   });
+
+  it('preserves paragraph breaks (newlines)', () => {
+    expect(
+      stripBotMention(
+        '@bot Please fix this.\n\nSteps to reproduce:\n1. Do X',
+        'bot',
+      ),
+    ).toBe('Please fix this.\n\nSteps to reproduce:\n1. Do X');
+  });
 });
 
 describe('abortableSleep', () => {

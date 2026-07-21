@@ -122,7 +122,7 @@ export function stripBotMention(text: string, botUsername: string): string {
       new RegExp(`(?<=\\s|^|[([{"<])@${escaped}(?=[^a-zA-Z0-9_/-]|$)`, 'g'),
       '',
     )
-    .replace(/\s{2,}/g, ' ')
+    .replace(/ {2,}/g, ' ')
     .trim();
 }
 

@@ -39,12 +39,14 @@ const {
   mockIssueNotesCreate,
   mockMRNotesCreate,
   mockIssuesCreate,
+  mockShowCurrentUser,
 } = vi.hoisted(() => ({
   mockTodosAll: vi.fn(),
   mockTodoDone: vi.fn(),
   mockIssueNotesCreate: vi.fn(),
   mockMRNotesCreate: vi.fn(),
   mockIssuesCreate: vi.fn(),
+  mockShowCurrentUser: vi.fn(),
 }));
 
 vi.mock('@gitbeaker/rest', () => ({
@@ -53,6 +55,7 @@ vi.mock('@gitbeaker/rest', () => ({
     IssueNotes: { create: mockIssueNotesCreate },
     MergeRequestNotes: { create: mockMRNotesCreate },
     Issues: { create: mockIssuesCreate },
+    Users: { showCurrentUser: mockShowCurrentUser },
   })),
 }));
 
@@ -69,6 +72,8 @@ describe('GitlabChannel', () => {
     mockIssueNotesCreate.mockClear();
     mockMRNotesCreate.mockClear();
     mockIssuesCreate.mockClear();
+    mockShowCurrentUser.mockClear();
+    mockShowCurrentUser.mockResolvedValue({ username: 'bot' });
   });
 
   afterEach(() => {
@@ -211,7 +216,7 @@ describe('GitlabChannel', () => {
           source_branch: 'feature-branch',
         },
         target_url: 'https://gitlab.com/owner/repo/-/merge_requests/3',
-        body: 'Please review @bob',
+        body: 'Please review @bot',
         state: 'pending',
         created_at: '2026-01-01T00:00:00Z',
         updated_at: '2026-01-01T00:00:00Z',
@@ -248,7 +253,7 @@ describe('GitlabChannel', () => {
 
     const env = envelopes[0] as { text: string; metadata?: string };
     expect(env.text).toContain('Please review');
-    expect(env.text).not.toContain('@bob');
+    expect(env.text).not.toContain('@bot');
     expect(env.metadata).toContain(
       'URL: https://gitlab.com/owner/repo/-/merge_requests/3',
     );

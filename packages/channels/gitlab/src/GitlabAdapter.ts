@@ -5,7 +5,7 @@ import {
   parseChatId,
   loadPollCursor,
   savePollCursor,
-  stripMentions,
+  stripBotMention,
   abortableSleep,
 } from '@qwen-code/channel-base';
 import type {
@@ -37,6 +37,7 @@ export class GitlabChannel extends ChannelBase {
   private lastProcessedAt: string;
   private processedIdsAtCursor: Set<string> = new Set();
   private readonly pollIntervalMs: number;
+  private botUsername: string | null = null;
 
   constructor(
     name: string,
@@ -72,6 +73,12 @@ export class GitlabChannel extends ChannelBase {
     }
     this.abortController = new AbortController();
     const { signal } = this.abortController;
+    try {
+      const user = await this.gitlab.Users.showCurrentUser();
+      this.botUsername = user.username ?? null;
+    } catch {
+      // bot username unavailable — stripBotMention will be skipped
+    }
     const gen = ++this.pollGeneration;
     this.runPollLoop(signal, gen).catch((err) => {
       if (!signal.aborted && gen === this.pollGeneration) {
@@ -270,7 +277,10 @@ export class GitlabChannel extends ChannelBase {
       `URL: ${todo.target_url}`,
       ...(sourceBranch ? [`Branch: ${sourceBranch}`] : []),
     ].join('\n');
-    const content = todo.body ? stripMentions(todo.body) : '';
+    const content =
+      todo.body && this.botUsername
+        ? stripBotMention(todo.body, this.botUsername)
+        : (todo.body ?? '');
     return {
       channelName: this.name,
       senderId: author.username,
