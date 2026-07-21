@@ -17,20 +17,21 @@ human to select a winner and is unavailable to headless clients.
 The existing `/triage` skill remains the only workflow entrypoint and the only
 owner of GitHub comments, labels, reviews, and approvals.
 
-Three optional repository Actions variables enable two capabilities:
+Four optional repository Actions variables enable two capabilities:
 
 | Variable                     | Behavior                                                                                              |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------- |
+| `CLAUDE_CODE_SRC_PATH`       | An existing absolute Claude Code source directory on a self-hosted runner. Preferred when available.  |
 | `QWEN_TRIAGE_REFERENCE_REPO` | A public HTTPS GitHub repository fetched for read-only product-direction source searches.             |
 | `QWEN_TRIAGE_REFERENCE_REF`  | The reviewed 40-character commit SHA to fetch from that repository. Required with the repository URL. |
 | `QWEN_TRIAGE_ARENA_MODEL`    | A second model ID available through the triage job's OpenAI-compatible endpoint.                      |
 
-When the reference repository and reviewed commit are configured, CI fetches
-only that commit into an ignored directory inside the trusted checkout and
-exposes only its local path to `/triage`. Keeping it inside the workspace allows
-read/search tools to access it. The fetch and checkout are capped at 90 seconds.
-Failure is non-fatal because competitive evidence is advisory; triage records
-that the configured source was unavailable.
+When the existing runner path is available, CI exposes it to `/triage` directly
+for backward compatibility. Otherwise, when the reference repository and
+reviewed commit are configured, CI fetches only that commit into an ignored
+directory inside the trusted checkout and exposes its local path. The fetch and
+checkout are capped at 90 seconds. Failure is non-fatal because competitive
+evidence is advisory; triage records that the configured source was unavailable.
 
 When the arena model is configured, CI changes the declarative challenger agent
 from `inherit` to that model before Qwen starts. `/triage` sends the same
@@ -39,14 +40,16 @@ synthesizes their independent results. Disagreement is a reason for conservative
 maintainer escalation, never an automatic rejection.
 
 With none of these variables configured, triage keeps its existing single-model
-behavior. Configuring the reference repository and commit enables
-source-informed single-model review. Adding the arena model enables
-source-informed cross-model review.
+behavior. Configuring either an available runner path or the reference
+repository and commit enables source-informed single-model review. Adding the
+arena model enables source-informed cross-model review.
 
 ## Security and ownership
 
-- Only repository Actions variables select the repository and secondary model;
-  issue and PR text cannot change either value.
+- Only repository Actions variables select the runner path, repository, and
+  secondary model; issue and PR text cannot change them.
+- The runner path must be an existing absolute directory. Maintaining and
+  pinning its contents remains a runner-operations responsibility.
 - Reference URLs are restricted to public `https://github.com/` URLs.
 - Reference contents and issue/PR text are treated as untrusted evidence, not
   instructions.

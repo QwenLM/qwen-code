@@ -32,8 +32,11 @@ This is the first bot you will interact with when you create an issue. Its job i
 
 #### Maintainer product-direction configuration
 
-Product-direction review has three optional repository Actions variables:
+Product-direction review has four optional repository Actions variables:
 
+- `CLAUDE_CODE_SRC_PATH`: an existing absolute Claude Code source directory on
+  a self-hosted runner. Triage uses it first when it is available, preserving
+  the existing runner configuration.
 - `QWEN_TRIAGE_REFERENCE_REPO`: a public `https://github.com/` clone URL for a
   reference implementation such as Claude Code. Triage searches this checkout
   as advisory product evidence.
@@ -47,11 +50,11 @@ Product-direction review has three optional repository Actions variables:
   parent triage agent judges their results.
 
 With none of these variables set, triage uses its primary model and the fixed
-Claude Code changelog fallback. Setting the reference repository and commit
-enables source-informed single-model review; adding the arena model enables the
-cross-model arena. Reviewer agents explicitly disallow every tool enabled by
-the triage job, and the parent `/triage` workflow remains the only component
-that comments, labels, or reviews.
+Claude Code changelog fallback. An available runner path enables source-informed
+review immediately; the reference repository and commit provide a portable
+fallback. Adding the arena model enables the cross-model arena. Reviewer agents
+explicitly disallow every tool enabled by the triage job, and the parent
+`/triage` workflow remains the only component that comments, labels, or reviews.
 
 ### 2. When you open a Pull Request: `Continuous Integration (CI)`
 

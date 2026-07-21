@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -143,6 +152,9 @@ describe('qwen-triage tmux workflow', () => {
     const runStep = step('Run Qwen Triage');
 
     expect(prepareStep).toContain(
+      "LEGACY_REFERENCE_PATH: '${{ vars.CLAUDE_CODE_SRC_PATH }}'",
+    );
+    expect(prepareStep).toContain(
       "REFERENCE_REPO: '${{ vars.QWEN_TRIAGE_REFERENCE_REPO }}'",
     );
     expect(prepareStep).toContain(
@@ -167,6 +179,15 @@ describe('qwen-triage tmux workflow', () => {
     expect(prepareStep).toContain(
       '${GITHUB_WORKSPACE:?}/.qwen/triage-reference',
     );
+    expect(prepareStep).toContain('[[ "$LEGACY_REFERENCE_PATH" = /* ]]');
+    expect(prepareStep).toContain('[ -d "$LEGACY_REFERENCE_PATH" ]');
+    expect(prepareStep).toContain(
+      'TRIAGE_REFERENCE_PATH=$LEGACY_REFERENCE_PATH',
+    );
+    expect(prepareStep).toContain(
+      '[ "$reference_status" != available ] && [ -n "$REFERENCE_REPO" ]',
+    );
+    expect(prepareStep).toContain("reference_status='not-configured'");
     expect(prepareStep).toContain("reference_status='configured-unavailable'");
     expect(prepareStep).toContain("reference_status='available'");
     expect(prepareStep).toContain('TRIAGE_REFERENCE_STATUS=$reference_status');
@@ -189,6 +210,42 @@ describe('qwen-triage tmux workflow', () => {
     expect(runStep).toContain(
       "TRIAGE_ARENA_ENABLED: '${{ env.TRIAGE_ARENA_ENABLED }}'",
     );
+  });
+
+  it('uses the existing runner source path before the portable fallback', () => {
+    const temp = mkdtempSync(join(tmpdir(), 'triage-reference-'));
+    try {
+      const sourcePath = join(temp, 'claude-code');
+      const githubEnv = join(temp, 'github-env');
+      mkdirSync(sourcePath);
+      writeFileSync(githubEnv, '');
+
+      const workflowDoc = parse(workflow);
+      const prepareStep = workflowDoc.jobs.triage.steps.find(
+        ({ name }) => name === 'Prepare product direction review',
+      );
+      execFileSync('bash', ['-c', prepareStep.run], {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          LEGACY_REFERENCE_PATH: sourcePath,
+          REFERENCE_REPO: '',
+          REFERENCE_REF: '',
+          ARENA_MODEL: '',
+          PRIMARY_MODEL: 'primary-model',
+          GITHUB_ENV: githubEnv,
+          GITHUB_WORKSPACE: process.cwd(),
+        },
+      });
+
+      expect(readFileSync(githubEnv, 'utf8')).toBe(
+        `TRIAGE_REFERENCE_PATH=${sourcePath}\n` +
+          'TRIAGE_REFERENCE_STATUS=available\n' +
+          'TRIAGE_ARENA_ENABLED=false\n',
+      );
+    } finally {
+      rmSync(temp, { recursive: true, force: true });
+    }
   });
 
   it('keeps product direction fan-out read-only and inside triage', () => {

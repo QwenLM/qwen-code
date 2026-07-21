@@ -250,6 +250,7 @@ jobs:
 
       - name: 'Prepare product direction review'
         env:
+          LEGACY_REFERENCE_PATH: '${{ vars.CLAUDE_CODE_SRC_PATH }}'
           REFERENCE_REPO: '${{ vars.QWEN_TRIAGE_REFERENCE_REPO }}'
           REFERENCE_REF: '${{ vars.QWEN_TRIAGE_REFERENCE_REF }}'
           ARENA_MODEL: '${{ vars.QWEN_TRIAGE_ARENA_MODEL }}'
@@ -257,8 +258,21 @@ jobs:
         run: |-
           set -euo pipefail
           reference_ref="${REFERENCE_REF:-}"
+          reference_status='not-configured'
 
-          if [ -n "$REFERENCE_REPO" ]; then
+          if [ -n "$LEGACY_REFERENCE_PATH" ]; then
+            reference_status='configured-unavailable'
+            if [[ "$LEGACY_REFERENCE_PATH" = /* ]] &&
+               [[ "$LEGACY_REFERENCE_PATH" != *$'\n'* ]] &&
+               [ -d "$LEGACY_REFERENCE_PATH" ]; then
+              echo "TRIAGE_REFERENCE_PATH=$LEGACY_REFERENCE_PATH" >> "$GITHUB_ENV"
+              reference_status='available'
+            else
+              echo '::warning::CLAUDE_CODE_SRC_PATH is not an available absolute directory; checking the portable reference configuration.'
+            fi
+          fi
+
+          if [ "$reference_status" != available ] && [ -n "$REFERENCE_REPO" ]; then
             reference_path="${GITHUB_WORKSPACE:?}/.qwen/triage-reference"
             reference_status='configured-unavailable'
             if [[ "$REFERENCE_REPO" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?/?$ ]] &&
@@ -281,10 +295,8 @@ jobs:
             else
               echo '::warning::QWEN_TRIAGE_REFERENCE_REPO must be a public https://github.com/ clone URL and QWEN_TRIAGE_REFERENCE_REF must be a 40-character commit SHA; continuing without source evidence.'
             fi
-            echo "TRIAGE_REFERENCE_STATUS=$reference_status" >> "$GITHUB_ENV"
-          else
-            echo 'TRIAGE_REFERENCE_STATUS=not-configured' >> "$GITHUB_ENV"
           fi
+          echo "TRIAGE_REFERENCE_STATUS=$reference_status" >> "$GITHUB_ENV"
 
           arena_enabled=false
           if [ -n "$ARENA_MODEL" ] &&
