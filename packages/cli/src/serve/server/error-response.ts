@@ -56,6 +56,7 @@ import {
   WorkspaceSkillNotFoundError,
   WorkspaceSkillNotToggleableError,
 } from '../workspace-service/types.js';
+import { WorkspaceRuntimeMcpOperationConflictError } from '../workspace-runtime-mcp-operations.js';
 import { WorkspaceRuntimeStillStartingError } from '../workspace-runtime-coordinator.js';
 
 export type BridgeErrorContext = {
@@ -170,6 +171,10 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof WorkspaceRuntimeMcpOperationConflictError) {
+    res.status(409).json({ error: err.message, code: err.code });
+    return;
+  }
   if (err instanceof WorkspaceRuntimeStillStartingError) {
     res.set('Retry-After', '5');
     res.status(503).json({
