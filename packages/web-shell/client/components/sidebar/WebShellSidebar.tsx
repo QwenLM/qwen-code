@@ -190,20 +190,29 @@ export type WebShellSidebarSessionActionItem =
   | 'pin'
   | 'archive';
 
+/** Subset of action items that have working inline (hover-button) handlers. */
+export type WebShellSidebarSessionInlineActionItem =
+  | 'pin'
+  | 'archive'
+  | 'rename'
+  | 'export'
+  | 'delete';
+
 export interface WebShellSidebarSessionActionsOptions {
   /** Session action items to show. Defaults to all. */
   items?: readonly WebShellSidebarSessionActionItem[];
   /**
    * Which items appear as inline buttons (on hover). Defaults to ['pin', 'archive'].
    * Only items that also pass their built-in visibility condition are rendered.
+   * Only items with working inline handlers are accepted (details/group are dropdown-only).
    */
-  inlineItems?: readonly WebShellSidebarSessionActionItem[];
+  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
 
 const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
   ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
 
-const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
+const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionInlineActionItem[] =
   ['pin', 'archive'];
 
 /**
@@ -2683,12 +2692,13 @@ export function WebShellSidebar({
                       >
                         {(() => {
                           const inlineActions: Array<{
-                            key: WebShellSidebarSessionActionItem;
+                            key: WebShellSidebarSessionInlineActionItem;
                             icon?: ReactNode;
                             label: string;
                             disabled?: boolean;
                             title?: string;
                             active?: boolean;
+                            destructive?: boolean;
                             visible: boolean;
                             onClick: () => void;
                           }> = [
@@ -2721,17 +2731,6 @@ export function WebShellSidebar({
                               onClick: () => handleArchive(session),
                             },
                             {
-                              key: 'details',
-                              icon: <InfoIcon size={16} strokeWidth={1.2} />,
-                              label: t('sidebar.details'),
-                              visible:
-                                sessionActionItems.has('details') &&
-                                inlineActionItems.has('details'),
-                              onClick: () => {
-                                /* TODO: open details panel */
-                              },
-                            },
-                            {
                               key: 'rename',
                               icon: <PencilIcon size={16} strokeWidth={1.2} />,
                               label: t('sidebar.rename'),
@@ -2743,21 +2742,6 @@ export function WebShellSidebar({
                                 sessionActionItems.has('rename') &&
                                 inlineActionItems.has('rename'),
                               onClick: () => handleRenameFromMenu(session),
-                            },
-                            {
-                              key: 'group',
-                              icon: (
-                                <FolderInputIcon size={16} strokeWidth={1.2} />
-                              ),
-                              label: t('sidebar.sessionGroup'),
-                              disabled: busy,
-                              visible:
-                                organizationEnabled &&
-                                sessionActionItems.has('group') &&
-                                inlineActionItems.has('group'),
-                              onClick: () => {
-                                /* TODO: open group menu */
-                              },
                             },
                             {
                               key: 'export',
@@ -2777,6 +2761,7 @@ export function WebShellSidebar({
                               icon: <Trash2Icon size={16} strokeWidth={1.2} />,
                               label: t('sidebar.delete'),
                               disabled: isCurrent,
+                              destructive: true,
                               title: isCurrent
                                 ? t('sidebar.currentDeleteDisabled')
                                 : undefined,
@@ -2801,6 +2786,13 @@ export function WebShellSidebar({
                                 aria-label={action.label}
                                 title={action.title ?? action.label}
                                 onClick={action.onClick}
+                                style={
+                                  action.destructive && !action.disabled
+                                    ? {
+                                        color: 'var(--destructive, #dc2626)',
+                                      }
+                                    : undefined
+                                }
                               >
                                 {action.icon ?? (
                                   <span style={{ fontSize: 12 }}>
@@ -2810,13 +2802,22 @@ export function WebShellSidebar({
                               </button>
                             ));
                         })()}
-                        {(sessionActionItems.has('details') ||
-                          sessionActionItems.has('rename') ||
-                          (organizationEnabled &&
-                            sessionActionItems.has('group')) ||
-                          (canExportSessions &&
-                            sessionActionItems.has('export')) ||
-                          sessionActionItems.has('delete')) && (
+                        {(organizationEnabled &&
+                          sessionActionItems.has('pin') &&
+                          !inlineActionItems.has('pin')) ||
+                        (canMutateSessionArchive(session) &&
+                          sessionActionItems.has('archive') &&
+                          !inlineActionItems.has('archive')) ||
+                        sessionActionItems.has('details') ||
+                        (sessionActionItems.has('rename') &&
+                          !inlineActionItems.has('rename')) ||
+                        (organizationEnabled &&
+                          sessionActionItems.has('group')) ||
+                        (canExportSessions &&
+                          sessionActionItems.has('export') &&
+                          !inlineActionItems.has('export')) ||
+                        (sessionActionItems.has('delete') &&
+                          !inlineActionItems.has('delete')) ? (
                           <DropdownMenu>
                             <DropdownMenuTrigger asChild>
                               <button
@@ -2842,6 +2843,35 @@ export function WebShellSidebar({
                               }}
                             >
                               <DropdownMenuGroup>
+                                {organizationEnabled &&
+                                  sessionActionItems.has('pin') &&
+                                  !inlineActionItems.has('pin') && (
+                                    <DropdownMenuItem
+                                      disabled={busy}
+                                      onSelect={() => handleTogglePin(session)}
+                                    >
+                                      <PinIcon />
+                                      {session.isPinned
+                                        ? t('sidebar.unpin')
+                                        : t('sidebar.pin')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {canMutateSessionArchive(session) &&
+                                  sessionActionItems.has('archive') &&
+                                  !inlineActionItems.has('archive') && (
+                                    <DropdownMenuItem
+                                      disabled={busy || isCurrent}
+                                      title={
+                                        isCurrent
+                                          ? t('sidebar.archiveCurrentDisabled')
+                                          : undefined
+                                      }
+                                      onSelect={() => handleArchive(session)}
+                                    >
+                                      <ArchiveIcon />
+                                      {t('sidebar.archive')}
+                                    </DropdownMenuItem>
+                                  )}
                                 {sessionActionItems.has('details') && (
                                   <DropdownMenuSub>
                                     <DropdownMenuSubTrigger>
@@ -2853,22 +2883,23 @@ export function WebShellSidebar({
                                     </DropdownMenuSubContent>
                                   </DropdownMenuSub>
                                 )}
-                                {sessionActionItems.has('rename') && (
-                                  <DropdownMenuItem
-                                    disabled={!isCurrent}
-                                    title={
-                                      !isCurrent
-                                        ? t('sidebar.renameCurrentOnly')
-                                        : undefined
-                                    }
-                                    onSelect={() =>
-                                      handleRenameFromMenu(session)
-                                    }
-                                  >
-                                    <PencilIcon />
-                                    {t('sidebar.rename')}
-                                  </DropdownMenuItem>
-                                )}
+                                {sessionActionItems.has('rename') &&
+                                  !inlineActionItems.has('rename') && (
+                                    <DropdownMenuItem
+                                      disabled={!isCurrent}
+                                      title={
+                                        !isCurrent
+                                          ? t('sidebar.renameCurrentOnly')
+                                          : undefined
+                                      }
+                                      onSelect={() =>
+                                        handleRenameFromMenu(session)
+                                      }
+                                    >
+                                      <PencilIcon />
+                                      {t('sidebar.rename')}
+                                    </DropdownMenuItem>
+                                  )}
                                 {organizationEnabled &&
                                   sessionActionItems.has('group') && (
                                     <DropdownMenuItem
@@ -2885,7 +2916,8 @@ export function WebShellSidebar({
                                     </DropdownMenuItem>
                                   )}
                                 {canExportSessions &&
-                                  sessionActionItems.has('export') && (
+                                  sessionActionItems.has('export') &&
+                                  !inlineActionItems.has('export') && (
                                     <DropdownMenuItem
                                       disabled={exporting}
                                       onSelect={() =>
@@ -2896,27 +2928,28 @@ export function WebShellSidebar({
                                       {t('sidebar.export')}
                                     </DropdownMenuItem>
                                   )}
-                                {sessionActionItems.has('delete') && (
-                                  <DropdownMenuItem
-                                    variant="destructive"
-                                    disabled={isCurrent}
-                                    title={
-                                      isCurrent
-                                        ? t('sidebar.currentDeleteDisabled')
-                                        : undefined
-                                    }
-                                    onSelect={() =>
-                                      handleDeleteSession(session)
-                                    }
-                                  >
-                                    <Trash2Icon />
-                                    {t('sidebar.delete')}
-                                  </DropdownMenuItem>
-                                )}
+                                {sessionActionItems.has('delete') &&
+                                  !inlineActionItems.has('delete') && (
+                                    <DropdownMenuItem
+                                      variant="destructive"
+                                      disabled={isCurrent}
+                                      title={
+                                        isCurrent
+                                          ? t('sidebar.currentDeleteDisabled')
+                                          : undefined
+                                      }
+                                      onSelect={() =>
+                                        handleDeleteSession(session)
+                                      }
+                                    >
+                                      <Trash2Icon />
+                                      {t('sidebar.delete')}
+                                    </DropdownMenuItem>
+                                  )}
                               </DropdownMenuGroup>
                             </DropdownMenuContent>
                           </DropdownMenu>
-                        )}
+                        ) : null}
                       </div>
                     )}
                   </div>
