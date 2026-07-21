@@ -31,7 +31,10 @@ export async function getSessionSuggestions(
     return [];
   }
 
-  const needle = pattern.trim().toLowerCase();
+  const stripped = pattern.startsWith('session:')
+    ? pattern.slice('session:'.length)
+    : pattern;
+  const needle = stripped.trim().toLowerCase();
   return items
     .map((s) => {
       const label = s.customTitle?.trim() || s.prompt || s.sessionId;

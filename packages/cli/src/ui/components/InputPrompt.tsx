@@ -1400,7 +1400,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         // Category tab switching for the tabbed `@` completion UI. Only consume
         // ←/→ when there is more than one tab, so plain file/slash completion
         // leaves left/right cursor movement in the buffer untouched.
-        if ((completion.availableCategories?.length ?? 0) > 1) {
+        if ((completion.availableCategories?.length ?? 0) > 2) {
           if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
             completion.switchCategory(1);
             setExpandedSuggestionIndex(-1);
