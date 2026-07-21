@@ -124,8 +124,6 @@ export type WebShellSidebarFooterItem =
   | 'settings'
   | 'version'
   | 'theme'
-  | 'scheduledTasks'
-  | 'goals'
   | 'sessionsOverview'
   | 'splitView'
   | 'daemonStatus'
@@ -146,22 +144,67 @@ export interface WebShellSidebarLockedWorkspace {
   ) => ReactNode;
 }
 
+export type WebShellSidebarPrimaryNavItem =
+  | 'newTask'
+  | 'plugins'
+  | 'scheduledTasks'
+  | 'goals';
+
+export interface WebShellSidebarPrimaryNavOptions {
+  /** Built-in primary nav entries to show. Defaults to all. */
+  items?: readonly WebShellSidebarPrimaryNavItem[];
+  /** Additional custom content rendered after the built-in nav buttons. */
+  render?: () => ReactNode;
+}
+
 export interface WebShellSidebarFooterOptions {
   /** Built-in footer entries to expose. Entries use the canonical footer order. */
   items?: readonly WebShellSidebarFooterItem[];
+  /** Additional custom content rendered before the built-in footer items (left side). */
+  render?: () => ReactNode;
 }
 
 const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'settings',
   'version',
   'theme',
-  'scheduledTasks',
-  'goals',
   'sessionsOverview',
   'splitView',
   'daemonStatus',
   'collapse',
 ];
+
+const DEFAULT_PRIMARY_NAV_ITEMS: readonly WebShellSidebarPrimaryNavItem[] = [
+  'newTask',
+  'plugins',
+  'scheduledTasks',
+  'goals',
+];
+
+export type WebShellSidebarSessionActionItem =
+  | 'details'
+  | 'rename'
+  | 'group'
+  | 'export'
+  | 'delete'
+  | 'pin'
+  | 'archive';
+
+export interface WebShellSidebarSessionActionsOptions {
+  /** Session action items to show. Defaults to all. */
+  items?: readonly WebShellSidebarSessionActionItem[];
+  /**
+   * Which items appear as inline buttons (on hover). Defaults to ['pin', 'archive'].
+   * Only items that also pass their built-in visibility condition are rendered.
+   */
+  inlineItems?: readonly WebShellSidebarSessionActionItem[];
+}
+
+const DEFAULT_SESSION_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
+  ['details', 'rename', 'group', 'export', 'delete', 'pin', 'archive'];
+
+const DEFAULT_INLINE_ACTION_ITEMS: readonly WebShellSidebarSessionActionItem[] =
+  ['pin', 'archive'];
 
 /**
  * Palette order for the quick color-grouping buckets. Mirrors core's
@@ -252,6 +295,11 @@ interface WebShellSidebarProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
   branding?: false | WebShellSidebarBranding;
+  primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  hideProjectHeader?: boolean;
+  /** Customize which action buttons appear on session rows. */
+  sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
 }
 
@@ -441,6 +489,9 @@ export function WebShellSidebar({
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
   branding,
+  primaryNav: primaryNavOptions,
+  hideProjectHeader,
+  sessionActions: sessionActionsOptions,
   footer,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
@@ -452,6 +503,21 @@ export function WebShellSidebar({
     () =>
       new Set(footer === false ? [] : (footer?.items ?? DEFAULT_FOOTER_ITEMS)),
     [footer],
+  );
+  const primaryNavItems = useMemo(
+    () => new Set(primaryNavOptions?.items ?? DEFAULT_PRIMARY_NAV_ITEMS),
+    [primaryNavOptions?.items],
+  );
+  const sessionActionItems = useMemo(
+    () => new Set(sessionActionsOptions?.items ?? DEFAULT_SESSION_ACTION_ITEMS),
+    [sessionActionsOptions?.items],
+  );
+  const inlineActionItems = useMemo(
+    () =>
+      new Set(
+        sessionActionsOptions?.inlineItems ?? DEFAULT_INLINE_ACTION_ITEMS,
+      ),
+    [sessionActionsOptions?.inlineItems],
   );
   const shouldRenderBrand =
     branding !== false && !(mobileOpen && (branding?.hideWhenCompact ?? true));
@@ -2615,130 +2681,242 @@ export function WebShellSidebar({
                         onClick={(event) => event.stopPropagation()}
                         onKeyDown={(event) => event.stopPropagation()}
                       >
-                        {organizationEnabled && (
-                          <button
-                            className={cx(
-                              styles.sessionActionButton,
-                              session.isPinned &&
-                                styles.activeSessionActionButton,
-                            )}
-                            type="button"
-                            disabled={busy}
-                            aria-label={
-                              session.isPinned
+                        {(() => {
+                          const inlineActions: Array<{
+                            key: WebShellSidebarSessionActionItem;
+                            icon?: ReactNode;
+                            label: string;
+                            disabled?: boolean;
+                            title?: string;
+                            active?: boolean;
+                            visible: boolean;
+                            onClick: () => void;
+                          }> = [
+                            {
+                              key: 'pin',
+                              icon: <PinIcon size={16} strokeWidth={1.2} />,
+                              label: session.isPinned
                                 ? t('sidebar.unpin')
-                                : t('sidebar.pin')
-                            }
-                            title={
-                              session.isPinned
-                                ? t('sidebar.unpin')
-                                : t('sidebar.pin')
-                            }
-                            onClick={() => handleTogglePin(session)}
-                          >
-                            <PinIcon />
-                          </button>
-                        )}
-                        {canMutateSessionArchive(session) && (
-                          <button
-                            className={styles.sessionActionButton}
-                            type="button"
-                            disabled={busy || isCurrent}
-                            aria-label={t('sidebar.archive')}
-                            title={
-                              isCurrent
+                                : t('sidebar.pin'),
+                              disabled: busy,
+                              active: session.isPinned,
+                              visible:
+                                organizationEnabled &&
+                                sessionActionItems.has('pin') &&
+                                inlineActionItems.has('pin'),
+                              onClick: () => handleTogglePin(session),
+                            },
+                            {
+                              key: 'archive',
+                              icon: <ArchiveIcon size={16} strokeWidth={1.2} />,
+                              label: t('sidebar.archive'),
+                              disabled: busy || isCurrent,
+                              title: isCurrent
                                 ? t('sidebar.archiveCurrentDisabled')
-                                : t('sidebar.archive')
-                            }
-                            onClick={() => handleArchive(session)}
-                          >
-                            <ArchiveIcon />
-                          </button>
-                        )}
-                        <DropdownMenu>
-                          <DropdownMenuTrigger asChild>
-                            <button
-                              className={styles.sessionActionButton}
-                              type="button"
-                              aria-label={t('sidebar.moreActions')}
-                              title={t('sidebar.moreActions')}
+                                : t('sidebar.archive'),
+                              visible:
+                                canMutateSessionArchive(session) &&
+                                sessionActionItems.has('archive') &&
+                                inlineActionItems.has('archive'),
+                              onClick: () => handleArchive(session),
+                            },
+                            {
+                              key: 'details',
+                              icon: <InfoIcon size={16} strokeWidth={1.2} />,
+                              label: t('sidebar.details'),
+                              visible:
+                                sessionActionItems.has('details') &&
+                                inlineActionItems.has('details'),
+                              onClick: () => {
+                                /* TODO: open details panel */
+                              },
+                            },
+                            {
+                              key: 'rename',
+                              icon: <PencilIcon size={16} strokeWidth={1.2} />,
+                              label: t('sidebar.rename'),
+                              disabled: !isCurrent,
+                              title: !isCurrent
+                                ? t('sidebar.renameCurrentOnly')
+                                : undefined,
+                              visible:
+                                sessionActionItems.has('rename') &&
+                                inlineActionItems.has('rename'),
+                              onClick: () => handleRenameFromMenu(session),
+                            },
+                            {
+                              key: 'group',
+                              icon: (
+                                <FolderInputIcon size={16} strokeWidth={1.2} />
+                              ),
+                              label: t('sidebar.sessionGroup'),
+                              disabled: busy,
+                              visible:
+                                organizationEnabled &&
+                                sessionActionItems.has('group') &&
+                                inlineActionItems.has('group'),
+                              onClick: () => {
+                                /* TODO: open group menu */
+                              },
+                            },
+                            {
+                              key: 'export',
+                              icon: (
+                                <DownloadIcon size={16} strokeWidth={1.2} />
+                              ),
+                              label: t('sidebar.export'),
+                              disabled: exporting,
+                              visible:
+                                canExportSessions &&
+                                sessionActionItems.has('export') &&
+                                inlineActionItems.has('export'),
+                              onClick: () => handleExportSession(session),
+                            },
+                            {
+                              key: 'delete',
+                              icon: <Trash2Icon size={16} strokeWidth={1.2} />,
+                              label: t('sidebar.delete'),
+                              disabled: isCurrent,
+                              title: isCurrent
+                                ? t('sidebar.currentDeleteDisabled')
+                                : undefined,
+                              visible:
+                                sessionActionItems.has('delete') &&
+                                inlineActionItems.has('delete'),
+                              onClick: () => handleDeleteSession(session),
+                            },
+                          ];
+                          return inlineActions
+                            .filter((a) => a.visible)
+                            .map((action) => (
+                              <button
+                                key={action.key}
+                                className={cx(
+                                  styles.sessionActionButton,
+                                  action.active &&
+                                    styles.activeSessionActionButton,
+                                )}
+                                type="button"
+                                disabled={action.disabled}
+                                aria-label={action.label}
+                                title={action.title ?? action.label}
+                                onClick={action.onClick}
+                              >
+                                {action.icon ?? (
+                                  <span style={{ fontSize: 12 }}>
+                                    {action.label}
+                                  </span>
+                                )}
+                              </button>
+                            ));
+                        })()}
+                        {(sessionActionItems.has('details') ||
+                          sessionActionItems.has('rename') ||
+                          (organizationEnabled &&
+                            sessionActionItems.has('group')) ||
+                          (canExportSessions &&
+                            sessionActionItems.has('export')) ||
+                          sessionActionItems.has('delete')) && (
+                          <DropdownMenu>
+                            <DropdownMenuTrigger asChild>
+                              <button
+                                className={styles.sessionActionButton}
+                                type="button"
+                                aria-label={t('sidebar.moreActions')}
+                                title={t('sidebar.moreActions')}
+                              >
+                                <EllipsisVerticalIcon />
+                              </button>
+                            </DropdownMenuTrigger>
+                            <DropdownMenuContent
+                              align="end"
+                              className="w-auto min-w-40"
+                              onPointerDownOutside={() => {
+                                sessionMenuPointerDismissRef.current = true;
+                              }}
+                              onCloseAutoFocus={(event) => {
+                                if (!sessionMenuPointerDismissRef.current)
+                                  return;
+                                sessionMenuPointerDismissRef.current = false;
+                                event.preventDefault();
+                              }}
                             >
-                              <EllipsisVerticalIcon />
-                            </button>
-                          </DropdownMenuTrigger>
-                          <DropdownMenuContent
-                            align="end"
-                            className="w-auto min-w-40"
-                            onPointerDownOutside={() => {
-                              sessionMenuPointerDismissRef.current = true;
-                            }}
-                            onCloseAutoFocus={(event) => {
-                              if (!sessionMenuPointerDismissRef.current) return;
-                              sessionMenuPointerDismissRef.current = false;
-                              event.preventDefault();
-                            }}
-                          >
-                            <DropdownMenuGroup>
-                              <DropdownMenuSub>
-                                <DropdownMenuSubTrigger>
-                                  <InfoIcon />
-                                  {t('sidebar.details')}
-                                </DropdownMenuSubTrigger>
-                                <DropdownMenuSubContent className="min-w-64 p-3">
-                                  {details}
-                                </DropdownMenuSubContent>
-                              </DropdownMenuSub>
-                              <DropdownMenuItem
-                                disabled={!isCurrent}
-                                title={
-                                  !isCurrent
-                                    ? t('sidebar.renameCurrentOnly')
-                                    : undefined
-                                }
-                                onSelect={() => handleRenameFromMenu(session)}
-                              >
-                                <PencilIcon />
-                                {t('sidebar.rename')}
-                              </DropdownMenuItem>
-                              {organizationEnabled && (
-                                <DropdownMenuItem
-                                  disabled={busy}
-                                  onSelect={(event) =>
-                                    openGroupMenuFromAnchor(
-                                      event.currentTarget as HTMLElement,
-                                      session,
-                                    )
-                                  }
-                                >
-                                  <FolderInputIcon />
-                                  {t('sidebar.sessionGroup')}
-                                </DropdownMenuItem>
-                              )}
-                              {canExportSessions && (
-                                <DropdownMenuItem
-                                  disabled={exporting}
-                                  onSelect={() => handleExportSession(session)}
-                                >
-                                  <DownloadIcon />
-                                  {t('sidebar.export')}
-                                </DropdownMenuItem>
-                              )}
-                              <DropdownMenuItem
-                                variant="destructive"
-                                disabled={isCurrent}
-                                title={
-                                  isCurrent
-                                    ? t('sidebar.currentDeleteDisabled')
-                                    : undefined
-                                }
-                                onSelect={() => handleDeleteSession(session)}
-                              >
-                                <Trash2Icon />
-                                {t('sidebar.delete')}
-                              </DropdownMenuItem>
-                            </DropdownMenuGroup>
-                          </DropdownMenuContent>
-                        </DropdownMenu>
+                              <DropdownMenuGroup>
+                                {sessionActionItems.has('details') && (
+                                  <DropdownMenuSub>
+                                    <DropdownMenuSubTrigger>
+                                      <InfoIcon />
+                                      {t('sidebar.details')}
+                                    </DropdownMenuSubTrigger>
+                                    <DropdownMenuSubContent className="min-w-64 p-3">
+                                      {details}
+                                    </DropdownMenuSubContent>
+                                  </DropdownMenuSub>
+                                )}
+                                {sessionActionItems.has('rename') && (
+                                  <DropdownMenuItem
+                                    disabled={!isCurrent}
+                                    title={
+                                      !isCurrent
+                                        ? t('sidebar.renameCurrentOnly')
+                                        : undefined
+                                    }
+                                    onSelect={() =>
+                                      handleRenameFromMenu(session)
+                                    }
+                                  >
+                                    <PencilIcon />
+                                    {t('sidebar.rename')}
+                                  </DropdownMenuItem>
+                                )}
+                                {organizationEnabled &&
+                                  sessionActionItems.has('group') && (
+                                    <DropdownMenuItem
+                                      disabled={busy}
+                                      onSelect={(event) =>
+                                        openGroupMenuFromAnchor(
+                                          event.currentTarget as HTMLElement,
+                                          session,
+                                        )
+                                      }
+                                    >
+                                      <FolderInputIcon />
+                                      {t('sidebar.sessionGroup')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {canExportSessions &&
+                                  sessionActionItems.has('export') && (
+                                    <DropdownMenuItem
+                                      disabled={exporting}
+                                      onSelect={() =>
+                                        handleExportSession(session)
+                                      }
+                                    >
+                                      <DownloadIcon />
+                                      {t('sidebar.export')}
+                                    </DropdownMenuItem>
+                                  )}
+                                {sessionActionItems.has('delete') && (
+                                  <DropdownMenuItem
+                                    variant="destructive"
+                                    disabled={isCurrent}
+                                    title={
+                                      isCurrent
+                                        ? t('sidebar.currentDeleteDisabled')
+                                        : undefined
+                                    }
+                                    onSelect={() =>
+                                      handleDeleteSession(session)
+                                    }
+                                  >
+                                    <Trash2Icon />
+                                    {t('sidebar.delete')}
+                                  </DropdownMenuItem>
+                                )}
+                              </DropdownMenuGroup>
+                            </DropdownMenuContent>
+                          </DropdownMenu>
+                        )}
                       </div>
                     )}
                   </div>
@@ -2772,6 +2950,8 @@ export function WebShellSidebar({
       openGroupMenuFromAnchor,
       organizationEnabled,
       saveRename,
+      sessionActionItems,
+      inlineActionItems,
       startRename,
       t,
     ],
@@ -3367,32 +3547,36 @@ export function WebShellSidebar({
           </div>
         )}
         <div className={styles.primaryNav}>
-          <button
-            className={styles.newChatButton}
-            type="button"
-            title={t('sidebar.newTask')}
-            aria-label={t('sidebar.newTask')}
-            disabled={newSessionDisabled}
-            onClick={() => handleNewSession()}
-          >
-            <span className={styles.navIcon}>
-              <SquarePenIcon size={16} strokeWidth={1.2} />
-            </span>
-            {!collapsed && <span>{t('sidebar.newTask')}</span>}
-          </button>
-          <button
-            className={styles.pluginButton}
-            type="button"
-            title={t('sidebar.plugins')}
-            aria-label={t('sidebar.plugins')}
-            onClick={onOpenPlugins}
-          >
-            <span className={styles.navIcon}>
-              <BlocksIcon size={16} strokeWidth={1.2} />
-            </span>
-            {!collapsed && <span>{t('sidebar.plugins')}</span>}
-          </button>
-          {footerItems.has('scheduledTasks') && (
+          {primaryNavItems.has('newTask') && (
+            <button
+              className={styles.newChatButton}
+              type="button"
+              title={t('sidebar.newTask')}
+              aria-label={t('sidebar.newTask')}
+              disabled={newSessionDisabled}
+              onClick={() => handleNewSession()}
+            >
+              <span className={styles.navIcon}>
+                <SquarePenIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.newTask')}</span>}
+            </button>
+          )}
+          {primaryNavItems.has('plugins') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.plugins')}
+              aria-label={t('sidebar.plugins')}
+              onClick={onOpenPlugins}
+            >
+              <span className={styles.navIcon}>
+                <BlocksIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.plugins')}</span>}
+            </button>
+          )}
+          {primaryNavItems.has('scheduledTasks') && (
             <button
               className={styles.pluginButton}
               type="button"
@@ -3406,7 +3590,7 @@ export function WebShellSidebar({
               {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
             </button>
           )}
-          {footerItems.has('goals') && (
+          {primaryNavItems.has('goals') && (
             <button
               className={styles.pluginButton}
               type="button"
@@ -3420,6 +3604,7 @@ export function WebShellSidebar({
               {!collapsed && <span>{t('sidebar.goals')}</span>}
             </button>
           )}
+          {primaryNavOptions?.render?.()}
         </div>
         <div className={styles.body}>
           <div className={styles.sessionList}>
@@ -3443,7 +3628,7 @@ export function WebShellSidebar({
                 )}
               </>
             )}
-            {!collapsed && (
+            {!collapsed && !hideProjectHeader && (
               <div className={styles.projectsHeader}>
                 <button
                   className={styles.projectsHeaderToggle}
@@ -3486,7 +3671,7 @@ export function WebShellSidebar({
                 </div>
               </div>
             )}
-            {searchOpen && !collapsed && (
+            {searchOpen && !collapsed && !hideProjectHeader && (
               <div className={styles.projectSearch}>
                 <SearchIcon aria-hidden="true" />
                 <Input
@@ -3690,6 +3875,7 @@ export function WebShellSidebar({
             )}
           >
             <div className={styles.footerPrimary}>
+              {typeof footer === 'object' && footer.render?.()}
               {footerItems.has('settings') && (
                 <button
                   className={styles.footerButton}

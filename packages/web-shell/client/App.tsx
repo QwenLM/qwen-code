@@ -127,6 +127,8 @@ import {
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarLockedWorkspace,
+  type WebShellSidebarPrimaryNavOptions,
+  type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
 import {
@@ -427,6 +429,12 @@ export interface WebShellSidebarOptions {
   showCompactToggle?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
+  /** Customize the primary navigation area (new task button, custom entries). */
+  primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  hideProjectHeader?: boolean;
+  /** Customize which action buttons appear on session rows. */
+  sessionActions?: WebShellSidebarSessionActionsOptions;
   /** Hide the footer completely or select the built-in entries it exposes. */
   footer?: false | WebShellSidebarFooterOptions;
   /** Customize the workspace row shown when lockWorkspaceCwd is active. */
@@ -647,6 +655,9 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   defaultCollapsed: boolean;
   showCompactToggle: boolean;
   branding?: false | WebShellSidebarBranding;
+  primaryNav?: WebShellSidebarPrimaryNavOptions;
+  hideProjectHeader?: boolean;
+  sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
 } {
@@ -661,6 +672,9 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
     showCompactToggle: sidebar.showCompactToggle ?? true,
     branding: sidebar.branding,
+    primaryNav: sidebar.primaryNav,
+    hideProjectHeader: sidebar.hideProjectHeader,
+    sessionActions: sidebar.sessionActions,
     footer: sidebar.footer,
     lockedWorkspace: sidebar.lockedWorkspace,
   };
@@ -6472,6 +6486,9 @@ export function App({
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
                   branding={sidebarOptions.branding}
+                  primaryNav={sidebarOptions.primaryNav}
+                  hideProjectHeader={sidebarOptions.hideProjectHeader}
+                  sessionActions={sidebarOptions.sessionActions}
                   footer={sidebarOptions.footer}
                 />
               </div>
