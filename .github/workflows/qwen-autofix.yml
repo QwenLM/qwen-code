@@ -1238,12 +1238,6 @@ jobs:
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
         run: |-
-          # The head the reds were evaluated against. Taken from the REMOTE,
-          # not local HEAD: after a rejected push the two differ, and
-          # recording a sha that never landed would suppress the still-red
-          # checks on the head that actually exists. Empty on failure, which
-          # matches no marker and therefore keeps them visible — fail-open.
-          REPORT_HEAD="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha // ""' 2> /dev/null || echo '')"
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
@@ -2093,8 +2087,8 @@ jobs:
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new + ${N_RED_NOW} still-red on ${LIVE_HEAD:0:9}, conflict=${HAS_CONFLICT}, round=${ROUND}"
-            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new + ${N_RED_NOW} still-red (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, ${N_RED_NOW} still-red on ${LIVE_HEAD:0:9}, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new, ${N_RED_NOW} still-red (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
@@ -3108,6 +3102,12 @@ jobs:
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
+          # The head the reds were evaluated against. Taken from the REMOTE,
+          # not local HEAD: after a rejected push the two differ, and
+          # recording a sha that never landed would suppress the still-red
+          # checks on the head that actually exists. Empty on failure, which
+          # matches no marker and therefore keeps them visible — fail-open.
+          REPORT_HEAD="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha // ""' 2> /dev/null || echo '')"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
           SUFFIX=''

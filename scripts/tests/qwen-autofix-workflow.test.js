@@ -462,14 +462,34 @@ describe('qwen-autofix workflow', () => {
     expect(
       workflow.match(/<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g) ?? [],
     ).toHaveLength(3);
+    // Every step that EMITS the marker must define REPORT_HEAD itself — a
+    // shell variable does not cross step boundaries — and no step may define
+    // it without emitting. Counting the two kinds separately missed exactly
+    // this: one assignment had landed in `issue-autofix`, which emits no
+    // marker and has no ${PR} in scope, while review-address's handoff step
+    // emitted the marker with the variable unset. Both counts were "right";
+    // the pairing was not.
+    // Checked PER STEP BLOCK, not by step name: `Report dry-run / failure`
+    // exists in BOTH issue-autofix and review-address, so a name-keyed set
+    // merges them and the misplacement stays invisible — that is how the
+    // first version of this assertion passed while the bug was live.
+    let emitterSteps = 0;
+    for (const m of workflow.matchAll(
+      /\n {6}- name: '(?:[^']+)'\n([\s\S]*?)(?=\n {6}- name: '|\n {2}[a-z][a-z0-9-]*:\n|$)/g,
+    )) {
+      const body = m[1];
+      const emits = body.includes(
+        '<!-- autofix-redcheck head=${REPORT_HEAD} -->',
+      );
+      const defines = body.includes('REPORT_HEAD="$(gh api');
+      expect(emits).toBe(defines);
+      if (emits) emitterSteps += 1;
+    }
+    expect(emitterSteps).toBe(2);
     // Taken from the REMOTE head: after a rejected push local HEAD is ahead of
     // what landed, and recording a sha that never existed would suppress the
     // reds on the head that does. Empty on failure — matches no marker, so the
     // reds stay visible.
-    expect(
-      workflow.match(/REPORT_HEAD="\$\(gh api "repos\/\$\{REPO\}\/pulls/g) ??
-        [],
-    ).toHaveLength(2);
     expect(workflow).not.toContain('REPORT_HEAD="$(git rev-parse HEAD)"');
   });
 
