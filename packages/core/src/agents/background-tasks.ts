@@ -1465,6 +1465,7 @@ export class BackgroundTaskRegistry {
   }
 
   abortAll(options: BackgroundTaskCancelOptions = {}): void {
+    this.rejectWaitQueue();
     const cancelOptions: BackgroundTaskCancelOptions = {
       persistedStatus: 'running',
       ...options,

@@ -166,13 +166,16 @@ describe('useBranchCommand', () => {
         order.push('initialize');
       }),
     });
+    loadHistory.mockImplementation(() => {
+      order.push('ui');
+    });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
 
-    expect(order).toEqual(['switch', 'initialize', 'reset']);
+    expect(order).toEqual(['switch', 'initialize', 'ui', 'reset']);
     expect(backgroundTaskRegistry.reset).toHaveBeenCalledOnce();
     expect(monitorRegistry.reset).toHaveBeenCalledOnce();
     expect(backgroundShellRegistry.reset).toHaveBeenCalledOnce();
@@ -199,6 +202,30 @@ describe('useBranchCommand', () => {
     expect(monitorRegistry.reset).not.toHaveBeenCalled();
     expect(backgroundShellRegistry.reset).not.toHaveBeenCalled();
     expect(workflowRunRegistry.reset).not.toHaveBeenCalled();
+  });
+
+  it('preserves terminal background state when the UI swap throws', async () => {
+    loadHistory.mockImplementation(() => {
+      throw new Error('history load failed');
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(2);
+    expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();
+    expect(monitorRegistry.reset).not.toHaveBeenCalled();
+    expect(backgroundShellRegistry.reset).not.toHaveBeenCalled();
+    expect(workflowRunRegistry.reset).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('history load failed'),
+      }),
+      expect.any(Number),
+    );
   });
 
   it('persists and reloads the title before switching core or UI', async () => {

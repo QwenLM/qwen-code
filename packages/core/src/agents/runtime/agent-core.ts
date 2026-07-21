@@ -790,7 +790,10 @@ export class AgentCore {
       }
 
       // Check termination conditions.
-      if (options?.maxTurns && turnCounter >= options.maxTurns) {
+      if (
+        options?.maxTurns &&
+        (options.roundOffset ?? 0) + turnCounter >= options.maxTurns
+      ) {
         terminateMode = AgentTerminateMode.MAX_TURNS;
         break;
       }
@@ -1205,7 +1208,10 @@ export class AgentCore {
     options: ReasoningLoopOptions | undefined,
     turnCounter: number,
   ): boolean {
-    return !options?.maxTurns || turnCounter < options.maxTurns;
+    return (
+      !options?.maxTurns ||
+      (options.roundOffset ?? 0) + turnCounter < options.maxTurns
+    );
   }
 
   private getRemainingTimeMs(

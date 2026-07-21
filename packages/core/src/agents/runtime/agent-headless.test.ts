@@ -719,6 +719,67 @@ describe('subagent.ts', () => {
         });
       });
 
+      it('should enforce max turns before starting a same-turn continuation', async () => {
+        const { config } = await createMockConfig();
+        const runConfig: RunConfig = { ...defaultRunConfig, max_turns: 1 };
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          runConfig,
+        );
+        await scope.execute(new ContextState());
+
+        await scope.execute(new ContextState(), undefined, {
+          resetStats: false,
+          initialExternalInputs: ['continue'],
+        });
+
+        expect(mockSendMessageStream).toHaveBeenCalledOnce();
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+        expect(scope.getExecutionSummary().rounds).toBe(1);
+      });
+
+      it('should not idle-wait after a continuation exhausts the logical turn budget', async () => {
+        const { config } = await createMockConfig();
+        const runConfig: RunConfig = { ...defaultRunConfig, max_turns: 2 };
+        mockSendMessageStream.mockImplementation(
+          createMockStream(['stop', 'stop', 'stop']),
+        );
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          { systemPrompt: 'You are a test agent.' },
+          defaultModelConfig,
+          runConfig,
+        );
+        await scope.execute(new ContextState());
+
+        const waitForExternalMessages = vi.fn(async () => [
+          {
+            kind: 'notification' as const,
+            text: '<task-notification>late</task-notification>',
+          },
+        ]);
+        scope.setExternalMessageProvider(() => []);
+        scope.setExternalMessageWaiter(waitForExternalMessages);
+        scope.setExternalMessageWaitPredicate(() => true);
+
+        await scope.execute(new ContextState(), undefined, {
+          resetStats: false,
+          initialExternalInputs: ['continue'],
+        });
+
+        expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+        expect(waitForExternalMessages).not.toHaveBeenCalled();
+        expect(scope.getTerminateMode()).toBe(AgentTerminateMode.MAX_TURNS);
+        expect(scope.getExecutionSummary().rounds).toBe(2);
+      });
+
       it('should reject concurrent execute calls', async () => {
         const { config } = await createMockConfig();
         let releaseResponse: (() => void) | undefined;

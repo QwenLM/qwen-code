@@ -1071,6 +1071,42 @@ describe('BackgroundTaskRegistry', () => {
         }),
       ).toThrow('invalidated by session reset');
     });
+
+    it.each([
+      ['default notifications', undefined],
+      ['suppressed notifications', { notify: false }],
+    ])('rejects queued launches when abortAll uses %s', async (_, options) => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      registry.register(makeRegistration('bg-1'));
+      const waiter = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+      );
+
+      registry.abortAll(options);
+
+      await expect(waiter).rejects.toThrow(
+        'Agent launch cancelled while waiting for a background slot.',
+      );
+      expect(registry.getQueuedCount()).toBe(0);
+    });
+
+    it('invalidates unconsumed slot reservations when aborting all agents', () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 1,
+      });
+      const reservation = registry.tryReserveBackgroundSlot()!;
+
+      registry.abortAll({ notify: false });
+
+      expect(() =>
+        registry.register(makeRegistration('bg-1'), {
+          slotReservation: reservation,
+        }),
+      ).toThrow('invalidated by session reset');
+      expect(registry.get('bg-1')).toBeUndefined();
+    });
   });
 
   describe('per-model background concurrency limit', () => {

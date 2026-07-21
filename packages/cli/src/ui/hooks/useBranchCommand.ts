@@ -189,7 +189,6 @@ export function useBranchCommand(
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
         await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
-        resetBackgroundStateForSessionSwitch(config);
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the branch but recorder writing into
@@ -211,6 +210,7 @@ export function useBranchCommand(
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
         uiSwapped = true;
+        resetBackgroundStateForSessionSwitch(config);
 
         // 9. Re-arm /goal under the fork's new sessionId. The branched JSONL
         // is a verbatim copy of the parent's, so an active goal sentinel
