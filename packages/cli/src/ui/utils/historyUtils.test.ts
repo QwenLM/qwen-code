@@ -195,4 +195,12 @@ describe('findLastUserItemIndex', () => {
     ];
     expect(findLastUserItemIndex(h)).toBe(2);
   });
+
+  it('skips user items with sentToModel false', () => {
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: 'real' }, 1),
+      mk({ type: 'user', text: 'steer', sentToModel: false }, 2),
+    ];
+    expect(findLastUserItemIndex(h)).toBe(0);
+  });
 });

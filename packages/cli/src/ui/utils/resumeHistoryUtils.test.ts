@@ -823,6 +823,40 @@ describe('applyCollapsePolicyAndSummary', () => {
   it('returns empty history without a summary', () => {
     expect(applyCollapsePolicyAndSummary([], true)).toEqual([]);
   });
+
+  it('does not count sentToModel-false items as user turns for the collapse boundary', () => {
+    const items = [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'first response' },
+      { id: 3, type: MessageType.USER, text: 'second' },
+      { id: 4, type: MessageType.GEMINI, text: 'second response' },
+      { id: 5, type: MessageType.USER, text: 'third' },
+      { id: 6, type: MessageType.GEMINI, text: 'third response' },
+      {
+        id: 7,
+        type: MessageType.USER,
+        text: 'steer',
+        sentToModel: false,
+      },
+    ] as HistoryItem[];
+
+    const result = applyCollapsePolicyAndSummary(items, true, 2);
+
+    // The steer item must not shift the boundary: the 2 most recent real
+    // user turns are 'third' (index 4) and 'second' (index 2), so only
+    // items 0-1 are suppressed.
+    expect(result).toHaveLength(8);
+    expectSuppressed(result[0]);
+    expectSuppressed(result[1]);
+    result.slice(2, 7).forEach(expectVisible);
+    expect(result[7]).toEqual(
+      expect.objectContaining({
+        type: MessageType.INFO,
+        text: expect.stringContaining('2 messages hidden'),
+        display: { kind: 'collapse-summary' },
+      }),
+    );
+  });
 });
 
 describe('stripSuppressOnRestore', () => {
