@@ -221,7 +221,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("MAX_ROUNDS: '5'");
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
-    expect(reviewScanJob).toContain('not an open in-repo main-targeting PR');
+    expect(reviewScanJob).toContain('not an open main-targeting PR');
     // Candidates fail CLOSED on the fork field, matching the forced path
     // and the NOTE that documents the jq // false trap.
     expect(reviewScanJob).toContain('select(.isCrossRepository == false)');
@@ -731,20 +731,27 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('routes submitted review events only for trusted in-repo bot PRs', () => {
+  it('routes submitted review events only for trusted managed PRs', () => {
     expect(routeStep).toContain('PR_AUTHOR');
     expect(routeStep).toContain('PR_NUMBER_EVENT');
     expect(routeStep).toContain(
       'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
     );
-    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
-    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    // In-repo PRs are managed only when the bot authored them; forks only
+    // under the scan's takeover rules (allow-edits + bot fork or the label).
+    expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    expect(routeStep).toContain('.maintainerCanModify == true');
+    expect(routeStep).toContain('index($t) != null');
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
     );
     expect(routeStep).toContain(
       "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
+    );
+    expect(routeStep).toContain(
+      'review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits',
     );
   });
 
@@ -1588,7 +1595,10 @@ describe('qwen-autofix workflow', () => {
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
     // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip
-    // vetoes even a takeover-labeled PR; closed and fork PRs never pass.
+    // vetoes even a takeover-labeled PR; closed PRs never pass. A fork PR
+    // passes the structural predicate only with maintainer edits allowed — the
+    // live write+ author gate is a shell step below (asserted separately),
+    // mirroring the scheduled scan's per-candidate fork admission.
     const okProgram = reviewScanJob.match(
       /OK="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg take "\$\{TAKEOVER_LABEL\}" --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)'/,
     )?.[1];
@@ -1629,6 +1639,26 @@ describe('qwen-autofix workflow', () => {
     expect(ok(meta('human', ['autofix/takeover'], { state: 'CLOSED' }))).toBe(
       'false',
     );
+    // Fork PRs: admitted structurally only when maintainer edits are allowed
+    // (the bot's own fork or a takeover-labelled fork). The live write+ author
+    // check is the shell gate asserted below; without allow-edits a fork still
+    // fails closed here.
+    expect(
+      ok(
+        meta('human', ['autofix/takeover'], {
+          isCrossRepository: true,
+          maintainerCanModify: true,
+        }),
+      ),
+    ).toBe('true');
+    expect(
+      ok(
+        meta('qwen-code-dev-bot', [], {
+          isCrossRepository: true,
+          maintainerCanModify: true,
+        }),
+      ),
+    ).toBe('true');
     expect(
       ok(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
     ).toBe('false');
@@ -1641,6 +1671,16 @@ describe('qwen-autofix workflow', () => {
     expect(ok(missing)).toBe('false');
     expect(reviewScanJob).toContain('.isCrossRepository == false');
     expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
+    // The forced path queries maintainerCanModify and re-checks a fork author's
+    // live permission exactly like the scheduled scan's per-candidate gate, so
+    // a fork the route admitted in real time is not silently discarded here.
+    expect(reviewScanJob).toContain(
+      '--json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify',
+    );
+    expect(reviewScanJob).toContain('forced fork PR #${FORCED_PR} admitted');
+    expect(reviewScanJob).toContain(
+      'gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission"',
+    );
   });
 
   it('exposes exactly one comment command: label-toggle takeover sugar', () => {
@@ -1829,16 +1869,19 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
-    // Route step must check PR author against AUTOFIX_BOT for review events.
-    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
+    // Route step must check PR author against AUTOFIX_BOT for review events
+    // (an in-repo PR is managed only when the bot authored it).
+    expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
     // Must verify sender is trusted (collaborator or review bot).
     expect(routeStep).toContain('"${SENDER_LOGIN}" == "${REVIEW_BOT}"');
     expect(routeStep).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
-    // Must reject fork PRs and non-main targets.
-    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    // Non-main targets are rejected; forks are admitted only under the scan's
+    // own takeover rules (allow-edits + bot fork or takeover label).
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
+    expect(routeStep).toContain('--json labels,maintainerCanModify');
     // Must set ROUTE_PR from the event payload.
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
@@ -1856,6 +1899,127 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "ref: '${{ github.event.repository.default_branch }}'",
     );
+  });
+
+  it('admits managed fork PRs to the real-time review trigger, not just in-repo bot PRs', () => {
+    // The */10 schedule is throttled to 40-70min on this repo, so a takeover PR
+    // that only the scan could pick up waited up to an hour for feedback the
+    // event already carried. Real-time pickup now applies the scan's OWN fork
+    // admission (allow-edits + the bot's own fork or an explicit takeover
+    // label); review-address still re-verifies allow-edits, a live write+
+    // author and a matching head repo before touching the branch.
+    const block = routeStep.match(
+      /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request_review' \]\]; then[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(block).toBeTruthy();
+
+    const run = ({
+      headRepo,
+      author,
+      base = 'main',
+      sender = 'alice',
+      allowEdits = true,
+      labels = [],
+      perm = 'write',
+      metaOk = true,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'route-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const meta = JSON.stringify({
+        maintainerCanModify: allowEdits,
+        labels: labels.map((name) => ({ name })),
+      });
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `if [[ "$*" == *"--json labels,maintainerCanModify"* ]]; then ${
+            metaOk ? `printf '%s' ${JSON.stringify(meta)}; exit 0` : 'exit 1'
+          }; fi`,
+          `if [[ "$*" == *permission* ]]; then printf '%s' ${JSON.stringify(perm)}; exit 0; fi`,
+          'exit 1',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            'sanitize_number() { printf "%s" "${1//[^0-9]/}"; }',
+            'DO_ISSUE=true; DO_REVIEW=false; ROUTE_PR=""',
+            block,
+            'printf "DO_REVIEW=%s ROUTE_PR=%s" "${DO_REVIEW}" "${ROUTE_PR}"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            EVENT_NAME: 'pull_request_review',
+            REPO: 'QwenLM/qwen-code',
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            REVIEW_BOT: 'qwen-code-ci-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            PR_NUMBER_EVENT: '7259',
+            PR_HEAD_REPO: headRepo,
+            PR_AUTHOR: author,
+            PR_BASE_REF: base,
+            SENDER_LOGIN: sender,
+          },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out;
+    };
+
+    const IN_REPO = 'QwenLM/qwen-code';
+    const FORK = 'wenshao/qwen-code';
+    // Unchanged: an in-repo bot PR is admitted, a human in-repo PR is not.
+    expect(run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot' })).toContain(
+      'DO_REVIEW=true',
+    );
+    expect(run({ headRepo: IN_REPO, author: 'someone' })).toContain(
+      'DO_REVIEW=false',
+    );
+    // NEW: the bot's own fork, and a takeover-labelled human fork, are admitted
+    // in real time and route to that exact PR.
+    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
+      'DO_REVIEW=true',
+    );
+    expect(
+      run({ headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] }),
+    ).toContain('DO_REVIEW=true');
+    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
+      'ROUTE_PR=7259',
+    );
+    // Still rejected: no allow-edits, an unlabelled human fork, a non-main
+    // base, and an untrusted sender.
+    expect(
+      run({ headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false }),
+    ).toContain('DO_REVIEW=false');
+    expect(run({ headRepo: FORK, author: 'wenshao' })).toContain(
+      'DO_REVIEW=false',
+    );
+    expect(
+      run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', base: 'release' }),
+    ).toContain('DO_REVIEW=false');
+    expect(
+      run({
+        headRepo: FORK,
+        author: 'wenshao',
+        labels: ['autofix/takeover'],
+        perm: 'read',
+      }),
+    ).toContain('DO_REVIEW=false');
+    // A metadata read failure fails CLOSED: the event is ignored rather than
+    // admitting a fork whose allow-edits/labels could not be verified.
+    expect(
+      run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
+    ).toContain('DO_REVIEW=false');
   });
 
   it('treats Suggestion-level review findings as actionable feedback', () => {
