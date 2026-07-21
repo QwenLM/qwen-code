@@ -68,6 +68,14 @@ export function classifyUpdateCheckError(
 ): UpdateCheckFailureReason {
   if (error instanceof UpdateCheckTimeoutError) return 'timeout';
   if (error instanceof Error) {
+    if (
+      'killed' in error &&
+      error.killed === true &&
+      'signal' in error &&
+      error.signal === 'SIGTERM'
+    ) {
+      return 'timeout';
+    }
     const errors = [error];
     if (error.cause instanceof Error) errors.push(error.cause);
     const matchesCode = (code: string) =>

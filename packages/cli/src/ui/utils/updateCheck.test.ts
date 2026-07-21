@@ -649,6 +649,16 @@ describe('classifyUpdateCheckError', () => {
     );
   });
 
+  it('classifies execFile timeouts as timeout', () => {
+    const error = Object.assign(new Error('Command failed: npm view'), {
+      code: null,
+      killed: true,
+      signal: 'SIGTERM',
+    });
+
+    expect(classifyUpdateCheckError(error)).toBe('timeout');
+  });
+
   it.each([
     'ENOTFOUND',
     'ECONNREFUSED',
