@@ -6,10 +6,14 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-const { spawnSyncMock, existsSyncMock } = vi.hoisted(() => ({
-  spawnSyncMock: vi.fn(() => ({ status: 0, signal: null })),
-  existsSyncMock: vi.fn(() => false),
-}));
+const { spawnSyncMock, existsSyncMock, homedirMock, tmpdirMock } = vi.hoisted(
+  () => ({
+    spawnSyncMock: vi.fn(() => ({ status: 0, signal: null })),
+    existsSyncMock: vi.fn(() => false),
+    homedirMock: vi.fn(() => '/home/test-user'),
+    tmpdirMock: vi.fn(() => '/tmp'),
+  }),
+);
 
 vi.mock('node:child_process', () => ({
   spawnSync: spawnSyncMock,
@@ -22,6 +26,12 @@ vi.mock('node:fs', async (importOriginal) => ({
   readFileSync: vi.fn(() => JSON.stringify({ version: '0.0.0-test' })),
 }));
 
+vi.mock('node:os', async (importOriginal) => ({
+  ...(await importOriginal()),
+  homedir: homedirMock,
+  tmpdir: tmpdirMock,
+}));
+
 const normalizePath = (path) => String(path).replaceAll('\\', '/');
 
 describe('scripts/cli-entry.js production entry', () => {
@@ -31,6 +41,8 @@ describe('scripts/cli-entry.js production entry', () => {
   beforeEach(() => {
     vi.resetModules();
     vi.clearAllMocks();
+    homedirMock.mockReturnValue('/home/test-user');
+    tmpdirMock.mockReturnValue('/tmp');
     // A non-fast-path command, so the entry takes the spawnSync branch (mocked)
     // instead of importing the real dist/cli.js in-process.
     process.argv = ['node', 'scripts/cli-entry.js', 'review', 'check'];
@@ -88,6 +100,21 @@ describe('scripts/cli-entry.js production entry', () => {
       if (inheritedShim === undefined)
         delete process.env.QWEN_CODE_LAUNCHER_PATH;
       else process.env.QWEN_CODE_LAUNCHER_PATH = inheritedShim;
+    }
+  });
+
+  it('falls back to tmpdir for tilde QWEN_HOME when homedir is unavailable', async () => {
+    const inheritedHome = process.env.QWEN_HOME;
+    homedirMock.mockReturnValue(undefined);
+    process.env.QWEN_HOME = '~';
+    try {
+      await import('../cli-entry.js?tilde-home-fallback');
+      expect(normalizePath(process.env.QWEN_CODE_MANAGED_NPM_ROOT)).toBe(
+        '/tmp/updates/npm',
+      );
+    } finally {
+      if (inheritedHome === undefined) delete process.env.QWEN_HOME;
+      else process.env.QWEN_HOME = inheritedHome;
     }
   });
 });

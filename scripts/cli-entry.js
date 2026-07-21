@@ -77,10 +77,10 @@ const currentEntryPath = realpathSync(fileURLToPath(import.meta.url));
 function resolveQwenHome() {
   const configured = process.env['QWEN_HOME'];
   if (!configured) return join(homedir() || tmpdir(), '.qwen');
-  if (configured === '~') return homedir();
+  if (configured === '~') return homedir() || tmpdir();
   if (configured.startsWith('~/') || configured.startsWith('~\\')) {
     return join(
-      homedir(),
+      homedir() || tmpdir(),
       ...configured
         .slice(2)
         .split(/[/\\]+/)
