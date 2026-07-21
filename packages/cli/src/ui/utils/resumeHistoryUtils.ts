@@ -643,7 +643,8 @@ export function applyCollapsePolicyAndSummary(
   if (collapsePreviewCount > 0) {
     let userTurnCount = 0;
     for (let i = rawItems.length - 1; i >= 0; i--) {
-      if (rawItems[i].type === MessageType.USER) {
+      const item = rawItems[i];
+      if (item.type === MessageType.USER && item.sentToModel !== false) {
         userTurnCount++;
         if (userTurnCount === collapsePreviewCount) {
           boundary = i;

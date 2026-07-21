@@ -122,7 +122,8 @@ export function itemsAfterAreOnlySynthetic(
 /** Index of the last `user` (real prompt) item, or -1. */
 export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].type === 'user') return i;
+    const item = history[i];
+    if (item.type === 'user' && item.sentToModel !== false) return i;
   }
   return -1;
 }

@@ -1083,6 +1083,7 @@ export const AppContainer = (props: AppContainerProps) => {
         .filter(
           (item): item is HistoryItem & { type: 'user'; text: string } =>
             item.type === 'user' &&
+            item.sentToModel !== false &&
             typeof item.text === 'string' &&
             item.text.trim() !== '',
         )

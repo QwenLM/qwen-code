@@ -742,7 +742,8 @@ export const useGeminiStream = (
       streamingState === StreamingState.Idle
     ) {
       const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) => item.type === MessageType.USER,
+        (item: HistoryItem) =>
+          item.type === MessageType.USER && item.sentToModel !== false,
       );
 
       const turnCount =
