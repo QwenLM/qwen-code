@@ -81,6 +81,8 @@ const WORKING_DIRECTORY_BLOCKED_REASON =
   'Background task working directory does not match the restored session.';
 const WORKTREE_ISOLATION_BLOCKED_REASON =
   'Background task worktree isolation cannot be reconstructed after session restore.';
+const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
+  'Background task isolation metadata is incompatible.';
 
 type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
 
@@ -506,8 +508,7 @@ export class BackgroundAgentResumeService {
           meta.isolation !== undefined &&
           meta.isolation !== 'worktree'
         ) {
-          retainedStateBlockedReason =
-            'Background task isolation metadata is incompatible.';
+          retainedStateBlockedReason = INCOMPATIBLE_ISOLATION_BLOCKED_REASON;
         } else if (meta.isolation === 'worktree') {
           retainedStateBlockedReason = WORKTREE_ISOLATION_BLOCKED_REASON;
         } else if (
