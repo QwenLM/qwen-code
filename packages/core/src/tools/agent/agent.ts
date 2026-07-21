@@ -2780,6 +2780,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       if (shouldRunInBackground) {
         subagentRuntimeConfig.getShouldAvoidPermissionPrompts = () =>
           !shouldBubble;
+        if (subagentModelId) {
+          subagentRuntimeConfig.getModel = () => subagentModelId;
+        }
       }
 
       // Background agents need a dedicated emitter so their transcript never

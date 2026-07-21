@@ -4425,6 +4425,34 @@ describe('AgentTool', () => {
       writeMetaSpy.mockRestore();
     });
 
+    it('pins an inherited model for resident continuations', async () => {
+      vi.mocked(config.getModel).mockReturnValue('model-a');
+      vi.mocked(mockAgent.getCore).mockReturnValue({
+        modelConfig: {},
+        getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
+      } as unknown as ReturnType<AgentHeadless['getCore']>);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const runtimeConfig = vi.mocked(mockSubagentManager.createAgentHeadless)
+        .mock.calls[0]?.[1] as Config;
+      expect(runtimeConfig.getModel()).toBe('model-a');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ model: 'model-a' }),
+        expect.any(Object),
+      );
+
+      vi.mocked(config.getModel).mockReturnValue('model-b');
+      expect(runtimeConfig.getModel()).toBe('model-a');
+    });
+
     it('stores sanitized background results in the registry', async () => {
       vi.mocked(mockAgent.getFinalText).mockReturnValue(
         '<analysis>scratch</analysis><summary>visible</summary>',

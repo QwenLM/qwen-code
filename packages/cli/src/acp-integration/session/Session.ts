@@ -1635,6 +1635,7 @@ export class Session implements SessionContext {
     this.resolveCloseGate?.();
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
+    this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.todoStopGuardQueuedPromptPriority = false;
     this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
     this.todoStopGuard.clearTrust();

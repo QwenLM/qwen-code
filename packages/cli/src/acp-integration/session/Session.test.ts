@@ -336,6 +336,7 @@ describe('Session', () => {
     setNotificationCallback: ReturnType<typeof vi.fn>;
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
+    abortAll: ReturnType<typeof vi.fn>;
   };
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
@@ -479,6 +480,7 @@ describe('Session', () => {
       setNotificationCallback: vi.fn(),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
       getAll: vi.fn().mockReturnValue([]),
+      abortAll: vi.fn(),
     };
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
@@ -16055,6 +16057,9 @@ describe('Session', () => {
       expect(internals.notificationQueue).toHaveLength(0);
       expect(internals.cronQueue).toHaveLength(0);
       expect(internals.notificationProcessing).toBe(false);
+      expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledWith({
+        notify: false,
+      });
       expect(
         mockBackgroundTaskRegistry.setNotificationCallback,
       ).toHaveBeenLastCalledWith(undefined);
