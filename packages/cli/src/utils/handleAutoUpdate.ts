@@ -115,7 +115,7 @@ export function handleAutoUpdate(
             ...process.env,
             QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: info.update.latest,
           },
-          stdio: 'ignore' as const,
+          stdio: ['ignore', 'ignore', 'pipe'] as const,
           windowsHide: true,
         }
       : { stdio: ['pipe', 'ignore', 'pipe'] as const }),

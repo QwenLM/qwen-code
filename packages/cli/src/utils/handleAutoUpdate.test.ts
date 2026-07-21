@@ -230,7 +230,7 @@ describe('handleAutoUpdate', () => {
         env: expect.objectContaining({
           QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: '2.0.0-nightly',
         }),
-        stdio: 'ignore',
+        stdio: ['ignore', 'ignore', 'pipe'],
         windowsHide: true,
       },
     );
@@ -254,7 +254,7 @@ describe('handleAutoUpdate', () => {
         env: expect.objectContaining({
           QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: '2.0.0',
         }),
-        stdio: 'ignore',
+        stdio: ['ignore', 'ignore', 'pipe'],
         windowsHide: true,
       },
     );
