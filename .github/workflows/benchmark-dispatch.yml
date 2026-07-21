@@ -1,8 +1,8 @@
 name: 'Dispatch SWE-bench Verified Benchmark'
 
 on:
-  release:
-    types: ['published']
+  # Stable Releases are discovered by the outbound ECS release-poller. Keeping
+  # this workflow manual avoids requiring a public benchmark endpoint/domain.
   workflow_dispatch:
     inputs:
       qwen_ref:
@@ -22,8 +22,6 @@ on:
 jobs:
   dispatch:
     name: 'Submit benchmark run'
-    if: |-
-      ${{ github.event_name == 'workflow_dispatch' || github.event.release.prerelease == false }}
     runs-on: 'ubuntu-latest'
     permissions:
       contents: 'read'
