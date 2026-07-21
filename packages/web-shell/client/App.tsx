@@ -5994,14 +5994,29 @@ export function App({
     workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
       selectedWorkspaceGitStatus?.branch,
   );
+  const worktreeToggleRef = useRef<HTMLButtonElement>(null);
+  const worktreeCancelRef = useRef<HTMLButtonElement>(null);
+  const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
   const handleEnableWorktree = useCallback(() => {
     pendingWorktreeRef.current = {};
     setWorktreePending(true);
+    worktreeFocusTarget.current = 'cancel';
   }, []);
   const handleCancelWorktree = useCallback(() => {
     pendingWorktreeRef.current = undefined;
     setWorktreePending(false);
+    worktreeFocusTarget.current = 'toggle';
   }, []);
+  useEffect(() => {
+    if (!worktreeFocusTarget.current) return;
+    const target = worktreeFocusTarget.current;
+    worktreeFocusTarget.current = null;
+    if (target === 'cancel') {
+      worktreeCancelRef.current?.focus();
+    } else {
+      worktreeToggleRef.current?.focus();
+    }
+  }, [worktreePending]);
   const welcomeHeader = useMemo(
     () => (
       <>
@@ -6024,6 +6039,7 @@ export function App({
               </span>
             </span>
             <button
+              ref={worktreeCancelRef}
               type="button"
               className={styles.worktreeWelcomeCancel}
               aria-label={t('worktree.cancel')}
@@ -6036,6 +6052,7 @@ export function App({
         ) : (
           worktreeToggleEligible && (
             <button
+              ref={worktreeToggleRef}
               type="button"
               className={styles.worktreeWelcomeToggle}
               data-testid="worktree-welcome-toggle"

@@ -351,7 +351,7 @@ export function WorkspaceSection({
           <button
             type="button"
             className={styles.gitPill}
-            aria-label={t('gitDiff.title')}
+            aria-label={`${t('gitDiff.title')} — ${gitStatus.branch}`}
             onClick={() => onOpenGitDiff(workspace.cwd)}
           >
             <GitBranchIndicator

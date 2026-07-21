@@ -1076,9 +1076,6 @@ describe('App session callbacks', () => {
           { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
         ],
       };
-    });
-
-    afterEach(() => {
       mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
         workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
         workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
@@ -1090,11 +1087,9 @@ describe('App session callbacks', () => {
     const badgeDesc = 'Changes happen';
 
     async function waitForToggle(container: HTMLElement): Promise<void> {
-      // The git-status fetch resolves over a few promise ticks after mount.
-      await flush();
-      await flush();
-      await flush();
-      expect(container.querySelector(toggleSelector)).not.toBeNull();
+      await vi.waitFor(() => {
+        expect(container.querySelector(toggleSelector)).not.toBeNull();
+      });
     }
 
     async function clickButton(
@@ -1167,6 +1162,31 @@ describe('App session callbacks', () => {
     it('creates the session without worktree when the toggle is off', async () => {
       renderApp();
       await flush();
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('regular session');
+        await vi.waitFor(() => {
+          expect(mockSessionActions.createSession).toHaveBeenCalled();
+        });
+      });
+      const arg = mockSessionActions.createSession.mock.calls[0]?.[0] as
+        | Record<string, unknown>
+        | undefined;
+      expect(arg?.['worktree']).toBeUndefined();
+    });
+
+    it('clears the pending worktree intent when starting a new session from the sidebar', async () => {
+      const { container } = renderApp();
+      await waitForToggle(container);
+      await clickButton(container, toggleSelector);
+      expect(container.textContent).toContain(badgeDesc);
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+          ?.click();
+        await Promise.resolve();
+      });
 
       await act(async () => {
         testState.latestChatEditorProps?.onSubmit('regular session');
