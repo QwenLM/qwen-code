@@ -97,6 +97,7 @@ export async function isGlobalNpmInstallation(
   run: typeof execFileAsync = execFileAsync,
   canonicalize: typeof realpath = realpath,
 ): Promise<boolean> {
+  if (process.env['QWEN_CODE_MANAGED_NPM_UPDATE'] === 'true') return true;
   if (!cliPath) return false;
   // Canonicalize before matching. The CLI can be launched through its global
   // bin symlink (e.g. `.../bin/qwen`), whose path carries no `node_modules`

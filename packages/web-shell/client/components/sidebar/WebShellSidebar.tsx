@@ -223,10 +223,7 @@ interface WebShellSidebarProps {
   onOpenSplitView: () => void;
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
-  onNewSession: (
-    workspaceCwd?: string,
-    opts?: { worktree?: { slug?: string } },
-  ) => Promise<boolean> | boolean;
+  onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -1393,14 +1390,14 @@ export function WebShellSidebar({
   ]);
 
   const handleNewSession = useCallback(
-    (workspaceCwd?: string, opts?: { worktree?: { slug?: string } }) => {
+    (workspaceCwd?: string) => {
       if (creatingSessionRef.current) return;
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
       void (async () => {
         try {
-          const created = await onNewSession(workspaceCwd, opts);
+          const created = await onNewSession(workspaceCwd);
           if (created) {
             void reload().catch(() => undefined);
             bumpWorkspaceReload();
@@ -3544,11 +3541,6 @@ export function WebShellSidebar({
                             groupActionsDisabled={groupBusy}
                             excludePinned
                             onOpenGitDiff={onOpenGitDiff}
-                            onNewWorktreeSession={(cwd) =>
-                              handleNewSession(ws.primary ? undefined : cwd, {
-                                worktree: {},
-                              })
-                            }
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}

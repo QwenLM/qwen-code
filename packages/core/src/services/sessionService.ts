@@ -192,6 +192,7 @@ export interface UnarchiveSessionsOptions {
 
 export interface SessionServiceOptions {
   onWarning?: (message: string) => void;
+  runtimeBaseDir?: string;
 }
 
 /**
@@ -323,7 +324,7 @@ export class SessionService {
   private readonly onWarning: ((message: string) => void) | undefined;
 
   constructor(cwd: string, options: SessionServiceOptions = {}) {
-    this.storage = new Storage(cwd);
+    this.storage = new Storage(cwd, options.runtimeBaseDir);
     this.projectRoot = cwd;
     this.projectHash = getProjectHash(cwd);
     this.onWarning = options.onWarning;

@@ -132,6 +132,47 @@ describe('ToolConfirmationMessage', () => {
     expect(lastFrame() ?? '').not.toContain('command substitution');
   });
 
+  it('renders classifier fallback guidance and the Default Mode option', async () => {
+    const onConfirm = vi.fn();
+    const confirmationDetails: ToolCallConfirmationDetails = {
+      type: 'exec',
+      title: 'Confirm Shell Command',
+      command: 'touch /tmp/marker',
+      rootCommand: 'touch',
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message:
+          "Auto Mode couldn't classify this action. Switching to Default Mode is recommended.",
+      },
+      onConfirm,
+    };
+
+    const { lastFrame, stdin } = renderWithProviders(
+      <ToolConfirmationMessage
+        confirmationDetails={confirmationDetails}
+        config={mockConfig}
+        availableTerminalHeight={12}
+        contentWidth={80}
+      />,
+    );
+
+    const frame = lastFrame() ?? '';
+    expect(frame).toContain("Auto Mode couldn't classify this action");
+    expect(frame).toContain(
+      'Switch to Default Mode and allow once (recommended)',
+    );
+    expect(frame).not.toContain('Always allow');
+
+    stdin.write('\x1b[B');
+    stdin.write('\r');
+    await vi.waitFor(() =>
+      expect(onConfirm).toHaveBeenCalledWith(
+        ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+      ),
+    );
+  });
+
   // Regression coverage for the round-1 review on PR #4386 (PR #4386 round-2
   // self-review SR-1): the warnings block sits outside the MaxSizedBox
   // cap, so its footprint has to be reserved from `bodyContentHeight`
@@ -753,6 +794,41 @@ describe('ToolConfirmationMessage', () => {
   });
 
   describe('compactMode', () => {
+    it('keeps classifier fallback guidance and all choices visible', () => {
+      const confirmationDetails: ToolCallConfirmationDetails = {
+        type: 'exec',
+        title: 'Confirm Execution',
+        command: 'touch /tmp/marker',
+        rootCommand: 'touch',
+        hideAlwaysAllow: true,
+        autoModeFallback: {
+          reason: 'classifier_unavailable',
+          message:
+            "Auto Mode couldn't classify this action. Switching to Default Mode is recommended.",
+        },
+        onConfirm: vi.fn(),
+      };
+
+      const { lastFrame } = renderWithProviders(
+        <ToolConfirmationMessage
+          confirmationDetails={confirmationDetails}
+          config={mockConfig}
+          availableTerminalHeight={10}
+          contentWidth={80}
+          compactMode={true}
+        />,
+      );
+
+      const frame = lastFrame() ?? '';
+      expect(frame).toContain("Auto Mode couldn't classify this action");
+      expect(frame).toContain('Yes, allow once');
+      expect(frame).toContain(
+        'Switch to Default Mode and allow once (recommended)',
+      );
+      expect(frame).toContain('No');
+      expect(frame).not.toContain('Allow always');
+    });
+
     it('renders the command and exec-specific question for exec confirmations', () => {
       const confirmationDetails: ToolCallConfirmationDetails = {
         type: 'exec',
