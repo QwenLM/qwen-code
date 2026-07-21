@@ -2065,7 +2065,10 @@ export async function loadCliConfig(
     customSkillDirs:
       bareMode || safeMode
         ? undefined
-        : (settings.skills?.directories ?? [])
+        : (Array.isArray(settings.skills?.directories)
+            ? settings.skills.directories
+            : []
+          )
             .filter(
               (d): d is string => typeof d === 'string' && d.trim().length > 0,
             )
