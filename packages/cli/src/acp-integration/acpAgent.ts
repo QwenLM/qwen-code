@@ -10002,6 +10002,11 @@ class QwenAgent implements Agent {
         : { sessionId, resume: undefined };
     const argvForSession = {
       ...this.argv,
+      // Docker sandbox relaunch injects a fixed --sandbox-session-id into
+      // the ACP process argv. Without clearing it, every newSession()
+      // inherits the same ID and the second session collides with the
+      // first's writer lease (#7435).
+      sandboxSessionId: undefined,
       ...sessionArg,
       continue: false,
       ...(chatRecording !== undefined ? { chatRecording } : {}),

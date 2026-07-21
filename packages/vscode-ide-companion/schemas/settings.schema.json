@@ -1171,7 +1171,7 @@
           "default": 1000
         },
         "toolOutputBatchBudget": {
-          "description": "Per-message budget (characters) for the combined output of one batch of tool calls; the largest results are offloaded to disk when exceeded. Set to -1 to disable.",
+          "description": "Per-message character budget for the combined text output of one batch of tool calls. Oversized batches are reduced deterministically and recoverable output is persisted when possible. Set to -1 to disable.",
           "type": "number",
           "default": 200000
         },
