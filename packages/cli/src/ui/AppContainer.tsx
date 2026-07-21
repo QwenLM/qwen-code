@@ -3042,10 +3042,13 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
-    // Composer height also shifts with these; without them the footer isn't
-    // re-measured during a streaming turn and the VP viewport bottom clips.
+    // Composer and update notification height also shift with these; without
+    // them the footer isn't re-measured during a streaming turn and the VP
+    // viewport bottom clips.
     // (elapsedTime/currentLoadingPhrase excluded: they tick without changing rows.)
     streamingState,
+    updateInfo,
+    agentViewState.activeView,
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
