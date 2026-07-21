@@ -227,7 +227,7 @@ describe('SuggestionsDisplay tabs', () => {
         availableCategories={['all', 'file']}
       />,
     );
-    expect(lastFrame()).not.toContain('Sessions');
+    expect(lastFrame()).not.toContain('Files');
   });
 });
 

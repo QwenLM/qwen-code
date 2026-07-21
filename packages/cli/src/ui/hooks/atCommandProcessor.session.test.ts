@@ -218,4 +218,26 @@ describe('handleAtCommand @session:', () => {
     expect(card).toBeDefined();
     expect(card!.resultDisplay).toContain('I/O error');
   });
+
+  it('deduplicates identical session mentions', async () => {
+    mockResolve.mockResolvedValue({
+      text: '--- Referenced session "s1" (slimmed, read-only) ---\nUser: hi',
+      meta: { sessionId: UUID, title: 's1', messageCount: 1, approxTokens: 5 },
+      truncated: false,
+    });
+    const result = await handleAtCommand({
+      query: `compare @session:${UUID} with @session:${UUID}`,
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 7,
+      signal: abortController.signal,
+    });
+    expect(result.shouldProceed).toBe(true);
+    expect(mockResolve).toHaveBeenCalledTimes(1);
+    const cards = result.toolDisplays?.filter(
+      (d) => d.name === 'Referenced Session',
+    );
+    expect(cards).toHaveLength(1);
+  });
 });

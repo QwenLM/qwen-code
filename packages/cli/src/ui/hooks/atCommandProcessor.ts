@@ -331,7 +331,14 @@ export async function resolveAtCommandQuery({
     // token verbatim in the prompt text.
     const sessionRef = parseSessionRef(pathName);
     if (sessionRef) {
-      sessionMentions.push({ originalAtPath, ref: sessionRef });
+      if (
+        !sessionMentions.some(
+          (m) =>
+            (m.ref.id ?? m.ref.title) === (sessionRef.id ?? sessionRef.title),
+        )
+      ) {
+        sessionMentions.push({ originalAtPath, ref: sessionRef });
+      }
       atPathToResolvedSpecMap.set(originalAtPath, pathName);
       continue;
     }

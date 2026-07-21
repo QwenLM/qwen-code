@@ -236,6 +236,16 @@ describe('keyMatchers', () => {
         createKey('down', { shift: true }),
       ],
     },
+    {
+      command: Command.COMPLETION_TAB_LEFT,
+      positive: [createKey('left')],
+      negative: [createKey('left', { shift: true }), createKey('right')],
+    },
+    {
+      command: Command.COMPLETION_TAB_RIGHT,
+      positive: [createKey('right')],
+      negative: [createKey('right', { shift: true }), createKey('left')],
+    },
 
     // Text input
     {
