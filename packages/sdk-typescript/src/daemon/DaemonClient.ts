@@ -72,10 +72,17 @@ import type {
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
+  DaemonGitLog,
+  DaemonGitCommitDetail,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
+  DaemonWorkspaceRuntimeStatus,
+  DaemonWorkspaceRuntimeOperationStatus,
+  DaemonWorkspaceRuntimeOperationsStatus,
+  DaemonWorkspaceMcpConfigStatus,
+  DaemonWorkspaceMcpConfigMutationResult,
   DaemonWorkspaceMemoryStatus,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
@@ -91,7 +98,9 @@ import type {
   DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -295,6 +304,8 @@ export interface DaemonClientOptions {
 const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+const DEFAULT_WORKSPACE_RUNTIME_PREPARE_TIMEOUT_MS = 60_000;
+const WORKSPACE_RUNTIME_CLIENT_HEADROOM_MS = 5_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
 const GITHUB_SETUP_DEFAULT_TIMEOUT_MS = 90_000;
 const MAX_TIMER_DELAY_MS = 2_147_483_647;
@@ -987,6 +998,46 @@ export class DaemonClient {
     );
   }
 
+  async setWorkspaceMcpConfig(
+    name: string,
+    scope: 'user',
+    config: Record<string, unknown>,
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return await this.jsonRequest<DaemonWorkspaceMcpConfigMutationResult>(
+      `/workspace/config/mcp/servers/${urlEncode(name)}`,
+      'PUT /workspace/config/mcp/servers/:name',
+      { method: 'PUT', body: { scope, config }, mode: 'rest' },
+    );
+  }
+
+  async removeWorkspaceMcpConfig(
+    name: string,
+    scope: 'user',
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return await this.jsonRequest<DaemonWorkspaceMcpConfigMutationResult>(
+      `/workspace/config/mcp/servers/${urlEncode(name)}?scope=${urlEncode(scope)}`,
+      'DELETE /workspace/config/mcp/servers/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
+  async setUserConfigMcpServerEnabled(
+    serverName: string,
+    enabled: boolean,
+  ): Promise<DaemonMcpManageResult> {
+    const action = enabled ? 'enable' : 'disable';
+    return await this.jsonRequest<DaemonMcpManageResult>(
+      `/workspace/config/mcp/${urlEncode(serverName)}/${action}`,
+      'POST /workspace/config/mcp/:server/:action',
+      {
+        method: 'POST',
+        body: {},
+        mode: 'rest',
+        timeoutMs: MCP_RESTART_DEFAULT_TIMEOUT_MS,
+      },
+    );
+  }
+
   async initializeWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/initialize`,
@@ -1047,6 +1098,26 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceGitDiffHunks>(
       query,
       'GET /workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (skip != null) params.set('skip', String(skip));
+    const qs = params.toString();
+    return await this.jsonRequest<DaemonGitLog>(
+      `/workspace/git/log${qs ? `?${qs}` : ''}`,
+      'GET /workspace/git/log',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+    return await this.jsonRequest<DaemonGitCommitDetail>(
+      `/workspace/git/log/commit?sha=${urlEncode(sha)}`,
+      'GET /workspace/git/log/commit',
       { mode: 'rest' },
     );
   }
@@ -4023,10 +4094,11 @@ export class DaemonClient {
 
   async addWorkspace(
     cwd: string,
-    options: { persist?: boolean } = {},
+    options: { persist?: boolean; displayName?: string } = {},
   ): Promise<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     persisted?: boolean;
@@ -4039,6 +4111,9 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd,
           ...(options.persist ? { persist: true } : {}),
+          ...(options.displayName !== undefined
+            ? { displayName: options.displayName }
+            : {}),
         }),
       },
       async (res) => {
@@ -4048,11 +4123,24 @@ export class DaemonClient {
         return (await res.json()) as {
           id: string;
           cwd: string;
+          displayName?: string;
           primary: boolean;
           trusted: boolean;
           persisted?: boolean;
         };
       },
+    );
+  }
+
+  async updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability> {
+    return await this.workspaceJsonRequest<DaemonWorkspaceCapability>(
+      urlEncode(workspaceSelector),
+      '',
+      'PATCH /workspaces/:workspace',
+      { method: 'PATCH', body: update, mode: 'rest' },
     );
   }
 
@@ -4154,6 +4242,193 @@ export class WorkspaceDaemonClient {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
   }
 
+  ensureWorkspaceRuntime(): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.restPost(
+      '/runtime/ensure',
+      'POST /workspaces/:workspace/runtime/ensure',
+      {},
+      undefined,
+      DEFAULT_WORKSPACE_RUNTIME_PREPARE_TIMEOUT_MS +
+        WORKSPACE_RUNTIME_CLIENT_HEADROOM_MS,
+    );
+  }
+
+  workspaceRuntimeStatus(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/runtime/status',
+      'GET /workspaces/:workspace/runtime/status',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  workspaceRuntimeOperation(
+    operationId: string,
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeOperationStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/runtime/operations/${urlEncode(operationId)}`,
+      'GET /workspaces/:workspace/runtime/operations/:operationId',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  activeWorkspaceRuntimeOperations(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeOperationsStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/runtime/operations',
+      'GET /workspaces/:workspace/runtime/operations',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  workspaceRuntimeExtensions(): Promise<DaemonWorkspaceExtensionsStatus> {
+    return this.restGet(
+      '/runtime/extensions',
+      'GET /workspaces/:workspace/runtime/extensions',
+    );
+  }
+
+  workspaceRuntimeMcp(timeoutMs?: number): Promise<DaemonWorkspaceMcpStatus> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      '/runtime/mcp',
+      'GET /workspaces/:workspace/runtime/mcp',
+      { mode: 'rest', timeoutMs },
+    );
+  }
+
+  reloadWorkspaceRuntimeMcp(
+    timeoutMs?: number,
+  ): Promise<DaemonWorkspaceRuntimeStatus> {
+    const serverTimeoutMs =
+      timeoutMs ?? DEFAULT_WORKSPACE_RUNTIME_PREPARE_TIMEOUT_MS;
+    return this.restPost(
+      '/runtime/mcp/reload',
+      'POST /workspaces/:workspace/runtime/mcp/reload',
+      timeoutMs === undefined ? {} : { timeoutMs },
+      undefined,
+      serverTimeoutMs + WORKSPACE_RUNTIME_CLIENT_HEADROOM_MS,
+    );
+  }
+
+  workspaceRuntimeMcpTools(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpToolsStatus> {
+    return this.restGet(
+      `/runtime/mcp/${urlEncode(serverName)}/tools`,
+      'GET /workspaces/:workspace/runtime/mcp/:server/tools',
+    );
+  }
+
+  workspaceRuntimeMcpResources(
+    serverName: string,
+  ): Promise<DaemonWorkspaceMcpResourcesStatus> {
+    return this.restGet(
+      `/runtime/mcp/${urlEncode(serverName)}/resources`,
+      'GET /workspaces/:workspace/runtime/mcp/:server/resources',
+    );
+  }
+
+  restartWorkspaceRuntimeMcpServer(
+    serverName: string,
+  ): Promise<DaemonMcpRestartResult> {
+    return this.restPost(
+      `/runtime/mcp/${urlEncode(serverName)}/restart`,
+      'POST /workspaces/:workspace/runtime/mcp/:server/restart',
+      {},
+      undefined,
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  manageWorkspaceRuntimeMcpServer(
+    serverName: string,
+    action: Exclude<DaemonMcpManageAction, 'enable' | 'disable'>,
+  ): Promise<DaemonMcpManageResult> {
+    return this.restPost(
+      `/runtime/mcp/${urlEncode(serverName)}/${urlEncode(action)}`,
+      'POST /workspaces/:workspace/runtime/mcp/:server/:action',
+      {},
+      undefined,
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  setWorkspaceConfigMcpServerEnabled(
+    serverName: string,
+    enabled: boolean,
+  ): Promise<DaemonMcpManageResult> {
+    const action = enabled ? 'enable' : 'disable';
+    return this.restPost(
+      `/config/mcp/${urlEncode(serverName)}/${action}`,
+      'POST /workspaces/:workspace/config/mcp/:server/:action',
+      {},
+      undefined,
+      MCP_RESTART_DEFAULT_TIMEOUT_MS,
+    );
+  }
+
+  workspaceRuntimeSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.restGet(
+      '/runtime/skills',
+      'GET /workspaces/:workspace/runtime/skills',
+    );
+  }
+
+  workspaceConfigSkills(): Promise<DaemonWorkspaceSkillsStatus> {
+    return this.restGet(
+      '/config/skills',
+      'GET /workspaces/:workspace/config/skills',
+    );
+  }
+
+  workspaceRuntimeTools(): Promise<DaemonWorkspaceToolsStatus> {
+    return this.restGet(
+      '/runtime/tools',
+      'GET /workspaces/:workspace/runtime/tools',
+    );
+  }
+
+  workspaceMcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus> {
+    return this.restGet(
+      '/config/mcp/servers',
+      'GET /workspaces/:workspace/config/mcp/servers',
+    );
+  }
+
+  setWorkspaceMcpConfig(
+    name: string,
+    config: Record<string, unknown>,
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/mcp/servers/${urlEncode(name)}`,
+      'PUT /workspaces/:workspace/config/mcp/servers/:name',
+      {
+        method: 'PUT',
+        body: { scope: 'workspace', config },
+        mode: 'rest',
+      },
+    );
+  }
+
+  removeWorkspaceMcpConfig(
+    name: string,
+  ): Promise<DaemonWorkspaceMcpConfigMutationResult> {
+    return this.client.workspaceJsonRequest(
+      this.workspaceSelector,
+      `/config/mcp/servers/${urlEncode(name)}?scope=workspace`,
+      'DELETE /workspaces/:workspace/config/mcp/servers/:name',
+      { method: 'DELETE', mode: 'rest' },
+    );
+  }
+
   initializeWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
     return this.post(
       '/mcp/initialize',
@@ -4232,6 +4507,28 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       query,
       'GET /workspaces/:workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (skip != null) params.set('skip', String(skip));
+    const qs = params.toString();
+    return this.client.workspaceJsonRequest<DaemonGitLog>(
+      this.workspaceSelector,
+      `/git/log${qs ? `?${qs}` : ''}`,
+      'GET /workspaces/:workspace/git/log',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+    return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
+      this.workspaceSelector,
+      `/git/log/commit?sha=${urlEncode(sha)}`,
+      'GET /workspaces/:workspace/git/log/commit',
       { mode: 'rest' },
     );
   }
@@ -4856,6 +5153,30 @@ export class WorkspaceDaemonClient {
       path,
       label,
       { method: 'POST', body, clientId, timeoutMs },
+    );
+  }
+
+  private restGet<T>(path: string, label: string): Promise<T> {
+    return this.client.workspaceJsonRequest<T>(
+      this.workspaceSelector,
+      path,
+      label,
+      { mode: 'rest' },
+    );
+  }
+
+  private restPost<T>(
+    path: string,
+    label: string,
+    body: unknown,
+    clientId?: string,
+    timeoutMs?: number,
+  ): Promise<T> {
+    return this.client.workspaceJsonRequest<T>(
+      this.workspaceSelector,
+      path,
+      label,
+      { method: 'POST', body, clientId, timeoutMs, mode: 'rest' },
     );
   }
 }

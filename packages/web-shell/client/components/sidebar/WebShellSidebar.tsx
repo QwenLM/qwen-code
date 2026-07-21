@@ -223,10 +223,7 @@ interface WebShellSidebarProps {
   onOpenSplitView: () => void;
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
-  onNewSession: (
-    workspaceCwd?: string,
-    opts?: { worktree?: { slug?: string } },
-  ) => Promise<boolean> | boolean;
+  onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -661,6 +658,9 @@ export function WebShellSidebar({
   const currentSessionId = connection.sessionId;
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
+  );
+  const workspaceDisplayNameEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_display_name'),
   );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
@@ -1187,8 +1187,11 @@ export function WebShellSidebar({
   }, [currentSessionIdentity, getIdentityForSession, sessions]);
 
   const handleAddWorkspace = useCallback(
-    async (cwd: string, persist: boolean) => {
-      const result = await workspaceActions.addWorkspace(cwd, { persist });
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      const result = await workspaceActions.addWorkspace(cwd, {
+        persist,
+        ...(displayName ? { displayName } : {}),
+      });
       if (persist && result.persisted !== true) {
         throw new Error(t('sidebar.addWorkspacePersistenceError'));
       }
@@ -1387,14 +1390,14 @@ export function WebShellSidebar({
   ]);
 
   const handleNewSession = useCallback(
-    (workspaceCwd?: string, opts?: { worktree?: { slug?: string } }) => {
+    (workspaceCwd?: string) => {
       if (creatingSessionRef.current) return;
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
       void (async () => {
         try {
-          const created = await onNewSession(workspaceCwd, opts);
+          const created = await onNewSession(workspaceCwd);
           if (created) {
             void reload().catch(() => undefined);
             bumpWorkspaceReload();
@@ -3538,11 +3541,6 @@ export function WebShellSidebar({
                             groupActionsDisabled={groupBusy}
                             excludePinned
                             onOpenGitDiff={onOpenGitDiff}
-                            onNewWorktreeSession={(cwd) =>
-                              handleNewSession(ws.primary ? undefined : cwd, {
-                                worktree: {},
-                              })
-                            }
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
@@ -3817,6 +3815,7 @@ export function WebShellSidebar({
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}
+          displayNameEnabled={workspaceDisplayNameEnabled}
           onSuggest={handleSuggestWorkspacePaths}
         />
       )}

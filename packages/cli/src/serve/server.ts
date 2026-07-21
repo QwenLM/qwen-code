@@ -199,6 +199,10 @@ import {
   registerWorkspaceGitDiffRoutes,
   registerWorkspaceQualifiedGitDiffRoutes,
 } from './routes/workspace-git-diff.js';
+import {
+  registerWorkspaceGitLogRoutes,
+  registerWorkspaceQualifiedGitLogRoutes,
+} from './routes/workspace-git-log.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
 import {
   registerWorkspaceMcpControlRoutes,
@@ -770,6 +774,7 @@ export function createServeApp(
       maxPendingPromptsPerSession: opts.maxPendingPromptsPerSession,
       eventRingSize: opts.eventRingSize,
       compactedReplayMaxBytes: opts.compactedReplayMaxBytes,
+      initializeTimeoutMs: opts.initializeTimeoutMs,
       permissionResponseTimeoutMs: opts.permissionResponseTimeoutMs,
       boundWorkspace,
       sessionShellCommandEnabled,
@@ -1187,6 +1192,14 @@ export function createServeApp(
     workspaceRegistry,
     sendBridgeError,
   });
+  registerWorkspaceGitLogRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
+    sendBridgeError,
+  });
+  registerWorkspaceQualifiedGitLogRoutes(app, {
+    workspaceRegistry,
+    sendBridgeError,
+  });
 
   // Workspace memory + agents CRUD routes.
   mountWorkspaceMemoryRoutes(app, {
@@ -1332,6 +1345,8 @@ export function createServeApp(
     const persistSetting = deps.persistSetting;
     registerWorkspaceSettingsRoutes(app, {
       boundWorkspace: primaryBoundWorkspace,
+      workspaceRuntime: primaryRuntime,
+      workspaceRegistry,
       mutate,
       safeBody,
       persistSetting: async (...args) => {
@@ -1340,6 +1355,7 @@ export function createServeApp(
       broadcastSettingsChanged,
       parseAndValidateClientId: (req, res) =>
         parseAndValidateWorkspaceClientId(req, res, primaryBridge),
+      sendBridgeError,
     });
     registerWorkspaceQualifiedSettingsRoutes(app, {
       workspaceRegistry,
@@ -1349,6 +1365,7 @@ export function createServeApp(
         await persistSetting(...args);
       },
       invalidateServeFeaturesCache,
+      sendBridgeError,
     });
   }
   registerWorkspacePermissionsRoutes(app, {
@@ -1447,6 +1464,7 @@ export function createServeApp(
 
   registerWorkspaceMcpControlRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
+    workspaceRuntime: workspaceRegistry.primary,
     bridge: primaryBridge,
     workspace: primaryWorkspace,
     mutate,

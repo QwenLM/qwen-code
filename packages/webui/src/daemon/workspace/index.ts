@@ -25,6 +25,8 @@ export type {
   DaemonResourceOptions,
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
+  DaemonWorkspaceExtensionViewEntry,
+  DaemonWorkspaceSkillsViewStatus,
   DaemonWorkspaceProviderProps,
   DaemonWorkspaceStatus,
   ResourceResult,

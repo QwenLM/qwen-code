@@ -428,4 +428,35 @@ describe('workspace runtime routes', () => {
       workspaceCwd: '/workspace',
     });
   });
+
+  it('maps overlapping MCP operations to a 409 response', async () => {
+    const harness = createHarness({ mapBridgeErrors: true });
+    harness.setLive(true);
+    vi.mocked(harness.runtime.bridge.manageMcpServer).mockResolvedValue({
+      serverName: 'docs',
+      action: 'authenticate',
+      ok: true,
+      pending: true,
+      runtimeEpoch: 1,
+    });
+    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
+
+    try {
+      const first = await request(harness.app).post(
+        '/workspace/runtime/mcp/docs/authenticate',
+      );
+      expect(first.status).toBe(200);
+
+      const conflict = await request(harness.app).post(
+        '/workspace/runtime/mcp/docs/approve',
+      );
+      expect(conflict.status).toBe(409);
+      expect(conflict.body).toMatchObject({
+        code: 'mcp_operation_conflict',
+      });
+    } finally {
+      harness.setLive(false);
+      coordinator.dispose();
+    }
+  });
 });

@@ -38,7 +38,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { GitForkIcon } from 'lucide-react';
+import { GitForkIcon, XIcon } from 'lucide-react';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
@@ -75,7 +75,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
-import { GitDiffDialog } from './components/dialogs/GitDiffDialog';
+import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
@@ -113,6 +113,7 @@ import {
 } from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
+import { Spinner } from './components/ui/spinner';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { isAskUserPermission } from './utils/askUserPermission';
 import { ToolApproval } from './components/messages/ToolApproval';
@@ -129,6 +130,7 @@ import {
   type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
+import { workspaceLabel } from './utils/workspace';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -153,6 +155,10 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
+import {
+  invokeSlashCommandHandler,
+  SLASH_COMMAND_PATTERN,
+} from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
@@ -455,6 +461,19 @@ export type WebShellComposerPlaceholders = Readonly<
   Partial<Record<WebShellComposerPlaceholderState, string>>
 >;
 
+export interface WebShellSlashCommand {
+  /** Slash command name without the leading slash, normalized to lower case. */
+  command: string;
+  /** Trimmed text following the command name. */
+  args: string;
+  /** Original text submitted from the composer. */
+  input: string;
+}
+
+export type WebShellSlashCommandHandler = (
+  command: WebShellSlashCommand,
+) => boolean | void;
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
@@ -520,6 +539,11 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /**
+   * Called before Web Shell handles a slash command. Return true to skip the
+   * built-in or daemon behavior after handling the command in the host.
+   */
+  onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -1005,6 +1029,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  onSlashCommand,
   builtinAtProviders,
   atProviders,
   composerTagIcons,
@@ -1276,7 +1301,6 @@ export function App({
   );
   const sessionActions = useActions();
   const { notices, dismissNotice } = useSessionNotices();
-  const workspaceActions = useWorkspaceActions();
   // Phase 4: the workspace picked for the *next* new session on multi-workspace
   // daemons. Kept in a ref too because session creation is lazy (first prompt),
   // so the ensureSessionForPrompt callback must read the latest value.
@@ -1336,16 +1360,19 @@ export function App({
       workspaces,
     ],
   );
-  // Worktree sessions override the git chip branch via sessionWorktree.branch
-  // and query git status with the worktree path (?cwd= parameter).
+  // Worktree sessions query git status with the worktree path (?cwd=
+  // parameter); the chip prefers the live branch from that status, falling
+  // back to the creation-time sessionWorktree.branch.
+  const workspaceActions = useWorkspaceActions(activeWorkspaceCwd);
   useEffect(() => {
     if (!activeWorkspaceCwd) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
     }
-    if (gitStatusWorkspaceCwdRef.current !== activeWorkspaceCwd) {
-      gitStatusWorkspaceCwdRef.current = activeWorkspaceCwd;
+    const statusTarget = sessionWorktree?.path ?? activeWorkspaceCwd;
+    if (gitStatusWorkspaceCwdRef.current !== statusTarget) {
+      gitStatusWorkspaceCwdRef.current = statusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
     let cancelled = false;
@@ -2238,12 +2265,12 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  // The workspace the Changes dialog reads. Set by whichever entry point opened
+  // The workspace the Git dialog reads. Set by whichever entry point opened
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
-  const [diffWorkspaceCwd, setDiffWorkspaceCwd] = useState<string | undefined>(
-    undefined,
-  );
+  const [gitDialog, setGitDialog] = useState<
+    { workspaceCwd: string; view: GitDialogView } | undefined
+  >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
@@ -2257,8 +2284,26 @@ export function App({
   // dependency (it changes on every pane add/remove).
   const splitSessionIdsRef = useRef<string[]>(splitSessionIds);
   splitSessionIdsRef.current = splitSessionIds;
-  const [mcpDialogMessage, setMcpDialogMessage] =
-    useState<SerializedMcpStatusMessage | null>(null);
+  const [mcpDialogState, setMcpDialogState] = useState<{
+    workspaceCwd: string;
+    message: SerializedMcpStatusMessage;
+  } | null>(null);
+  const mcpDialogRequestRef = useRef(0);
+  const mcpDialogWorkspaceCwd =
+    activeWorkspaceCwd ?? connection.workspaceCwd ?? '';
+  const mcpDialogMessage =
+    mcpDialogState?.workspaceCwd === mcpDialogWorkspaceCwd
+      ? mcpDialogState.message
+      : null;
+  const clearMcpDialogMessage = useCallback(() => {
+    mcpDialogRequestRef.current += 1;
+    setMcpDialogState(null);
+  }, []);
+  const mcpManagerOptionsRef = useRef<{
+    showDescriptions?: boolean;
+    showSchema?: boolean;
+    showTips?: boolean;
+  }>({});
   // Settings and Daemon Status are shown as an in-place panel that replaces the
   // chat view (message list + composer), not as a modal overlay. Only one may be
   // active at a time; null means the normal chat view is shown.
@@ -2272,6 +2317,39 @@ export function App({
     | 'plugins'
     | null
   >(null);
+  const managementPanelActive =
+    activePanel === 'extensions' ||
+    activePanel === 'mcp' ||
+    activePanel === 'skills' ||
+    activePanel === 'plugins';
+  const [managementRuntimeState, setManagementRuntimeState] = useState<{
+    status: 'idle' | 'initializing' | 'ready' | 'error';
+    error?: string;
+  }>({ status: 'idle' });
+  const [managementRuntimeAttempt, setManagementRuntimeAttempt] = useState(0);
+  useEffect(() => {
+    if (!managementPanelActive) {
+      setManagementRuntimeState({ status: 'idle' });
+      return;
+    }
+    let cancelled = false;
+    setManagementRuntimeState({ status: 'initializing' });
+    void workspaceActions.ensureRuntime().then(
+      () => {
+        if (!cancelled) setManagementRuntimeState({ status: 'ready' });
+      },
+      (error: unknown) => {
+        if (cancelled) return;
+        setManagementRuntimeState({
+          status: 'error',
+          error: error instanceof Error ? error.message : String(error),
+        });
+      },
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [managementPanelActive, managementRuntimeAttempt, workspaceActions]);
   const closePanel = useCallback(() => setActivePanel(null), []);
   const handleUseSkill = useCallback(
     (name: string) => {
@@ -2305,17 +2383,64 @@ export function App({
     },
     [],
   );
-  const loadMcpManagerMessage = useCallback(async () => {
-    const status = await workspaceActions.loadMcpStatus();
-    setMcpDialogMessage({
-      status,
-      toolsByServer: {},
-      resourcesByServer: {},
-      showDescriptions: false,
-      showSchema: false,
-      showTips: false,
-    });
-  }, [workspaceActions]);
+  const loadMcpManagerMessage = useCallback(
+    async (options?: {
+      showDescriptions?: boolean;
+      showSchema?: boolean;
+      showTips?: boolean;
+    }) => {
+      const request = ++mcpDialogRequestRef.current;
+      const workspaceCwd = mcpDialogWorkspaceCwd;
+      let status: SerializedMcpStatusMessage['status'];
+      try {
+        status = await workspaceActions.loadMcpStatus();
+      } catch (error) {
+        status = {
+          v: 1,
+          workspaceCwd,
+          initialized: false,
+          source: 'config',
+          discoveryState: 'not_started',
+          servers: [],
+          errors: [
+            {
+              kind: 'mcp_runtime',
+              status: 'error',
+              error: error instanceof Error ? error.message : String(error),
+            },
+          ],
+        };
+      }
+      if (request !== mcpDialogRequestRef.current) return;
+      setMcpDialogState({
+        workspaceCwd,
+        message: {
+          status,
+          toolsByServer: {},
+          resourcesByServer: {},
+          showDescriptions: options?.showDescriptions === true,
+          showSchema: options?.showSchema === true,
+          showTips: options?.showTips === true,
+        },
+      });
+    },
+    [mcpDialogWorkspaceCwd, workspaceActions],
+  );
+  useEffect(() => {
+    if (
+      activePanel !== 'mcp' ||
+      managementRuntimeState.status !== 'ready' ||
+      mcpDialogMessage
+    ) {
+      return;
+    }
+    void loadMcpManagerMessage(mcpManagerOptionsRef.current);
+  }, [
+    activePanel,
+    loadMcpManagerMessage,
+    managementRuntimeState.status,
+    mcpDialogMessage,
+  ]);
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
@@ -2564,7 +2689,7 @@ export function App({
       // panel focus effect self-contained instead of relying on that.)
       editorRef.current?.focus();
     }
-  }, [activePanel, approvalOverlayActive]);
+  }, [activePanel, approvalOverlayActive, managementRuntimeState.status]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
   // overlay in the chat footer, which is hidden (display:none) while a panel is
   // shown. Left alone, the turn would hang behind Settings/Status with no
@@ -2839,6 +2964,8 @@ export function App({
   }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
+  const onSlashCommandRef = useRef(onSlashCommand);
+  onSlashCommandRef.current = onSlashCommand;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
   const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -2987,7 +3114,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
-    diffWorkspaceCwd !== undefined ||
+    gitDialog !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -3903,13 +4030,15 @@ export function App({
        * stay mounted until its prompt is admitted, or a rejection has nowhere to
        * render. Only that caller passes this.
        */
-      opts?: { keepView?: boolean; worktree?: { slug?: string } },
+      opts?: { keepView?: boolean },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
-      pendingWorktreeRef.current = opts?.worktree;
-      setWorktreePending(Boolean(opts?.worktree));
+      // Starting a fresh chat drops any pending worktree intent set from the
+      // empty-state toggle, so it never leaks into the next created session.
+      pendingWorktreeRef.current = undefined;
+      setWorktreePending(false);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -4502,6 +4631,11 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
+      if (
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -4540,7 +4674,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
       if (text.startsWith('/')) {
-        const match = text.match(/^\/([\w-]+)/);
+        const match = text.match(SLASH_COMMAND_PATTERN);
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
@@ -4565,13 +4699,19 @@ export function App({
             return true;
           }
           if (cmd === 'diff') {
-            // Local intercept: open the working-tree Changes dialog instead of
-            // forwarding `/diff` to the agent. Targets the current workspace.
             if (!gitDiffWorkspaceCwd) {
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
-            setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            return true;
+          }
+          if (cmd === 'log') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.logNoWorkspace'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
             return true;
           }
           if (cmd === 'tasks') {
@@ -4868,22 +5008,13 @@ export function App({
           }
           if (cmd === 'mcp') {
             const mcpArg = text.slice(match[0].length).trim().toLowerCase();
-            workspaceActions
-              .loadMcpStatus()
-              .then((status) => {
-                setMcpDialogMessage({
-                  status,
-                  toolsByServer: {},
-                  resourcesByServer: {},
-                  showDescriptions: mcpArg === 'desc',
-                  showSchema: mcpArg === 'schema',
-                  showTips: !mcpArg,
-                });
-                openPanel('mcp');
-              })
-              .catch((error: unknown) => {
-                reportError(error, 'Failed to load MCP status');
-              });
+            mcpManagerOptionsRef.current = {
+              showDescriptions: mcpArg === 'desc',
+              showSchema: mcpArg === 'schema',
+              showTips: !mcpArg,
+            };
+            clearMcpDialogMessage();
+            openPanel('mcp');
             return true;
           }
           if (cmd === 'skills') {
@@ -5368,6 +5499,7 @@ export function App({
       enqueuePrompt,
       echoOrDeferLocalCommand,
       branchCurrentSession,
+      clearMcpDialogMessage,
       closeMobileDrawer,
       closePanel,
       openPanel,
@@ -5948,6 +6080,36 @@ export function App({
     ],
   );
 
+  // The empty-state toggle is offered only when the workspace the next
+  // session would land in is trusted and is a git repository — the daemon
+  // rejects worktree creation otherwise. Mirrors the sidebar entry's gating.
+  const worktreeToggleEligible = Boolean(
+    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      selectedWorkspaceGitStatus?.branch,
+  );
+  const worktreeToggleRef = useRef<HTMLButtonElement>(null);
+  const worktreeCancelRef = useRef<HTMLButtonElement>(null);
+  const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
+  const handleEnableWorktree = useCallback(() => {
+    pendingWorktreeRef.current = {};
+    setWorktreePending(true);
+    worktreeFocusTarget.current = 'cancel';
+  }, []);
+  const handleCancelWorktree = useCallback(() => {
+    pendingWorktreeRef.current = undefined;
+    setWorktreePending(false);
+    worktreeFocusTarget.current = 'toggle';
+  }, []);
+  useEffect(() => {
+    if (!worktreeFocusTarget.current) return;
+    const target = worktreeFocusTarget.current;
+    worktreeFocusTarget.current = null;
+    if (target === 'cancel') {
+      worktreeCancelRef.current?.focus();
+    } else {
+      worktreeToggleRef.current?.focus();
+    }
+  }, [worktreePending]);
   const welcomeHeader = useMemo(
     () => (
       <>
@@ -5956,20 +6118,64 @@ export function App({
         ) : (
           <WelcomeHeader {...welcomeHeaderProps} />
         )}
-        {worktreePending && (
+        {worktreePending ? (
           <div className={styles.worktreeWelcomeBadge}>
-            <GitForkIcon size={20} strokeWidth={1.5} />
-            <span className={styles.worktreeWelcomeTitle}>
-              {t('worktree.welcomeTitle')}
+            <span className={styles.worktreeBadgeIcon}>
+              <GitForkIcon size={18} strokeWidth={1.8} />
             </span>
-            <span className={styles.worktreeWelcomeDesc}>
-              {t('worktree.welcomeDesc')}
+            <span className={styles.worktreeBadgeText}>
+              <span className={styles.worktreeWelcomeTitle}>
+                {t('worktree.welcomeTitle')}
+              </span>
+              <span className={styles.worktreeWelcomeDesc}>
+                {t('worktree.welcomeDesc')}
+              </span>
             </span>
+            <button
+              ref={worktreeCancelRef}
+              type="button"
+              className={styles.worktreeWelcomeCancel}
+              aria-label={t('worktree.cancel')}
+              data-testid="worktree-welcome-cancel"
+              onClick={handleCancelWorktree}
+            >
+              <XIcon size={14} strokeWidth={2} />
+            </button>
           </div>
+        ) : (
+          worktreeToggleEligible && (
+            <button
+              ref={worktreeToggleRef}
+              type="button"
+              className={styles.worktreeWelcomeToggle}
+              data-testid="worktree-welcome-toggle"
+              onClick={handleEnableWorktree}
+            >
+              <span className={styles.worktreeToggleIcon}>
+                <GitForkIcon size={16} strokeWidth={1.8} />
+              </span>
+              <span className={styles.worktreeToggleText}>
+                <span className={styles.worktreeToggleLabel}>
+                  {t('worktree.welcomeTitle')}
+                </span>
+                <span className={styles.worktreeToggleHint}>
+                  {t('worktree.toggleHint')}
+                </span>
+              </span>
+            </button>
+          )
         )}
       </>
     ),
-    [renderWelcomeHeader, welcomeHeaderProps, worktreePending, t],
+    [
+      renderWelcomeHeader,
+      welcomeHeaderProps,
+      worktreePending,
+      worktreeToggleEligible,
+      handleEnableWorktree,
+      handleCancelWorktree,
+      t,
+    ],
   );
   const welcomeFooter = useMemo(
     () => renderWelcomeFooter?.(welcomeHeaderProps),
@@ -6198,10 +6404,12 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {diffWorkspaceCwd && (
-            <GitDiffDialog
-              workspaceCwd={diffWorkspaceCwd}
-              onClose={() => setDiffWorkspaceCwd(undefined)}
+          {gitDialog && (
+            <GitDialog
+              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              workspaceCwd={gitDialog.workspaceCwd}
+              initialView={gitDialog.view}
+              onClose={() => setGitDialog(undefined)}
             />
           )}
           {tasksDialogMessage && (
@@ -6450,9 +6658,7 @@ export function App({
                       webShellThemeToSettingValue(theme),
                     );
                   }}
-                  onNewSession={(workspaceCwd, opts) => {
-                    return createNewSession(workspaceCwd, opts);
-                  }}
+                  onNewSession={(workspaceCwd) => createNewSession(workspaceCwd)}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
@@ -6467,7 +6673,9 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
-                  onOpenGitDiff={setDiffWorkspaceCwd}
+                  onOpenGitDiff={(workspaceCwd) =>
+                    setGitDialog({ workspaceCwd, view: 'diff' })
+                  }
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
@@ -6580,7 +6788,44 @@ export function App({
                     </div>
                   )}
                   <div className={styles.panelBody} key={activePanel}>
-                    {activePanel === 'settings' ? (
+                    {managementPanelActive &&
+                    managementRuntimeState.status !== 'ready' ? (
+                      <div
+                        className={styles.managementRuntimeState}
+                        role="status"
+                      >
+                        {managementRuntimeState.status === 'error' ? (
+                          <>
+                            <div className={styles.managementRuntimeError}>
+                              {t('management.runtime.failed')}
+                            </div>
+                            {managementRuntimeState.error ? (
+                              <div
+                                className={styles.managementRuntimeErrorDetail}
+                              >
+                                {managementRuntimeState.error}
+                              </div>
+                            ) : null}
+                            <button
+                              type="button"
+                              className={styles.managementRuntimeRetry}
+                              onClick={() =>
+                                setManagementRuntimeAttempt(
+                                  (attempt) => attempt + 1,
+                                )
+                              }
+                            >
+                              {t('common.retry')}
+                            </button>
+                          </>
+                        ) : (
+                          <>
+                            <Spinner />
+                            <span>{t('management.runtime.initializing')}</span>
+                          </>
+                        )}
+                      </div>
+                    ) : activePanel === 'settings' ? (
                       <SettingsMessage
                         settingsState={workspaceSettingsState}
                         embedded
@@ -6658,7 +6903,7 @@ export function App({
                       <McpManagerPage
                         message={mcpDialogMessage}
                         onClose={() => {
-                          setMcpDialogMessage(null);
+                          clearMcpDialogMessage();
                           closePanel();
                         }}
                       />
@@ -6917,6 +7162,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onSlashCommand={onSlashCommand}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
@@ -7264,17 +7510,23 @@ export function App({
                           currentMode={currentMode}
                           currentModel={currentModel}
                           gitBranch={
-                            sessionWorktree?.branch ??
-                            (connection.sessionId
-                              ? connection.gitBranch
-                              : (selectedWorkspaceGitStatus?.branch ??
-                                undefined))
+                            sessionWorktree
+                              ? (selectedWorkspaceGitStatus?.branch ??
+                                sessionWorktree.branch)
+                              : (connection.sessionId
+                                ? connection.gitBranch
+                                : (selectedWorkspaceGitStatus?.branch ??
+                                  undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd && !sessionWorktree
-                              ? () => setDiffWorkspaceCwd(gitDiffWorkspaceCwd)
+                              ? () =>
+                                  setGitDialog({
+                                    workspaceCwd: gitDiffWorkspaceCwd,
+                                    view: 'diff',
+                                  })
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}
@@ -7289,11 +7541,7 @@ export function App({
                               ? workspaces.map((entry) => ({
                                     id: entry.id,
                                     cwd: entry.cwd,
-                                    label:
-                                      entry.cwd
-                                        .split(/[\\/]+/)
-                                        .filter(Boolean)
-                                        .at(-1) ?? entry.cwd,
+                                    label: workspaceLabel(entry),
                                     primary: entry.primary,
                                   }))
                               : undefined

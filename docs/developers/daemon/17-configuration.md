@@ -27,7 +27,8 @@ This page collects every setting that affects the `qwen serve` daemon and its ad
 | `--allow-private-auth-base-url`         | boolean                    | `false`                                          | Allows `/workspace/auth/provider` to install localhost / private-network auth provider `baseUrl`; use only in trusted local development.                                            |
 | `--prompt-deadline-ms <n>`              | positive integer           | unset                                            | Server-side prompt wallclock limit in ms. Timeout aborts and returns an error.                                                                                                      |
 | `--writer-idle-timeout-ms <n>`          | positive integer           | unset                                            | Per-SSE-connection idle timeout in ms. The daemon closes the SSE connection when no event is sent for this duration.                                                                |
-| `--channel-idle-timeout-ms <n>`         | positive integer           | unset                                            | Compatibility auto-reap after the last session and workspace operation drain. Unset keeps the runtime live; `0` is rejected.                                                        |
+| `--channel-idle-timeout-ms <n>`         | non-negative integer       | `0`                                              | ACP child auto-reap delay after the last session and workspace operation drain. Unset or `0` reaps immediately.                                                                     |
+| `--initialize-timeout-ms <n>`           | positive integer           | `10000`                                          | ACP child request timeout, including the initialize handshake (ms).                                                                                                                 |
 | `--session-reap-interval-ms <n>`        | non-negative integer       | `60000`                                          | Session reaper scan interval; `0` disables it.                                                                                                                                      |
 | `--session-idle-timeout-ms <n>`         | non-negative integer       | `1800000`                                        | Disconnected-session idle reaping time; `0` disables it.                                                                                                                            |
 | `--rate-limit` / `--no-rate-limit`      | boolean                    | env / off                                        | Enables per-tier HTTP rate limiting for prompt, mutation, and read routes.                                                                                                          |
@@ -90,20 +91,21 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 
 `packages/cli/src/serve/types.ts` defines the typed options object accepted by both `runQwenServe` and `createServeApp`. It mirrors the CLI flags above and adds:
 
-| Field                         | Effect                                                                                           |
-| ----------------------------- | ------------------------------------------------------------------------------------------------ |
-| `eventRingSize`               | Overrides the default per-session ring size.                                                     |
-| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                                |
-| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                   |
-| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                          |
-| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                                 |
-| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required.    |
-| `promptDeadlineMs`            | Prompt wallclock limit.                                                                          |
-| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                         |
-| `channelIdleTimeoutMs`        | Positive compatibility ACP child auto-reap delay after runtime work drains; unset keeps it live. |
-| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                    |
-| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                          |
-| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                         |
+| Field                         | Effect                                                                                        |
+| ----------------------------- | --------------------------------------------------------------------------------------------- |
+| `eventRingSize`               | Overrides the default per-session ring size.                                                  |
+| `maxPendingPromptsPerSession` | Pending prompt cap per session; `0` / `Infinity` means unlimited.                             |
+| `mcpPoolActive`               | Programmatic switch, defaulting from `QWEN_SERVE_NO_MCP_POOL`.                                |
+| `allowOrigins`                | Cross-origin allowlist (`string[]`), corresponding to `--allow-origin`.                       |
+| `allowPrivateAuthBaseUrl`     | Allows private / localhost auth provider `baseUrl` installation.                              |
+| `enableSessionShell`          | Enables session shell execution; bearer token and session-bound client id are still required. |
+| `promptDeadlineMs`            | Prompt wallclock limit.                                                                       |
+| `writerIdleTimeoutMs`         | SSE writer idle timeout.                                                                      |
+| `channelIdleTimeoutMs`        | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.          |
+| `initializeTimeoutMs`         | ACP child request timeout, including the initialize handshake.                                |
+| `sessionReapIntervalMs`       | Session reaper scan interval.                                                                 |
+| `sessionIdleTimeoutMs`        | Disconnected-session idle reaping time.                                                       |
+| `rateLimit*`                  | Per-tier HTTP rate limit switch, thresholds, and window.                                      |
 
 ## `BridgeOptions` (programmatic bridge embedding)
 
@@ -120,7 +122,7 @@ The daemon constructs each workspace runtime from that workspace's merged settin
 | `statusProvider`                                                                                                        | Daemon-host preflight cells.                                                                  |
 | `childEnvOverrides`                                                                                                     | Per-handle environment additions or removals.                                                 |
 | `contextFilename`                                                                                                       | Overrides `getCurrentGeminiMdFilename()`.                                                     |
-| `channelIdleTimeoutMs`                                                                                                  | Positive compatibility auto-reap delay after runtime work drains; unset keeps it live.        |
+| `channelIdleTimeoutMs`                                                                                                  | ACP child auto-reap delay after runtime work drains; unset or `0` reaps immediately.          |
 
 ## Important defaults
 

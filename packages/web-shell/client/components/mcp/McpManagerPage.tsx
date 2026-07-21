@@ -19,13 +19,22 @@ import type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceRuntimeOperationStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { useMcp, useSettings } from '@qwen-code/webui/daemon-react-sdk';
+import { useMcp } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { extractErrorDetail } from '../../utils/errorDetail';
+import {
+  nextPollingDelay,
+  remainingPollingTimeout,
+} from '../../utils/polling-deadline';
 import styles from './McpManagerPage.module.css';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
 import { Alert, AlertDescription, AlertTitle } from '../ui/alert';
+import {
+  ManagementNotice,
+  type ManagementNoticeTone,
+} from '../ui/management-notice';
 import { Badge } from '../ui/badge';
 import {
   Breadcrumb,
@@ -81,10 +90,21 @@ import { Textarea } from '../ui/textarea';
 import type { EmbeddedManagerPage } from '../plugins/manager-page';
 
 type McpStatus = Awaited<ReturnType<DaemonWorkspaceActions['loadMcpStatus']>>;
+type McpConfigInventory = Awaited<
+  ReturnType<DaemonWorkspaceActions['loadMcpConfig']>
+>;
 type T = ReturnType<typeof useI18n>['t'];
 type SourceFilter = 'all' | 'user' | 'workspace' | 'extension';
 type McpSettingsScope = 'user' | 'workspace';
+type McpServerRuntimePayload = {
+  initialized: boolean;
+  acpChannelLive: boolean;
+  runtimeEpoch?: number;
+  serverName: string;
+};
 const DEFAULT_MCP_SERVER_CONFIG = '{\n  "command": "",\n  "args": []\n}';
+const MCP_OPERATION_REQUEST_TIMEOUT_MS = 30_000;
+const MCP_OPERATION_POLL_INTERVAL_MS = 1_500;
 type McpServerAction = {
   id:
     | 'edit'
@@ -101,6 +121,7 @@ type McpServerAction = {
 interface McpManagerPageProps {
   message: SerializedMcpStatusMessage;
   onClose: () => void;
+  workspaceCwd?: string;
   embedded?: EmbeddedManagerPage;
 }
 
@@ -137,6 +158,43 @@ function isManagedServerVisible(
   );
 }
 
+export function isCurrentMcpStatus(status: McpStatus): boolean {
+  return (
+    status.source === 'live' &&
+    status.initialized &&
+    status.discoveryState === 'completed' &&
+    status.runtimeState === 'ready' &&
+    status.runtimeEpoch !== undefined &&
+    status.runtimeEpoch === status.coordinatorRuntimeEpoch &&
+    status.runtimeEpoch === status.capabilityRuntimeEpoch
+  );
+}
+
+export function activeMcpAuthenticationOperation(
+  operations: readonly DaemonWorkspaceRuntimeOperationStatus[],
+): DaemonWorkspaceRuntimeOperationStatus | undefined {
+  return operations.find(
+    (operation) =>
+      operation.kind === 'mcp' &&
+      operation.action === 'authenticate' &&
+      (operation.state === 'running' ||
+        operation.state === 'waiting_for_input'),
+  );
+}
+
+function isUsableMcpRuntime(status: McpStatus): boolean {
+  return isCurrentMcpStatus(status) && !status.errors?.length;
+}
+
+function isRuntimeServerAction(action: McpServerAction['id']): boolean {
+  return (
+    action === 'approve' ||
+    action === 'reconnect' ||
+    action === 'authenticate' ||
+    action === 'clear-auth'
+  );
+}
+
 function sourceLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
   const source = sourceValue(server);
   return source === 'workspace'
@@ -147,14 +205,175 @@ function sourceLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
 }
 
 function mcpServersForScope(
-  settings: Awaited<ReturnType<DaemonWorkspaceActions['loadSettingsStatus']>>,
+  config: McpConfigInventory,
   scope: McpSettingsScope,
 ): Record<string, unknown> {
-  const value = settings.settings.find(
-    (setting) => setting.key === 'mcpServers',
-  )?.values[scope];
+  const value = config[scope];
   if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
   return Object.fromEntries(Object.entries(value));
+}
+
+export function configuredMcpServerScope(
+  config: McpConfigInventory | null,
+  serverName: string,
+): McpSettingsScope | undefined {
+  if (!config) return undefined;
+  if (Object.prototype.hasOwnProperty.call(config.workspace, serverName)) {
+    return 'workspace';
+  }
+  if (Object.prototype.hasOwnProperty.call(config.user, serverName)) {
+    return 'user';
+  }
+  return undefined;
+}
+
+export function mcpServerEnablementScope(
+  config: McpConfigInventory | null,
+  serverName: string,
+  action: 'enable' | 'disable',
+): McpSettingsScope | undefined {
+  if (action === 'disable') {
+    return configuredMcpServerScope(config, serverName);
+  }
+  const disabledScopes = config?.disabledServerScopes?.[serverName] ?? [];
+  if (disabledScopes.includes('workspace')) return 'workspace';
+  if (disabledScopes.includes('user')) return 'user';
+  return configuredMcpServerScope(config, serverName);
+}
+
+export function isCurrentMcpServerPayload(
+  payload: McpServerRuntimePayload | null | undefined,
+  requestedEpoch: number | undefined,
+): boolean {
+  return (
+    requestedEpoch !== undefined &&
+    payload?.initialized === true &&
+    payload.acpChannelLive === true &&
+    payload.runtimeEpoch === requestedEpoch
+  );
+}
+
+function filterCurrentMcpServerPayloads<T extends McpServerRuntimePayload>(
+  payloads: Record<string, T>,
+  status: McpStatus,
+): Record<string, T> {
+  if (!isUsableMcpRuntime(status)) return {};
+  return Object.fromEntries(
+    Object.entries(payloads).filter(
+      ([serverName, payload]) =>
+        payload.serverName === serverName &&
+        isCurrentMcpServerPayload(payload, status.runtimeEpoch),
+    ),
+  );
+}
+
+function configuredServerStatus(
+  name: string,
+  scope: McpSettingsScope,
+  value: unknown,
+  disabled: boolean,
+): DaemonWorkspaceMcpServerStatus {
+  const raw =
+    value && typeof value === 'object' && !Array.isArray(value)
+      ? (value as Record<string, unknown>)
+      : {};
+  const type = typeof raw['type'] === 'string' ? raw['type'] : undefined;
+  const command =
+    typeof raw['command'] === 'string' ? raw['command'] : undefined;
+  const args =
+    Array.isArray(raw['args']) &&
+    raw['args'].every((argument) => typeof argument === 'string')
+      ? (raw['args'] as string[])
+      : undefined;
+  const url = typeof raw['url'] === 'string' ? raw['url'] : undefined;
+  const httpUrl =
+    typeof raw['httpUrl'] === 'string'
+      ? raw['httpUrl']
+      : type === 'http'
+        ? url
+        : undefined;
+  const transport =
+    type === 'stdio' ||
+    type === 'sse' ||
+    type === 'http' ||
+    type === 'websocket' ||
+    type === 'sdk'
+      ? type
+      : httpUrl
+        ? 'http'
+        : url
+          ? 'sse'
+          : command
+            ? 'stdio'
+            : 'unknown';
+
+  return {
+    kind: 'mcp_server',
+    status: disabled ? 'disabled' : 'not_started',
+    name,
+    mcpStatus: 'disconnected',
+    transport,
+    disabled,
+    ...(disabled ? { disabledReason: 'config' as const } : {}),
+    source: scope === 'workspace' ? 'project' : 'user',
+    configOrigin:
+      scope === 'workspace' ? 'workspace_settings' : 'user_settings',
+    removable: true,
+    config: {
+      ...(command ? { command } : {}),
+      ...(args ? { args } : {}),
+      ...(httpUrl ? { httpUrl } : url ? { url } : {}),
+      ...(typeof raw['cwd'] === 'string' ? { cwd: raw['cwd'] } : {}),
+    },
+    ...(typeof raw['description'] === 'string'
+      ? { description: raw['description'] }
+      : {}),
+  };
+}
+
+export function mergeConfiguredMcpServers(
+  runtimeServers: readonly DaemonWorkspaceMcpServerStatus[],
+  config: McpConfigInventory | null,
+  preferConfig = false,
+): DaemonWorkspaceMcpServerStatus[] {
+  if (!config) return preferConfig ? [] : [...runtimeServers];
+  const configured = new Map<
+    string,
+    { scope: McpSettingsScope; value: unknown }
+  >();
+  for (const [name, value] of Object.entries(config.user)) {
+    configured.set(name, { scope: 'user', value });
+  }
+  for (const [name, value] of Object.entries(config.workspace)) {
+    configured.set(name, { scope: 'workspace', value });
+  }
+  const disabledServers = new Set(config.disabledServers ?? []);
+  const merged = runtimeServers.flatMap((server) => {
+    const entry = configured.get(server.name);
+    if (preferConfig && !entry) return [];
+    configured.delete(server.name);
+    return [
+      preferConfig && entry
+        ? configuredServerStatus(
+            server.name,
+            entry.scope,
+            entry.value,
+            disabledServers.has(server.name),
+          )
+        : server,
+    ];
+  });
+  const missing = [...configured.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, entry]) =>
+      configuredServerStatus(
+        name,
+        entry.scope,
+        entry.value,
+        disabledServers.has(name),
+      ),
+    );
+  return [...merged, ...missing];
 }
 
 function statusLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
@@ -168,12 +387,29 @@ function statusLabel(server: DaemonWorkspaceMcpServerStatus, t: T): string {
   if (server.authenticationState === 'pending') {
     return t('mcp.status.authenticating');
   }
+  if (server.requiresAuth) {
+    return t('mcp.status.needsAuthentication');
+  }
   if (server.mcpStatus === 'connected') return t('mcp.status.connected');
   if (server.mcpStatus === 'connecting') return t('mcp.status.connecting');
   return t('mcp.status.disconnectedTitle');
 }
 
+function authenticationRequired(
+  server: DaemonWorkspaceMcpServerStatus,
+): boolean {
+  return (
+    !server.disabled &&
+    !server.approvalState &&
+    server.authenticationState !== 'pending' &&
+    server.requiresAuth === true
+  );
+}
+
 function statusBadgeClass(server: DaemonWorkspaceMcpServerStatus): string {
+  if (authenticationRequired(server)) {
+    return styles.authenticationRequiredBadge;
+  }
   return !server.disabled &&
     !server.approvalState &&
     server.mcpStatus === 'connected'
@@ -197,25 +433,27 @@ function formatServerCommand(
 function serverActions(
   server: DaemonWorkspaceMcpServerStatus,
   t: T,
+  configuredScope: McpSettingsScope | undefined,
 ): McpServerAction[] {
   const actions: McpServerAction[] = [];
   const awaitingApproval = Boolean(server.approvalState);
-  const origin = configOriginValue(server);
-  if (origin === 'user_settings' || origin === 'workspace_settings') {
+  const runtimeAvailable = server.status !== 'not_started';
+  if (configuredScope) {
     actions.push({ id: 'edit', label: t('mcp.action.edit') });
   }
   if (
     !server.disabled &&
+    runtimeAvailable &&
     !awaitingApproval &&
     !server.requiresAuth &&
     server.mcpStatus === 'disconnected'
   ) {
     actions.push({ id: 'reconnect', label: t('mcp.action.reconnect') });
   }
-  if (!server.disabled && awaitingApproval) {
+  if (!server.disabled && runtimeAvailable && awaitingApproval) {
     actions.push({ id: 'approve', label: t('mcp.action.approve') });
   }
-  if (origin !== 'extension' || server.disabled) {
+  if (configuredScope) {
     actions.push({
       id: server.disabled ? 'enable' : 'disable',
       label: server.disabled ? t('mcp.action.enable') : t('mcp.action.disable'),
@@ -223,6 +461,7 @@ function serverActions(
   }
   if (
     !server.disabled &&
+    runtimeAvailable &&
     !awaitingApproval &&
     (server.mcpStatus !== 'disconnected' || server.requiresAuth)
   ) {
@@ -236,7 +475,7 @@ function serverActions(
       actions.push({ id: 'clear-auth', label: t('mcp.action.clearAuth') });
     }
   }
-  if ((server as { removable?: boolean }).removable) {
+  if (configuredScope) {
     actions.push({ id: 'remove', label: t('mcp.action.remove') });
   }
   return actions;
@@ -366,18 +605,27 @@ function ResourceDetail({
 export function McpManagerPage({
   message,
   onClose,
+  workspaceCwd,
   embedded,
 }: McpManagerPageProps) {
   const { t } = useI18n();
-  const mcp = useMcp({ autoLoad: false });
-  const settings = useSettings({ autoLoad: false });
+  const mcp = useMcp({ autoLoad: false }, workspaceCwd);
   const [status, setStatus] = useState<McpStatus>(message.status);
+  const [configInventory, setConfigInventory] =
+    useState<McpConfigInventory | null>(null);
   const [toolsByServer, setToolsByServer] = useState<
     Record<string, DaemonWorkspaceMcpToolsStatus>
-  >(message.toolsByServer);
+  >(() =>
+    filterCurrentMcpServerPayloads(message.toolsByServer, message.status),
+  );
   const [resourcesByServer, setResourcesByServer] = useState<
     Record<string, DaemonWorkspaceMcpResourcesStatus>
-  >(message.resourcesByServer ?? {});
+  >(() =>
+    filterCurrentMcpServerPayloads(
+      message.resourcesByServer ?? {},
+      message.status,
+    ),
+  );
   const [selectedServerName, setSelectedServerName] = useState<string | null>(
     null,
   );
@@ -389,7 +637,6 @@ export function McpManagerPage({
   const [query, setQuery] = useState('');
   const [sourceFilter, setSourceFilter] = useState<SourceFilter>('all');
   const [busyServer, setBusyServer] = useState<string | null>(null);
-  const [initializing, setInitializing] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [addDialogOpen, setAddDialogOpen] = useState(false);
   const [editingServer, setEditingServer] =
@@ -406,15 +653,33 @@ export function McpManagerPage({
     serverName?: string;
     text: string;
     error?: boolean;
+    success?: boolean;
+    progress?: boolean;
     authUrl?: string;
   } | null>(null);
+  const noticeTone: ManagementNoticeTone = notice?.error
+    ? 'error'
+    : notice?.success
+      ? 'success'
+      : notice?.progress
+        ? 'progress'
+        : 'info';
   const [loadErrorsByServer, setLoadErrorsByServer] = useState<
     Record<string, { tools?: string; resources?: string }>
   >({});
-  const hasInitializedDiscovery = useRef(
-    message.status.discoveryState === 'completed',
-  );
+  const hasLoadedConfig = useRef(false);
+  const configInventoryStatus = useRef<McpStatus | undefined>(undefined);
+  const authenticationObserverRef = useRef<{
+    operationId: string;
+    promise: Promise<void>;
+  } | null>(null);
+  const recoveredAuthenticationWorkspaceRef = useRef<string | null>(null);
   const mountedRef = useRef(true);
+  const statusRef = useRef(status);
+  const runtimeDataEpochRef = useRef<number | undefined>(
+    isUsableMcpRuntime(status) ? status.runtimeEpoch : undefined,
+  );
+  statusRef.current = status;
 
   useEffect(() => {
     mountedRef.current = true;
@@ -423,95 +688,112 @@ export function McpManagerPage({
     };
   }, []);
 
-  const waitForPoll = useCallback(async () => {
-    await new Promise((resolve) => window.setTimeout(resolve, 1_500));
+  useEffect(() => {
+    if (mcp.status) setStatus(mcp.status);
+  }, [mcp.status]);
+
+  useEffect(() => {
+    const nextEpoch = isUsableMcpRuntime(status)
+      ? status.runtimeEpoch
+      : undefined;
+    if (runtimeDataEpochRef.current === nextEpoch) return;
+    runtimeDataEpochRef.current = nextEpoch;
+    setToolsByServer({});
+    setResourcesByServer({});
+    setLoadErrorsByServer({});
+    setSelectedToolName(null);
+    setSelectedResourceUri(null);
+  }, [status]);
+
+  const refreshConfigInventory = useCallback(async () => {
+    const config = await mcp.loadConfig();
+    if (mountedRef.current) setConfigInventory(config);
+    return config;
+  }, [mcp]);
+
+  useEffect(() => {
+    if (
+      hasLoadedConfig.current &&
+      configInventoryStatus.current === mcp.status
+    ) {
+      return;
+    }
+    hasLoadedConfig.current = true;
+    configInventoryStatus.current = mcp.status;
+    void refreshConfigInventory().catch((error: unknown) => {
+      if (mountedRef.current) {
+        setNotice({ text: extractErrorDetail(error), error: true });
+      }
+    });
+  }, [mcp.status, refreshConfigInventory]);
+
+  const waitForPoll = useCallback(async (deadlineAt: number) => {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, nextPollingDelay(deadlineAt, 1_500)),
+    );
+    remainingPollingTimeout(deadlineAt);
     return mountedRef.current;
   }, []);
 
-  const startDiscovery = useCallback(
-    async (
-      operation: 'initialize' | 'reload',
-      showProgress = true,
-      deferStatus = false,
-    ): Promise<boolean> => {
-      await (operation === 'initialize'
-        ? mcp.initialize()
-        : mcp.reloadConfig());
-      if (!mountedRef.current) return false;
+  const waitForOperationPoll = useCallback(async () => {
+    await new Promise((resolve) =>
+      window.setTimeout(resolve, MCP_OPERATION_POLL_INTERVAL_MS),
+    );
+    return mountedRef.current;
+  }, []);
 
-      for (let attempt = 0; attempt < 40; attempt += 1) {
-        if (!(await waitForPoll())) return false;
-        const nextStatus = await mcp.reload();
-        if (!mountedRef.current) return false;
-        if (!nextStatus) continue;
-        if (!deferStatus || nextStatus.discoveryState === 'completed') {
-          setStatus((current) =>
-            showProgress &&
-            nextStatus.servers.length === 0 &&
-            current.servers.length > 0
-              ? { ...nextStatus, servers: current.servers }
-              : nextStatus,
-          );
+  const reloadDiscovery = useCallback(
+    async (showProgress = true): Promise<boolean> => {
+      await mcp.reloadConfig();
+      if (!mountedRef.current) return false;
+      const nextStatus = await mcp.reload();
+      if (!mountedRef.current || !nextStatus) return false;
+      setStatus(nextStatus);
+      if (nextStatus.errors?.length) {
+        if (showProgress) {
+          setNotice({
+            text: nextStatus.errors
+              .map((error) => error.error || error.hint || error.kind)
+              .join('\n'),
+            error: true,
+          });
         }
-        if (nextStatus.errors?.length) {
-          if (showProgress) {
-            setNotice({
-              text: nextStatus.errors
-                .map((error) => error.error || error.hint || error.kind)
-                .join('\n'),
-              error: true,
-            });
-          }
-          return false;
-        }
-        if (nextStatus.discoveryState === 'completed') {
-          if (showProgress) setNotice(null);
-          return true;
-        }
-        if (
-          nextStatus.initialized &&
-          nextStatus.discoveryState === 'not_started' &&
-          nextStatus.servers.length === 0
-        ) {
-          if (deferStatus) setStatus(nextStatus);
-          if (showProgress) setNotice({ text: t('mcp.discovery.empty') });
-          return true;
-        }
+        return false;
       }
-      if (showProgress) {
-        setNotice({ text: t('mcp.discovery.timeout'), error: true });
-      }
-      return false;
+      if (showProgress) setNotice(null);
+      return isCurrentMcpStatus(nextStatus);
     },
-    [mcp, t, waitForPoll],
+    [mcp],
   );
 
-  useEffect(() => {
-    if (hasInitializedDiscovery.current) return;
-    hasInitializedDiscovery.current = true;
-    setInitializing(true);
-    void startDiscovery('initialize')
-      .catch((error: unknown) => {
-        if (mountedRef.current) {
-          setNotice({ text: extractErrorDetail(error), error: true });
-        }
-      })
-      .finally(() => {
-        if (mountedRef.current) setInitializing(false);
-      });
-  }, [startDiscovery]);
-
   const servers = useMemo(
-    () => (status.servers ?? []).filter(isManagedServerVisible),
-    [status.servers],
+    () =>
+      mergeConfiguredMcpServers(
+        status.servers ?? [],
+        configInventory,
+        !isUsableMcpRuntime(status),
+      ).filter(isManagedServerVisible),
+    [configInventory, status],
   );
   const selectedServer =
     servers.find((server) => server.name === selectedServerName) ?? null;
-  const selectedTools = selectedServer
-    ? (toolsByServer[selectedServer.name]?.tools ?? [])
+  const selectedToolsPayload = selectedServer
+    ? toolsByServer[selectedServer.name]
+    : undefined;
+  const selectedResourcesPayload = selectedServer
+    ? resourcesByServer[selectedServer.name]
+    : undefined;
+  const selectedTools = isCurrentMcpServerPayload(
+    selectedToolsPayload,
+    isUsableMcpRuntime(status) ? status.runtimeEpoch : undefined,
+  )
+    ? (selectedToolsPayload?.tools ?? [])
     : [];
-  const selectedResources = selectedServer
-    ? (resourcesByServer[selectedServer.name]?.resources ?? [])
+  const selectedResources = isCurrentMcpServerPayload(
+    selectedResourcesPayload,
+    isUsableMcpRuntime(status) ? status.runtimeEpoch : undefined,
+  )
+    ? (selectedResourcesPayload?.resources ?? [])
     : [];
   const selectedTool =
     selectedTools.find((tool) => tool.name === selectedToolName) ?? null;
@@ -540,6 +822,9 @@ export function McpManagerPage({
 
   const loadServerData = useCallback(
     async (server: DaemonWorkspaceMcpServerStatus) => {
+      const requestedStatus = statusRef.current;
+      if (!isUsableMcpRuntime(requestedStatus)) return;
+      const requestedEpoch = requestedStatus.runtimeEpoch;
       const failures: unknown[] = [];
       const [toolsResult, resourcesResult] = await Promise.allSettled([
         mcp.loadTools(server.name),
@@ -547,15 +832,46 @@ export function McpManagerPage({
           ? mcp.loadResources(server.name)
           : Promise.resolve(null),
       ]);
+      if (
+        !mountedRef.current ||
+        !isUsableMcpRuntime(statusRef.current) ||
+        statusRef.current.runtimeEpoch !== requestedEpoch
+      ) {
+        return;
+      }
       if (toolsResult.status === 'fulfilled') {
-        setToolsByServer((current) => ({
-          ...current,
-          [server.name]: toolsResult.value,
-        }));
-        setLoadErrorsByServer((current) => ({
-          ...current,
-          [server.name]: { ...current[server.name], tools: undefined },
-        }));
+        const tools = toolsResult.value;
+        if (
+          tools.serverName === server.name &&
+          isCurrentMcpServerPayload(tools, requestedEpoch)
+        ) {
+          setToolsByServer((current) => ({
+            ...current,
+            [server.name]: tools,
+          }));
+          setLoadErrorsByServer((current) => ({
+            ...current,
+            [server.name]: { ...current[server.name], tools: undefined },
+          }));
+        } else {
+          const error = new Error(
+            `${server.name}: MCP tools are not current for runtime epoch ${requestedEpoch}`,
+          );
+          failures.push(error);
+          setToolsByServer((current) => {
+            if (!(server.name in current)) return current;
+            const next = { ...current };
+            delete next[server.name];
+            return next;
+          });
+          setLoadErrorsByServer((current) => ({
+            ...current,
+            [server.name]: {
+              ...current[server.name],
+              tools: extractErrorDetail(error),
+            },
+          }));
+        }
       } else {
         failures.push(toolsResult.reason);
         const error = extractErrorDetail(toolsResult.reason);
@@ -569,14 +885,37 @@ export function McpManagerPage({
         resourcesResult.value !== null
       ) {
         const resources = resourcesResult.value;
-        setResourcesByServer((current) => ({
-          ...current,
-          [server.name]: resources,
-        }));
-        setLoadErrorsByServer((current) => ({
-          ...current,
-          [server.name]: { ...current[server.name], resources: undefined },
-        }));
+        if (
+          resources.serverName === server.name &&
+          isCurrentMcpServerPayload(resources, requestedEpoch)
+        ) {
+          setResourcesByServer((current) => ({
+            ...current,
+            [server.name]: resources,
+          }));
+          setLoadErrorsByServer((current) => ({
+            ...current,
+            [server.name]: { ...current[server.name], resources: undefined },
+          }));
+        } else {
+          const error = new Error(
+            `${server.name}: MCP resources are not current for runtime epoch ${requestedEpoch}`,
+          );
+          failures.push(error);
+          setResourcesByServer((current) => {
+            if (!(server.name in current)) return current;
+            const next = { ...current };
+            delete next[server.name];
+            return next;
+          });
+          setLoadErrorsByServer((current) => ({
+            ...current,
+            [server.name]: {
+              ...current[server.name],
+              resources: extractErrorDetail(error),
+            },
+          }));
+        }
       } else if (resourcesResult.status === 'rejected') {
         failures.push(resourcesResult.reason);
         const error = extractErrorDetail(resourcesResult.reason);
@@ -606,20 +945,192 @@ export function McpManagerPage({
     [mcp],
   );
 
+  const observeAuthenticationOperation = useCallback(
+    (
+      initialOperation: DaemonWorkspaceRuntimeOperationStatus,
+      options: { authUrl?: string; detail?: string } = {},
+    ): Promise<void> => {
+      const current = authenticationObserverRef.current;
+      if (current && current.operationId === initialOperation.operationId) {
+        return current.promise;
+      }
+
+      const promise = (async () => {
+        let operation = initialOperation;
+        let authUrl = operation.authUrl ?? options.authUrl;
+        setBusyServer(operation.target);
+        setNotice({
+          serverName: operation.target,
+          text: oauthMessage(operation.target, t, options.detail),
+          progress: true,
+          ...(authUrl ? { authUrl } : {}),
+        });
+
+        while (mountedRef.current) {
+          if (operation.state === 'failed') {
+            throw new Error(
+              operation.error?.message ?? t('mcp.oauth.authenticationFailed'),
+            );
+          }
+
+          if (operation.state === 'succeeded') {
+            let candidate: McpStatus | undefined;
+            try {
+              candidate = await mcp.loadStatus(
+                MCP_OPERATION_REQUEST_TIMEOUT_MS,
+              );
+            } catch (error) {
+              if (mountedRef.current) {
+                setNotice({
+                  serverName: operation.target,
+                  text: t('mcp.oauth.observationStopped', {
+                    error: extractErrorDetail(error),
+                  }),
+                  ...(authUrl ? { authUrl } : {}),
+                });
+              }
+              return;
+            }
+            if (!mountedRef.current) return;
+            if (!candidate) {
+              if (!(await waitForOperationPoll())) return;
+              continue;
+            }
+            statusRef.current = candidate;
+            setStatus(candidate);
+            const statusError = candidate.errors?.[0];
+            if (statusError) {
+              throw new Error(
+                statusError.error ||
+                  statusError.hint ||
+                  t('mcp.oauth.statusFailed'),
+              );
+            }
+            const candidateServer = candidate.servers?.find(
+              (item) => item.name === operation.target,
+            );
+            if (!candidateServer) {
+              throw new Error(t('mcp.oauth.serverRemoved'));
+            }
+            if (candidateServer.authenticationState === 'failed') {
+              throw new Error(
+                candidateServer.authenticationError ||
+                  t('mcp.oauth.authenticationFailed'),
+              );
+            }
+            if (
+              candidateServer.authenticationState === 'succeeded' ||
+              (candidateServer.authenticationState === undefined &&
+                candidateServer.mcpStatus === 'connected')
+            ) {
+              if (isUsableMcpRuntime(candidate)) {
+                try {
+                  await loadServerData(candidateServer);
+                } catch {
+                  // Tool and resource refresh errors are recorded separately.
+                }
+              }
+              if (!mountedRef.current) return;
+              setNotice({
+                serverName: operation.target,
+                text: t('mcp.action.done', { action: t('mcp.action.auth') }),
+                success: true,
+              });
+              return;
+            }
+          } else {
+            const deadline = operation.deadlineAt
+              ? Date.parse(operation.deadlineAt)
+              : Number.NaN;
+            if (Number.isFinite(deadline) && Date.now() >= deadline) {
+              setNotice({
+                serverName: operation.target,
+                text: t('mcp.oauth.finishing'),
+                progress: true,
+                ...(authUrl ? { authUrl } : {}),
+              });
+            }
+          }
+
+          if (!(await waitForOperationPoll())) return;
+          try {
+            operation = await mcp.operationStatus(
+              operation.operationId,
+              MCP_OPERATION_REQUEST_TIMEOUT_MS,
+            );
+            authUrl = operation.authUrl ?? authUrl;
+          } catch (error) {
+            if (mountedRef.current) {
+              setNotice({
+                serverName: operation.target,
+                text: t('mcp.oauth.observationStopped', {
+                  error: extractErrorDetail(error),
+                }),
+                ...(authUrl ? { authUrl } : {}),
+              });
+            }
+            return;
+          }
+        }
+      })().finally(() => {
+        if (
+          authenticationObserverRef.current?.operationId ===
+          initialOperation.operationId
+        ) {
+          authenticationObserverRef.current = null;
+        }
+        if (mountedRef.current) setBusyServer(null);
+      });
+      authenticationObserverRef.current = {
+        operationId: initialOperation.operationId,
+        promise,
+      };
+      return promise;
+    },
+    [loadServerData, mcp, t, waitForOperationPoll],
+  );
+
+  useEffect(() => {
+    const workspaceKey = workspaceCwd ?? status.workspaceCwd;
+    if (recoveredAuthenticationWorkspaceRef.current === workspaceKey) return;
+    recoveredAuthenticationWorkspaceRef.current = workspaceKey;
+    void mcp
+      .activeOperations(MCP_OPERATION_REQUEST_TIMEOUT_MS)
+      .then(async ({ operations }) => {
+        if (
+          !mountedRef.current ||
+          recoveredAuthenticationWorkspaceRef.current !== workspaceKey
+        ) {
+          return;
+        }
+        const operation = activeMcpAuthenticationOperation(operations);
+        if (operation) await observeAuthenticationOperation(operation);
+      })
+      .catch(() => undefined);
+  }, [mcp, observeAuthenticationOperation, status.workspaceCwd, workspaceCwd]);
+
   const refreshAll = useCallback(async () => {
     if (refreshing) return;
     setRefreshing(true);
     setNotice(null);
     try {
-      const nextStatus = await mcp.reload();
-      if (!nextStatus) return;
-      setStatus(nextStatus);
-    } catch (error) {
-      setNotice({ text: extractErrorDetail(error), error: true });
+      const [configResult, runtimeResult] = await Promise.allSettled([
+        refreshConfigInventory(),
+        reloadDiscovery(),
+      ]);
+      const failures = [configResult, runtimeResult]
+        .filter(
+          (result): result is PromiseRejectedResult =>
+            result.status === 'rejected',
+        )
+        .map((result) => extractErrorDetail(result.reason));
+      if (failures.length > 0) {
+        setNotice({ text: failures.join('\n'), error: true });
+      }
     } finally {
       setRefreshing(false);
     }
-  }, [mcp, refreshing]);
+  }, [refreshConfigInventory, refreshing, reloadDiscovery]);
 
   const addServer = useCallback(async () => {
     const name = serverName.trim();
@@ -628,7 +1139,7 @@ export function McpManagerPage({
       setAddError(t('mcp.add.nameRequired'));
       return;
     }
-    let config: Parameters<typeof mcp.addServer>[0]['config'];
+    let config: Record<string, unknown>;
     try {
       const parsed: unknown = JSON.parse(serverConfig);
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
@@ -636,7 +1147,7 @@ export function McpManagerPage({
       }
       const description = serverDescription.trim();
       config = {
-        ...(parsed as Parameters<typeof mcp.addServer>[0]['config']),
+        ...(parsed as Record<string, unknown>),
         ...(description ? { description } : {}),
       };
     } catch (error) {
@@ -647,20 +1158,26 @@ export function McpManagerPage({
     setAdding(true);
     let persisted = false;
     try {
-      await settings.setValue(serverScope, 'mcpServers', config, {
-        mcpServerMutation: { operation: 'set', name },
-      });
+      const mutation = await mcp.setConfig(name, serverScope, { ...config });
       persisted = true;
+      await refreshConfigInventory();
       setNotice(null);
-      const runtimeUpdated = await startDiscovery('reload', false).catch(
-        () => false,
-      );
+      if (mutation.activation === 'reconciling') {
+        await mcp.waitForRuntime();
+      }
+      const nextStatus = await mcp.reload();
+      if (nextStatus) setStatus(nextStatus);
+      const activation = String(mutation.activation);
       setNotice({
         ...(editing ? { serverName: name } : {}),
-        text: runtimeUpdated
-          ? t(editing ? 'mcp.edit.done' : 'mcp.add.done', { name })
-          : t('mcp.runtime.notUpdated'),
-        error: !runtimeUpdated,
+        text:
+          activation === 'applied' || activation === 'reconciling'
+            ? t(editing ? 'mcp.edit.done' : 'mcp.add.done', { name })
+            : activation === 'deferred'
+              ? t('mcp.runtime.deferred')
+              : t('mcp.runtime.notUpdated'),
+        error: activation === 'partial',
+        success: activation === 'applied' || activation === 'reconciling',
       });
       setAddDialogOpen(false);
       setEditingServer(null);
@@ -688,12 +1205,11 @@ export function McpManagerPage({
   }, [
     mcp,
     editingServer,
+    refreshConfigInventory,
     serverConfig,
     serverDescription,
     serverName,
     serverScope,
-    settings,
-    startDiscovery,
     t,
   ]);
 
@@ -702,19 +1218,12 @@ export function McpManagerPage({
     setBusyServer(serverToRemove.name);
     let persisted = false;
     try {
-      const currentSettings = await settings.reload();
-      if (!currentSettings) {
-        setNotice({
-          serverName: serverToRemove.name,
-          text: t('mcp.add.settingsUnavailable'),
-          error: true,
-        });
-        return;
-      }
-      const scope: McpSettingsScope =
-        sourceValue(serverToRemove) === 'workspace' ? 'workspace' : 'user';
-      const servers = mcpServersForScope(currentSettings, scope);
-      if (!(serverToRemove.name in servers)) {
+      const currentConfig = await mcp.loadConfig();
+      const scope = configuredMcpServerScope(
+        currentConfig,
+        serverToRemove.name,
+      );
+      if (!scope) {
         setNotice({
           serverName: serverToRemove.name,
           text: t('mcp.remove.notWorkspace'),
@@ -722,31 +1231,36 @@ export function McpManagerPage({
         });
         return;
       }
-      await settings.setValue(
-        scope,
-        'mcpServers',
-        {},
-        {
-          mcpServerMutation: {
-            operation: 'remove',
-            name: serverToRemove.name,
-          },
-        },
-      );
+      if (mountedRef.current) setConfigInventory(currentConfig);
+      const mutation = await mcp.removeConfig(serverToRemove.name, scope);
       persisted = true;
       setServerToRemove(null);
+      await refreshConfigInventory();
       setNotice({
         serverName: serverToRemove.name,
         text: t('mcp.action.running', { action: t('mcp.action.remove') }),
+        progress: true,
       });
-      const runtimeUpdated = await startDiscovery('reload', false, true).catch(
-        () => false,
-      );
-      if (runtimeUpdated) {
+      if (mutation.activation === 'reconciling') {
+        await mcp.waitForRuntime();
+      }
+      const nextStatus = await mcp.reload();
+      if (nextStatus) setStatus(nextStatus);
+      const activation = String(mutation.activation);
+      if (activation !== 'partial') {
         setSelectedServerName(null);
         setSelectedToolName(null);
         setSelectedResourceUri(null);
-        setNotice(null);
+        setNotice(
+          activation === 'deferred'
+            ? { text: t('mcp.runtime.deferred') }
+            : {
+                text: t('mcp.action.done', {
+                  action: t('mcp.action.remove'),
+                }),
+                success: true,
+              },
+        );
       } else {
         setNotice({
           serverName: serverToRemove.name,
@@ -765,25 +1279,19 @@ export function McpManagerPage({
     } finally {
       setBusyServer(null);
     }
-  }, [serverToRemove, settings, startDiscovery, t]);
+  }, [mcp, refreshConfigInventory, serverToRemove, t]);
 
   const openEditServer = useCallback(
     async (server: DaemonWorkspaceMcpServerStatus) => {
       if (busyServer) return;
-      const origin = configOriginValue(server);
-      if (origin !== 'user_settings' && origin !== 'workspace_settings') {
-        return;
-      }
-      const scope: McpSettingsScope =
-        origin === 'workspace_settings' ? 'workspace' : 'user';
       setBusyServer(server.name);
       setNotice(null);
       try {
-        const currentSettings = await settings.reload();
-        if (!currentSettings) {
-          throw new Error(t('mcp.add.settingsUnavailable'));
-        }
-        const storedConfig = mcpServersForScope(currentSettings, scope)[
+        const currentConfig = await mcp.loadConfig();
+        const scope = configuredMcpServerScope(currentConfig, server.name);
+        if (!scope) throw new Error(t('mcp.edit.notFound'));
+        if (mountedRef.current) setConfigInventory(currentConfig);
+        const storedConfig = mcpServersForScope(currentConfig, scope)[
           server.name
         ];
         if (
@@ -817,12 +1325,18 @@ export function McpManagerPage({
         setBusyServer(null);
       }
     },
-    [busyServer, settings, t],
+    [busyServer, mcp, t],
   );
 
   const runAction = useCallback(
     async (server: DaemonWorkspaceMcpServerStatus, action: McpServerAction) => {
       if (busyServer) return;
+      if (
+        isRuntimeServerAction(action.id) &&
+        !isUsableMcpRuntime(statusRef.current)
+      ) {
+        return;
+      }
       if (action.id === 'remove') {
         setServerToRemove(server);
         return;
@@ -831,17 +1345,29 @@ export function McpManagerPage({
         await openEditServer(server);
         return;
       }
+      if (
+        (action.id === 'enable' || action.id === 'disable') &&
+        !mcpServerEnablementScope(configInventory, server.name, action.id)
+      ) {
+        return;
+      }
       setBusyServer(server.name);
+      const deadlineAt = Date.now() + 5 * 60_000;
       setNotice({
         serverName: server.name,
         text:
           action.id === 'authenticate'
             ? oauthMessage(server.name, t)
             : t('mcp.action.running', { action: action.label }),
+        progress: true,
       });
+      let activation: string | undefined;
+      let configPersisted = false;
+      let authUrl: string | undefined;
       try {
         let detail = '';
-        let authUrl: string | undefined;
+        let operationId: string | undefined;
+        let operationDeadlineAt: string | undefined;
         let pendingAuthentication = false;
         if (action.id === 'reconnect') {
           const result = await mcp.restartServer(server.name);
@@ -870,71 +1396,98 @@ export function McpManagerPage({
             );
           }
         } else {
-          const result = await mcp.manageServer(server.name, action.id);
+          const configScope =
+            action.id === 'enable' || action.id === 'disable'
+              ? mcpServerEnablementScope(
+                  configInventory,
+                  server.name,
+                  action.id,
+                )
+              : undefined;
+          const result = await mcp.manageServer(
+            server.name,
+            action.id,
+            configScope,
+          );
           if (!mountedRef.current) return;
           authUrl = result.authUrl;
+          operationId = result.operationId;
+          operationDeadlineAt = result.deadlineAt;
+          activation = result.activation;
+          if (action.id === 'enable' || action.id === 'disable') {
+            configPersisted = true;
+            await refreshConfigInventory();
+          }
           detail = [...(result.messages ?? [])].join('\n');
+          if (result.warning) {
+            detail = detail ? `${detail}\n${result.warning}` : result.warning;
+          }
           pendingAuthentication =
             action.id === 'authenticate' && result.pending === true;
+          if (result.activation === 'reconciling') {
+            await mcp.waitForRuntime();
+          } else if (result.activation === 'deferred') {
+            detail = t('mcp.runtime.deferred');
+          } else if (result.activation === 'partial') {
+            detail = t('mcp.runtime.notUpdated');
+          }
           if (pendingAuthentication) {
             setNotice({
               serverName: server.name,
               text: oauthMessage(server.name, t, detail),
+              progress: true,
               ...(authUrl ? { authUrl } : {}),
             });
           }
         }
         let nextStatus: McpStatus | undefined;
         if (pendingAuthentication) {
-          for (let attempt = 0; attempt < 400; attempt += 1) {
-            if (!(await waitForPoll())) return;
-            const candidate = await mcp.reload();
-            if (!mountedRef.current) return;
-            if (!candidate) continue;
-            setStatus(candidate);
-            const statusError = candidate.errors?.[0];
-            if (statusError) {
-              throw new Error(
-                statusError.error ||
-                  statusError.hint ||
-                  t('mcp.oauth.statusFailed'),
-              );
-            }
-            const candidateServer = candidate.servers?.find(
-              (item) => item.name === server.name,
-            );
-            if (!candidateServer) {
-              throw new Error(t('mcp.oauth.serverRemoved'));
-            }
-            if (candidateServer.authenticationState === 'failed') {
-              throw new Error(
-                candidateServer.authenticationError ||
-                  t('mcp.oauth.authenticationFailed'),
-              );
-            }
-            if (
-              candidateServer.authenticationState === 'succeeded' ||
-              (candidateServer.authenticationState === undefined &&
-                candidateServer.mcpStatus === 'connected')
-            ) {
-              nextStatus = candidate;
-              break;
-            }
+          if (!operationId) {
+            throw new Error('MCP authentication operation id is missing');
           }
-          if (!nextStatus) throw new Error(t('mcp.oauth.timeout'));
-        } else {
+          let operation: DaemonWorkspaceRuntimeOperationStatus;
+          try {
+            operation = await mcp.operationStatus(
+              operationId,
+              MCP_OPERATION_REQUEST_TIMEOUT_MS,
+            );
+          } catch (error) {
+            setNotice({
+              serverName: server.name,
+              text: t('mcp.oauth.observationStopped', {
+                error: extractErrorDetail(error),
+              }),
+              ...(authUrl ? { authUrl } : {}),
+            });
+            return;
+          }
+          await observeAuthenticationOperation(
+            {
+              ...operation,
+              ...(operation.deadlineAt || !operationDeadlineAt
+                ? {}
+                : { deadlineAt: operationDeadlineAt }),
+              ...(operation.authUrl || !authUrl ? {} : { authUrl }),
+            },
+            { authUrl, detail },
+          );
+          return;
+        } else if (activation === 'deferred' || activation === 'partial') {
           nextStatus = await mcp.reload();
+        } else {
+          nextStatus = await mcp.loadStatus(
+            remainingPollingTimeout(deadlineAt),
+          );
           if (!mountedRef.current) return;
-          for (
-            let attempt = 0;
-            nextStatus?.discoveryState !== undefined &&
-            nextStatus.discoveryState !== 'completed' &&
-            !nextStatus.errors?.length &&
-            attempt < 40;
-            attempt += 1
+          while (
+            nextStatus !== undefined &&
+            !isCurrentMcpStatus(nextStatus) &&
+            !nextStatus.errors?.length
           ) {
-            if (!(await waitForPoll())) return;
-            const candidate = await mcp.reload();
+            if (!(await waitForPoll(deadlineAt))) return;
+            const candidate = await mcp.loadStatus(
+              remainingPollingTimeout(deadlineAt),
+            );
             if (!mountedRef.current) return;
             if (!candidate) continue;
             nextStatus = candidate;
@@ -949,7 +1502,7 @@ export function McpManagerPage({
           if (
             nextServer &&
             (nextStatus.discoveryState === undefined ||
-              nextStatus.discoveryState === 'completed')
+              isUsableMcpRuntime(nextStatus))
           ) {
             try {
               await loadServerData(nextServer);
@@ -961,20 +1514,51 @@ export function McpManagerPage({
         }
         setNotice({
           serverName: server.name,
-          text: pendingAuthentication
-            ? t('mcp.action.done', { action: action.label })
-            : action.id === 'authenticate' && detail
+          text:
+            action.id === 'authenticate' && detail
               ? oauthMessage(server.name, t, detail)
               : detail || t('mcp.action.done', { action: action.label }),
+          ...(activation === 'partial' ? { error: true } : {}),
+          ...(activation !== 'partial' && activation !== 'deferred'
+            ? { success: true }
+            : {}),
           ...(!pendingAuthentication && authUrl ? { authUrl } : {}),
         });
       } catch (error) {
+        let reportedError = error;
+        if (action.id === 'authenticate' && mountedRef.current) {
+          try {
+            const { operations } = await mcp.activeOperations(
+              MCP_OPERATION_REQUEST_TIMEOUT_MS,
+            );
+            const operation = activeMcpAuthenticationOperation(operations);
+            if (operation?.target === server.name) {
+              await observeAuthenticationOperation(operation, { authUrl });
+              return;
+            }
+          } catch (recoveryError) {
+            reportedError = recoveryError;
+          }
+          if (/timed out/i.test(extractErrorDetail(error))) {
+            setNotice({
+              serverName: server.name,
+              text: t('mcp.oauth.observationStopped', {
+                error: extractErrorDetail(error),
+              }),
+              ...(authUrl ? { authUrl } : {}),
+            });
+            return;
+          }
+        }
         if (mountedRef.current) {
           setNotice({
             serverName: server.name,
-            text: t('mcp.action.failed', {
-              error: extractErrorDetail(error),
-            }),
+            text:
+              activation === undefined && !configPersisted
+                ? t('mcp.action.failed', {
+                    error: extractErrorDetail(reportedError),
+                  })
+                : `${t('mcp.runtime.notUpdated')} ${extractErrorDetail(reportedError)}`,
             error: true,
           });
         }
@@ -982,7 +1566,17 @@ export function McpManagerPage({
         if (mountedRef.current) setBusyServer(null);
       }
     },
-    [busyServer, loadServerData, mcp, openEditServer, t, waitForPoll],
+    [
+      busyServer,
+      configInventory,
+      loadServerData,
+      mcp,
+      observeAuthenticationOperation,
+      openEditServer,
+      refreshConfigInventory,
+      t,
+      waitForPoll,
+    ],
   );
 
   const openServer = (server: DaemonWorkspaceMcpServerStatus) => {
@@ -991,7 +1585,13 @@ export function McpManagerPage({
     setSelectedToolName(null);
     setSelectedResourceUri(null);
     setNotice(null);
-    if (server.approvalState) return;
+    if (
+      !isUsableMcpRuntime(statusRef.current) ||
+      server.approvalState ||
+      server.status === 'not_started'
+    ) {
+      return;
+    }
     void loadServerData(server).catch((error: unknown) => {
       setNotice({
         serverName: server.name,
@@ -1006,6 +1606,7 @@ export function McpManagerPage({
     setSelectedServerName(null);
     setSelectedToolName(null);
     setSelectedResourceUri(null);
+    setNotice(null);
     setRefreshing(true);
     void mcp
       .reload()
@@ -1138,7 +1739,11 @@ export function McpManagerPage({
           <DialogTitle>{t('mcp.remove.title')}</DialogTitle>
           <DialogDescription>
             {t(
-              serverToRemove && sourceValue(serverToRemove) === 'workspace'
+              serverToRemove &&
+                configuredMcpServerScope(
+                  configInventory,
+                  serverToRemove.name,
+                ) === 'workspace'
                 ? 'mcp.remove.description'
                 : 'mcp.remove.description.global',
               {
@@ -1332,7 +1937,11 @@ export function McpManagerPage({
     const tools = selectedTools;
     const resources = selectedResources;
     const loadErrors = loadErrorsByServer[selectedServer.name];
-    const actions = serverActions(selectedServer, t);
+    const actions = serverActions(
+      selectedServer,
+      t,
+      configuredMcpServerScope(configInventory, selectedServer.name),
+    );
     return (
       <>
         <div className="flex w-full flex-col gap-6 pb-8">
@@ -1398,22 +2007,25 @@ export function McpManagerPage({
             </div>
 
             {notice?.serverName === selectedServer.name ? (
-              <Alert variant={notice.error ? 'destructive' : 'default'}>
-                {notice.error ? <AlertCircleIcon /> : <InfoIcon />}
-                <AlertDescription className="whitespace-pre-wrap break-words">
-                  <p>{notice.text}</p>
-                  {notice.authUrl && isHttpUrl(notice.authUrl) ? (
-                    <a
-                      className="mt-2 inline-block underline underline-offset-3"
-                      href={notice.authUrl}
-                      target="_blank"
-                      rel="noreferrer"
-                    >
-                      {t('mcp.oauth.open')}
-                    </a>
-                  ) : null}
-                </AlertDescription>
-              </Alert>
+              <ManagementNotice
+                tone={noticeTone}
+                noticeKey={notice.text}
+                closeLabel={t('common.close')}
+                onDismiss={() => setNotice(null)}
+                className="whitespace-pre-wrap break-words"
+              >
+                <p>{notice.text}</p>
+                {notice.authUrl && isHttpUrl(notice.authUrl) ? (
+                  <a
+                    className="mt-2 inline-block underline underline-offset-3"
+                    href={notice.authUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    {t('mcp.oauth.open')}
+                  </a>
+                ) : null}
+              </ManagementNotice>
             ) : null}
 
             <Tabs
@@ -1602,6 +2214,11 @@ export function McpManagerPage({
             <p className="mt-1 text-sm text-muted-foreground tabular-nums">
               {t('mcp.servers', { count: servers.length })}
             </p>
+            {status.source && status.source !== 'live' ? (
+              <Badge variant="secondary" className="mt-2">
+                {t(`mcp.runtimeSource.${status.source}`)}
+              </Badge>
+            ) : null}
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -1634,13 +2251,30 @@ export function McpManagerPage({
           </div>
         </div>
 
-        {initializing && connectingCount === 0 ? (
-          <Alert>
-            <RefreshCwIcon className="animate-spin" />
-            <AlertTitle>{t('mcp.discovery.initializing')}</AlertTitle>
-            <AlertDescription>{t('mcp.startingNote')}</AlertDescription>
+        {status.runtimeState && status.runtimeState !== 'ready' ? (
+          <Alert
+            variant={
+              status.runtimeState === 'error' ? 'destructive' : 'default'
+            }
+            data-testid="mcp-runtime-state"
+            data-runtime-state={status.runtimeState}
+          >
+            {status.runtimeState === 'starting' ? (
+              <RefreshCwIcon className="animate-spin" />
+            ) : status.runtimeState === 'error' ? (
+              <AlertCircleIcon />
+            ) : (
+              <InfoIcon />
+            )}
+            <AlertTitle>
+              {t(`mcp.runtimeState.${status.runtimeState}`)}
+            </AlertTitle>
+            <AlertDescription>
+              {t(`mcp.runtimeState.${status.runtimeState}.description`)}
+            </AlertDescription>
           </Alert>
-        ) : connectingCount > 0 ? (
+        ) : null}
+        {connectingCount > 0 ? (
           <Alert>
             <RefreshCwIcon />
             <AlertTitle>
@@ -1649,11 +2283,34 @@ export function McpManagerPage({
             <AlertDescription>{t('mcp.startingNote')}</AlertDescription>
           </Alert>
         ) : null}
-        {notice && !notice.serverName ? (
-          <Alert variant={notice.error ? 'destructive' : 'default'}>
-            <AlertCircleIcon />
-            <AlertDescription>{notice.text}</AlertDescription>
+        {status.source && status.source !== 'live' ? (
+          <Alert>
+            <InfoIcon />
+            <AlertDescription>
+              {t(`mcp.runtimeSource.${status.source}.description`)}
+            </AlertDescription>
           </Alert>
+        ) : null}
+        {notice && !notice.serverName ? (
+          <ManagementNotice
+            tone={noticeTone}
+            noticeKey={notice.text}
+            closeLabel={t('common.close')}
+            onDismiss={() => setNotice(null)}
+            className="whitespace-pre-wrap break-words"
+          >
+            <p>{notice.text}</p>
+            {notice.authUrl && isHttpUrl(notice.authUrl) ? (
+              <a
+                className="mt-2 inline-block underline underline-offset-3"
+                href={notice.authUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                {t('mcp.oauth.open')}
+              </a>
+            ) : null}
+          </ManagementNotice>
         ) : null}
         {(status.errors ?? []).map((error, index) => (
           <Alert key={`${error.kind}-${index}`} variant="destructive">

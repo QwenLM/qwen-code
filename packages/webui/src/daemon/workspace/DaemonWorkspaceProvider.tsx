@@ -165,7 +165,7 @@ export function DaemonWorkspaceProvider({
     };
   }, [client, getCapabilities]);
 
-  resolvedCwdRef.current = capabilities?.workspaceCwd ?? workspaceCwd;
+  resolvedCwdRef.current = workspaceCwd ?? capabilities?.workspaceCwd;
 
   const workspaceActions = useMemo<DaemonWorkspaceActions>(
     () =>
@@ -184,7 +184,7 @@ export function DaemonWorkspaceProvider({
       client,
       token,
       baseUrl,
-      workspaceCwd: capabilities?.workspaceCwd ?? workspaceCwd,
+      workspaceCwd: workspaceCwd ?? capabilities?.workspaceCwd,
       status,
       error,
       capabilities,
@@ -222,9 +222,28 @@ export function useDaemonWorkspace(): DaemonWorkspaceContextValue {
   return context;
 }
 
-export function useDaemonWorkspaceActions(): DaemonWorkspaceActions {
+export function useDaemonWorkspaceActions(
+  workspaceCwd?: string,
+): DaemonWorkspaceActions {
   const context = useDaemonWorkspace();
-  return context.actions;
+  return useMemo(
+    () =>
+      workspaceCwd === undefined
+        ? context.actions
+        : createDaemonWorkspaceActions({
+            getClient: () => context.client,
+            getWorkspaceCwd: () => workspaceCwd,
+            baseUrl: context.baseUrl,
+            token: context.token,
+          }),
+    [
+      context.actions,
+      context.baseUrl,
+      context.client,
+      context.token,
+      workspaceCwd,
+    ],
+  );
 }
 
 /**

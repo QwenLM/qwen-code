@@ -361,6 +361,7 @@ function getTelemetryConfig(
     cwd,
     model: '',
     debugMode: false,
+    chatRecording: false,
   });
   return config;
 }

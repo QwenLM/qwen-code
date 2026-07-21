@@ -72,6 +72,7 @@ vi.mock('./ChatPane', () => ({
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
         data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
+        data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
       >
         <span data-testid="pane-title">{props.title}</span>
         {props.onToggleMaximize && (
@@ -201,6 +202,19 @@ describe('SplitView', () => {
         .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
         ?.getAttribute('data-pane-restart-sse'),
     ).toBe('true');
+  });
+
+  it('passes the host slash command handler to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      onSlashCommand: vi.fn(),
+    });
+
+    expect(
+      panes().every(
+        (pane) => pane.getAttribute('data-slash-handler') === 'true',
+      ),
+    ).toBe(true);
   });
 
   it('seeds with the current session when no session ids are given', () => {
@@ -729,7 +743,13 @@ describe('SplitView', () => {
     workspaceCwd: '/w',
     workspaces: [
       { id: 'w0', cwd: '/w', primary: true, trusted: true },
-      { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      {
+        id: 'w1',
+        cwd: '/wsB',
+        displayName: 'Payments API',
+        primary: false,
+        trusted: true,
+      },
     ],
   };
 
@@ -745,10 +765,10 @@ describe('SplitView', () => {
     const options = pickerOptions();
     // Primary sessions are still listed…
     expect(options.some((o) => o.includes('Two'))).toBe(true);
-    // …plus the non-primary session, tagged with its workspace basename.
-    expect(options.some((o) => o.includes('Beta') && o.includes('wsB'))).toBe(
-      true,
-    );
+    // …plus the non-primary session, tagged with its workspace display name.
+    expect(
+      options.some((o) => o.includes('Beta') && o.includes('Payments API')),
+    ).toBe(true);
     // Primary-workspace sessions show their own basename too, not a "Primary"
     // tag — the redundant label was removed from the picker.
     expect(options.some((o) => o.includes('Primary'))).toBe(false);

@@ -71,6 +71,7 @@ async function createMinimalConfig(): Promise<Config> {
     targetDir: cwd,
     cwd,
     debugMode: false,
+    chatRecording: false,
     mcpServers,
     pendingMcpServers: getPendingGatedMcpServers(mcpServers, cwd),
     fileDiscoveryService: fileService,

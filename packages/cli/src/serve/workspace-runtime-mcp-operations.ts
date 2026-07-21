@@ -7,6 +7,7 @@
 import * as crypto from 'node:crypto';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import type { WorkspaceRuntime } from './workspace-registry.js';
+import { errorMessage as message } from './error-message.js';
 import type { WorkspaceRequestContext } from './workspace-service/types.js';
 
 const MCP_POLL_INTERVAL_MS = 250;
@@ -44,10 +45,6 @@ function requestContext(
   return { route, workspaceCwd: runtime.workspaceCwd };
 }
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -55,7 +52,11 @@ function wait(ms: number): Promise<void> {
   });
 }
 
-class WorkspaceRuntimeStillStartingError extends Error {}
+class WorkspaceRuntimeStillStartingError extends Error {
+  constructor() {
+    super('Workspace runtime is still starting');
+  }
+}
 
 async function waitUntilDeadline<T>(
   operation: Promise<T>,
@@ -80,14 +81,24 @@ async function waitUntilDeadline<T>(
   }
 }
 
+// ACP OAuth uses a process-global callback listener, so authentication must be
+// serialized across every workspace runtime in the daemon.
 let activeMcpAuthentication:
   | {
       owner: object;
       operationId: string;
-      workspaceCwd: string;
-      serverName: string;
     }
   | undefined;
+
+export class WorkspaceRuntimeMcpOperationConflictError extends Error {
+  constructor(
+    readonly code: 'mcp_operation_conflict' | 'mcp_authentication_lane_busy',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'WorkspaceRuntimeMcpOperationConflictError';
+  }
+}
 
 export class WorkspaceRuntimeMcpOperations {
   private disposed = false;
@@ -149,15 +160,15 @@ export class WorkspaceRuntimeMcpOperations {
     this.pruneOperations();
     const activeOperationId = this.activeOperationByTarget.get(serverName);
     if (activeOperationId) {
-      throw new Error(
+      throw new WorkspaceRuntimeMcpOperationConflictError(
+        'mcp_operation_conflict',
         `MCP server "${serverName}" already has active operation "${activeOperationId}"`,
       );
     }
     if (action === 'authenticate' && activeMcpAuthentication) {
-      throw new Error(
-        `MCP authentication operation "${activeMcpAuthentication.operationId}" ` +
-          `is already active for "${activeMcpAuthentication.serverName}" ` +
-          `in workspace "${activeMcpAuthentication.workspaceCwd}"`,
+      throw new WorkspaceRuntimeMcpOperationConflictError(
+        'mcp_authentication_lane_busy',
+        'Another MCP authentication is already in progress in this daemon',
       );
     }
     const operationId = crypto.randomUUID();
@@ -166,8 +177,6 @@ export class WorkspaceRuntimeMcpOperations {
       activeMcpAuthentication = {
         owner: this.authenticationLaneOwner,
         operationId,
-        workspaceCwd: this.runtime.workspaceCwd,
-        serverName,
       };
       let releaseBarrier!: () => void;
       const barrier = new Promise<void>((resolve) => {
@@ -289,6 +298,20 @@ export class WorkspaceRuntimeMcpOperations {
     ) {
       activeMcpAuthentication = undefined;
     }
+    if (this.authenticationBarrier) {
+      const barrier = this.authenticationBarrier;
+      this.authenticationBarrier = undefined;
+      barrier.release();
+    }
+  }
+
+  completeDisposeAfterBridgeShutdown(): void {
+    if (
+      this.disposed &&
+      activeMcpAuthentication?.owner === this.authenticationLaneOwner
+    ) {
+      activeMcpAuthentication = undefined;
+    }
   }
 
   private pruneOperations(): void {
@@ -341,7 +364,8 @@ export class WorkspaceRuntimeMcpOperations {
     }
     if (
       activeMcpAuthentication?.owner === this.authenticationLaneOwner &&
-      activeMcpAuthentication.operationId === operationId
+      activeMcpAuthentication.operationId === operationId &&
+      (!this.disposed || !this.runtime.bridge.isChannelLive())
     ) {
       activeMcpAuthentication = undefined;
     }
@@ -515,6 +539,7 @@ export class WorkspaceRuntimeMcpOperations {
     operationEpoch?: number,
   ): Promise<void> {
     while (
+      !this.disposed &&
       this.runtime.bridge.isChannelLive() &&
       (operationEpoch === undefined ||
         this.dependencies.runtimeEpoch() === operationEpoch)

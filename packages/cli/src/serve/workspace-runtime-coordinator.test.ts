@@ -1397,6 +1397,43 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(h.getWorkspaceSkillsStatus).not.toHaveBeenCalled();
   });
 
+  it('preserves JSON-RPC messages in capability and operation errors', async () => {
+    const h = makeRuntime();
+    h.setLive(true);
+    h.invokeWorkspaceCommand.mockRejectedValueOnce({
+      code: -32603,
+      message: 'Skill refresh failed',
+    });
+    const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
+
+    expect(coordinator.reconcileSkillsConfiguration()).toBe('reconciling');
+    await vi.waitFor(() => {
+      expect(coordinator.status().capabilities.skills).toMatchObject({
+        state: 'error',
+        error: {
+          code: 'skills_reconcile_failed',
+          message: 'Skill refresh failed',
+        },
+      });
+    });
+
+    let operationId: string | undefined;
+    await expect(
+      coordinator.runMcpOperation('docs', 'enable', async (id) => {
+        operationId = id;
+        throw { code: -32603, message: 'MCP mutation failed' };
+      }),
+    ).rejects.toEqual({ code: -32603, message: 'MCP mutation failed' });
+    expect(operationId).toBeDefined();
+    expect(coordinator.operationStatus(operationId!)).toMatchObject({
+      state: 'failed',
+      error: {
+        code: 'mcp_operation_failed',
+        message: 'MCP mutation failed',
+      },
+    });
+  });
+
   it('bounds retained terminal operation history', async () => {
     const h = makeRuntime();
     const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
@@ -1483,27 +1520,40 @@ describe('WorkspaceRuntimeCoordinator', () => {
   });
 
   it('serializes OAuth authentication across workspace runtimes', async () => {
-    const first = new WorkspaceRuntimeCoordinator(
-      makeRuntime('/workspace-a').runtime,
-    );
+    const firstRuntime = makeRuntime('/workspace-a');
+    firstRuntime.setLive(true);
+    const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
     const second = new WorkspaceRuntimeCoordinator(
       makeRuntime('/workspace-b').runtime,
     );
-
-    await first.runMcpOperation('docs', 'authenticate', async () => ({
-      pending: true,
-    }));
-    await expect(
-      second.runMcpOperation('calendar', 'authenticate', async () => ({
+    try {
+      await first.runMcpOperation('docs', 'authenticate', async () => ({
         pending: true,
-      })),
-    ).rejects.toThrow('already active');
+      }));
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({
+          pending: true,
+        })),
+      ).rejects.toMatchObject({
+        code: 'mcp_authentication_lane_busy',
+        message:
+          'Another MCP authentication is already in progress in this daemon',
+      });
 
-    first.dispose();
-    await expect(
-      second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-    ).resolves.toMatchObject({ operationId: expect.any(String) });
-    second.dispose();
+      first.dispose();
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({})),
+      ).rejects.toMatchObject({ code: 'mcp_authentication_lane_busy' });
+
+      firstRuntime.setLive(false);
+      first.completeDisposeAfterBridgeShutdown();
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({})),
+      ).resolves.toMatchObject({ operationId: expect.any(String) });
+    } finally {
+      first.dispose();
+      second.dispose();
+    }
   });
 
   it('releases the global OAuth lane after the owning runtime exits', async () => {
@@ -1513,41 +1563,42 @@ describe('WorkspaceRuntimeCoordinator', () => {
     const second = new WorkspaceRuntimeCoordinator(
       makeRuntime('/workspace-b').runtime,
     );
-    const operation = await first.runMcpOperation(
-      'docs',
-      'authenticate',
-      async () => ({ pending: true }),
-    );
+    try {
+      const operation = await first.runMcpOperation(
+        'docs',
+        'authenticate',
+        async () => ({ pending: true }),
+      );
 
-    firstRuntime.setLive(false);
-    await vi.waitFor(() => {
-      expect(first.operationStatus(operation.operationId)).toMatchObject({
-        state: 'failed',
-        error: { code: 'mcp_authentication_runtime_unavailable' },
+      firstRuntime.setLive(false);
+      await vi.waitFor(() => {
+        expect(first.operationStatus(operation.operationId)).toMatchObject({
+          state: 'failed',
+          error: { code: 'mcp_authentication_runtime_unavailable' },
+        });
       });
-    });
-    await expect(
-      second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-    ).resolves.toMatchObject({ operationId: expect.any(String) });
-
-    first.dispose();
-    second.dispose();
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({})),
+      ).resolves.toMatchObject({ operationId: expect.any(String) });
+    } finally {
+      first.dispose();
+      second.dispose();
+    }
   });
 
   it('keeps the OAuth lane when entry fails while ACP still owns authentication', async () => {
     vi.useFakeTimers();
+    const firstRuntime = makeRuntime('/workspace-a');
+    firstRuntime.setLive(true);
+    let physicalPending = true;
+    Object.assign(firstRuntime.runtime.bridge, {
+      isWorkspaceMcpAuthenticationPending: () => physicalPending,
+    });
+    const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
+    const second = new WorkspaceRuntimeCoordinator(
+      makeRuntime('/workspace-b').runtime,
+    );
     try {
-      const firstRuntime = makeRuntime('/workspace-a');
-      firstRuntime.setLive(true);
-      let physicalPending = true;
-      Object.assign(firstRuntime.runtime.bridge, {
-        isWorkspaceMcpAuthenticationPending: () => physicalPending,
-      });
-      const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
-      const second = new WorkspaceRuntimeCoordinator(
-        makeRuntime('/workspace-b').runtime,
-      );
-
       await expect(
         first.runMcpOperation('docs', 'authenticate', async () => {
           throw new Error('OAuth URL start timed out');
@@ -1556,49 +1607,49 @@ describe('WorkspaceRuntimeCoordinator', () => {
       await vi.advanceTimersByTimeAsync(0);
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       physicalPending = false;
       await vi.advanceTimersByTimeAsync(250);
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
       ).resolves.toMatchObject({ operationId: expect.any(String) });
+    } finally {
       first.dispose();
       second.dispose();
-    } finally {
       vi.useRealTimers();
     }
   });
 
   it('keeps timed-out OAuth non-terminal until ACP releases the provider', async () => {
     vi.useFakeTimers();
+    const firstRuntime = makeRuntime('/workspace-a');
+    firstRuntime.setLive(true);
+    let pending = true;
+    firstRuntime.getWorkspaceMcpStatus.mockImplementation(async () => ({
+      v: 1,
+      workspaceCwd: '/workspace-a',
+      initialized: true,
+      source: 'live',
+      runtimeEpoch: 1,
+      discoveryState: 'completed',
+      servers: [
+        {
+          kind: 'mcp_server',
+          name: 'docs',
+          status: 'ok',
+          mcpStatus: 'connected',
+          transport: 'stdio',
+          disabled: false,
+          authenticationState: pending ? 'pending' : 'succeeded',
+        },
+      ],
+    }));
+    const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
+    const second = new WorkspaceRuntimeCoordinator(
+      makeRuntime('/workspace-b').runtime,
+    );
     try {
-      const firstRuntime = makeRuntime('/workspace-a');
-      firstRuntime.setLive(true);
-      let pending = true;
-      firstRuntime.getWorkspaceMcpStatus.mockImplementation(async () => ({
-        v: 1,
-        workspaceCwd: '/workspace-a',
-        initialized: true,
-        source: 'live',
-        runtimeEpoch: 1,
-        discoveryState: 'completed',
-        servers: [
-          {
-            kind: 'mcp_server',
-            name: 'docs',
-            status: 'ok',
-            mcpStatus: 'connected',
-            transport: 'stdio',
-            disabled: false,
-            authenticationState: pending ? 'pending' : 'succeeded',
-          },
-        ],
-      }));
-      const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
-      const second = new WorkspaceRuntimeCoordinator(
-        makeRuntime('/workspace-b').runtime,
-      );
       const operation = await first.runMcpOperation(
         'docs',
         'authenticate',
@@ -1611,7 +1662,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       });
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       pending = false;
       await vi.advanceTimersByTimeAsync(250);
@@ -1624,9 +1675,9 @@ describe('WorkspaceRuntimeCoordinator', () => {
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
       ).resolves.toMatchObject({ operationId: expect.any(String) });
+    } finally {
       first.dispose();
       second.dispose();
-    } finally {
       vi.useRealTimers();
     }
   });
@@ -1639,30 +1690,33 @@ describe('WorkspaceRuntimeCoordinator', () => {
       isWorkspaceMcpAuthenticationPending: () => physicalPending,
     });
     const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
-    const authentication = await coordinator.runMcpOperation(
-      'docs',
-      'authenticate',
-      async () => ({ pending: true, runtimeEpoch: 1 }),
-    );
+    try {
+      const authentication = await coordinator.runMcpOperation(
+        'docs',
+        'authenticate',
+        async () => ({ pending: true, runtimeEpoch: 1 }),
+      );
 
-    expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(h.reloadWorkspaceMcp).not.toHaveBeenCalled();
+      expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(h.reloadWorkspaceMcp).not.toHaveBeenCalled();
 
-    physicalPending = false;
-    await vi.waitFor(
-      () => {
-        expect(h.reloadWorkspaceMcp).toHaveBeenCalledOnce();
-        expect(
-          coordinator.operationStatus(authentication.operationId),
-        ).toMatchObject({
-          state: 'failed',
-          error: { code: 'mcp_server_not_found' },
-        });
-      },
-      { timeout: 2000 },
-    );
-    coordinator.dispose();
+      physicalPending = false;
+      await vi.waitFor(
+        () => {
+          expect(h.reloadWorkspaceMcp).toHaveBeenCalledOnce();
+          expect(
+            coordinator.operationStatus(authentication.operationId),
+          ).toMatchObject({
+            state: 'failed',
+            error: { code: 'mcp_server_not_found' },
+          });
+        },
+        { timeout: 2000 },
+      );
+    } finally {
+      coordinator.dispose();
+    }
   });
 
   it('runs a queued MCP reconciliation before a later OAuth operation', async () => {
@@ -1674,68 +1728,70 @@ describe('WorkspaceRuntimeCoordinator', () => {
       return { accepted: true };
     });
     const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
-
-    expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
-    await Promise.resolve();
-    await Promise.resolve();
-    const authentication = coordinator.runMcpOperation(
-      'docs',
-      'authenticate',
-      async () => {
-        calls.push('authenticate');
-        return {};
-      },
-    );
-
-    let timeout: ReturnType<typeof setTimeout> | undefined;
     try {
-      await expect(
-        Promise.race([
-          authentication,
-          new Promise<never>((_resolve, reject) => {
-            timeout = setTimeout(
-              () => reject(new Error('MCP physical lane deadlocked')),
-              500,
-            );
-          }),
-        ]),
-      ).resolves.toMatchObject({ operationId: expect.any(String) });
+      expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
+      await Promise.resolve();
+      await Promise.resolve();
+      const authentication = coordinator.runMcpOperation(
+        'docs',
+        'authenticate',
+        async () => {
+          calls.push('authenticate');
+          return {};
+        },
+      );
+
+      let timeout: ReturnType<typeof setTimeout> | undefined;
+      try {
+        await expect(
+          Promise.race([
+            authentication,
+            new Promise<never>((_resolve, reject) => {
+              timeout = setTimeout(
+                () => reject(new Error('MCP physical lane deadlocked')),
+                500,
+              );
+            }),
+          ]),
+        ).resolves.toMatchObject({ operationId: expect.any(String) });
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+      expect(calls).toEqual(['reload', 'authenticate']);
     } finally {
-      if (timeout) clearTimeout(timeout);
+      coordinator.dispose();
     }
-    expect(calls).toEqual(['reload', 'authenticate']);
-    coordinator.dispose();
   });
 
   it('keeps the OAuth lane after the entry deadline until the physical request and provider settle', async () => {
     vi.useFakeTimers();
+    const firstRuntime = makeRuntime('/workspace-a');
+    firstRuntime.setLive(true);
+    let pending = true;
+    firstRuntime.getWorkspaceMcpStatus.mockImplementation(async () => ({
+      v: 1,
+      workspaceCwd: '/workspace-a',
+      initialized: true,
+      source: 'live',
+      runtimeEpoch: 1,
+      discoveryState: 'completed',
+      servers: [
+        {
+          kind: 'mcp_server',
+          name: 'docs',
+          status: 'ok',
+          mcpStatus: 'connected',
+          transport: 'stdio',
+          disabled: false,
+          authenticationState: pending ? 'pending' : 'succeeded',
+        },
+      ],
+    }));
+    const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
+    const second = new WorkspaceRuntimeCoordinator(
+      makeRuntime('/workspace-b').runtime,
+    );
     try {
-      const firstRuntime = makeRuntime('/workspace-a');
-      firstRuntime.setLive(true);
-      let pending = true;
-      firstRuntime.getWorkspaceMcpStatus.mockImplementation(async () => ({
-        v: 1,
-        workspaceCwd: '/workspace-a',
-        initialized: true,
-        source: 'live',
-        runtimeEpoch: 1,
-        discoveryState: 'completed',
-        servers: [
-          {
-            kind: 'mcp_server',
-            name: 'docs',
-            status: 'ok',
-            mcpStatus: 'connected',
-            transport: 'stdio',
-            disabled: false,
-            authenticationState: pending ? 'pending' : 'succeeded',
-          },
-        ],
-      }));
-      const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
-      const second = new WorkspaceRuntimeCoordinator(
-        makeRuntime('/workspace-b').runtime,
-      );
       let operationId: string | undefined;
       let finishPhysicalRequest!: (value: {
         pending: boolean;
@@ -1766,7 +1822,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       });
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       finishPhysicalRequest({ pending: true, runtimeEpoch: 1 });
       await vi.advanceTimersByTimeAsync(0);
@@ -1775,7 +1831,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
       });
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
-      ).rejects.toThrow('already active');
+      ).rejects.toThrow('already in progress');
 
       pending = false;
       await vi.advanceTimersByTimeAsync(250);
@@ -1788,19 +1844,19 @@ describe('WorkspaceRuntimeCoordinator', () => {
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
       ).resolves.toMatchObject({ operationId: expect.any(String) });
+    } finally {
       first.dispose();
       second.dispose();
-    } finally {
       vi.useRealTimers();
     }
   });
 
   it('does not let a replacement runtime epoch complete an old OAuth operation', async () => {
     vi.useFakeTimers();
+    const h = makeRuntime();
+    h.setLive(true);
+    const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
     try {
-      const h = makeRuntime();
-      h.setLive(true);
-      const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
       const operation = await coordinator.runMcpOperation(
         'docs',
         'authenticate',
@@ -1815,8 +1871,8 @@ describe('WorkspaceRuntimeCoordinator', () => {
         state: 'failed',
         error: { code: 'mcp_authentication_runtime_unavailable' },
       });
-      coordinator.dispose();
     } finally {
+      coordinator.dispose();
       vi.useRealTimers();
     }
   });
@@ -1924,6 +1980,81 @@ describe('WorkspaceRuntimeCoordinator', () => {
       capabilities: { mcp: { state: 'ready' } },
     });
     expect(h.reloadWorkspaceMcp).toHaveBeenCalledTimes(2);
+  });
+
+  it('releases the local barrier on dispose but holds the OAuth lane until bridge shutdown', async () => {
+    const h = makeRuntime();
+    h.setLive(true);
+    const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
+    const second = new WorkspaceRuntimeCoordinator(
+      makeRuntime('/workspace-b').runtime,
+    );
+    try {
+      await coordinator.runMcpOperation('docs', 'authenticate', async () => ({
+        pending: true,
+      }));
+      expect(coordinator.hasActiveWork()).toBe(true);
+
+      const queued = coordinator.runMcpRuntimeMutation(async () => ({}));
+      coordinator.dispose();
+
+      expect(coordinator.hasActiveWork()).toBe(false);
+      await expect(queued).rejects.toThrow('Workspace runtime was disposed');
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({})),
+      ).rejects.toMatchObject({ code: 'mcp_authentication_lane_busy' });
+
+      h.setLive(false);
+      coordinator.completeDisposeAfterBridgeShutdown();
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({})),
+      ).resolves.toMatchObject({ operationId: expect.any(String) });
+    } finally {
+      coordinator.dispose();
+      second.dispose();
+    }
+  });
+
+  it('does not deadlock when epoch flips during a physical lane reconciliation', async () => {
+    const h = makeRuntime();
+    h.setLive(true);
+    let finishMcpStatus!: (value: ServeWorkspaceMcpStatus) => void;
+    h.getWorkspaceMcpStatus.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishMcpStatus = resolve;
+        }),
+    );
+    const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
+
+    expect(coordinator.reconcileMcpConfiguration()).toBe('reconciling');
+    await vi.waitFor(() =>
+      expect(h.getWorkspaceMcpStatus).toHaveBeenCalledOnce(),
+    );
+
+    // Flip the epoch while the physical lane is blocked in prepareMcp.
+    // Before the fix, resumeCapabilityInBackground awaited inside the
+    // lane re-acquired the same lane → circular wait → permanent hang.
+    h.setLive(false);
+    h.setLive(true);
+    finishMcpStatus({
+      v: 1,
+      workspaceCwd: '/workspace',
+      initialized: true,
+      source: 'live',
+      runtimeEpoch: 1,
+      discoveryState: 'completed',
+      servers: [],
+    });
+
+    // The reconciliation must settle (not hang).
+    await vi.waitFor(
+      () => {
+        const state = coordinator.status().capabilities.mcp?.state;
+        expect(state).not.toBe('starting');
+      },
+      { timeout: 5000 },
+    );
   });
 
   it('is owned by the workspace runtime and stops accepting work after dispose', async () => {

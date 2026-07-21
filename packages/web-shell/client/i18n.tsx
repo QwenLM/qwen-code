@@ -48,8 +48,22 @@ const EN: Messages = {
   'gitDiff.expand': (v) => `Show changes for ${v?.path ?? 'file'}`,
   'gitDiff.collapse': (v) => `Hide changes for ${v?.path ?? 'file'}`,
   'worktree.welcomeTitle': 'Worktree isolated session',
-  'worktree.welcomeDesc':
-    'Changes are made in a separate copy of the repo and won’t affect your main branch',
+  'worktree.toggleHint': 'Isolated copy · main branch untouched',
+  'worktree.welcomeDesc': 'Changes happen in an isolated copy',
+  'worktree.cancel': 'Cancel worktree isolation',
+  'gitLog.title': 'History',
+  'gitLog.subtitle': (v) => `${v?.count ?? 0} commits`,
+  'gitLog.loading': 'Loading history…',
+  'gitLog.empty': 'No commits yet',
+  'gitLog.unavailable': 'Git is not available for this workspace',
+  'gitLog.error': 'Failed to load history',
+  'gitLog.loadMore': 'Load more',
+  'gitLog.loadingMore': 'Loading…',
+  'gitLog.files': (v) =>
+    `${v?.count ?? 0} files · +${v?.added ?? 0} −${v?.removed ?? 0}`,
+  'gitLog.detailError': 'Failed to load commit details',
+  'gitLog.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
+  'gitLog.copySha': (v) => `Copy commit ${v?.sha ?? ''}`,
   'workspace.paneLabel': (v) => `Workspace: ${v?.name ?? ''}`,
   'about.auth': 'Auth',
   'about.baseUrl': 'Base URL',
@@ -291,6 +305,8 @@ const EN: Messages = {
   'common.invalid': 'invalid',
   'common.loading': 'Loading...',
   'common.retry': 'Try again',
+  'management.runtime.initializing': 'Service is initializing. Please wait…',
+  'management.runtime.failed': 'Failed to initialize the workspace service.',
   'common.save': 'save',
   'common.navigate': '↑↓ to navigate',
   'common.next': 'next',
@@ -783,6 +799,7 @@ const EN: Messages = {
   'scheduledTasks.reference.skill': 'Skills',
   'scheduledTasks.reference.mcp': 'MCP',
   'scheduledTasks.referencePicker': 'Reference picker',
+  'scheduledTasks.reference.remove': 'Remove',
   'scheduledTasks.reference.loading': 'Loading…',
   'scheduledTasks.reference.empty': 'No available items.',
   'scheduledTasks.frequency': 'Frequency',
@@ -875,8 +892,6 @@ const EN: Messages = {
   'sidebar.newChat': 'New chat',
   'sidebar.newTask': 'New task',
   'sidebar.newWorktreeTask': 'New worktree task',
-  'sidebar.worktreeDescription':
-    'Work in an isolated copy — changes stay separate from the main branch',
   'sidebar.plugins': 'Plugins',
   'sidebar.project': 'Project',
   'sidebar.pinnedSessions': 'Pinned',
@@ -888,6 +903,9 @@ const EN: Messages = {
   'sidebar.addWorkspace': 'Add workspace',
   'sidebar.addWorkspaceTitle': 'Add Workspace',
   'sidebar.addWorkspacePath': 'Directory path',
+  'sidebar.addWorkspaceDisplayName': 'Display name (optional)',
+  'sidebar.addWorkspaceDisplayNameHint':
+    'Shown in Web Shell; the directory path remains the workspace identity.',
   'sidebar.addWorkspaceRegister': 'Register',
   'sidebar.addWorkspaceCancel': 'Cancel',
   'sidebar.addWorkspaceError': 'Failed to add workspace',
@@ -1106,12 +1124,15 @@ const EN: Messages = {
     'No active session yet. Send your first message before using this command.',
   'localCommand.diffNoWorkspace':
     'No workspace is available yet to show changes for.',
+  'localCommand.logNoWorkspace':
+    'No workspace is available yet to show history for.',
   'local.agents': 'Manage subagents',
   'local.bug': 'Submit a bug report',
   'local.compress': 'Compress the context into a summary',
   'local.compressFast': 'Fast context compression without AI',
   'local.config': 'Get or set any setting by dot-path key',
   'local.diff': 'Show working-tree change stats versus HEAD',
+  'local.log': 'Show commit history for the workspace',
   'local.directory': 'Manage workspace directories',
   'local.docs': 'Open the full Qwen Code documentation',
   'local.doctor': 'Run installation and environment diagnostics',
@@ -1275,17 +1296,39 @@ const EN: Messages = {
     }: ${v?.error ?? 'Unknown error'}`,
   'extensions.manage.agents': 'Agents:',
   'extensions.manage.actions': 'Extension actions',
+  'extensions.manage.activationDeferred':
+    'Runtime activation is deferred until this workspace runtime starts.',
+  'extensions.manage.activationPartial':
+    'Runtime activation was only partially applied.',
   'extensions.manage.add': 'Add Extension',
   'extensions.manage.checkingUpdates': 'Checking for updates...',
   'extensions.manage.checkUpdates': 'Check for updates',
   'extensions.manage.commands': 'Commands:',
+  'extensions.manage.completedWithWarnings': (v) =>
+    `Extension change was saved with runtime warnings: ${v?.warning ?? ''}`,
   'extensions.manage.contextFiles': 'Context files:',
   'extensions.manage.count': (v) => `${v?.count ?? 0} extensions installed`,
+  'extensions.manage.setting.disabled': 'Disabled',
+  'extensions.manage.setting.default': 'Default',
+  'extensions.manage.setting.enabled': 'Enabled',
+  'extensions.manage.setting.unknown': 'Unavailable',
+  'extensions.manage.setting.unavailableDescription':
+    'The service did not return scoped extension settings. Restart qwen serve and try again.',
+  'extensions.manage.userSetting': 'Global setting',
+  'extensions.manage.userSettingDescription':
+    'Applies to your workspaces unless a workspace setting overrides it.',
+  'extensions.manage.workspaceSetting': 'Workspace setting',
+  'extensions.manage.workspaceSettingDescription':
+    'Applies only to the current workspace.',
   'extensions.manage.disable': 'Disable Extension',
   'extensions.manage.disabled': (v) =>
     `Extension "${v?.name ?? 'extension'}" disabled.`,
   'extensions.manage.disabling': (v) =>
     `Disabling extension "${v?.name ?? 'extension'}"…`,
+  'extensions.manage.inherited': (v) =>
+    `Extension "${v?.name ?? 'extension'}" now uses the global setting.`,
+  'extensions.manage.inheriting': (v) =>
+    `Resetting extension "${v?.name ?? 'extension'}" to the global setting…`,
   'extensions.manage.empty': 'No extensions installed.',
   'extensions.manage.emptyAgents': 'This extension has no agents.',
   'extensions.manage.emptyCommands': 'This extension has no commands.',
@@ -1299,6 +1342,8 @@ const EN: Messages = {
     `Extension "${v?.name ?? 'extension'}" enabled.`,
   'extensions.manage.enabling': (v) =>
     `Enabling extension "${v?.name ?? 'extension'}"…`,
+  'extensions.manage.followupRefreshFailed': (v) =>
+    `Follow-up refresh failed: ${v?.error ?? 'unknown error'}.`,
   'extensions.manage.install': 'Install',
   'extensions.manage.installDescription':
     'Enter a GitHub, Git, or npm extension source.',
@@ -1315,10 +1360,16 @@ const EN: Messages = {
   'extensions.manage.origin': 'Origin:',
   'extensions.manage.overview': 'Overview',
   'extensions.manage.path': 'Path:',
+  'extensions.manage.phase.committing': (v) =>
+    `Saving the extension change for "${v?.name ?? 'extension'}"…`,
+  'extensions.manage.phase.preparing': (v) =>
+    `Preparing extension "${v?.name ?? 'extension'}"…`,
+  'extensions.manage.phase.reconciling': (v) =>
+    `Reconciling extension "${v?.name ?? 'extension'}" with workspace runtimes…`,
   'extensions.manage.queued': (v) =>
     `Extension action queued for "${v?.name ?? 'extension'}".`,
   'extensions.manage.refreshFailed': (v) =>
-    `Extension action succeeded, but session refresh failed${
+    `Extension action succeeded, but workspace runtime refresh failed${
       v?.error ? `: ${v.error}` : '.'
     }`,
   'extensions.manage.restartRequired': 'updated; restart required',
@@ -1402,6 +1453,10 @@ const EN: Messages = {
     `Starting OAuth authentication for MCP server '${v?.name ?? ''}'...`,
   'mcp.oauth.title': 'OAuth Authentication',
   'mcp.oauth.timeout': 'Authentication timed out. Refresh to check the status.',
+  'mcp.oauth.finishing':
+    'Authentication reached its deadline. The daemon is safely finishing the active operation; you can leave and return to this page.',
+  'mcp.oauth.observationStopped': (v) =>
+    `Stopped watching authentication: ${v?.error ?? 'unknown error'}. The daemon operation was not cancelled; reopen this page to resume.`,
   'mcp.oauth.authenticationFailed': 'Authentication failed.',
   'mcp.oauth.statusFailed': 'Failed to check the authentication status.',
   'mcp.oauth.serverRemoved':
@@ -1454,9 +1509,29 @@ const EN: Messages = {
   'mcp.edit.done': (v) => `Updated ${v?.name ?? 'MCP server'}.`,
   'mcp.edit.notFound': 'The MCP server is no longer present in settings.',
   'mcp.runtime.notUpdated':
-    'Configuration was saved, but the current session was not updated.',
+    'Configuration was saved, but the workspace runtime was not updated.',
   'mcp.runtime.removeNotUpdated':
-    'Configuration was deleted, but the current session was not updated.',
+    'Configuration was deleted, but the workspace runtime was not updated.',
+  'mcp.runtime.deferred':
+    'Change saved. The workspace runtime is cold and will apply it on the next initialization.',
+  'mcp.runtimeState.not_started': 'Workspace runtime not started',
+  'mcp.runtimeState.not_started.description':
+    'MCP configuration is available, but live server discovery has not started.',
+  'mcp.runtimeState.starting': 'Workspace runtime starting',
+  'mcp.runtimeState.starting.description':
+    'MCP server discovery is starting. Live tools and resources are not available yet.',
+  'mcp.runtimeState.stale': 'MCP runtime state is stale',
+  'mcp.runtimeState.stale.description':
+    'Showing configuration while the runtime catches up; stale runtime rows and actions are withheld.',
+  'mcp.runtimeState.error': 'MCP runtime unavailable',
+  'mcp.runtimeState.error.description':
+    'The workspace runtime could not provide a current MCP catalog. Review the errors below and retry.',
+  'mcp.runtimeSource.cache': 'Cached snapshot',
+  'mcp.runtimeSource.cache.description':
+    'Showing the last MCP runtime snapshot while live discovery is starting.',
+  'mcp.runtimeSource.config': 'Configuration fallback',
+  'mcp.runtimeSource.config.description':
+    'Showing configured MCP servers. Live discovery has not completed yet.',
   'mcp.discovery.empty': 'No MCP servers are configured.',
   'mcp.discovery.initializing': 'Initializing MCP servers…',
   'mcp.discovery.timeout':
@@ -1524,6 +1599,7 @@ const EN: Messages = {
   'mcp.status': 'Status',
   'mcp.status.blocked': 'Blocked',
   'mcp.status.authenticating': 'Authenticating',
+  'mcp.status.needsAuthentication': 'Authentication required',
   'mcp.status.needsApproval': 'Needs approval',
   'mcp.status.rejected': 'Rejected',
   'mcp.status.connected': 'connected',
@@ -1727,6 +1803,22 @@ const EN: Messages = {
   'skills.disabled': 'Skill disabled.',
   'skills.enable': 'Enable',
   'skills.enabled': 'Skill enabled.',
+  'skills.source.cache': 'Cached snapshot',
+  'skills.source.cache.description':
+    'Showing the last runtime snapshot while the workspace runtime is unavailable.',
+  'skills.source.config': 'Configuration fallback',
+  'skills.source.config.description':
+    'Showing configured skills. Live runtime validation is not available yet.',
+  'skills.runtimeNotConfirmed': (v) =>
+    `Skill configuration was saved, but runtime activation was not confirmed (${v?.activation ?? 'unknown'}).`,
+  'skills.refreshAfterMutationFailed': (v) =>
+    `The change was saved, but this page could not refresh: ${v?.error ?? 'unknown error'}.`,
+  'skills.activation.applied': 'Applied to the current workspace runtime.',
+  'skills.activation.reconciling':
+    'The current workspace runtime is reconciling the change.',
+  'skills.activation.deferred':
+    'The change will apply when the workspace runtime next starts.',
+  'skills.activation.partial': 'Runtime activation was only partially applied.',
   'skills.install.action': 'Upload skill',
   'skills.install.description':
     'Install a skill from GitHub, a local folder, or a ZIP archive.',
@@ -2185,7 +2277,22 @@ const ZH: Messages = {
   'gitDiff.expand': (v) => `显示 ${v?.path ?? '文件'} 的变更`,
   'gitDiff.collapse': (v) => `隐藏 ${v?.path ?? '文件'} 的变更`,
   'worktree.welcomeTitle': 'Worktree 隔离会话',
-  'worktree.welcomeDesc': '变更在仓库的独立副本中进行，不会影响主分支',
+  'worktree.toggleHint': '独立副本 · 不影响主分支',
+  'worktree.welcomeDesc': '变更在独立副本中进行',
+  'worktree.cancel': '取消 Worktree 隔离',
+  'gitLog.title': '提交历史',
+  'gitLog.subtitle': (v) => `${v?.count ?? 0} 条提交`,
+  'gitLog.loading': '加载历史中…',
+  'gitLog.empty': '暂无提交',
+  'gitLog.unavailable': '此工作区不可用 Git',
+  'gitLog.error': '加载历史失败',
+  'gitLog.loadMore': '加载更多',
+  'gitLog.loadingMore': '加载中…',
+  'gitLog.files': (v) =>
+    `${v?.count ?? 0} 个文件 · +${v?.added ?? 0} −${v?.removed ?? 0}`,
+  'gitLog.detailError': '加载提交详情失败',
+  'gitLog.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
+  'gitLog.copySha': (v) => `复制提交 ${v?.sha ?? ''}`,
   'workspace.paneLabel': (v) => `工作区：${v?.name ?? ''}`,
   // Tool display names (chat-stream badge labels). Keyed by `toolName.<wire>`;
   // a wire name with no entry here falls back to the English display name via
@@ -2474,6 +2581,8 @@ const ZH: Messages = {
   'common.invalid': '无效',
   'common.loading': '加载中...',
   'common.retry': '重试',
+  'management.runtime.initializing': '服务初始化中，请稍后…',
+  'management.runtime.failed': '工作区服务初始化失败。',
   'common.save': '保存',
   'common.navigate': '↑↓ 导航',
   'common.next': '下一步',
@@ -2933,6 +3042,7 @@ const ZH: Messages = {
   'scheduledTasks.reference.skill': '技能',
   'scheduledTasks.reference.mcp': 'MCP',
   'scheduledTasks.referencePicker': '引用选择器',
+  'scheduledTasks.reference.remove': '删除',
   'scheduledTasks.reference.loading': '加载中…',
   'scheduledTasks.reference.empty': '暂无可选项。',
   'scheduledTasks.frequency': '频率',
@@ -3022,7 +3132,6 @@ const ZH: Messages = {
   'sidebar.newChat': '新对话',
   'sidebar.newTask': '新建任务',
   'sidebar.newWorktreeTask': '新建 Worktree 任务',
-  'sidebar.worktreeDescription': '在隔离的仓库副本中工作——变更不会影响主分支',
   'sidebar.plugins': '插件',
   'sidebar.project': '项目',
   'sidebar.pinnedSessions': '置顶',
@@ -3034,6 +3143,9 @@ const ZH: Messages = {
   'sidebar.addWorkspace': '添加工作区',
   'sidebar.addWorkspaceTitle': '添加工作区',
   'sidebar.addWorkspacePath': '目录路径',
+  'sidebar.addWorkspaceDisplayName': '展示名称（可选）',
+  'sidebar.addWorkspaceDisplayNameHint':
+    '用于 Web Shell 展示；目录路径仍是工作区身份。',
   'sidebar.addWorkspaceRegister': '注册',
   'sidebar.addWorkspaceCancel': '取消',
   'sidebar.addWorkspaceError': '添加工作区失败',
@@ -3238,12 +3350,14 @@ const ZH: Messages = {
   'localCommand.noSession':
     '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'localCommand.diffNoWorkspace': '当前还没有可用于查看变更的工作区。',
+  'localCommand.logNoWorkspace': '当前还没有可用于查看历史的工作区。',
   'local.agents': '管理智能体',
   'local.bug': '提交错误报告',
   'local.compress': '将上下文压缩为摘要',
   'local.compressFast': '无需 AI 的快速上下文压缩',
   'local.config': '通过点分路径键获取或设置配置项',
   'local.diff': '显示工作区相对 HEAD 的改动统计',
+  'local.log': '显示工作区的提交历史',
   'local.directory': '管理工作区目录',
   'local.docs': '打开完整的 Qwen Code 文档',
   'local.doctor': '运行安装和环境诊断',
@@ -3401,11 +3515,28 @@ const ZH: Messages = {
   'extensions.manage.checkingUpdates': '正在检查更新...',
   'extensions.manage.checkUpdates': '检查更新',
   'extensions.manage.commands': '命令：',
+  'extensions.manage.completedWithWarnings': (v) =>
+    `扩展变更已保存，但运行时返回警告：${v?.warning ?? ''}`,
   'extensions.manage.contextFiles': '上下文文件：',
   'extensions.manage.count': (v) => `已安装 ${v?.count ?? 0} 个扩展`,
+  'extensions.manage.setting.disabled': '禁用',
+  'extensions.manage.setting.default': '默认',
+  'extensions.manage.setting.enabled': '启用',
+  'extensions.manage.setting.unknown': '状态不可用',
+  'extensions.manage.setting.unavailableDescription':
+    '当前服务未返回扩展的全局和工作区设置，请重启 qwen serve 后重试。',
+  'extensions.manage.userSetting': '全局设置',
+  'extensions.manage.userSettingDescription':
+    '适用于用户工作区，工作区设置可单独覆盖。',
+  'extensions.manage.workspaceSetting': '工作区设置',
+  'extensions.manage.workspaceSettingDescription': '仅适用于当前工作区。',
   'extensions.manage.disable': '禁用扩展',
   'extensions.manage.disabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已禁用。`,
   'extensions.manage.disabling': (v) => `正在禁用扩展 "${v?.name ?? '扩展'}"…`,
+  'extensions.manage.inherited': (v) =>
+    `扩展 "${v?.name ?? '扩展'}" 已恢复为全局设置。`,
+  'extensions.manage.inheriting': (v) =>
+    `正在将扩展 "${v?.name ?? '扩展'}" 恢复为全局设置…`,
   'extensions.manage.empty': '未安装扩展。',
   'extensions.manage.emptyAgents': '此扩展没有智能体。',
   'extensions.manage.emptyCommands': '此扩展没有命令。',
@@ -3417,6 +3548,8 @@ const ZH: Messages = {
   'extensions.manage.enable': '启用扩展',
   'extensions.manage.enabled': (v) => `扩展 "${v?.name ?? '扩展'}" 已启用。`,
   'extensions.manage.enabling': (v) => `正在启用扩展 "${v?.name ?? '扩展'}"…`,
+  'extensions.manage.followupRefreshFailed': (v) =>
+    `后续刷新失败：${v?.error ?? '未知错误'}。`,
   'extensions.manage.install': '安装',
   'extensions.manage.installDescription': '输入 GitHub、Git 或 npm 扩展来源。',
   'extensions.manage.installSelectPluginDescription': (v) =>
@@ -3432,10 +3565,16 @@ const ZH: Messages = {
   'extensions.manage.origin': '来源平台：',
   'extensions.manage.overview': '基本信息',
   'extensions.manage.path': '路径：',
+  'extensions.manage.phase.committing': (v) =>
+    `正在保存扩展 "${v?.name ?? '扩展'}" 的变更…`,
+  'extensions.manage.phase.preparing': (v) =>
+    `正在准备扩展 "${v?.name ?? '扩展'}"…`,
+  'extensions.manage.phase.reconciling': (v) =>
+    `正在将扩展 "${v?.name ?? '扩展'}" 应用到工作区运行时…`,
   'extensions.manage.queued': (v) =>
     `扩展 "${v?.name ?? '扩展'}" 的操作已提交。`,
   'extensions.manage.refreshFailed': (v) =>
-    `扩展操作已成功，但 session 刷新失败${v?.error ? `：${v.error}` : '。'}`,
+    `扩展操作已成功，但工作区运行时刷新失败${v?.error ? `：${v.error}` : '。'}`,
   'extensions.manage.restartRequired': '已更新，需要重启',
   'extensions.manage.search': '搜索扩展…',
   'extensions.manage.selectExtension': '请选择扩展',
@@ -3508,6 +3647,10 @@ const ZH: Messages = {
     `正在为 MCP server '${v?.name ?? ''}' 启动 OAuth 认证...`,
   'mcp.oauth.title': 'OAuth 认证',
   'mcp.oauth.timeout': '认证等待超时，请刷新后查看状态。',
+  'mcp.oauth.finishing':
+    '认证已到达期限，daemon 正在安全结束当前操作；你可以离开并稍后返回此页面。',
+  'mcp.oauth.observationStopped': (v) =>
+    `认证状态观察已停止：${v?.error ?? '未知错误'}。daemon 操作未被取消，重新打开此页面可继续观察。`,
   'mcp.oauth.authenticationFailed': '认证失败。',
   'mcp.oauth.statusFailed': '检查认证状态失败。',
   'mcp.oauth.serverRemoved': 'MCP 服务器已在认证期间被移除。',
@@ -3555,8 +3698,27 @@ const ZH: Messages = {
   'mcp.edit.saving': '正在保存修改…',
   'mcp.edit.done': (v) => `已更新 ${v?.name ?? 'MCP 服务器'}。`,
   'mcp.edit.notFound': '设置中已不存在该 MCP 服务器。',
-  'mcp.runtime.notUpdated': '配置已保存，但未同步当前会话。',
-  'mcp.runtime.removeNotUpdated': '配置已删除，但未同步当前会话。',
+  'mcp.runtime.notUpdated': '配置已保存，但未同步到当前工作区运行时。',
+  'mcp.runtime.removeNotUpdated': '配置已删除，但未同步到当前工作区运行时。',
+  'mcp.runtime.deferred': '变更已保存，将在工作区运行时下次初始化时生效。',
+  'mcp.runtimeState.not_started': '工作区运行时尚未启动',
+  'mcp.runtimeState.not_started.description':
+    'MCP 配置可用，但实时服务器发现尚未开始。',
+  'mcp.runtimeState.starting': '工作区运行时正在启动',
+  'mcp.runtimeState.starting.description':
+    'MCP 服务器发现正在启动，实时工具和资源暂不可用。',
+  'mcp.runtimeState.stale': 'MCP 运行时状态已过期',
+  'mcp.runtimeState.stale.description':
+    '运行时同步期间仅显示配置；过期的运行时条目和操作已隐藏。',
+  'mcp.runtimeState.error': 'MCP 运行时不可用',
+  'mcp.runtimeState.error.description':
+    '工作区运行时无法提供当前 MCP 目录，请查看下方错误并重试。',
+  'mcp.runtimeSource.cache': '缓存快照',
+  'mcp.runtimeSource.cache.description':
+    '实时发现启动期间，正在显示上一次 MCP 运行时快照。',
+  'mcp.runtimeSource.config': '配置回退',
+  'mcp.runtimeSource.config.description':
+    '正在显示已配置的 MCP 服务器；实时发现尚未完成。',
   'mcp.discovery.empty': '尚未配置 MCP 服务器。',
   'mcp.discovery.initializing': '正在初始化 MCP 服务器…',
   'mcp.discovery.timeout': 'MCP 发现耗时较长，请刷新后查看状态。',
@@ -3618,6 +3780,7 @@ const ZH: Messages = {
   'mcp.status': '状态',
   'mcp.status.blocked': '已阻止',
   'mcp.status.authenticating': '认证中',
+  'mcp.status.needsAuthentication': '待认证',
   'mcp.status.needsApproval': '待审批',
   'mcp.status.rejected': '已拒绝',
   'mcp.status.connected': '已连接',
@@ -3812,6 +3975,20 @@ const ZH: Messages = {
   'skills.disabled': 'Skill 已禁用。',
   'skills.enable': '启用',
   'skills.enabled': 'Skill 已启用。',
+  'skills.source.cache': '缓存快照',
+  'skills.source.cache.description':
+    '工作区运行时当前不可用，正在显示上一次运行时快照。',
+  'skills.source.config': '配置回退',
+  'skills.source.config.description':
+    '正在显示已配置的 Skill；实时运行时校验尚不可用。',
+  'skills.runtimeNotConfirmed': (v) =>
+    `Skill 配置已保存，但尚未确认运行时已生效（${v?.activation ?? '未知'}）。`,
+  'skills.refreshAfterMutationFailed': (v) =>
+    `变更已保存，但此页面刷新失败：${v?.error ?? '未知错误'}。`,
+  'skills.activation.applied': '已应用到当前工作区运行时。',
+  'skills.activation.reconciling': '当前工作区运行时正在协调此变更。',
+  'skills.activation.deferred': '此变更将在工作区运行时下次启动时生效。',
+  'skills.activation.partial': '运行时仅部分应用了此变更。',
   'skills.install.action': '上传技能',
   'skills.install.description': '从 GitHub、本地文件夹或 ZIP 压缩包安装技能。',
   'skills.install.error.authentication': '上传技能需要身份认证。',

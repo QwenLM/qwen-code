@@ -29,10 +29,15 @@ export interface DaemonCapabilitiesLimits {
 export interface DaemonWorkspaceCapability {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+}
+
+export interface DaemonWorkspaceUpdate {
+  displayName: string | null;
 }
 
 export interface DaemonWorkspaceRemovalActivity {
@@ -155,6 +160,61 @@ export interface DaemonWorkspaceGitDiffHunks {
    * daemons and untruncated responses (additive to v=1).
    */
   truncated?: boolean;
+}
+
+/** A single commit entry in the log list. */
+export interface DaemonGitLogEntry {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Unix timestamp in seconds. */
+  authorDate: number;
+  subject: string;
+  /** Ref decorations, e.g. `"HEAD -> main, origin/main, v1.2.0"`. */
+  refs?: string;
+  /** Parent SHAs (length > 1 ⇒ merge commit). */
+  parents: string[];
+}
+
+/** Response from `GET /workspace/git/log`. */
+export interface DaemonGitLog {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when git is not available for this workspace. */
+  available: boolean;
+  entries: DaemonGitLogEntry[];
+  hasMore: boolean;
+}
+
+/** Per-file numstat entry within a commit detail. */
+export interface DaemonGitCommitFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+/** Response from `GET /workspace/git/log/commit?sha=`. */
+export interface DaemonGitCommitDetail {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the commit was not found or git is unavailable. */
+  available: boolean;
+  sha?: string;
+  shortSha?: string;
+  authorName?: string;
+  authorEmail?: string;
+  authorDate?: number;
+  subject?: string;
+  body?: string;
+  refs?: string;
+  parents?: string[];
+  files?: DaemonGitCommitFileStat[];
+  filesCount?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  hiddenCount?: number;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */
@@ -455,7 +515,7 @@ export interface DaemonStatusReport {
     eventRingSize: number;
     promptDeadlineMs: number | null;
     writerIdleTimeoutMs: number | null;
-    channelIdleTimeoutMs: number;
+    channelIdleTimeoutMs: number | null;
     sessionIdleTimeoutMs: number;
     acpConnectionCap: number | null;
     compactedReplayMaxBytes: number;
@@ -1189,6 +1249,8 @@ export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache' | 'config';
   discoveryState?: DaemonMcpDiscoveryState;
   servers: DaemonWorkspaceMcpServerStatus[];
   errors?: DaemonStatusCell[];
@@ -1204,6 +1266,69 @@ export interface DaemonWorkspaceMcpStatus {
    * Older daemons omit the field.
    */
   budgets?: DaemonMcpBudgetStatusCell[];
+}
+
+export type DaemonWorkspaceRuntimeCapability =
+  | 'extensions'
+  | 'mcp'
+  | 'skills'
+  | 'tools';
+
+export interface DaemonWorkspaceRuntimeCapabilityStatus {
+  state: 'not_started' | 'starting' | 'ready' | 'stale' | 'error';
+  desiredGeneration?: number;
+  appliedGeneration?: number;
+  runtimeEpoch?: number;
+  appliedEpoch?: number;
+  error?: { code: string; message: string };
+}
+
+export interface DaemonWorkspaceRuntimeStatus {
+  v: 1;
+  workspaceCwd: string;
+  state: 'cold' | 'starting' | 'active' | 'idle' | 'stopping' | 'error';
+  runtimeLive: boolean;
+  runtimeEpoch?: number;
+  capabilities: Partial<
+    Record<
+      DaemonWorkspaceRuntimeCapability,
+      DaemonWorkspaceRuntimeCapabilityStatus
+    >
+  >;
+}
+
+export interface DaemonWorkspaceRuntimeOperationStatus {
+  v: 1;
+  operationId: string;
+  workspaceCwd: string;
+  kind: 'mcp';
+  action: string;
+  target: string;
+  state: 'running' | 'waiting_for_input' | 'succeeded' | 'failed';
+  deadlineAt?: string;
+  authUrl?: string;
+  error?: { code: string; message: string };
+}
+
+export interface DaemonWorkspaceRuntimeOperationsStatus {
+  v: 1;
+  operations: DaemonWorkspaceRuntimeOperationStatus[];
+}
+
+export interface DaemonWorkspaceMcpConfigStatus {
+  v: 1;
+  effective: Record<string, unknown>;
+  user: Record<string, unknown>;
+  workspace: Record<string, unknown>;
+  disabledServers: string[];
+  disabledServerScopes?: Record<string, Array<'user' | 'workspace'>>;
+}
+
+export interface DaemonWorkspaceMcpConfigMutationResult {
+  name: string;
+  scope: 'user' | 'workspace';
+  config?: Record<string, unknown>;
+  activation: 'applied' | 'reconciling' | 'deferred' | 'partial';
 }
 
 /** Response of `POST /workspace/mcp/initialize`. */
@@ -1227,6 +1352,7 @@ export interface DaemonWorkspaceMcpToolsStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: DaemonWorkspaceMcpToolStatus[];
   errors?: DaemonStatusCell[];
@@ -1255,6 +1381,7 @@ export interface DaemonWorkspaceMcpResourcesStatus {
   workspaceCwd: string;
   serverName: string;
   initialized: boolean;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   resources: DaemonWorkspaceMcpResourceStatus[];
   errors?: DaemonStatusCell[];
@@ -1279,6 +1406,8 @@ export interface DaemonWorkspaceSkillsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: boolean;
+  runtimeEpoch?: number;
+  source?: 'live' | 'cache' | 'config';
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
 }
@@ -1771,6 +1900,7 @@ export interface DaemonWorkspaceToolsStatus {
   v: 1;
   workspaceCwd: string;
   initialized: true;
+  runtimeEpoch?: number;
   acpChannelLive: boolean;
   tools: DaemonWorkspaceToolStatus[];
   errors?: DaemonStatusCell[];
@@ -2644,6 +2774,11 @@ export interface DaemonMcpManageResult {
   messages?: string[];
   authUrl?: string;
   pending?: boolean;
+  runtimeEpoch?: number;
+  operationId?: string;
+  deadlineAt?: string;
+  activation?: 'applied' | 'reconciling' | 'deferred' | 'partial';
+  warning?: string;
 }
 
 /**

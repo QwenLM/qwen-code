@@ -18,6 +18,7 @@ import {
 } from './workspace-runtime-mcp-operations.js';
 import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
+import { errorMessage as message } from './error-message.js';
 import type { WorkspaceRequestContext } from './workspace-service/types.js';
 
 const DEFAULT_PREPARE_TIMEOUT_MS = 60_000;
@@ -64,10 +65,6 @@ function requestContext(
   return { route, workspaceCwd: runtime.workspaceCwd };
 }
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -75,7 +72,11 @@ function wait(ms: number): Promise<void> {
   });
 }
 
-class WorkspaceRuntimeStillStartingError extends Error {}
+export class WorkspaceRuntimeStillStartingError extends Error {
+  constructor() {
+    super('Workspace runtime is still starting');
+  }
+}
 class WorkspaceRuntimeEpochChangedError extends WorkspaceRuntimeStillStartingError {}
 
 export function isWorkspaceRuntimeDrainingError(error: unknown): boolean {
@@ -233,6 +234,13 @@ export class WorkspaceRuntimeCoordinator {
     this.draining = true;
     this.mcpOperations.dispose();
     this.deferredConfigurationReconciliation.clear();
+    this.inFlight.clear();
+    this.backgroundResume.clear();
+    this.capabilityPhysicalTail.clear();
+  }
+
+  completeDisposeAfterBridgeShutdown(): void {
+    this.mcpOperations.completeDisposeAfterBridgeShutdown();
   }
 
   private runtimeEpoch(): number {
@@ -586,7 +594,11 @@ export class WorkspaceRuntimeCoordinator {
           revision,
         );
         if (!completed) {
-          await this.resumeCapabilityInBackground('mcp', revision, deadline);
+          void this.resumeCapabilityInBackground(
+            'mcp',
+            revision,
+            deadline,
+          ).catch(() => undefined);
         }
         return result;
       });
@@ -703,11 +715,11 @@ export class WorkspaceRuntimeCoordinator {
             revision,
           );
           if (!completed) {
-            await this.resumeCapabilityInBackground(
+            void this.resumeCapabilityInBackground(
               capability,
               revision,
               deadline,
-            );
+            ).catch(() => undefined);
           }
         }),
       )

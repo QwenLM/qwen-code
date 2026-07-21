@@ -163,6 +163,39 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('records MCP management as workspace activity', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage
+            ? {
+                serverName: 'aone',
+                action: 'disable',
+                ok: true,
+              }
+            : method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+              ? { discoveryState: 'completed', servers: [] }
+              : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      vi.setSystemTime(1_000);
+      await bridge.preheat();
+      expect(bridge.lastActivityAt).toBeNull();
+      vi.setSystemTime(2_000);
+
+      await bridge.manageMcpServer('aone', 'disable', undefined);
+
+      expect(bridge.lastActivityAt).toBe(2_000);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not start MCP management after its channel deadline expires', async () => {
     vi.useFakeTimers();
     const releaseFactory = deferred<void>();
@@ -199,6 +232,26 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
       vi.useRealTimers();
     }
+  });
+
+  it('does not start a channel after the MCP deadline already expired', async () => {
+    const channelFactory = vi.fn(async () => {
+      throw new Error('orphaned channel spawn');
+    });
+    const bridge = makeBridge({ channelFactory });
+
+    await expect(
+      bridge.manageMcpServer(
+        'aone',
+        'authenticate',
+        undefined,
+        'operation-1',
+        Date.now() - 1,
+      ),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    expect(channelFactory).not.toHaveBeenCalled();
+
+    await bridge.shutdown();
   });
 
   it('does not send MCP management after its deadline expires on a warm channel', async () => {
@@ -4283,6 +4336,82 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('replaces an empty workspace channel after a restore timeout', async () => {
+    const first = makeChannel({
+      loadSessionImpl: () => new Promise<LoadSessionResponse>(() => {}),
+    });
+    const second = makeChannel({
+      loadSessionImpl: () => ({ configOptions: [] }),
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(first.channel)
+      .mockResolvedValueOnce(second.channel);
+    const bridge = makeBridge({ channelFactory, initializeTimeoutMs: 25 });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'timed-out-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toThrow();
+    await vi.waitFor(() => expect(first.killed).toBe(true));
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'restored-after-timeout',
+        workspaceCwd: WS_A,
+      }),
+    ).resolves.toMatchObject({ sessionId: 'restored-after-timeout' });
+    expect(channelFactory).toHaveBeenCalledTimes(2);
+
+    await bridge.shutdown();
+  });
+
+  it('replaces a timed-out restore channel with an unobserved physical request', async () => {
+    const first = makeChannel({
+      loadSessionImpl: () => new Promise<LoadSessionResponse>(() => {}),
+      extMethodImpl: (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh
+          ? new Promise(() => {})
+          : {},
+    });
+    const second = makeChannel({
+      loadSessionImpl: () => ({ configOptions: [] }),
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(first.channel)
+      .mockResolvedValueOnce(second.channel);
+    const bridge = makeBridge({ channelFactory, initializeTimeoutMs: 25 });
+    await bridge.preheat();
+
+    await expect(
+      bridge.invokeWorkspaceCommand(
+        SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
+        {},
+        { timeoutMs: 25 },
+      ),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    await expect(
+      bridge.loadSession({
+        sessionId: 'timed-out-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toBeInstanceOf(BridgeTimeoutError);
+    await vi.waitFor(() => expect(first.killed).toBe(true));
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'restored-on-fresh-channel',
+        workspaceCwd: WS_A,
+      }),
+    ).resolves.toMatchObject({ sessionId: 'restored-on-fresh-channel' });
+    expect(channelFactory).toHaveBeenCalledTimes(2);
+
+    await bridge.shutdown();
+  });
+
   it('keeps an empty workspace channel live after restore fails', async () => {
     let shouldFail = true;
     const handle = makeChannel({
@@ -5284,6 +5413,39 @@ describe('createAcpSessionBridge', () => {
     expect(handle.killed).toBe(false);
 
     await bridge.shutdown();
+  });
+
+  it('replaces an empty workspace channel after newSession times out', async () => {
+    vi.useFakeTimers();
+    const firstHandle = makeChannel({
+      newSessionImpl: () => new Promise(() => {}),
+    });
+    const secondHandle = makeChannel({ sessionIdPrefix: 'recovered' });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(firstHandle.channel)
+      .mockResolvedValueOnce(secondHandle.channel);
+    const bridge = makeBridge({
+      channelFactory,
+      initializeTimeoutMs: 100,
+    });
+
+    try {
+      const first = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A })
+        .catch((error: unknown) => error);
+      await vi.advanceTimersByTimeAsync(100);
+      await expect(first).resolves.toBeInstanceOf(BridgeTimeoutError);
+      await vi.waitFor(() => expect(firstHandle.killed).toBe(true));
+
+      await expect(
+        bridge.spawnOrAttach({ workspaceCwd: WS_A }),
+      ).resolves.toMatchObject({ sessionId: 'recovered:/work/a' });
+      expect(channelFactory).toHaveBeenCalledTimes(2);
+    } finally {
+      await bridge.shutdown();
+      vi.useRealTimers();
+    }
   });
 
   it('keeps the shared channel after overlapping thread spawns fail', async () => {
@@ -12820,7 +12982,7 @@ describe('createAcpSessionBridge', () => {
       expect(b.attached).toBe(true);
       expect(bridge.sessionCount).toBe(1);
       // B disconnects — but A is alive. detachClient must NOT reap.
-      await bridge.detachClient(b.sessionId);
+      await bridge.detachClient(b.sessionId, b.clientId);
       // Session survives — A would have 404'd on every subsequent
       // request otherwise.
       expect(bridge.sessionCount).toBe(1);
@@ -12849,7 +13011,152 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(1); // bailed, no reap
       // B disconnects: detachClient decrements attachCount→0 AND
       // sees the tombstone → completes the deferred reap.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('duplicate detach with same clientId decrements attachCount only once (DAEMON-006)', async () => {
+      // A spawns (owner, attachCount stays 0); B and C attach
+      // (attachCount: 2). B's detach arrives TWICE (e.g. route
+      // handler + disconnect reaper both firing). The second detach
+      // finds no attach-ref in the ledger and must NOT decrement —
+      // otherwise it steals C's ref, attachCount hits 0 with C still
+      // connected, and A's requireZeroAttaches kill reaps a session
+      // C is actively using.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(c.attached).toBe(true);
+      expect(c.clientId).not.toBe(b.clientId);
+      await bridge.detachClient(b.sessionId, b.clientId);
+      await bridge.detachClient(b.sessionId, b.clientId);
+      // attachCount must still be 1 (C's ref intact): the owner's
+      // zero-attaches kill bails and C's session survives.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('detach with unknown clientId does not decrement attachCount (DAEMON-006)', async () => {
+      // A stray DELETE with a bogus X-Qwen-Client-Id must not steal
+      // B's attach ref: the owner's requireZeroAttaches kill must
+      // still bail on attachCount === 1.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      await bridge.detachClient(b.sessionId, 'client_does-not-exist');
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('anonymous detach (no clientId) does not decrement attachCount (DAEMON-006)', async () => {
+      // A DELETE without X-Qwen-Client-Id returns 204 but releases
+      // nothing — attach/spawn responses always hand out a clientId,
+      // and clients that lost theirs are reaped by the idle backstop.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
       await bridge.detachClient(b.sessionId);
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('spawn owner detaching itself does not steal an attacher ref (DAEMON-006)', async () => {
+      // Owner registrations never contribute to attachCount, so the
+      // owner's own DELETE detach must leave B's ref intact — while
+      // still dropping the owner's registration so close-on-last-
+      // detach stays reachable.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      // Owner says goodbye with its own clientId.
+      await bridge.detachClient(a.sessionId, a.clientId);
+      expect(bridge.sessionCount).toBe(1);
+      // attachCount must still be 1 (B's ref survived the owner
+      // detach): the zero-attaches kill bails.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      // Owner's registration WAS removed: once B leaves too, the
+      // deferred-reap tombstone completes and the session closes.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('deferred reap fires exactly on the real last attacher detach (DAEMON-006 regression)', async () => {
+      // With the tombstone set, noise detaches (unknown/anonymous)
+      // must NOT complete the reap early; the genuine last attacher's
+      // clientId-bearing detach must.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1); // bailed, tombstone set
+      // Noise: neither of these releases B's ledger ref.
+      await bridge.detachClient(b.sessionId, 'client_unknown');
+      await bridge.detachClient(b.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      // The real last attacher leaves → deferred reap completes.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('repeated attach under one clientId detaches ref-by-ref (DAEMON-006)', async () => {
+      // Echoing the same clientId on a second attach refcounts the
+      // ledger entry; each detach releases exactly one ref, and the
+      // deferred reap fires only when the LAST ref is gone.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      const c = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        clientId: b.clientId,
+      });
+      expect(c.attached).toBe(true);
+      expect(c.clientId).toBe(b.clientId); // echoed id was honored
+      // attachCount is now 2; tombstone the owner's kill.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      // First detach releases one ref → attachCount 2→1, no reap.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(1);
+      // Second detach releases the last ref → attachCount 0 → reap.
+      await bridge.detachClient(b.sessionId, b.clientId);
       expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
@@ -13363,7 +13670,11 @@ describe('createAcpSessionBridge', () => {
       expect(handle.agent.extMethodCalls).toHaveLength(1);
       expect(handle.agent.extMethodCalls[0]).toEqual({
         method: 'qwen/control/session/close',
-        params: { sessionId: session.sessionId, requireFlush: true },
+        params: {
+          sessionId: session.sessionId,
+          drainTimeoutMs: 8_000,
+          requireFlush: true,
+        },
       });
       expect(bridge.sessionCount).toBe(1);
       expect(() =>
@@ -13449,6 +13760,134 @@ describe('createAcpSessionBridge', () => {
       expect(events[resolvedIndex]?.data).toMatchObject({
         outcome: { outcome: 'cancelled' },
       });
+
+      await bridge.shutdown();
+    });
+
+    it('resolves pending permissions before waiting for agent close during kill', async () => {
+      let capturedConn: AgentSideConnection | undefined;
+      const permissionResponse: { current?: Promise<unknown> } = {};
+      const factory: ChannelFactory = async () => {
+        const { clientStream, agentStream } = createInMemoryChannel();
+        const fakeAgent = new FakeAgent({
+          extMethodImpl: async (method) => {
+            if (method !== 'qwen/control/session/close') return {};
+            const result = (await permissionResponse.current) as {
+              outcome: { outcome: string };
+            };
+            expect(result.outcome.outcome).toBe('cancelled');
+            return {};
+          },
+        });
+        capturedConn = new AgentSideConnection(() => fakeAgent, agentStream);
+        return {
+          stream: clientStream,
+          exited: new Promise<
+            | {
+                exitCode: number | null;
+                signalCode: NodeJS.Signals | null;
+              }
+            | undefined
+          >(() => {}),
+          kill: async () => {},
+          killSync: () => {},
+        };
+      };
+      const bridge = makeBridge({ channelFactory: factory });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      permissionResponse.current = (
+        capturedConn as unknown as {
+          requestPermission(p: unknown): Promise<unknown>;
+        }
+      ).requestPermission({
+        sessionId: session.sessionId,
+        toolCall: { toolCallId: 'tc-kill', title: 'dangerous command' },
+        options: [
+          { optionId: 'allow', name: 'Allow', kind: 'allow_once' },
+          { optionId: 'deny', name: 'Deny', kind: 'reject_once' },
+        ],
+      });
+
+      await vi.waitFor(() => expect(bridge.pendingPermissionCount).toBe(1));
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+      await expect(permissionResponse.current).resolves.toMatchObject({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(bridge.pendingPermissionCount).toBe(0);
+      expect(bridge.sessionCount).toBe(0);
+
+      await bridge.shutdown();
+    });
+
+    it('force-kills the channel when kill follows a stuck acknowledged close', async () => {
+      const closeStarted = deferred<void>();
+      const closeGate = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== 'qwen/control/session/close') return {};
+          closeStarted.resolve();
+          return closeGate.promise;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const closeResult = bridge.closeSession(session.sessionId).then(
+        () => 'resolved' as const,
+        () => 'rejected' as const,
+      );
+      await closeStarted.promise;
+
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+      await expect(closeResult).resolves.toBe('rejected');
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    });
+
+    it('keeps multiplexed siblings live while one close is still draining', async () => {
+      const firstCloseGate = deferred<Record<string, unknown>>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method !== 'qwen/control/session/close') return {};
+          return firstCloseGate.promise;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        sessionScope: 'thread',
+        initializeTimeoutMs: 20,
+      });
+      const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const close = bridge.closeSession(first.sessionId);
+      await vi.waitFor(() =>
+        expect(handle.agent.extMethodCalls).toContainEqual({
+          method: 'qwen/control/session/close',
+          params: {
+            sessionId: first.sessionId,
+            drainTimeoutMs: 16,
+          },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 40));
+
+      expect(handle.killed).toBe(false);
+      expect(bridge.sessionCount).toBe(2);
+      expect(() =>
+        bridge.recordHeartbeat(sibling.sessionId, {
+          clientId: sibling.clientId,
+        }),
+      ).not.toThrow();
+
+      firstCloseGate.resolve({});
+      await close;
+      expect(bridge.sessionCount).toBe(1);
 
       await bridge.shutdown();
     });
@@ -15685,7 +16124,7 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
 });
 
 describe('channelIdleTimeoutMs', () => {
-  it('keeps the channel by default after workspace runtime control drains', async () => {
+  it('reaps the channel by default after workspace runtime control drains', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method) =>
         method === SERVE_STATUS_EXT_METHODS.workspaceExtensions
@@ -15706,22 +16145,27 @@ describe('channelIdleTimeoutMs', () => {
     });
 
     expect(epoch).toBe(1);
-    expect(
-      bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs,
-    ).toBeNull();
-    expect(handle.killed).toBe(false);
+    expect(bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs).toBe(
+      0,
+    );
+    expect(handle.killed).toBe(true);
     await bridge.shutdown();
   });
 
-  it('rejects an explicit zero timeout', () => {
-    expect(() =>
-      makeBridge({
-        channelFactory: async () => makeChannel().channel,
-        channelIdleTimeoutMs: 0,
-      }),
-    ).toThrow(
-      'Must be a positive integer when provided; omit it to disable automatic reaping.',
+  it('accepts an explicit zero timeout as immediate reaping', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+
+    await bridge.withWorkspaceRuntimeControl!(async () => undefined);
+
+    expect(bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs).toBe(
+      0,
     );
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
   });
 
   it('reuses the channel during a configured idle window', async () => {
@@ -15927,6 +16371,56 @@ describe('preheat', () => {
       expect(handle.killed).toBe(false);
 
       await vi.advanceTimersByTimeAsync(5_000);
+      expect(handle.killed).toBe(true);
+
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('kills channel via deferred spawn-reset when concurrent workspace control completes (#7308)', async () => {
+    vi.useFakeTimers();
+    try {
+      const releaseControl = deferred<void>();
+      const handle = makeChannel({
+        newSessionImpl: () =>
+          new Promise<NewSessionResponse>(() => {
+            /* never resolves — forces initializeTimeoutMs expiry */
+          }),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        channelIdleTimeoutMs: 60_000,
+        initializeTimeoutMs: 5_000,
+      });
+
+      await bridge.preheat();
+
+      // Start a workspace-control request that hangs, keeping the
+      // channel "busy" so the spawn-reset kill is deferred.
+      const controlPromise = bridge.withWorkspaceRuntimeControl!(
+        () => releaseControl.promise,
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      // Spawn will time out because newSessionImpl never resolves.
+      const spawnPromise = bridge
+        .spawnOrAttach({ workspaceCwd: WS_A, sessionScope: 'thread' })
+        .catch((e: unknown) => e);
+
+      await vi.advanceTimersByTimeAsync(5_000);
+      const spawnError = await spawnPromise;
+      expect(spawnError).toBeInstanceOf(BridgeTimeoutError);
+
+      // Channel must survive: workspace control is still in flight.
+      expect(handle.killed).toBe(false);
+
+      // Resolve the workspace-control request; the deferred kill fires.
+      releaseControl.resolve(undefined);
+      await vi.advanceTimersByTimeAsync(0);
+      await controlPromise;
+
       expect(handle.killed).toBe(true);
 
       await bridge.shutdown();
@@ -16623,6 +17117,121 @@ describe('activePromptCount and lastActivityAt', () => {
     expect(bridge.activePromptCount).toBe(0);
 
     await bridge.shutdown();
+  });
+
+  it('killSession calls connection.cancel with the killed sessionId', async () => {
+    let rejectPrompt: ((error?: unknown) => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: () =>
+        new Promise<PromptResponse>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      cancelImpl: () => {
+        rejectPrompt?.(new Error('cancelled'));
+      },
+    });
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    const promptResult = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'test' }],
+      })
+      .then(
+        () => ({ ok: true as const }),
+        (error) => ({ ok: false as const, error }),
+      );
+
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+
+    await bridge.killSession(session.sessionId);
+
+    await vi.waitFor(() =>
+      expect(handle.agent.cancelCalls.length).toBeGreaterThan(0),
+    );
+    expect(handle.agent.cancelCalls).toContainEqual({
+      sessionId: session.sessionId,
+    });
+
+    await promptResult;
+    await bridge.shutdown();
+  });
+
+  it('killSession does not wait for a blocked cancel notification write', async () => {
+    let rejectPrompt: ((error?: unknown) => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: () =>
+        new Promise<PromptResponse>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      cancelImpl: () => {
+        rejectPrompt?.(new Error('cancelled'));
+      },
+    });
+    const originalStream = handle.channel.stream;
+    const originalWriter = originalStream.writable.getWriter();
+    let cancelWriteAttempted = false;
+    let releaseCancelWrite!: () => void;
+    const cancelWrite = new Promise<void>((resolve) => {
+      releaseCancelWrite = resolve;
+    });
+    handle.channel.stream = {
+      readable: originalStream.readable,
+      writable: new WritableStream({
+        async write(message) {
+          if ((message as { method?: unknown }).method === 'session/cancel') {
+            cancelWriteAttempted = true;
+            await cancelWrite;
+            return;
+          }
+          await originalWriter.write(message);
+        },
+      }),
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptResult = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'test' }],
+      })
+      .catch(() => undefined);
+
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+    const kill = bridge.killSession(session.sessionId);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await expect(
+        Promise.race([
+          kill,
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error('killSession blocked on cancel write')),
+              500,
+            );
+          }),
+        ]),
+      ).resolves.toBe(true);
+      await vi.waitFor(() => expect(cancelWriteAttempted).toBe(true));
+      expect(bridge.sessionCount).toBe(0);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      releaseCancelWrite();
+      rejectPrompt?.(new Error('cancelled'));
+      await kill.catch(() => undefined);
+      await promptResult;
+      originalWriter.releaseLock();
+      await bridge.shutdown();
+    }
   });
 
   it('activePromptCount returns to 0 when channel crashes during a hung prompt', async () => {

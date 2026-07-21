@@ -15,6 +15,11 @@ import {
 import type { Request, Response } from 'express';
 import { loadSettings } from '../../config/settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
+import {
+  detectSystemLanguage,
+  resolveLanguageSetting,
+} from '../../i18n/index.js';
+import { resolveSupportedLanguage } from '../../i18n/languages.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import { parseAndValidateWorkspaceClientId } from '../server/request-helpers.js';
@@ -52,6 +57,17 @@ export const redactExtensionDisplaySource = (source: string): string => {
 const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
+
+const resolveExtensionLocale = (workspaceDir: string): string => {
+  const configuredLanguage = loadSettings(workspaceDir).merged.general
+    ?.language as string | undefined;
+  const requestedLocale = resolveLanguageSetting(configuredLanguage);
+  if (requestedLocale === 'auto') {
+    return detectSystemLanguage();
+  }
+
+  return resolveSupportedLanguage(requestedLocale) ?? requestedLocale;
+};
 
 /**
  * Thrown by the per-workspace install queue when it is saturated, and matched
@@ -259,6 +275,7 @@ export function createExtensionsController(
   ) =>
     new ExtensionManager({
       workspaceDir,
+      locale: resolveExtensionLocale(workspaceDir),
       isWorkspaceTrusted:
         trustedOverride ??
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
@@ -364,7 +381,11 @@ export function createExtensionsController(
   };
 
   let extensionsStatusCache:
-    | { expiresAt: number; value: ServeWorkspaceExtensionsStatus }
+    | {
+        locale: string;
+        expiresAt: number;
+        value: ServeWorkspaceExtensionsStatus;
+      }
     | undefined;
 
   const refreshExtensionsForAllSessions = async (): Promise<{
@@ -927,8 +948,12 @@ export function createExtensionsController(
 
   const buildLocalExtensionsStatus =
     async (): Promise<ServeWorkspaceExtensionsStatus> => {
+      const locale = resolveExtensionLocale(boundWorkspace);
       const now = Date.now();
-      if (extensionsStatusCache && extensionsStatusCache.expiresAt > now) {
+      if (
+        extensionsStatusCache?.locale === locale &&
+        extensionsStatusCache.expiresAt > now
+      ) {
         return extensionsStatusCache.value;
       }
       const extensionManager = createExtensionManager();
@@ -1003,6 +1028,7 @@ export function createExtensionsController(
         extensions: entries,
       };
       extensionsStatusCache = {
+        locale,
         expiresAt: Date.now() + 2_000,
         value: status,
       };

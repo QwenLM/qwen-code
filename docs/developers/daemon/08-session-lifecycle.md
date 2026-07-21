@@ -296,18 +296,17 @@ normally; it must not trigger a resync loop.
 
 `bridge.preheat()` remains available to explicit embedders, but `qwen serve`
 starts every workspace child lazily on the first runtime command or Session.
-The Workspace Runtime remains
-live after all Session and management leases drain, and skip-relaunch behavior
-reuses that idle child when a new Session or management operation arrives.
-Omitting `channelIdleTimeoutMs` keeps this default. A positive value enables
-delayed compatibility auto-reap; `0` is rejected.
+The Workspace Runtime owns the child while work is active. After all Session
+and management leases drain, an omitted or zero `channelIdleTimeoutMs` keeps
+the legacy behavior and reaps the child immediately. A positive value keeps
+the idle child reusable until the configured timeout expires.
 
 ## Configuration
 
 - `BridgeOptions.maxSessions` (default 20) — cap.
 - `BridgeOptions.sessionScope` (default `'single'`; optional `'thread'`).
 - `BridgeOptions.initializeTimeoutMs` (default 10s) — ACP `initialize` handshake.
-- `BridgeOptions.channelIdleTimeoutMs` (unset by default, disabling automatic channel reaping; a configured value must be positive).
+- `BridgeOptions.channelIdleTimeoutMs` (unset or `0` reaps immediately after runtime work drains; a positive value delays reaping).
 - Capability tags: `session_create`, `session_scope_override`, `session_load`, `session_resume`, `unstable_session_resume` (deprecated alias), `session_list`, `session_info`, `session_close`, `session_metadata`, `session_set_model`, `client_identity`, `client_heartbeat`, `session_recap`, `session_generation`, `session_btw`, `session_context_usage`, `session_tasks`, `session_stats`, `session_lsp`, `session_status`, `non_blocking_prompt`.
 
 ### Stateless generation (`session_generation` capability tag)

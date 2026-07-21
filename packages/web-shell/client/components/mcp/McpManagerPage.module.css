@@ -3,6 +3,12 @@
   color: var(--success-color);
 }
 
+.authenticationRequiredBadge {
+  border-color: var(--warning-border);
+  background: var(--warning-bg);
+  color: var(--warning-color);
+}
+
 .serverGrid {
   display: grid;
   grid-template-columns: minmax(0, 1fr);

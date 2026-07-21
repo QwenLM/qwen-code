@@ -177,7 +177,7 @@ sequenceDiagram
 ## State & Lifecycle
 
 - Bridge construction is synchronous. A caller may preheat the channel before the first session; otherwise the first `spawnOrAttach` cold-starts the ACP child. A failed preheat leaves first use free to retry.
-- `defaultEntry` is the reusable logical Session under `sessionScope: 'single'`. Session close removes only its Session lease; the workspace channel remains live by default after all Session, restore, workspace-control, discovery, and authentication work drains. A positive `channelIdleTimeoutMs` enables delayed compatibility auto-reap; `0` is rejected.
+- `defaultEntry` is the reusable logical Session under `sessionScope: 'single'`. Session close removes only its Session lease. After all Session, restore, workspace-control, discovery, and authentication work drains, an omitted or zero `channelIdleTimeoutMs` reaps the child immediately; a positive value delays reaping.
 - `MAX_EVENT_RING_SIZE = 1_000_000` is a soft upper bound on `BridgeOptions.eventRingSize` to catch operator typos before ~500 MB per-session OOMs.
 - `DEFAULT_PERMISSION_TIMEOUT_MS = 5 * 60 * 1000` keeps a wedged permission request from blocking the per-session `promptQueue` forever.
 - `DEFAULT_MAX_PENDING_PER_SESSION = 64` mirrors `DEFAULT_MAX_SUBSCRIBERS`; excess `requestPermission` calls resolve as cancelled with a stderr warning.
@@ -212,7 +212,7 @@ sequenceDiagram
 | `permissionPolicy`                            | from `settings.json`'s `policy.permissionStrategy` | One of `first-responder` / `designated` / `consensus` / `local-only`.                                                 |
 | `permissionConsensusQuorum`                   | from `settings.json`                               | N for consensus policy.                                                                                               |
 | `permissionAudit`                             | `createNoOpPermissionAuditPublisher()`             | Wire to `PermissionAuditRing` for the audit trail.                                                                    |
-| `channelIdleTimeoutMs`                        | unset                                              | Positive compatibility auto-reap delay after all workspace runtime work drains; unset keeps the runtime live.         |
+| `channelIdleTimeoutMs`                        | `0`                                                | Auto-reap delay after all workspace runtime work drains; unset or `0` reaps immediately.                              |
 
 ## Additional bridge methods
 
