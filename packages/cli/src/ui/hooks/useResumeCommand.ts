@@ -217,6 +217,18 @@ export function useResumeCommand(
           try {
             resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);
+            // The forward path cleared the old session's in-memory
+            // background agents (resetBackgroundStateForSessionSwitch above,
+            // ~L158) before swapping core. After rolling core back to the old
+            // session, reload them so `list_agents` reflects the old session's
+            // still-on-disk sidecars again; otherwise the user lands back on
+            // the old session with an empty roster until the next process
+            // start or successful /resume. Best-effort — the guard inside
+            // loadPausedBackgroundAgents requires the session to already be
+            // current, which the startNewSession above satisfies.
+            await config
+              .loadPausedBackgroundAgents(oldSessionId)
+              .catch(() => {});
           } catch (rollbackErr) {
             config
               .getDebugLogger()
