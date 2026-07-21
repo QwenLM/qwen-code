@@ -10945,6 +10945,112 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('quarantines a disposed session when the final strict flush fails', async () => {
+    const recording = makeRecordingService();
+    let ownsWriter = true;
+    recording.hasWriteOwnership.mockImplementation(() => ownsWriter);
+    recording.close.mockImplementation(async () => {
+      ownsWriter = false;
+    });
+    recording.flush
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('flush failed'))
+      .mockResolvedValue(undefined);
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const liveSession = vi.mocked(Session).mock.results.at(-1)?.value as
+      | { dispose: ReturnType<typeof vi.fn> }
+      | undefined;
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(recording.flush).toHaveBeenCalledTimes(2);
+    expect(recording.close).not.toHaveBeenCalled();
+    expect(recording.hasWriteOwnership()).toBe(true);
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(liveSession?.dispose).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).not.toContain(liveSessionId);
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(recording.flush).toHaveBeenCalledTimes(3);
+    expect(recording.close).toHaveBeenCalledOnce();
+    expect(recording.hasWriteOwnership()).toBe(false);
+    expect(liveSession?.dispose).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps the disposed session quarantined while close retains writer ownership', async () => {
+    const recording = makeRecordingService();
+    let ownsWriter = true;
+    recording.hasWriteOwnership.mockImplementation(() => ownsWriter);
+    recording.close
+      .mockRejectedValueOnce(new Error('lease release failed'))
+      .mockImplementation(async () => {
+        ownsWriter = false;
+      });
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const liveSession = vi.mocked(Session).mock.results.at(-1)?.value as
+      | { dispose: ReturnType<typeof vi.fn> }
+      | undefined;
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+      }),
+    ).rejects.toThrow('lease release failed');
+    expect(liveSession?.dispose).toHaveBeenCalledOnce();
+    expect(recording.close).toHaveBeenCalledOnce();
+    expect(recording.hasWriteOwnership()).toBe(true);
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).not.toContain(liveSessionId);
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(liveSession?.dispose).toHaveBeenCalledTimes(2);
+    expect(recording.close).toHaveBeenCalledTimes(2);
+    expect(recording.hasWriteOwnership()).toBe(false);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not abort an active generation when the close gate is unavailable', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
@@ -11124,6 +11230,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
         requireFlush: false,
       }),
     ).rejects.toThrow('dispose failed');
+    expect(recording.finalize).not.toHaveBeenCalled();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(recording.close).not.toHaveBeenCalled();
     expect(innerConfig.shutdown).not.toHaveBeenCalled();
     expect(vi.mocked(unregisterGoalHook).mock.calls).toHaveLength(
       unregisterCalls,
@@ -11151,6 +11260,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
     expect(liveSession?.dispose).toHaveBeenCalledTimes(2);
     expect(recording.close).toHaveBeenCalledOnce();
+    expect(liveSession!.dispose.mock.invocationCallOrder[1]).toBeLessThan(
+      recording.close.mock.invocationCallOrder[0]!,
+    );
     expect(innerConfig.shutdown).toHaveBeenCalledOnce();
     expect(unregisterGoalHook).toHaveBeenCalledWith(innerConfig, liveSessionId);
     expect(mcpPool?.releaseSession).toHaveBeenCalledWith(liveSessionId);
@@ -12473,7 +12585,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     expect(result).toBe(setupError);
     expect(recording.close).toHaveBeenCalledOnce();
-    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
     expect(recording.hasWriteOwnership()).toBe(true);
     expect(lastSessionMock?.dispose).toHaveBeenCalledOnce();
     expect(
@@ -12486,12 +12598,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         .map((session) => session.getId()),
     ).not.toContain('persisted-1');
 
-    innerConfig.shutdown.mockImplementation(async () => {
-      recording.hasWriteOwnership.mockReturnValue(false);
-    });
+    recording.close.mockResolvedValue(undefined);
+    recording.hasWriteOwnership.mockReturnValue(false);
     mockConnectionState.resolve();
     await agentPromise;
-    expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
+    expect(recording.close).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
     expect(recording.hasWriteOwnership()).toBe(false);
   });
 
@@ -12522,7 +12634,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('removes a stored session when replay and the first lease release fail', async () => {
+  it('quarantines a stored session when replay and the first lease release fail', async () => {
     const replayError = new Error('replay failed');
     const innerConfig = bindRestoreMocks({
       sessionExists: true,
@@ -12565,11 +12677,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         .getActiveSessions()
         .map((session) => session.getId()),
     ).not.toContain('persisted-1');
-    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
-    expect(recording.close).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(recording.close).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
+    expect(failedSession.dispose).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(recording.close).toHaveBeenCalledTimes(3);
   });
 
   it('cleans Config once when replay fails and lease release succeeds', async () => {

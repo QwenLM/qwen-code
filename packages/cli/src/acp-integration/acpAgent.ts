@@ -3279,7 +3279,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     session: Session,
     cleanupErrors: unknown[] = [],
-    options: { shutdownConfig?: boolean } = {},
+    options: { shutdownConfig?: boolean; requireFlush?: boolean } = {},
   ): Promise<void> {
     if (
       this.sessions.get(sessionId) !== session &&
@@ -3289,15 +3289,40 @@ class QwenAgent implements Agent {
     }
     this.quarantineStoredSession(sessionId, session);
     await session.dispose();
+    const config = session.getConfig();
+    const recorder = config.getChatRecordingService();
+    recorder?.finalize();
+    let flushError: unknown;
+    try {
+      await recorder?.flush();
+    } catch (error) {
+      flushError = error;
+    }
+    if (flushError !== undefined && options.requireFlush === true) {
+      throw flushError;
+    }
+
+    let closeError: unknown;
+    try {
+      await recorder?.close();
+    } catch (error) {
+      closeError = error;
+    }
+    if (recorder?.hasWriteOwnership()) {
+      throw closeError ?? new SessionWriterUnavailableError();
+    }
+    if (flushError !== undefined) cleanupErrors.push(flushError);
+    if (closeError !== undefined) cleanupErrors.push(closeError);
+
     if (options.shutdownConfig !== false) {
       try {
-        await session.getConfig().shutdown({ shutdownTelemetry: false });
+        await config.shutdown({ shutdownTelemetry: false });
       } catch (error) {
         cleanupErrors.push(error);
       }
     }
     try {
-      unregisterGoalHook(session.getConfig(), sessionId);
+      unregisterGoalHook(config, sessionId);
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -3392,6 +3417,14 @@ class QwenAgent implements Agent {
     throw error;
   }
 
+  private ownsSessionConfig(config: Config): boolean {
+    const sessionId = config.getSessionId();
+    return (
+      this.sessions.get(sessionId)?.getConfig() === config ||
+      this.closingSessions.get(sessionId)?.getConfig() === config
+    );
+  }
+
   private pendingConfigCleanupKey(
     runtimeBaseDir: string,
     sessionId: string,
@@ -3440,6 +3473,7 @@ class QwenAgent implements Agent {
     if (closingSession) {
       await this.removeStoredSessionEntry(sessionId, closingSession, [], {
         shutdownConfig: opts?.shutdownConfig,
+        requireFlush: opts?.requireFlush,
       });
       return;
     }
@@ -3483,32 +3517,9 @@ class QwenAgent implements Agent {
         'close',
       );
 
-      recorder?.finalize();
-      let flushError: unknown;
-      try {
-        await recorder?.flush();
-      } catch (error) {
-        flushError = error;
-      }
-      if (flushError !== undefined && requireFlush) {
-        throw flushError;
-      }
-
-      let closeError: unknown;
-      try {
-        await recorder?.close();
-      } catch (error) {
-        closeError = error;
-      }
-      if (recorder?.hasWriteOwnership()) {
-        throw closeError ?? new SessionWriterUnavailableError();
-      }
-
-      const cleanupErrors: unknown[] = [];
-      if (flushError !== undefined) cleanupErrors.push(flushError);
-      if (closeError !== undefined) cleanupErrors.push(closeError);
-      await this.removeStoredSessionEntry(sessionId, session, cleanupErrors, {
+      await this.removeStoredSessionEntry(sessionId, session, [], {
         shutdownConfig: opts?.shutdownConfig,
+        requireFlush,
       });
       removedFromStore = true;
     } finally {
@@ -3804,9 +3815,7 @@ class QwenAgent implements Agent {
           );
         } catch (error) {
           return this.cleanupAfterRequestFailure(error, async () => {
-            if (
-              this.sessions.get(config.getSessionId())?.getConfig() !== config
-            ) {
+            if (!this.ownsSessionConfig(config)) {
               await this.cleanupUnstoredConfig(config);
             }
           });
@@ -3938,9 +3947,7 @@ class QwenAgent implements Agent {
         );
       } catch (error) {
         return this.cleanupAfterRequestFailure(error, async () => {
-          if (
-            this.sessions.get(config.getSessionId())?.getConfig() !== config
-          ) {
+          if (!this.ownsSessionConfig(config)) {
             await this.cleanupUnstoredConfig(config);
           }
         });
@@ -3991,24 +3998,9 @@ class QwenAgent implements Agent {
           session.installRewriter();
           session.startCronScheduler();
         } catch (err) {
-          return this.cleanupAfterRequestFailure(err, async () => {
-            try {
-              await this.discardStoredSessionIfCurrent(
-                params.sessionId,
-                session,
-              );
-            } catch (cleanupError) {
-              await this.removeStoredSessionEntry(
-                params.sessionId,
-                session,
-                [cleanupError],
-                {
-                  shutdownConfig: false,
-                },
-              );
-              await this.cleanupUnstoredConfig(config);
-            }
-          });
+          return this.cleanupAfterRequestFailure(err, () =>
+            this.discardStoredSessionIfCurrent(params.sessionId, session),
+          );
         }
       }
 
@@ -4103,9 +4095,7 @@ class QwenAgent implements Agent {
         );
       } catch (error) {
         return this.cleanupAfterRequestFailure(error, async () => {
-          if (
-            this.sessions.get(config.getSessionId())?.getConfig() !== config
-          ) {
+          if (!this.ownsSessionConfig(config)) {
             await this.cleanupUnstoredConfig(config);
           }
         });
@@ -10297,11 +10287,8 @@ class QwenAgent implements Agent {
           shutdownConfig: false,
         });
       } catch (cleanupError) {
-        await this.removeStoredSessionEntry(
-          sessionId,
-          session,
-          [cleanupError],
-          { shutdownConfig: false },
+        debugLogger.warn(
+          `Session ${sessionId} cleanup failed while preserving the creation error: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
         );
       }
       throw error;
