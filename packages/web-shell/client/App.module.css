@@ -484,27 +484,171 @@
   overflow: visible;
 }
 
-.worktreeWelcomeBadge {
+.worktreeWelcomeToggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 18px auto 0;
+  padding: 9px 18px 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card, transparent);
+  color: var(--foreground);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+  animation: worktreeWelcomeIn 220ms ease-out;
+}
+
+.worktreeWelcomeToggle:hover {
+  border-color: var(--color-accent-border, rgba(139, 92, 246, 0.5));
+  box-shadow: 0 6px 20px var(--color-accent-bg, rgba(139, 92, 246, 0.16));
+  transform: translateY(-1px);
+}
+
+.worktreeWelcomeToggle:active {
+  transform: translateY(0) scale(0.99);
+  transition-duration: 60ms;
+}
+
+.worktreeToggleIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--color-accent-bg, rgba(139, 92, 246, 0.1));
+  color: var(--color-accent-fg, #8b5cf6);
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    background 160ms ease;
+}
+
+.worktreeWelcomeToggle:hover .worktreeToggleIcon {
+  transform: rotate(-10deg) scale(1.08);
+  background: var(--color-accent-bg, rgba(139, 92, 246, 0.16));
+}
+
+.worktreeToggleText {
   display: flex;
   flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.worktreeToggleLabel {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--foreground);
+}
+
+.worktreeToggleHint {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted-foreground);
+}
+
+.worktreeWelcomeBadge {
+  position: relative;
+  display: flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 12px;
-  padding: 12px 20px;
-  border-radius: 12px;
+  gap: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 18px auto 0;
+  padding: 10px 40px 10px 10px;
+  border: 1px solid var(--color-accent-border, rgba(139, 92, 246, 0.25));
+  border-radius: 14px;
   background: var(--color-accent-bg, rgba(139, 92, 246, 0.06));
-  border: 1px solid var(--color-accent-border, rgba(139, 92, 246, 0.15));
-  color: var(--color-accent-fg, #8b5cf6);
+  color: var(--foreground);
+  text-align: left;
+  box-shadow: 0 2px 14px var(--color-accent-bg, rgba(139, 92, 246, 0.12));
+  animation: worktreeWelcomeIn 220ms ease-out;
+}
+
+.worktreeBadgeIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--color-accent-fg, #8b5cf6);
+  color: #fff;
+  box-shadow: 0 3px 10px var(--color-accent-border, rgba(139, 92, 246, 0.45));
+}
+
+.worktreeBadgeText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
 }
 
 .worktreeWelcomeTitle {
-  font-size: 14px;
+  font-size: 13px;
   font-weight: 600;
+  line-height: 1.35;
+  color: var(--color-accent-fg, #8b5cf6);
 }
 
 .worktreeWelcomeDesc {
-  font-size: 12px;
-  opacity: 0.7;
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted-foreground);
+}
+
+.worktreeWelcomeCancel {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0.55;
+  transition:
+    opacity 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    transform 180ms ease;
+}
+
+.worktreeWelcomeCancel:hover {
+  opacity: 1;
+  background: var(--color-accent-border, rgba(139, 92, 246, 0.2));
+  color: var(--color-accent-fg, #8b5cf6);
+  transform: rotate(90deg);
+}
+
+@keyframes worktreeWelcomeIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .missingSessionState {

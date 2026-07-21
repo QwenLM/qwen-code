@@ -29,7 +29,7 @@ type QwenHistoryInternals = {
     sessionId: string,
     cwd: string,
     sourceElements?: NonNullable<Message['textElements']>,
-  ) => void;
+  ) => Promise<void>;
   applyQwenTranscriptTextElements: (
     messages: Message[],
     sessionId: string,
@@ -71,6 +71,8 @@ type QwenAvailableCommandsInternals = {
     signal: { aborted: boolean };
   } | null;
   qwenSessionId: string | null;
+  persistedQwenSessionId: string | null;
+  qwenPersistenceCwd: string | null;
   _isProcessing: boolean;
   currentTurnId?: string;
   handleExtMethod: (
@@ -80,9 +82,12 @@ type QwenAvailableCommandsInternals = {
   suppressedSessionUpdates: Set<string>;
   eventQueue: {
     hasPending: boolean;
+    isComplete: boolean;
     drain: () => AsyncGenerator<AgentEvent>;
   };
   ensureProcess: () => Promise<void>;
+  ensureQwenSession: () => Promise<void>;
+  waitForCurrentTurnUsage: () => Promise<void>;
   startProcess: () => Promise<void>;
   callAcp: <T>(
     method: string,
@@ -99,6 +104,17 @@ type QwenAvailableCommandsInternals = {
   handleSessionUpdate: (params: unknown) => void;
   flushPendingAvailableCommandsUpdate: (sessionId: string) => void;
 };
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((next) => {
+    resolve = next;
+  });
+  return { promise, resolve };
+}
 
 type QwenSpawnInternals = {
   buildSpawnCommand: (
@@ -578,9 +594,7 @@ describe('QwenAgent slash command history', () => {
         },
       ],
     });
-    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith([
-      'optimistic-image',
-    ]);
+    expect(onMidTurnMessagesDrained).toHaveBeenCalledWith(['optimistic-image']);
 
     agent.destroy();
   });
@@ -817,7 +831,7 @@ describe('QwenAgent slash command history', () => {
     ]);
   });
 
-  it('writes slash command text elements into the Qwen transcript user record', () => {
+  it('records slash command text elements through ACP without rewriting the transcript', async () => {
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(runtimeRoot, cwd);
@@ -838,7 +852,12 @@ describe('QwenAgent slash command history', () => {
     ]);
 
     const agent = createAgent(cwd);
-    (
+    const extMethod = mock(async () => ({}));
+    (agent as unknown as QwenAvailableCommandsInternals).callAcp = async (
+      _method,
+      execute,
+    ) => await execute({ extMethod });
+    await (
       agent as unknown as QwenHistoryInternals
     ).persistQwenTranscriptTextElements(sessionId, cwd, [
       {
@@ -853,7 +872,102 @@ describe('QwenAgent slash command history', () => {
     const records = readQwenTranscript(runtimeRoot, cwd, sessionId);
     agent.destroy();
 
-    expect(records[0]?.textElements).toEqual([
+    expect(records[0]?.textElements).toBeUndefined();
+    expect(extMethod).toHaveBeenCalledWith('qwen/session/recordTextElements', {
+      sessionId,
+      content: '/qc-helper hello',
+      textElements: [
+        {
+          type: 'slash_command',
+          byte_range: { start: 0, end: 10 },
+          placeholder: '/qc-helper',
+          label: 'qc-helper',
+          target: 'qc-helper',
+        },
+      ],
+    });
+  });
+
+  it('keeps text-element persistence and replay on the pre-cd transcript root', async () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const persistenceCwd = mkdtempSync(join(tmpdir(), 'qwen-original-cwd-'));
+    const logicalCwd = mkdtempSync(join(tmpdir(), 'qwen-after-cd-'));
+    tempRoots.push(runtimeRoot, persistenceCwd, logicalCwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'session-after-logical-cd';
+    writeQwenTranscript(runtimeRoot, persistenceCwd, sessionId, [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-30T08:02:52.927Z',
+        type: 'user',
+        cwd: logicalCwd,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: '/qc-helper' }] },
+      },
+      {
+        uuid: 'm1',
+        parentUuid: 'u1',
+        sessionId,
+        timestamp: '2026-04-30T08:02:53.927Z',
+        type: 'system',
+        subtype: 'user_text_elements',
+        cwd: logicalCwd,
+        version: 'test',
+        systemPayload: {
+          content: '/qc-helper',
+          textElements: [
+            {
+              type: 'slash_command',
+              byte_range: { start: 0, end: 10 },
+              placeholder: '/qc-helper',
+              label: 'qc-helper',
+              target: 'qc-helper',
+            },
+          ],
+        },
+      },
+    ]);
+
+    const agent = createAgent(persistenceCwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals &
+      QwenHistoryInternals;
+    internals.qwenSessionId = sessionId;
+    internals.qwenPersistenceCwd = persistenceCwd;
+    const extMethod = mock(async () => ({}));
+    internals.callAcp = async (_method, execute) =>
+      await execute({ extMethod });
+
+    await internals.persistQwenTranscriptTextElements(sessionId, logicalCwd, [
+      {
+        type: 'slash_command',
+        byte_range: { start: 0, end: 10 },
+        placeholder: '/qc-helper',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      },
+    ]);
+    const messages = internals.applyQwenTranscriptTextElements(
+      [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: '/qc-helper',
+          timestamp: Date.parse('2026-04-30T08:02:52.927Z'),
+        },
+      ],
+      sessionId,
+      logicalCwd,
+    );
+    agent.destroy();
+
+    expect(extMethod).toHaveBeenCalledWith(
+      'qwen/session/recordTextElements',
+      expect.objectContaining({ sessionId, content: '/qc-helper' }),
+    );
+    expect(messages[0]?.textElements).toEqual([
       {
         type: 'slash_command',
         byte_range: { start: 0, end: 10 },
@@ -864,7 +978,151 @@ describe('QwenAgent slash command history', () => {
     ]);
   });
 
-  it('writes skill text elements into the Qwen transcript user record', () => {
+  it('does not complete a newer turn when prior text-element persistence resumes', async () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'session-with-delayed-text-elements';
+    const firstRecord = {
+      uuid: 'u1',
+      parentUuid: null,
+      sessionId,
+      timestamp: '2026-04-30T08:02:52.927Z',
+      type: 'user',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: '/first' }] },
+    };
+    const secondRecord = {
+      uuid: 'u2',
+      parentUuid: 'u1',
+      sessionId,
+      timestamp: '2026-04-30T08:02:53.927Z',
+      type: 'user',
+      cwd,
+      version: 'test',
+      message: { role: 'user', parts: [{ text: '/second' }] },
+    };
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [firstRecord]);
+
+    const firstPersistStarted = deferred<void>();
+    const firstPersistGate = deferred<Record<string, unknown>>();
+    const secondPromptStarted = deferred<void>();
+    const secondPromptGate = deferred<Record<string, unknown>>();
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.qwenSessionId = sessionId;
+    internals.ensureProcess = async () => {};
+    internals.ensureQwenSession = async () => {};
+    internals.waitForCurrentTurnUsage = async () => {};
+    let promptCalls = 0;
+    let persistenceCalls = 0;
+    internals.callAcp = (async <T>(method: string): Promise<T> => {
+      if (method === 'session/prompt') {
+        promptCalls++;
+        if (promptCalls === 1) {
+          return { stopReason: 'end_turn' } as T;
+        }
+        secondPromptStarted.resolve();
+        return (await secondPromptGate.promise) as T;
+      }
+      if (method === 'ext/qwen/session/recordTextElements') {
+        persistenceCalls++;
+        if (persistenceCalls === 1) {
+          firstPersistStarted.resolve();
+          return (await firstPersistGate.promise) as T;
+        }
+      }
+      return {} as T;
+    }) as QwenAvailableCommandsInternals['callAcp'];
+
+    const textElements = [
+      {
+        type: 'slash_command' as const,
+        byte_range: { start: 0, end: 6 },
+        placeholder: '/first',
+        label: 'first',
+        target: 'first',
+      },
+    ];
+    const firstIterator = agent.chat('/first', undefined, { textElements });
+    void firstIterator.next();
+    await firstPersistStarted.promise;
+
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      firstRecord,
+      secondRecord,
+    ]);
+    const secondIterator = agent.chat('/second', undefined, { textElements });
+    const secondNext = secondIterator.next();
+    await secondPromptStarted.promise;
+    firstPersistGate.resolve({});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(internals.eventQueue.isComplete).toBe(false);
+
+    secondPromptGate.resolve({ stopReason: 'end_turn' });
+    await expect(secondNext).resolves.toMatchObject({
+      value: { type: 'complete' },
+      done: false,
+    });
+    await secondIterator.return(undefined);
+    agent.destroy();
+  });
+
+  it('does not replace a writer-conflicted persisted session with a fresh session', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(cwd);
+
+    const agent = createAgent(cwd);
+    const internals = agent as unknown as QwenAvailableCommandsInternals;
+    internals.persistedQwenSessionId = 'persisted-session';
+    internals.qwenPersistenceCwd = cwd;
+    internals.ensureProcess = async () => {};
+    let newSessionCalls = 0;
+    internals.callAcp = async (method, execute) => {
+      if (method === 'session/load') {
+        return execute({
+          loadSession: async () => {
+            throw {
+              code: -32020,
+              message: 'Writer conflict',
+              data: { errorKind: 'session_writer_conflict' },
+            };
+          },
+        });
+      }
+      if (method === 'session/new') {
+        newSessionCalls += 1;
+        return execute({
+          newSession: async () => ({
+            sessionId: 'unexpected-fresh-session',
+            models: {},
+            modes: {},
+          }),
+        });
+      }
+      throw new Error(`Unexpected ACP method ${method}`);
+    };
+
+    const events: AgentEvent[] = [];
+    for await (const event of agent.chat('hello')) {
+      events.push(event);
+    }
+    agent.destroy();
+
+    expect(newSessionCalls).toBe(0);
+    expect(events).toEqual([
+      {
+        type: 'error',
+        message: 'Writer conflict: {"errorKind":"session_writer_conflict"}',
+      },
+      { type: 'complete' },
+    ]);
+  });
+
+  it('records skill text elements through ACP', async () => {
     const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
     const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
     tempRoots.push(runtimeRoot, cwd);
@@ -885,7 +1143,12 @@ describe('QwenAgent slash command history', () => {
     ]);
 
     const agent = createAgent(cwd);
-    (
+    const extMethod = mock(async () => ({}));
+    (agent as unknown as QwenAvailableCommandsInternals).callAcp = async (
+      _method,
+      execute,
+    ) => await execute({ extMethod });
+    await (
       agent as unknown as QwenHistoryInternals
     ).persistQwenTranscriptTextElements(sessionId, cwd, [
       {
@@ -897,18 +1160,24 @@ describe('QwenAgent slash command history', () => {
       },
     ]);
 
-    const records = readQwenTranscript(runtimeRoot, cwd, sessionId);
     agent.destroy();
 
-    expect(records[0]?.textElements).toEqual([
-      {
-        type: 'skill',
-        byte_range: { start: 0, end: 10 },
-        placeholder: '@qc-helper',
-        label: 'qc-helper',
-        target: 'qc-helper',
-      },
-    ]);
+    expect(extMethod).toHaveBeenCalledWith(
+      'qwen/session/recordTextElements',
+      expect.objectContaining({
+        sessionId,
+        content: '@qc-helper',
+        textElements: [
+          {
+            type: 'skill',
+            byte_range: { start: 0, end: 10 },
+            placeholder: '@qc-helper',
+            label: 'qc-helper',
+            target: 'qc-helper',
+          },
+        ],
+      }),
+    );
   });
 
   it('loads text elements back from the Qwen transcript', () => {
@@ -937,6 +1206,76 @@ describe('QwenAgent slash command history', () => {
             target: 'qc-helper',
           },
         ],
+      },
+    ]);
+
+    const agent = createAgent(cwd);
+    const messages = (
+      agent as unknown as QwenHistoryInternals
+    ).applyQwenTranscriptTextElements(
+      [
+        {
+          id: 'message-1',
+          role: 'user',
+          content: '@qc-helper',
+          timestamp: Date.parse('2026-04-30T08:02:52.927Z'),
+        },
+      ],
+      sessionId,
+      cwd,
+    );
+    agent.destroy();
+
+    expect(messages[0]?.textElements).toEqual([
+      {
+        type: 'skill',
+        byte_range: { start: 0, end: 10 },
+        placeholder: '@qc-helper',
+        label: 'qc-helper',
+        target: 'qc-helper',
+      },
+    ]);
+  });
+
+  it('loads append-only text element records from the Qwen transcript', () => {
+    const runtimeRoot = mkdtempSync(join(tmpdir(), 'qwen-runtime-'));
+    const cwd = mkdtempSync(join(tmpdir(), 'qwen-cwd-'));
+    tempRoots.push(runtimeRoot, cwd);
+    process.env.QWEN_RUNTIME_DIR = runtimeRoot;
+
+    const sessionId = 'session-with-append-only-text-elements';
+    writeQwenTranscript(runtimeRoot, cwd, sessionId, [
+      {
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-30T08:02:52.927Z',
+        type: 'user',
+        cwd,
+        version: 'test',
+        message: { role: 'user', parts: [{ text: '@qc-helper' }] },
+      },
+      {
+        uuid: 'm1',
+        parentUuid: 'u1',
+        sessionId,
+        timestamp: '2026-04-30T08:02:53.927Z',
+        type: 'system',
+        subtype: 'user_text_elements',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          content: '@qc-helper',
+          textElements: [
+            {
+              type: 'skill',
+              byte_range: { start: 0, end: 10 },
+              placeholder: '@qc-helper',
+              label: 'qc-helper',
+              target: 'qc-helper',
+            },
+          ],
+        },
       },
     ]);
 

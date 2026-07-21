@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
@@ -38,6 +39,9 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
+vi.mock('./usageHistoryService.js', () => ({
+  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
+}));
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
@@ -1439,6 +1443,15 @@ describe('SessionService', () => {
 
       expect(result).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalled();
+      // #7384: the usage salvage must see the transcript BEFORE it is
+      // unlinked, or the summary is unrecoverable.
+      const salvage = vi.mocked(persistUsageBeforeTranscriptDeletion);
+      expect(salvage).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.jsonl`),
+      );
+      expect(salvage.mock.invocationCallOrder[0]!).toBeLessThan(
+        unlinkSyncSpy.mock.invocationCallOrder[0]!,
+      );
       expect(rmSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`file-history/${sessionIdA}`),
         { recursive: true, force: true },

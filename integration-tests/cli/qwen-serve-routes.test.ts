@@ -166,12 +166,14 @@ beforeAll(async () => {
   port = await new Promise<number>((resolve, reject) => {
     let buf = '';
     // Capture the timeout handle so we can clear it on success — an
-    // un-cleared 10s timer outlives the spawn promise and keeps the
+    // un-cleared timer outlives the spawn promise and keeps the
     // vitest event loop alive past the test, manifesting as
     // intermittent `Test timed out` retries on slow CI.
+    // 25s is strictly below the 30s beforeAll backstop so this
+    // descriptive rejection fires first on a genuine boot hang.
     const bootTimer = setTimeout(
       () => reject(new Error('daemon boot timeout')),
-      10_000,
+      25_000,
     );
     const onData = (chunk: Buffer) => {
       buf += chunk.toString();

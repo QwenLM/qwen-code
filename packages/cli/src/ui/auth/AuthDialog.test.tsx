@@ -1234,7 +1234,12 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 1/2 · API Key',
+        'Alibaba ModelStudio · Step 1/3 · Region',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/3 · API Key',
       );
 
       await typeText(stdin, 'sk-token-plan');
@@ -1242,7 +1247,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 2/2 · Model IDs',
+        'Alibaba ModelStudio · Step 3/3 · Model IDs',
       );
       stdin.write('\r');
       await vi.waitFor(
@@ -1309,7 +1314,12 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 1/2 · API Key',
+        'Alibaba ModelStudio · Step 1/3 · Region',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/3 · API Key',
       );
 
       await typeText(stdin, 'sk-token-plan');
@@ -1317,7 +1327,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 2/2 · Model IDs',
+        'Alibaba ModelStudio · Step 3/3 · Model IDs',
       );
 
       // The Model IDs input is pre-filled with the saved custom model id
@@ -1373,7 +1383,22 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
-        'Alibaba ModelStudio · Step 1/2 · API Key',
+        'Alibaba ModelStudio · Step 1/3 · Region',
+      );
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Alibaba ModelStudio · Step 2/3 · API Key',
+      );
+      stdin.write('\u001b');
+
+      await vi.waitFor(
+        () => {
+          expect(lastFrame()).toContain(
+            'Alibaba ModelStudio · Step 1/3 · Region',
+          );
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
       );
       stdin.write('\u001b');
 

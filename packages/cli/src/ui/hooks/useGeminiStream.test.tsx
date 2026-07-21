@@ -33,6 +33,8 @@ import {
   SendMessageType,
   ToolErrorType,
   ToolConfirmationOutcome,
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
@@ -6779,6 +6781,50 @@ describe('useGeminiStream', () => {
         expect(
           mockSendMessageStream.mock.calls[0][3].modelOverride,
         ).toBeUndefined();
+      });
+
+      // Regression for #7156: progress setState calls issued from inside a
+      // background subagent's AsyncLocalStorage frame can batch with the
+      // notification trigger into one React commit, so the drain effect
+      // executes on a stack that still carries the subagent's frame. The
+      // drained turn — and every async continuation it starts — then
+      // resolves Config.getModel() to the subagent's runtime view and the
+      // main session switches onto the subagent's model. The drain effect
+      // must therefore run via runOutsideAgentContext. This test drives the
+      // notification callback from inside an agent frame (bypassing the
+      // producer-side guard in BackgroundTaskRegistry.emitNotification) and
+      // fails if the consumer-side wrapping is removed.
+      it('drains a notification outside a background agent ALS frame', async () => {
+        renderTestHook();
+        const callback = mockBackgroundShellRegistry.setNotificationCallback
+          .mock.calls[0][0] as (displayText: string, modelText: string) => void;
+
+        let capturedRuntimeView: unknown = 'unset';
+        mockSendMessageStream.mockImplementationOnce(() => {
+          capturedRuntimeView = getRuntimeContentGenerator();
+          return (async function* () {})();
+        });
+
+        const subagentView = {
+          contentGenerator: {},
+          contentGeneratorConfig: { model: 'small-default' },
+        } as never;
+        // The whole act() flush runs inside the agent frame, mirroring the
+        // contaminated React commit from the issue.
+        await runWithRuntimeContentGenerator(subagentView, async () => {
+          await act(async () => {
+            callback(
+              'Background shell "npm test" completed.',
+              '<task-notification>completed</task-notification>',
+            );
+          });
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.Notification,
+        });
+        expect(capturedRuntimeView).toBeUndefined();
       });
     });
   });

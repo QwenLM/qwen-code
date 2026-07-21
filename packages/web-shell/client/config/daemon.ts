@@ -10,6 +10,27 @@ export function getDaemonBaseUrl(): string {
 let cachedDaemonToken: string | undefined;
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
+const DAEMON_TOKEN_STORAGE_KEY = 'qwen-daemon-token';
+
+// sessionStorage access can throw (privacy modes, storage-disabled
+// embeds); the token flow must degrade to the pre-persistence behavior
+// rather than break page load.
+function readStoredDaemonToken(): string | undefined {
+  try {
+    return window.sessionStorage.getItem(DAEMON_TOKEN_STORAGE_KEY) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function persistDaemonToken(token: string): void {
+  try {
+    window.sessionStorage.setItem(DAEMON_TOKEN_STORAGE_KEY, token);
+  } catch {
+    // Storage unavailable — the token still works for this load via the
+    // in-memory cache; a refresh will lose it, matching the old behavior.
+  }
+}
 
 export function getDaemonToken(): string | undefined {
   if (cachedDaemonToken) return cachedDaemonToken;
@@ -23,10 +44,21 @@ export function getDaemonToken(): string | undefined {
   const fromHash = new URLSearchParams(
     window.location.hash.replace(/^#/, ''),
   ).get('token');
-  cachedDaemonToken =
-    fromHash ||
-    new URLSearchParams(window.location.search).get('token') ||
-    undefined;
+  const fromUrl =
+    fromHash || new URLSearchParams(window.location.search).get('token') || '';
+  if (fromUrl) {
+    // Persist per-tab so the token survives a page refresh (#7301):
+    // removeDaemonTokenFromUrl() deliberately strips it from the URL for
+    // history hygiene, which previously left a refreshed page with no
+    // credential at all. sessionStorage (not localStorage) keeps the token
+    // scoped to this tab and cleared when the tab closes.
+    persistDaemonToken(fromUrl);
+    cachedDaemonToken = fromUrl;
+    return cachedDaemonToken;
+  }
+  // Refresh path: the URL was already cleaned on the first load — fall
+  // back to the per-tab persisted copy.
+  cachedDaemonToken = readStoredDaemonToken();
   return cachedDaemonToken;
 }
 

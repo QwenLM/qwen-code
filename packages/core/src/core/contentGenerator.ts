@@ -137,6 +137,9 @@ export type ContentGeneratorConfig = {
   customHeaders?: Record<string, string>;
   // Extra body parameters to be merged into the request body
   extra_body?: Record<string, unknown>;
+  // When true, the model rejects enable_thinking=false with a 400 error
+  // (e.g. qwen3.8-max-preview), so thinking must never be disabled on the wire.
+  thinkingMandatory?: boolean;
   // Supported input modalities. Unsupported media types are replaced with text
   // placeholders. Leave undefined to use automatic detection from model name.
   modalities?: InputModalities;
