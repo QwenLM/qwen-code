@@ -719,3 +719,13 @@ describe('extractHostnameFromProxyUrl', () => {
     );
   });
 });
+
+describe('requireUndici guard', () => {
+  it('throws an actionable error when a sync builder runs before preload', async () => {
+    vi.resetModules();
+    const fresh = await import('./runtimeFetchOptions.js');
+    expect(() =>
+      fresh.getOrCreateSharedDispatcher('http://proxy.local'),
+    ).toThrow(/undici is not loaded yet; await preloadRuntimeFetchModule\(\)/);
+  });
+});

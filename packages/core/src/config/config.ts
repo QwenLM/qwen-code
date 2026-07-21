@@ -165,7 +165,7 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
-import { loadUndici } from '../utils/runtimeFetchOptions.js';
+import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -2249,8 +2249,18 @@ export class Config {
           );
         })
         .catch((error) => {
-          this.debugLogger.error('Failed to install proxy dispatcher:', error);
+          // Redact before logging: the error can embed the proxy URL with
+          // credentials. Rethrow so initialize() fails loudly, matching the
+          // old synchronous constructor behavior.
+          this.debugLogger.error(
+            'Failed to install proxy dispatcher:',
+            redactProxyError(error),
+          );
+          throw error;
         });
+      // Swallow an early rejection so it cannot become an unhandledRejection
+      // before initialize() awaits (and surfaces) the stored promise.
+      this.proxyDispatcherReady.catch(() => {});
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled

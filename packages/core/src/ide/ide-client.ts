@@ -902,6 +902,9 @@ export class IdeClient {
         undiciFetch,
       }),
     );
+    // Swallow an early rejection so it cannot become an unhandledRejection
+    // before the first fetch call awaits (and surfaces) it.
+    undiciReady.catch(() => {});
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
       const { agent, undiciFetch } = await undiciReady;
       const fetchOptions: RequestInit & { dispatcher?: unknown } = {
