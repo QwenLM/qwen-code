@@ -97,6 +97,7 @@ const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
 const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
+const mockLogConversationFinishedEvent = vi.hoisted(() => vi.fn());
 const mockUseDualOutput = vi.hoisted(() => vi.fn());
 const mockDualOutput = vi.hoisted(() => ({
   startAssistantMessage: vi.fn(),
@@ -129,6 +130,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
+    logConversationFinishedEvent: mockLogConversationFinishedEvent,
   };
 });
 
@@ -10345,5 +10347,53 @@ describe('useGeminiStream', () => {
         expect(call[0]).not.toHaveProperty('timestamp');
       }
     });
+  });
+
+  it('excludes sentToModel-false steer items from YOLO turn-count telemetry', async () => {
+    mockConfig.getApprovalMode = () => ApprovalMode.YOLO;
+
+    const history: HistoryItem[] = [
+      { id: 1, type: MessageType.USER, text: 'first' },
+      { id: 2, type: MessageType.GEMINI, text: 'reply one' },
+      { id: 3, type: MessageType.USER, text: 'second' },
+      { id: 4, type: MessageType.GEMINI, text: 'reply two' },
+      { id: 5, type: MessageType.USER, text: 'steer', sentToModel: false },
+    ];
+
+    renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        history,
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        undefined,
+        undefined,
+        undefined,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(mockLogConversationFinishedEvent).toHaveBeenCalledOnce();
+    });
+
+    const event = mockLogConversationFinishedEvent.mock.calls[0][1];
+    // findLastIndex should land on 'second' (index 2), not the steer (index 4).
+    // turnCount = history.length - 2 = 3.
+    expect(event.turnCount).toBe(3);
   });
 });
