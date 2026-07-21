@@ -6934,6 +6934,53 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('flushes error terminals for active and queued prompts before session_died on killSession (DAEMON-005)', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      p1.catch(() => {});
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued at kill' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      p2.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      await expect(bridge.killSession(session.sessionId)).resolves.toBe(true);
+
+      const diedIdx = events.findIndex((e) => e.type === 'session_died');
+      expect(diedIdx).toBeGreaterThan(-1);
+      for (const promptId of ['prompt-a', 'prompt-b']) {
+        const terms = terminalsFor(events, promptId);
+        expect(terms).toHaveLength(1);
+        expect(terms[0]?.type).toBe('turn_error');
+        expect((terms[0]?.data as { code?: string }).code).toBe(
+          'session_killed',
+        );
+        // The terminal precedes the session_died frame — a reorder that
+        // flushes after events.close() would drop it into a closed bus.
+        expect(events.indexOf(terms[0]!)).toBeLessThan(diedIdx);
+      }
+      await bridge.shutdown();
+    });
+
     it('publishes exactly one terminal per prompt under cancel + remove + deadline races (DAEMON-002)', async () => {
       const handle = wedgeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
