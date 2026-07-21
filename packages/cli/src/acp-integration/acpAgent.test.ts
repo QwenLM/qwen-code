@@ -13331,7 +13331,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
   it('refreshes extension state without a duplicate direct skill refresh', async () => {
     const extensionManager = {
-      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshCacheWithSnapshot: vi.fn().mockResolvedValue({ generation: 7 }),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const skillManager = {
@@ -13370,7 +13370,7 @@ describe('sessionLanguage multi-session propagation', () => {
     );
 
     const agentPromise = runAcpAgent(
-      makeConfig() as unknown as Config,
+      cfg as unknown as Config,
       { merged: { mcpServers: {} } } as unknown as LoadedSettings,
       mockArgv,
     );
@@ -13383,12 +13383,13 @@ describe('sessionLanguage multi-session propagation', () => {
 
     await agent.newSession({ cwd: '/ext', mcpServers: [] });
     await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
-        sessionId: 's-ext',
-      }),
-    ).resolves.toEqual({ ok: true });
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceRuntimeExtensionsRefresh,
+        {},
+      ),
+    ).resolves.toEqual({ ok: true, refreshed: 1, generation: 7 });
 
-    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshCacheWithSnapshot).toHaveBeenCalledOnce();
     expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(refreshHierarchicalMemory).not.toHaveBeenCalled();

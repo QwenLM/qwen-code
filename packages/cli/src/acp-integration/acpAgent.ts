@@ -8547,6 +8547,64 @@ class QwenAgent implements Agent {
         }
         return { ok: true };
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceRuntimeExtensionsRefresh: {
+        const sessions = Array.from(this.sessions.values());
+        const configs = new Set(
+          [
+            this.config,
+            ...(this.workspaceMcpDiscoveryConfig
+              ? [this.workspaceMcpDiscoveryConfig]
+              : []),
+            ...sessions.map((session) => session.getConfig()),
+          ].filter(
+            (config) => typeof config.getExtensionManager === 'function',
+          ),
+        );
+        const errors: unknown[] = [];
+        let generation: number | undefined;
+        const runRefresh = async (refresh: () => Promise<unknown>) => {
+          try {
+            await refresh();
+          } catch (error) {
+            errors.push(error);
+          }
+        };
+        for (const config of configs) {
+          const extensionManager = config.getExtensionManager();
+          await runRefresh(async () => {
+            const snapshot = await extensionManager.refreshCacheWithSnapshot();
+            if (config === this.config) {
+              generation = snapshot.generation;
+            }
+          });
+          await runRefresh(async () => await extensionManager.refreshTools());
+          await runRefresh(
+            async () =>
+              await config.getGeminiClient()?.refreshSystemInstruction(),
+          );
+        }
+        for (const session of sessions) {
+          await runRefresh(
+            async () => await session.sendAvailableCommandsUpdate(),
+          );
+        }
+        if (errors.length > 0) {
+          const details = errors
+            .map((error) =>
+              error instanceof Error ? error.message : String(error),
+            )
+            .join('; ');
+          throw new AggregateError(
+            errors,
+            `Extension runtime refresh failed: ${details}`,
+          );
+        }
+        return {
+          ok: true,
+          refreshed: configs.size,
+          ...(generation === undefined ? {} : { generation }),
+        };
+      }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;
         if (!sessionId || !SESSION_ID_RE.test(sessionId)) {

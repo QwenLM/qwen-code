@@ -4316,6 +4316,38 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('replaces an empty workspace channel after a restore timeout', async () => {
+    const first = makeChannel({
+      loadSessionImpl: () => new Promise<LoadSessionResponse>(() => {}),
+    });
+    const second = makeChannel({
+      loadSessionImpl: () => ({ configOptions: [] }),
+    });
+    const channelFactory = vi
+      .fn()
+      .mockResolvedValueOnce(first.channel)
+      .mockResolvedValueOnce(second.channel);
+    const bridge = makeBridge({ channelFactory, initializeTimeoutMs: 25 });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'timed-out-restore',
+        workspaceCwd: WS_A,
+      }),
+    ).rejects.toThrow();
+    await vi.waitFor(() => expect(first.killed).toBe(true));
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'restored-after-timeout',
+        workspaceCwd: WS_A,
+      }),
+    ).resolves.toMatchObject({ sessionId: 'restored-after-timeout' });
+    expect(channelFactory).toHaveBeenCalledTimes(2);
+
+    await bridge.shutdown();
+  });
+
   it('keeps an empty workspace channel live after restore fails', async () => {
     let shouldFail = true;
     const handle = makeChannel({

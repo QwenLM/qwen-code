@@ -537,7 +537,7 @@ Response shape:
     "compactedReplayMaxBytes": 4194304,
     "promptDeadlineMs": null,
     "writerIdleTimeoutMs": null,
-    "channelIdleTimeoutMs": 0,
+    "channelIdleTimeoutMs": null,
     "sessionIdleTimeoutMs": 1800000,
     "acpConnectionCap": 64
   },
@@ -961,12 +961,15 @@ interface WorkspaceAcpPreheatResult {
   durationMs: number;
   reason?: 'timeout' | 'error';
   error?: string;
+  backgroundInProgress?: boolean;
 }
 ```
 
 `ready` always equals `channelLive`. A live response omits `reason` and
 `error`; otherwise `reason` is `timeout` or `error`. `durationMs` measures the
 current HTTP call, not the full lifetime of an initialization the call joined.
+`backgroundInProgress` is true when the HTTP wait ended but shared channel
+initialization is still continuing in the background.
 Operational timeout or failure returns HTTP 200. Invalid `timeoutMs` returns
 400, while authentication, rate limiting, and deferred-runtime failures retain
 their normal responses.

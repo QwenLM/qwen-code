@@ -377,6 +377,8 @@ interface ChannelInfo {
   workspaceControlInFlight: number;
   /** Reset an otherwise-idle channel after a timed-out Session spawn. */
   sessionSpawnResetPending: boolean;
+  /** Reset an otherwise-idle channel after a timed-out Session restore. */
+  sessionRestoreResetPending: boolean;
   workspacePhysicalRequests: Map<
     'extensions' | 'mcp' | 'skills',
     Set<Promise<void>>
@@ -1473,6 +1475,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       void killChannelWithLog(ci, 'newSession timeout');
       return;
     }
+    if (ci.sessionRestoreResetPending && hasNoChannelWork(ci)) {
+      ci.sessionRestoreResetPending = false;
+      cancelIdleTimer();
+      void killChannelWithLog(ci, 'session restore timeout');
+      return;
+    }
     const timeoutMs = channelIdleTimeoutMs;
     if (timeoutMs === null) {
       cancelIdleTimer();
@@ -2044,6 +2052,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         sessionSpawnsInFlight: 0,
         workspaceControlInFlight: 0,
         sessionSpawnResetPending: false,
+        sessionRestoreResetPending: false,
         workspacePhysicalRequests: new Map(),
         workspaceMcpDiscoveryInFlight: false,
         workspaceMcpDiscoveryRequested: false,
@@ -4088,10 +4097,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           replayError = extracted.replayError;
           replayHasMore = extracted.hasMore === true ? true : undefined;
         }
+        ci.sessionRestoreResetPending = false;
       } catch (err) {
         restoreEvents.close();
         if (isAcpSessionResourceNotFound(err, req.sessionId)) {
           throw new SessionNotFoundError(req.sessionId);
+        }
+        if (err instanceof BridgeTimeoutError) {
+          ci.sessionRestoreResetPending = true;
         }
         throw err;
       }
