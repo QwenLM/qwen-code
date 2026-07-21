@@ -1314,6 +1314,61 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledTimes(2);
   });
 
+  it('aborts residents and waits for every tracked agent execution to settle', async () => {
+    let resolveFirst!: () => void;
+    let rejectSecond!: (error: Error) => void;
+    const first = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      rejectSecond = reject;
+    });
+    const resident: ResidentBackgroundAgent = {
+      continue: vi.fn(() => true),
+      dispose: vi.fn(),
+    };
+    registry.register(makeRegistration('resident-1'));
+    registry.registerResidentAgent('resident-1', resident);
+    registry.trackAgentExecution(first);
+    const abortAll = vi.spyOn(registry, 'abortAll');
+
+    let settled = false;
+    const wait = registry.abortAllAndWait({ notify: false }).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    expect(resident.dispose).toHaveBeenCalledOnce();
+
+    registry.trackAgentExecution(second);
+    resolveFirst();
+    await vi.waitFor(() => expect(abortAll).toHaveBeenCalledTimes(2));
+    expect(settled).toBe(false);
+
+    rejectSecond(new Error('expected test rejection'));
+    await wait;
+    expect(settled).toBe(true);
+    expect(abortAll).toHaveBeenNthCalledWith(1, { notify: false });
+    expect(abortAll).toHaveBeenNthCalledWith(2, { notify: false });
+  });
+
+  it('bounds the wait when an aborted agent execution never settles', async () => {
+    vi.useFakeTimers();
+    try {
+      registry.trackAgentExecution(new Promise<void>(() => {}));
+
+      const wait = registry.abortAllAndWait({ notify: false });
+      const rejection = wait.catch((error: unknown) => error);
+
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(await rejection).toEqual(
+        new Error('Background agents did not stop within 5000ms.'),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('abortAll({ notify: false }) suppresses terminal notifications from old tasks', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);

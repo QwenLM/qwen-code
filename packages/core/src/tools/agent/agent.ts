@@ -3541,6 +3541,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   true,
                 );
               });
+            registry.trackAgentExecution(currentTurnPromise);
             currentTurnPromise.catch(reportUnexpectedBackgroundError);
             return true;
           },
@@ -3558,6 +3559,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgAbortController,
           false,
         );
+        registry.trackAgentExecution(currentTurnPromise);
         currentTurnPromise.catch(reportUnexpectedBackgroundError);
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);

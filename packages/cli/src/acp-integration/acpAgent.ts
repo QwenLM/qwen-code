@@ -2804,8 +2804,8 @@ export async function runAcpAgent(
     await fireSessionEndOnce(SessionEndReason.PromptInputExit);
     // Mirror the SIGTERM handler's pool drain on the IDE-initiated
     // normal close path to avoid leaking shared MCP entries.
-    await drainPoolBeforeExit('ide_close');
     await agentInstance?.disposeSessions();
+    await drainPoolBeforeExit('ide_close');
   } finally {
     process.off('SIGTERM', shutdownHandler);
     process.off('SIGINT', shutdownHandler);
@@ -2977,6 +2977,7 @@ interface PendingMcpAuthentication {
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly closingSessions: Map<string, Session> = new Map();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
@@ -3266,19 +3267,28 @@ class QwenAgent implements Agent {
     }
   }
 
+  private quarantineStoredSession(sessionId: string, session: Session): void {
+    if (this.sessions.get(sessionId) === session) {
+      this.sessions.delete(sessionId);
+      this.closingSessions.set(sessionId, session);
+    }
+  }
+
   private async removeStoredSessionEntry(
     sessionId: string,
     session: Session,
     cleanupErrors: unknown[] = [],
-    options: { shutdownConfig?: boolean } = {},
+    options: { shutdownConfig?: boolean; preserveMcpLease?: boolean } = {},
   ): Promise<void> {
-    if (this.sessions.get(sessionId) !== session) return;
-    try {
-      session.dispose();
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (
+      this.sessions.get(sessionId) !== session &&
+      this.closingSessions.get(sessionId) !== session
+    ) {
+      return;
     }
-    if (options.shutdownConfig !== false) {
+    this.quarantineStoredSession(sessionId, session);
+    await session.dispose();
+    if (options.shutdownConfig !== false && options.preserveMcpLease !== true) {
       try {
         await session.getConfig().shutdown({ shutdownTelemetry: false });
       } catch (error) {
@@ -3290,17 +3300,24 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    try {
-      this.mcpPool?.releaseSession(sessionId);
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (options.preserveMcpLease !== true) {
+      try {
+        this.mcpPool?.releaseSession(sessionId);
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
     }
     try {
       uiTelemetryService.removeSession(sessionId);
     } catch (error) {
       cleanupErrors.push(error);
     }
-    this.sessions.delete(sessionId);
+    if (this.sessions.get(sessionId) === session) {
+      this.sessions.delete(sessionId);
+    }
+    if (this.closingSessions.get(sessionId) === session) {
+      this.closingSessions.delete(sessionId);
+    }
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -3418,11 +3435,22 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
+      preserveMcpLease?: boolean;
     },
   ): Promise<void> {
+    const closingSession = this.closingSessions.get(sessionId);
+    if (closingSession) {
+      await this.removeStoredSessionEntry(sessionId, closingSession, [], {
+        shutdownConfig: opts?.shutdownConfig,
+        preserveMcpLease: opts?.preserveMcpLease,
+      });
+      return;
+    }
     const session = this.sessions.get(sessionId);
     if (!session) {
-      this.mcpPool?.releaseSession(sessionId);
+      if (opts?.preserveMcpLease !== true) {
+        this.mcpPool?.releaseSession(sessionId);
+      }
       return;
     }
 
@@ -3486,6 +3514,7 @@ class QwenAgent implements Agent {
       if (closeError !== undefined) cleanupErrors.push(closeError);
       await this.removeStoredSessionEntry(sessionId, session, cleanupErrors, {
         shutdownConfig: opts?.shutdownConfig,
+        preserveMcpLease: opts?.preserveMcpLease,
       });
       removedFromStore = true;
     } finally {
@@ -3508,7 +3537,6 @@ class QwenAgent implements Agent {
     }
     await this.closeStoredSession(sessionId, opts);
   }
-
   async disposeSessions(): Promise<void> {
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
@@ -3519,6 +3547,11 @@ class QwenAgent implements Agent {
         this.discardStoredSessionIfCurrent(sessionId, session, {
           waitForCloseGate: true,
         }),
+      ),
+    );
+    await Promise.allSettled(
+      [...this.closingSessions.entries()].map(([sessionId, session]) =>
+        this.removeStoredSessionEntry(sessionId, session),
       ),
     );
     await Promise.allSettled(
@@ -10178,6 +10211,13 @@ class QwenAgent implements Agent {
 
     if (this.sessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} is already active.`);
+    }
+    if (this.closingSessions.has(sessionId)) {
+      // The replacement Config may already have attached its MCP view under
+      // this same session ID. Stopping the old manager would detach that view.
+      await this.closeStoredSession(sessionId, {
+        preserveMcpLease: this.mcpPool !== undefined,
+      });
     }
 
     const session = new Session(sessionId, config, this.connection, settings);

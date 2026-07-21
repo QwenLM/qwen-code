@@ -2465,6 +2465,7 @@ describe('BackgroundAgentResumeService', () => {
 
     const dispose = vi.fn().mockResolvedValue(undefined);
     const { service, subagentManager, config } = createService({ hookSystem });
+    const trackAgentExecution = vi.spyOn(registry, 'trackAgentExecution');
     const getModel = vi.spyOn(config, 'getModel').mockReturnValue('model-a');
     subagentManager.createAgentHeadless.mockResolvedValue({
       subagent,
@@ -2489,6 +2490,7 @@ describe('BackgroundAgentResumeService', () => {
     const revived = await revive;
 
     expect(revived).toBeDefined();
+    expect(trackAgentExecution).toHaveBeenCalledOnce();
     expect(revived?.model).toBe('model-a');
     expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
     const [, runtimeConfig, createOptions] =
@@ -2529,6 +2531,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(registry.continueResidentAgent(agentId, 'tighten the summary')).toBe(
       true,
     );
+    expect(trackAgentExecution).toHaveBeenCalledTimes(2);
     expect(registry.get(agentId)?.status).toBe('running');
     await vi.waitFor(() => {
       expect(execute).toHaveBeenCalledTimes(3);

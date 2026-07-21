@@ -337,6 +337,7 @@ describe('Session', () => {
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
     abortAll: ReturnType<typeof vi.fn>;
+    abortAllAndWait: ReturnType<typeof vi.fn>;
   };
   let mockMonitorRegistry: {
     setNotificationCallback: ReturnType<typeof vi.fn>;
@@ -481,6 +482,7 @@ describe('Session', () => {
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
       getAll: vi.fn().mockReturnValue([]),
       abortAll: vi.fn(),
+      abortAllAndWait: vi.fn().mockResolvedValue(undefined),
     };
     mockMonitorRegistry = {
       setNotificationCallback: vi.fn(),
@@ -16103,6 +16105,53 @@ describe('Session', () => {
       expect(internals.cronAbortController).toBeNull();
       expect(internals.cronProcessing).toBe(false);
       expect(internals.cronCompletion).toBeNull();
+    });
+
+    it('waits for aborted background agents before disposal completes', async () => {
+      let release!: () => void;
+      mockBackgroundTaskRegistry.abortAllAndWait.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+
+      let settled = false;
+      const disposal = session.dispose().then(() => {
+        settled = true;
+      });
+
+      await vi.waitFor(() => {
+        expect(mockBackgroundTaskRegistry.abortAllAndWait).toHaveBeenCalledWith(
+          { notify: false },
+        );
+      });
+      expect(settled).toBe(false);
+      expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledOnce();
+
+      release();
+      await disposal;
+      expect(settled).toBe(true);
+    });
+
+    it('rejects prompts once disposal has started', async () => {
+      let release!: () => void;
+      mockBackgroundTaskRegistry.abortAllAndWait.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+
+      const disposal = session.dispose();
+      await expect(
+        session.prompt({
+          prompt: [],
+          sessionId: 'test-session-id',
+        }),
+      ).rejects.toThrow('Session is closing');
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+      release();
+      await disposal;
     });
 
     it('is idempotent — repeated dispose() calls do not throw or re-register', () => {

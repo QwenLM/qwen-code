@@ -1629,7 +1629,13 @@ export class Session implements SessionContext {
     return this.createdAt;
   }
 
-  dispose(): void {
+  async dispose(): Promise<void> {
+    const pendingCompletions = [
+      this.pendingPromptCompletion,
+      this.cronCompletion,
+      this.notificationCompletion,
+    ].filter((completion): completion is Promise<void> => completion !== null);
+    this.pendingPrompt?.abort();
     this.disposed = true;
     this.closing = true;
     this.resolveCloseGate?.();
@@ -1669,6 +1675,10 @@ export class Session implements SessionContext {
     this.unsubscribeChatRecordingFailure = undefined;
     this.config.setSubSessionSpawner(undefined);
     clearGoalTerminalObserver(this.sessionId);
+    await Promise.allSettled(pendingCompletions);
+
+    const registry = this.config.getBackgroundTaskRegistry();
+    await registry.abortAllAndWait({ notify: false });
   }
 
   /**

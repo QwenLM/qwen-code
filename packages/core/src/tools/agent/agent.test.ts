@@ -4277,6 +4277,7 @@ describe('AgentTool', () => {
       claimPendingInputsForResident: ReturnType<typeof vi.fn>;
       unregisterResidentAgent: ReturnType<typeof vi.fn>;
       restartCompletedAgent: ReturnType<typeof vi.fn>;
+      trackAgentExecution: ReturnType<typeof vi.fn>;
     };
 
     const bgSubagent: SubagentConfig = {
@@ -4334,6 +4335,7 @@ describe('AgentTool', () => {
         claimPendingInputsForResident: vi.fn().mockReturnValue([]),
         unregisterResidentAgent: vi.fn().mockReturnValue(true),
         restartCompletedAgent: vi.fn().mockReturnValue(restartedEntry),
+        trackAgentExecution: vi.fn(),
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
@@ -4379,6 +4381,10 @@ describe('AgentTool', () => {
 
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
+      expect(mockRegistry.trackAgentExecution).toHaveBeenCalledOnce();
+      expect(mockRegistry.trackAgentExecution).toHaveBeenCalledWith(
+        expect.any(Promise),
+      );
       expect(llmText).toContain(
         `Use ${ToolNames.SEND_MESSAGE} to continue this agent`,
       );
@@ -4628,6 +4634,7 @@ describe('AgentTool', () => {
         | undefined;
       expect(resident).toBeDefined();
       expect(resident?.continue('Now inspect the helper')).toBe(true);
+      expect(mockRegistry.trackAgentExecution).toHaveBeenCalledTimes(2);
 
       await vi.waitFor(() => {
         expect(mockAgent.execute).toHaveBeenCalledTimes(2);

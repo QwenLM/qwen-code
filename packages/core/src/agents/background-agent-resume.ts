@@ -1226,6 +1226,7 @@ export class BackgroundAgentResumeService {
                 true,
               );
             });
+          registry.trackAgentExecution(currentTurnPromise);
           currentTurnPromise.catch(reportUnexpectedBackgroundError);
           return true;
         },
@@ -1241,6 +1242,7 @@ export class BackgroundAgentResumeService {
         bgAbortController,
         false,
       );
+      registry.trackAgentExecution(currentTurnPromise);
       currentTurnPromise.catch(reportUnexpectedBackgroundError);
       return entry;
     } catch (error) {
