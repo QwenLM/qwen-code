@@ -2538,8 +2538,8 @@ export const useGeminiStream = (
               {
                 type: MessageType.USER,
                 text: message,
-                sentToModel: true,
-              } as HistoryItemWithoutId,
+                sentToModel: false,
+              },
               Date.now(),
             );
           }

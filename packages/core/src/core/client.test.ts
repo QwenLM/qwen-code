@@ -8811,6 +8811,7 @@ Other open files:
         expect(accept).toHaveBeenCalledOnce();
 
         await iter.return(undefined as never);
+        expect(accept).toHaveBeenCalledOnce();
       });
 
       it('restores an attached ToolResult steer when history never accepts it', async () => {
