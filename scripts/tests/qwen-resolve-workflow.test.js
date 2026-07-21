@@ -200,6 +200,80 @@ describe('qwen resolve workflow', () => {
     expect(resolveJob).not.toContain("- name: 'Refresh dependencies'");
   });
 
+  it('asks the resolution report for what the diff cannot show', () => {
+    // Measured before this contract existed: every substantive /resolve
+    // summary was a file-by-file inventory that hit the byte cap exactly and
+    // stopped mid-word (#2993, #4256, #6206 all ended at 2100 bytes total).
+    // The inventory duplicates the diff; what only the resolver knows is the
+    // root cause, whether the merge was semantic, and what it could not check.
+    const prompt = step(resolveJob, 'Resolve conflicts');
+    expect(prompt).toContain('Keep the summary under 4000 bytes');
+    expect(prompt).toContain(
+      'A file-by-file inventory is the first thing to cut',
+    );
+    expect(prompt).toContain('**Root cause.**');
+    expect(prompt).toContain('**Textual or semantic.**');
+    expect(prompt).toContain('**What is load-bearing.**');
+    expect(prompt).toContain('**What you could not verify.**');
+    // /resolve runs no tests AND may not edit non-conflicted files, so a merge
+    // that breaks an untouched test can only be reported, never fixed here.
+    expect(prompt).toContain('NON-conflicted test');
+    // Project convention for anything posted as a PR comment.
+    expect(prompt).toContain('<summary>中文说明</summary>');
+  });
+
+  it('truncates an over-long report visibly, on a character boundary', () => {
+    const helper = resolveJob.match(
+      /(SUMMARY_MAX_BYTES=\d+\n[\s\S]*?append_safe_file\(\) \{[\s\S]*?\n {10}\})/,
+    )?.[1];
+    expect(helper).toBeTruthy();
+    // The instructed limit must sit BELOW the enforced one, or a report that
+    // obeys the prompt still gets cut.
+    const cap = Number(helper.match(/SUMMARY_MAX_BYTES=(\d+)/)[1]);
+    expect(cap).toBeGreaterThan(4000);
+
+    const run = (body) => {
+      const dir = mkdtempSync(path.join(tmpdir(), 'resolve-summary-'));
+      writeFileSync(path.join(dir, 'address-summary.md'), body);
+      const out = spawnSync(
+        'bash',
+        [
+          '-c',
+          `${helper.replace(/^ {10}/gm, '')}\nappend_safe_file "$WORKDIR/address-summary.md"`,
+        ],
+        { env: { ...process.env, WORKDIR: dir }, encoding: 'utf8' },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      expect(out.status).toBe(0);
+      return out.stdout;
+    };
+
+    // A report inside the budget is passed through whole and unannotated.
+    const short = run(
+      '# Merge report\n\nRoot cause: #7351 touched the same chain.\n',
+    );
+    expect(short).toContain('Root cause: #7351 touched the same chain.');
+    expect(short).not.toContain('truncated at');
+
+    // An over-long one is cut AND says so — the silent stop is the bug.
+    const long = run(`${'x'.repeat(cap + 500)}\n`);
+    expect(long).toContain(`truncated at ${cap} bytes`);
+    expect(long).toContain('attached to this workflow run');
+
+    // The cut lands on a byte boundary, so a multi-byte character straddling
+    // it must be dropped rather than emitted as a broken tail. One leading
+    // ASCII byte offsets the 3-byte characters so the cap falls INSIDE one —
+    // without the offset the cut would land cleanly and prove nothing.
+    const wide = run(`x${'中'.repeat(Math.ceil(cap / 3) + 2)}`);
+    expect(() =>
+      new TextDecoder('utf-8', { fatal: true }).decode(
+        new TextEncoder().encode(wide),
+      ),
+    ).not.toThrow();
+    expect(wide).not.toContain('�');
+    expect(wide).toContain(`truncated at ${cap} bytes`);
+  });
+
   it('uses resolve naming for run artifacts', () => {
     expect(workflow).toContain('qwen-resolve-');
     expect(workflow).toContain('/tmp/qwen-resolve');
