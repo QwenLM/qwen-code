@@ -387,7 +387,7 @@ jobs:
 
       # SECURITY: checkout trusted base code; /review fetches PR diff context.
       - name: 'Checkout base branch'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
@@ -989,7 +989,7 @@ jobs:
           echo "pr_number=${pr_number}" >> "$GITHUB_OUTPUT"
 
       - name: 'Checkout base branch'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
@@ -1183,7 +1183,16 @@ jobs:
 
             ## Finish with exactly one outcome
 
-            - If you confidently resolved the conflicts, create one Conventional Commit on the current branch and write `${{ env.WORKDIR }}/address-summary.md`. Include what conflicted and how you resolved each side.
+            - If you confidently resolved the conflicts, create one Conventional Commit on the current branch and write `${{ env.WORKDIR }}/address-summary.md`.
+
+              **Keep the summary under 4000 bytes.** It is truncated when posted, and a report that stops mid-sentence is worse than a short one. A file-by-file inventory is the first thing to cut: the reviewer can already read the diff. Spend the space on what only you know, having just done the merge:
+
+              1. **Root cause.** Which change on the base branch collided with this PR — name the PR or commit when you can tell — not merely which files conflicted.
+              2. **Textual or semantic.** Say plainly whether the two sides were only adjacent, or whether both modified the same logic. If semantic, show the resolved code in a short fenced block: prose describing merged logic cannot be checked without re-reading the diff.
+              3. **What is load-bearing.** Any ordering, condition, or precedence the resolution depends on, written so that a future edit which breaks it is recognisable as breaking it.
+              4. **What you could not verify.** This command runs no build or tests, and you may only edit files that actually conflicted. If the merge changes behaviour that a NON-conflicted test or caller depends on, say so and name it — you must not fix it here, and silence would leave it broken.
+
+              End with the project's collapsed Chinese translation: `<details>` / `<summary>中文说明</summary>` / the translated body / `</details>`.
             - If there is no longer a conflict, do not commit. Write `${{ env.WORKDIR }}/no-action.md` explaining what changed.
             - If you cannot confidently resolve the conflict, do not commit. Write `${{ env.WORKDIR }}/failure.md` with the blocker and what you learned.
 
@@ -1355,10 +1364,18 @@ jobs:
           HEAD_REPO: '${{ steps.prepare.outputs.head_repo }}'
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           DRY_RUN: '${{ env.DRY_RUN }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
           push_failed=false
 
+          # Budget for one agent-written section of the comment. The old 2000
+          # was below what a real resolution report costs to write: EVERY
+          # substantive /resolve summary hit it exactly and stopped mid-word,
+          # so reviewers read a report that looked abandoned rather than
+          # clipped. The prompt now asks for under 4000; this leaves headroom
+          # above that, so the cut only fires on genuinely runaway output.
+          SUMMARY_MAX_BYTES=6000
           append_safe_file() {
             cleaned="${WORKDIR}/safe-$(basename "$1")"
             # Strip only dangerous HTML elements, not every `<...>` — the agent's
@@ -1369,7 +1386,14 @@ jobs:
             # head -c truncates at a byte boundary, which can split a multi-byte
             # UTF-8 character and emit a broken tail in the comment. Drop any
             # incomplete trailing sequence the byte cut leaves behind.
-            head -c 2000 "$cleaned" | iconv -f UTF-8 -t UTF-8 -c
+            head -c "$SUMMARY_MAX_BYTES" "$cleaned" | iconv -f UTF-8 -t UTF-8 -c
+            # Announce the cut. Silent truncation is the worse half of the bug:
+            # a clipped report is indistinguishable from an agent that trailed
+            # off, so a reviewer cannot tell whether the missing analysis was
+            # never written or merely not shown.
+            if [ "$(wc -c < "$cleaned")" -gt "$SUMMARY_MAX_BYTES" ]; then
+              printf '\n_… truncated at %s bytes. The full text is attached to this [workflow run](%s) as an artifact._\n' "$SUMMARY_MAX_BYTES" "$RUN_URL"
+            fi
             echo
           }
 

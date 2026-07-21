@@ -108,6 +108,12 @@ env:
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human.
   MAX_ROUNDS: '5'
+  # An auth/access model error (401/402/403, "no access"/"does not exist")
+  # never self-heals - only a maintainer can fix the key - and every retry
+  # costs an agent run AND a PR comment. Cap those attempts far below
+  # MAX_ROUNDS so the actionable "check the model key" message lands in an
+  # hour instead of a day. Transient (429/5xx) errors keep the full budget.
+  API_AUTH_MAX_ROUNDS: '3'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
@@ -205,6 +211,7 @@ jobs:
       pr_number: '${{ steps.decide.outputs.pr_number }}'
       takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'
       ack_pr: '${{ steps.decide.outputs.ack_pr }}'
+      ack_base: '${{ steps.decide.outputs.ack_base }}'
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
       retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
@@ -242,6 +249,7 @@ jobs:
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
+          ACK_BASE=''
           TAKEOVER_CMD=''
           CMD_PR=''
           RETRY_PR=''
@@ -454,6 +462,14 @@ jobs:
                   elif [[ "${PR_STATE}" != 'open' ]]; then
                     echo "🧭 takeover ignored: PR state '${PR_STATE:-unknown}' is not open"
                   elif [[ "${PR_BASE_REF}" != 'main' ]]; then
+                    # Refuse OUT LOUD. Staying silent here made a labelled
+                    # stacked PR indistinguishable from a managed one: the
+                    # label stuck, the route run went green, and the only
+                    # trace was this log line — so the PR sat unmanaged for
+                    # hours with nobody able to tell without reading the job
+                    # log. The ack job posts the explanation instead.
+                    TAKEOVER_ACK='base-refused'
+                    ACK_BASE="${PR_BASE_REF}"
                     echo "🧭 takeover ignored: PR targets '${PR_BASE_REF}' not 'main'"
                   else
                     DO_REVIEW=true
@@ -531,6 +547,7 @@ jobs:
           echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
           echo "takeover_ack=${TAKEOVER_ACK}" >> "${GITHUB_OUTPUT}"
           echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
+          echo "ack_base=${ACK_BASE}" >> "${GITHUB_OUTPUT}"
           echo "takeover_cmd=${TAKEOVER_CMD}" >> "${GITHUB_OUTPUT}"
           echo "retry_pr=${RETRY_PR}" >> "${GITHUB_OUTPUT}"
           echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
@@ -1440,6 +1457,10 @@ jobs:
       REPO: '${{ github.repository }}'
       ACK: '${{ needs.route.outputs.takeover_ack }}'
       PR: '${{ needs.route.outputs.ack_pr }}'
+      # The base the ROUTE saw when it refused — naming a live re-read here
+      # could report 'main' for a refusal that was decided against something
+      # else, so the message stays tied to the decision it explains.
+      ACK_BASE: '${{ needs.route.outputs.ack_base }}'
       GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
     steps:
       - name: 'Acknowledge takeover state change'
@@ -1469,13 +1490,23 @@ jobs:
           # ack on a skip-labeled PR during a transient API failure. A red
           # ack job posts nothing — engagement itself is scan-driven and
           # unaffected.
-          if ! PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
-            echo "::error::could not read PR #${PR} state for takeover ack"
-            exit 1
+          # A base refusal needs no live state — it is decided entirely by the
+          # route — so it does NOT ride on this read. Making the one ack whose
+          # whole purpose is "say why nothing happened" depend on an unrelated
+          # API call would reintroduce the silence it exists to remove.
+          HAS_SKIP=''
+          PR_AUTHOR_LIVE=''
+          if [[ "${ACK}" != 'base-refused' ]]; then
+            if ! PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
+              echo "::error::could not read PR #${PR} state for takeover ack"
+              exit 1
+            fi
+            HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
+            PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
           fi
-          HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
-          PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
-          if [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then
+          if [[ "${ACK}" == 'base-refused' ]]; then
+            BODY="$(printf '🚫 Takeover not engaged: the loop only manages PRs that target `main`, and this one targets `%s`. A stacked PR moves whenever its base branch does, so "new feedback since the last round" and base-conflict resolution are not well defined until the base lands. Two ways forward: retarget this PR to `main` once the base PR merges — the `%s` label is left in place and the scan lists by label, so the next scan engages it with no re-labelling — or take over the base PR instead.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：循环只管理以 `main` 为 base 的 PR，而本 PR 的 base 是 `%s`。堆叠 PR 会随 base 分支移动，因此“自上一轮以来的新反馈”与 base 冲突处理都无法良定义。两条路：待 base 的 PR 合入后把本 PR 改为面向 `main` —— `%s` 标签予以保留，扫描按标签枚举，下一次扫描即会自动接管，无需重新打标签；或改为接管 base 那个 PR。\n\n</details>\n\n<!-- takeover-ack base-refused -->' "${ACK_BASE}" "${TAKEOVER_LABEL}" "${ACK_BASE}" "${TAKEOVER_LABEL}")"
+          elif [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then
             BODY="$(printf '🚫 Takeover label applied but NOT engaged: this PR carries `%s`, which wins over takeover — the loop will not manage it. Remove `%s` to engage.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 已打接管标签但未生效：本 PR 带有 `%s`，其优先级高于接管，循环不会介入。移除 `%s` 后才会接管。\n\n</details>\n\n<!-- takeover-ack skip-blocked -->' "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}")"
           elif [[ "${ACK}" == 'engaged' ]]; then
             BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
@@ -1512,6 +1543,16 @@ jobs:
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
+          # Fleet visibility: every per-PR decision below also records a row so
+          # the run summary shows the WHOLE managed fleet in one table.
+          # Reconstructing this by hand (list bot PRs, regex each one's eval
+          # markers, cross-check checks and fork state) was the only way to see
+          # a stall, so stalls stayed invisible until someone went looking.
+          FLEET_FILE="$(mktemp)"
+          trap 'rm -f "${FLEET_FILE}"' EXIT
+          fleet_row() {
+            printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
+          }
           WORKDIR="$(mktemp -d)"
 
           # Candidate PRs: open, same-repo, targeting main, and either
@@ -1675,11 +1716,13 @@ jobs:
             # inspection budget.
             if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
               echo "⏳ #${PR}: review-address already in flight or queued — skipping"
+              fleet_row "${PR}" 'busy' 'address run in flight'
               continue
             fi
             INSPECTED=$(( INSPECTED + 1 ))
             if [[ "${INSPECTED}" -gt "${MAX_CANDIDATE_INSPECTIONS}" ]]; then
               echo "🧮 candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — deferring the rest to the next scan"
+              fleet_row '-' 'deferred' "candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — remaining candidates deferred to next scan"
               break
             fi
             # One PR fetch for the branch name, check rollup, creation time
@@ -1695,6 +1738,7 @@ jobs:
               # which a joined '/' test would wave through into a red fetch.
               if [[ -z "${HR_OWNER}" || -z "${HR_NAME}" ]]; then
                 echo "⚠️ #${PR}: fork head repository unresolved (owner='${HR_OWNER}' name='${HR_NAME}') — skipping"
+                fleet_row "${PR}" 'skipped' "fork head unresolved (owner='${HR_OWNER}' name='${HR_NAME}')"
                 continue
               fi
               HEAD_REPO_FULL="${HR_OWNER}/${HR_NAME}"
@@ -1706,6 +1750,7 @@ jobs:
             # address job re-checks it live once more before any mutation).
             if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")" == "true" ]]; then
               echo "⏭️ #${PR}: ${SKIP_LABEL} label present (applied mid-scan) — skipping"
+              fleet_row "${PR}" 'skipped' "${SKIP_LABEL} label present"
               continue
             fi
             EFF_MAX_ROUNDS="${MAX_ROUNDS}"
@@ -1717,6 +1762,7 @@ jobs:
               # not start evaluation" handoff. Retried on the next scan. (This also
               # means CREATED_WM below is only reached with a populated PR_META.)
               echo "⚠️ #${PR}: could not fetch PR metadata (API error); skipping until next scan"
+              fleet_row "${PR}" 'unknown' 'PR metadata unreadable (API error)'
               continue
             fi
             # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
@@ -1738,6 +1784,7 @@ jobs:
             ' <<< "${CHECKS_JSON}")"
             if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
               echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
+              fleet_row "${PR}" 'waiting' 'active checks in flight'
               continue
             fi
             # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
@@ -1880,6 +1927,7 @@ jobs:
 
             if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
               echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
+              fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
               # A MANAGED PR pausing at its cap deserves a visible reminder —
               # maintainers otherwise learn about it only from workflow logs.
               # Once per counting window: re-arming opens a fresh window and,
@@ -1986,10 +2034,12 @@ jobs:
 
             if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
+              fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
             fi
 
             echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
@@ -2009,12 +2059,31 @@ jobs:
             # the remainder (their signals persist).
             if [[ "$(jq 'length' <<< "${TARGETS}")" -ge "${MAX_TARGETS_PER_SCAN}" ]]; then
               echo "⚠️ target budget (${MAX_TARGETS_PER_SCAN}) reached; deferring the remaining candidates to the next scan"
+              fleet_row '-' 'deferred' "target budget (${MAX_TARGETS_PER_SCAN}) reached — remaining candidates deferred to next scan"
               break
             fi
           done
 
           COUNT="$(jq 'length' <<< "${TARGETS}")"
           echo "📋 ${COUNT} PR(s) to process"
+          {
+            echo "### 🤖 AutoFix fleet (${COUNT} selected this scan)"
+            echo
+            echo '| PR | State | Detail |'
+            echo '| --- | --- | --- |'
+            if [[ -s "${FLEET_FILE}" ]]; then
+              while IFS=$'\t' read -r f_pr f_state f_detail; do
+                f_detail="${f_detail//|/\\|}"
+                if [[ "${f_pr}" == '-' ]]; then
+                  printf '| — | %s | %s |\n' "${f_state}" "${f_detail}"
+                else
+                  printf '| #%s | %s | %s |\n' "${f_pr}" "${f_state}" "${f_detail}"
+                fi
+              done < "${FLEET_FILE}"
+            else
+              echo '| - | no managed PRs inspected | - |'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
@@ -2759,7 +2828,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3018,6 +3087,30 @@ jobs:
             for f in failure.md handoff.md address-summary.md no-action.md; do
               if [[ -s "${WORKDIR}/${f}" ]]; then DETAIL_FILE="${WORKDIR}/${f}"; break; fi
             done
+            # run-agent.mjs drops this marker when qwen died on a model-side
+            # [API Error: 4xx/5xx] (access denied, quota, a 5xx). The agent never
+            # evaluated the feedback, so this is treated as a retry (sentinel ts,
+            # no watermark advance) below — a model access/quota blip must not
+            # strand the PR the way a real evaluated handoff would.
+            API_ERROR_DETAIL=''
+            API_ERROR_KIND=''
+            if [[ -s "${WORKDIR}/agent-api-error" ]]; then
+              # First line only, comment-opener escaped (agent stdout can echo
+              # external PR-comment text and the marker regex spans '<!-- ... -->'
+              # happily), and capped so a long span can't bloat the headline.
+              # `cut -c` counts BYTES, so the cap can split a multi-byte
+              # character - and the classifier deliberately matches CJK renders,
+              # so a >200-byte Chinese error is a supported input, not a
+              # hypothetical. iconv -c drops the dangling bytes so the headline
+              # stays valid UTF-8; it EXITS 1 when it discards one, which under
+              # this step's `set -eo pipefail` would abort before the marker and
+              # the gh pr comment - hence the `|| true`, same as the sibling
+              # publish site below.
+              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed 's/<!--/<!\\-\\-/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
+            fi
+            if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
+              API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
+            fi
             # If feedback was actually read (prepare ran), stamp its newest ts so
             # the watermark advances and the same feedback is not re-selected next
             # scan. If the crash happened before prepare, NEWEST is empty and the
@@ -3045,41 +3138,71 @@ jobs:
             MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
-              if [[ -z "${DETAIL_FILE}" || "${GATE_CRASHED}" == 'true' ]]; then
-                # Prepare ran (NEWEST is set) but no verdict was reached — either
-                # the agent produced NO output at all (crashed before writing any
-                # verdict, e.g. a staged runner that fails to boot), or the gate
-                # crashed after the agent wrote its summary. It evaluated NOTHING,
-                # so the watermark must NOT advance past this feedback: an advance
-                # makes the next scan see "nothing new" and never retry,
-                # stranding the PR on a transient crash (a deploy, an infra blip,
-                # a base-image bug fixed minutes later). Stamp the sentinel ts
-                # (excluded from EVAL_WM) so the feedback stays live and the next
-                # scan retries; the incremented round still bounds retries to
-                # MAX_ROUNDS before a terminal handoff, so a PERSISTENT crash
-                # cannot loop forever.
+              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || "${GATE_CRASHED}" == 'true' ]]; then
+                # Prepare ran (NEWEST is set) but no verdict was reached. Three
+                # ways that happens, and in ALL of them the agent evaluated
+                # NOTHING: it produced no output at all (crashed before any
+                # verdict — a staged runner that fails to boot), it died on a
+                # model [API Error] (access/quota/5xx/transport), or the gate
+                # crashed after the agent wrote its summary. So the watermark
+                # must NOT advance past this feedback: an advance makes the next
+                # scan see "nothing new" and never retry, stranding the PR on a
+                # transient failure (an infra blip, a quota reset minutes away, a
+                # model-access grant, a base-image bug fixed minutes later).
+                # Stamp the sentinel ts (excluded from EVAL_WM) so the feedback
+                # stays live and the next scan retries; the incremented round
+                # still bounds retries before a terminal handoff, so a PERSISTENT
+                # failure cannot loop forever.
                 MARK_TS='9999-12-31T23:59:59Z'
-                # Only promise a retry when one will actually happen: at
-                # MARK_ROUND == MAX_ROUNDS the next scan's round-cap gate skips
-                # the PR, and the cap-reached notice is takeover-only — so the
-                # final attempt must say so itself, or the maintainer waits for
-                # a retry that never comes. No Run log here: the report block
-                # below appends it to every handoff (avoid a duplicate URL).
-                # Name the real cause: a gate crash points the maintainer at
-                # the gate logs (the agent's commit is discarded with the runner,
-                # but the feedback watermark is preserved so the retry re-attempts
-                # the same feedback), while a no-output crash points at the run.
-                if [[ -z "${DETAIL_FILE}" ]]; then
-                  CAUSE='crashed before it could evaluate the feedback'
-                  LAST_FIX='a human should take over this PR'
+                # Cause-aware wording, most specific first — a model error and a
+                # gate crash each name the operator fix, while a bare no-output
+                # crash points at a human. (The API clause runs first as
+                # defense-in-depth: today run-agent writes failure.md on the
+                # API-death path and the gate converts that to an explicit
+                # outcome=failed, so GATE_CRASHED is false — but if the gate
+                # ever changes, a model blip must not be reported as a gate
+                # problem.) No Run log here — the report block below appends
+                # it (avoid a duplicate).
+                if [[ -n "${API_ERROR_DETAIL}" ]]; then
+                  CAUSE="could not reach the model — ${API_ERROR_DETAIL}"
+                  LAST_FIX="a maintainer should check the autofix model key/access, then re-arm"
+                elif [[ -z "${DETAIL_FILE}" ]]; then
+                  CAUSE="crashed before it could evaluate the feedback"
+                  LAST_FIX="a human should take over this PR"
                 else
-                  CAUSE='hit a verification-gate error before reaching a verdict'
-                  LAST_FIX='a maintainer should check the gate logs, then re-arm'
+                  # A gate crash points the maintainer at the gate logs: the
+                  # agent's commit is discarded with the runner, but the
+                  # feedback watermark is preserved, so the retry re-attempts
+                  # the same feedback rather than skipping it.
+                  CAUSE="hit a verification-gate error before reaching a verdict"
+                  LAST_FIX="a maintainer should check the gate logs, then re-arm"
                 fi
-                if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
-                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — it will retry on the next scan."
+                # Budget retries by CAUSE. A transient 429/5xx self-heals, so
+                # it keeps the full round budget. An auth/access error that
+                # only a maintainer can fix never self-heals, and every attempt
+                # costs an agent run AND a PR comment - on a takeover PR that
+                # is ~100 comments over ~17h before the useful message lands.
+                CAUSE_MAX="${MAX_ROUNDS}"
+                if [[ "${API_ERROR_KIND}" == 'auth' && "${API_AUTH_MAX_ROUNDS}" -lt "${MAX_ROUNDS}" ]]; then
+                  CAUSE_MAX="${API_AUTH_MAX_ROUNDS}"
+                fi
+                # Only promise a retry when one will actually happen: at the
+                # cap the next scan's round gate skips the PR, and the
+                # cap-reached notice is takeover-only, so the final attempt
+                # must say so itself. Clamp the displayed numerator:
+                # MARK_ROUND counts ALL rounds in the window, so earlier real
+                # attempts can push it past CAUSE_MAX — "attempt 4/3" reads
+                # as a bug.
+                DISPLAY_ROUND=$(( MARK_ROUND < CAUSE_MAX ? MARK_ROUND : CAUSE_MAX ))
+                if [[ "${MARK_ROUND}" -lt "${CAUSE_MAX}" ]]; then
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${DISPLAY_ROUND}/${CAUSE_MAX}) — it will retry on the next scan."
                 else
-                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — this was the last automatic attempt; ${LAST_FIX}."
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${DISPLAY_ROUND}/${CAUSE_MAX}) — this was the last automatic attempt; ${LAST_FIX}."
+                  # Stamp the terminal round so the scan's max-round gate skips
+                  # this PR instead of re-handing-off every tick; the sentinel
+                  # ts keeps the feedback live for a re-arm once the key is
+                  # fixed. (No-op when CAUSE_MAX is already MAX_ROUNDS.)
+                  MARK_ROUND="${MAX_ROUNDS}"
                 fi
               else
                 HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
