@@ -222,7 +222,7 @@ describe('qwen-autofix workflow', () => {
     // Asserting the literal numbers only detected edits — it would not catch
     // a cap that stopped binding, which is the failure that matters.
     const num = (key) =>
-      Number(workflow.match(new RegExp(`${key}: '(\\d+)'`))?.[1]);
+      Number(workflow.match(new RegExp(`\\b${key}: '(\\d+)'`))?.[1]);
     const strictRounds = num('MAX_ROUNDS');
     const takeoverRounds = num('TAKEOVER_MAX_ROUNDS');
     const authRounds = num('API_AUTH_MAX_ROUNDS');
