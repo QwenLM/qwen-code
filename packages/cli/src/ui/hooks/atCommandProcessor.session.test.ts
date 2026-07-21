@@ -193,7 +193,7 @@ describe('handleAtCommand @session:', () => {
       (d) => d.name === 'Referenced Session',
     );
     expect(card).toBeDefined();
-    expect(card!.resultDisplay).toContain('I/O error');
+    expect(card!.resultDisplay).toContain('EACCES');
     expect(mockResolve).not.toHaveBeenCalled();
   });
 
@@ -216,7 +216,7 @@ describe('handleAtCommand @session:', () => {
       (d) => d.name === 'Referenced Session',
     );
     expect(card).toBeDefined();
-    expect(card!.resultDisplay).toContain('I/O error');
+    expect(card!.resultDisplay).toContain('corrupted JSONL');
   });
 
   it('deduplicates cross-form refs (UUID + title) resolving to the same session', async () => {

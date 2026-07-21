@@ -654,8 +654,8 @@ export async function resolveAtCommandQuery({
         matches = await new SessionService(
           config.getProjectRoot(),
         ).findSessionsByTitle(ref.title);
-      } catch {
-        const reason = `Could not look up sessions matching "@${originalAtPath.substring(1)}" (I/O error); try a session id instead.`;
+      } catch (error: unknown) {
+        const reason = `Could not look up sessions matching "@${originalAtPath.substring(1)}" (${getErrorMessage(error)}); try a session id instead.`;
         onDebugMessage(reason);
         scopedMentionEntries.push({
           originalAtPath,
@@ -728,8 +728,8 @@ export async function resolveAtCommandQuery({
       resolved = await new SessionReferenceService(
         config.getProjectRoot(),
       ).resolve(sessionId, ref.title ? { title: ref.title } : {});
-    } catch {
-      const reason = `Failed to load session "${sessionId}" (I/O error); the transcript may be corrupted or unreadable.`;
+    } catch (error: unknown) {
+      const reason = `Failed to load session "${sessionId}" (${getErrorMessage(error)}); the transcript may be corrupted or unreadable.`;
       onDebugMessage(reason);
       scopedMentionEntries.push({
         originalAtPath,

@@ -2605,6 +2605,11 @@ describe('InputPrompt', () => {
     await wait();
 
     expect(switchCategory).toHaveBeenCalledWith(1);
+
+    stdin.write('\x1b[D'); // left arrow
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(-1);
     unmount();
   });
 
