@@ -12229,12 +12229,13 @@ describe('createAcpSessionBridge', () => {
     });
 
     it('duplicate detach with same clientId decrements attachCount only once (DAEMON-006)', async () => {
-      // A spawns (owner, attachCount stays 0); B attaches
-      // (attachCount: 1). B's detach arrives TWICE (e.g. route
+      // A spawns (owner, attachCount stays 0); B and C attach
+      // (attachCount: 2). B's detach arrives TWICE (e.g. route
       // handler + disconnect reaper both firing). The second detach
-      // finds no attach-ref in the ledger and must NOT decrement,
-      // otherwise A's requireZeroAttaches kill would see 0 and reap
-      // a session A still owns.
+      // finds no attach-ref in the ledger and must NOT decrement —
+      // otherwise it steals C's ref, attachCount hits 0 with C still
+      // connected, and A's requireZeroAttaches kill reaps a session
+      // C is actively using.
       const factory: ChannelFactory = async () => makeChannel().channel;
       const bridge = makeBridge({
         channelFactory: factory,
@@ -12243,13 +12244,13 @@ describe('createAcpSessionBridge', () => {
       const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(b.attached).toBe(true);
-      await bridge.detachClient(b.sessionId, b.clientId);
-      await bridge.detachClient(b.sessionId, b.clientId);
-      // attachCount must have gone 1→0 exactly once — but the
-      // duplicate must not have poisoned anything: a fresh attacher
-      // bumps it back to 1 and the owner's zero-attaches kill bails.
       const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
       expect(c.attached).toBe(true);
+      expect(c.clientId).not.toBe(b.clientId);
+      await bridge.detachClient(b.sessionId, b.clientId);
+      await bridge.detachClient(b.sessionId, b.clientId);
+      // attachCount must still be 1 (C's ref intact): the owner's
+      // zero-attaches kill bails and C's session survives.
       await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
       expect(bridge.sessionCount).toBe(1);
       await bridge.shutdown();
