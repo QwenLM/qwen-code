@@ -241,7 +241,13 @@ describe('qwen resolve workflow', () => {
           '-c',
           `${helper.replace(/^ {10}/gm, '')}\nappend_safe_file "$WORKDIR/address-summary.md"`,
         ],
-        { env: { ...process.env, WORKDIR: dir }, encoding: 'utf8' },
+        {
+          env: {
+            ...process.env,
+            WORKDIR: dir,
+            RUN_URL: 'https://github.com/test/repo/actions/runs/1',
+          },
+        },
       );
       rmSync(dir, { recursive: true, force: true });
       expect(out.status).toBe(0);
@@ -249,27 +255,29 @@ describe('qwen resolve workflow', () => {
     };
 
     // A report inside the budget is passed through whole and unannotated.
-    const short = run(
-      '# Merge report\n\nRoot cause: #7351 touched the same chain.\n',
+    const short = new TextDecoder().decode(
+      run('# Merge report\n\nRoot cause: #7351 touched the same chain.\n'),
     );
     expect(short).toContain('Root cause: #7351 touched the same chain.');
     expect(short).not.toContain('truncated at');
 
     // An over-long one is cut AND says so — the silent stop is the bug.
-    const long = run(`${'x'.repeat(cap + 500)}\n`);
+    const long = new TextDecoder().decode(run(`${'x'.repeat(cap + 500)}\n`));
     expect(long).toContain(`truncated at ${cap} bytes`);
-    expect(long).toContain('attached to this workflow run');
+    expect(long).toContain('attached to this [workflow run](');
 
     // The cut lands on a byte boundary, so a multi-byte character straddling
     // it must be dropped rather than emitted as a broken tail. One leading
     // ASCII byte offsets the 3-byte characters so the cap falls INSIDE one —
     // without the offset the cut would land cleanly and prove nothing.
-    const wide = run(`x${'中'.repeat(Math.ceil(cap / 3) + 2)}`);
+    const wideBuf = run(`x${'中'.repeat(Math.ceil(cap / 3) + 2)}`);
+    // Fatal-decode the raw bytes bash emitted: a split multi-byte character
+    // would throw here. Re-encoding a JS string first (TextEncoder) can never
+    // produce invalid UTF-8, so that round-trip would make this assertion inert.
     expect(() =>
-      new TextDecoder('utf-8', { fatal: true }).decode(
-        new TextEncoder().encode(wide),
-      ),
+      new TextDecoder('utf-8', { fatal: true }).decode(wideBuf),
     ).not.toThrow();
+    const wide = new TextDecoder().decode(wideBuf);
     expect(wide).not.toContain('�');
     expect(wide).toContain(`truncated at ${cap} bytes`);
   });

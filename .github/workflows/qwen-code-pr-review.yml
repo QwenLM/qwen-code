@@ -1364,6 +1364,7 @@ jobs:
           HEAD_REPO: '${{ steps.prepare.outputs.head_repo }}'
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           DRY_RUN: '${{ env.DRY_RUN }}'
+          RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
         run: |-
           set -euo pipefail
           push_failed=false
@@ -1391,7 +1392,7 @@ jobs:
             # off, so a reviewer cannot tell whether the missing analysis was
             # never written or merely not shown.
             if [ "$(wc -c < "$cleaned")" -gt "$SUMMARY_MAX_BYTES" ]; then
-              printf '\n_… truncated at %s bytes. The full text is attached to this workflow run as an artifact._\n' "$SUMMARY_MAX_BYTES"
+              printf '\n_… truncated at %s bytes. The full text is attached to this [workflow run](%s) as an artifact._\n' "$SUMMARY_MAX_BYTES" "$RUN_URL"
             fi
             echo
           }
