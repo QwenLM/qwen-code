@@ -11,11 +11,11 @@ that exact value in the signature:
 
 ```bash
 TRIAGE_MODEL="$(printenv OPENAI_MODEL || true)"
-[ -n "$TRIAGE_MODEL" ] || TRIAGE_MODEL="unknown"
 ```
 
-Replace `<TRIAGE_MODEL>` below with the captured value; never post the
-placeholder literally.
+When the value is non-empty, use `_— <TRIAGE_MODEL> via Qwen Code /triage_`.
+When it is empty, use `_— Qwen Code /triage_`. Never post the placeholder
+literally.
 
 ```markdown
 <!-- qwen-triage stage=1 -->
@@ -34,7 +34,7 @@ placeholder literally.
 - **下一步**: <一句话动作>
 </details>
 
-— _Qwen Code · <TRIAGE_MODEL>_
+_— <TRIAGE_MODEL> via Qwen Code /triage_
 ```
 
 ## Stage 1: Intake Gate

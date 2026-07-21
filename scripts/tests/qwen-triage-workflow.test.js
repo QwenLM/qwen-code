@@ -47,9 +47,10 @@ describe('qwen-triage tmux workflow', () => {
     expect(issueWorkflow).toContain(
       'TRIAGE_MODEL="$(printenv OPENAI_MODEL || true)"',
     );
-    expect(issueWorkflow).toContain('TRIAGE_MODEL="unknown"');
-    expect(issueWorkflow).toContain('— _Qwen Code · <TRIAGE_MODEL>_');
-    expect(issueWorkflow).toContain('never post the\nplaceholder literally');
+    expect(issueWorkflow).toContain('_— <TRIAGE_MODEL> via Qwen Code /triage_');
+    expect(issueWorkflow).toContain('_— Qwen Code /triage_');
+    expect(issueWorkflow).toContain('When it is empty');
+    expect(issueWorkflow).not.toContain('TRIAGE_MODEL="unknown"');
     expect(issueWorkflow).not.toContain('--- Qwen Code');
   });
 
