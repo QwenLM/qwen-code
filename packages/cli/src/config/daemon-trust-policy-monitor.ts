@@ -65,21 +65,23 @@ export function createDaemonTrustPolicyMonitor(
     }
   };
 
+  const startDrain = (): Promise<void> => {
+    running = drain().finally(() => {
+      running = undefined;
+      if (!stopped && pendingReasons.size > 0) {
+        return startDrain();
+      }
+      return undefined;
+    });
+    return running;
+  };
+
   const requestReconcile = (
     reason: DaemonTrustPolicyChangeReason = 'manual',
   ): Promise<void> => {
     if (stopped) return Promise.resolve();
     pendingReasons.add(reason);
-    if (!running) {
-      running = drain().finally(() => {
-        running = undefined;
-        if (!stopped && pendingReasons.size > 0) {
-          return requestReconcile();
-        }
-        return undefined;
-      });
-    }
-    return running;
+    return running ?? startDrain();
   };
 
   return {

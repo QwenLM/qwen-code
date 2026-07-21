@@ -45,6 +45,49 @@ describe('daemon trust policy monitor', () => {
     monitor.stop();
   });
 
+  it('passes only the requested reasons to onSnapshot', async () => {
+    const readSnapshot = vi
+      .fn<() => Promise<DaemonTrustPolicySnapshot>>()
+      .mockResolvedValueOnce(snapshot('one'))
+      .mockResolvedValueOnce(snapshot('two'));
+    const onSnapshot = vi.fn();
+    const monitor = createDaemonTrustPolicyMonitor({
+      readSnapshot,
+      onSnapshot,
+      pollIntervalMs: 60_000,
+    });
+
+    await monitor.start();
+    await monitor.requestReconcile('poll');
+
+    expect(onSnapshot).toHaveBeenCalledTimes(2);
+    expect(onSnapshot.mock.calls[0]?.[1]).toEqual(new Set(['initial']));
+    expect(onSnapshot.mock.calls[1]?.[1]).toEqual(new Set(['poll']));
+    monitor.stop();
+  });
+
+  it('does not publish for an unchanged revision without a manual reason', async () => {
+    const readSnapshot = vi
+      .fn<() => Promise<DaemonTrustPolicySnapshot>>()
+      .mockResolvedValue(snapshot('one'));
+    const onSnapshot = vi.fn();
+    const monitor = createDaemonTrustPolicyMonitor({
+      readSnapshot,
+      onSnapshot,
+      pollIntervalMs: 60_000,
+    });
+
+    await monitor.start();
+    expect(onSnapshot).toHaveBeenCalledTimes(1);
+
+    await monitor.requestReconcile('poll');
+    expect(onSnapshot).toHaveBeenCalledTimes(1);
+
+    await monitor.requestReconcile('manual');
+    expect(onSnapshot).toHaveBeenCalledTimes(2);
+    monitor.stop();
+  });
+
   it('reacts immediately to IDE trust changes and stops cleanly', async () => {
     const readSnapshot = vi
       .fn<() => Promise<DaemonTrustPolicySnapshot>>()
