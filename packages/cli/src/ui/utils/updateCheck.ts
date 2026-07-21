@@ -18,7 +18,10 @@ import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('UPDATE_CHECK');
 
-export const FETCH_TIMEOUT_MS = 2000;
+// 5s matches comparable CLIs (e.g. Claude Code's autoUpdater uses
+// AbortSignal.timeout(5000)) and gives slow mirrors and corporate proxies a
+// realistic budget. Related: #7049.
+export const FETCH_TIMEOUT_MS = 5000;
 
 /**
  * Sentinel error thrown when `fetchInfo()` does not resolve within
@@ -40,6 +43,60 @@ export class UpdateCheckTimeoutError extends Error {
     super(`update-notifier fetchInfo timed out after ${timeoutMs}ms${suffix}`);
     this.name = 'UpdateCheckTimeoutError';
     this.distTag = distTag;
+  }
+}
+
+export type UpdateCheckFailureReason = 'timeout' | 'offline' | 'registry';
+
+const NETWORK_ERROR_CODES = [
+  'ENOTFOUND',
+  'ECONNREFUSED',
+  'EAI_AGAIN',
+  'ETIMEDOUT',
+  'ENETUNREACH',
+];
+
+/**
+ * Buckets an update-check failure so callers can tell the user what actually
+ * happened instead of a generic "check your network" message. Matches error
+ * codes both on the `code` property and inside the message text, because the
+ * global-npm path surfaces network failures only through `npm` child-process
+ * stderr embedded in the error message. Related: #7049.
+ */
+export function classifyUpdateCheckError(
+  error: unknown,
+): UpdateCheckFailureReason {
+  if (error instanceof UpdateCheckTimeoutError) return 'timeout';
+  if (error instanceof Error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (
+      NETWORK_ERROR_CODES.some(
+        (netCode) => code === netCode || error.message.includes(netCode),
+      )
+    ) {
+      return 'offline';
+    }
+  }
+  return 'registry';
+}
+
+/**
+ * Short human-readable reason for an update-check failure, for embedding in
+ * status messages, e.g. "registry did not respond within 5s".
+ */
+export function describeUpdateCheckFailure(
+  error: unknown,
+  timeoutMs: number = FETCH_TIMEOUT_MS,
+): string {
+  switch (classifyUpdateCheckError(error)) {
+    case 'timeout':
+      return t('registry did not respond within {{seconds}}s', {
+        seconds: String(Math.round(timeoutMs / 1000)),
+      });
+    case 'offline':
+      return t('registry unreachable');
+    default:
+      return t('registry error');
   }
 }
 

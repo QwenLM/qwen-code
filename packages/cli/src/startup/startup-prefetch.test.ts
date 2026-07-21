@@ -51,7 +51,8 @@ vi.mock('../utils/startupProfiler.js', () => ({
   recordStartupEvent: (...args: unknown[]) => mockRecordStartupEvent(...args),
 }));
 
-vi.mock('../ui/utils/updateCheck.js', () => ({
+vi.mock('../ui/utils/updateCheck.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ui/utils/updateCheck.js')>()),
   checkForUpdatesDetailed: (...args: unknown[]) =>
     mockCheckForUpdatesDetailed(...args),
 }));
@@ -78,7 +79,12 @@ vi.mock('../utils/updateEventEmitter.js', () => ({
 }));
 
 vi.mock('../i18n/index.js', () => ({
-  t: (key: string) => key,
+  t: (key: string, params?: Record<string, string | number>) =>
+    params
+      ? key.replace(/\{\{(\w+)\}\}/g, (match, name) =>
+          name in params ? String(params[name]) : match,
+        )
+      : key,
 }));
 
 vi.mock('../core/initializer.js', () => ({
@@ -415,7 +421,7 @@ describe('startupPrefetch', () => {
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
   });
 
-  it('surfaces update check errors through the update event emitter', async () => {
+  it('surfaces update check errors as a warning through the update event emitter', async () => {
     const config = makeConfig();
     mockCheckForUpdatesDetailed.mockResolvedValue({
       status: 'error',
@@ -427,10 +433,50 @@ describe('startupPrefetch', () => {
     await vi.dynamicImportSettled();
 
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Failed to check for updates. Please check your network or registry configuration.',
+      message: 'Update check skipped (registry error) — run /update to retry.',
+      severity: 'warning',
     });
     expect(mockRequestUpdateOnExit).not.toHaveBeenCalled();
+  });
+
+  it('reports a timeout-specific reason when the update check times out', async () => {
+    const config = makeConfig();
+    const { UpdateCheckTimeoutError, FETCH_TIMEOUT_MS } = await import(
+      '../ui/utils/updateCheck.js'
+    );
+    mockCheckForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new UpdateCheckTimeoutError(FETCH_TIMEOUT_MS, 'latest'),
+    });
+
+    startPostRenderPrefetches(config, makeSettings());
+
+    await vi.dynamicImportSettled();
+
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
+      message: `Update check skipped (registry did not respond within ${Math.round(FETCH_TIMEOUT_MS / 1000)}s) — run /update to retry.`,
+      severity: 'warning',
+    });
+  });
+
+  it('reports an offline-specific reason when the registry is unreachable', async () => {
+    const config = makeConfig();
+    const error = new Error('getaddrinfo failed') as NodeJS.ErrnoException;
+    error.code = 'ENOTFOUND';
+    mockCheckForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error,
+    });
+
+    startPostRenderPrefetches(config, makeSettings());
+
+    await vi.dynamicImportSettled();
+
+    expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
+      message:
+        'Update check skipped (registry unreachable) — run /update to retry.',
+      severity: 'warning',
+    });
   });
 
   it('requires connectIde option before connecting IDE', async () => {
@@ -657,8 +703,8 @@ describe('startupPrefetch', () => {
 
     expect(mockWarn).toHaveBeenCalledWith('update_check failed:', error);
     expect(mockUpdateEventEmit).toHaveBeenCalledWith('update-failed', {
-      message:
-        'Failed to check for updates. Please check your network or registry configuration.',
+      message: 'Update check skipped (registry error) — run /update to retry.',
+      severity: 'warning',
     });
   });
 
