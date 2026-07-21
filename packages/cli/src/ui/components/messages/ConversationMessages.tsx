@@ -312,21 +312,16 @@ const ThinkBody: React.FC<{
 
   if (isPending && !expanded) {
     const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
+    // Use a constant window height rather than deriving it from
+    // availableTerminalHeight. While a thought streams the terminal keeps
+    // constrainHeight on, so availableTerminalHeight (and therefore a derived
+    // maxLines) drifts up and down as sibling pending content grows — which
+    // reintroduced the very height flicker this block is meant to remove. The
+    // window is at most a few lines, so a fixed cap can't meaningfully overflow
+    // (VP scrolls anyway), and it keeps the height stable.
+    const maxLines = MAX_STREAMING_THINKING_VISUAL_LINES;
     const lines = tailVisualLines(text, innerWidth, maxLines);
-    const target = Math.min(
-      maxLines,
-      Math.max(lines.length, maxSeenLinesRef.current),
-    );
+    const target = Math.max(lines.length, maxSeenLinesRef.current);
     maxSeenLinesRef.current = target;
     // Pad at the top so the newest line stays pinned to the bottom.
     const padded =

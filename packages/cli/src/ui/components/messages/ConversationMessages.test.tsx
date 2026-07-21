@@ -242,6 +242,40 @@ describe('<ThinkMessage />', () => {
     );
     expect((lastFrame() ?? '').split('\n').length).toBeLessThan(tallHeight);
   });
+
+  it('keeps the streaming window height stable as availableTerminalHeight changes', () => {
+    // While a thought streams the terminal keeps constrainHeight on, so
+    // availableTerminalHeight drifts as sibling pending content grows. The
+    // streaming window must not track it, or the block flickers in height.
+    const tall = Array.from({ length: 10 }, (_, i) => `Row ${i + 1}`).join(
+      '\n',
+    );
+    const { lastFrame, rerender } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={tall}
+        isPending={true}
+        expanded={false}
+        contentWidth={40}
+        availableTerminalHeight={30}
+      />,
+    );
+    const heightBefore = (lastFrame() ?? '').split('\n').length;
+
+    // Same thought, but availableTerminalHeight collapses to a value whose
+    // old maxLines = floor(6/3) = 2 would have shrunk the window.
+    rerender(
+      <ThinkMessage
+        {...defaultProps}
+        text={tall}
+        isPending={true}
+        expanded={false}
+        contentWidth={40}
+        availableTerminalHeight={6}
+      />,
+    );
+    expect((lastFrame() ?? '').split('\n').length).toBe(heightBefore);
+  });
 });
 
 describe('<ThinkMessageContent />', () => {
