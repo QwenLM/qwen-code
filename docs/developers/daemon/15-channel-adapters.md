@@ -2,7 +2,7 @@
 
 ## Overview
 
-`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into an agent prompt and send the agent response back to the chat platform. Six IM channels and three polling-based code-hosting channels ship today: DingTalk, WeChat (Weixin), Telegram, Feishu (IM), and GitHub, GitLab, Gitea (polling). They share a base layer (`packages/channels/base/`) and an adapter-facing `ChannelAgentBridge` contract.
+`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into an agent prompt and send the agent response back to the chat platform. Six IM channels and three polling-based code-hosting channels ship today: DingTalk, WeChat (Weixin), Telegram, Feishu, WeCom, QQ Bot (IM), and GitHub, GitLab, Gitea (polling). They share a base layer (`packages/channels/base/`) and an adapter-facing `ChannelAgentBridge` contract.
 
 There are two current host modes:
 

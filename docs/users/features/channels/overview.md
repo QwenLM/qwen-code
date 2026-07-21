@@ -406,7 +406,7 @@ GitHub, GitLab, and Gitea channels work differently from the messaging-platform 
 Polling channels use a repository-per-chat, issue-per-thread model:
 
 - **`chatId`** — the repository path (e.g., `owner/repo`)
-- **`threadId`** — the issue or pull request (e.g., `issue:42` or `pr:17`)
+- **`threadId`** — the issue or pull/merge request (e.g., `issue:42`, `pr:17` for GitHub/Gitea, or `mr:17` for GitLab)
 - **`sessionScope: thread`** is the natural fit — each issue or pull request gets its own session
 
 ### Proactive Responses

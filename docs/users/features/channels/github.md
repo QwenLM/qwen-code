@@ -76,7 +76,7 @@ Unlike the messaging-platform channels that receive messages in real time, the G
 
 With `sessionScope: thread`, each issue or pull request gets its own isolated session. The agent's responses are posted as comments on the corresponding issue or pull request.
 
-The adapter responds to: issue comments, pull request review comments, new issues, and new pull requests where you are mentioned or assigned.
+The adapter responds to: issue comments, pull request review comments, new issues, and new pull requests where you are mentioned.
 
 ## Proactive Sends
 

@@ -655,6 +655,12 @@ describe('GiteaChannel', () => {
   it('uses longer backoff after consecutive errors', async () => {
     mockNotifyGetList.mockRejectedValue(new Error('API down'));
 
+    const callTimestamps: number[] = [];
+    mockNotifyGetList.mockImplementation(async () => {
+      callTimestamps.push(Date.now());
+      throw new Error('API down');
+    });
+
     const channel = new GiteaChannel(
       'test',
       { ...baseConfig, pollInterval: 50 },
@@ -663,13 +669,17 @@ describe('GiteaChannel', () => {
     await channel.connect();
 
     await vi.waitFor(
-      () =>
-        expect(mockNotifyGetList.mock.calls.length).toBeGreaterThanOrEqual(3),
-      { timeout: 10_000 },
+      () => expect(callTimestamps.length).toBeGreaterThanOrEqual(4),
+      { timeout: 40_000 },
     );
 
     channel.disconnect();
-  }, 15_000);
+
+    const shortGap = callTimestamps[1]! - callTimestamps[0]!;
+    const longGap = callTimestamps[3]! - callTimestamps[2]!;
+    expect(shortGap).toBeLessThan(4000);
+    expect(longGap).toBeGreaterThan(25_000);
+  }, 50_000);
 
   it('restores cursor from disk on construction', async () => {
     const cursorDir = join(tempDir, 'channels');

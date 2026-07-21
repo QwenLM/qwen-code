@@ -28,6 +28,7 @@ export class GithubChannel extends ChannelBase {
   private lastProcessedAt: string;
   private processedIdsAtCursor: Set<string> = new Set();
   private readonly pollIntervalMs: number;
+  private botUsername: string | null = null;
 
   constructor(
     name: string,
@@ -63,6 +64,12 @@ export class GithubChannel extends ChannelBase {
     }
     this.abortController = new AbortController();
     const { signal } = this.abortController;
+    try {
+      const { data: user } = await this.octokit.rest.users.getAuthenticated();
+      this.botUsername = user.login ?? null;
+    } catch {
+      // bot username unavailable — isReplyToBot will be conservative
+    }
     const gen = ++this.pollGeneration;
     this.runPollLoop(signal, gen).catch((err) => {
       if (!signal.aborted && gen === this.pollGeneration) {
@@ -156,7 +163,9 @@ export class GithubChannel extends ChannelBase {
         ...(this.lastProcessedAt ? { since: this.lastProcessedAt } : {}),
       },
     );
-    notifications.sort((a, b) => a.updated_at.localeCompare(b.updated_at));
+    notifications.sort((a, b) =>
+      (a.updated_at ?? '').localeCompare(b.updated_at ?? ''),
+    );
     for (const notification of notifications) {
       const nid = notification.id;
       const updatedAt = notification.updated_at;
@@ -330,7 +339,8 @@ export class GithubChannel extends ChannelBase {
       text: content ? `${content}\n\n${metadata}` : metadata,
       isGroup: true,
       isMentioned: MENTION_REASONS.has(notification.reason),
-      isReplyToBot: false,
+      isReplyToBot:
+        this.botUsername !== null && notification.reason === 'author',
     };
   }
 }

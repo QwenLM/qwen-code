@@ -159,11 +159,15 @@ export class GitlabChannel extends ChannelBase {
     let page = 1;
     const perPage = 100;
     while (true) {
-      const apiSince = this.lastProcessedAt
-        ? new Date(
-            new Date(this.lastProcessedAt).getTime() - 1000,
-          ).toISOString()
-        : undefined;
+      let apiSince: string | undefined;
+      if (this.lastProcessedAt) {
+        const parsed = new Date(this.lastProcessedAt).getTime();
+        if (Number.isNaN(parsed)) {
+          this.lastProcessedAt = '';
+        } else {
+          apiSince = new Date(parsed - 1000).toISOString();
+        }
+      }
       const response = await this.gitlab.TodoLists.all({
         perPage,
         page,

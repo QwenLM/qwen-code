@@ -42,6 +42,7 @@ const {
   mockGetPullRequest,
   mockGetReviewComment,
   mockMarkThreadAsRead,
+  mockGetAuthenticatedUser,
 } = vi.hoisted(() => ({
   mockListNotifications: vi.fn(),
   mockCreateComment: vi.fn(),
@@ -51,6 +52,7 @@ const {
   mockGetPullRequest: vi.fn(),
   mockGetReviewComment: vi.fn(),
   mockMarkThreadAsRead: vi.fn(),
+  mockGetAuthenticatedUser: vi.fn(),
 }));
 
 const mockPaginate = vi.fn();
@@ -71,6 +73,9 @@ vi.mock('@octokit/rest', () => ({
       pulls: {
         get: mockGetPullRequest,
         getReviewComment: mockGetReviewComment,
+      },
+      users: {
+        getAuthenticated: mockGetAuthenticatedUser,
       },
     },
     paginate: mockPaginate,
@@ -94,6 +99,8 @@ describe('GithubChannel', () => {
     mockGetReviewComment.mockClear();
     mockMarkThreadAsRead.mockClear();
     mockPaginate.mockClear();
+    mockGetAuthenticatedUser.mockClear();
+    mockGetAuthenticatedUser.mockResolvedValue({ data: { login: 'bot' } });
   });
 
   afterEach(() => {
