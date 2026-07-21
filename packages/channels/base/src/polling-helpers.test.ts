@@ -16,6 +16,7 @@ import {
   loadPollCursor,
   savePollCursor,
   stripMentions,
+  stripBotMention,
   abortableSleep,
 } from './polling-helpers.js';
 
@@ -295,6 +296,44 @@ describe('stripMentions', () => {
       '() can you review?',
     );
     expect(stripMentions('[@bob] thoughts?')).toBe('[] thoughts?');
+  });
+});
+
+describe('stripBotMention', () => {
+  it('strips only the bot mention', () => {
+    expect(stripBotMention('@bot please fix', 'bot')).toBe('please fix');
+  });
+
+  it('preserves other mentions', () => {
+    expect(stripBotMention('@alice @bot can you check', 'bot')).toBe(
+      '@alice can you check',
+    );
+  });
+
+  it('does not strip partial username matches', () => {
+    expect(stripBotMention('@bot-team please review', 'bot')).toBe(
+      '@bot-team please review',
+    );
+  });
+
+  it('handles mention after punctuation', () => {
+    expect(stripBotMention('(@bot) thoughts?', 'bot')).toBe('() thoughts?');
+  });
+
+  it('collapses extra whitespace', () => {
+    expect(stripBotMention('hello   @bot   world', 'bot')).toBe('hello world');
+  });
+
+  it('returns original text when bot not mentioned', () => {
+    expect(stripBotMention('@alice please review', 'bot')).toBe(
+      '@alice please review',
+    );
+  });
+
+  it('escapes regex special characters in username', () => {
+    expect(stripBotMention('hello @my.bot please fix', 'my.bot')).toBe(
+      'hello please fix',
+    );
   });
 });
 

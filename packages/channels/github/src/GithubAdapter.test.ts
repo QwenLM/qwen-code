@@ -323,7 +323,7 @@ describe('GithubChannel', () => {
     });
     const text = (envelopes[0] as { text: string }).text;
     expect(text).toContain('PR description');
-    expect(text).not.toContain('@reviewer');
+    expect(text).toContain('@reviewer');
     expect(text).toContain('URL: https://github.com/owner/repo/pull/7');
     expect(text).toContain('Branch: feature-branch');
     expect((envelopes[0] as { senderId: string }).senderId).toBe('pr-author');
@@ -571,7 +571,7 @@ describe('GithubChannel', () => {
     );
   });
 
-  it('advances cursor and marks read when handleInbound fails', async () => {
+  it('does not advance cursor or mark read when handleInbound fails', async () => {
     const bridge = mockBridge();
 
     const notification = {
@@ -615,10 +615,9 @@ describe('GithubChannel', () => {
     await new Promise((r) => setTimeout(r, 100));
     channel.disconnect();
 
-    expect(mockMarkThreadAsRead).toHaveBeenCalledWith({ thread_id: 1 });
+    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
-    expect(cursor.processedIds.has('1')).toBe(true);
+    expect(cursor.timestamp).toBe('');
   });
 
   it('does not re-dispatch seen notifications', async () => {

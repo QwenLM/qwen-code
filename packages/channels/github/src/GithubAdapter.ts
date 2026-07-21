@@ -7,7 +7,7 @@ import {
   extractCommentIdFromUrl,
   loadPollCursor,
   savePollCursor,
-  stripMentions,
+  stripBotMention,
   abortableSleep,
 } from '@qwen-code/channel-base';
 import type {
@@ -156,11 +156,14 @@ export class GithubChannel extends ChannelBase {
   }
 
   private async pollNotifications(): Promise<void> {
+    const apiSince = this.lastProcessedAt
+      ? new Date(new Date(this.lastProcessedAt).getTime() - 1000).toISOString()
+      : undefined;
     const notifications = await this.octokit.paginate(
       this.octokit.rest.activity.listNotificationsForAuthenticatedUser,
       {
         per_page: 100,
-        ...(this.lastProcessedAt ? { since: this.lastProcessedAt } : {}),
+        ...(apiSince ? { since: apiSince } : {}),
       },
     );
     notifications.sort((a, b) =>
@@ -199,6 +202,7 @@ export class GithubChannel extends ChannelBase {
         process.stderr.write(
           `[GitHub:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
         );
+        continue;
       }
       this.advanceCursor(updatedAt, nid);
       try {
@@ -327,7 +331,10 @@ export class GithubChannel extends ChannelBase {
           ]
         : []),
     ].join('\n');
-    const content = body ? stripMentions(body) : '';
+    const content =
+      body && this.botUsername
+        ? stripBotMention(body, this.botUsername)
+        : (body ?? '');
 
     return {
       channelName: this.name,

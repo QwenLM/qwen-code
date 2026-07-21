@@ -82,6 +82,8 @@ The adapter responds to: issue comments, pull request review comments, new issue
 
 The agent can proactively create issues or post comments without an inbound notification. Without a `threadId`, a new issue is created. With a `threadId`, a comment is added to the existing issue or pull request.
 
+> ⚠️ **Security:** On a **public** repository with `senderPolicy: "open"`, any GitHub user who mentions the bot can submit a prompt that drives the agent in your `cwd` — reading code, spending tokens, posting comments, and running tools (subject to the daemon's permission policy). Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
+
 ## Tips
 
 - **Use `sessionScope: "thread"`** — this gives each issue or pull request its own session, so conversations stay focused.

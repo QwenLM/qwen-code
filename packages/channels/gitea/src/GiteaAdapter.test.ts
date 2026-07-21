@@ -252,7 +252,7 @@ describe('GiteaChannel', () => {
     expect(mockRepoGetPullRequest).toHaveBeenCalledWith('owner', 'repo', 5);
     const text = (envelopes[0] as { text: string }).text;
     expect(text).toContain('PR body');
-    expect(text).not.toContain('@reviewer');
+    expect(text).toContain('@reviewer');
     expect(text).toContain('URL: https://gitea.com/owner/repo/pulls/5');
     expect(text).toContain('Branch: feature-branch');
   });
@@ -494,7 +494,7 @@ describe('GiteaChannel', () => {
     expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(true);
   });
 
-  it('advances cursor and marks read when handleInbound fails', async () => {
+  it('does not advance cursor or mark read when handleInbound fails', async () => {
     const bridge = mockBridge();
 
     const notification = {
@@ -536,10 +536,9 @@ describe('GiteaChannel', () => {
     await new Promise((r) => setTimeout(r, 100));
     channel.disconnect();
 
-    expect(mockNotifyReadThread).toHaveBeenCalledWith('1');
+    expect(mockNotifyReadThread).not.toHaveBeenCalled();
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
-    expect(cursor.processedIds.has('1')).toBe(true);
+    expect(cursor.timestamp).toBe('');
   });
 
   it('fetches all pages of notifications', async () => {

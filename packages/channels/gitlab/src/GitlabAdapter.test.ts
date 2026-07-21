@@ -352,7 +352,7 @@ describe('GitlabChannel', () => {
     expect(mockIssuesCreate).not.toHaveBeenCalled();
   });
 
-  it('advances cursor and dismisses todo when handleInbound fails', async () => {
+  it('does not advance cursor or dismiss todo when handleInbound fails', async () => {
     const bridge = mockBridge();
     (bridge as Record<string, unknown>).prompt = vi
       .fn()
@@ -390,10 +390,9 @@ describe('GitlabChannel', () => {
     await new Promise((r) => setTimeout(r, 100));
     channel.disconnect();
 
-    expect(mockTodoDone).toHaveBeenCalledWith({ todoId: 50 });
+    expect(mockTodoDone).not.toHaveBeenCalled();
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
-    expect(cursor.processedIds.has('50')).toBe(true);
+    expect(cursor.timestamp).toBe('');
   });
 
   it('fetches all pages of todos', async () => {

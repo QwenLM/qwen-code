@@ -8,7 +8,7 @@ import {
   extractCommentIdFromUrl,
   loadPollCursor,
   savePollCursor,
-  stripMentions,
+  stripBotMention,
   abortableSleep,
 } from '@qwen-code/channel-base';
 import type {
@@ -158,8 +158,13 @@ export class GiteaChannel extends ChannelBase {
     const notifications: NotificationThread[] = [];
     let page = 1;
     while (true) {
-      const params = this.lastProcessedAt
-        ? { since: this.lastProcessedAt, limit: 100, page }
+      const apiSince = this.lastProcessedAt
+        ? new Date(
+            new Date(this.lastProcessedAt).getTime() - 1000,
+          ).toISOString()
+        : undefined;
+      const params = apiSince
+        ? { since: apiSince, limit: 100, page }
         : { limit: 100, page };
       const { data: batch } =
         await this.client.notifications.notifyGetList(params);
@@ -201,6 +206,7 @@ export class GiteaChannel extends ChannelBase {
         process.stderr.write(
           `[Gitea:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
         );
+        continue;
       }
       this.advanceCursor(updatedAt, nid);
       try {
@@ -298,7 +304,10 @@ export class GiteaChannel extends ChannelBase {
         : []),
       ...(prBranch ? [`Branch: ${prBranch}`] : []),
     ].join('\n');
-    const content = body ? stripMentions(body) : '';
+    const content =
+      body && this.botUsername
+        ? stripBotMention(body, this.botUsername)
+        : (body ?? '');
     const isMentioned = this.botUsername
       ? new RegExp(
           `(?<=\\s|^|[([{"<])@${this.botUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[^a-zA-Z0-9_/-]|$)`,

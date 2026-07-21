@@ -86,6 +86,8 @@ The agent can proactively create issues or post comments without an inbound noti
 
 The Gitea adapter detects `@mentions` by scanning comment text for `@<your-username>` patterns. It resolves the bot's username from the API at startup. If the username is unavailable, `isMentioned` defaults to `false`.
 
+> ⚠️ **Security:** On a **public** repository with `senderPolicy: "open"`, any Gitea user who mentions the bot can submit a prompt that drives the agent in your `cwd` — reading code, spending tokens, posting comments, and running tools (subject to the daemon's permission policy). Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
+
 ## Tips
 
 - **Use `sessionScope: "thread"`** — this gives each issue or pull request its own session, so conversations stay focused.

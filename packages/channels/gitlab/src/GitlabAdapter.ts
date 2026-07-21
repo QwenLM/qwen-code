@@ -206,6 +206,7 @@ export class GitlabChannel extends ChannelBase {
           process.stderr.write(
             `[GitLab:${this.name}] error processing todo ${todo.id}: ${err instanceof Error ? err.message : err}\n`,
           );
+          continue;
         }
       }
       this.advanceCursor(updatedAt, tid);

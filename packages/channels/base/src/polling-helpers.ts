@@ -115,6 +115,17 @@ export function savePollCursor(
   renameSync(tmp, target);
 }
 
+export function stripBotMention(text: string, botUsername: string): string {
+  const escaped = botUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return text
+    .replace(
+      new RegExp(`(?<=\\s|^|[([{"<])@${escaped}(?=[^a-zA-Z0-9_/-]|$)`, 'g'),
+      '',
+    )
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+}
+
 export function stripMentions(text: string): string {
   return text
     .replace(

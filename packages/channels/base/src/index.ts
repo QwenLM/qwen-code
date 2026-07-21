@@ -77,6 +77,7 @@ export {
   loadPollCursor,
   savePollCursor,
   stripMentions,
+  stripBotMention,
   abortableSleep,
 } from './polling-helpers.js';
 export type {
