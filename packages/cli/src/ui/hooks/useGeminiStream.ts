@@ -119,6 +119,7 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 import { GOAL_COMMAND_RE } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -2073,7 +2074,7 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
-              break;
+              return StreamProcessingStatus.UserCancelled;
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp);
@@ -2232,8 +2233,8 @@ export const useGeminiStream = (
         commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
+        dualOutput?.finalizeAssistantMessage();
       }
-      dualOutput?.finalizeAssistantMessage();
       // When a loop was detected, halt without scheduling the calls collected
       // before the guard fired. The core splice/clear only touches
       // turn.pendingToolCalls, which the TUI does not execute from — without
@@ -2828,6 +2829,7 @@ export const useGeminiStream = (
           streamingResponseLengthRef.current = 0;
         }
 
+        let cleanupReviewLease = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -2867,6 +2869,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             metadata?.onDeliveryFailed?.();
@@ -2897,6 +2900,7 @@ export const useGeminiStream = (
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {
+            cleanupReviewLease = true;
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
@@ -2938,6 +2942,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
@@ -2955,6 +2960,13 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          if (cleanupReviewLease) {
+            cleanupReviewWorktreeLeases({
+              sessionId: config.getSessionId(),
+              promptId: prompt_id!,
+              repositoryRoot: config.getProjectRoot(),
+            });
+          }
           submitPromptOnCompleteRef.current = null;
           activeModelStreamsRef.current = Math.max(
             0,

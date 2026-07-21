@@ -2362,10 +2362,10 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
-    // The prepare step must not gate the unconditional build-output restore on
-    // a diff check; `git diff --quiet` only appears in a comment documenting
-    // the verification gate, never as an executed guard here.
     expect(prepareBranchAndFeedbackStep).not.toContain('if git diff --quiet');
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'if ! git diff --quiet || ! git diff --cached --quiet; then',
+    );
   });
 
   it('clears persistent autofix workdirs before agent steps run', () => {

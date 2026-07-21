@@ -13645,6 +13645,68 @@ describe('CoreToolScheduler validation retry loop detection', () => {
     expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
   });
 
+  it('counts identical validation failures once per model response batch', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    await scheduler.schedule(
+      [
+        makeRequest('c1', 'strictStringTool', { value: {} }),
+        makeRequest('c2', 'strictStringTool', { value: {} }),
+        makeRequest('c3', 'strictStringTool', { value: {} }),
+      ],
+      new AbortController().signal,
+    );
+
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c5', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
+  it('preserves the last repeated error count across mixed-error batches', async () => {
+    const tool = new StrictStringTool();
+    const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);
+
+    await scheduler.schedule(
+      [
+        makeRequest('c1', 'strictStringTool', { value: {} }),
+        makeRequest('c2', 'strictStringTool', {}),
+        makeRequest('c3', 'strictStringTool', { value: {} }),
+      ],
+      new AbortController().signal,
+    );
+
+    let msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c4', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).not.toContain(RETRY_LOOP_STOP_DIRECTIVE);
+
+    await scheduler.schedule(
+      [makeRequest('c5', 'strictStringTool', { value: {} })],
+      new AbortController().signal,
+    );
+    msg = getLastErrorMessage(onToolCallsUpdate);
+    expect(msg).toContain(RETRY_LOOP_STOP_DIRECTIVE);
+  });
+
   it('should keep retry counts stable when truncation guidance is toggled', async () => {
     const tool = new StrictStringTool();
     const { scheduler, onToolCallsUpdate } = createSchedulerWithTool(tool);

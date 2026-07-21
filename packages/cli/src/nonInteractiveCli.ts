@@ -72,6 +72,8 @@ import {
   settleChatRecording,
   subscribeToHeadlessChatRecordingFailures,
 } from './utils/chat-recording-failure.js';
+import { registerCleanup } from './utils/cleanup.js';
+import { cleanupReviewWorktreeLeases } from './services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_CLI');
 
@@ -390,6 +392,16 @@ export async function runNonInteractive(
     // Get readonly values once at the start
     const sessionId = config.getSessionId();
     const permissionMode = config.getApprovalMode() as PermissionMode;
+    const cleanupReviewWorktrees = (gitTimeout?: number) =>
+      cleanupReviewWorktreeLeases({
+        sessionId,
+        promptId: prompt_id,
+        repositoryRoot: config.getProjectRoot(),
+        gitTimeout,
+      });
+    const unregisterReviewWorktreeCleanup = registerCleanup(() =>
+      cleanupReviewWorktrees(1_000),
+    );
 
     let turnCount = 0;
     let totalApiDurationMs = 0;
@@ -2281,6 +2293,8 @@ export async function runNonInteractive(
       }
       await handleError(error, config);
     } finally {
+      cleanupReviewWorktrees();
+      unregisterReviewWorktreeCleanup();
       // Unsubscribe the leader message callback and approval
       // listener, but do NOT tear down the team itself — in
       // stream-json sessions the same Config is reused across
