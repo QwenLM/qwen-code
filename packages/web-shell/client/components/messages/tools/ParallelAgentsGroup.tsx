@@ -253,6 +253,7 @@ export function ParallelAgentsGroup({
                   <button
                     type="button"
                     className={styles.row}
+                    aria-expanded={subagentDetails ? undefined : isExpanded}
                     onClick={() => {
                       if (subagentDetails) subagentDetails.onOpen(agent);
                       else setExpandedId(isExpanded ? null : agent.callId);

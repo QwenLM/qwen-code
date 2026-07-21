@@ -214,6 +214,7 @@ function projectSubagentToolUpdate(
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);
+  const terminateReason = boundedString(rawOutput?.['terminateReason'], 240);
   const projectedInput = rawInput
     ? {
         ...(subagentType ? { subagent_type: subagentType } : {}),
@@ -232,6 +233,7 @@ function projectSubagentToolUpdate(
         ...(subagentName ? { subagentName } : {}),
         ...(taskDescription ? { taskDescription } : {}),
         ...(status ? { status } : {}),
+        ...(terminateReason ? { terminateReason } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
           : {}),

@@ -17,6 +17,7 @@ describe('on-demand subagent transcript projection', () => {
         rawOutput: {
           type: 'task_execution',
           status: 'completed',
+          terminateReason: 'max_turns',
           result: 'large result',
           toolCalls: [{ callId: 'read-1' }],
           executionSummary: {
@@ -57,6 +58,7 @@ describe('on-demand subagent transcript projection', () => {
       rawOutput: {
         type: 'task_execution',
         status: 'completed',
+        terminateReason: 'max_turns',
         executionSummary: {
           totalToolCalls: 1,
           inputTokens: 100,

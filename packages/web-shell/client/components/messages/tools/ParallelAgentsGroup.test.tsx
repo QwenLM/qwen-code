@@ -152,8 +152,10 @@ describe('ParallelAgentsGroup timeline rendering', () => {
     const row = container.querySelector('[class*="row"]') as HTMLButtonElement;
 
     expect(container.textContent).not.toContain('nested agent output');
+    expect(row.getAttribute('aria-expanded')).toBe('false');
     act(() => row.click());
     expect(container.textContent).toContain('nested agent output');
+    expect(row.getAttribute('aria-expanded')).toBe('true');
   });
 
   it('opens nested agents through the details provider when available', () => {
@@ -175,9 +177,9 @@ describe('ParallelAgentsGroup timeline rendering', () => {
     act(() =>
       (container.querySelector('[aria-expanded]') as HTMLElement).click(),
     );
-    act(() =>
-      (container.querySelector('[class*="row"]') as HTMLElement).click(),
-    );
+    const row = container.querySelector('[class*="row"]') as HTMLElement;
+    expect(row.hasAttribute('aria-expanded')).toBe(false);
+    act(() => row.click());
 
     expect(onOpen).toHaveBeenCalledWith(nested);
   });

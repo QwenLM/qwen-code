@@ -210,7 +210,12 @@ interface DaemonSubagentSummary {
   parentToolCallId?: string;
   subagentType?: string;
   description?: string;
-  status: string;
+  status:
+    | 'pending'
+    | 'running'
+    | 'completed'
+    | 'failed'
+    | 'waiting-for-approval';
   startedAt?: number;
   endedAt?: number;
   toolCount?: number;
