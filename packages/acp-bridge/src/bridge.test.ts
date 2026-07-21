@@ -2999,6 +2999,71 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('propagates partial and replayError from a bounded refresh', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'bounded page' },
+                _meta: { 'qwen.session.recordId': 'record-bounded' },
+              },
+            },
+          ],
+          hasMore: true,
+          partial: true,
+          replayError: 'transcript read failed',
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-metadata',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(refreshed).toMatchObject({
+      attached: true,
+      partial: true,
+      replayError: 'transcript read failed',
+      historyHasMore: true,
+    });
+
+    await bridge.shutdown();
+  });
+
   it('falls back to the live replay when a bounded refresh stays unstable', async () => {
     let update = 0;
     const handle = makeChannel({

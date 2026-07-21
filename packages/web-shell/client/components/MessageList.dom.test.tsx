@@ -1474,6 +1474,37 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('button')).toBeNull();
   });
 
+  it('suppresses the loading status during automatic pagination', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    expect(c.querySelector('[role="status"]')).toBeNull();
+
+    await act(async () => {
+      resolveLoad();
+      await Promise.resolve();
+    });
+  });
+
   it('shows when the history display limit is reached', () => {
     const c = mount([userMsg('u1')], undefined, {
       historyCapacityReached: true,
