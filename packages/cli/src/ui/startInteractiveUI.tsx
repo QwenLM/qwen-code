@@ -30,6 +30,7 @@ import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
 import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
+import { ErrorBoundary } from './components/shared/ErrorBoundary.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
@@ -192,13 +193,22 @@ export async function startInteractiveUI(
     // coordinates even though these listeners are owned and cleaned up.
     process.stdout.setMaxListeners(0);
   }
+  const appTree = (
+    <ErrorBoundary
+      onError={(error, info) => {
+        debugLogger.error(
+          `[FATAL_RENDER_ERROR] ${error.message}\n${info.componentStack ?? ''}\n${error.stack ?? ''}`,
+        );
+      }}
+    >
+      <AppWrapper />
+    </ErrorBoundary>
+  );
   const instance = render(
     process.env['DEBUG'] ? (
-      <React.StrictMode>
-        <AppWrapper />
-      </React.StrictMode>
+      <React.StrictMode>{appTree}</React.StrictMode>
     ) : (
-      <AppWrapper />
+      appTree
     ),
     {
       exitOnCtrlC: false,
