@@ -16,6 +16,8 @@
  *                            notification XML points here
  *   agent-<id>.meta.json   — sidecar with agentType, description, parent
  *                            session/agent IDs, createdAt
+ *   agent-<id>.jsonl.stream — transient live text, removed when the writer
+ *                            closes
  */
 
 import * as fs from 'node:fs';
@@ -335,10 +337,21 @@ export function attachJsonlTranscriptWriter(
         : null;
   let fd: number | null = null;
   let streamFd: number | null = null;
+  const streamPath = `${jsonlPath}.stream`;
+  const streamRunId = randomUUID();
   let pendingStreamText = '';
   let pendingStreamBytes = 0;
   let streamFlushTimer: NodeJS.Timeout | null = null;
   let openFailed = false;
+
+  try {
+    fs.rmSync(streamPath, { force: true });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to reset streaming transcript ${streamPath}:`,
+      error,
+    );
+  }
 
   const ensureOpen = (): boolean => {
     if (fd !== null) return true;
@@ -388,12 +401,12 @@ export function attachJsonlTranscriptWriter(
     try {
       if (streamFd === null) {
         fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
-        streamFd = fs.openSync(`${jsonlPath}.stream`, 'a');
+        streamFd = fs.openSync(streamPath, 'w');
       }
       fs.writeSync(streamFd, text);
     } catch (error) {
       debugLogger.warn(
-        `Failed to append streaming transcript ${jsonlPath}.stream:`,
+        `Failed to append streaming transcript ${streamPath}:`,
         error,
       );
     }
@@ -402,6 +415,7 @@ export function attachJsonlTranscriptWriter(
   const appendStreamText = (event: AgentStreamTextEvent) => {
     const record = `${JSON.stringify({
       v: 1,
+      runId: event.runId ?? streamRunId,
       round: event.round,
       text: event.text,
       thought: event.thought === true,
@@ -437,6 +451,8 @@ export function attachJsonlTranscriptWriter(
         ],
       },
       usageMetadata: event.usageMetadata,
+      agentRunId: event.runId ?? streamRunId,
+      agentRound: event.round,
     });
   };
 
@@ -577,6 +593,14 @@ export function attachJsonlTranscriptWriter(
         // Best-effort cleanup; the process will release the descriptor.
       }
       streamFd = null;
+    }
+    try {
+      fs.rmSync(streamPath, { force: true });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to remove streaming transcript ${streamPath}:`,
+        error,
+      );
     }
   };
 

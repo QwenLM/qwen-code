@@ -46,10 +46,16 @@ interface ResolvedAgentTask {
 
 interface AgentStreamRecord {
   v: 1;
+  runId?: string;
   round?: number;
   text: string;
   thought: boolean;
   timestamp: number;
+}
+
+interface TranscriptReadBounds {
+  transcript: number;
+  stream: number;
 }
 
 export interface ResolvedVirtualSubagentSession {
@@ -219,9 +225,13 @@ class VirtualSubagentTarget {
   private snapshotDelivered = false;
   private offset = 0;
   private streamOffset = 0;
+  private streamIdentity: string | undefined;
   private streamReady = false;
-  private canonicalRounds = 0;
-  private streamedSinceCanonical = false;
+  private canonicalThroughTimestamp = 0;
+  private readonly completedStreamRounds = new Set<string>();
+  private readonly streamedRounds = new Set<string>();
+  private readonly streamRunIds = new Set<string>();
+  private legacyStreamedSinceCanonical = false;
   private replayState: unknown;
   private initialized = false;
   private refreshPromise: Promise<void> = Promise.resolve();
@@ -239,10 +249,14 @@ class VirtualSubagentTarget {
   ) {}
 
   updateStatus(status: string): void {
+    const wasRunning = this.task.status === 'running';
     this.task.status = status;
     if (status !== 'running' && this.pollTimer) {
       clearInterval(this.pollTimer);
       this.pollTimer = undefined;
+    }
+    if (wasRunning && status !== 'running') {
+      void this.refreshLive().catch(() => undefined);
     }
   }
 
@@ -250,13 +264,14 @@ class VirtualSubagentTarget {
     if (event && !this.snapshotDelivered) this.events.push(event);
   }
 
-  private async readNewRecords(): Promise<ChatRecord[]> {
+  private async readNewRecords(endOffset?: number): Promise<ChatRecord[]> {
     let handle: fs.FileHandle | undefined;
     try {
       handle = await fs.open(this.task.outputFile, 'r');
       const stat = await handle.stat();
-      if (stat.size <= this.offset) return [];
-      const bytes = Buffer.alloc(stat.size - this.offset);
+      const size = Math.min(stat.size, endOffset ?? stat.size);
+      if (size <= this.offset) return [];
+      const bytes = Buffer.alloc(size - this.offset);
       const { bytesRead } = await handle.read(
         bytes,
         0,
@@ -285,7 +300,7 @@ class VirtualSubagentTarget {
     }
   }
 
-  private async readStreamUpdates(): Promise<void> {
+  private async readStreamUpdates(endOffset?: number): Promise<void> {
     const replayingExisting = !this.streamReady;
     this.streamReady = true;
     const filePath = `${this.task.outputFile}.stream`;
@@ -293,8 +308,21 @@ class VirtualSubagentTarget {
     try {
       handle = await fs.open(filePath, 'r');
       const stat = await handle.stat();
-      if (stat.size <= this.streamOffset) return;
-      const bytes = Buffer.alloc(stat.size - this.streamOffset);
+      const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+      if (
+        this.streamIdentity !== undefined &&
+        this.streamIdentity !== identity
+      ) {
+        this.streamOffset = 0;
+        this.streamRunIds.clear();
+        this.streamedRounds.clear();
+        this.legacyStreamedSinceCanonical = false;
+      }
+      this.streamIdentity = identity;
+      if (stat.size < this.streamOffset) this.streamOffset = 0;
+      const size = Math.min(stat.size, endOffset ?? stat.size);
+      if (size <= this.streamOffset) return;
+      const bytes = Buffer.alloc(size - this.streamOffset);
       const { bytesRead } = await handle.read(
         bytes,
         0,
@@ -323,9 +351,17 @@ class VirtualSubagentTarget {
         ) {
           continue;
         }
+        const roundKey =
+          typeof record.runId === 'string' && typeof record.round === 'number'
+            ? `${record.runId}:${record.round}`
+            : undefined;
+        if (typeof record.runId === 'string') {
+          this.streamRunIds.add(record.runId);
+        }
         if (
-          (typeof record.round === 'number' &&
-            record.round <= this.canonicalRounds) ||
+          (roundKey
+            ? this.completedStreamRounds.has(roundKey)
+            : record.timestamp <= this.canonicalThroughTimestamp) ||
           (replayingExisting && typeof record.round !== 'number')
         ) {
           continue;
@@ -340,34 +376,73 @@ class VirtualSubagentTarget {
           }),
         });
         this.rememberEvent(event);
-        this.streamedSinceCanonical = true;
+        if (roundKey) this.streamedRounds.add(roundKey);
+        else this.legacyStreamedSinceCanonical = true;
+      }
+      for (const completed of this.completedStreamRounds) {
+        const runId = completed.slice(0, completed.lastIndexOf(':'));
+        if (!this.streamRunIds.has(runId)) {
+          this.completedStreamRounds.delete(completed);
+        }
       }
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      this.streamIdentity = undefined;
+      this.streamRunIds.clear();
+      this.streamedRounds.clear();
+      this.legacyStreamedSinceCanonical = false;
     } finally {
       await handle?.close();
     }
   }
 
-  private refreshOnce = async (): Promise<void> => {
-    let records = await this.readNewRecords();
+  private refreshOnce = async (endOffset?: number): Promise<void> => {
+    let records = await this.readNewRecords(endOffset);
     if (records.length === 0) {
       this.initialized = true;
       return;
     }
-    this.canonicalRounds += records.filter(
-      (record) =>
+    for (const record of records) {
+      if (
         record.type === 'assistant' &&
         (record.usageMetadata !== undefined ||
-          record.message?.parts?.some((part) => typeof part.text === 'string')),
-    ).length;
-    if (this.streamedSinceCanonical) {
-      records = records.filter(
-        (record) =>
+          record.message?.parts?.some((part) => typeof part.text === 'string'))
+      ) {
+        if (
+          typeof record.agentRunId === 'string' &&
+          typeof record.agentRound === 'number'
+        ) {
+          this.completedStreamRounds.add(
+            `${record.agentRunId}:${record.agentRound}`,
+          );
+        }
+        const timestamp = Date.parse(record.timestamp);
+        if (Number.isFinite(timestamp)) {
+          this.canonicalThroughTimestamp = Math.max(
+            this.canonicalThroughTimestamp,
+            timestamp,
+          );
+        }
+      }
+    }
+    if (this.streamedRounds.size > 0 || this.legacyStreamedSinceCanonical) {
+      records = records.filter((record) => {
+        const roundKey =
+          typeof record.agentRunId === 'string' &&
+          typeof record.agentRound === 'number'
+            ? `${record.agentRunId}:${record.agentRound}`
+            : undefined;
+        if (roundKey && this.streamedRounds.delete(roundKey)) return false;
+        if (
+          !this.legacyStreamedSinceCanonical ||
           record.type !== 'assistant' ||
-          record.message?.parts?.some((part) => part.functionCall),
-      );
-      this.streamedSinceCanonical = false;
+          record.message?.parts?.some((part) => part.functionCall)
+        ) {
+          return true;
+        }
+        this.legacyStreamedSinceCanonical = false;
+        return false;
+      });
       if (records.length === 0) return;
     }
     const startTime = records[0]?.timestamp ?? new Date().toISOString();
@@ -414,36 +489,76 @@ class VirtualSubagentTarget {
     this.initialized = true;
   };
 
-  refreshLive(): Promise<void> {
-    this.refreshPromise = this.refreshPromise
-      .catch(() => undefined)
-      .then(async () => {
-        await this.refreshOnce();
-        if (this.task.status === 'running') await this.readStreamUpdates();
-      });
-    return this.refreshPromise;
+  private refreshAt(bounds?: TranscriptReadBounds): Promise<void> {
+    return this.refreshOnce(bounds?.transcript).then(async () => {
+      if (this.task.status === 'running') {
+        await this.readStreamUpdates(bounds?.stream);
+      }
+    });
   }
 
-  private async createSnapshotOnce(): Promise<BridgeEvent[]> {
+  private enqueueRefresh<T>(work: () => Promise<T>): Promise<T> {
+    const result = this.refreshPromise.catch(() => undefined).then(work);
+    this.refreshPromise = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  }
+
+  refreshLive(): Promise<void> {
+    return this.enqueueRefresh(() => this.refreshAt());
+  }
+
+  private async captureReadBounds(): Promise<TranscriptReadBounds> {
+    const size = async (filePath: string): Promise<number> => {
+      try {
+        return (await fs.stat(filePath)).size;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+        throw error;
+      }
+    };
+    const [transcript, stream] = await Promise.all([
+      size(this.task.outputFile),
+      size(`${this.task.outputFile}.stream`),
+    ]);
+    return { transcript, stream };
+  }
+
+  private async createSnapshotOnce(): Promise<{
+    events: BridgeEvent[];
+    lastEventId: number;
+  }> {
     if (!this.snapshotDelivered) {
       await this.refreshLive();
       const snapshot = [...this.events];
       this.events.length = 0;
       this.snapshotDelivered = true;
-      return snapshot;
+      return { events: snapshot, lastEventId: this.bus.lastEventId };
     }
-    const target = new VirtualSubagentTarget(
-      this.sessionId,
-      this.parentSessionId,
-      this.task,
-      this.workspaceCwd,
-      () => undefined,
-    );
-    await target.refreshLive();
-    return [...target.events];
+    return this.enqueueRefresh(async () => {
+      const bounds = await this.captureReadBounds();
+      const target = new VirtualSubagentTarget(
+        this.sessionId,
+        this.parentSessionId,
+        this.task,
+        this.workspaceCwd,
+        () => undefined,
+      );
+      await target.refreshAt(bounds);
+      await this.refreshAt(bounds);
+      return {
+        events: [...target.events],
+        lastEventId: this.bus.lastEventId,
+      };
+    });
   }
 
-  private createSnapshot(): Promise<BridgeEvent[]> {
+  private createSnapshot(): Promise<{
+    events: BridgeEvent[];
+    lastEventId: number;
+  }> {
     const snapshot = this.snapshotPromise.then(() => this.createSnapshotOnce());
     this.snapshotPromise = snapshot.then(
       () => undefined,
@@ -453,7 +568,7 @@ class VirtualSubagentTarget {
   }
 
   async load(clientId?: string) {
-    const compactedReplay = await this.createSnapshot();
+    const snapshot = await this.createSnapshot();
     if (this.subscribers === 0) this.scheduleRetention();
     return {
       sessionId: this.sessionId,
@@ -463,10 +578,10 @@ class VirtualSubagentTarget {
       createdAt: new Date(this.task.startTime).toISOString(),
       hasActivePrompt: this.task.status === 'running',
       state: {},
-      compactedReplay,
+      compactedReplay: snapshot.events,
       liveJournal: [],
       historyHasMore: false,
-      lastEventId: this.bus.lastEventId,
+      lastEventId: snapshot.lastEventId,
     };
   }
 
@@ -604,6 +719,8 @@ export class VirtualSubagentSessions {
     parentSessionId: string,
     toolCallId: string,
   ): Promise<ResolvedAgentTask | undefined> {
+    // Pre-toolUseId transcripts cannot be linked exactly. This score is only a
+    // best-effort compatibility path and identical parallel launches may tie.
     const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
     const projectDir = Storage.runWithRuntimeBaseDir(
       runtimeDir,

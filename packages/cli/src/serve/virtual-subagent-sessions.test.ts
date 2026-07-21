@@ -58,19 +58,26 @@ describe('VirtualSubagentSessions', () => {
     await fs.writeFile(
       outputFile,
       `${JSON.stringify(record('one', null, 'user', 'task'))}\n${JSON.stringify(
-        record('two', 'one', 'assistant', 'first'),
+        {
+          ...record('two', 'one', 'assistant', 'first'),
+          timestamp: new Date(1_000).toISOString(),
+          agentRunId: 'run-one',
+          agentRound: 1,
+        },
       )}\n`,
     );
     await fs.writeFile(
       `${outputFile}.stream`,
       `${JSON.stringify({
         v: 1,
+        runId: 'run-one',
         round: 1,
         text: 'completed round duplicate',
         thought: false,
-        timestamp: Date.now(),
+        timestamp: 500,
       })}\n${JSON.stringify({
         v: 1,
+        runId: 'run-one',
         round: 2,
         text: 'already streaming',
         thought: false,
@@ -149,13 +156,15 @@ describe('VirtualSubagentSessions', () => {
       lastEventId: loaded?.lastEventId,
     });
     const iterator = stream![Symbol.asyncIterator]();
-    await fs.appendFile(
+    await fs.rm(`${outputFile}.stream`);
+    await fs.writeFile(
       `${outputFile}.stream`,
       `${JSON.stringify({
         v: 1,
-        round: 2,
-        text: 'streamed thought',
-        thought: true,
+        runId: 'run-two',
+        round: 1,
+        text: `resumed round live ${'x'.repeat(512)}`,
+        thought: false,
         timestamp: Date.now(),
       })}\n`,
     );
@@ -173,7 +182,7 @@ describe('VirtualSubagentSessions', () => {
     await iterator.return?.();
     expect(streamed?.value).toMatchObject({ type: 'session_update' });
     expect(JSON.stringify(reloaded?.compactedReplay)).toContain(
-      'streamed thought',
+      'resumed round live',
     );
   });
 
@@ -242,6 +251,167 @@ describe('VirtualSubagentSessions', () => {
     expect(JSON.stringify(second?.compactedReplay)).not.toContain(
       'stale stream',
     );
+  });
+
+  it('keeps later canonical rounds when one streamed round is reconciled', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
+    tempDirs.push(dir);
+    const outputFile = path.join(dir, 'agent.jsonl');
+    await fs.writeFile(
+      outputFile,
+      `${JSON.stringify(record('one', null, 'user', 'task'))}\n`,
+    );
+    await fs.writeFile(
+      `${outputFile}.stream`,
+      `${JSON.stringify({
+        v: 1,
+        runId: 'run-batch',
+        round: 1,
+        text: 'streamed first round',
+        thought: false,
+        timestamp: Date.now(),
+      })}\n`,
+    );
+    const runtime = {
+      workspaceId: 'workspace-batch',
+      workspaceCwd: '/workspace',
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: {
+        getSessionTasksStatus: async () => ({
+          v: 1 as const,
+          sessionId: 'parent-session',
+          now: Date.now(),
+          tasks: [
+            {
+              kind: 'agent' as const,
+              id: 'agent-batch',
+              label: 'agent',
+              description: 'agent',
+              status: 'running' as const,
+              startTime: Date.now(),
+              runtimeMs: 1,
+              outputFile,
+              isBackgrounded: false,
+              toolUseId: 'call-batch',
+            },
+          ],
+        }),
+      },
+    } as unknown as WorkspaceRuntime;
+    const sessions = new VirtualSubagentSessions();
+    const resolved = await sessions.resolve(
+      runtime,
+      'parent-session',
+      'call-batch',
+    );
+    const loaded = await sessions.load(runtime, resolved!.sessionId);
+    const abort = new AbortController();
+    const stream = await sessions.subscribe(runtime, resolved!.sessionId, {
+      signal: abort.signal,
+      lastEventId: loaded!.lastEventId,
+    });
+    const iterator = stream![Symbol.asyncIterator]();
+    expect((await iterator.next()).value?.type).toBe('replay_complete');
+
+    await fs.appendFile(
+      outputFile,
+      `${JSON.stringify({
+        ...record('two', 'one', 'assistant', 'streamed first round'),
+        agentRunId: 'run-batch',
+        agentRound: 1,
+      })}\n${JSON.stringify({
+        ...record('three', 'two', 'assistant', 'canonical second round'),
+        agentRunId: 'run-batch',
+        agentRound: 2,
+      })}\n`,
+    );
+
+    const update = await iterator.next();
+    abort.abort();
+    await iterator.return?.();
+    expect(JSON.stringify(update.value)).toContain('canonical second round');
+  });
+
+  it('does not replay a second load snapshot again on subscribe', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
+    tempDirs.push(dir);
+    const outputFile = path.join(dir, 'agent.jsonl');
+    await fs.writeFile(
+      outputFile,
+      `${JSON.stringify(record('one', null, 'user', 'task'))}\n`,
+    );
+    const runtime = {
+      workspaceId: 'workspace-reload',
+      workspaceCwd: '/workspace',
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: {
+        getSessionTasksStatus: async () => ({
+          v: 1 as const,
+          sessionId: 'parent-session',
+          now: Date.now(),
+          tasks: [
+            {
+              kind: 'agent' as const,
+              id: 'agent-reload',
+              label: 'agent',
+              description: 'agent',
+              status: 'running' as const,
+              startTime: Date.now(),
+              runtimeMs: 1,
+              outputFile,
+              isBackgrounded: false,
+              toolUseId: 'call-reload',
+            },
+          ],
+        }),
+      },
+    } as unknown as WorkspaceRuntime;
+    const sessions = new VirtualSubagentSessions();
+    const resolved = await sessions.resolve(
+      runtime,
+      'parent-session',
+      'call-reload',
+    );
+    await sessions.load(runtime, resolved!.sessionId);
+    await fs.appendFile(
+      outputFile,
+      `${JSON.stringify({
+        ...record('two', 'one', 'assistant', 'between snapshots'),
+        agentRunId: 'run-reload',
+        agentRound: 1,
+      })}\n`,
+    );
+
+    const loaded = await sessions.load(runtime, resolved!.sessionId);
+    expect(JSON.stringify(loaded!.compactedReplay)).toContain(
+      'between snapshots',
+    );
+    await fs.writeFile(
+      `${outputFile}.stream`,
+      `${JSON.stringify({
+        v: 1,
+        runId: 'run-reload',
+        round: 1,
+        text: 'between snapshots',
+        thought: false,
+        timestamp: Date.now(),
+      })}\n`,
+    );
+    const abort = new AbortController();
+    const stream = await sessions.subscribe(runtime, resolved!.sessionId, {
+      signal: abort.signal,
+      lastEventId: loaded!.lastEventId,
+    });
+    const iterator = stream![Symbol.asyncIterator]();
+    const replayed: unknown[] = [];
+    for (;;) {
+      const next = await iterator.next();
+      if (next.value?.type === 'replay_complete') break;
+      replayed.push(next.value);
+    }
+    abort.abort();
+    await iterator.return?.();
+    expect(JSON.stringify(replayed)).not.toContain('between snapshots');
   });
 
   it('keeps task status while supplementing terminal metrics', async () => {
@@ -335,9 +505,26 @@ describe('VirtualSubagentSessions', () => {
     expect((await iterator.next()).value?.type).toBe('replay_complete');
 
     taskStatus = 'completed';
+    await fs.appendFile(
+      outputFile,
+      `${JSON.stringify(
+        record('final', 'child', 'assistant', 'final canonical output'),
+      )}\n`,
+    );
     expect(
       await sessions.resolve(runtime, parentSessionId, toolCallId),
     ).toMatchObject({ status: 'completed', totalTokens: 999 });
+
+    const finalUpdate = await Promise.race([
+      iterator.next(),
+      new Promise<undefined>((resolve) =>
+        setTimeout(() => resolve(undefined), 400),
+      ),
+    ]);
+    expect(JSON.stringify(finalUpdate?.value)).toContain(
+      'final canonical output',
+    );
+
     await fs.appendFile(
       `${outputFile}.stream`,
       `${JSON.stringify({

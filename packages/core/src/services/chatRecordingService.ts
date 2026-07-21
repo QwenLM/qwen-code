@@ -320,6 +320,10 @@ export interface ChatRecord {
   agentColor?: string;
   /** True for records produced by a subagent (a sidechain off the parent session). */
   isSidechain?: boolean;
+  /** Writer execution that produced this subagent round. */
+  agentRunId?: string;
+  /** Round number within agentRunId. */
+  agentRound?: number;
   /** Source kind for injected external input records. */
   externalInputKind?: 'message' | 'notification';
 

@@ -2,8 +2,12 @@
 
 ## Status
 
-Proposed design. This document does not authorize implementation and does not
-change the existing daemon protocol.
+Phase 1 is implemented with two deliberate differences from the target design
+below. The Web Shell currently projects the main transcript in its client store
+instead of requesting a server-side `projection=main` view, and subagent detail
+uses legacy session routes resolved through the selected parent-session runtime
+instead of separate workspace-prefixed routes. The remaining sections describe
+the target architecture, not the complete shipped protocol.
 
 ## Problem
 

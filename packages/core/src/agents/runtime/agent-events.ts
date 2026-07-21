@@ -85,6 +85,7 @@ export interface AgentRoundEvent {
 
 export interface AgentRoundTextEvent {
   subagentId: string;
+  runId?: string;
   round: number;
   text: string;
   thoughtText: string;
@@ -94,6 +95,7 @@ export interface AgentRoundTextEvent {
 
 export interface AgentStreamTextEvent {
   subagentId: string;
+  runId?: string;
   round: number;
   text: string;
   /** Whether this text is reasoning/thinking content (as opposed to regular output) */

@@ -328,6 +328,13 @@ describe('agent-transcript', () => {
         thought: true,
         timestamp: 1,
       });
+      emitter.emit(AgentEventType.STREAM_TEXT, {
+        subagentId: 'agent-x',
+        round: 1,
+        text: 'x'.repeat(64 * 1024),
+        thought: false,
+        timestamp: 1,
+      });
       emitter.emit(AgentEventType.ROUND_TEXT, {
         subagentId: 'agent-x',
         round: 1,
@@ -335,15 +342,24 @@ describe('agent-transcript', () => {
         thoughtText: 'thinking now',
         timestamp: 2,
       });
-      cleanup();
-
       expect(readJsonl(jsonlPath)[0].message?.parts).toEqual([
         { text: 'thinking now', thought: true },
         { text: 'answer' },
       ]);
       expect(
-        JSON.parse(fs.readFileSync(`${jsonlPath}.stream`, 'utf8').trim()),
-      ).toMatchObject({ text: 'thinking now', thought: true, timestamp: 1 });
+        JSON.parse(
+          fs.readFileSync(`${jsonlPath}.stream`, 'utf8').trim().split('\n')[0]!,
+        ),
+      ).toMatchObject({
+        runId: readJsonl(jsonlPath)[0].agentRunId,
+        round: 1,
+        text: 'thinking now',
+        thought: true,
+        timestamp: 1,
+      });
+      expect(readJsonl(jsonlPath)[0].agentRound).toBe(1);
+      cleanup();
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
     });
 
     it('flushes live stream chunks when the pending buffer reaches 64 KiB', () => {
@@ -378,6 +394,18 @@ describe('agent-transcript', () => {
         thought: false,
         timestamp: 2,
       });
+      cleanup();
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
+    });
+
+    it('replaces a stale stream sidecar when a writer starts', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
+      fs.writeFileSync(`${jsonlPath}.stream`, 'stale\n');
+
+      const { cleanup } = makeWriter(jsonlPath);
+
+      expect(fs.existsSync(`${jsonlPath}.stream`)).toBe(false);
       cleanup();
     });
 

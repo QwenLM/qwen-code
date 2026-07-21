@@ -507,7 +507,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
-  it('folds sub-agent usage onto its parent-keyed assistant block', () => {
+  it('keeps sub-agent usage in the parent turn total by default', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
@@ -535,13 +535,12 @@ describe('daemon UI normalizer and transcript reducer', () => {
       {
         kind: 'assistant',
         text: 'answer',
-        usage: { inputTokens: 100, outputTokens: 20 },
+        usage: { inputTokens: 5100, outputTokens: 820 },
       },
       {
         kind: 'assistant',
         text: 'sub-agent answer',
         parentToolCallId: 'sub-1',
-        usage: { inputTokens: 5000, outputTokens: 800 },
       },
     ]);
   });

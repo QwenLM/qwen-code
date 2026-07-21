@@ -153,6 +153,7 @@ export default defineConfig({
         'class-variance-authority',
         'clsx',
         'tailwind-merge',
+        'vaul',
         '@qwen-code/sdk',
         /^@qwen-code\/sdk\//,
         '@qwen-code/webui',

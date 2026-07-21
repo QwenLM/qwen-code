@@ -296,9 +296,10 @@ function applyDaemonTranscriptEvent(
       }
       break;
     case 'assistant.usage':
-      applyAssistantUsage(next, event);
       if (event.parentToolCallId && !next.retainSubagentBlocks) {
         applySubagentUsageToParentTool(next, event);
+      } else {
+        applyAssistantUsage(next, event);
       }
       break;
     case 'thought.text.delta':
@@ -511,11 +512,9 @@ function clearActiveAssistant(
 }
 
 /**
- * Fold a round's token usage onto its active assistant block. Main-agent usage
- * uses the top-level pointer; sub-agent usage uses the parent-keyed pointer so
- * it is not also counted as main-agent usage. Multiple rounds accumulate, and
- * renderers combine main usage with the root sub-agent execution summaries for
- * the spawning turn's total.
+ * Fold a round's token usage onto the active top-level assistant block.
+ * Subagent usage stays part of the spawning turn's total for compatibility.
+ * Summary projections route it to the parent tool before calling this helper.
  *
  * No active block (a rare usage frame with no preceding top-level assistant
  * text) drops the count rather than minting a stray empty block.
@@ -524,10 +523,7 @@ function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  const blockId = event.parentToolCallId
-    ? state.activeAssistantBlockByParent[event.parentToolCallId]
-    : state.activeAssistantBlockId;
-  const block = getWritableBlockById(state, blockId);
+  const block = getWritableBlockById(state, state.activeAssistantBlockId);
   if (!block || block.kind !== 'assistant') return;
   const prev = block.usage;
   block.usage = {
