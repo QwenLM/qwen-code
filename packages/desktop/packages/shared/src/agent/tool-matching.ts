@@ -438,7 +438,9 @@ function detectBackgroundEvents(
       (normalizedToolName !== 'agent' || isTopLevelQwenAgent)) ||
     defaultsToBackground;
   if (isParentTaskTool(entry.name) && wasRunInBackground && !isError && resultStr) {
-    const agentIdMatch = resultStr.match(/agentId:\s*([a-zA-Z0-9_-]+)/);
+    const agentIdMatch =
+      resultStr.match(/task_id:\s*([a-zA-Z0-9_-]+)/) ??
+      resultStr.match(/agentId:\s*([a-zA-Z0-9_-]+)/);
     if (agentIdMatch?.[1]) {
       const intentValue = entry.input._intent;
       events.push({

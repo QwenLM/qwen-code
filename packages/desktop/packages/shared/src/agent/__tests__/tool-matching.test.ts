@@ -660,11 +660,11 @@ describe('extractToolResults', () => {
     })
   })
 
-  it('detects background Agent by default when the flag is omitted', () => {
+  it('detects background Agent from canonical task_id when the flag is omitted', () => {
     toolIndex.register('toolu_agent', 'Agent', { _intent: 'Explore codebase', prompt: 'Find auth code' })
 
     const blocks: ContentBlock[] = [
-      makeToolResultBlock('toolu_agent', 'Background agent launched.\nagentId: default_bg_xyz'),
+      makeToolResultBlock('toolu_agent', 'Background agent launched.\ntask_id: default_bg_xyz'),
     ]
 
     const events = extractToolResults(blocks, null, undefined, toolIndex)

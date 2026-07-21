@@ -321,12 +321,12 @@ describe('groupActivitiesByParent', () => {
   })
 
   describe('TaskOutput data attachment', () => {
-    it('attaches TaskOutput data to parent Task group via agentId chain', () => {
+    it('attaches TaskOutput data via the canonical task_id chain', () => {
       resetCounters()
 
-      // Task that ran in background returns agentId in its result
+      // Task that ran in background returns task_id in its result
       const task = createTaskActivity('Background task', {
-        content: 'Task completed successfully\n\nagentId: abc123',
+        content: 'Task completed successfully\n\ntask_id: abc123',
         status: 'completed',
       })
 

@@ -1249,12 +1249,13 @@ export function groupActivitiesByParent(
   }
 
   // Build a map of Task toolUseId -> agent ID (extracted from Task result content)
-  // When Task runs with run_in_background: true, the result contains "agentId: xyz"
+  // Current results use "task_id: xyz"; older transcripts use "agentId: xyz".
   const taskToAgentId = new Map<string, string>()
   for (const activity of activities) {
     if (isParentTaskTool(activity.toolName ?? '') && (activity.status === 'completed' || activity.status === 'backgrounded') && activity.content) {
-      // Parse agent ID from Task result - look for "agentId: xyz" pattern
-      const agentIdMatch = activity.content.match(/agentId:\s*([a-zA-Z0-9_-]+)/)
+      const agentIdMatch =
+        activity.content.match(/task_id:\s*([a-zA-Z0-9_-]+)/) ??
+        activity.content.match(/agentId:\s*([a-zA-Z0-9_-]+)/)
       const capturedAgentId = agentIdMatch?.[1]
       if (capturedAgentId && activity.toolUseId) {
         taskToAgentId.set(activity.toolUseId, capturedAgentId)
