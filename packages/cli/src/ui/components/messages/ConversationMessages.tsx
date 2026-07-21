@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useRef } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -275,7 +276,7 @@ function tailVisualLines(
   text: string,
   width: number,
   maxLines: number,
-): string {
+): string[] {
   const charBudget = maxLines * width * 2;
   let sliceStart = Math.max(0, text.length - charBudget);
   if (sliceStart > 0) {
@@ -285,7 +286,7 @@ function tailVisualLines(
     }
   }
   const lines = wrapToVisualLines(text.slice(sliceStart), width);
-  return lines.slice(-maxLines).join('\n');
+  return lines.slice(-maxLines);
 }
 
 const ThinkBody: React.FC<{
@@ -295,6 +296,18 @@ const ThinkBody: React.FC<{
   availableTerminalHeight?: number;
   contentWidth: number;
 }> = ({ text, isPending, expanded, availableTerminalHeight, contentWidth }) => {
+  // Grow-only height tracker for the streaming window: the rendered block never
+  // shrinks below the tallest it has already reached for this thought, so a
+  // blank paragraph separator (`\n\n`) transiently entering/leaving the tail
+  // window can't make the block jump 2→3→5 rows and flicker. Reset when the
+  // block stops streaming or when the buffer shrinks (a new thought replaced it).
+  const maxSeenLinesRef = useRef(0);
+  const prevTextLenRef = useRef(0);
+  if (!isPending || text.length < prevTextLenRef.current) {
+    maxSeenLinesRef.current = 0;
+  }
+  prevTextLenRef.current = text.length;
+
   if (!isPending && !expanded) return null;
 
   if (isPending && !expanded) {
@@ -309,7 +322,18 @@ const ThinkBody: React.FC<{
             ),
           )
         : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
+    const lines = tailVisualLines(text, innerWidth, maxLines);
+    const target = Math.min(
+      maxLines,
+      Math.max(lines.length, maxSeenLinesRef.current),
+    );
+    maxSeenLinesRef.current = target;
+    // Pad at the top so the newest line stays pinned to the bottom.
+    const padded =
+      lines.length < target
+        ? [...new Array(target - lines.length).fill(''), ...lines]
+        : lines;
+    const display = padded.join('\n');
     return (
       <Box paddingLeft={2}>
         <Text dimColor wrap="truncate">

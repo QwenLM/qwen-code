@@ -181,6 +181,67 @@ describe('<ThinkMessage />', () => {
     expect(output).toContain('Line 20');
     expect(output).not.toContain('Line 1\n');
   });
+
+  it('should not shrink the streaming window when the visible tail momentarily drops', () => {
+    // A long unbroken run pushes the tail window to its full height. When the
+    // next chunk introduces a newline near the char-budget boundary, the tail
+    // slice can momentarily collapse to a single line even though the buffer
+    // only grew. Grow-only height must pad that back up so the block does not
+    // flicker down and then up again.
+    const wide = 'X'.repeat(400);
+    const { lastFrame, rerender } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={wide}
+        isPending={true}
+        expanded={false}
+        contentWidth={40}
+      />,
+    );
+    const tallHeight = (lastFrame() ?? '').split('\n').length;
+
+    rerender(
+      <ThinkMessage
+        {...defaultProps}
+        text={`${wide}\nY`}
+        isPending={true}
+        expanded={false}
+        contentWidth={40}
+      />,
+    );
+    const afterFrame = lastFrame() ?? '';
+    expect(afterFrame).toContain('Y');
+    // Height is preserved (grow-only), not collapsed to the 1-line natural tail.
+    expect(afterFrame.split('\n').length).toBe(tallHeight);
+  });
+
+  it('should reset the grow-only window when a new thought replaces the buffer', () => {
+    const tall = Array.from({ length: 10 }, (_, i) => `Row ${i + 1}`).join(
+      '\n',
+    );
+    const { lastFrame, rerender } = render(
+      <ThinkMessage
+        {...defaultProps}
+        text={tall}
+        isPending={true}
+        expanded={false}
+        contentWidth={40}
+      />,
+    );
+    const tallHeight = (lastFrame() ?? '').split('\n').length;
+
+    // A shorter buffer signals a fresh thought; the window should shrink back.
+    rerender(
+      <ThinkMessage
+        {...defaultProps}
+        text={'short'}
+        isPending={true}
+        expanded={false}
+        contentWidth={40}
+      />,
+    );
+    expect((lastFrame() ?? '').split('\n').length).toBeLessThan(tallHeight);
+  });
 });
 
 describe('<ThinkMessageContent />', () => {
