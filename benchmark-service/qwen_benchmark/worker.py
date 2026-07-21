@@ -30,6 +30,17 @@ class Worker:
         self.suites = suites
         self.runner_factory = runner_factory
 
+    def _heartbeat(self, run_id: str) -> None:
+        try:
+            self.store.heartbeat(run_id)
+        except Exception:
+            # State storage must not terminate an in-flight agent or verifier.
+            # The next heartbeat/final transition can reconcile the run once the
+            # transient SQLite/filesystem problem clears.
+            LOGGER.exception(
+                "heartbeat unavailable for %s; benchmark continues", run_id
+            )
+
     def run_once(self) -> bool:
         run = self.store.claim_run()
         if not run:
@@ -60,15 +71,11 @@ class Worker:
         self._write_status(artifacts, run_id)
 
         if self.runner_factory:
-            runner = self.runner_factory(lambda: self.store.heartbeat(run_id))
+            runner = self.runner_factory(lambda: self._heartbeat(run_id))
         elif suite["runner_mode"] == "harbor":
-            runner = HarborRunner(
-                self.settings, lambda: self.store.heartbeat(run_id)
-            )
+            runner = HarborRunner(self.settings, lambda: self._heartbeat(run_id))
         else:
-            runner = SwebenchRunner(
-                self.settings, lambda: self.store.heartbeat(run_id)
-            )
+            runner = SwebenchRunner(self.settings, lambda: self._heartbeat(run_id))
         try:
             request_commit = request.get("qwen_commit")
             qwen_commit = request_commit or runner.resolve_qwen_commit(
@@ -148,16 +155,27 @@ class Worker:
             self._write_status(artifacts, run_id)
         except Exception as error:
             LOGGER.exception("unexpected worker failure for %s", run_id)
-            self.store.transition(run_id, "FAILED", error=str(error))
             artifacts.write_json(
                 "error.json", {"class": "unexpected", "error": str(error)}
             )
-            self._write_status(artifacts, run_id)
+            try:
+                self.store.transition(run_id, "FAILED", error=str(error))
+                self._write_status(artifacts, run_id)
+            except Exception:
+                LOGGER.exception(
+                    "could not persist failure state for %s; worker remains alive",
+                    run_id,
+                )
         return True
 
     def _start_grading(self, artifacts: Artifacts, run_id: str) -> None:
-        self.store.transition(run_id, "GRADING")
-        self._write_status(artifacts, run_id)
+        try:
+            self.store.transition(run_id, "GRADING")
+            self._write_status(artifacts, run_id)
+        except Exception:
+            LOGGER.exception(
+                "could not persist GRADING state for %s; benchmark continues", run_id
+            )
 
     def _record_result(self, run_id: str, suite: Suite, result: RunResult) -> None:
         resolved = set(result.resolved_ids)

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 import uuid
 from datetime import UTC, datetime
 from pathlib import Path
@@ -12,6 +14,8 @@ from .models import RunRequest
 
 
 TERMINAL_RUN_STATES = {"SUCCEEDED", "FAILED", "CANCELED"}
+LOGGER = logging.getLogger(__name__)
+SQLITE_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
 
 
 def now() -> str:
@@ -25,13 +29,18 @@ class Store:
     def connect(self) -> sqlite3.Connection:
         connection = sqlite3.connect(self.database_path, timeout=30)
         connection.row_factory = sqlite3.Row
-        connection.execute("PRAGMA journal_mode=WAL")
+        connection.execute("PRAGMA busy_timeout=30000")
         connection.execute("PRAGMA foreign_keys=ON")
         return connection
 
     def initialize(self) -> None:
         self.database_path.parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as connection:
+            # Journal mode is persistent database configuration. Reapplying it on
+            # every heartbeat creates an unnecessary failure point while Harbor is
+            # running and can require opening the WAL sidecar repeatedly.
+            connection.execute("PRAGMA journal_mode=WAL")
+            connection.execute("PRAGMA synchronous=NORMAL")
             connection.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS runs (
@@ -214,11 +223,25 @@ class Store:
             self._event(connection, run_id, "RUN_STATUS", {"status": status})
 
     def heartbeat(self, run_id: str) -> None:
-        with self.connect() as connection:
-            connection.execute(
-                "UPDATE runs SET heartbeat_at = ? WHERE run_id = ?",
-                (now(), run_id),
-            )
+        for attempt in range(len(SQLITE_RETRY_DELAYS) + 1):
+            try:
+                with self.connect() as connection:
+                    connection.execute(
+                        "UPDATE runs SET heartbeat_at = ? WHERE run_id = ?",
+                        (now(), run_id),
+                    )
+                return
+            except sqlite3.OperationalError:
+                if attempt == len(SQLITE_RETRY_DELAYS):
+                    raise
+                delay = SQLITE_RETRY_DELAYS[attempt]
+                LOGGER.warning(
+                    "SQLite heartbeat failed for %s; retrying in %.2fs",
+                    run_id,
+                    delay,
+                    exc_info=True,
+                )
+                time.sleep(delay)
 
     def update_instance(
         self,

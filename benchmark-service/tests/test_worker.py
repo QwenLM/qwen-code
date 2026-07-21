@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import sqlite3
 from pathlib import Path
 
 from qwen_benchmark.config import Settings, load_suites
@@ -43,6 +44,18 @@ class FakeRunner:
             },
         )
         return RunResult(1, 1, ["sympy__sympy-20590"], [], [], report)
+
+
+class FlakyHeartbeatStore(Store):
+    def __init__(self, database_path: Path):
+        super().__init__(database_path)
+        self.heartbeat_calls = 0
+
+    def heartbeat(self, run_id: str) -> None:
+        self.heartbeat_calls += 1
+        if self.heartbeat_calls == 1:
+            raise sqlite3.OperationalError("unable to open database file")
+        super().heartbeat(run_id)
 
 
 def test_worker_completes_and_writes_artifacts(tmp_path: Path) -> None:
@@ -100,3 +113,44 @@ def test_worker_completes_and_writes_artifacts(tmp_path: Path) -> None:
             (artifact_root / relative_path).read_bytes()
         ).hexdigest()
         assert actual == expected
+
+
+def test_transient_heartbeat_failure_does_not_abort_runner(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "state/benchmark.db",
+        work_root=tmp_path / "work",
+        artifact_root=tmp_path / "artifacts",
+        qwen_repo=tmp_path,
+        swebench_python=Path("/usr/bin/python3"),
+        auth_mode="token",
+        shared_token="test-token",
+        oidc_audience="qwen-benchmark",
+        allowed_repository="QwenLM/qwen-code",
+        allowed_repository_id=None,
+        allowed_workflow=None,
+        poll_seconds=0.01,
+        github_token=None,
+        harbor_jobs_root=tmp_path / "harbor-jobs",
+    )
+    settings.prepare_directories()
+    store = FlakyHeartbeatStore(settings.database_path)
+    store.initialize()
+    suites = load_suites()
+    request = RunRequest(
+        qwen_ref="HEAD",
+        suite="swebench_verified_gold_smoke",
+        trigger="manual",
+    )
+    run, _ = store.create_run(request, suites[request.suite], "worker-test-flaky")
+    worker = Worker(
+        settings,
+        store,
+        suites,
+        runner_factory=lambda heartbeat: FakeRunner(heartbeat),
+    )
+
+    assert worker.run_once() is True
+    final = store.get_run(run["run_id"])
+    assert final is not None
+    assert final["status"] == "SUCCEEDED"
+    assert store.heartbeat_calls >= 1

@@ -95,55 +95,66 @@ class HarborRunner:
             else harbor_dataset
         )
 
-        for instance_id in suite["instance_ids"]:
-            harbor_task_name = f"{suite.get('harbor_task_prefix', '')}{instance_id}"
-            command = [
-                str(self.settings.harbor_binary),
-                "run",
-                "--dataset",
-                dataset_spec,
-                "--include-task-name",
-                harbor_task_name,
-                "--agent",
-                "qwen-coder",
-                "--model",
-                self.settings.benchmark_model,
-                "--agent-kwarg",
-                f"version={version}",
-                "--agent-kwarg",
-                f"max_turns={suite.get('harbor_max_turns', 200)}",
-                "--env",
-                "docker",
-                "--n-concurrent",
-                "1",
-                "--max-retries",
-                "0",
-                "--job-name",
-                instance_id,
-                "--jobs-dir",
-                str(run_jobs_root),
-                "--yes",
-            ]
-            returncode = self._command(
-                command,
-                work_dir,
-                work_dir / f"harbor-{instance_id}.log",
-                suite["instance_timeout_seconds"],
-            )
-            job_dir = run_jobs_root / instance_id
-            if returncode != 0 and not list(job_dir.glob("*/result.json")):
-                raise InfrastructureError(
-                    f"Harbor failed before producing a trial result: {instance_id}"
+        result: RunResult | None = None
+        try:
+            for instance_id in suite["instance_ids"]:
+                harbor_task_name = f"{suite.get('harbor_task_prefix', '')}{instance_id}"
+                command = [
+                    str(self.settings.harbor_binary),
+                    "run",
+                    "--dataset",
+                    dataset_spec,
+                    "--include-task-name",
+                    harbor_task_name,
+                    "--agent",
+                    "qwen-coder",
+                    "--model",
+                    self.settings.benchmark_model,
+                    "--agent-kwarg",
+                    f"version={version}",
+                    "--agent-kwarg",
+                    f"max_turns={suite.get('harbor_max_turns', 200)}",
+                    "--env",
+                    "docker",
+                    "--n-concurrent",
+                    "1",
+                    "--max-retries",
+                    "0",
+                    "--job-name",
+                    instance_id,
+                    "--jobs-dir",
+                    str(run_jobs_root),
+                    "--yes",
+                ]
+                returncode = self._command(
+                    command,
+                    work_dir,
+                    work_dir / f"harbor-{instance_id}.log",
+                    suite["instance_timeout_seconds"],
                 )
+                job_dir = run_jobs_root / instance_id
+                if returncode != 0 and not list(job_dir.glob("*/result.json")):
+                    raise InfrastructureError(
+                        f"Harbor failed before producing a trial result: {instance_id}"
+                    )
 
-        result = self._parse_results(run_jobs_root, suite, version, work_dir)
-        artifacts.copy_tree(run_jobs_root, "harbor/jobs")
-        for instance_id in suite["instance_ids"]:
-            log_path = work_dir / f"harbor-{instance_id}.log"
-            if log_path.exists():
-                artifacts.copy(log_path, f"harbor/logs/{instance_id}.log")
-        artifacts.copy(result.report_path, "harbor/evaluation-report.json")
-        return result
+            result = self._parse_results(run_jobs_root, suite, version, work_dir)
+            return result
+        finally:
+            # Preserve all evidence even when Harbor, the verifier, or state-store
+            # bookkeeping fails after a trial has already produced useful output.
+            try:
+                artifacts.copy_tree(run_jobs_root, "harbor/jobs")
+                for instance_id in suite["instance_ids"]:
+                    log_path = work_dir / f"harbor-{instance_id}.log"
+                    if log_path.exists():
+                        artifacts.copy(log_path, f"harbor/logs/{instance_id}.log")
+                if result is not None:
+                    artifacts.copy(
+                        result.report_path, "harbor/evaluation-report.json"
+                    )
+            except OSError:
+                LOGGER.exception("failed to collect Harbor artifacts for %s", run_id)
 
     def _wait_for_npm_release(self, version: str) -> dict:
         deadline = time.monotonic() + self.settings.npm_wait_seconds
