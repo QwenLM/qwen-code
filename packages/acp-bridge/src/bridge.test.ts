@@ -6821,6 +6821,13 @@ describe('createAcpSessionBridge', () => {
       await new Promise((r) => setTimeout(r, 60));
       expect(terminalsFor(events, 'prompt-queued-deadline')).toHaveLength(1);
 
+      // A queued prompt never ran, so its deadline terminal must not
+      // advertise a session-level turnError nor arm the retry path — those
+      // belong to the ACTIVE turn only.
+      expect(
+        bridge.getSessionSummary(session.sessionId).turnError,
+      ).toBeUndefined();
+
       await bridge.shutdown();
       // Shutdown flushed the still-wedged head prompt exactly once, and the
       // queued prompt's residual FIFO abort stayed latched.
@@ -6831,6 +6838,11 @@ describe('createAcpSessionBridge', () => {
       expect((headTerms[0]?.data as { code?: string }).code).toBe(
         'daemon_shutdown',
       );
+      // The caller sees the same typed rejection as a running-prompt expiry
+      // — the pre-dispatch abort check (reached once shutdown released the
+      // wedged head) propagates the deadline reason instead of a generic
+      // AbortError.
+      await expect(p2).rejects.toBeInstanceOf(PromptDeadlineExceededError);
     });
 
     it('keeps a detached session draining until the last pending prompt settles (DAEMON-005)', async () => {
@@ -6931,6 +6943,53 @@ describe('createAcpSessionBridge', () => {
         // on promptId observe the turn ending before the session vanishes.
         expect(events.indexOf(terms[0]!)).toBeLessThan(closedIdx);
       }
+      await bridge.shutdown();
+    });
+
+    it('still publishes a terminal for a removed RUNNING prompt when the session closes before the agent cooperates', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-removed-running' },
+      );
+      p1.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Remove the RUNNING prompt — the wedged agent ignores the cancel,
+      // so no terminal has been published yet.
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
+      ).toEqual({ removed: true });
+      // The API no longer shows the prompt…
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
+      // …and a repeat removal is a no-op.
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
+      ).toEqual({ removed: false });
+      expect(terminalsFor(events, 'prompt-removed-running')).toHaveLength(0);
+
+      // Session closes before the agent ever settles: the teardown flush
+      // must still see the removed-but-unsettled prompt and publish its
+      // terminal before the bus closes.
+      await bridge.closeSession(session.sessionId);
+
+      const closedIdx = events.findIndex((e) => e.type === 'session_closed');
+      expect(closedIdx).toBeGreaterThan(-1);
+      const terms = terminalsFor(events, 'prompt-removed-running');
+      expect(terms).toHaveLength(1);
+      expect(terms[0]?.type).toBe('turn_error');
+      expect((terms[0]?.data as { code?: string }).code).toBe('session_closed');
+      expect(events.indexOf(terms[0]!)).toBeLessThan(closedIdx);
       await bridge.shutdown();
     });
 
