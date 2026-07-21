@@ -2329,7 +2329,7 @@ describe('daemonWorkerCommand', () => {
           type: 'channel_delivery_result',
           id: 'ipc-delivery-invalid',
           ok: false,
-          code: 'channel_delivery_invalid',
+          code: 'channel_delivery_rejected',
           error: 'recipient is invalid',
         });
       });
@@ -2945,6 +2945,71 @@ describe('daemonWorkerCommand', () => {
       expect(exit).toHaveBeenCalledWith(0);
     } finally {
       restoreSend();
+    }
+  });
+
+  it('uses one shutdown window for delivery and webhook tasks', async () => {
+    vi.useFakeTimers();
+    const exit = mockProcessExitNoThrow();
+    const send = vi.fn();
+    const restoreSend = stubProcessSend(send as NodeJS.Process['send']);
+    const never = new Promise<void>(() => undefined);
+    const disconnect = vi.fn().mockResolvedValue(undefined);
+    mockCreateChannel.mockResolvedValueOnce({
+      connect: vi.fn().mockResolvedValue(undefined),
+      disconnect,
+      name: 'telegram',
+      validateWebhookTask: vi.fn(),
+      runWebhookTask: vi.fn(() => never),
+      deliverProactive: vi.fn(() => never),
+    });
+    vi.stubEnv('QWEN_CHANNEL_DAEMON_WORKER', 'worker-token');
+    vi.stubEnv('QWEN_DAEMON_URL', 'http://127.0.0.1:4170');
+    vi.stubEnv('QWEN_DAEMON_WORKSPACE', '/workspace');
+    const existingMessageListeners = process.listeners('message');
+
+    try {
+      const handler = daemonWorkerCommand.handler({
+        channel: ['telegram'],
+        _: [],
+        $0: 'qwen',
+      });
+      await vi.waitFor(() => {
+        expect(send).toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'ready' }),
+        );
+      });
+      const listener = process
+        .listeners('message')
+        .find((candidate) => !existingMessageListeners.includes(candidate));
+      listener?.(
+        {
+          type: 'channel_delivery',
+          id: 'delivery-drain',
+          expiresAt: Date.now() + 1000,
+          request: deliveryRequest,
+        },
+        undefined,
+      );
+      listener?.(
+        {
+          type: 'webhook_task',
+          id: 'webhook-drain',
+          expiresAt: Date.now() + 1000,
+          task: webhookTask,
+        },
+        undefined,
+      );
+
+      process.emit('SIGTERM', 'SIGTERM');
+      await vi.advanceTimersByTimeAsync(10_000);
+      await handler;
+
+      expect(disconnect).toHaveBeenCalledOnce();
+      expect(exit).toHaveBeenCalledWith(0);
+    } finally {
+      restoreSend();
+      vi.useRealTimers();
     }
   });
 });

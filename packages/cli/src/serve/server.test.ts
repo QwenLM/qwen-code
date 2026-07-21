@@ -26,6 +26,7 @@ import {
   type ChannelWorkerControlState,
 } from './channel-worker-manager.js';
 import { runQwenServe, type RunHandle } from './run-qwen-serve.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import {
   resolveWebShellDir,
   isDocumentNavigation,
@@ -9071,7 +9072,12 @@ describe('createServeApp', () => {
 
     it('validates delivery and forwards it only through trusted prompt context', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
+      const channelDeliveryAuthorizations =
+        new ChannelDeliveryAuthorizationStore();
+      const app = createServeApp(baseOpts, undefined, {
+        bridge,
+        channelDeliveryAuthorizations,
+      });
       const delivery = {
         kind: 'channel',
         target: {
@@ -9098,6 +9104,19 @@ describe('createServeApp', () => {
           target: delivery.target,
         },
       });
+      expect(
+        channelDeliveryAuthorizations.consume(realpathSync(process.cwd()), {
+          sessionId: 'session-A',
+          deliveryId: res.body.promptId,
+          source: 'prompt',
+          promptId: res.body.promptId,
+          target: delivery.target as {
+            channelName: string;
+            type: 'user';
+            id: string;
+          },
+        }),
+      ).toBe(true);
     });
 
     it('rejects malformed prompt delivery before bridge admission', async () => {

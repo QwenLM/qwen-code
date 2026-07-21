@@ -777,7 +777,8 @@ Both routes use the strict mutation gate. The qualified route resolves only a
 registered, trusted workspace. Success is `200 {delivered:true,deliveryId}`.
 Errors are `400 channel_delivery_invalid`, `503 channel_worker_unavailable` or
 `channel_delivery_queue_full`, `504 channel_delivery_timeout`, and `502
-channel_delivery_failed`. A timeout has an unknown outcome and is not retried.
+channel_delivery_rejected` or `channel_delivery_failed`. A timeout has an
+unknown outcome and is not retried.
 There is intentionally no separate connectivity-test endpoint: a normal
 Notify call is the end-to-end test.
 

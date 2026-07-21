@@ -61,8 +61,8 @@ describe('daemon event schema', () => {
         status: 'failed',
         taskId: 'task-1',
         firedAt: 123,
-        code: 'channel_worker_unavailable',
-        error: 'Channel worker is not running.',
+        code: 'channel_delivery_rejected',
+        error: 'Recipient rejected.',
       },
     };
 

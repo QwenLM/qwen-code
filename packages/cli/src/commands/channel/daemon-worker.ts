@@ -41,6 +41,8 @@ import {
   type ChannelWebhookEnqueueErrorCode,
 } from '../../serve/channel-webhook-ipc.js';
 import {
+  ChannelDeliveryError,
+  isChannelDeliveryError,
   isChannelDeliveryMessage,
   type ChannelDeliveryErrorCode,
   type ChannelDeliveryRequest,
@@ -612,7 +614,10 @@ export async function runChannelDaemonWorker(
       async deliverChannelMessage(request: ChannelDeliveryRequest) {
         const channel = channels.get(request.channelName);
         if (!channel || !connected.includes(request.channelName)) {
-          throw new Error(`Channel "${request.channelName}" is not running.`);
+          throw new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            `Channel "${request.channelName}" is not running.`,
+          );
         }
         await channel.deliverProactive(
           { channelName: request.channelName, ...request.target },
@@ -990,27 +995,24 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
           clearHeartbeat();
           process.removeListener('message', onMessage);
           try {
-            if (activeChannelDeliveries.size > 0) {
+            const deliveryCount = activeChannelDeliveries.size;
+            const webhookCount = activeWebhookTasks.size;
+            if (deliveryCount > 0) {
               writeStderrLine(
-                `[Channel] shutdown: draining ${activeChannelDeliveries.size} channel delivery task(s)...`,
+                `[Channel] shutdown: draining ${deliveryCount} channel delivery task(s)...`,
               );
-              await Promise.race([
-                Promise.allSettled(activeChannelDeliveries.values()),
-                new Promise<void>((resolve) => {
-                  const timer = setTimeout(
-                    resolve,
-                    WEBHOOK_TASK_SHUTDOWN_DRAIN_MS,
-                  );
-                  timer.unref();
-                }),
-              ]);
             }
-            if (activeWebhookTasks.size > 0) {
+            if (webhookCount > 0) {
               writeStderrLine(
-                `[Channel] shutdown: draining ${activeWebhookTasks.size} webhook task(s)...`,
+                `[Channel] shutdown: draining ${webhookCount} webhook task(s)...`,
               );
+            }
+            if (deliveryCount > 0 || webhookCount > 0) {
               await Promise.race([
-                Promise.allSettled(activeWebhookTasks.values()),
+                Promise.allSettled([
+                  ...activeChannelDeliveries.values(),
+                  ...activeWebhookTasks.values(),
+                ]),
                 new Promise<void>((resolve) => {
                   const timer = setTimeout(
                     resolve,
@@ -1095,15 +1097,14 @@ function classifyWebhookTaskValidationError(
 function classifyChannelDeliveryError(
   error: unknown,
 ): ChannelDeliveryErrorCode {
+  if (isChannelDeliveryError(error)) {
+    return error.code;
+  }
   if (
     isChannelProactiveDeliveryError(error) &&
     error.disposition === 'permanent'
   ) {
-    return 'channel_delivery_invalid';
-  }
-  const message = error instanceof Error ? error.message : String(error);
-  if (/^Channel ".+" is not running\.$/u.test(message)) {
-    return 'channel_worker_unavailable';
+    return 'channel_delivery_rejected';
   }
   return 'channel_delivery_failed';
 }

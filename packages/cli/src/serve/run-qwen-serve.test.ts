@@ -28,6 +28,7 @@ import {
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -105,9 +106,16 @@ describe('createBoundChannelDeliveryHandler', () => {
     const deliverChannelMessage = vi.fn(async () => ({
       delivered: true as const,
     }));
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
     const handler = createBoundChannelDeliveryHandler(
       '/canonical',
       () => ({ deliverChannelMessage }) as never,
+      authorizations,
     );
 
     await expect(
@@ -123,7 +131,21 @@ describe('createBoundChannelDeliveryHandler', () => {
 
   it('does not lazily start a missing manager and returns a clear failure', async () => {
     const getManager = vi.fn(() => undefined);
-    const handler = createBoundChannelDeliveryHandler('/canonical', getManager);
+    const warn = vi.fn(() => {
+      throw new Error('logger unavailable');
+    });
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      getManager,
+      authorizations,
+      { warn } as never,
+    );
 
     await expect(handler(info)).resolves.toEqual({
       status: 'failed',
@@ -131,6 +153,47 @@ describe('createBoundChannelDeliveryHandler', () => {
       error: 'Channel worker is not running.',
     });
     expect(getManager).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith('channel delivery failed', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      source: info.source,
+      channelName: info.target.channelName,
+      code: 'channel_worker_unavailable',
+    });
+  });
+
+  it('rejects an unauthorized or changed target before worker IPC', async () => {
+    const deliverChannelMessage = vi.fn(async () => ({
+      delivered: true as const,
+    }));
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+    );
+
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+      error: 'Channel delivery is not authorized.',
+    });
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    await expect(
+      handler({ ...info, target: { ...info.target, id: 'user-2' } }),
+    ).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+      error: 'Channel delivery is not authorized.',
+    });
+    expect(deliverChannelMessage).not.toHaveBeenCalled();
+
+    await expect(handler(info)).resolves.toEqual({ status: 'delivered' });
+    expect(deliverChannelMessage).toHaveBeenCalledTimes(1);
   });
 });
 

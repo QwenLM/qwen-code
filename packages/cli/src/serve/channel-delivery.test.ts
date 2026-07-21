@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_CHANNEL_DELIVERY_TEXT_LENGTH,
   normalizeChannelDelivery,
+  normalizeChannelDeliveryText,
   parseChannelDelivery,
 } from './channel-delivery.js';
 
@@ -36,7 +37,11 @@ describe('channel delivery contract', () => {
   });
 
   it('normalizes and safely bounds delivery text for worker IPC', () => {
-    const oversized = `${'x'.repeat(MAX_CHANNEL_DELIVERY_TEXT_LENGTH)}\ud800tail`;
+    const baseline = normalizeChannelDeliveryText(
+      'x'.repeat(MAX_CHANNEL_DELIVERY_TEXT_LENGTH + 1),
+    );
+    const prefixLimit = baseline.indexOf('\n\n[Channel delivery truncated');
+    const oversized = `${'x'.repeat(prefixLimit - 1)}😀${'x'.repeat(MAX_CHANNEL_DELIVERY_TEXT_LENGTH)}`;
     const request = normalizeChannelDelivery('prompt-1', delivery, oversized);
 
     expect(request).toMatchObject({
@@ -48,7 +53,8 @@ describe('channel delivery contract', () => {
       MAX_CHANNEL_DELIVERY_TEXT_LENGTH,
     );
     expect(request.text).toContain('[Channel delivery truncated');
-    expect(request.text.charCodeAt(request.text.length - 1)).not.toBe(0xd800);
+    const suffixStart = request.text.indexOf('\n\n[Channel delivery truncated');
+    expect(request.text.charCodeAt(suffixStart - 1)).not.toBe(0xd83d);
   });
 
   it('rejects empty text before worker IPC', () => {

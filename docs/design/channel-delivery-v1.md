@@ -50,7 +50,7 @@ Webhook remains an independent asynchronous path with its own secret and `202` w
 
 ## Workspace ownership
 
-The daemon binds the workspace when constructing each ACP bridge. A child may request delivery for its own session but cannot choose `workspaceCwd`. The host callback closes over the canonical workspace and routes only to that workspace's worker group. Missing, bootstrapping, draining, stopped, or removed owners return `channel_worker_unavailable`; there is no fallback to the primary runtime and no lazy worker startup.
+The daemon binds the workspace when constructing each ACP bridge. Prompt admission records the daemon-issued delivery ID and pinned target, while scheduled delivery is authorized from the persisted task. The child callback must match that authorization and cannot choose `workspaceCwd` or replace the target. The host callback closes over the canonical workspace and routes only to that workspace's worker group. Missing, bootstrapping, draining, stopped, or removed owners return `channel_worker_unavailable`; there is no fallback to the primary runtime and no lazy worker startup.
 
 ## Reliability and privacy
 

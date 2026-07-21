@@ -70,8 +70,20 @@ describe('scheduled-task keepalive', () => {
   });
 
   it('heartbeats each distinct bound session, skipping unbound tasks', async () => {
+    const onTasksRead = vi.fn();
     await updateCronTasks(workspace, () => [
-      task({ id: 'a', sessionId: 'sess-1' }),
+      task({
+        id: 'a',
+        sessionId: 'sess-1',
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            type: 'user',
+            id: 'user-1',
+          },
+        },
+      }),
       task({ id: 'b', sessionId: 'sess-2' }),
       task({ id: 'c', sessionId: 'sess-1' }), // same session as 'a'
       task({ id: 'd' }), // unbound — no session to keep alive
@@ -80,11 +92,17 @@ describe('scheduled-task keepalive', () => {
       bridge,
       boundWorkspace: workspace,
       intervalMs: 60_000,
+      onTasksRead,
     });
     await ka.tick();
     ka.stop();
     // Deduped to the distinct bound sessions; the unbound task is skipped.
     expect(beats.sort()).toEqual(['sess-1', 'sess-2']);
+    expect(onTasksRead).toHaveBeenCalledWith(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 'a', sessionId: 'sess-1' }),
+      ]),
+    );
   });
 
   it('skips heartbeat and revive for disabled tasks (keeps them reap-able)', async () => {

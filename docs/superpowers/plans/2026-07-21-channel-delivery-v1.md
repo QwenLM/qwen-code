@@ -64,7 +64,7 @@
 **Interfaces:**
 
 - Produces: `ChannelDeliveryRequest { deliveryId, channelName, target, text }`.
-- Produces: `ChannelDeliveryErrorCode` values `channel_worker_unavailable`, `channel_delivery_timeout`, `channel_delivery_invalid`, `channel_delivery_queue_full`, `channel_delivery_failed`.
+- Produces: `ChannelDeliveryErrorCode` values `channel_worker_unavailable`, `channel_delivery_timeout`, `channel_delivery_invalid`, `channel_delivery_rejected`, `channel_delivery_queue_full`, `channel_delivery_failed`.
 - Produces: `ChannelWorkerManager.deliver(workspaceCwd, request): Promise<void>`.
 
 - [ ] Add IPC validator and result-correlation tests, then confirm RED because the module is absent.

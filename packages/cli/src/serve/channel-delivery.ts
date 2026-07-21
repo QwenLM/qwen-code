@@ -77,7 +77,7 @@ export function parseChannelDelivery(value: unknown): PublicChannelDelivery {
   };
 }
 
-function normalizeDeliveryText(text: string): string {
+export function normalizeChannelDeliveryText(text: string): string {
   if (text.length <= MAX_CHANNEL_DELIVERY_TEXT_LENGTH) return text;
   const prefixLimit =
     MAX_CHANNEL_DELIVERY_TEXT_LENGTH - TRUNCATED_TEXT_SUFFIX.length;
@@ -104,6 +104,6 @@ export function normalizeChannelDelivery(
     deliveryId,
     channelName: delivery.target.channelName,
     target: { type: delivery.target.type, id: delivery.target.id },
-    text: normalizeDeliveryText(text),
+    text: normalizeChannelDeliveryText(text),
   };
 }

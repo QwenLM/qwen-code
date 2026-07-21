@@ -115,6 +115,7 @@ describe('channel notify routes', () => {
     ['channel_worker_unavailable', 503],
     ['channel_delivery_queue_full', 503],
     ['channel_delivery_timeout', 504],
+    ['channel_delivery_rejected', 502],
     ['channel_delivery_failed', 502],
   ] as const)('maps %s to HTTP %i', async (code, status) => {
     const deliver = vi.fn(async () => {

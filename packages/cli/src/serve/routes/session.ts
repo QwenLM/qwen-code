@@ -95,6 +95,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
@@ -104,6 +105,7 @@ interface RegisterSessionRoutesDeps {
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   sendBridgeError: SendBridgeError;
   daemonLog?: DaemonLogger;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
@@ -114,6 +116,7 @@ const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 const GENERATION_HEARTBEAT_MS = 15_000;
+const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
   'POST /session/:id/fork',
@@ -2325,6 +2328,16 @@ export function registerSessionRoutes(
         }
 
         const promptId = crypto.randomUUID();
+        if (delivery && deps.channelDeliveryAuthorizations) {
+          deps.channelDeliveryAuthorizations.authorizePrompt(
+            runtime.workspaceCwd,
+            {
+              sessionId,
+              deliveryId: promptId,
+              target: delivery.target,
+            },
+          );
+        }
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
         delete forwardedBody['delivery'];
@@ -2381,6 +2394,11 @@ export function registerSessionRoutes(
             },
           );
         } catch (err) {
+          deps.channelDeliveryAuthorizations?.revokePrompt(
+            runtime.workspaceCwd,
+            sessionId,
+            promptId,
+          );
           if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
           res.off('close', onResClose);
           res.off('finish', onResFinish);
@@ -2431,6 +2449,16 @@ export function registerSessionRoutes(
           )
           .finally(() => {
             if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
+            if (delivery && deps.channelDeliveryAuthorizations) {
+              const revokeTimer = setTimeout(() => {
+                deps.channelDeliveryAuthorizations?.revokePrompt(
+                  runtime.workspaceCwd,
+                  sessionId,
+                  promptId,
+                );
+              }, CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS);
+              revokeTimer.unref();
+            }
           })
           .catch(() => {});
 

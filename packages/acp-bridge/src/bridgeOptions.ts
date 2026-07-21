@@ -523,6 +523,7 @@ export type ChannelDeliveryErrorCode =
   | 'channel_worker_unavailable'
   | 'channel_delivery_timeout'
   | 'channel_delivery_invalid'
+  | 'channel_delivery_rejected'
   | 'channel_delivery_queue_full'
   | 'channel_delivery_failed';
 

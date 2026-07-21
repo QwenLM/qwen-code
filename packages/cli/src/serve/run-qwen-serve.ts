@@ -125,6 +125,7 @@ import {
   ChannelDeliveryError,
   isChannelDeliveryError,
 } from './channel-delivery-ipc.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -171,15 +172,37 @@ const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
 export function createBoundChannelDeliveryHandler(
   boundWorkspace: string,
   getManager: () => ChannelWorkerManager | undefined,
+  authorizations: ChannelDeliveryAuthorizationStore,
+  daemonLog?: Pick<DaemonLogger, 'warn'>,
 ): ChannelDeliveryHandler {
   return async (info): Promise<ChannelDeliveryHostResult> => {
+    const failed = (
+      code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+      error: string,
+    ): ChannelDeliveryHostResult => {
+      writeDaemonLifecycleBestEffort(() =>
+        daemonLog?.warn('channel delivery failed', {
+          sessionId: info.sessionId,
+          deliveryId: info.deliveryId,
+          source: info.source,
+          channelName: info.target.channelName,
+          code,
+        }),
+      );
+      return { status: 'failed', code, error };
+    };
+    if (!authorizations.consume(boundWorkspace, info)) {
+      return failed(
+        'channel_delivery_invalid',
+        'Channel delivery is not authorized.',
+      );
+    }
     const manager = getManager();
     if (!manager) {
-      return {
-        status: 'failed',
-        code: 'channel_worker_unavailable',
-        error: 'Channel worker is not running.',
-      };
+      return failed(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
     }
     try {
       await manager.deliverChannelMessage(boundWorkspace, {
@@ -191,13 +214,9 @@ export function createBoundChannelDeliveryHandler(
       return { status: 'delivered' };
     } catch (err) {
       if (isChannelDeliveryError(err)) {
-        return { status: 'failed', code: err.code, error: err.message };
+        return failed(err.code, err.message);
       }
-      return {
-        status: 'failed',
-        code: 'channel_delivery_failed',
-        error: 'Channel delivery failed.',
-      };
+      return failed('channel_delivery_failed', 'Channel delivery failed.');
     }
   };
 }
@@ -1776,6 +1795,7 @@ async function runQwenServeImpl(
   loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
+  const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
   const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
@@ -3381,6 +3401,8 @@ async function runQwenServeImpl(
         onChannelDelivery: createBoundChannelDeliveryHandler(
           boundWorkspace,
           () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
         ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
@@ -3700,6 +3722,8 @@ async function runQwenServeImpl(
         onChannelDelivery: createBoundChannelDeliveryHandler(
           workspaceInput.cwd,
           () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
         ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
@@ -4078,6 +4102,8 @@ async function runQwenServeImpl(
           onChannelDelivery: createBoundChannelDeliveryHandler(
             cwd,
             () => channelWorkerManager,
+            channelDeliveryAuthorizations,
+            daemonLog,
           ),
           maxSessions: opts.maxSessions,
           freshSessionAdmission: totalSessionAdmission.admit,
@@ -4448,6 +4474,7 @@ async function runQwenServeImpl(
           request,
         );
       },
+      channelDeliveryAuthorizations,
       reloadChannelWorker,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),

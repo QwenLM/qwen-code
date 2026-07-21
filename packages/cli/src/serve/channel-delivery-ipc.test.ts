@@ -73,8 +73,8 @@ describe('channel delivery IPC', () => {
         type: 'channel_delivery_result',
         id: 'ipc-1',
         ok: false,
-        code: 'channel_delivery_failed',
-        error: 'Platform send failed.',
+        code: 'channel_delivery_rejected',
+        error: 'Recipient rejected.',
       }),
     ).toBe(true);
     expect(

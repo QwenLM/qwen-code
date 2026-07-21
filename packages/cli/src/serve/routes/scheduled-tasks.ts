@@ -54,6 +54,7 @@ import {
   type PublicChannelDelivery,
 } from '../channel-delivery.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
+import type { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 import {
   requireTrustedWorkspaceRuntime,
   resolveWorkspaceRuntimeFromParam,
@@ -150,6 +151,7 @@ interface RegisterScheduledTaskCrudRoutesDeps {
   resolveTarget: ResolveScheduledTaskTarget;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
 }
 
 interface RegisterScheduledTasksRoutesDeps {
@@ -162,12 +164,14 @@ interface RegisterScheduledTasksRoutesDeps {
    * fall back to the shared per-project durable-owner firing model.
    */
   bridge?: ScheduledTasksSessionBridge;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
 }
 
 interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
+  channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   /**
    * When true, a task created through a qualified route binds to a dedicated
    * session in the target workspace (its bridge mints one). Must mirror the
@@ -285,7 +289,13 @@ function registerScheduledTaskCrudRoutes(
   app: Application,
   deps: RegisterScheduledTaskCrudRoutesDeps,
 ): void {
-  const { prefix, resolveTarget, mutate, safeBody } = deps;
+  const {
+    prefix,
+    resolveTarget,
+    mutate,
+    safeBody,
+    channelDeliveryAuthorizations,
+  } = deps;
   const base = `${prefix}/scheduled-tasks`;
 
   // ── List ──────────────────────────────────────────────────────────
@@ -517,6 +527,15 @@ function registerScheduledTaskCrudRoutes(
       });
       return;
     }
+    if (task.delivery && task.sessionId) {
+      channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+        sessionId: task.sessionId,
+        taskId: task.id,
+        target: task.delivery.target,
+        recurring: task.recurring,
+        lastFiredAt: task.lastFiredAt ?? undefined,
+      });
+    }
     res.status(201).json(toView(task));
   });
 
@@ -746,6 +765,15 @@ function registerScheduledTaskCrudRoutes(
         // non-critical — the schedule change already persisted
       }
     }
+    if (updated.delivery && updated.sessionId) {
+      channelDeliveryAuthorizations?.registerScheduledTask(workspaceCwd, {
+        sessionId: updated.sessionId,
+        taskId: updated.id,
+        target: updated.delivery.target,
+        recurring: updated.recurring,
+        lastFiredAt: updated.lastFiredAt ?? undefined,
+      });
+    }
     res.status(200).json(toView(updated));
   });
 
@@ -795,6 +823,13 @@ function registerScheduledTaskCrudRoutes(
     // Stop the now-orphaned session (keeps its transcript on disk as history).
     if (boundSessionId && bridge) {
       await bridge.closeSession(boundSessionId).catch(() => {});
+    }
+    if (boundSessionId) {
+      channelDeliveryAuthorizations?.revokeScheduledTask(
+        workspaceCwd,
+        boundSessionId,
+        id,
+      );
     }
     res.status(200).json({ deleted: true, id });
   });
@@ -918,12 +953,19 @@ export function registerScheduledTasksRoutes(
   app: Application,
   deps: RegisterScheduledTasksRoutesDeps,
 ): void {
-  const { boundWorkspace, mutate, safeBody, bridge } = deps;
+  const {
+    boundWorkspace,
+    mutate,
+    safeBody,
+    bridge,
+    channelDeliveryAuthorizations,
+  } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '',
     resolveTarget: () => ({ workspaceCwd: boundWorkspace, bridge }),
     mutate,
     safeBody,
+    channelDeliveryAuthorizations,
   });
 }
 
@@ -939,8 +981,13 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
   app: Application,
   deps: RegisterWorkspaceQualifiedScheduledTasksRoutesDeps,
 ): void {
-  const { workspaceRegistry, mutate, safeBody, manageScheduledTaskSessions } =
-    deps;
+  const {
+    workspaceRegistry,
+    mutate,
+    safeBody,
+    manageScheduledTaskSessions,
+    channelDeliveryAuthorizations,
+  } = deps;
   registerScheduledTaskCrudRoutes(app, {
     prefix: '/workspaces/:workspace',
     resolveTarget: (req, res) => {
@@ -960,6 +1007,7 @@ export function registerWorkspaceQualifiedScheduledTasksRoutes(
     },
     mutate,
     safeBody,
+    channelDeliveryAuthorizations,
   });
 }
 

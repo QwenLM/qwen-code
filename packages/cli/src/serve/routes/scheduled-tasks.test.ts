@@ -25,6 +25,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { ChannelDeliveryAuthorizationStore } from '../channel-delivery-authorization.js';
 
 function safeBody(req: Request): Record<string, unknown> {
   return req.body && typeof req.body === 'object'
@@ -94,6 +95,7 @@ interface Harness {
   scratch: string;
   workspace: string;
   bridge: StubBridge;
+  channelDeliveryAuthorizations: ChannelDeliveryAuthorizationStore;
 }
 
 async function makeHarness(): Promise<Harness> {
@@ -105,6 +107,7 @@ async function makeHarness(): Promise<Harness> {
   Storage.setRuntimeBaseDir(scratch);
 
   const bridge = makeStubBridge();
+  const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
   const app = express();
   app.use(express.json());
   registerScheduledTasksRoutes(app, {
@@ -113,8 +116,15 @@ async function makeHarness(): Promise<Harness> {
     mutate: () => (_req, _res, next) => next(),
     safeBody,
     bridge,
+    channelDeliveryAuthorizations,
   });
-  return { app, scratch, workspace, bridge };
+  return {
+    app,
+    scratch,
+    workspace,
+    bridge,
+    channelDeliveryAuthorizations,
+  };
 }
 
 async function teardown(h: Harness): Promise<void> {
@@ -168,7 +178,7 @@ describe('scheduled-tasks routes', () => {
       kind: 'channel',
       target: {
         channelName: 'dingtalk',
-        type: 'user',
+        type: 'user' as const,
         id: 'user-1',
       },
     };
@@ -181,6 +191,17 @@ describe('scheduled-tasks routes', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.delivery).toEqual(delivery);
+    const firedAt = res.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: res.body.sessionId,
+        deliveryId: `${res.body.id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: res.body.id,
+        firedAt,
+        target: delivery.target,
+      }),
+    ).toBe(true);
     const list = await request(h.app).get('/scheduled-tasks');
     expect(list.body.tasks[0].delivery).toEqual(delivery);
   });

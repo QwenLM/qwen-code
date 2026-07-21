@@ -7152,6 +7152,15 @@ describe('Session', () => {
               type: core.StreamEventType.CHUNK,
               value: {
                 candidates: [
+                  { content: { parts: [{ text: 'discarded attempt' }] } },
+                ],
+              },
+            },
+            { type: core.StreamEventType.RETRY, value: {} },
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
                   { content: { parts: [{ text: 'final answer' }] } },
                 ],
               },
@@ -7193,6 +7202,237 @@ describe('Session', () => {
             },
           );
         });
+      });
+
+      it('keeps continuation retry text in the delivered prompt final', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [{ content: { parts: [{ text: 'first half' }] } }],
+              },
+            },
+            {
+              type: core.StreamEventType.RETRY,
+              value: {},
+              isContinuation: true,
+            } as never,
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: ' second half' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+          _meta: {
+            'qwen.daemon.channelDelivery': {
+              deliveryId: 'prompt-continuation',
+              target: {
+                channelName: 'dingtalk',
+                type: 'user',
+                id: 'user-1',
+              },
+            },
+          },
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.objectContaining({
+              deliveryId: 'prompt-continuation',
+              text: 'first half second half',
+            }),
+          );
+        });
+      });
+
+      it('keeps a failed delivery result outside the completed prompt flow', async () => {
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          status: 'failed',
+          code: 'channel_worker_unavailable',
+          error: 'Channel worker is not running.',
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'final answer' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-failed-delivery',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.anything(),
+          );
+        });
+      });
+
+      it('keeps a transport failure and throwing debug logger outside the prompt flow', async () => {
+        mockClient.extMethod = vi
+          .fn()
+          .mockRejectedValue(new Error('delivery IPC unavailable'));
+        debugLoggerWarnSpy.mockImplementationOnce(() => {
+          throw new Error('debug logger unavailable');
+        });
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'final answer' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-transport-failure',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.anything(),
+          );
+        });
+      });
+
+      it('does not submit delivery when the prompt hits the token limit', async () => {
+        mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+        mockGeminiClient.tryCompressChat.mockResolvedValueOnce({
+          originalTokenCount: 101,
+          newTokenCount: 101,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-max-tokens',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).resolves.toEqual({ stopReason: 'max_tokens' });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
+      });
+
+      it('does not submit delivery when the prompt is cancelled', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          (async function* () {
+            await session.cancelPendingPrompt();
+            yield* createEmptyStream();
+          })(),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-cancelled',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).resolves.toEqual({ stopReason: 'cancelled' });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
+      });
+
+      it('does not submit delivery when the prompt stream fails', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createFailingStream('provider failed'));
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-error',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).rejects.toThrow('provider failed');
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
       });
 
       it('does not submit a prompt without trusted delivery metadata', async () => {
@@ -7266,6 +7506,19 @@ describe('Session', () => {
                 type: core.StreamEventType.CHUNK,
                 value: {
                   candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'discarded scheduled attempt' }],
+                      },
+                    },
+                  ],
+                },
+              },
+              { type: core.StreamEventType.RETRY, value: {} },
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
                     { content: { parts: [{ text: 'scheduled answer' }] } },
                   ],
                 },
@@ -7296,6 +7549,67 @@ describe('Session', () => {
             },
           );
         });
+      });
+
+      it('does not submit delivery when a scheduled prompt fails', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn(
+            (
+              callback: (job: {
+                id: string;
+                prompt: string;
+                lastFiredAt: number;
+                delivery: unknown;
+              }) => void,
+            ) => {
+              callback({
+                id: 'task-error',
+                prompt: 'scheduled prompt',
+                lastFiredAt: 1_750_000_000_001,
+                delivery: {
+                  kind: 'channel',
+                  target: {
+                    channelName: 'dingtalk',
+                    type: 'chat',
+                    id: 'chat-1',
+                  },
+                },
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createFailingStream('scheduled failed'));
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start scheduler' }],
+        });
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+            expect.objectContaining({
+              update: expect.objectContaining({
+                content: expect.objectContaining({
+                  text: '[cron error] scheduled failed',
+                }),
+              }),
+            }),
+          );
+        });
+
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
       });
 
       it('marks loop wakeup ACP prompts with loop source metadata', async () => {

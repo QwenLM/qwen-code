@@ -1170,8 +1170,8 @@ describe('BridgeClient — channel-delivery extMethod dispatch', () => {
   it('publishes only a sanitized code and error for a failed delivery', async () => {
     const { client, publish } = makeClient(async () => ({
       status: 'failed',
-      code: 'channel_worker_unavailable',
-      error: 'Channel worker is not running.',
+      code: 'channel_delivery_rejected',
+      error: 'Recipient rejected.',
     }));
 
     await client.extMethod(METHOD, validParams);
@@ -1180,8 +1180,8 @@ describe('BridgeClient — channel-delivery extMethod dispatch', () => {
       type: 'channel_delivery_result',
       data: {
         status: 'failed',
-        code: 'channel_worker_unavailable',
-        error: 'Channel worker is not running.',
+        code: 'channel_delivery_rejected',
+        error: 'Recipient rejected.',
       },
     });
     expect(JSON.stringify(publish.mock.calls)).not.toContain('dingtalk');
