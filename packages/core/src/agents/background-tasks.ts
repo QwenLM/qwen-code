@@ -489,6 +489,11 @@ export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
   private readonly residentAgents = new Map<string, ResidentBackgroundAgent>();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
+  private readonly finishingAgents = new Set<string>();
+  private readonly finishingWaiters = new Map<
+    string,
+    Set<(settled: boolean) => void>
+  >();
   private readonly waitQueue: BackgroundSlotWaiter[] = [];
   // Maps each outstanding slot reservation to the concrete model ID it was
   // reserved for (undefined when unresolved). A Map rather than a Set so the
@@ -677,6 +682,7 @@ export class BackgroundTaskRegistry {
       entry.parentName = this.agents.get(entry.parentAgentId)?.subagentType;
     }
     this.agents.set(entry.agentId, entry);
+    this.releaseFinishingWaiters(entry.agentId, true);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
     if (
       wasRunningBackground &&
@@ -810,6 +816,7 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.result = result;
     entry.stats = stats;
+    this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Background agent completed: ${agentId}`);
 
     this.rejectPendingApprovals(entry);
@@ -865,6 +872,7 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.error = error;
     entry.stats = stats;
+    this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Background agent failed: ${agentId}`);
 
     this.rejectPendingApprovals(entry);
@@ -907,6 +915,7 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     entry.persistedCancellationStatus = persistedStatus;
+    this.releaseFinishingWaiters(agentId, true);
     this.disposeResidentAgent(agentId);
     if (entry.metaPath) {
       patchAgentMeta(entry.metaPath, {
@@ -950,6 +959,7 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     entry.notified = true;
+    this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Abandoned paused background agent: ${agentId}`);
     this.rejectPendingApprovals(entry);
     this.emitStatusChange(entry);
@@ -976,6 +986,7 @@ export class BackgroundTaskRegistry {
     entry.endTime ??= Date.now();
     if (partialResult) entry.result = partialResult;
     entry.stats = stats;
+    this.releaseFinishingWaiters(agentId, true);
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
@@ -1319,6 +1330,7 @@ export class BackgroundTaskRegistry {
       | AgentTask
       | undefined;
     if (!firstEntry) {
+      this.releaseAllFinishingWaiters(false);
       this.disposeAllResidentAgents();
       this.rejectWaitQueue();
       return;
@@ -1333,6 +1345,7 @@ export class BackgroundTaskRegistry {
       this.wakeMessageWaiters(entry.agentId);
     }
     this.rejectWaitQueue();
+    this.releaseAllFinishingWaiters(false);
     this.agents.clear();
     this.disposeAllResidentAgents();
     this.emitStatusChange(firstEntry);
@@ -1353,7 +1366,13 @@ export class BackgroundTaskRegistry {
    */
   queueExternalInput(agentId: string, input: AgentExternalInput): boolean {
     const entry = this.agents.get(agentId);
-    if (!entry || entry.status !== 'running') return false;
+    if (
+      !entry ||
+      entry.status !== 'running' ||
+      this.finishingAgents.has(agentId)
+    ) {
+      return false;
+    }
     const queue = entry.pendingMessages!;
     queue.push(input);
     debugLogger.info(
@@ -1361,6 +1380,40 @@ export class BackgroundTaskRegistry {
     );
     this.wakeMessageWaiters(agentId);
     return true;
+  }
+
+  /** Close the input queue after its final drain but before async teardown. */
+  beginFinishing(agentId: string): boolean {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'running') return false;
+    this.finishingAgents.add(agentId);
+    return true;
+  }
+
+  isFinishing(agentId: string): boolean {
+    return this.finishingAgents.has(agentId);
+  }
+
+  /** Wait until a finishing task publishes its terminal state. */
+  waitForFinishing(agentId: string, signal: AbortSignal): Promise<boolean> {
+    if (!this.finishingAgents.has(agentId)) return Promise.resolve(true);
+    if (signal.aborted) return Promise.resolve(false);
+
+    return new Promise<boolean>((resolve) => {
+      const settle = (settled: boolean) => {
+        signal.removeEventListener('abort', onAbort);
+        const waiters = this.finishingWaiters.get(agentId);
+        waiters?.delete(settle);
+        if (waiters?.size === 0) this.finishingWaiters.delete(agentId);
+        resolve(settled);
+      };
+      const onAbort = () => settle(false);
+      const waiters = this.finishingWaiters.get(agentId) ?? new Set();
+      waiters.add(settle);
+      this.finishingWaiters.set(agentId, waiters);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
   }
 
   /**
@@ -1619,8 +1672,23 @@ export class BackgroundTaskRegistry {
   }
 
   private deleteAgent(agentId: string): boolean {
+    this.releaseFinishingWaiters(agentId, false);
     this.disposeResidentAgent(agentId);
     return this.agents.delete(agentId);
+  }
+
+  private releaseFinishingWaiters(agentId: string, settled: boolean): void {
+    this.finishingAgents.delete(agentId);
+    const waiters = this.finishingWaiters.get(agentId);
+    if (!waiters) return;
+    this.finishingWaiters.delete(agentId);
+    for (const resolve of waiters) resolve(settled);
+  }
+
+  private releaseAllFinishingWaiters(settled: boolean): void {
+    for (const agentId of Array.from(this.finishingAgents)) {
+      this.releaseFinishingWaiters(agentId, settled);
+    }
   }
 
   private disposeAllResidentAgents(): void {

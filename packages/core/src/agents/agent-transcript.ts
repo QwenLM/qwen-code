@@ -146,6 +146,8 @@ export interface AgentPersistedCliFlags {
   sandbox?: SandboxConfig | null;
   screenReader?: boolean;
   model?: string;
+  authType?: string;
+  baseUrl?: string;
   maxSessionTurns?: number;
   maxToolCalls?: number;
   /**

@@ -834,6 +834,14 @@ export class BackgroundAgentResumeService {
                   },
                 }
               : {}),
+            ...(meta.persistedCliFlags?.authType
+              ? {
+                  runtimeAuthOverrides: {
+                    authType: meta.persistedCliFlags.authType,
+                    baseUrl: meta.persistedCliFlags.baseUrl,
+                  },
+                }
+              : {}),
           });
         subagent = result.subagent;
         subagentDispose = result.dispose;

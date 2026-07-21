@@ -80,7 +80,7 @@ class SendMessageInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     if (isPlanRequiredTeammateAwaitingApproval(this.config)) {
       const msg = getPlanRequiredTeammatePreApprovalMessage(
         ToolNames.SEND_MESSAGE,
@@ -178,7 +178,27 @@ class SendMessageInvocation extends BaseToolInvocation<
         };
       }
 
-      registry.queueMessage(this.params.task_id, this.params.message);
+      if (
+        registry.isFinishing(this.params.task_id) ||
+        !registry.queueMessage(this.params.task_id, this.params.message)
+      ) {
+        const settled = await registry.waitForFinishing(
+          this.params.task_id,
+          signal,
+        );
+        if (!settled) {
+          const message = `Message delivery to background task "${this.params.task_id}" was cancelled.`;
+          return {
+            llmContent: `Error: ${message}`,
+            returnDisplay: message,
+            error: {
+              message,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
+          };
+        }
+        return this.execute(signal);
+      }
 
       return {
         llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary.`,

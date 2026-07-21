@@ -37,6 +37,7 @@ import type {
   AgentEventEmitter,
 } from '../../agents/runtime/agent-events.js';
 import { partToString } from '../../utils/partUtils.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
@@ -151,6 +152,7 @@ describe('AgentTool', () => {
       get: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       drainMessages: vi.fn().mockReturnValue([]),
+      beginFinishing: vi.fn().mockReturnValue(true),
       queueMessage: vi.fn(),
       queueExternalInput: vi.fn(),
       wakeExternalInputWaiters: vi.fn(),
@@ -190,6 +192,10 @@ describe('AgentTool', () => {
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'parent-model',
+        authType: 'openai',
+      }),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
       getSandbox: vi.fn().mockReturnValue(undefined),
@@ -4272,6 +4278,7 @@ describe('AgentTool', () => {
       fail: ReturnType<typeof vi.fn>;
       finalizeCancelled: ReturnType<typeof vi.fn>;
       drainMessages: ReturnType<typeof vi.fn>;
+      beginFinishing: ReturnType<typeof vi.fn>;
       waitForMessages: ReturnType<typeof vi.fn>;
       queueExternalInput: ReturnType<typeof vi.fn>;
       wakeExternalInputWaiters: ReturnType<typeof vi.fn>;
@@ -4329,6 +4336,7 @@ describe('AgentTool', () => {
         fail: vi.fn(),
         finalizeCancelled: vi.fn(),
         drainMessages: vi.fn().mockReturnValue([]),
+        beginFinishing: vi.fn().mockReturnValue(true),
         waitForMessages: vi.fn().mockResolvedValue([]),
         queueExternalInput: vi.fn(),
         wakeExternalInputWaiters: vi.fn(),
@@ -4421,10 +4429,48 @@ describe('AgentTool', () => {
         expect.objectContaining({
           persistedCliFlags: expect.objectContaining({
             model: 'subagent-model',
+            authType: 'openai',
           }),
         }),
       );
       expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+      writeMetaSpy.mockRestore();
+    });
+
+    it('does not persist the parent base URL for a cross-provider runtime', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+        model: 'parent-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://parent-provider.example.com',
+      });
+      vi.mocked(mockAgent.getCore).mockReturnValue({
+        modelConfig: { model: 'subagent-model' },
+        runtimeView: {
+          contentGenerator: {},
+          contentGeneratorConfig: {
+            model: 'subagent-model',
+            authType: AuthType.USE_ANTHROPIC,
+          },
+        },
+        getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const persistedFlags = writeMetaSpy.mock.calls[0]?.[1].persistedCliFlags;
+      expect(persistedFlags).toMatchObject({
+        model: 'subagent-model',
+        authType: 'anthropic',
+      });
+      expect(persistedFlags).toHaveProperty('baseUrl', undefined);
       writeMetaSpy.mockRestore();
     });
 
@@ -4606,6 +4652,9 @@ describe('AgentTool', () => {
         expect.any(Object),
         expect.objectContaining({
           modelConfigOverrides: { model: 'parent-model' },
+          runtimeAuthOverrides: expect.objectContaining({
+            authType: 'openai',
+          }),
         }),
       );
       expect(mockSubagentDispose).not.toHaveBeenCalled();

@@ -258,6 +258,39 @@ describe('SendMessageTool — background-task mode', () => {
     ]);
   });
 
+  it('revives a task when it finishes while a message waits at the finalization boundary', async () => {
+    registry.register({
+      agentId: 'agent-1',
+      description: 'test agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/test.jsonl',
+    });
+    registry.beginFinishing('agent-1');
+    reviveCompletedBackgroundAgent.mockResolvedValue(registry.get('agent-1'));
+
+    const resultPromise = tool.validateBuildAndExecute(
+      { task_id: 'agent-1', message: 'late correction' },
+      new AbortController().signal,
+    );
+    await Promise.resolve();
+
+    expect(registry.get('agent-1')!.pendingMessages).toEqual([]);
+    expect(reviveCompletedBackgroundAgent).not.toHaveBeenCalled();
+
+    registry.complete('agent-1', 'done');
+    const result = await resultPromise;
+
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('revived it with your message');
+    expect(reviveCompletedBackgroundAgent).toHaveBeenCalledWith(
+      'agent-1',
+      'late correction',
+    );
+  });
+
   it('returns error for non-existent task', async () => {
     const result = await tool.validateBuildAndExecute(
       { task_id: 'nope', message: 'hello' },

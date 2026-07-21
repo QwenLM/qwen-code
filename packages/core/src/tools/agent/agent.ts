@@ -120,6 +120,7 @@ import type {
 } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
+import type { AuthOverrides } from '../../models/content-generator-config.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
 // shells out to `git rev-parse` synchronously; caching avoids the per-launch
@@ -605,7 +606,9 @@ function capturePersistedCliFlags(
   config: Config,
   resolvedApprovalMode: ApprovalMode,
   modelOverride?: string,
+  runtimeAuthOverrides?: { authType?: string; baseUrl?: string },
 ): AgentPersistedCliFlags {
+  const contentGeneratorConfig = config.getContentGeneratorConfig();
   return {
     approvalMode: resolvedApprovalMode,
     bare: config.getBareMode(),
@@ -613,6 +616,10 @@ function capturePersistedCliFlags(
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
     model: modelOverride ?? config.getModel(),
+    authType: runtimeAuthOverrides?.authType ?? contentGeneratorConfig.authType,
+    baseUrl: runtimeAuthOverrides
+      ? runtimeAuthOverrides.baseUrl
+      : contentGeneratorConfig.baseUrl,
     maxSessionTurns: config.getMaxSessionTurns(),
     maxToolCalls: config.getMaxToolCalls(),
     maxSubagentDepth: config.getMaxSubagentDepth(),
@@ -2338,6 +2345,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // selector once subagentConfig is loaded. Used to enforce per-model
     // background-agent concurrency caps (agents.maxParallelAgentsByModel).
     let subagentModelId: string | undefined;
+    let subagentRuntimeAuthOverrides: AuthOverrides | undefined;
     const releaseBackgroundSlotReservation = () => {
       if (backgroundSlotReservation && !backgroundSlotReservationConsumed) {
         this.config
@@ -2491,11 +2499,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // resolveModelId maps it to the actual model ID, falling back to the
         // parent's current model when the sub-agent inherits (forks always
         // inherit, since FORK_AGENT has no model selector).
-        subagentModelId = resolveModelId(
+        const resolvedSubagentModel = resolveModelId(
           subagentConfig.model,
           buildModelIdContext(this.config),
-        )?.modelId;
+        );
+        subagentModelId = resolvedSubagentModel?.modelId;
         subagentModelId ??= this.config.getModel();
+        const parentContentGeneratorConfig =
+          this.config.getContentGeneratorConfig();
+        const authType =
+          resolvedSubagentModel?.authType ??
+          parentContentGeneratorConfig.authType;
+        subagentRuntimeAuthOverrides = authType
+          ? {
+              authType,
+              ...(authType === parentContentGeneratorConfig.authType
+                ? { baseUrl: parentContentGeneratorConfig.baseUrl }
+                : {}),
+            }
+          : undefined;
         const registry = this.config.getBackgroundTaskRegistry();
         backgroundSlotReservation =
           registry.tryReserveBackgroundSlot(subagentModelId);
@@ -2827,6 +2849,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             ...(shouldRunInBackground && subagentModelId
               ? { modelConfigOverrides: { model: subagentModelId } }
               : {}),
+            ...(shouldRunInBackground && subagentRuntimeAuthOverrides
+              ? { runtimeAuthOverrides: subagentRuntimeAuthOverrides }
+              : {}),
           },
         );
         subagent = result.subagent;
@@ -3063,6 +3088,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             this.config,
             resolvedApprovalMode,
             bgSubagent.getCore().modelConfig.model,
+            bgSubagent.getCore().runtimeView?.contentGeneratorConfig ??
+              subagentRuntimeAuthOverrides,
           ),
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
@@ -3309,6 +3336,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   finishingInputs = pending;
                   continue;
                 }
+                registry.beginFinishing(hookOpts.agentId);
               }
               if (hadWorktreeIsolation) {
                 recordTerminalOutcome();

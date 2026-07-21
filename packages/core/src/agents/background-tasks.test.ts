@@ -1977,6 +1977,30 @@ describe('BackgroundTaskRegistry', () => {
     it('returns empty array for non-existent agent', () => {
       expect(registry.drainMessages('nope')).toEqual([]);
     });
+
+    it('rejects new messages after finalization begins and releases waiters on completion', async () => {
+      registry.register({
+        agentId: 'test-1',
+        description: 'test agent',
+        status: 'running',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        isBackgrounded: true,
+        outputFile: '/tmp/test.jsonl',
+      });
+
+      expect(registry.beginFinishing('test-1')).toBe(true);
+      expect(registry.queueMessage('test-1', 'late correction')).toBe(false);
+
+      const settled = registry.waitForFinishing(
+        'test-1',
+        new AbortController().signal,
+      );
+      registry.complete('test-1', 'done');
+
+      await expect(settled).resolves.toBe(true);
+      expect(registry.get('test-1')!.pendingMessages).toEqual([]);
+    });
   });
 
   describe('waitForMessages', () => {
