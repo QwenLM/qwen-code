@@ -6,6 +6,8 @@
 
 type UndiciModule = typeof import('undici');
 
+export type { UndiciModule };
+
 let undiciModulePromise: Promise<UndiciModule> | undefined;
 
 /**

@@ -5,17 +5,17 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import type { UndiciModule } from './load-undici.js';
 
-const makeModule = (partial: Partial<UndiciModule> = {}): UndiciModule =>
-  ({
-    Agent: class {},
-    ProxyAgent: class {},
-    EnvHttpProxyAgent: class {},
-    fetch: vi.fn(),
-    setGlobalDispatcher: vi.fn(),
-    ...partial,
-  }) as unknown as UndiciModule;
+const makeModule = (
+  overrides: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  Agent: class {},
+  ProxyAgent: class {},
+  EnvHttpProxyAgent: class {},
+  fetch: vi.fn(),
+  setGlobalDispatcher: vi.fn(),
+  ...overrides,
+});
 
 describe('loadUndici CJS interop normalization', () => {
   it('unwraps a default-only esbuild chunk', async () => {
