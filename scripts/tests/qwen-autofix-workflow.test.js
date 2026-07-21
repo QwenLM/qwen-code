@@ -315,6 +315,71 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('could not fetch PR metadata');
   });
 
+  it('does not block the feedback gate on the LLM review check', () => {
+    // The gate waits for checks so a FAILED one can be read as feedback. The
+    // LLM review's conclusion carries nothing the loop acts on — its output is
+    // a review, delivered by the pull_request_review trigger — so waiting for
+    // it only hid the PR for a median 49 minutes per round (p90 123, max 158,
+    // measured over 32 completed runs).
+    const nonBlocking = JSON.parse(
+      workflow.match(/NON_BLOCKING_CHECKS: '(\[[^\n]*\])'/)?.[1] ?? 'null',
+    );
+    expect(nonBlocking).toEqual(['review-pr']);
+    // Cross-file invariant: each excluded name must still be a real job id in
+    // the review workflow. A rename there would silently restore the wait,
+    // with nothing failing — the same trap as the shared concurrency group.
+    const reviewWorkflow = readFileSync(
+      '.github/workflows/qwen-code-pr-review.yml',
+      'utf8',
+    );
+    for (const name of nonBlocking) {
+      expect(reviewWorkflow).toContain(`\n  ${name}:\n`);
+    }
+
+    // Replay the REAL extracted filter over a rollup fixture.
+    const filter = reviewScanJob.match(
+      /HAS_PENDING_CHECKS="\$\(jq -r[\s\S]*?<<< "\$\{CHECKS_JSON\}"\)"/,
+    )?.[0];
+    expect(filter).toBeTruthy();
+    const run = (checks) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `CHECKS_JSON='${JSON.stringify(checks)}'\n${filter}\nprintf '%s' "$HAS_PENDING_CHECKS"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PENDING_CUTOFF: '2026-07-21T00:00:00Z',
+            NON_BLOCKING_CHECKS: JSON.stringify(nonBlocking),
+          },
+          encoding: 'utf8',
+        },
+      );
+    const started = '2026-07-21T09:00:00Z';
+    const llm = {
+      name: 'review-pr',
+      workflowName: '🧐 Qwen Pull Request Review',
+      status: 'IN_PROGRESS',
+      startedAt: started,
+    };
+    const build = {
+      name: 'Test (ubuntu-latest, Node 22.x)',
+      workflowName: 'CI',
+      status: 'IN_PROGRESS',
+      startedAt: started,
+    };
+    // The LLM review alone no longer blocks…
+    expect(run([llm])).toBe('false');
+    // …but a real correctness check still does, alone or alongside it — a
+    // failed build IS feedback, so the gate must not race it.
+    expect(run([build])).toBe('true');
+    expect(run([llm, build])).toBe('true');
+    // Unchanged: the branch-mutating sibling in the same workflow still blocks.
+    expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
+  });
+
   it('bounds fleet-wide simultaneity below the per-scan target budget', () => {
     // max-parallel is the ONE place different PRs wait on each other: the scan
     // emits every eligible PR (up to MAX_TARGETS_PER_SCAN) and the matrix
@@ -4340,14 +4405,26 @@ describe('qwen-autofix workflow', () => {
     // Behaviorally replay the pending-staleness jq filter against sample checks so
     // a flipped comparison (which would age out live checks → double-processing)
     // is caught, not just string-matched.
+    // The `--arg cut …` line may carry further jq arguments (the non-blocking
+    // check list), so anchor on the program's quotes rather than assuming it
+    // follows `cut` immediately.
     const jqFilter = reviewScanJob.match(
-      /--arg cut "\$\{PENDING_CUTOFF\}" '([\s\S]*?)' <<< "\$\{CHECKS_JSON\}"/,
+      /--arg cut "\$\{PENDING_CUTOFF\}"[\s\S]*?'([\s\S]*?)' <<< "\$\{CHECKS_JSON\}"/,
     )?.[1];
     expect(jqFilter).toBeTruthy();
     const runStaleness = (checks) =>
       execFileSync(
         'jq',
-        ['-r', '--arg', 'cut', '2026-07-16T00:00:00Z', jqFilter],
+        [
+          '-r',
+          '--arg',
+          'cut',
+          '2026-07-16T00:00:00Z',
+          '--argjson',
+          'nonblocking',
+          '[]',
+          jqFilter,
+        ],
         { input: JSON.stringify(checks), encoding: 'utf8' },
       ).trim();
     // Started AFTER the cutoff (recent) → active → blocks.
