@@ -82,6 +82,10 @@ export function buildAgentContentGeneratorConfig(
     return nextConfig;
   }
 
+  if (modelId && modelId !== parentConfig.model) {
+    nextConfig.thinkingMandatory = undefined;
+  }
+
   nextConfig.apiKey = resolveCredentialField(
     authOverrides.apiKey,
     sameProvider ? parentConfig.apiKey : undefined,

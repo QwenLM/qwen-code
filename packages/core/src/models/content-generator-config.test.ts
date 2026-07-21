@@ -72,6 +72,19 @@ describe('buildAgentContentGeneratorConfig', () => {
       expect(result.contextWindowSize).toBe(128000);
       expect(result.extra_body).toEqual({ custom: 'value' });
     });
+
+    it('does not inherit mandatory thinking from another model', () => {
+      const config = createMockConfig({
+        ...parentConfig,
+        thinkingMandatory: true,
+      });
+
+      const result = buildAgentContentGeneratorConfig(config, 'custom-model', {
+        authType: 'openai',
+      });
+
+      expect(result.thinkingMandatory).toBeUndefined();
+    });
   });
 
   describe('cross-provider, no registry match', () => {

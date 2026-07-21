@@ -349,6 +349,35 @@ describe('useProviderUpdates', () => {
     expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
   });
 
+  it('does not refresh auth before auth initialization completes', async () => {
+    mockConfig.getContentGeneratorConfig.mockReturnValue(undefined as never);
+    (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[
+      METADATA_KEY
+    ] = {
+      baseUrl: CODING_PLAN_CHINA_BASE_URL,
+      version: 'old-version-hash',
+    };
+    mockSettings.merged['modelProviders'] = {
+      [AuthType.USE_OPENAI]: chinaTemplate,
+    };
+
+    const { result } = renderHook(() =>
+      useProviderUpdates(
+        mockSettings as never,
+        mockConfig as never,
+        mockAddItem,
+      ),
+    );
+
+    await waitFor(() => {
+      expect(result.current.providerUpdateRequest).toBeDefined();
+    });
+    await result.current.providerUpdateRequest!.onConfirm('update');
+
+    expect(mockConfig.reloadModelProvidersConfig).toHaveBeenCalled();
+    expect(mockConfig.refreshAuth).not.toHaveBeenCalled();
+  });
+
   it('does not overwrite existing env key with empty value', async () => {
     process.env[CODING_PLAN_ENV_KEY] = 'sk-sp-existing-key';
     (mockSettings.merged[PROVIDER_METADATA_NS] as Record<string, unknown>)[

@@ -260,7 +260,7 @@ export function useProviderUpdates(
         }
         const activeConfig = config.getContentGeneratorConfig();
         const updatesActiveProvider =
-          activeConfig.authType === providerCfg.protocol &&
+          activeConfig?.authType === providerCfg.protocol &&
           providerMatchesCredentials(
             providerCfg,
             activeConfig.baseUrl,
