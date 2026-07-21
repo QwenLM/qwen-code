@@ -346,7 +346,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         if (event.id !== undefined) slot.lastEventId = event.id;
         slot.lastMeta = meta ?? slot.lastMeta;
         slot.lastEnvelopeMeta = event._meta ?? slot.lastEnvelopeMeta;
-        slot.lastTurn = captureTurnFields(event) ?? slot.lastTurn;
+        slot.lastTurn = captureTurnFields(event, slot.lastTurn);
         slot.lastSessionId = captureSessionId(event) ?? slot.lastSessionId;
       } else {
         entries.push({ sourceRecordIds, index: this.slots.length });
@@ -378,7 +378,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
         lastSlot.lastMeta = meta ?? lastSlot.lastMeta;
         lastSlot.lastEnvelopeMeta = event._meta ?? lastSlot.lastEnvelopeMeta;
-        lastSlot.lastTurn = captureTurnFields(event) ?? lastSlot.lastTurn;
+        lastSlot.lastTurn = captureTurnFields(event, lastSlot.lastTurn);
         lastSlot.lastSessionId =
           captureSessionId(event) ?? lastSlot.lastSessionId;
       } else {
@@ -577,20 +577,24 @@ function makeMergedSessionUpdateEvent(
 }
 
 /**
- * Top-level `promptId`/`originatorClientId` of an event, or `undefined`
- * when it carries neither (so `??` fallbacks keep an earlier capture).
+ * Field-level merge of `promptId`/`originatorClientId` from an incoming
+ * event with an earlier capture. Each field falls back independently so a
+ * chunk carrying only one field does not silently drop the other from the
+ * previous capture (mirrors the tool_call path's per-field `??` merge).
  */
 function captureTurnFields(
   event: BridgeEvent,
+  previous?: Pick<BridgeEvent, 'promptId' | 'originatorClientId'>,
 ): Pick<BridgeEvent, 'promptId' | 'originatorClientId'> | undefined {
-  if (event.promptId === undefined && event.originatorClientId === undefined) {
+  const promptId = event.promptId ?? previous?.promptId;
+  const originatorClientId =
+    event.originatorClientId ?? previous?.originatorClientId;
+  if (promptId === undefined && originatorClientId === undefined) {
     return undefined;
   }
   return {
-    ...(event.promptId !== undefined ? { promptId: event.promptId } : {}),
-    ...(event.originatorClientId !== undefined
-      ? { originatorClientId: event.originatorClientId }
-      : {}),
+    ...(promptId !== undefined ? { promptId } : {}),
+    ...(originatorClientId !== undefined ? { originatorClientId } : {}),
   };
 }
 

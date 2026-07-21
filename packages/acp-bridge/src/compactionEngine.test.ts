@@ -1810,6 +1810,44 @@ describe('turn attribution preservation (DAEMON-007)', () => {
     expect((merged!.data as { sessionId?: string }).sessionId).toBe('s-1');
   });
 
+  it('merges turn fields independently when a later chunk carries only one', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeTextChunk(1, 'a'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+      }),
+    );
+    // Second chunk carries only promptId — originatorClientId must survive
+    // from the earlier capture (field-level merge, not atomic replacement).
+    engine.ingest(withAttribution(makeTextChunk(2, 'b'), { promptId: 'p2' }));
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_message_chunk');
+    expect(merged!.promptId).toBe('p2');
+    expect(merged!.originatorClientId).toBe('client-a');
+  });
+
+  it('merges turn fields independently in the subagent path', () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    engine.ingest(
+      withAttribution(makeTextChunkWithParent(1, 'sub ', 'task-A'), {
+        promptId: 'p1',
+        originatorClientId: 'client-a',
+      }),
+    );
+    engine.ingest(
+      withAttribution(makeTextChunkWithParent(2, 'agent', 'task-A'), {
+        originatorClientId: 'client-b',
+      }),
+    );
+    engine.ingest(makeTurnComplete(3));
+
+    const [merged] = compactedUpdates(engine, 'agent_message_chunk');
+    expect(merged!.promptId).toBe('p1');
+    expect(merged!.originatorClientId).toBe('client-b');
+  });
+
   it('subagent (parentToolCallId) merge path also preserves attribution', () => {
     const engine = new TurnBoundaryCompactionEngine();
     engine.ingest(
