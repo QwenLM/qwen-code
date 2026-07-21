@@ -31,6 +31,8 @@ import {
   MCPServerConfig,
   runForkedAgent,
   SessionService,
+  SESSION_WRITER_RPC_CODES,
+  SessionWriterUnavailableError,
   SESSION_TITLE_MAX_LENGTH,
   Storage,
   tokenLimit,
@@ -326,6 +328,7 @@ const POSIX_TMP_LOCAL_READ_ROOT = '/tmp';
 // aborts before the bridge's backstop timer fires.
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 const MCP_OAUTH_START_TIMEOUT_MS = 30_000;
+const SESSION_DRAIN_TIMEOUT_MS = 30_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
@@ -409,6 +412,98 @@ function workspaceMemoryErrorData(
   };
 }
 
+const SESSION_WRITER_MESSAGES = {
+  session_writer_conflict:
+    'This session is already open in another Qwen process.',
+  session_writer_lost: 'Write ownership for this session was lost.',
+  session_transcript_changed:
+    'The session transcript changed outside its active writer.',
+  session_writer_unavailable: 'Session write ownership could not be verified.',
+} as const;
+
+function getSessionWriterError(error: unknown):
+  | {
+      rpcCode: number;
+      errorKind: keyof typeof SESSION_WRITER_RPC_CODES;
+      message: string;
+    }
+  | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const candidate = error as Record<string, unknown>;
+  const errorKind = candidate['errorKind'];
+  if (
+    typeof errorKind !== 'string' ||
+    !(errorKind in SESSION_WRITER_RPC_CODES)
+  ) {
+    return undefined;
+  }
+  const typedKind = errorKind as keyof typeof SESSION_WRITER_RPC_CODES;
+  if (candidate['rpcCode'] !== SESSION_WRITER_RPC_CODES[typedKind]) {
+    return undefined;
+  }
+  return {
+    rpcCode: SESSION_WRITER_RPC_CODES[typedKind],
+    errorKind: typedKind,
+    message: SESSION_WRITER_MESSAGES[typedKind],
+  };
+}
+
+function mapSessionWriterRequestError(error: unknown): unknown {
+  const writerError = getSessionWriterError(error);
+  return writerError
+    ? new RequestError(writerError.rpcCode, writerError.message, {
+        errorKind: writerError.errorKind,
+      })
+    : error;
+}
+
+async function shutdownSessionConfig(config: Config): Promise<void> {
+  await config.shutdown({ shutdownTelemetry: false });
+  if (config.hasSessionWriteOwnership()) {
+    throw new SessionWriterUnavailableError();
+  }
+}
+
+async function waitForSessionDrain(
+  operation: Promise<void>,
+  timeoutMs: number,
+  kind: 'close' | 'restore',
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Session ${kind} timed out after ${timeoutMs}ms`)),
+      timeoutMs,
+    );
+    timer.unref();
+  });
+  try {
+    await Promise.race([operation, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+async function beginSessionCloseAfterCurrentGate(
+  session: Session,
+  timeoutMs: number,
+): Promise<() => void> {
+  const deadline = Date.now() + timeoutMs;
+  while (true) {
+    const releaseGate = session.beginCloseIfAvailable();
+    if (releaseGate) return releaseGate;
+    const remainingMs = deadline - Date.now();
+    if (remainingMs <= 0) {
+      throw new Error(`Session close timed out after ${timeoutMs}ms`);
+    }
+    await waitForSessionDrain(
+      session.waitForCloseGateToRelease(),
+      remainingMs,
+      'close',
+    );
+  }
+}
+
 const logWorkspaceMemoryExtractionError =
   createWorkspaceMemoryExtractionErrorLogger(debugLogger);
 
@@ -434,7 +529,7 @@ function buildAcpLocalReadRoots(config: Config): string[] {
     // local read fallback, not read_file's default permission.
     config.storage.getProjectTempDir(),
     path.join(config.storage.getProjectDir(), 'subagents'),
-    Storage.getGlobalTempDir(),
+    path.join(config.getSessionRuntimeBaseDir(), 'tmp'),
     getAutoMemoryRoot(config.getTargetDir()),
     getUserAutoMemoryRoot(),
     ...config.storage.getUserSkillsDirs(),
@@ -2573,6 +2668,16 @@ export async function runAcpAgent(
   } finally {
     endAcpBootstrapConfigProfiling();
   }
+  // The ACP path exits gemini.tsx before its startup-warning printing runs,
+  // so config warnings (including initialize-time ones like the WebSearch
+  // enablement notice) would otherwise vanish. stderr lands in the client's
+  // logs without interfering with the ACP protocol on stdout.
+  // Defensive `typeof` for tests that stub Config without getWarnings.
+  const startupWarnings =
+    typeof config.getWarnings === 'function' ? config.getWarnings() : [];
+  for (const warning of startupWarnings) {
+    process.stderr.write(`${warning}\n`);
+  }
   const eventLoopMonitor = startEventLoopLagMonitor({
     onNewMaxStall: (maxMs) => {
       console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
@@ -2669,7 +2774,7 @@ export async function runAcpAgent(
     try {
       // Fire SessionEnd hook for all active sessions (aligned with core path)
       await fireSessionEndOnce(SessionEndReason.Other);
-      agentInstance?.disposeSessions();
+      await agentInstance?.disposeSessions();
 
       try {
         process.stdin.destroy();
@@ -2710,7 +2815,7 @@ export async function runAcpAgent(
     // Mirror the SIGTERM handler's pool drain on the IDE-initiated
     // normal close path to avoid leaking shared MCP entries.
     await drainPoolBeforeExit('ide_close');
-    agentInstance?.disposeSessions();
+    await agentInstance?.disposeSessions();
   } finally {
     process.off('SIGTERM', shutdownHandler);
     process.off('SIGINT', shutdownHandler);
@@ -2901,6 +3006,7 @@ class QwenAgent implements Agent {
     string,
     TranscriptReplayConfigCacheEntry
   >();
+  private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private clientCapabilities: ClientCapabilities | undefined;
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
@@ -3039,21 +3145,24 @@ class QwenAgent implements Agent {
   ): Promise<void> {
     if (this.workspaceMcpDiscoveryConfig) return;
     const cwd = this.config.getTargetDir();
-    const config = await loadCliConfig(
-      settings.merged,
-      {
-        ...this.argv,
-        sessionId: 'workspace-mcp-discovery',
-        resume: undefined,
-        continue: false,
-      },
-      cwd,
-      undefined,
-      {
-        userHooks: settings.getUserHooks(),
-        projectHooks: settings.getProjectHooks(),
-      },
-      buildDisabledSkillNamesProvider(settings),
+    const config = await this.runWithPinnedRuntimeBaseDir(settings, cwd, () =>
+      loadCliConfig(
+        settings.merged,
+        {
+          ...this.argv,
+          sessionId: 'workspace-mcp-discovery',
+          resume: undefined,
+          continue: false,
+          chatRecording: false,
+        },
+        cwd,
+        undefined,
+        {
+          userHooks: settings.getUserHooks(),
+          projectHooks: settings.getProjectHooks(),
+        },
+        buildDisabledSkillNamesProvider(settings),
+      ),
     );
     config.setMcpTransportPool(this.mcpPool);
     try {
@@ -3167,120 +3276,266 @@ class QwenAgent implements Agent {
     }
   }
 
+  private async removeStoredSessionEntry(
+    sessionId: string,
+    session: Session,
+    cleanupErrors: unknown[] = [],
+    options: { shutdownConfig?: boolean } = {},
+  ): Promise<void> {
+    if (this.sessions.get(sessionId) !== session) return;
+    try {
+      session.dispose();
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    if (options.shutdownConfig !== false) {
+      try {
+        await session.getConfig().shutdown({ shutdownTelemetry: false });
+      } catch (error) {
+        cleanupErrors.push(error);
+      }
+    }
+    try {
+      unregisterGoalHook(session.getConfig(), sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      this.mcpPool?.releaseSession(sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    try {
+      uiTelemetryService.removeSession(sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
+    }
+    this.sessions.delete(sessionId);
+    if (cleanupErrors.length > 0) {
+      debugLogger.warn(
+        `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
+          .map((error) =>
+            error instanceof Error ? error.message : String(error),
+          )
+          .join('; ')}`,
+      );
+    }
+  }
+
+  private async withLiveSessionRestore<T>(
+    sessionId: string,
+    session: Session,
+    operation: (config: Config, data: ResumedSessionData) => Promise<T>,
+  ): Promise<T> {
+    await session.assertCanStartTurn();
+    const config = session.getConfig();
+    const releaseGate = session.beginClose();
+    try {
+      await waitForSessionDrain(
+        session.waitForActiveTurnsToSettle(),
+        SESSION_DRAIN_TIMEOUT_MS,
+        'restore',
+      );
+      const recorder = config.getChatRecordingService();
+      const loadAuthoritative = () =>
+        config.getSessionService().loadSession(sessionId);
+      const data = recorder
+        ? await recorder.runWithWriteBarrier(loadAuthoritative)
+        : await loadAuthoritative();
+      if (!data) throw new SessionWriterUnavailableError();
+      return await operation(config, data);
+    } catch (error) {
+      throw mapSessionWriterRequestError(error);
+    } finally {
+      releaseGate();
+    }
+  }
+
+  private async cleanupUnstoredConfig(config: Config): Promise<void> {
+    const sessionId = config.getSessionId();
+    const cleanupKey = this.pendingConfigCleanupKey(
+      config.getSessionRuntimeBaseDir(),
+      sessionId,
+    );
+    try {
+      await shutdownSessionConfig(config);
+    } catch (error) {
+      const pending = this.pendingConfigCleanup.get(cleanupKey) ?? new Set();
+      pending.add(config);
+      this.pendingConfigCleanup.set(cleanupKey, pending);
+      throw mapSessionWriterRequestError(error);
+    }
+    const pending = this.pendingConfigCleanup.get(cleanupKey);
+    pending?.delete(config);
+    if (pending?.size === 0) {
+      this.pendingConfigCleanup.delete(cleanupKey);
+    }
+  }
+
+  private async cleanupAfterRequestFailure(
+    error: unknown,
+    cleanup: () => Promise<void>,
+  ): Promise<never> {
+    try {
+      await cleanup();
+    } catch (cleanupError) {
+      debugLogger.warn(
+        `Session cleanup failed while preserving the original request error: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
+      );
+    }
+    throw error;
+  }
+
+  private pendingConfigCleanupKey(
+    runtimeBaseDir: string,
+    sessionId: string,
+  ): string {
+    return `${path.resolve(runtimeBaseDir)}\0${sessionId}`;
+  }
+
+  private async retryPendingConfigCleanup(
+    runtimeBaseDir: string,
+    requiredSessionId?: string,
+  ): Promise<void> {
+    const resolvedRuntimeBaseDir = path.resolve(runtimeBaseDir);
+    const configs = new Set<Config>();
+    for (const pending of this.pendingConfigCleanup.values()) {
+      for (const config of pending) {
+        if (
+          path.resolve(config.getSessionRuntimeBaseDir()) ===
+          resolvedRuntimeBaseDir
+        ) {
+          configs.add(config);
+        }
+      }
+    }
+    for (const config of configs) {
+      try {
+        await this.cleanupUnstoredConfig(config);
+      } catch (error) {
+        if (config.getSessionId() === requiredSessionId) throw error;
+        debugLogger.warn(
+          `Deferred Config cleanup retry failed for session ${config.getSessionId()}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
   private async closeStoredSession(
     sessionId: string,
-    opts?: { requireFlush?: boolean },
+    opts?: {
+      requireFlush?: boolean;
+      drainTimeoutMs?: number;
+      shutdownConfig?: boolean;
+      waitForCloseGate?: boolean;
+    },
   ): Promise<void> {
-    for (const [requestId, generation] of this.generationControllers) {
-      if (generation.sessionId !== sessionId) continue;
-      generation.controller.abort();
-      this.generationControllers.delete(requestId);
-    }
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
       return;
     }
 
+    const recorder = session.getConfig().getChatRecordingService();
     const requireFlush = opts?.requireFlush === true;
-    const flushRecording = async (): Promise<unknown> => {
-      try {
-        await session.getConfig().getChatRecordingService()?.flush();
-        return undefined;
-      } catch (err) {
-        debugLogger.debug(
-          `Session ${sessionId} chat recording flush during close failed: ${
-            err instanceof Error ? err.message : String(err)
-          }`,
-        );
-        return err;
-      }
-    };
-
     if (requireFlush) {
-      const preCancelFlushError = await flushRecording();
-      if (preCancelFlushError !== undefined) {
-        throw preCancelFlushError;
+      await recorder?.flush();
+    }
+
+    const drainTimeoutMs = opts?.drainTimeoutMs ?? SESSION_DRAIN_TIMEOUT_MS;
+    const cancelClose = opts?.waitForCloseGate
+      ? await beginSessionCloseAfterCurrentGate(session, drainTimeoutMs)
+      : session.beginClose();
+    for (const [requestId, generation] of this.generationControllers) {
+      if (generation.sessionId !== sessionId) continue;
+      generation.controller.abort();
+      this.generationControllers.delete(requestId);
+    }
+    let removedFromStore = false;
+    try {
+      await waitForSessionDrain(
+        (async () => {
+          try {
+            await session.cancelPendingPrompt();
+          } catch (err) {
+            debugLogger.debug(
+              `Session ${sessionId} cancel during close failed: ${
+                err instanceof Error ? err.message : String(err)
+              }`,
+            );
+          }
+          await session.waitForActiveTurnsToSettle();
+        })(),
+        drainTimeoutMs,
+        'close',
+      );
+
+      recorder?.finalize();
+      let flushError: unknown;
+      try {
+        await recorder?.flush();
+      } catch (error) {
+        flushError = error;
       }
-    }
+      if (flushError !== undefined && requireFlush) {
+        throw flushError;
+      }
 
-    try {
-      await session.cancelPendingPrompt();
-    } catch (err) {
-      debugLogger.debug(
-        `Session ${sessionId} cancel during close failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
+      let closeError: unknown;
+      try {
+        await recorder?.close();
+      } catch (error) {
+        closeError = error;
+      }
+      if (recorder?.hasWriteOwnership()) {
+        throw closeError ?? new SessionWriterUnavailableError();
+      }
 
-    const flushError = await flushRecording();
-    if (flushError !== undefined && requireFlush) {
-      throw flushError;
+      const cleanupErrors: unknown[] = [];
+      if (flushError !== undefined) cleanupErrors.push(flushError);
+      if (closeError !== undefined) cleanupErrors.push(closeError);
+      await this.removeStoredSessionEntry(sessionId, session, cleanupErrors, {
+        shutdownConfig: opts?.shutdownConfig,
+      });
+      removedFromStore = true;
+    } finally {
+      if (!removedFromStore) cancelClose();
     }
-
-    try {
-      await session.getConfig().getToolRegistry()?.stop();
-    } catch (err) {
-      debugLogger.debug(
-        `Session ${sessionId} tool registry stop during close failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-
-    unregisterGoalHook(session.getConfig(), sessionId);
-    this.mcpPool?.releaseSession(sessionId);
-    uiTelemetryService.removeSession(sessionId);
-    this.sessions.delete(sessionId);
   }
 
-  private discardStoredSessionIfCurrent(
+  private async discardStoredSessionIfCurrent(
     sessionId: string,
     session: Session,
-  ): void {
+    opts?: {
+      requireFlush?: boolean;
+      drainTimeoutMs?: number;
+      shutdownConfig?: boolean;
+      waitForCloseGate?: boolean;
+    },
+  ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) {
       return;
     }
-    const logCleanupFailure = (action: string, err: unknown) => {
-      debugLogger.debug(
-        `Session ${sessionId} ${action} during failed restore cleanup failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    };
-    try {
-      session.dispose();
-    } catch (err) {
-      logCleanupFailure('dispose', err);
-    }
-    try {
-      unregisterGoalHook(session.getConfig(), sessionId);
-    } catch (err) {
-      logCleanupFailure('goal hook unregister', err);
-    }
-    try {
-      this.mcpPool?.releaseSession(sessionId);
-    } catch (err) {
-      logCleanupFailure('MCP pool release', err);
-    }
-    try {
-      uiTelemetryService.removeSession(sessionId);
-    } catch (err) {
-      logCleanupFailure('telemetry removal', err);
-    }
-    this.sessions.delete(sessionId);
+    await this.closeStoredSession(sessionId, opts);
   }
 
-  disposeSessions(): void {
+  async disposeSessions(): Promise<void> {
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
     this.generationControllers.clear();
-    for (const session of this.sessions.values()) {
-      session.dispose();
-    }
-    this.sessions.clear();
+    await Promise.allSettled(
+      [...this.sessions.entries()].map(([sessionId, session]) =>
+        this.discardStoredSessionIfCurrent(sessionId, session, {
+          waitForCloseGate: true,
+        }),
+      ),
+    );
+    await Promise.allSettled(
+      [...this.pendingConfigCleanup.values()]
+        .flatMap((configs) => [...configs])
+        .map((config) => this.cleanupUnstoredConfig(config)),
+    );
     this.disposeTranscriptReplayConfigs();
   }
 
@@ -3320,6 +3575,38 @@ class QwenAgent implements Agent {
         ),
         budget: this.workspaceMcpBudget,
       });
+    }
+  }
+
+  private runWithPinnedRuntimeBaseDir<T>(
+    settings: LoadedSettings,
+    cwd: string,
+    operation: () => T,
+  ): T {
+    return runWithAcpRuntimeOutputDir(settings, cwd, operation);
+  }
+
+  private async assertLiveSessionScope(
+    config: Config,
+    settings: LoadedSettings,
+    cwd: string,
+  ): Promise<void> {
+    if (path.resolve(config.storage.getProjectRoot()) !== path.resolve(cwd)) {
+      throw RequestError.invalidParams(
+        undefined,
+        'The live session belongs to another workspace.',
+      );
+    }
+    const requestedRuntimeBaseDir = await this.runWithPinnedRuntimeBaseDir(
+      settings,
+      cwd,
+      () => Storage.getRuntimeBaseDir(),
+    );
+    if (
+      path.resolve(config.getSessionRuntimeBaseDir()) !==
+      path.resolve(requestedRuntimeBaseDir)
+    ) {
+      throw mapSessionWriterRequestError(new SessionWriterUnavailableError());
     }
   }
 
@@ -3474,14 +3761,24 @@ class QwenAgent implements Agent {
         const config = await profiler.time('config_setup', () =>
           this.newSessionConfig(cwd, mcpServers, settings),
         );
-        await profiler.time('auth', () => this.ensureAuthenticated(config));
-        profiler.timeSync('file_system_setup', () =>
-          this.setupFileSystem(config),
-        );
-
-        const session = await profiler.time('session_register', () =>
-          this.createAndStoreSession(config, settings),
-        );
+        let session: Session;
+        try {
+          await profiler.time('auth', () => this.ensureAuthenticated(config));
+          profiler.timeSync('file_system_setup', () =>
+            this.setupFileSystem(config),
+          );
+          session = await profiler.time('session_register', () =>
+            this.createAndStoreSession(config, settings),
+          );
+        } catch (error) {
+          return this.cleanupAfterRequestFailure(error, async () => {
+            if (
+              this.sessions.get(config.getSessionId())?.getConfig() !== config
+            ) {
+              await this.cleanupUnstoredConfig(config);
+            }
+          });
+        }
         profiler.setSessionId(session.getId());
         return profiler.timeSync('response_build', () => ({
           sessionId: session.getId(),
@@ -3499,7 +3796,64 @@ class QwenAgent implements Agent {
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
     const settings = loadSettingsCached(params.cwd);
-    const exists = await runWithAcpRuntimeOutputDir(
+    const liveSession = this.sessions.get(params.sessionId);
+    if (liveSession) {
+      const liveConfig = liveSession.getConfig();
+      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+      return this.withLiveSessionRestore(
+        params.sessionId,
+        liveSession,
+        async (config, sessionData) => {
+          const response: LoadSessionResponse = {
+            modes: this.buildModesData(config),
+            models: this.buildAvailableModels(config),
+            configOptions: this.buildConfigOptions(config),
+            ...(sessionData.artifactSnapshot
+              ? { artifactSnapshot: sessionData.artifactSnapshot }
+              : {}),
+          } as LoadSessionResponse;
+          const records = sessionData.conversation.messages;
+          if (records.length === 0) return response;
+
+          const bulkReplay = isBulkLoadReplayRequest(params);
+          const replayPage = bulkReplay
+            ? selectRecentHistoryRecords(records, getLoadReplayPageSize(params))
+            : { records, hasMore: false };
+          const replay = await collectHistoryReplayUpdates({
+            sessionId: params.sessionId,
+            config,
+            records: replayPage.records,
+            gaps: sessionData.historyGaps,
+            cumulativeUsage: createReplayCumulativeUsage(),
+            logger: debugLogger,
+          });
+          if (!bulkReplay) {
+            for (const update of replay.updates) {
+              await liveSession.sendUpdate(update);
+            }
+            if (replay.replayError !== undefined) {
+              throw RequestError.internalError(undefined, replay.replayError);
+            }
+            return response;
+          }
+
+          return {
+            ...response,
+            _meta: {
+              [LOAD_REPLAY_META_KEY]: {
+                v: LOAD_REPLAY_VERSION,
+                updates: replay.updates,
+                ...(replay.replayError !== undefined
+                  ? { partial: true as const, replayError: replay.replayError }
+                  : {}),
+                ...(replayPage.hasMore ? { hasMore: true as const } : {}),
+              },
+            },
+          };
+        },
+      );
+    }
+    const exists = await this.runWithPinnedRuntimeBaseDir(
       settings,
       params.cwd,
       async () => {
@@ -3526,22 +3880,30 @@ class QwenAgent implements Agent {
       params.sessionId,
       true,
     );
-    await this.ensureAuthenticated(config);
-    this.setupFileSystem(config);
-
     const sessionData = config.getResumedSessionData();
     const bulkReplay = isBulkLoadReplayRequest(params);
     const replayPageSize = bulkReplay
       ? getLoadReplayPageSize(params)
       : undefined;
-    const session = await this.createAndStoreSession(
-      config,
-      settings,
-      sessionData,
-      bulkReplay
-        ? { replayHistory: false, startPostReplayServices: false }
-        : {},
-    );
+    let session: Session;
+    try {
+      await this.ensureAuthenticated(config);
+      this.setupFileSystem(config);
+      session = await this.createAndStoreSession(
+        config,
+        settings,
+        sessionData,
+        bulkReplay
+          ? { replayHistory: false, startPostReplayServices: false }
+          : {},
+      );
+    } catch (error) {
+      return this.cleanupAfterRequestFailure(error, async () => {
+        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
+          await this.cleanupUnstoredConfig(config);
+        }
+      });
+    }
     let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
     if (bulkReplay) {
       try {
@@ -3588,8 +3950,21 @@ class QwenAgent implements Agent {
         session.installRewriter();
         session.startCronScheduler();
       } catch (err) {
-        this.discardStoredSessionIfCurrent(params.sessionId, session);
-        throw err;
+        return this.cleanupAfterRequestFailure(err, async () => {
+          try {
+            await this.discardStoredSessionIfCurrent(params.sessionId, session);
+          } catch (cleanupError) {
+            await this.removeStoredSessionEntry(
+              params.sessionId,
+              session,
+              [cleanupError],
+              {
+                shutdownConfig: false,
+              },
+            );
+            await this.cleanupUnstoredConfig(config);
+          }
+        });
       }
     }
 
@@ -3624,7 +3999,25 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     // Same per-request settings discipline as `loadSession`.
     const settings = loadSettingsCached(params.cwd);
-    const exists = await runWithAcpRuntimeOutputDir(
+    const liveSession = this.sessions.get(params.sessionId);
+    if (liveSession) {
+      const liveConfig = liveSession.getConfig();
+      await this.assertLiveSessionScope(liveConfig, settings, params.cwd);
+      return this.withLiveSessionRestore(
+        params.sessionId,
+        liveSession,
+        async (config, sessionData) =>
+          ({
+            modes: this.buildModesData(config),
+            models: this.buildAvailableModels(config),
+            configOptions: this.buildConfigOptions(config),
+            ...(sessionData.artifactSnapshot
+              ? { artifactSnapshot: sessionData.artifactSnapshot }
+              : {}),
+          }) as ResumeSessionResponse,
+      );
+    }
+    const exists = await this.runWithPinnedRuntimeBaseDir(
       settings,
       params.cwd,
       async () => {
@@ -3644,15 +4037,23 @@ class QwenAgent implements Agent {
       params.sessionId,
       true,
     );
-    await this.ensureAuthenticated(config);
-    this.setupFileSystem(config);
-
-    const session = await this.createAndStoreSession(
-      config,
-      settings,
-      config.getResumedSessionData(),
-      { replayHistory: false },
-    );
+    let session: Session;
+    try {
+      await this.ensureAuthenticated(config);
+      this.setupFileSystem(config);
+      session = await this.createAndStoreSession(
+        config,
+        settings,
+        config.getResumedSessionData(),
+        { replayHistory: false },
+      );
+    } catch (error) {
+      return this.cleanupAfterRequestFailure(error, async () => {
+        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
+          await this.cleanupUnstoredConfig(config);
+        }
+      });
+    }
 
     await this.#restoreWorktreeOnResume(config, session);
     this.#restoreGoalOnResume(config, session);
@@ -6086,6 +6487,23 @@ class QwenAgent implements Agent {
     method: string,
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
+    try {
+      return await this.extMethodInternal(method, params);
+    } catch (error) {
+      const writerError = getSessionWriterError(error);
+      if (writerError) {
+        throw new RequestError(writerError.rpcCode, writerError.message, {
+          errorKind: writerError.errorKind,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async extMethodInternal(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
     const requestedCwd =
       typeof params['cwd'] === 'string' ? params['cwd'] : undefined;
     const cwd = requestedCwd || process.cwd();
@@ -7411,6 +7829,34 @@ class QwenAgent implements Agent {
         }
         return { sessionId, persisted: true, kind };
       }
+      case 'qwen/session/recordTextElements': {
+        const sessionId = params['sessionId'];
+        const content = params['content'];
+        const textElements = params['textElements'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        if (typeof content !== 'string' || !Array.isArray(textElements)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid user text elements payload',
+          );
+        }
+        const session = this.sessionOrThrow(sessionId);
+        await session.assertCanStartTurn();
+        const recording = session.getConfig().getChatRecordingService();
+        if (!recording) {
+          throw RequestError.internalError(
+            undefined,
+            'Chat recording service unavailable',
+          );
+        }
+        await recording.recordUserTextElements({ content, textElements });
+        return { sessionId, persisted: true };
+      }
       case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
         const sessionId = params['sessionId'];
         const displayName = params['displayName'];
@@ -7515,8 +7961,24 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
+        const rawDrainTimeoutMs = params['drainTimeoutMs'];
+        if (
+          rawDrainTimeoutMs !== undefined &&
+          (typeof rawDrainTimeoutMs !== 'number' ||
+            !Number.isSafeInteger(rawDrainTimeoutMs) ||
+            rawDrainTimeoutMs < 1 ||
+            rawDrainTimeoutMs > 2_147_483_647)
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid session close drain timeout',
+          );
+        }
         await this.closeStoredSession(sessionId, {
           requireFlush: params['requireFlush'] === true,
+          ...(typeof rawDrainTimeoutMs === 'number'
+            ? { drainTimeoutMs: rawDrainTimeoutMs }
+            : {}),
         });
         return { sessionId, closed: true };
       }
@@ -8643,16 +9105,14 @@ class QwenAgent implements Agent {
         let artifactSnapshot: unknown;
         let artifactSnapshotUnavailable: string | undefined;
         try {
-          await session.getConfig().getChatRecordingService()?.flush();
-          const cwd = session.getConfig().getProjectRoot();
-          const sessionData = await runWithAcpRuntimeOutputDir(
-            this.settings,
-            cwd,
-            async () => {
-              const sessionService = new SessionService(cwd);
-              return sessionService.loadSession(sessionId);
-            },
-          );
+          const config = session.getConfig();
+          const recording = config.getChatRecordingService();
+          await recording?.flush();
+          const loadAuthoritative = () =>
+            config.getSessionService().loadSession(sessionId);
+          const sessionData = recording
+            ? await recording.runWithWriteBarrier(loadAuthoritative)
+            : await loadAuthoritative();
           if (sessionData === undefined) {
             artifactSnapshotUnavailable =
               'session data unavailable after rewind';
@@ -8701,21 +9161,41 @@ class QwenAgent implements Agent {
           );
         }
 
-        const sessionData = await runWithAcpRuntimeOutputDir(
-          this.settings,
-          cwd,
-          async () => {
-            const sessionService = new SessionService(cwd);
-            return sessionService.loadSession(sessionId);
-          },
-        );
+        const liveSession = this.sessions.get(sessionId);
+        let replayConfig = this.config;
+        let sessionData: ResumedSessionData | undefined;
+        if (liveSession) {
+          const config = liveSession.getConfig();
+          await this.assertLiveSessionScope(
+            config,
+            loadSettingsCached(cwd),
+            cwd,
+          );
+          const recording = config.getChatRecordingService();
+          const loadAuthoritative = () =>
+            config.getSessionService().loadSession(sessionId);
+          sessionData = recording
+            ? await recording.runWithWriteBarrier(loadAuthoritative)
+            : await loadAuthoritative();
+          replayConfig = config;
+        } else {
+          const settings = loadSettingsCached(cwd);
+          sessionData = await this.runWithPinnedRuntimeBaseDir(
+            settings,
+            cwd,
+            async () => {
+              const sessionService = new SessionService(cwd);
+              return sessionService.loadSession(sessionId);
+            },
+          );
+        }
         if (!sessionData?.conversation) {
           return { updates: [] };
         }
 
         const replay = await collectHistoryReplayUpdates({
           sessionId,
-          config: this.config,
+          config: replayConfig,
           records: sessionData.conversation.messages,
           gaps: sessionData.historyGaps,
           cumulativeUsage: createReplayCumulativeUsage(),
@@ -8789,61 +9269,56 @@ class QwenAgent implements Agent {
           });
         }
 
-        const recording = sourceSession.getConfig().getChatRecordingService();
+        const sourceConfig = sourceSession.getConfig();
+        const recording = sourceConfig.getChatRecordingService();
         if (recording) {
           await recording.flush();
         }
 
         const newSessionId = randomUUID();
-        return await runWithAcpRuntimeOutputDir(
-          this.settings,
-          cwd,
-          async () => {
-            const sessionService = new SessionService(cwd);
-            await sessionService.forkSession(sessionId, newSessionId);
+        const sessionService = sourceConfig.getSessionService();
+        await sessionService.forkSession(sessionId, newSessionId);
 
-            let title: string;
-            try {
-              let baseName: string;
-              if (typeof name === 'string' && name.trim().length > 0) {
-                baseName = name.trim();
-              } else {
-                const existingTitle = recording?.getCurrentCustomTitle();
-                const stripped = existingTitle
-                  ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
-                  .trim();
-                if (stripped && stripped.length > 0) {
-                  baseName = stripped;
-                } else {
-                  baseName = sessionId.slice(0, 8);
-                }
-              }
-
-              title = await computeUniqueBranchTitle(baseName, sessionService);
-              const renamed = await sessionService.renameSession(
-                newSessionId,
-                title,
-                'manual',
-              );
-              if (!renamed) {
-                throw new RequestError(
-                  -32603,
-                  `Failed to set title on forked session ${newSessionId}`,
-                  { errorKind: 'internal', sessionId: newSessionId },
-                );
-              }
-            } catch (err) {
-              sessionService.removeSession(newSessionId).catch((rmErr) => {
-                process.stderr.write(
-                  `qwen serve: failed to clean up orphan session ${newSessionId}: ${rmErr instanceof Error ? rmErr.message : rmErr}\n`,
-                );
-              });
-              throw err;
+        let title: string;
+        try {
+          let baseName: string;
+          if (typeof name === 'string' && name.trim().length > 0) {
+            baseName = name.trim();
+          } else {
+            const existingTitle = recording?.getCurrentCustomTitle();
+            const stripped = existingTitle
+              ?.replace(/\s*\(Branch(?:\s+\d+)?\)\s*$/, '')
+              .trim();
+            if (stripped && stripped.length > 0) {
+              baseName = stripped;
+            } else {
+              baseName = sessionId.slice(0, 8);
             }
+          }
 
-            return { newSessionId, title, displayName: title };
-          },
-        );
+          title = await computeUniqueBranchTitle(baseName, sessionService);
+          const renamed = await sessionService.renameSession(
+            newSessionId,
+            title,
+            'manual',
+          );
+          if (!renamed) {
+            throw new RequestError(
+              -32603,
+              `Failed to set title on forked session ${newSessionId}`,
+              { errorKind: 'internal', sessionId: newSessionId },
+            );
+          }
+        } catch (err) {
+          sessionService.removeSession(newSessionId).catch((rmErr) => {
+            process.stderr.write(
+              `qwen serve: failed to clean up orphan session ${newSessionId}: ${rmErr instanceof Error ? rmErr.message : rmErr}\n`,
+            );
+          });
+          throw err;
+        }
+
+        return { newSessionId, title, displayName: title };
       }
       case 'qwen/settings/getCore': {
         const settings = loadSettings(cwd);
@@ -9351,17 +9826,25 @@ class QwenAgent implements Agent {
     }
 
     const entry: TranscriptReplayConfigCacheEntry = { settings };
-    const pending = this.newSessionConfig(cwd, [], settings, undefined, false, {
-      skipMcpDiscovery: true,
-      skipHooks: true,
-      skipSkillManager: true,
-      skipFileCheckpointing: true,
-      // Read-only replay: tolerate tools that cannot construct without the
-      // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
-      // registry is only consulted for optional tool_call metadata during
-      // replay, and ToolCallEmitter falls back to the recorded tool name.
-      lenientToolWarmup: true,
-    });
+    const pending = this.newSessionConfig(
+      cwd,
+      [],
+      settings,
+      undefined,
+      false,
+      {
+        skipMcpDiscovery: true,
+        skipHooks: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+        // Read-only replay: tolerate tools that cannot construct without the
+        // subsystems skipped above (e.g. SkillTool needs the SkillManager). The
+        // registry is only consulted for optional tool_call metadata during
+        // replay, and ToolCallEmitter falls back to the recorded tool name.
+        lenientToolWarmup: true,
+      },
+      false,
+    );
     entry.pending = pending;
     this.transcriptReplayConfigCache.set(key, entry);
     try {
@@ -9397,6 +9880,43 @@ class QwenAgent implements Agent {
     sessionId?: string,
     resume?: boolean,
     initializeOptions: ConfigInitializeOptions = {},
+    chatRecording?: boolean,
+  ): Promise<Config> {
+    try {
+      return await this.runWithPinnedRuntimeBaseDir(settings, cwd, async () => {
+        await this.retryPendingConfigCleanup(
+          Storage.getRuntimeBaseDir(),
+          sessionId,
+        );
+        return this.newSessionConfigInRuntimeContext(
+          cwd,
+          mcpServers,
+          settings,
+          sessionId,
+          resume,
+          initializeOptions,
+          chatRecording,
+        );
+      });
+    } catch (error) {
+      const writerError = getSessionWriterError(error);
+      if (writerError) {
+        throw new RequestError(writerError.rpcCode, writerError.message, {
+          errorKind: writerError.errorKind,
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async newSessionConfigInRuntimeContext(
+    cwd: string,
+    mcpServers: McpServer[],
+    settings: LoadedSettings,
+    sessionId?: string,
+    resume?: boolean,
+    initializeOptions: ConfigInitializeOptions = {},
+    chatRecording?: boolean,
   ): Promise<Config> {
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
@@ -9468,6 +9988,7 @@ class QwenAgent implements Agent {
       ...this.argv,
       ...sessionArg,
       continue: false,
+      ...(chatRecording !== undefined ? { chatRecording } : {}),
     };
 
     const config = await loadCliConfig(
@@ -9567,15 +10088,21 @@ class QwenAgent implements Agent {
           });
       });
     }
-    await config.initialize({
-      ...initializeOptions,
-      // Reverse tool channel (issue #5626, Phase 2): bind the session
-      // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
-      // client-hosted (extension) MCP server added at runtime reaches the
-      // daemon WS. Servers that aren't client-hosted never use this callback
-      // (the daemon only adds SDK-type runtime servers for client MCP).
-      sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
-    });
+    try {
+      await config.initialize({
+        ...initializeOptions,
+        // Reverse tool channel (issue #5626, Phase 2): bind the session
+        // manager's SDK MCP callback to the `client_mcp/message` ext-method so a
+        // client-hosted (extension) MCP server added at runtime reaches the
+        // daemon WS. Servers that aren't client-hosted never use this callback
+        // (the daemon only adds SDK-type runtime servers for client MCP).
+        sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
+      });
+    } catch (error) {
+      return this.cleanupAfterRequestFailure(error, () =>
+        this.cleanupUnstoredConfig(config),
+      );
+    }
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a
     // slow or wedged server discovery.
@@ -9659,43 +10186,62 @@ class QwenAgent implements Agent {
       await geminiClient.initialize();
     }
 
-    this.sessions.get(sessionId)?.dispose();
+    if (this.sessions.has(sessionId)) {
+      throw new Error(`Session ${sessionId} is already active.`);
+    }
 
     const session = new Session(sessionId, config, this.connection, settings);
     this.sessions.set(sessionId, session);
+    try {
+      if (sessionData?.fileHistorySnapshots?.length) {
+        config
+          .getFileHistoryService()
+          .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+      }
 
-    setTimeout(async () => {
-      await session.sendAvailableCommandsUpdate();
-    }, 0);
+      if (sessionData?.conversation.messages) {
+        config
+          .getChatRecordingService()
+          ?.rebuildTurnBoundaries(sessionData.conversation.messages);
+      }
 
-    if (sessionData?.fileHistorySnapshots?.length) {
-      config
-        .getFileHistoryService()
-        .restoreFromSnapshots(sessionData.fileHistorySnapshots);
+      if (
+        options.replayHistory !== false &&
+        sessionData?.conversation.messages
+      ) {
+        await session.replayHistory(
+          sessionData.conversation.messages,
+          sessionData.historyGaps,
+        );
+      }
+
+      if (options.startPostReplayServices !== false) {
+        // Install rewriter AFTER history replay to avoid rewriting historical messages
+        session.installRewriter();
+
+        // After replay so a durable cron fire can't interleave with it.
+        session.startCronScheduler();
+      }
+
+      setTimeout(() => {
+        void session.sendAvailableCommandsUpdate();
+      }, 0);
+      return session;
+    } catch (error) {
+      try {
+        await this.discardStoredSessionIfCurrent(sessionId, session, {
+          shutdownConfig: false,
+        });
+      } catch (cleanupError) {
+        await this.removeStoredSessionEntry(
+          sessionId,
+          session,
+          [cleanupError],
+          { shutdownConfig: false },
+        );
+      }
+      throw error;
     }
-
-    if (sessionData?.conversation.messages) {
-      config
-        .getChatRecordingService()
-        ?.rebuildTurnBoundaries(sessionData.conversation.messages);
-    }
-
-    if (options.replayHistory !== false && sessionData?.conversation.messages) {
-      await session.replayHistory(
-        sessionData.conversation.messages,
-        sessionData.historyGaps,
-      );
-    }
-
-    if (options.startPostReplayServices !== false) {
-      // Install rewriter AFTER history replay to avoid rewriting historical messages
-      session.installRewriter();
-
-      // After replay so a durable cron fire can't interleave with it.
-      session.startCronScheduler();
-    }
-
-    return session;
   }
 
   private buildAvailableModels(config: Config): NewSessionResponse['models'] {

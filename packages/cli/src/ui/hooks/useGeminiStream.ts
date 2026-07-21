@@ -13,6 +13,7 @@ import {
   useLayoutEffect,
 } from 'react';
 import {
+  runOutsideAgentContext,
   type Config,
   type EditorType,
   type GeminiClient,
@@ -119,6 +120,7 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 import { GOAL_COMMAND_RE } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -2073,7 +2075,7 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
-              break;
+              return StreamProcessingStatus.UserCancelled;
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp);
@@ -2232,8 +2234,8 @@ export const useGeminiStream = (
         commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
+        dualOutput?.finalizeAssistantMessage();
       }
-      dualOutput?.finalizeAssistantMessage();
       // When a loop was detected, halt without scheduling the calls collected
       // before the guard fired. The core splice/clear only touches
       // turn.pendingToolCalls, which the TUI does not execute from — without
@@ -2828,6 +2830,7 @@ export const useGeminiStream = (
           streamingResponseLengthRef.current = 0;
         }
 
+        let cleanupReviewLease = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -2867,6 +2870,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             metadata?.onDeliveryFailed?.();
@@ -2897,6 +2901,7 @@ export const useGeminiStream = (
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {
+            cleanupReviewLease = true;
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
@@ -2938,6 +2943,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
@@ -2955,6 +2961,13 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          if (cleanupReviewLease) {
+            cleanupReviewWorktreeLeases({
+              sessionId: config.getSessionId(),
+              promptId: prompt_id!,
+              repositoryRoot: config.getProjectRoot(),
+            });
+          }
           submitPromptOnCompleteRef.current = null;
           activeModelStreamsRef.current = Math.max(
             0,
@@ -3811,45 +3824,59 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
-      const queue = notificationQueueRef.current;
-      const targetType = queue[0]!.sendMessageType;
+      // Consumer-side guard for #7156: this effect can run on a render pass
+      // that React batched together with progress setState calls issued from
+      // INSIDE a subagent's AsyncLocalStorage frame, in which case the whole
+      // synchronous effect stack — and every async continuation submitQuery
+      // starts — inherits the subagent's runtime view, and the notification
+      // turn resolves Config.getModel() to the SUBAGENT's model. Exiting the
+      // frame here guarantees the drained turn always runs on the main
+      // session's configuration, regardless of which producer's setState
+      // triggered the commit.
+      runOutsideAgentContext(() => {
+        const queue = notificationQueueRef.current;
+        const targetType = queue[0]!.sendMessageType;
 
-      // Cron prompts must run as individual turns — each needs its own
-      // slash/shell/@ preprocessing and approval cycle. Only batch
-      // Notification items (which pass through without preprocessing).
-      if (targetType === SendMessageType.Cron) {
-        const item = queue.shift()!;
-        addItem(
-          { type: 'notification' as const, text: item.displayText },
-          Date.now(),
-        );
-        submitQuery(item.modelText, item.sendMessageType, undefined, {
-          notificationDisplayText: item.displayText,
-          onDelivered: item.onDelivered,
-          onDeliveryFailed: item.onDeliveryFailed,
+        // Cron prompts must run as individual turns — each needs its own
+        // slash/shell/@ preprocessing and approval cycle. Only batch
+        // Notification items (which pass through without preprocessing).
+        if (targetType === SendMessageType.Cron) {
+          const item = queue.shift()!;
+          addItem(
+            { type: 'notification' as const, text: item.displayText },
+            Date.now(),
+          );
+          submitQuery(item.modelText, item.sendMessageType, undefined, {
+            notificationDisplayText: item.displayText,
+            onDelivered: item.onDelivered,
+            onDeliveryFailed: item.onDeliveryFailed,
+          });
+          return;
+        }
+
+        // Drain contiguous leading Notification items into one batch.
+        let splitIdx = 0;
+        while (
+          splitIdx < queue.length &&
+          queue[splitIdx]!.sendMessageType === targetType
+        ) {
+          splitIdx++;
+        }
+        const batch = queue.splice(0, splitIdx);
+
+        const now = Date.now();
+        for (const item of batch) {
+          addItem(
+            { type: 'notification' as const, text: item.displayText },
+            now,
+          );
+        }
+
+        const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
+        const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
+        submitQuery(combinedModelText, targetType, undefined, {
+          notificationDisplayText: combinedDisplayText,
         });
-        return;
-      }
-
-      // Drain contiguous leading Notification items into one batch.
-      let splitIdx = 0;
-      while (
-        splitIdx < queue.length &&
-        queue[splitIdx]!.sendMessageType === targetType
-      ) {
-        splitIdx++;
-      }
-      const batch = queue.splice(0, splitIdx);
-
-      const now = Date.now();
-      for (const item of batch) {
-        addItem({ type: 'notification' as const, text: item.displayText }, now);
-      }
-
-      const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
-      const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
-      submitQuery(combinedModelText, targetType, undefined, {
-        notificationDisplayText: combinedDisplayText,
       });
     }
   }, [streamingState, submitQuery, notificationTrigger, addItem]);

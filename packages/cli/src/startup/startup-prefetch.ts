@@ -196,6 +196,10 @@ export function startPostRenderPrefetches(
             return;
           }
           const installationInfo = getInstallationInfo(projectRoot, true);
+          if (installationInfo.packageManager === 'npm') {
+            void handleAutoUpdate(result.info, settings, projectRoot);
+            return;
+          }
           if (
             installationInfo.updateCommand ||
             (installationInfo.isStandalone && installationInfo.standaloneDir)
@@ -257,9 +261,7 @@ export function startPostRenderPrefetches(
   }
 
   if (options.initializeTelemetry) {
-    runDeferredTask('telemetry_init', () => {
-      initializeTelemetry(config);
-    });
+    runDeferredTask('telemetry_init', () => initializeTelemetry(config));
   }
 
   if (config.isInteractive()) {
