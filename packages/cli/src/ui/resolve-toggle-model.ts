@@ -72,3 +72,67 @@ export function resolveToggleTarget(
   }
   return { modelId, authType: currentAuthType };
 }
+
+/**
+ * A snapshot of the model to return to on a backward toggle.
+ */
+export interface TogglePreviousModel {
+  modelId: string;
+  authType: AuthType;
+}
+
+/**
+ * The action the toggle handler should perform, computed purely from state.
+ */
+export type ToggleAction =
+  | { type: 'no-auth' }
+  | { type: 'already-on'; modelId: string }
+  | {
+      type: 'forward';
+      target: ResolvedToggleTarget;
+      previous: TogglePreviousModel;
+    }
+  | { type: 'backward'; previous: TogglePreviousModel };
+
+/**
+ * Decide what the Ctrl+F toggle should do given the current state.
+ *
+ * Pure: no side effects, no config calls — the handler in AppContainer
+ * executes the returned action (switchModel, history messages, ref updates).
+ */
+export function computeToggleAction(
+  currentModel: string,
+  currentAuthType: AuthType | undefined,
+  target: ResolvedToggleTarget,
+  previousModel: TogglePreviousModel | null,
+): ToggleAction {
+  if (!currentAuthType) {
+    return { type: 'no-auth' };
+  }
+  const alreadyOnTarget =
+    currentModel === target.modelId && currentAuthType === target.authType;
+  if (alreadyOnTarget) {
+    if (previousModel) {
+      return { type: 'backward', previous: previousModel };
+    }
+    return { type: 'already-on', modelId: target.modelId };
+  }
+  return {
+    type: 'forward',
+    target,
+    previous: { modelId: currentModel, authType: currentAuthType },
+  };
+}
+
+/**
+ * Whether a switch into `targetAuthType` from `currentAuthType` requires
+ * cached Qwen OAuth credentials (mirrors the `/model` command's logic).
+ */
+export function needsCachedCredentials(
+  targetAuthType: AuthType,
+  currentAuthType: AuthType,
+): boolean {
+  return (
+    targetAuthType !== currentAuthType && targetAuthType === AuthType.QWEN_OAUTH
+  );
+}

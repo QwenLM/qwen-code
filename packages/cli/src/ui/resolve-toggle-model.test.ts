@@ -8,6 +8,8 @@ import { describe, it, expect } from 'vitest';
 import { AuthType } from '@qwen-code/qwen-code-core';
 import {
   resolveToggleTarget,
+  computeToggleAction,
+  needsCachedCredentials,
   type ToggleModelProviderLookup,
 } from './resolve-toggle-model.js';
 
@@ -95,5 +97,69 @@ describe('resolveToggleTarget', () => {
     expect(
       resolveToggleTarget(config, 'some-model(note)', AuthType.QWEN_OAUTH),
     ).toEqual({ modelId: 'some-model(note)', authType: AuthType.QWEN_OAUTH });
+  });
+});
+
+describe('computeToggleAction', () => {
+  const target = { modelId: 'model-b', authType: AuthType.USE_OPENAI };
+
+  it('returns no-auth when currentAuthType is undefined', () => {
+    expect(computeToggleAction('model-a', undefined, target, null)).toEqual({
+      type: 'no-auth',
+    });
+  });
+
+  it('returns forward with previous snapshot when not on target', () => {
+    expect(
+      computeToggleAction('model-a', AuthType.USE_OPENAI, target, null),
+    ).toEqual({
+      type: 'forward',
+      target,
+      previous: { modelId: 'model-a', authType: AuthType.USE_OPENAI },
+    });
+  });
+
+  it('returns backward when already on target and previousModel exists', () => {
+    const prev = { modelId: 'model-a', authType: AuthType.USE_OPENAI };
+    expect(
+      computeToggleAction('model-b', AuthType.USE_OPENAI, target, prev),
+    ).toEqual({ type: 'backward', previous: prev });
+  });
+
+  it('returns already-on when on target with no previousModel', () => {
+    expect(
+      computeToggleAction('model-b', AuthType.USE_OPENAI, target, null),
+    ).toEqual({ type: 'already-on', modelId: 'model-b' });
+  });
+
+  it('returns forward when model id matches but authType differs', () => {
+    const qwenTarget = { modelId: 'shared', authType: AuthType.QWEN_OAUTH };
+    expect(
+      computeToggleAction('shared', AuthType.USE_OPENAI, qwenTarget, null),
+    ).toEqual({
+      type: 'forward',
+      target: qwenTarget,
+      previous: { modelId: 'shared', authType: AuthType.USE_OPENAI },
+    });
+  });
+});
+
+describe('needsCachedCredentials', () => {
+  it('returns true when switching into qwen-oauth from another provider', () => {
+    expect(
+      needsCachedCredentials(AuthType.QWEN_OAUTH, AuthType.USE_OPENAI),
+    ).toBe(true);
+  });
+
+  it('returns false when staying on the same provider', () => {
+    expect(
+      needsCachedCredentials(AuthType.QWEN_OAUTH, AuthType.QWEN_OAUTH),
+    ).toBe(false);
+  });
+
+  it('returns false when switching into a non-qwen-oauth provider', () => {
+    expect(
+      needsCachedCredentials(AuthType.USE_OPENAI, AuthType.QWEN_OAUTH),
+    ).toBe(false);
   });
 });

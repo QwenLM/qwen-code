@@ -62,7 +62,7 @@ import {
   type SpeculationState,
   IDLE_SPECULATION,
   ApprovalMode,
-  AuthType,
+  type AuthType,
   ConditionalRulesRegistry,
   MCPDiscoveryState,
   ToolConfirmationOutcome,
@@ -178,7 +178,11 @@ import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { canToggleModel } from './can-toggle-model.js';
-import { resolveToggleTarget } from './resolve-toggle-model.js';
+import {
+  resolveToggleTarget,
+  computeToggleAction,
+  needsCachedCredentials,
+} from './resolve-toggle-model.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
@@ -3749,106 +3753,69 @@ export const AppContainer = (props: AppContainerProps) => {
           );
           return;
         }
-        // Resolve the *target* auth type for the toggle model. A cross-provider
-        // toggle must switch to the provider that owns the toggle model, not
-        // reuse the current auth type (which would fail the registry lookup or
-        // use the wrong credentials/endpoint).
         const target = resolveToggleTarget(config, toggleSpec, currentAuthType);
-        const alreadyOnTarget =
-          current === target.modelId && currentAuthType === target.authType;
-        if (alreadyOnTarget) {
-          if (previousModelRef.current) {
-            const prevModel = previousModelRef.current;
-            isTogglingRef.current = true;
-            config
-              .switchModel(
-                prevModel.authType,
-                prevModel.modelId,
-                prevModel.authType !== currentAuthType &&
-                  prevModel.authType === AuthType.QWEN_OAUTH
-                  ? { requireCachedCredentials: true }
-                  : undefined,
-              )
-              .then(() => {
-                previousModelRef.current = null;
-                historyManager.addItem(
-                  {
-                    type: MessageType.INFO,
-                    text: 'Switched to ' + prevModel.modelId,
-                  },
-                  Date.now(),
-                );
-              })
-              .catch((err) => {
-                debugLogger.debug('toggle-backward failed', err);
-                // Clear ref — failed backward toggle likely means model is gone or
-                // auth is invalid; retrying would loop. Next Ctrl+F shows "Already on".
-                previousModelRef.current = null;
-                historyManager.addItem(
-                  {
-                    type: MessageType.ERROR,
-                    text:
-                      '⚠ Failed to switch to ' +
-                      prevModel.modelId +
-                      ': ' +
-                      (err instanceof Error ? err.message : String(err)),
-                  },
-                  Date.now(),
-                );
-              })
-              .finally(() => {
-                isTogglingRef.current = false;
-              });
-          } else {
+        const action = computeToggleAction(
+          current,
+          currentAuthType,
+          target,
+          previousModelRef.current,
+        );
+
+        if (action.type === 'no-auth') {
+          // Unreachable: guarded above, but narrows the union for TypeScript.
+          return;
+        }
+        if (action.type === 'already-on') {
+          historyManager.addItem(
+            { type: MessageType.INFO, text: 'Already on ' + action.modelId },
+            Date.now(),
+          );
+          return;
+        }
+
+        const switchTo =
+          action.type === 'forward' ? action.target : action.previous;
+        const switchOptions = needsCachedCredentials(
+          switchTo.authType,
+          currentAuthType!,
+        )
+          ? { requireCachedCredentials: true }
+          : undefined;
+
+        isTogglingRef.current = true;
+        config
+          .switchModel(switchTo.authType, switchTo.modelId, switchOptions)
+          .then(() => {
+            previousModelRef.current =
+              action.type === 'forward' ? action.previous : null;
             historyManager.addItem(
               {
                 type: MessageType.INFO,
-                text: 'Already on ' + target.modelId,
+                text: 'Switched to ' + switchTo.modelId,
               },
               Date.now(),
             );
-          }
-        } else {
-          const prevModel = { modelId: current, authType: currentAuthType };
-          isTogglingRef.current = true;
-          config
-            .switchModel(
-              target.authType,
-              target.modelId,
-              target.authType !== currentAuthType &&
-                target.authType === AuthType.QWEN_OAUTH
-                ? { requireCachedCredentials: true }
-                : undefined,
-            )
-            .then(() => {
-              previousModelRef.current = prevModel;
-              historyManager.addItem(
-                {
-                  type: MessageType.INFO,
-                  text: 'Switched to ' + target.modelId,
-                },
-                Date.now(),
-              );
-            })
-            .catch((err) => {
-              previousModelRef.current = null;
-              debugLogger.debug('toggle-forward failed', err);
-              historyManager.addItem(
-                {
-                  type: MessageType.ERROR,
-                  text:
-                    '⚠ Failed to switch to ' +
-                    target.modelId +
-                    ': ' +
-                    (err instanceof Error ? err.message : String(err)),
-                },
-                Date.now(),
-              );
-            })
-            .finally(() => {
-              isTogglingRef.current = false;
-            });
-        }
+          })
+          .catch((err) => {
+            debugLogger.debug(`toggle-${action.type} failed`, err);
+            // Clear ref — failed toggle likely means model is gone or auth is
+            // invalid; retrying would loop. Next Ctrl+F shows "Already on".
+            previousModelRef.current = null;
+            historyManager.addItem(
+              {
+                type: MessageType.ERROR,
+                text:
+                  '⚠ Failed to switch to ' +
+                  switchTo.modelId +
+                  ': ' +
+                  (err instanceof Error ? err.message : String(err)),
+              },
+              Date.now(),
+            );
+          })
+          .finally(() => {
+            isTogglingRef.current = false;
+          });
         return;
       }
       if (keyMatchers[Command.TOGGLE_MODEL](key)) {

@@ -34,16 +34,17 @@ const IS_WINDOWS = process.platform === 'win32';
     rig = new TestRig();
     await rig.setup('model-toggle-hotkey-e2e', {
       settings: {
-        generation: {
-          authType: 'gemini',
-          apiKey: 'test-api-key',
+        security: {
+          auth: {
+            selectedType: 'openai',
+          },
         },
         model: {
           name: 'model-a',
           toggleModel: 'model-b',
         },
         modelProviders: {
-          gemini: [{ id: 'model-a' }, { id: 'model-b' }],
+          openai: [{ id: 'model-a' }, { id: 'model-b' }],
         },
       },
     });
