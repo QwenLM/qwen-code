@@ -115,9 +115,13 @@ vi.mock('../../services/review-worktree-lease.js', () => ({
 vi.mock('../../dualOutput/DualOutputContext.js', () => ({
   useDualOutput: mockUseDualOutput,
 }));
+const mockFinalizeToolResponses = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
+  mockFinalizeToolResponses.mockImplementation(
+    actualCoreModule.finalizeToolResponses,
+  );
   return {
     ...actualCoreModule,
     GeminiClient: MockedGeminiClientClass,
@@ -131,6 +135,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     clearActiveGoal: mockClearActiveGoal,
     runVisionBridge: mockRunVisionBridge,
     refreshMemoryAfterManagedWrite: mockRefreshMemoryAfterManagedWrite,
+    finalizeToolResponses: mockFinalizeToolResponses,
   };
 });
 
@@ -3163,6 +3168,22 @@ describe('useGeminiStream', () => {
   });
 
   it('suppresses duplicate provider tool-call ids before TUI scheduling', async () => {
+    const recordToolResult = vi.fn();
+    (
+      mockConfig as Config & {
+        getToolOutputBatchBudget: () => number;
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getToolOutputBatchBudget = () => 10_000;
+    (
+      mockConfig as Config & {
+        getChatRecordingService: () => {
+          recordToolResult: typeof recordToolResult;
+        };
+      }
+    ).getChatRecordingService = () => ({ recordToolResult });
     let capturedOnComplete:
       | ((completedTools: TrackedToolCall[]) => Promise<void>)
       | null = null;
@@ -3271,13 +3292,16 @@ describe('useGeminiStream', () => {
             functionResponse: {
               id: 'tool-dup',
               name: 'shell',
-              response: { output: 'first' },
+              response: {
+                output: `Tool output was too large and has been truncated${'x'.repeat(14_000)}`,
+              },
             },
           },
         ],
         resultDisplay: 'first',
         error: undefined,
         errorType: undefined,
+        persistedOutputFiles: [],
       },
       tool: {
         name: 'shell',
@@ -3301,11 +3325,25 @@ describe('useGeminiStream', () => {
     });
     const toolResultParts = mockSendMessageStream.mock.calls[1][0] as Part[];
     expect(toolResultParts).toHaveLength(2);
-    expect(toolResultParts[0].functionResponse?.response?.['output']).toBe(
-      'first',
+    expect(toolResultParts[0].functionResponse?.response?.['output']).toContain(
+      'Tool output truncated.',
     );
     expect(toolResultParts[1].functionResponse?.response?.['error']).toContain(
       'Duplicate provider tool call id "tool-dup"',
+    );
+    const wireLength = toolResultParts.reduce((sum, part) => {
+      const response = part.functionResponse?.response;
+      const output = response?.['output'];
+      const error = response?.['error'];
+      return (
+        sum +
+        (typeof output === 'string' ? output.length : 0) +
+        (typeof error === 'string' ? error.length : 0)
+      );
+    }, 0);
+    expect(wireLength).toBeLessThanOrEqual(10_000);
+    expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
+      toolResultParts,
     );
     expect(client.recordCompletedToolCall).toHaveBeenCalledTimes(1);
   });
@@ -6830,7 +6868,7 @@ describe('useGeminiStream', () => {
   });
 
   describe('Memory Refresh on save_memory', () => {
-    it('should call performMemoryRefresh when a save_memory tool call completes successfully', async () => {
+    it('refreshes memory without finalizing client-only tool responses', async () => {
       const mockPerformMemoryRefresh = vi.fn().mockResolvedValue(undefined);
       const completedToolCall: TrackedCompletedToolCall = {
         request: {
@@ -6904,6 +6942,11 @@ describe('useGeminiStream', () => {
       await waitFor(() => {
         expect(mockPerformMemoryRefresh).toHaveBeenCalledTimes(1);
       });
+      expect(mockFinalizeToolResponses).not.toHaveBeenCalled();
+      expect(mockSendMessageStream).not.toHaveBeenCalled();
+      expect(mockMarkToolsAsSubmitted).toHaveBeenCalledWith([
+        'save-mem-call-1',
+      ]);
     });
 
     it('refreshes managed-memory instructions after interactive memory file writes', async () => {
