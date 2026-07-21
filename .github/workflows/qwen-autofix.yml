@@ -1630,7 +1630,7 @@ jobs:
             INSPECTED=$(( INSPECTED + 1 ))
             if [[ "${INSPECTED}" -gt "${MAX_CANDIDATE_INSPECTIONS}" ]]; then
               echo "🧮 candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — deferring the rest to the next scan"
-              fleet_row "${PR}" 'deferred' "candidate-inspection budget reached"
+              fleet_row '-' 'deferred' "candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — remaining candidates deferred to next scan"
               break
             fi
             # One PR fetch for the branch name, check rollup, creation time

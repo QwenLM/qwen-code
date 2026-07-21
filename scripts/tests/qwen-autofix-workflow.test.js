@@ -3145,10 +3145,10 @@ describe('qwen-autofix workflow', () => {
     expect(scan).toContain(
       `fleet_row "\${PR}" 'skipped' "\${SKIP_LABEL} label present"`,
     );
-    // 'deferred' has two distinct call sites: the candidate-inspection budget
-    // (per-PR row) and the target budget (summary row with '-').
+    // 'deferred' has two distinct call sites, both summary rows with '-':
+    // the candidate-inspection budget and the target budget.
     expect(scan).toContain(
-      `fleet_row "\${PR}" 'deferred' "candidate-inspection budget reached"`,
+      `fleet_row '-' 'deferred' "candidate-inspection budget`,
     );
     expect(scan).toContain(`fleet_row '-' 'deferred' "target budget`);
     // The table is written to the run summary, not just the job log.
