@@ -295,5 +295,26 @@ describe('useCompletion', () => {
       });
       expect(result.current.activeCategory).toBe('all');
     });
+
+    it('resets activeSuggestionIndex and visibleStartIndex when the active tab disappears', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(2 as 1)); // → session
+      act(() => {
+        result.current.setActiveSuggestionIndex(3);
+        result.current.setVisibleStartIndex(2);
+      });
+      expect(result.current.activeSuggestionIndex).toBe(3);
+      expect(result.current.visibleStartIndex).toBe(2);
+
+      act(() => {
+        result.current.setSuggestions([mixed[0]]);
+      });
+      expect(result.current.activeCategory).toBe('all');
+      expect(result.current.activeSuggestionIndex).toBe(0);
+      expect(result.current.visibleStartIndex).toBe(0);
+    });
   });
 });

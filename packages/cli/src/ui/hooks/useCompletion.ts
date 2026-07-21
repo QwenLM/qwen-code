@@ -102,6 +102,8 @@ export function useCompletion(
   useEffect(() => {
     if (!availableCategories.includes(activeCategory)) {
       setActiveCategory('all');
+      setActiveSuggestionIndex(0);
+      setVisibleStartIndex(0);
     }
   }, [availableCategories, activeCategory]);
 
