@@ -54,4 +54,13 @@ describe('validateAndCanonicalizeWorkspaceInput inside a POSIX container sandbox
       ).toThrow('must be an absolute path');
     },
   );
+
+  it('echoes the operator-typed input in the rejection, not the translation result', () => {
+    vi.stubEnv('SANDBOX', '');
+    // The extraction renamed the parameter; the message must interpolate
+    // the RAW input ("relative/path"), never the null translation result.
+    expect(() =>
+      validateAndCanonicalizeWorkspaceInput('relative/path'),
+    ).toThrow('Invalid --workspace "relative/path": must be an absolute path.');
+  });
 });

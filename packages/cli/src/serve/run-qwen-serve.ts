@@ -1714,7 +1714,7 @@ export function validateAndCanonicalizeWorkspaceInput(
   const workspace = translateAndCheckAbsoluteWorkspacePath(rawWorkspace);
   if (workspace === null) {
     throw new Error(
-      `Invalid --workspace "${workspace}": must be an absolute path.`,
+      `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
     );
   }
   try {
