@@ -319,10 +319,15 @@ describe('ShellExecutionService', () => {
 
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the pty child env while keeping user vars and third-party credentials', async () => {
-      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
-      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
-      process.env['GH_TOKEN'] = 'gh-abc';
-      process.env['PATH'] = '/usr/bin';
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
 
       await simulateExecution('echo hi', (pty) => {
         pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
@@ -2280,10 +2285,15 @@ describe('ShellExecutionService child_process fallback', () => {
 
   describe('child environment sanitization (#6601)', () => {
     it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
-      process.env['QWEN_SERVER_TOKEN'] = 'serve-secret';
-      process.env['QWEN_DAEMON_TOKEN'] = 'daemon-secret';
-      process.env['GH_TOKEN'] = 'gh-abc';
-      process.env['PATH'] = '/usr/bin';
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
 
       await simulateExecution('echo hi', (cp) => {
         cp.emit('exit', 0, null);
