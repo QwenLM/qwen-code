@@ -21,6 +21,7 @@ import {
   type AgentStatusChangeEvent,
 } from '@qwen-code/qwen-code-core';
 import { useUIState } from '../../contexts/UIStateContext.js';
+import { useUIActions } from '../../contexts/UIActionsContext.js';
 import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { useAgentViewActions } from '../../contexts/AgentViewContext.js';
@@ -58,6 +59,7 @@ export const AgentChatContent = ({
 }: AgentChatContentProps) => {
   const readonly = !interactiveAgent;
   const uiState = useUIState();
+  const uiActions = useUIActions();
   const { historyRemountKey, availableTerminalHeight, constrainHeight } =
     uiState;
   const { columns: terminalWidth } = useTerminalSize();
@@ -125,16 +127,27 @@ export const AgentChatContent = ({
   // subscribe to agent events, so driving this from there would leave
   // focus stuck on a terminated PTY.
   const [embeddedShellFocused, setEmbeddedShellFocused] = useState(false);
-  const { setAgentShellFocused } = useAgentViewActions();
+  const { setAgentShellFocused, setAgentViewHasActiveShellPty } =
+    useAgentViewActions();
 
+  // Sync embedded shell focus state and active-PTY flag to the agent view
+  // context so AppContainer's canToggleModel guard can check them.
   useEffect(() => {
     if (readonly) return;
+    setAgentViewHasActiveShellPty(instanceKey, !!activePtyId);
     setAgentShellFocused(embeddedShellFocused);
     // Intentionally not resetting on unmount: calling setState on a parent
     // context provider during effect cleanup triggers React error #185
     // ("Cannot update a component while rendering a different component")
     // when both child and provider unmount in the same commit phase.
-  }, [embeddedShellFocused, readonly, setAgentShellFocused]);
+  }, [
+    embeddedShellFocused,
+    activePtyId,
+    readonly,
+    instanceKey,
+    setAgentShellFocused,
+    setAgentViewHasActiveShellPty,
+  ]);
 
   useEffect(() => {
     if (!activePtyId) setEmbeddedShellFocused(false);
@@ -143,6 +156,10 @@ export const AgentChatContent = ({
   useKeypress(
     (key) => {
       if (readonly) return;
+      // When we have an active embedded shell PTY, our Ctrl+F focus toggle
+      // takes priority over the global model toggle. Only defer to the
+      // model-toggle handler when no agent shell PTY is active.
+      if (!activePtyId && uiActions.handleToggleKeypress(key)) return;
       if (key.ctrl && key.name === 'f') {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);

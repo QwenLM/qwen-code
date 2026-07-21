@@ -46,4 +46,19 @@ describe('AgentViewProvider in-process bridges', () => {
 
     expect(config.onArenaManagerChange).toHaveBeenCalled();
   });
+
+  it('does not re-subscribe bridge callbacks on re-render with same config', () => {
+    const config = makeConfig();
+
+    const { rerender } = render(
+      <AgentViewProvider config={config}>{null}</AgentViewProvider>,
+    );
+
+    // Re-rendering with the same config should not cause additional subscriptions
+    rerender(<AgentViewProvider config={config}>{null}</AgentViewProvider>);
+
+    // Mount hook fires once; the early-return prevents redundant state updates
+    expect(config.onTeamManagerChange).toHaveBeenCalledTimes(1);
+    expect(config.onArenaManagerChange).toHaveBeenCalledTimes(1);
+  });
 });

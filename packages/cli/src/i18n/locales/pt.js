@@ -55,6 +55,7 @@ export default {
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
   'to view transcript': 'para ver a transcrição',
+  'to toggle model': 'alternar modelo',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',

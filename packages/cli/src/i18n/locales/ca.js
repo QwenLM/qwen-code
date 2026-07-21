@@ -59,6 +59,7 @@ export default {
   'to paste images': 'per enganxar imatges',
   'for external editor': 'per a editor extern',
   'to view transcript': 'per veure la transcripció',
+  'to toggle model': 'alternar model',
   'Jump through words in the input': "Salta entre paraules a l'entrada",
   'Close dialogs, cancel requests, or quit application':
     "Tanca els diàlegs, cancel·la les peticions o surt de l'aplicació",

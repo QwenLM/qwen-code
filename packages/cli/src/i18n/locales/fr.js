@@ -58,6 +58,7 @@ export default {
   'to search history': "pour rechercher dans l'historique",
   'to paste images': 'pour coller des images',
   'for external editor': 'pour un éditeur externe',
+  'to toggle model': 'pour basculer de modèle',
   'Jump through words in the input': "Sauter de mot en mot dans l'entrée",
   'Close dialogs, cancel requests, or quit application':
     "Fermer les boîtes de dialogue, annuler les requêtes ou quitter l'application",

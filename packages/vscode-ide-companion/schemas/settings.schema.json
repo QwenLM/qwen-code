@@ -582,6 +582,10 @@
           "description": "The model to use for conversations.",
           "type": "string"
         },
+        "toggleModel": {
+          "description": "Alternate model ID for quick toggle via the toggleModel hotkey. When set, pressing the configured hotkey switches between the current model and this model. Leave empty to disable the hotkey.",
+          "type": "string"
+        },
         "baseUrl": {
           "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
           "type": "string"

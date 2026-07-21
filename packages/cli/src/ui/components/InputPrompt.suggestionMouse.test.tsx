@@ -63,6 +63,7 @@ vi.mock('../contexts/AgentViewContext.js', () => ({
     activeView: 'main',
     agents: new Map(),
     agentShellFocused: false,
+    agentViewHasActiveShellPty: false,
     agentInputBufferText: '',
     agentTabBarFocused: false,
     agentApprovalModes: new Map(),

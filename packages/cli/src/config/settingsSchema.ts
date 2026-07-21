@@ -1353,6 +1353,16 @@ const SETTINGS_SCHEMA = {
         description: 'The model to use for conversations.',
         showInDialog: false,
       },
+      toggleModel: {
+        type: 'string',
+        label: 'Toggle Model',
+        category: 'Model',
+        requiresRestart: false,
+        default: undefined as string | undefined,
+        description:
+          'Alternate model ID for quick toggle via the toggleModel hotkey. When set, pressing the configured hotkey switches between the current model and this model. Leave empty to disable the hotkey.',
+        showInDialog: false,
+      },
       baseUrl: {
         type: 'string',
         label: 'Model Base URL',

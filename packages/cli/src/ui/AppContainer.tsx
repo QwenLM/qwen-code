@@ -176,6 +176,7 @@ import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
+import { canToggleModel } from './can-toggle-model.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
@@ -1016,12 +1017,18 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  const activePtyIdRef = useRef(false);
+  const embeddedShellFocusedRef = useRef(false);
+  const agentViewActiveShellPtyRef = useRef(false);
+  const toggleModelConfiguredRef = useRef(false);
   // Live content-area height, kept in a ref so useGeminiStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
   // when bounding the pending item's rendered height. terminalWidthRef pairs
   // with it so the commit loop reads width and height consistently (both live).
   const availableTerminalHeightRef = useRef(0);
   const terminalWidthRef = useRef(0);
+  const previousModelRef = useRef<string | null>(null);
+  const isTogglingRef = useRef(false);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -1036,6 +1043,17 @@ export const AppContainer = (props: AppContainerProps) => {
     updateHandlerRef.current = handler;
     return () => handler?.cleanup();
   }, [historyManager.addItem]);
+
+  // Invalidate previousModelRef when model changes externally (e.g., /model command).
+  // During toggle isTogglingRef is set so we don't wipe our own ref.
+  useEffect(() => {
+    const unsub = config.onModelChange(() => {
+      if (!isTogglingRef.current) {
+        previousModelRef.current = null;
+      }
+    });
+    return unsub;
+  }, [config]);
 
   // Derive widths for InputPrompt using shared helper
   const { inputWidth, suggestionsWidth } = useMemo(() => {
@@ -1916,6 +1934,26 @@ export const AppContainer = (props: AppContainerProps) => {
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
   isIdleRef.current = streamingState === StreamingState.Idle;
+  activePtyIdRef.current = !!activePtyId;
+  embeddedShellFocusedRef.current = embeddedShellFocused;
+  // agentViewActiveShellPtyRef synced below — agentViewState is declared
+  // later in the component body (useAgentViewState is a hook call).
+  toggleModelConfiguredRef.current = !!settings.merged.model?.toggleModel;
+
+  /** Check whether a Ctrl+F keypress should trigger the model toggle. */
+  const handleToggleKeypress = useCallback(
+    (key: Key): boolean =>
+      canToggleModel(key, {
+        toggleModelConfigured: toggleModelConfiguredRef.current,
+        isToggling: isTogglingRef.current,
+        isIdle: isIdleRef.current,
+        hasActivePty: activePtyIdRef.current,
+        embeddedShellFocused: embeddedShellFocusedRef.current,
+        agentViewHasActiveShellPty: agentViewActiveShellPtyRef.current,
+        dialogsVisible: dialogsVisibleRef.current,
+      }),
+    [],
+  );
 
   useEffect(() => {
     if (streamingState === StreamingState.Idle) {
@@ -1977,6 +2015,8 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
+  agentViewActiveShellPtyRef.current =
+    agentViewState.agentViewHasActiveShellPty;
   const {
     dialogOpen: bgTasksDialogOpen,
     entries: bgTaskEntries,
@@ -3684,6 +3724,108 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
 
+      // Ctrl+F: toggle between current and alternate model
+      if (handleToggleKeypress(key)) {
+        debugLogger.debug('toggle triggered', {
+          toggle: settings.merged.model?.toggleModel,
+        });
+        const toggleModel = settings.merged.model!.toggleModel!;
+        const current = config.getModel();
+        const authType = config.getAuthType();
+        if (!authType) {
+          historyManager.addItem(
+            {
+              type: MessageType.ERROR,
+              text: '⚠ Cannot toggle: auth type not available',
+            },
+            Date.now(),
+          );
+          return;
+        }
+        if (current === toggleModel) {
+          if (previousModelRef.current) {
+            const prevModel = previousModelRef.current;
+            isTogglingRef.current = true;
+            config
+              .switchModel(authType, prevModel)
+              .then(() => {
+                previousModelRef.current = null;
+                historyManager.addItem(
+                  {
+                    type: MessageType.INFO,
+                    text: 'Switched to ' + prevModel,
+                  },
+                  Date.now(),
+                );
+              })
+              .catch((err) => {
+                debugLogger.debug('toggle-backward failed', err);
+                // Clear ref — failed backward toggle likely means model is gone or
+                // auth is invalid; retrying would loop. Next Ctrl+F shows "Already on".
+                previousModelRef.current = null;
+                historyManager.addItem(
+                  {
+                    type: MessageType.ERROR,
+                    text:
+                      '⚠ Failed to switch to ' +
+                      prevModel +
+                      ': ' +
+                      (err instanceof Error ? err.message : String(err)),
+                  },
+                  Date.now(),
+                );
+              })
+              .finally(() => {
+                isTogglingRef.current = false;
+              });
+          } else {
+            historyManager.addItem(
+              {
+                type: MessageType.INFO,
+                text: 'Already on ' + toggleModel,
+              },
+              Date.now(),
+            );
+          }
+        } else {
+          const prevModel = current;
+          isTogglingRef.current = true;
+          config
+            .switchModel(authType, toggleModel)
+            .then(() => {
+              previousModelRef.current = prevModel;
+              historyManager.addItem(
+                {
+                  type: MessageType.INFO,
+                  text: 'Switched to ' + toggleModel,
+                },
+                Date.now(),
+              );
+            })
+            .catch((err) => {
+              previousModelRef.current = null;
+              debugLogger.debug('toggle-forward failed', err);
+              historyManager.addItem(
+                {
+                  type: MessageType.ERROR,
+                  text:
+                    '⚠ Failed to switch to ' +
+                    toggleModel +
+                    ': ' +
+                    (err instanceof Error ? err.message : String(err)),
+                },
+                Date.now(),
+              );
+            })
+            .finally(() => {
+              isTogglingRef.current = false;
+            });
+        }
+        return;
+      }
+      if (keyMatchers[Command.TOGGLE_MODEL](key)) {
+        debugLogger.debug('toggle rejected by guard');
+      }
       // Ctrl+O: open the transcript full-detail screen. (Close while open is
       // handled by the transcript guard at the very top of this handler.)
       if (keyMatchers[Command.TOGGLE_TRANSCRIPT](key)) {
@@ -3907,6 +4049,9 @@ export const AppContainer = (props: AppContainerProps) => {
         );
       }
     },
+    // historyManager intentionally excluded from deps — its identity
+    // changes on every message and would rebuild this callback needlessly.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     [
       constrainHeight,
       setConstrainHeight,
@@ -3946,6 +4091,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setThoughtExpanded,
       openTranscript,
       closeTranscript,
+      handleToggleKeypress,
     ],
   );
 
@@ -4360,7 +4506,16 @@ export const AppContainer = (props: AppContainerProps) => {
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
-      vimHandleInput,
+      vimHandleInput: (key: Key) => {
+        // When handleToggleKeypress passes, AppContainer's global key handler
+        // (handleGlobalKeypress) handles Ctrl+F for model toggle. Block
+        // the text-buffer cursor-right so both don't fire on the same keypress.
+        if (handleToggleKeypress(key)) {
+          return true;
+        }
+        return vimHandleInput(key);
+      },
+      handleToggleKeypress,
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,
@@ -4452,6 +4607,7 @@ export const AppContainer = (props: AppContainerProps) => {
       closePermissionsDialog,
       setShellModeActive,
       vimHandleInput,
+      handleToggleKeypress,
       handleIdePromptComplete,
       handleCommandMigrationComplete,
       handleFolderTrustSelect,

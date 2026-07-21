@@ -96,6 +96,8 @@ describe('keyMatchers', () => {
     [Command.TOGGLE_THINKING_EXPANDED]: (key: Key) =>
       key.meta && key.name === 't',
     [Command.TOGGLE_TRANSCRIPT]: (key: Key) => key.ctrl && key.name === 'o',
+    [Command.TOGGLE_MODEL]: (key: Key) =>
+      key.ctrl && key.name === 'f' && !key.shift,
   };
 
   // Test data for each command with positive and negative test cases
@@ -434,6 +436,16 @@ describe('keyMatchers', () => {
       command: Command.TOGGLE_TRANSCRIPT,
       positive: [createKey('o', { ctrl: true })],
       negative: [createKey('o'), createKey('o', { meta: true })],
+    },
+    {
+      command: Command.TOGGLE_MODEL,
+      positive: [createKey('f', { ctrl: true })],
+      negative: [
+        createKey('f'),
+        createKey('f', { shift: true }),
+        createKey('f', { ctrl: true, shift: true }),
+        createKey('g', { ctrl: true }),
+      ],
     },
   ];
 

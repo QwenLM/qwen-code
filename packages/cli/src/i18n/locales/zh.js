@@ -262,6 +262,7 @@ export default {
   'to paste images': '粘贴图片',
   'for external editor': '外部编辑器',
   'to view transcript': '查看完整记录',
+  'to toggle model': '切换模型',
   'Jump through words in the input': '在输入中按单词跳转',
   'Close dialogs, cancel requests, or quit application':
     '关闭对话框、取消请求或退出应用程序',

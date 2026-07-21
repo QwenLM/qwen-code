@@ -2044,6 +2044,7 @@ export default {
   'to search history': 'zum Durchsuchen des Verlaufs',
   'to paste images': 'zum Einfügen von Bildern',
   'for external editor': 'für externen Editor',
+  'to toggle model': 'zum Umschalten des Modells',
   'Updating...': 'Wird aktualisiert...',
   Unknown: 'Unbekannt',
   Error: 'Fehler',

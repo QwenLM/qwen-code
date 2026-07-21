@@ -1487,6 +1487,7 @@ export default {
   'to search history': '履歴を検索',
   'to paste images': '画像を貼り付け',
   'for external editor': '外部エディタ用',
+  'to toggle model': 'モデルを切り替え',
   '? for shortcuts': '? でショートカット表示',
   'Invalid approval mode "{{arg}}". Valid modes: {{modes}}':
     '無効な承認モード "{{arg}}" です。有効なモード: {{modes}}',

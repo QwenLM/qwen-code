@@ -139,6 +139,7 @@ vi.mock('./contexts/AgentViewContext.js', () => ({
   useAgentViewState: vi.fn(() => ({
     activeView: 'main',
     agents: new Map(),
+    agentViewHasActiveShellPty: false,
   })),
   useAgentViewActions: vi.fn(() => ({
     switchToAgent: vi.fn(),
