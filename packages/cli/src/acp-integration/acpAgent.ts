@@ -239,6 +239,7 @@ import {
 } from '../config/trustedFolders.js';
 import {
   ACP_PREFLIGHT_KINDS,
+  SESSION_CLOSE_QUARANTINED_ERROR_KIND,
   STATUS_SCHEMA_VERSION,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
@@ -2762,6 +2763,7 @@ export async function runAcpAgent(
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
 
     try {
+      await agentInstance?.beginSessionShutdown();
       // Fire SessionEnd hook for all active sessions (aligned with core path)
       await fireSessionEndOnce(SessionEndReason.Other);
       await agentInstance?.disposeSessions();
@@ -2800,6 +2802,7 @@ export async function runAcpAgent(
 
   try {
     await connection.closed;
+    await agentInstance?.beginSessionShutdown();
     // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
     await fireSessionEndOnce(SessionEndReason.PromptInputExit);
     // Mirror the SIGTERM handler's pool drain on the IDE-initiated
@@ -2979,6 +2982,9 @@ class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private readonly closingSessions: Map<string, Session> = new Map();
   private readonly activeSessionOperations = new Set<string>();
+  private readonly activeSessionLifecycleOperations = new Set<Promise<void>>();
+  private disposingSessions = false;
+  private sessionDisposalPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
@@ -3557,7 +3563,49 @@ class QwenAgent implements Agent {
     };
   }
 
-  async disposeSessions(): Promise<void> {
+  private acquireSessionLifecycleOperation(): () => void {
+    if (this.disposingSessions) {
+      throw new RequestError(-32000, 'Session shutdown is in progress.', {
+        errorKind: 'session_busy',
+      });
+    }
+    let resolve!: () => void;
+    const completion = new Promise<void>((done) => {
+      resolve = done;
+    });
+    this.activeSessionLifecycleOperations.add(completion);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.activeSessionLifecycleOperations.delete(completion);
+      resolve();
+    };
+  }
+
+  private async runSessionLifecycleOperation<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const release = this.acquireSessionLifecycleOperation();
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  async beginSessionShutdown(): Promise<void> {
+    this.disposingSessions = true;
+    await Promise.allSettled([...this.activeSessionLifecycleOperations]);
+  }
+
+  disposeSessions(): Promise<void> {
+    this.sessionDisposalPromise ??= this.disposeSessionsOnce();
+    return this.sessionDisposalPromise;
+  }
+
+  private async disposeSessionsOnce(): Promise<void> {
+    await this.beginSessionShutdown();
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
     }
@@ -3784,6 +3832,12 @@ class QwenAgent implements Agent {
   }
 
   async newSession(params: NewSessionRequest): Promise<NewSessionResponse> {
+    return this.runSessionLifecycleOperation(() => this.newSessionImpl(params));
+  }
+
+  private async newSessionImpl(
+    params: NewSessionRequest,
+  ): Promise<NewSessionResponse> {
     const { cwd, mcpServers } = params;
     const parentContext = extractDaemonTraceContext(params);
     return await withDaemonSpan(
@@ -3833,6 +3887,14 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    return this.runSessionLifecycleOperation(() =>
+      this.loadSessionImpl(params),
+    );
+  }
+
+  private async loadSessionImpl(
+    params: LoadSessionRequest,
+  ): Promise<LoadSessionResponse> {
     // Load per-request settings BEFORE the existence check: the check must
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
@@ -4034,6 +4096,14 @@ class QwenAgent implements Agent {
   }
 
   async unstable_resumeSession(
+    params: ResumeSessionRequest,
+  ): Promise<ResumeSessionResponse> {
+    return this.runSessionLifecycleOperation(() =>
+      this.unstableResumeSessionImpl(params),
+    );
+  }
+
+  private async unstableResumeSessionImpl(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
     // Same per-request settings discipline as `loadSession`.
@@ -8023,17 +8093,38 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        const releaseSessionOperation = this.acquireSessionOperation(sessionId);
+        const releaseLifecycleOperation =
+          this.acquireSessionLifecycleOperation();
         try {
-          await this.closeStoredSession(sessionId, {
-            requireFlush: params['requireFlush'] === true,
-            ...(typeof rawDrainTimeoutMs === 'number'
-              ? { drainTimeoutMs: rawDrainTimeoutMs }
-              : {}),
-          });
-          return { sessionId, closed: true };
+          const releaseSessionOperation =
+            this.acquireSessionOperation(sessionId);
+          try {
+            try {
+              await this.closeStoredSession(sessionId, {
+                requireFlush: params['requireFlush'] === true,
+                ...(typeof rawDrainTimeoutMs === 'number'
+                  ? { drainTimeoutMs: rawDrainTimeoutMs }
+                  : {}),
+              });
+            } catch (error) {
+              if (this.closingSessions.has(sessionId)) {
+                throw new RequestError(
+                  -32603,
+                  error instanceof Error ? error.message : String(error),
+                  {
+                    errorKind: SESSION_CLOSE_QUARANTINED_ERROR_KIND,
+                    sessionId,
+                  },
+                );
+              }
+              throw error;
+            }
+            return { sessionId, closed: true };
+          } finally {
+            releaseSessionOperation();
+          }
         } finally {
-          releaseSessionOperation();
+          releaseLifecycleOperation();
         }
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {

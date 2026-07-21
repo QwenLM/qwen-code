@@ -49,6 +49,7 @@ import {
 import {
   BridgeChannelClosedError,
   BridgeTimeoutError,
+  SESSION_CLOSE_QUARANTINED_ERROR_KIND,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
 } from './status.js';
@@ -12906,6 +12907,31 @@ describe('createAcpSessionBridge', () => {
         }),
       ).toThrow(SessionNotFoundError);
 
+      await bridge.shutdown();
+    });
+
+    it('kills the channel when the child quarantined the session before close failed', async () => {
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+            throw new RequestError(-32603, 'dispose failed', {
+              errorKind: SESSION_CLOSE_QUARANTINED_ERROR_KIND,
+            });
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(bridge.closeSession(session.sessionId)).rejects.toThrow(
+        'dispose failed',
+      );
+
+      expect(handle.killed).toBe(true);
+      await vi.waitFor(() => expect(bridge.sessionCount).toBe(0));
       await bridge.shutdown();
     });
 
