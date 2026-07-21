@@ -7646,6 +7646,25 @@ class QwenAgent implements Agent {
         // Canonicalize path
         const canonicalPath = await fs.realpath(targetPath);
 
+        // Server-controlled containment check (worktree create/restore).
+        // Must run BEFORE the no-op check: a no-op cd to a directory
+        // outside the allowed roots must still be rejected.
+        const allowedRoots = params['allowedRoots'];
+        if (Array.isArray(allowedRoots) && allowedRoots.length > 0) {
+          const contained = allowedRoots.some((root: unknown) => {
+            if (typeof root !== 'string') return false;
+            const rel = path.relative(root, canonicalPath);
+            return !rel.startsWith('..') && !path.isAbsolute(rel);
+          });
+          if (!contained) {
+            throw new RequestError(
+              -32004,
+              `Path outside allowed roots: ${canonicalPath}`,
+              { errorKind: 'containment_violation', path: canonicalPath },
+            );
+          }
+        }
+
         // Noop check
         const previousCwd = config.getTargetDir();
         if (canonicalPath === previousCwd) {

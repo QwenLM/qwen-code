@@ -5682,6 +5682,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           {
             sessionId,
             path: req.path,
+            ...(req.allowedRoots ? { allowedRoots: req.allowedRoots } : {}),
           },
         );
         const extResult = raw as {
@@ -5740,6 +5741,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
 
       return { sessionId, ...result };
+    },
+
+    setSessionWorktree(sessionId, worktree) {
+      const entry = byId.get(sessionId);
+      if (entry) {
+        entry.worktree = worktree;
+      }
     },
 
     async closeSession(sessionId, context, closeOpts) {

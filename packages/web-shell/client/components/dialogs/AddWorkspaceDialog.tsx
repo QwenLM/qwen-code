@@ -27,7 +27,8 @@ export interface WorkspacePathSuggestions {
 
 interface AddWorkspaceDialogProps {
   onClose: () => void;
-  onAdd: (cwd: string, persist: boolean) => Promise<void>;
+  onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
+  displayNameEnabled?: boolean;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
@@ -36,6 +37,7 @@ interface AddWorkspaceDialogProps {
 }
 
 const HINT_ID = 'add-workspace-hint';
+const DISPLAY_NAME_HINT_ID = 'add-workspace-display-name-hint';
 const ERROR_ID = 'add-workspace-error';
 const LISTBOX_ID = 'add-workspace-suggestions';
 const SUGGEST_DEBOUNCE_MS = 150;
@@ -47,10 +49,12 @@ function isAbsoluteLike(value: string): boolean {
 export function AddWorkspaceDialog({
   onClose,
   onAdd,
+  displayNameEnabled = false,
   onSuggest,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
   const [path, setPath] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [persist, setPersist] = useState(true);
@@ -192,7 +196,12 @@ export function AddWorkspaceDialog({
       setSubmitting(true);
       closeList();
       try {
-        await onAdd(trimmed, persist);
+        const trimmedDisplayName = displayNameEnabled ? displayName.trim() : '';
+        if (trimmedDisplayName) {
+          await onAdd(trimmed, persist, trimmedDisplayName);
+        } else {
+          await onAdd(trimmed, persist);
+        }
         onClose();
       } catch (err) {
         setError(
@@ -202,7 +211,16 @@ export function AddWorkspaceDialog({
         setSubmitting(false);
       }
     },
-    [path, persist, onAdd, onClose, closeList, t],
+    [
+      path,
+      displayName,
+      displayNameEnabled,
+      persist,
+      onAdd,
+      onClose,
+      closeList,
+      t,
+    ],
   );
 
   const showList = listOpen && suggestions.length > 0;
@@ -292,6 +310,26 @@ export function AddWorkspaceDialog({
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
+          {displayNameEnabled && (
+            <Field>
+              <FieldLabel htmlFor="add-workspace-display-name">
+                {t('sidebar.addWorkspaceDisplayName')}
+              </FieldLabel>
+              <Input
+                id="add-workspace-display-name"
+                type="text"
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                disabled={submitting}
+                maxLength={256}
+                autoComplete="off"
+                aria-describedby={DISPLAY_NAME_HINT_ID}
+              />
+              <FieldDescription id={DISPLAY_NAME_HINT_ID}>
+                {t('sidebar.addWorkspaceDisplayNameHint')}
+              </FieldDescription>
+            </Field>
+          )}
           <Field orientation="horizontal">
             <FieldContent>
               <FieldLabel htmlFor="add-workspace-persist">

@@ -15,7 +15,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
@@ -2219,7 +2219,9 @@ describe('qwen-autofix workflow', () => {
       reviewAddressReportStep,
       publishPrStep,
     ]) {
-      expect(step).toContain("MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'");
+      expect(step).toContain(
+        "MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
+      );
       expect(step).toContain('MODEL_DISPLAY="${MODEL:-default}"');
       expect(step).toContain(footer);
     }
@@ -2360,7 +2362,10 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
-    expect(prepareBranchAndFeedbackStep).not.toContain('git diff --quiet');
+    expect(prepareBranchAndFeedbackStep).not.toContain('if git diff --quiet');
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'if ! git diff --quiet || ! git diff --cached --quiet; then',
+    );
   });
 
   it('clears persistent autofix workdirs before agent steps run', () => {
@@ -2561,6 +2566,16 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain(
         'bash .github/scripts/check-settings-schema.sh',
       );
+      // The owning-package resolver is likewise a shared script staged from the
+      // trusted base, invoked (not inlined) so the two gates cannot drift into
+      // resolving packages differently. The old inline detection must be gone.
+      expect(step).toContain(
+        'bash "${RUNNER_TEMP}/resolve-owning-packages.sh"',
+      );
+      expect(step).not.toContain("grep -oE '^packages/[^/]+'");
+      expect(step).not.toContain(
+        'bash .github/scripts/resolve-owning-packages.sh',
+      );
       expect(step).toContain(
         'No package changes detected; skipping package tests.',
       );
@@ -2571,6 +2586,12 @@ describe('qwen-autofix workflow', () => {
     expect(
       workflow.match(
         /cp \.github\/scripts\/check-settings-schema\.sh "\$\{RUNNER_TEMP\}\/check-settings-schema\.sh"/g,
+      ) ?? [],
+    ).toHaveLength(2);
+    // The owning-package resolver is staged the same way, in the same steps.
+    expect(
+      workflow.match(
+        /cp \.github\/scripts\/resolve-owning-packages\.sh "\$\{RUNNER_TEMP\}\/resolve-owning-packages\.sh"/g,
       ) ?? [],
     ).toHaveLength(2);
     // In the issue-autofix job the staging must happen BEFORE the verify gate's
@@ -2609,6 +2630,22 @@ describe('qwen-autofix workflow', () => {
     expect(schemaScript).toContain('is out of date');
     expect(schemaScript).toContain('git status --porcelain');
     expect(schemaScript).toContain('outcome=failed');
+    // The owning-package resolver maps each changed path to the longest-prefix
+    // npm WORKSPACE, expanded from the ON-DISK root package.json workspaces
+    // globs (so a workspace the branch adds is included — node_modules is the
+    // base's), not "any ancestor dir with a package.json" (a fixture inside a
+    // workspace's src tree is not a workspace). It fails loudly on an empty set.
+    const resolveScript = readFileSync(
+      '.github/scripts/resolve-owning-packages.sh',
+      'utf8',
+    );
+    expect(resolveScript).toContain('readFileSync("package.json"');
+    expect(resolveScript).not.toContain('npm query .workspace');
+    expect(resolveScript).toContain(
+      '[[ "${f}" == "${w}"/* && "${#w}" -gt "${#best}" ]]',
+    );
+    expect(resolveScript).toContain('no workspaces resolved from package.json');
+    expect(resolveScript).toContain('sort -u');
     // The review gate's freshness check is a STRUCTURAL guard: the script call
     // must run BEFORE the no-op/unchanged return, so a stale-schema PR the agent
     // wrongly no-ops fails (outcome=failed) instead of being reported as evaluated
@@ -2773,6 +2810,184 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
+  it('resolver maps each changed file to its longest-prefix workspace from the on-disk manifest', () => {
+    // Reads the on-disk root package.json workspaces globs (NO npm install), so
+    // it sees workspaces the branch ADDS — node_modules would only have the
+    // base's. Set up a new top-level and a new nested workspace, a fixture
+    // package.json inside a workspace's src tree (NOT a workspace), a
+    // !-excluded workspace, and a non-workspace dir.
+    const script = resolve('.github/scripts/resolve-owning-packages.sh');
+    const dir = mkdtempSync(join(tmpdir(), 'ws-'));
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({
+          name: 'root',
+          private: true,
+          workspaces: [
+            'packages/*',
+            'packages/channels/*',
+            '!packages/desktop',
+          ],
+        }),
+      );
+      for (const pkg of [
+        'packages/cli',
+        'packages/brandnew', // a new top-level workspace the branch adds
+        'packages/channels/base',
+        'packages/channels/newchannel', // a new nested workspace the branch adds
+        'packages/desktop', // excluded by the ! glob
+        'packages/cli/src/commands/examples/starter', // fixture, NOT a workspace
+      ]) {
+        mkdirSync(join(dir, pkg), { recursive: true });
+        writeFileSync(join(dir, pkg, 'package.json'), '{}');
+      }
+      mkdirSync(join(dir, 'packages/sdk-python'), { recursive: true }); // no manifest
+      const changed =
+        [
+          'packages/cli/src/commands/examples/starter/src/index.ts', // -> packages/cli
+          'packages/brandnew/src/z.ts', // -> packages/brandnew (branch-added)
+          'packages/channels/newchannel/src/y.ts', // -> newchannel (branch-added nested)
+          'packages/desktop/src/d.ts', // excluded workspace -> dropped
+          'packages/sdk-python/foo.py', // no manifest -> dropped
+          'README.md', // outside packages/ -> dropped
+        ].join('\n') + '\n';
+      const out = execFileSync('bash', [script], {
+        input: changed,
+        cwd: dir,
+        encoding: 'utf8',
+      }).trim();
+      expect(out.split('\n').sort()).toEqual([
+        'packages/brandnew',
+        'packages/channels/newchannel',
+        'packages/cli',
+      ]);
+      expect(out).not.toContain('examples/starter'); // fixture never owns
+      expect(out).not.toContain('sdk-python');
+      expect(out).not.toContain('packages/desktop'); // ! negation honoured
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('resolver fails loudly when the manifest declares no workspaces', () => {
+    // An empty workspace set (unreadable/missing workspaces) must be a hard,
+    // non-zero exit — not a silent empty output that reads as "no package
+    // changes" and skips the gate. The call sites carry no `|| true`.
+    const script = resolve('.github/scripts/resolve-owning-packages.sh');
+    const dir = mkdtempSync(join(tmpdir(), 'nows-'));
+    try {
+      writeFileSync(
+        join(dir, 'package.json'),
+        JSON.stringify({ name: 'root' }),
+      );
+      let threw = false;
+      let stderr = '';
+      try {
+        execFileSync('bash', [script], {
+          input: 'packages/cli/src/x.ts\n',
+          cwd: dir,
+          encoding: 'utf8',
+        });
+      } catch (e) {
+        threw = true;
+        stderr = e.stderr?.toString() ?? '';
+      }
+      expect(threw).toBe(true);
+      expect(stderr).toContain('no workspaces resolved from package.json');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('handoff frames a committed-but-unpushed change as NOT pushed, an abort as neutral', () => {
+    // Keyed on COMMITTED, not OUTCOME. When the agent committed but nothing was
+    // pushed, the address-summary.md can read like a success and cite the
+    // now-discarded commit, so the handoff must say it was NOT pushed. An abort
+    // / pre-gate failure made no commit (COMMITTED unset) and must stay neutral,
+    // since there is no commit to call discarded.
+    const body = reviewAddressReportStep.match(
+      /if \[\[ -n "\$\{DETAIL_FILE\}" \]\]; then\n[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(body).toBeTruthy();
+    const run = (committed) => {
+      const dir = mkdtempSync(join(tmpdir(), 'hoff-'));
+      try {
+        writeFileSync(join(dir, 'd.md'), 'Done. Single commit abc1234.\n');
+        return execFileSync('bash', ['-c', body], {
+          env: {
+            ...process.env,
+            DETAIL_FILE: join(dir, 'd.md'),
+            COMMITTED: committed,
+          },
+          encoding: 'utf8',
+        });
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+    const committed = run('true');
+    expect(committed).toContain('This change was NOT pushed');
+    // Do not assert the gate ran — a pre-gate failure.md abort also lands here.
+    expect(committed).not.toContain('did NOT pass the verification gate');
+    expect(committed).not.toContain('What I found before stopping');
+    // No commit (abort / pre-gate failure) keeps the neutral framing.
+    expect(run('')).toContain('What I found before stopping');
+    expect(run('')).not.toContain('This change was NOT pushed');
+  });
+
+  it('verify gate records committed=true only on a real diff (exit 1), not a git error (128)', () => {
+    // The handoff's "was NOT pushed" wording keys on this output; it is recorded
+    // at the top of the step, before any gate can exit. `git diff --quiet` exits
+    // 1 for a real diff but 128 on a bad ref — only 1 is a commit, so a git
+    // error must not be misreported as a discarded commit. Drive the extracted
+    // snippet with a stubbed git whose exit is scripted.
+    const snippet = verificationGateSteps[1].match(
+      /committed_rc=0[\s\S]*?committed=true[^\n]*\n\s*fi/,
+    )?.[0];
+    expect(snippet).toBeTruthy();
+    const run = (gitDiffExit) => {
+      const dir = mkdtempSync(join(tmpdir(), 'committed-'));
+      const out = join(dir, 'gh_output');
+      const bin = join(dir, 'bin');
+      writeFileSync(out, '');
+      mkdirSync(bin);
+      // Stub git: `diff --quiet` exits 0 (no commit) or 1 (branch changed).
+      writeFileSync(
+        join(bin, 'git'),
+        `#!/usr/bin/env bash\nexit ${gitDiffExit}\n`,
+      );
+      chmodSync(join(bin, 'git'), 0o755);
+      try {
+        execFileSync('bash', ['-c', `export BRANCH=feat\n${snippet}`], {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            GITHUB_OUTPUT: out,
+          },
+          encoding: 'utf8',
+        });
+      } catch {
+        // The snippet's own `if` swallows git's exit; no throw expected.
+      }
+      const result = readFileSync(out, 'utf8');
+      rmSync(dir, { recursive: true, force: true });
+      return result;
+    };
+    // git diff --quiet exits 1 => branch has a commit => committed=true.
+    expect(run(1)).toContain('committed=true');
+    // exits 0 => no new commit => nothing recorded.
+    expect(run(0)).not.toContain('committed=true');
+    // exits 128 => bad ref / git error => NOT treated as a commit.
+    expect(run(128)).not.toContain('committed=true');
+    // Neither gate carries an EXIT trap: the wording keys on committed, so an
+    // outcome=failed-forcing trap (which would also fire on pre-commit
+    // failures) must not creep back into either verify step.
+    for (const gate of verificationGateSteps) {
+      expect(gate).not.toMatch(/\btrap\b/);
+    }
+  });
+
   it('still runs review verification reporting when the agent step fails', () => {
     expect(verificationGateSteps).toHaveLength(2);
     const reviewVerificationGateStep = verificationGateSteps[1];
@@ -2897,6 +3112,298 @@ describe('qwen-autofix workflow', () => {
         ),
       ),
     ).toBe(0);
+  });
+
+  it('re-arms a stranded PR from a marker instead of a deleted comment', () => {
+    // Recovery used to mean `gh api -X DELETE` on the bot's own eval marker:
+    // raw API access, an erased audit trail, undiscoverable. `@qwen-code
+    // /retry` posts an autofix-rearm marker instead, which must do BOTH halves
+    // of what the deletion did - release the watermark those older markers
+    // held, and reset the round counter - or the PR stays stuck.
+    const scan =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    const block = scan.match(
+      /(MARKERS="\$\(jq[\s\S]*?ROUND="\$\(jq[^\n]*\n)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+
+    const BOT = 'qwen-code-dev-bot';
+    const evalMarker = (at, ts, round) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
+    });
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'rearm-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$EVAL_WM" "$REARM_KEY" "$ROUND"`,
+        ],
+        {
+          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out.split('|');
+    };
+
+    const evaluated = [
+      evalMarker('2026-07-20T08:00:00Z', '2026-07-20T07:00:00Z', 1),
+      evalMarker('2026-07-20T09:00:00Z', '2026-07-20T08:30:00Z', 2),
+    ];
+    // Stranded: the watermark sits at the newest evaluated feedback and the
+    // round has climbed, so the scan reports "nothing new" forever.
+    const [wmBefore, keyBefore, roundBefore] = run(evaluated);
+    expect(wmBefore).toBe('2026-07-20T08:30:00Z');
+    expect(keyBefore).toBe('none');
+    expect(roundBefore).toBe('2');
+
+    // After /retry both halves clear: no marker holds the watermark, and the
+    // marker opens a fresh counting window so the round restarts at 0.
+    const [wmAfter, keyAfter, roundAfter] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmAfter).toBe('');
+    expect(keyAfter).toBe('2026-07-20T10:00:00Z');
+    expect(roundAfter).toBe('0');
+
+    // A marker written AFTER the re-arm counts again (the exception is scoped
+    // to the re-arm instant, it does not disable the watermark forever).
+    const [wmNext] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+      evalMarker('2026-07-20T11:00:00Z', '2026-07-20T10:30:00Z', 1),
+    ]);
+    expect(wmNext).toBe('2026-07-20T10:30:00Z');
+
+    // A re-arm posted by anyone other than the bot is ignored: both scanners
+    // filter markers by author, so a spoofed comment must not re-arm.
+    const [wmSpoof] = run([
+      ...evaluated,
+      {
+        user: { login: 'someone-else' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+  });
+
+  it('address-side stale check mirrors the scan-side re-arm logic under bash', () => {
+    // The scan-side and address-side jq blocks are copy-pasted (~40 lines
+    // each, 4 jq expressions). Drift between them is the class of bug the
+    // re-arm feature prevents: a queued address job could stamp an
+    // old-sequence eval marker into a fresh window after /retry. This test
+    // runs the address-side block under bash with the same fixtures and
+    // asserts identical outputs.
+    const block = prepareBranchAndFeedbackStep.match(
+      /(LIVE_MARKS="\$\(jq[\s\S]*?LIVE_MAX_ROUND="\$\(jq[^\n]*\n)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+
+    const BOT = 'qwen-code-dev-bot';
+    const evalMarker = (at, ts, round) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
+    });
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'rearm-live-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$LIVE_EVAL_WM" "$LIVE_REARM_KEY" "$LIVE_MAX_ROUND"`,
+        ],
+        {
+          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out.split('|');
+    };
+
+    const evaluated = [
+      evalMarker('2026-07-20T08:00:00Z', '2026-07-20T07:00:00Z', 1),
+      evalMarker('2026-07-20T09:00:00Z', '2026-07-20T08:30:00Z', 2),
+    ];
+    const [wmBefore, keyBefore, roundBefore] = run(evaluated);
+    expect(wmBefore).toBe('2026-07-20T08:30:00Z');
+    expect(keyBefore).toBe('none');
+    expect(roundBefore).toBe('2');
+
+    const [wmAfter, keyAfter, roundAfter] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmAfter).toBe('');
+    expect(keyAfter).toBe('2026-07-20T10:00:00Z');
+    expect(roundAfter).toBe('0');
+
+    const [wmNext] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+      evalMarker('2026-07-20T11:00:00Z', '2026-07-20T10:30:00Z', 1),
+    ]);
+    expect(wmNext).toBe('2026-07-20T10:30:00Z');
+
+    const [wmSpoof] = run([
+      ...evaluated,
+      {
+        user: { login: 'someone-else' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+  });
+
+  it('routes @qwen-code /retry through the takeover command authorization', () => {
+    // Prefilter must let the command reach route at all, and the marker must
+    // be a CONTROL comment so the agent never sees it as feedback to address.
+    expect(workflow).toContain(
+      "startsWith(github.event.comment.body, '@qwen-code /retry')",
+    );
+    expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
+    expect(workflow).toContain('<!-- autofix-rearm -->');
+    expect(workflow).toContain('<!-- (autofix-eval|autofix-rearm|qwen-triage|');
+    // Verify all four filter sites (scan + 3 address) include autofix-rearm
+    const filterMatches = [
+      ...workflow.matchAll(/autofix-eval\|autofix-rearm\|qwen-triage/g),
+    ];
+    expect(filterMatches.length).toBeGreaterThanOrEqual(4);
+    // The re-arm marker is posted by the bot itself (both scanners filter by
+    // that login), so the job verifies the PAT identity before commenting.
+    const job = workflow.match(
+      /- name: 'Post re-arm marker'[\s\S]*?(?=\n {2}[a-z-]+:\n)/,
+    )?.[0];
+    expect(job).toBeTruthy();
+    expect(job).toContain("gh api user --jq '.login'");
+    expect(job).toContain('expected ${AUTOFIX_BOT}');
+    expect(job).toContain('gh pr comment "${PR}"');
+    // Re-arm reuses the takeover command's authorization rather than adding a
+    // second policy: same live permission check, same author rules.
+    expect(routeStep).toContain("RETRY_REQ=''");
+    expect(routeStep).toContain(
+      'RETRY_PR="$(sanitize_number "${ISSUE_NUMBER}")"',
+    );
+    expect(routeStep).toContain('retry_pr=${RETRY_PR}');
+  });
+
+  it('behaviorally posts the re-arm marker only after verifying the PAT identity', () => {
+    // The retry-command job's bash is extracted and executed against a stubbed
+    // `gh` so the identity guard and the posted comment body are exercised, not
+    // merely string-matched: a malformed printf body or a broken quote escape
+    // would post a marker the scanners ignore while still printing "re-armed",
+    // and the structural toContain('<!-- autofix-rearm -->') check matches the
+    // marker at several workflow sites so it would not catch a typo in the body.
+    const BOT = 'qwen-code-dev-bot';
+    const rearmStep = workflow.match(
+      /- name: 'Post re-arm marker'\n {8}run: \|-\n {10}([\s\S]*?)\n\n {2}takeover-ack:/,
+    )?.[1];
+    expect(rearmStep).toBeTruthy();
+    const block = rearmStep.replace(/\n {10}/g, '\n');
+
+    const runRearm = ({ actor = BOT, apiFail = false } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$1 $2" >> '${join(dir, 'calls.log')}'`,
+            'if [[ "$1" == "api" && "$2" == "user" ]]; then',
+            `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
+            `  printf '%s' "${actor}"`,
+            'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
+            `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
+            'fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'calls.log'), '');
+        const res = spawnSync('bash', ['-c', block], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_TOKEN: 'x',
+            PR: '7354',
+            REPO: 'QwenLM/qwen-code',
+            AUTOFIX_BOT: BOT,
+          },
+          encoding: 'utf8',
+        });
+        return {
+          status: res.status,
+          stdout: res.stdout ?? '',
+          calls: readFileSync(join(dir, 'calls.log'), 'utf8'),
+          body: existsSync(join(dir, 'body.txt'))
+            ? readFileSync(join(dir, 'body.txt'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Happy path: identity verified via gh api user, then the marker is posted
+    // with the scanner marker line in the bilingual collapsed format.
+    const ok = runRearm({ actor: BOT });
+    expect(ok.status).toBe(0);
+    expect(ok.calls).toContain('api user');
+    expect(ok.calls).toContain('pr comment');
+    expect(ok.stdout).toContain('re-armed PR #7354');
+    expect(ok.body).toContain('AutoFix re-armed');
+    expect(ok.body).toContain('<!-- autofix-rearm -->');
+    expect(ok.body).toContain('<details>');
+    expect(ok.body).toContain('中文说明');
+    // No line may be indented 4+ spaces, or the marker renders as a code block
+    // and the scanners' marker match silently fails.
+    expect(ok.body).not.toMatch(/^ {4,}/m);
+
+    // Actor mismatch: the PAT authenticates as someone else -> the guard exits
+    // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
+    // behind a fake "re-armed" line).
+    const mismatch = runRearm({ actor: 'someone-else' });
+    expect(mismatch.status).toBe(1);
+    expect(mismatch.calls).toContain('api user');
+    expect(mismatch.calls).not.toContain('pr comment');
+    expect(mismatch.body).toBe('');
+    expect(mismatch.stdout).toContain(`expected ${BOT}`);
+
+    // API failure: gh api user fails -> exits non-zero, posts nothing, and
+    // surfaces the captured gh stderr in the error message.
+    const failed = runRearm({ apiFail: true });
+    expect(failed.status).toBe(1);
+    expect(failed.calls).not.toContain('pr comment');
+    expect(failed.body).toBe('');
+    expect(failed.stdout).toContain('Failed to verify CI_DEV_BOT_PAT identity');
+    expect(failed.stdout).toContain('Bad credentials');
   });
 
   it('replays the handoff decision and terminal-round transitions under bash', () => {

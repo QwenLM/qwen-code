@@ -29,10 +29,15 @@ export interface DaemonCapabilitiesLimits {
 export interface DaemonWorkspaceCapability {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+}
+
+export interface DaemonWorkspaceUpdate {
+  displayName: string | null;
 }
 
 export interface DaemonWorkspaceRemovalActivity {
@@ -155,6 +160,61 @@ export interface DaemonWorkspaceGitDiffHunks {
    * daemons and untruncated responses (additive to v=1).
    */
   truncated?: boolean;
+}
+
+/** A single commit entry in the log list. */
+export interface DaemonGitLogEntry {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Unix timestamp in seconds. */
+  authorDate: number;
+  subject: string;
+  /** Ref decorations, e.g. `"HEAD -> main, origin/main, v1.2.0"`. */
+  refs?: string;
+  /** Parent SHAs (length > 1 ⇒ merge commit). */
+  parents: string[];
+}
+
+/** Response from `GET /workspace/git/log`. */
+export interface DaemonGitLog {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when git is not available for this workspace. */
+  available: boolean;
+  entries: DaemonGitLogEntry[];
+  hasMore: boolean;
+}
+
+/** Per-file numstat entry within a commit detail. */
+export interface DaemonGitCommitFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+/** Response from `GET /workspace/git/log/commit?sha=`. */
+export interface DaemonGitCommitDetail {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the commit was not found or git is unavailable. */
+  available: boolean;
+  sha?: string;
+  shortSha?: string;
+  authorName?: string;
+  authorEmail?: string;
+  authorDate?: number;
+  subject?: string;
+  body?: string;
+  refs?: string;
+  parents?: string[];
+  files?: DaemonGitCommitFileStat[];
+  filesCount?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  hiddenCount?: number;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */

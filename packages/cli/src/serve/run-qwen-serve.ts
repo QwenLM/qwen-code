@@ -2103,6 +2103,7 @@ async function runQwenServeImpl(
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,
     cwd: validateAndCanonicalizeWorkspace(workspace),
+    displayName: undefined as string | undefined,
     removable: false,
     registrationIds: [] as string[],
   }));
@@ -2169,6 +2170,7 @@ async function runQwenServeImpl(
       const stored = await workspaceRegistrationStore.read();
       for (const storedWorkspace of stored.workspaces) {
         const registrationId = workspaceRegistrationId(storedWorkspace);
+        const displayName = stored.displayNames?.[registrationId];
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
@@ -2185,6 +2187,7 @@ async function runQwenServeImpl(
         );
         if (existingInput) {
           existingInput.registrationIds.push(registrationId);
+          existingInput.displayName ??= displayName;
           continue;
         }
         const nested = workspaceInputs.some(
@@ -2211,6 +2214,7 @@ async function runQwenServeImpl(
         workspaceInputs.push({
           raw: storedWorkspace,
           cwd,
+          displayName,
           removable: true,
           registrationIds: [registrationId],
         });
@@ -2395,6 +2399,14 @@ async function runQwenServeImpl(
         `Invalid sessionIdleTimeoutMs: ${opts.sessionIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
       );
     }
+  }
+  if (opts.initializeTimeoutMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.initializeTimeoutMs)) {
+      throw new TypeError(
+        `Invalid initializeTimeoutMs: ${opts.initializeTimeoutMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
+    assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
@@ -3344,6 +3356,9 @@ async function runQwenServeImpl(
               channelIdleTimeoutMs: clampTimeoutMs(opts.channelIdleTimeoutMs),
             }
           : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
+          : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3477,6 +3492,9 @@ async function runQwenServeImpl(
       {
         workspaceId: daemonWorkspaceHash,
         workspaceCwd: boundWorkspace,
+        ...(workspaceInputs[0]?.displayName
+          ? { displayName: workspaceInputs[0].displayName }
+          : {}),
         primary: true,
         trusted: trustedWorkspace,
         removable: false,
@@ -3655,6 +3673,9 @@ async function runQwenServeImpl(
               channelIdleTimeoutMs: clampTimeoutMs(opts.channelIdleTimeoutMs),
             }
           : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
+          : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3773,6 +3794,9 @@ async function runQwenServeImpl(
       workspaceRuntimes.push({
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
+        ...(workspaceInput.displayName
+          ? { displayName: workspaceInput.displayName }
+          : {}),
         primary: false,
         trusted: secondaryTrusted,
         removable: workspaceInput.removable,
@@ -4024,6 +4048,9 @@ async function runQwenServeImpl(
             ? {
                 channelIdleTimeoutMs: clampTimeoutMs(opts.channelIdleTimeoutMs),
               }
+            : {}),
+          ...(opts.initializeTimeoutMs !== undefined
+            ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
