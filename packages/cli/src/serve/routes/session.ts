@@ -1481,7 +1481,15 @@ export function registerSessionRoutes(
       const virtualKey = parseVirtualSubagentSessionId(sessionId);
       if (virtualKey) {
         const route = `POST /session/:id/${action}`;
-        if (action !== 'load' || !virtualSubagentSessions) {
+        if (action !== 'load') {
+          res.status(400).json({
+            error: `Virtual subagent sessions do not support ${action}`,
+            code: 'unsupported_action',
+            sessionId,
+          });
+          return;
+        }
+        if (!virtualSubagentSessions) {
           res.status(404).json({
             error: `No session with id "${sessionId}"`,
             code: 'session_not_found',

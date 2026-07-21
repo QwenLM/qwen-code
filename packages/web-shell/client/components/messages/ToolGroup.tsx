@@ -1174,8 +1174,9 @@ export const ToolLine = memo(function ToolLine({
     if (subagentDetails) {
       return (
         <div className={styles.line}>
-          <div
-            className={`${styles.lineMain} ${styles.lineExpandable}`}
+          <button
+            type="button"
+            className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
             onClick={() => subagentDetails.onOpen(tool)}
           >
             <AgentIcon />
@@ -1194,7 +1195,7 @@ export const ToolLine = memo(function ToolLine({
               }}
             />
             <span className={styles.lineChevronRight} aria-hidden="true" />
-          </div>
+          </button>
         </div>
       );
     }

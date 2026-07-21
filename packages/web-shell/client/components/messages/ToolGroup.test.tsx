@@ -580,6 +580,9 @@ describe('tool row rendering', () => {
     mounted.push({ root, container });
 
     expect(container.textContent).not.toContain('large hidden result');
+    expect(container.querySelector('[class*="lineExpandable"]')?.tagName).toBe(
+      'BUTTON',
+    );
     act(() => {
       (
         container.querySelector('[class*="lineExpandable"]') as HTMLElement

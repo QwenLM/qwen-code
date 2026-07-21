@@ -1,9 +1,10 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../../i18n';
 import type { ACPToolCall } from '../../../adapters/types';
+import { SubagentDetailsProvider } from '../../../subagentDetailsContext';
 
 const { computeAgentsTimeline, ParallelAgentsGroup } = await import(
   './ParallelAgentsGroup'
@@ -144,6 +145,43 @@ describe('computeAgentsTimeline', () => {
 });
 
 describe('ParallelAgentsGroup timeline rendering', () => {
+  it('keeps nested agents inspectable without a details provider', () => {
+    const container = renderExpandedGroup([
+      agent({ callId: 'nested', subContent: 'nested agent output' }),
+    ]);
+    const row = container.querySelector('[class*="row"]') as HTMLButtonElement;
+
+    expect(container.textContent).not.toContain('nested agent output');
+    act(() => row.click());
+    expect(container.textContent).toContain('nested agent output');
+  });
+
+  it('opens nested agents through the details provider when available', () => {
+    const onOpen = vi.fn();
+    const nested = agent({ callId: 'nested' });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ParallelAgentsGroup agents={[nested]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+    act(() =>
+      (container.querySelector('[aria-expanded]') as HTMLElement).click(),
+    );
+    act(() =>
+      (container.querySelector('[class*="row"]') as HTMLElement).click(),
+    );
+
+    expect(onOpen).toHaveBeenCalledWith(nested);
+  });
+
   it('renders one bar per agent and a ruler when the span is comparable', () => {
     const container = renderExpandedGroup([
       agent({ callId: 'a1', startTime: 0, endTime: 24_000 }),
