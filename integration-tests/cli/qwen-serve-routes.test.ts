@@ -150,6 +150,11 @@ beforeAll(async () => {
                 'QWEN_SERVE_NO_PERSISTENT_REGISTRATION',
                 'QWEN_SERVE_CLIENT_MCP_OVER_WS',
                 'QWEN_SERVE_CDP_TUNNEL_OVER_WS',
+                // The daemon and its ACP child must not inherit the
+                // CI sandbox setting — sandboxed shell execution inside
+                // the child conflicts with the host-side session-writer
+                // lease bookkeeping (#7435).
+                'QWEN_SANDBOX',
               ].includes(k),
           ),
         ),

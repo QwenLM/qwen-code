@@ -159,7 +159,8 @@ beforeAll(async () => {
       env: {
         ...Object.fromEntries(
           Object.entries(process.env).filter(
-            ([key]) => !/^(https?|all)_proxy$/i.test(key),
+            ([key]) =>
+              !/^(https?|all)_proxy$/i.test(key) && key !== 'QWEN_SANDBOX',
           ),
         ),
         HOME: homeDir,
