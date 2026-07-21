@@ -24,7 +24,7 @@ export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
 export const FORK_AGENT = {
   name: FORK_SUBAGENT_TYPE,
   description:
-    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"`. Runs detached in the background; you are notified when it completes.',
+    'Fork yourself — inherits parent conversation context. Selected explicitly via `subagent_type: "fork"`. Runs detached in the background; you are notified when it completes.',
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',

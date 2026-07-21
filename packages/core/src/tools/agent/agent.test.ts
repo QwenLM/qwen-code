@@ -331,8 +331,8 @@ describe('AgentTool', () => {
       expect(nonInteractiveTool.description).toContain(
         'Never delegate understanding',
       );
-      // Forks are available headlessly too, so the live fork reference is
-      // present in non-interactive descriptions as well.
+      // Forks are now available in headless sessions too, so the fork
+      // inheritance guidance is present regardless of interactivity.
       expect(nonInteractiveTool.description).toContain(
         'forks inherit all or the selected recent window',
       );
