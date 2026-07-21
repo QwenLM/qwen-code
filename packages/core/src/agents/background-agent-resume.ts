@@ -1017,33 +1017,6 @@ export class BackgroundAgentResumeService {
         });
       }
 
-      const projectRoot = this.config.getProjectRoot();
-      cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
-        agentId: meta.agentId,
-        agentName: target.agentName,
-        agentColor: target.subagentConfig?.color ?? meta.agentColor,
-        sessionId: meta.parentSessionId,
-        cwd: projectRoot,
-        version: this.config.getCliVersion() || 'unknown',
-        gitBranch: getGitBranch(projectRoot),
-        initialUserPrompt: writerInitialPrompt,
-        appendToExisting: true,
-        initialParentUuid: recovery.lastStableUuid,
-      }).cleanup;
-
-      const nextResumeCount = (meta.resumeCount ?? 0) + 1;
-      patchAgentMeta(metaPath, {
-        status: 'running',
-        isBackgrounded: true,
-        lastUpdatedAt: new Date().toISOString(),
-        resolvedApprovalMode,
-        ...(resumeAccountingModel ? { model: resumeAccountingModel } : {}),
-        subagentName: target.agentName,
-        agentColor: target.subagentConfig?.color ?? meta.agentColor,
-        resumeCount: nextResumeCount,
-        lastError: undefined,
-      });
-
       const pendingMessages = [...(ownedEntry.pendingMessages ?? [])];
       const registration: AgentTaskRegistration = {
         ...ownedEntry,
@@ -1143,6 +1116,33 @@ export class BackgroundAgentResumeService {
       const cleanupApprovalBridge = shouldBubble
         ? registry.bridgeApprovalEvents(meta.agentId, bgEmitter)
         : undefined;
+
+      const projectRoot = this.config.getProjectRoot();
+      cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
+        agentId: meta.agentId,
+        agentName: target.agentName,
+        agentColor: target.subagentConfig?.color ?? meta.agentColor,
+        sessionId: meta.parentSessionId,
+        cwd: projectRoot,
+        version: this.config.getCliVersion() || 'unknown',
+        gitBranch: getGitBranch(projectRoot),
+        initialUserPrompt: writerInitialPrompt,
+        appendToExisting: true,
+        initialParentUuid: recovery.lastStableUuid,
+      }).cleanup;
+
+      const nextResumeCount = (meta.resumeCount ?? 0) + 1;
+      patchAgentMeta(metaPath, {
+        status: 'running',
+        isBackgrounded: true,
+        lastUpdatedAt: new Date().toISOString(),
+        resolvedApprovalMode,
+        ...(resumeAccountingModel ? { model: resumeAccountingModel } : {}),
+        subagentName: target.agentName,
+        agentColor: target.subagentConfig?.color ?? meta.agentColor,
+        resumeCount: nextResumeCount,
+        lastError: undefined,
+      });
 
       const runBody = async () => {
         try {

@@ -4334,13 +4334,14 @@ export class Config {
 
       this.skillManager?.stopWatching();
 
+      this.backgroundTaskRegistry.abortAll({ notify: false });
+      this.monitorRegistry.abortAll({ notify: false });
+      this.backgroundShellRegistry.abortAll();
+      await this.backgroundTaskRegistry.abortAllAndWait({ notify: false });
+
       if (this.toolRegistry) {
         await this.toolRegistry.stop();
       }
-
-      this.backgroundTaskRegistry.abortAll();
-      this.monitorRegistry.abortAll({ notify: false });
-      this.backgroundShellRegistry.abortAll();
 
       await this.cleanupArenaRuntime();
       await this.cleanupTeamRuntime();

@@ -2804,8 +2804,8 @@ export async function runAcpAgent(
     await fireSessionEndOnce(SessionEndReason.PromptInputExit);
     // Mirror the SIGTERM handler's pool drain on the IDE-initiated
     // normal close path to avoid leaking shared MCP entries.
-    await drainPoolBeforeExit('ide_close');
     await agentInstance?.disposeSessions();
+    await drainPoolBeforeExit('ide_close');
   } finally {
     process.off('SIGTERM', shutdownHandler);
     process.off('SIGINT', shutdownHandler);
@@ -2977,6 +2977,7 @@ interface PendingMcpAuthentication {
 
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
+  private readonly closingSessions: Map<string, Session> = new Map();
   private readonly activeSessionOperations = new Set<string>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
@@ -3267,18 +3268,27 @@ class QwenAgent implements Agent {
     }
   }
 
+  private quarantineStoredSession(sessionId: string, session: Session): void {
+    if (this.sessions.get(sessionId) === session) {
+      this.sessions.delete(sessionId);
+      this.closingSessions.set(sessionId, session);
+    }
+  }
+
   private async removeStoredSessionEntry(
     sessionId: string,
     session: Session,
     cleanupErrors: unknown[] = [],
     options: { shutdownConfig?: boolean } = {},
   ): Promise<void> {
-    if (this.sessions.get(sessionId) !== session) return;
-    try {
-      await session.dispose();
-    } catch (error) {
-      cleanupErrors.push(error);
+    if (
+      this.sessions.get(sessionId) !== session &&
+      this.closingSessions.get(sessionId) !== session
+    ) {
+      return;
     }
+    this.quarantineStoredSession(sessionId, session);
+    await session.dispose();
     if (options.shutdownConfig !== false) {
       try {
         await session.getConfig().shutdown({ shutdownTelemetry: false });
@@ -3301,7 +3311,12 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    this.sessions.delete(sessionId);
+    if (this.sessions.get(sessionId) === session) {
+      this.sessions.delete(sessionId);
+    }
+    if (this.closingSessions.get(sessionId) === session) {
+      this.closingSessions.delete(sessionId);
+    }
     if (cleanupErrors.length > 0) {
       debugLogger.warn(
         `Session ${sessionId} closed after ${cleanupErrors.length} cleanup failure(s): ${cleanupErrors
@@ -3421,6 +3436,13 @@ class QwenAgent implements Agent {
       waitForCloseGate?: boolean;
     },
   ): Promise<void> {
+    const closingSession = this.closingSessions.get(sessionId);
+    if (closingSession) {
+      await this.removeStoredSessionEntry(sessionId, closingSession, [], {
+        shutdownConfig: opts?.shutdownConfig,
+      });
+      return;
+    }
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
@@ -3540,6 +3562,11 @@ class QwenAgent implements Agent {
         this.discardStoredSessionIfCurrent(sessionId, session, {
           waitForCloseGate: true,
         }),
+      ),
+    );
+    await Promise.allSettled(
+      [...this.closingSessions.entries()].map(([sessionId, session]) =>
+        this.removeStoredSessionEntry(sessionId, session),
       ),
     );
     await Promise.allSettled(
@@ -3915,7 +3942,9 @@ class QwenAgent implements Agent {
         );
       } catch (error) {
         return this.cleanupAfterRequestFailure(error, async () => {
-          if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
+          if (
+            this.sessions.get(config.getSessionId())?.getConfig() !== config
+          ) {
             await this.cleanupUnstoredConfig(config);
           }
         });
@@ -4077,7 +4106,9 @@ class QwenAgent implements Agent {
         );
       } catch (error) {
         return this.cleanupAfterRequestFailure(error, async () => {
-          if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
+          if (
+            this.sessions.get(config.getSessionId())?.getConfig() !== config
+          ) {
             await this.cleanupUnstoredConfig(config);
           }
         });
@@ -10236,6 +10267,9 @@ class QwenAgent implements Agent {
       await geminiClient.initialize();
     }
 
+    if (this.closingSessions.has(sessionId)) {
+      await this.closeStoredSession(sessionId);
+    }
     if (this.sessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} is already active.`);
     }

@@ -9532,6 +9532,34 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     );
   });
 
+  it('waits for session disposal before draining the MCP pool on connection close', async () => {
+    await setupSessionMocks('session-shutdown-order');
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const liveSession = vi.mocked(Session).mock.results.at(-1)?.value as
+      | { dispose: ReturnType<typeof vi.fn> }
+      | undefined;
+    const mcpPool = vi.mocked(McpTransportPool).mock.results.at(-1)?.value as
+      | { drainAll: ReturnType<typeof vi.fn> }
+      | undefined;
+    let releaseDisposal!: () => void;
+    liveSession?.dispose.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDisposal = resolve;
+        }),
+    );
+
+    mockConnectionState.resolve();
+    await vi.waitFor(() => expect(liveSession?.dispose).toHaveBeenCalledOnce());
+    expect(mcpPool?.drainAll).not.toHaveBeenCalled();
+
+    releaseDisposal();
+    await agentPromise;
+    expect(mcpPool?.drainAll).toHaveBeenCalledOnce();
+  });
+
   it('rewindSession extension method rewinds the active session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -10887,7 +10915,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       requireFlush: false,
     });
     await vi.waitFor(() => expect(liveSession?.dispose).toHaveBeenCalledOnce());
-    expect(toolRegistry.stop).not.toHaveBeenCalled();
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
 
     releaseDispose();
     await expect(close).resolves.toEqual({
@@ -11070,6 +11098,66 @@ describe('QwenAgent extMethod renameSession routing', () => {
       liveSessionId,
     );
     expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('quarantines a session until a failed disposal succeeds on retry', async () => {
+    const recording = makeRecordingService();
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const liveSession = vi.mocked(Session).mock.results.at(-1)?.value as
+      | { dispose: ReturnType<typeof vi.fn> }
+      | undefined;
+    liveSession?.dispose.mockRejectedValueOnce(new Error('dispose failed'));
+    const mcpPool = vi.mocked(McpTransportPool).mock.results.at(-1)?.value as
+      | { releaseSession: ReturnType<typeof vi.fn> }
+      | undefined;
+    const unregisterCalls = vi.mocked(unregisterGoalHook).mock.calls.length;
+    const telemetryCalls = vi.mocked(uiTelemetryService.removeSession).mock
+      .calls.length;
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: false,
+      }),
+    ).rejects.toThrow('dispose failed');
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(vi.mocked(unregisterGoalHook).mock.calls).toHaveLength(
+      unregisterCalls,
+    );
+    expect(mcpPool?.releaseSession).not.toHaveBeenCalled();
+    expect(vi.mocked(uiTelemetryService.removeSession).mock.calls).toHaveLength(
+      telemetryCalls,
+    );
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).not.toContain(liveSessionId);
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: false,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+
+    expect(liveSession?.dispose).toHaveBeenCalledTimes(2);
+    expect(recording.close).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(unregisterGoalHook).toHaveBeenCalledWith(innerConfig, liveSessionId);
+    expect(mcpPool?.releaseSession).toHaveBeenCalledWith(liveSessionId);
+    expect(uiTelemetryService.removeSession).toHaveBeenCalledWith(
+      liveSessionId,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -12904,8 +12992,55 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('keeps the existing session when replacement preflight fails', async () => {
-    bindRestoreMocks({ sessionExists: true });
+  it('does not replace a quarantined session until disposal succeeds', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: [] },
+    });
+    const { agent, agentPromise } = await spawnAgent();
+
+    await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock;
+    firstSession?.dispose.mockRejectedValueOnce(new Error('dispose failed'));
+    const closeStoredSession = (
+      agent as unknown as {
+        closeStoredSession(sessionId: string): Promise<void>;
+      }
+    ).closeStoredSession.bind(agent);
+
+    await expect(closeStoredSession('persisted-1')).rejects.toThrow(
+      'dispose failed',
+    );
+    expect(lastSessionMock).toBe(firstSession);
+    expect(firstSession?.dispose).toHaveBeenCalledOnce();
+
+    await expect(
+      agent.loadSession({
+        cwd: '/tmp',
+        sessionId: 'persisted-1',
+        mcpServers: [],
+      }),
+    ).resolves.toMatchObject({
+      modes: expect.anything(),
+      models: expect.anything(),
+      configOptions: expect.anything(),
+    });
+    expect(firstSession?.dispose).toHaveBeenCalledTimes(2);
+    expect(lastSessionMock).not.toBe(firstSession);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('skips replacement preflight when load and resume reuse a live session', async () => {
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: { messages: [] },
+    });
     const { agent, agentPromise } = await spawnAgent();
 
     await agent.loadSession({
@@ -12914,29 +13049,33 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       mcpServers: [],
     });
     const existingSession = lastSessionMock;
+    const configLoadCalls = vi.mocked(loadCliConfig).mock.calls.length;
 
-    vi.mocked(loadCliConfig).mockRejectedValueOnce(
-      new Error('load replacement failed'),
-    );
     await expect(
       agent.loadSession({
         cwd: '/tmp',
         sessionId: 'persisted-1',
         mcpServers: [],
       }),
-    ).rejects.toThrow('load replacement failed');
+    ).resolves.toMatchObject({
+      modes: expect.anything(),
+      models: expect.anything(),
+      configOptions: expect.anything(),
+    });
 
-    vi.mocked(loadCliConfig).mockRejectedValueOnce(
-      new Error('resume replacement failed'),
-    );
     await expect(
       agent.unstable_resumeSession({
         cwd: '/tmp',
         sessionId: 'persisted-1',
         mcpServers: [],
       }),
-    ).rejects.toThrow('resume replacement failed');
+    ).resolves.toMatchObject({
+      modes: expect.anything(),
+      models: expect.anything(),
+      configOptions: expect.anything(),
+    });
 
+    expect(loadCliConfig).toHaveBeenCalledTimes(configLoadCalls);
     expect(existingSession?.dispose).not.toHaveBeenCalled();
     expect(lastSessionMock).toBe(existingSession);
 

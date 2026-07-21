@@ -535,6 +535,34 @@ describe('Server Config (config.ts)', () => {
       // In daemon mode this is what stops the map growing per session.
       expect(getSessionProjectDir(sessionId)).toBeUndefined();
     });
+
+    it('waits for background agents before stopping the tool registry', async () => {
+      const config = new Config(baseParams);
+      const stop = vi.fn().mockResolvedValue(undefined);
+      const internals = config as unknown as {
+        initialized: boolean;
+        toolRegistry: ToolRegistry;
+      };
+      internals.initialized = true;
+      internals.toolRegistry = { stop } as unknown as ToolRegistry;
+      const registry = config.getBackgroundTaskRegistry();
+      const abortAll = vi.spyOn(registry, 'abortAll');
+      let releaseAgent!: () => void;
+      registry.trackAgentExecution(
+        new Promise<void>((resolve) => {
+          releaseAgent = resolve;
+        }),
+      );
+      const shutdown = config.shutdown();
+      await vi.waitFor(() => {
+        expect(abortAll).toHaveBeenCalled();
+      });
+      expect(stop).not.toHaveBeenCalled();
+
+      releaseAgent();
+      await shutdown;
+      expect(stop).toHaveBeenCalledOnce();
+    });
   });
 
   describe('shell execution config', () => {

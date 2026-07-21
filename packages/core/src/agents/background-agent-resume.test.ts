@@ -3461,6 +3461,7 @@ describe('BackgroundAgentResumeService', () => {
       }) + '\n',
       'utf8',
     );
+    const transcriptBeforeRevive = fs.readFileSync(outputFile, 'utf8');
 
     registry.register({
       agentId,
@@ -3551,6 +3552,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(restoredMeta?.status).toBe('completed');
     expect(restoredMeta?.model).toBe('model-a');
     expect(restoredMeta?.persistedCliFlags?.model).toBe('model-a');
+    expect(fs.readFileSync(outputFile, 'utf8')).toBe(transcriptBeforeRevive);
     expect(dispose).toHaveBeenCalledOnce();
   });
 

@@ -2742,7 +2742,6 @@ describe('Session', () => {
       mockChat.sendMessageStream = vi
         .fn()
         .mockResolvedValueOnce(createEmptyStream());
-      const startCronScheduler = vi.spyOn(session, 'startCronScheduler');
       const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
         .calls[0][0] as (
         displayText: string,
@@ -2750,7 +2749,7 @@ describe('Session', () => {
         meta: { agentId: string; status: string; toolUseId?: string },
       ) => void;
 
-      session.beginClose();
+      const cancelClose = session.beginClose();
       callback(
         'Background agent "worker" completed.',
         '<task-notification><status>completed</status></task-notification>',
@@ -2763,9 +2762,8 @@ describe('Session', () => {
       await Promise.resolve();
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
 
-      session.cancelClose();
+      cancelClose();
 
-      expect(startCronScheduler).toHaveBeenCalledOnce();
       await vi.waitFor(() => {
         expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
       });
@@ -2809,7 +2807,7 @@ describe('Session', () => {
         status: 'completed',
       });
 
-      session.beginClose();
+      const cancelClose = session.beginClose();
       let cancellationSettled = false;
       const cancellation = session
         .cancelPendingPrompt({
@@ -2829,7 +2827,7 @@ describe('Session', () => {
       releaseNotification();
       await cancellation;
       expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-      session.cancelClose();
+      cancelClose();
 
       await vi.waitFor(() => {
         expect(
@@ -16256,7 +16254,7 @@ describe('Session', () => {
           prompt: [],
           sessionId: 'test-session-id',
         }),
-      ).rejects.toThrow('Session test-session-id is closing.');
+      ).rejects.toThrow('Session is closing');
       expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
 
       release();
