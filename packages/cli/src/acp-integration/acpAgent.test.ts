@@ -11633,11 +11633,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           loadSession,
         }) as unknown as InstanceType<typeof SessionService>,
     );
-    vi.mocked(Session).mockImplementation(() => {
+    vi.mocked(Session).mockImplementation((_sessionId, config) => {
       const releaseCloseGate = vi.fn();
       const sessionMock = {
         getId: vi.fn().mockReturnValue('persisted-1'),
-        getConfig: vi.fn().mockReturnValue(innerConfig),
+        getConfig: vi.fn().mockReturnValue(config),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi
           .fn()
@@ -12723,7 +12723,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('waits for a quarantined owner before creating a replacement', async () => {
+  it('fully closes a quarantined owner before initializing its replacement', async () => {
     const innerConfig = bindRestoreMocks({
       sessionExists: true,
       resumedConversation: { messages: [] },
@@ -12750,8 +12750,98 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     const mcpPool = vi.mocked(McpTransportPool).mock.results.at(-1)?.value as
       | { releaseSession: ReturnType<typeof vi.fn> }
       | undefined;
+    const replacementConfig = makeRestoreInnerConfig({
+      resumedConversation: { messages: [] },
+    });
+    vi.mocked(loadCliConfig).mockResolvedValueOnce(
+      replacementConfig as unknown as Config,
+    );
+    let releaseDisposal!: () => void;
+    firstSession.dispose.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDisposal = resolve;
+        }),
+    );
+    const replacement = agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    await vi.waitFor(() =>
+      expect(firstSession.dispose).toHaveBeenCalledTimes(2),
+    );
+    expect(loadCliConfig).toHaveBeenCalledOnce();
+    expect(replacementConfig.initialize).not.toHaveBeenCalled();
+    expect(Session).toHaveBeenCalledOnce();
+
     await expect(
-      agent.loadSession({
+      (
+        agent as unknown as {
+          extMethod(method: string, params: unknown): Promise<unknown>;
+        }
+      ).extMethod('qwen/control/session/close', {
+        sessionId: 'persisted-1',
+      }),
+    ).rejects.toMatchObject({
+      data: { errorKind: 'session_busy', sessionId: 'persisted-1' },
+    });
+
+    releaseDisposal();
+    await expect(replacement).resolves.toMatchObject({
+      modes: expect.anything(),
+      models: expect.anything(),
+      configOptions: expect.anything(),
+    });
+
+    expect(Session).toHaveBeenCalledTimes(2);
+    expect(lastSessionMock).not.toBe(firstSession);
+    expect(lastSessionMock?.getConfig()).toBe(replacementConfig);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledWith({
+      shutdownTelemetry: false,
+    });
+    expect(mcpPool?.releaseSession).toHaveBeenCalledWith('persisted-1');
+    expect(innerConfig.shutdown.mock.invocationCallOrder[0]).toBeLessThan(
+      replacementConfig.initialize.mock.invocationCallOrder[0]!,
+    );
+    expect(mcpPool?.releaseSession.mock.invocationCallOrder[0]).toBeLessThan(
+      replacementConfig.initialize.mock.invocationCallOrder[0]!,
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('closes a quarantined owner before unstable resume initializes its replacement', async () => {
+    const innerConfig = bindRestoreMocks({ sessionExists: true });
+    const { agent, agentPromise } = await spawnAgent();
+    await agent.unstable_resumeSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+    });
+    const firstSession = lastSessionMock!;
+    firstSession.dispose.mockRejectedValueOnce(new Error('dispose failed'));
+    const closeStoredSession = (
+      agent as unknown as {
+        closeStoredSession(sessionId: string): Promise<void>;
+      }
+    ).closeStoredSession.bind(agent);
+
+    await expect(closeStoredSession('persisted-1')).rejects.toThrow(
+      'dispose failed',
+    );
+    const mcpPool = vi.mocked(McpTransportPool).mock.results.at(-1)?.value as
+      | { releaseSession: ReturnType<typeof vi.fn> }
+      | undefined;
+    const replacementConfig = makeRestoreInnerConfig();
+    vi.mocked(loadCliConfig).mockResolvedValueOnce(
+      replacementConfig as unknown as Config,
+    );
+
+    await expect(
+      agent.unstable_resumeSession({
         cwd: '/tmp',
         sessionId: 'persisted-1',
         mcpServers: [],
@@ -12762,11 +12852,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       configOptions: expect.anything(),
     });
 
-    expect(firstSession.dispose).toHaveBeenCalledTimes(2);
-    expect(Session).toHaveBeenCalledTimes(2);
-    expect(lastSessionMock).not.toBe(firstSession);
-    expect(innerConfig.shutdown).not.toHaveBeenCalled();
-    expect(mcpPool?.releaseSession).not.toHaveBeenCalled();
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(mcpPool?.releaseSession).toHaveBeenCalledWith('persisted-1');
+    expect(innerConfig.shutdown.mock.invocationCallOrder[0]).toBeLessThan(
+      replacementConfig.initialize.mock.invocationCallOrder[0]!,
+    );
+    expect(mcpPool?.releaseSession.mock.invocationCallOrder[0]).toBeLessThan(
+      replacementConfig.initialize.mock.invocationCallOrder[0]!,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

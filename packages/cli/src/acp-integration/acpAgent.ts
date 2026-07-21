@@ -2978,6 +2978,7 @@ interface PendingMcpAuthentication {
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private readonly closingSessions: Map<string, Session> = new Map();
+  private readonly activeSessionOperations = new Set<string>();
   private workspaceMcpDiscoveryConfig: Config | undefined;
   private workspaceMcpDiscoveryPromise: Promise<void> | undefined;
   private workspaceMcpDiscoveryError: string | undefined;
@@ -3278,7 +3279,7 @@ class QwenAgent implements Agent {
     sessionId: string,
     session: Session,
     cleanupErrors: unknown[] = [],
-    options: { shutdownConfig?: boolean; preserveMcpLease?: boolean } = {},
+    options: { shutdownConfig?: boolean } = {},
   ): Promise<void> {
     if (
       this.sessions.get(sessionId) !== session &&
@@ -3288,7 +3289,7 @@ class QwenAgent implements Agent {
     }
     this.quarantineStoredSession(sessionId, session);
     await session.dispose();
-    if (options.shutdownConfig !== false && options.preserveMcpLease !== true) {
+    if (options.shutdownConfig !== false) {
       try {
         await session.getConfig().shutdown({ shutdownTelemetry: false });
       } catch (error) {
@@ -3300,12 +3301,10 @@ class QwenAgent implements Agent {
     } catch (error) {
       cleanupErrors.push(error);
     }
-    if (options.preserveMcpLease !== true) {
-      try {
-        this.mcpPool?.releaseSession(sessionId);
-      } catch (error) {
-        cleanupErrors.push(error);
-      }
+    try {
+      this.mcpPool?.releaseSession(sessionId);
+    } catch (error) {
+      cleanupErrors.push(error);
     }
     try {
       uiTelemetryService.removeSession(sessionId);
@@ -3435,22 +3434,18 @@ class QwenAgent implements Agent {
       drainTimeoutMs?: number;
       shutdownConfig?: boolean;
       waitForCloseGate?: boolean;
-      preserveMcpLease?: boolean;
     },
   ): Promise<void> {
     const closingSession = this.closingSessions.get(sessionId);
     if (closingSession) {
       await this.removeStoredSessionEntry(sessionId, closingSession, [], {
         shutdownConfig: opts?.shutdownConfig,
-        preserveMcpLease: opts?.preserveMcpLease,
       });
       return;
     }
     const session = this.sessions.get(sessionId);
     if (!session) {
-      if (opts?.preserveMcpLease !== true) {
-        this.mcpPool?.releaseSession(sessionId);
-      }
+      this.mcpPool?.releaseSession(sessionId);
       return;
     }
 
@@ -3514,7 +3509,6 @@ class QwenAgent implements Agent {
       if (closeError !== undefined) cleanupErrors.push(closeError);
       await this.removeStoredSessionEntry(sessionId, session, cleanupErrors, {
         shutdownConfig: opts?.shutdownConfig,
-        preserveMcpLease: opts?.preserveMcpLease,
       });
       removedFromStore = true;
     } finally {
@@ -3537,6 +3531,21 @@ class QwenAgent implements Agent {
     }
     await this.closeStoredSession(sessionId, opts);
   }
+
+  private acquireSessionOperation(sessionId: string): () => void {
+    if (this.activeSessionOperations.has(sessionId)) {
+      throw new RequestError(
+        -32000,
+        `Session operation already in progress: ${sessionId}`,
+        { errorKind: 'session_busy', sessionId },
+      );
+    }
+    this.activeSessionOperations.add(sessionId);
+    return () => {
+      this.activeSessionOperations.delete(sessionId);
+    };
+  }
+
   async disposeSessions(): Promise<void> {
     for (const generation of this.generationControllers.values()) {
       generation.controller.abort();
@@ -3887,134 +3896,149 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
-    // Adopt into the "latest loaded" cache only once the session is
-    // confirmed — a failed probe for a stale id must not repoint
-    // agent-level readers at this request's workspace.
-    this.settings = settings;
-
-    const config = await this.newSessionConfig(
-      params.cwd,
-      // `LoadSessionRequest.mcpServers` is required in today's ACP
-      // schema, but mirror `unstable_resumeSession` and tolerate a
-      // future loosening — `newSessionConfig` iterates the list, so
-      // a `null`/`undefined` would otherwise throw `TypeError`.
-      params.mcpServers ?? [],
-      settings,
+    const releaseSessionOperation = this.acquireSessionOperation(
       params.sessionId,
-      true,
     );
-    const sessionData = config.getResumedSessionData();
-    const bulkReplay = isBulkLoadReplayRequest(params);
-    const replayPageSize = bulkReplay
-      ? getLoadReplayPageSize(params)
-      : undefined;
-    let session: Session;
     try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      session = await this.createAndStoreSession(
-        config,
+      if (this.closingSessions.has(params.sessionId)) {
+        await this.closeStoredSession(params.sessionId);
+      }
+      // Adopt into the "latest loaded" cache only once the session is
+      // confirmed — a failed probe for a stale id must not repoint
+      // agent-level readers at this request's workspace.
+      this.settings = settings;
+
+      const config = await this.newSessionConfig(
+        params.cwd,
+        // `LoadSessionRequest.mcpServers` is required in today's ACP
+        // schema, but mirror `unstable_resumeSession` and tolerate a
+        // future loosening — `newSessionConfig` iterates the list, so
+        // a `null`/`undefined` would otherwise throw `TypeError`.
+        params.mcpServers ?? [],
         settings,
-        sessionData,
-        bulkReplay
-          ? { replayHistory: false, startPostReplayServices: false }
-          : {},
+        params.sessionId,
+        true,
       );
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
-      });
-    }
-    let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
-    if (bulkReplay) {
+      const sessionData = config.getResumedSessionData();
+      const bulkReplay = isBulkLoadReplayRequest(params);
+      const replayPageSize = bulkReplay
+        ? getLoadReplayPageSize(params)
+        : undefined;
+      let session: Session;
       try {
-        const records = sessionData?.conversation.messages;
-        let replayUpdates: SessionUpdate[] = [];
-        if (records) {
-          session.primeTurnFromHistory(records);
-          const replayPage = selectRecentHistoryRecords(
-            records,
-            replayPageSize,
-          );
-          const replayUsage = createReplayCumulativeUsage();
-          const replay = await collectHistoryReplayUpdates({
-            sessionId: params.sessionId,
-            config,
-            records: replayPage.records,
-            gaps: sessionData?.historyGaps,
-            cumulativeUsage: replayUsage,
-            // A resume: the goal restore runs right after this.
-            supersedeUnrestorableGoal: true,
-            logger: debugLogger,
-          });
-          replayUpdates = replay.updates;
-          copyCumulativeUsage(session.cumulativeUsage, replayUsage);
-          if (replay.replayError !== undefined) {
-            replayEnvelope = {
+        await this.ensureAuthenticated(config);
+        this.setupFileSystem(config);
+        session = await this.createAndStoreSession(
+          config,
+          settings,
+          sessionData,
+          bulkReplay
+            ? { replayHistory: false, startPostReplayServices: false }
+            : {},
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(error, async () => {
+          if (
+            this.sessions.get(config.getSessionId())?.getConfig() !== config
+          ) {
+            await this.cleanupUnstoredConfig(config);
+          }
+        });
+      }
+      let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
+      if (bulkReplay) {
+        try {
+          const records = sessionData?.conversation.messages;
+          let replayUpdates: SessionUpdate[] = [];
+          if (records) {
+            session.primeTurnFromHistory(records);
+            const replayPage = selectRecentHistoryRecords(
+              records,
+              replayPageSize,
+            );
+            const replayUsage = createReplayCumulativeUsage();
+            const replay = await collectHistoryReplayUpdates({
+              sessionId: params.sessionId,
+              config,
+              records: replayPage.records,
+              gaps: sessionData?.historyGaps,
+              cumulativeUsage: replayUsage,
+              // A resume: the goal restore runs right after this.
+              supersedeUnrestorableGoal: true,
+              logger: debugLogger,
+            });
+            replayUpdates = replay.updates;
+            copyCumulativeUsage(session.cumulativeUsage, replayUsage);
+            if (replay.replayError !== undefined) {
+              replayEnvelope = {
+                v: LOAD_REPLAY_VERSION,
+                updates: replayUpdates,
+                partial: true,
+                replayError: replay.replayError,
+                ...(replayPage.hasMore ? { hasMore: true } : {}),
+              };
+            }
+            replayEnvelope ??= {
               v: LOAD_REPLAY_VERSION,
               updates: replayUpdates,
-              partial: true,
-              replayError: replay.replayError,
               ...(replayPage.hasMore ? { hasMore: true } : {}),
             };
           }
           replayEnvelope ??= {
             v: LOAD_REPLAY_VERSION,
             updates: replayUpdates,
-            ...(replayPage.hasMore ? { hasMore: true } : {}),
           };
+          session.installRewriter();
+          session.startCronScheduler();
+        } catch (err) {
+          return this.cleanupAfterRequestFailure(err, async () => {
+            try {
+              await this.discardStoredSessionIfCurrent(
+                params.sessionId,
+                session,
+              );
+            } catch (cleanupError) {
+              await this.removeStoredSessionEntry(
+                params.sessionId,
+                session,
+                [cleanupError],
+                {
+                  shutdownConfig: false,
+                },
+              );
+              await this.cleanupUnstoredConfig(config);
+            }
+          });
         }
-        replayEnvelope ??= {
-          v: LOAD_REPLAY_VERSION,
-          updates: replayUpdates,
-        };
-        session.installRewriter();
-        session.startCronScheduler();
-      } catch (err) {
-        return this.cleanupAfterRequestFailure(err, async () => {
-          try {
-            await this.discardStoredSessionIfCurrent(params.sessionId, session);
-          } catch (cleanupError) {
-            await this.removeStoredSessionEntry(
-              params.sessionId,
-              session,
-              [cleanupError],
-              {
-                shutdownConfig: false,
-              },
-            );
-            await this.cleanupUnstoredConfig(config);
-          }
-        });
       }
+
+      await this.#restoreWorktreeOnResume(config, session);
+      this.#restoreGoalOnResume(config, session);
+
+      const modesData = this.buildModesData(config);
+      const availableModels = this.buildAvailableModels(config);
+      const configOptions = this.buildConfigOptions(config);
+
+      const response: LoadSessionResponse = {
+        modes: modesData,
+        models: availableModels,
+        configOptions,
+        ...(sessionData?.artifactSnapshot
+          ? { artifactSnapshot: sessionData.artifactSnapshot }
+          : {}),
+      } as LoadSessionResponse;
+      if (!replayEnvelope) {
+        return response;
+      }
+      return {
+        ...response,
+        _meta: {
+          [LOAD_REPLAY_META_KEY]: replayEnvelope,
+        },
+      };
+    } finally {
+      releaseSessionOperation();
     }
-
-    await this.#restoreWorktreeOnResume(config, session);
-    this.#restoreGoalOnResume(config, session);
-
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    const response: LoadSessionResponse = {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as LoadSessionResponse;
-    if (!replayEnvelope) {
-      return response;
-    }
-    return {
-      ...response,
-      _meta: {
-        [LOAD_REPLAY_META_KEY]: replayEnvelope,
-      },
-    };
   }
 
   async unstable_resumeSession(
@@ -4051,49 +4075,61 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
-    this.settings = settings;
-
-    const config = await this.newSessionConfig(
-      params.cwd,
-      params.mcpServers ?? [],
-      settings,
+    const releaseSessionOperation = this.acquireSessionOperation(
       params.sessionId,
-      true,
     );
-    let session: Session;
     try {
-      await this.ensureAuthenticated(config);
-      this.setupFileSystem(config);
-      session = await this.createAndStoreSession(
-        config,
+      if (this.closingSessions.has(params.sessionId)) {
+        await this.closeStoredSession(params.sessionId);
+      }
+      this.settings = settings;
+
+      const config = await this.newSessionConfig(
+        params.cwd,
+        params.mcpServers ?? [],
         settings,
-        config.getResumedSessionData(),
-        { replayHistory: false },
+        params.sessionId,
+        true,
       );
-    } catch (error) {
-      return this.cleanupAfterRequestFailure(error, async () => {
-        if (this.sessions.get(config.getSessionId())?.getConfig() !== config) {
-          await this.cleanupUnstoredConfig(config);
-        }
-      });
+      let session: Session;
+      try {
+        await this.ensureAuthenticated(config);
+        this.setupFileSystem(config);
+        session = await this.createAndStoreSession(
+          config,
+          settings,
+          config.getResumedSessionData(),
+          { replayHistory: false },
+        );
+      } catch (error) {
+        return this.cleanupAfterRequestFailure(error, async () => {
+          if (
+            this.sessions.get(config.getSessionId())?.getConfig() !== config
+          ) {
+            await this.cleanupUnstoredConfig(config);
+          }
+        });
+      }
+
+      await this.#restoreWorktreeOnResume(config, session);
+      this.#restoreGoalOnResume(config, session);
+
+      const modesData = this.buildModesData(config);
+      const availableModels = this.buildAvailableModels(config);
+      const configOptions = this.buildConfigOptions(config);
+
+      const sessionData = config.getResumedSessionData();
+      return {
+        modes: modesData,
+        models: availableModels,
+        configOptions,
+        ...(sessionData?.artifactSnapshot
+          ? { artifactSnapshot: sessionData.artifactSnapshot }
+          : {}),
+      } as ResumeSessionResponse;
+    } finally {
+      releaseSessionOperation();
     }
-
-    await this.#restoreWorktreeOnResume(config, session);
-    this.#restoreGoalOnResume(config, session);
-
-    const modesData = this.buildModesData(config);
-    const availableModels = this.buildAvailableModels(config);
-    const configOptions = this.buildConfigOptions(config);
-
-    const sessionData = config.getResumedSessionData();
-    return {
-      modes: modesData,
-      models: availableModels,
-      configOptions,
-      ...(sessionData?.artifactSnapshot
-        ? { artifactSnapshot: sessionData.artifactSnapshot }
-        : {}),
-    } as ResumeSessionResponse;
   }
 
   /**
@@ -7997,13 +8033,18 @@ class QwenAgent implements Agent {
             'Invalid session close drain timeout',
           );
         }
-        await this.closeStoredSession(sessionId, {
-          requireFlush: params['requireFlush'] === true,
-          ...(typeof rawDrainTimeoutMs === 'number'
-            ? { drainTimeoutMs: rawDrainTimeoutMs }
-            : {}),
-        });
-        return { sessionId, closed: true };
+        const releaseSessionOperation = this.acquireSessionOperation(sessionId);
+        try {
+          await this.closeStoredSession(sessionId, {
+            requireFlush: params['requireFlush'] === true,
+            ...(typeof rawDrainTimeoutMs === 'number'
+              ? { drainTimeoutMs: rawDrainTimeoutMs }
+              : {}),
+          });
+          return { sessionId, closed: true };
+        } finally {
+          releaseSessionOperation();
+        }
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
         const sessionId = params['sessionId'];
@@ -10209,15 +10250,8 @@ class QwenAgent implements Agent {
       await geminiClient.initialize();
     }
 
-    if (this.sessions.has(sessionId)) {
+    if (this.sessions.has(sessionId) || this.closingSessions.has(sessionId)) {
       throw new Error(`Session ${sessionId} is already active.`);
-    }
-    if (this.closingSessions.has(sessionId)) {
-      // The replacement Config may already have attached its MCP view under
-      // this same session ID. Stopping the old manager would detach that view.
-      await this.closeStoredSession(sessionId, {
-        preserveMcpLease: this.mcpPool !== undefined,
-      });
     }
 
     const session = new Session(sessionId, config, this.connection, settings);
