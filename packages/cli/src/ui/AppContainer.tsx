@@ -62,6 +62,7 @@ import {
   type SpeculationState,
   IDLE_SPECULATION,
   ApprovalMode,
+  AuthType,
   ConditionalRulesRegistry,
   MCPDiscoveryState,
   ToolConfirmationOutcome,
@@ -177,6 +178,7 @@ import { useBracketedPaste } from './hooks/useBracketedPaste.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { canToggleModel } from './can-toggle-model.js';
+import { resolveToggleTarget } from './resolve-toggle-model.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
@@ -1027,7 +1029,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // with it so the commit loop reads width and height consistently (both live).
   const availableTerminalHeightRef = useRef(0);
   const terminalWidthRef = useRef(0);
-  const previousModelRef = useRef<string | null>(null);
+  // Remembers the model to toggle back to, including its auth type so a
+  // cross-provider toggle can return to the original provider correctly.
+  const previousModelRef = useRef<{
+    modelId: string;
+    authType: AuthType;
+  } | null>(null);
   const isTogglingRef = useRef(false);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
@@ -3729,10 +3736,10 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('toggle triggered', {
           toggle: settings.merged.model?.toggleModel,
         });
-        const toggleModel = settings.merged.model!.toggleModel!;
+        const toggleSpec = settings.merged.model!.toggleModel!;
         const current = config.getModel();
-        const authType = config.getAuthType();
-        if (!authType) {
+        const currentAuthType = config.getAuthType();
+        if (!currentAuthType) {
           historyManager.addItem(
             {
               type: MessageType.ERROR,
@@ -3742,18 +3749,32 @@ export const AppContainer = (props: AppContainerProps) => {
           );
           return;
         }
-        if (current === toggleModel) {
+        // Resolve the *target* auth type for the toggle model. A cross-provider
+        // toggle must switch to the provider that owns the toggle model, not
+        // reuse the current auth type (which would fail the registry lookup or
+        // use the wrong credentials/endpoint).
+        const target = resolveToggleTarget(config, toggleSpec, currentAuthType);
+        const alreadyOnTarget =
+          current === target.modelId && currentAuthType === target.authType;
+        if (alreadyOnTarget) {
           if (previousModelRef.current) {
             const prevModel = previousModelRef.current;
             isTogglingRef.current = true;
             config
-              .switchModel(authType, prevModel)
+              .switchModel(
+                prevModel.authType,
+                prevModel.modelId,
+                prevModel.authType !== currentAuthType &&
+                  prevModel.authType === AuthType.QWEN_OAUTH
+                  ? { requireCachedCredentials: true }
+                  : undefined,
+              )
               .then(() => {
                 previousModelRef.current = null;
                 historyManager.addItem(
                   {
                     type: MessageType.INFO,
-                    text: 'Switched to ' + prevModel,
+                    text: 'Switched to ' + prevModel.modelId,
                   },
                   Date.now(),
                 );
@@ -3768,7 +3789,7 @@ export const AppContainer = (props: AppContainerProps) => {
                     type: MessageType.ERROR,
                     text:
                       '⚠ Failed to switch to ' +
-                      prevModel +
+                      prevModel.modelId +
                       ': ' +
                       (err instanceof Error ? err.message : String(err)),
                   },
@@ -3782,22 +3803,29 @@ export const AppContainer = (props: AppContainerProps) => {
             historyManager.addItem(
               {
                 type: MessageType.INFO,
-                text: 'Already on ' + toggleModel,
+                text: 'Already on ' + target.modelId,
               },
               Date.now(),
             );
           }
         } else {
-          const prevModel = current;
+          const prevModel = { modelId: current, authType: currentAuthType };
           isTogglingRef.current = true;
           config
-            .switchModel(authType, toggleModel)
+            .switchModel(
+              target.authType,
+              target.modelId,
+              target.authType !== currentAuthType &&
+                target.authType === AuthType.QWEN_OAUTH
+                ? { requireCachedCredentials: true }
+                : undefined,
+            )
             .then(() => {
               previousModelRef.current = prevModel;
               historyManager.addItem(
                 {
                   type: MessageType.INFO,
-                  text: 'Switched to ' + toggleModel,
+                  text: 'Switched to ' + target.modelId,
                 },
                 Date.now(),
               );
@@ -3810,7 +3838,7 @@ export const AppContainer = (props: AppContainerProps) => {
                   type: MessageType.ERROR,
                   text:
                     '⚠ Failed to switch to ' +
-                    toggleModel +
+                    target.modelId +
                     ': ' +
                     (err instanceof Error ? err.message : String(err)),
                 },

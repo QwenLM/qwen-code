@@ -76,10 +76,10 @@ export const KeyboardShortcuts: React.FC = () => {
   const showModelToggle = !!settings.merged.model?.toggleModel;
   const shortcuts = getShortcuts(showModelToggle);
 
-  // Column distribution sums must match shortcuts.length (14 with toggle, 13 without)
+  // Column distribution sums must match shortcuts.length (15 with toggle, 14 without)
   const columnSplits: Record<number, number[]> = showModelToggle
-    ? { 3: [5, 5, 4], 2: [7, 7], 1: [14] }
-    : { 3: [5, 4, 4], 2: [7, 6], 1: [13] };
+    ? { 3: [5, 5, 5], 2: [8, 7], 1: [15] }
+    : { 3: [5, 5, 4], 2: [7, 7], 1: [14] };
 
   // Helper to calculate width needed for a column layout
   const getShortcutWidth = (shortcut: Shortcut) =>

@@ -48,4 +48,20 @@ describe('KeyboardShortcuts', () => {
     expect(frame).toContain('ctrl+f');
     expect(frame).toContain('to toggle model');
   });
+
+  // Regression: column-split sums must equal shortcuts.length, otherwise the
+  // trailing shortcut ("for external editor") is sliced off and never rendered.
+  it('should render the last shortcut when toggleModel is not configured', () => {
+    const { lastFrame } = renderShortcuts();
+    const frame = lastFrame();
+    expect(frame).toContain('ctrl+x');
+    expect(frame).toContain('for external editor');
+  });
+
+  it('should render the last shortcut when toggleModel is configured', () => {
+    const { lastFrame } = renderShortcuts('model-b');
+    const frame = lastFrame();
+    expect(frame).toContain('ctrl+x');
+    expect(frame).toContain('for external editor');
+  });
 });
