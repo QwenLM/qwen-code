@@ -26,6 +26,7 @@ on:
         type: 'choice'
         options:
           - 'self-hosted'
+          - 'test'
           - 'hosted'
 
 concurrency:
@@ -60,7 +61,7 @@ jobs:
     # base-repo context), else a busy hosted pool delays it and blocks the
     # ECS-bound jobs. The kill-switch is read here, so flipping it reverts
     # everything to hosted.
-    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: '${{ (github.event_name == ''workflow_dispatch'' && github.event.inputs.linux_runner == ''test'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen-test"]'') || ((vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'')) }}'
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
@@ -115,7 +116,9 @@ jobs:
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
-            if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
+            if [[ "${DISPATCH_LINUX_RUNNER}" == "test" ]]; then
+              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen-test"]'
+            elif [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
               ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
             fi
           elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
