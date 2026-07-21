@@ -3348,9 +3348,10 @@ describe('qwen-autofix workflow', () => {
     );
 
     // MERGE SEAM: this branch's model-error route and the gate-crash route
-    // land in the SAME if-chain. A model death also leaves OUTCOME empty on a
-    // failed job, so GATE_CRASHED is true for it too — the model cause must
-    // win, or a provider blip sends the maintainer to the gate logs.
+    // land in the SAME if-chain. The model cause is tested first as
+    // defense-in-depth: today the gate converts a model death to an explicit
+    // outcome=failed (GATE_CRASHED is false), but if that ever changes, a
+    // provider blip must not be reported as a gate problem.
     const modelDown = run({
       OUTCOME: '',
       API_ERROR_DETAIL: 'terminated (cause: read ECONNRESET)',
@@ -3373,11 +3374,12 @@ describe('qwen-autofix workflow', () => {
     expect(authDown).toContain('this was the last automatic attempt');
     expect(authDown).toContain('check the autofix model key/access');
     // The model-error clause is deliberately independent of the crash signal:
-    // today a model death also fails the job, so GATE_CRASHED would catch it
-    // anyway — but if the agent step is ever made continue-on-error, or the
-    // gate declares a verdict after a recorded model error, GATE_CRASHED goes
-    // false and ONLY this clause keeps the feedback live instead of advancing
-    // the watermark past feedback nothing ever read.
+    // today run-agent writes failure.md on the API-death path and the gate
+    // converts that to an explicit outcome=failed (GATE_CRASHED is false), so
+    // this clause is the ONLY thing routing a model death to a retry. If the
+    // gate ever changes (continue-on-error, a verdict after a recorded model
+    // error), the if-chain ordering keeps the model cause from being reported
+    // as a gate problem.
     expect(
       run({
         OUTCOME: '',
@@ -4014,6 +4016,18 @@ describe('qwen-autofix workflow', () => {
     expect(authCapped).toContain('attempt 3/3');
     expect(authCapped).toContain('check the autofix model key/access');
     expect(authCapped).not.toContain('it will retry');
+    // MARK_ROUND counts ALL rounds in the window: if earlier rounds were
+    // consumed by real attempts, the first auth error can land past
+    // CAUSE_MAX. The displayed numerator must be clamped to CAUSE_MAX so
+    // the headline never reads "attempt 5/3".
+    const authOverflow = runHeadline({
+      ROUND: '4',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+      API_ERROR_KIND: 'auth',
+    });
+    expect(authOverflow).toContain('attempt 3/3');
+    expect(authOverflow).not.toContain('attempt 5/3');
+    expect(authOverflow).toContain('this was the last automatic attempt');
 
     // Behaviorally replay the pending-staleness jq filter against sample checks so
     // a flipped comparison (which would age out live checks → double-processing)
@@ -4293,6 +4307,18 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
         '[API Error: Qwen OAuth quota exceeded',
       );
+    });
+    // A terminal wrapped error must NOT be overridden by an earlier standalone
+    // OAuth quota string in the same tail: the last-error-wins rule applies.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Qwen OAuth quota exceeded (limit: 100/min)\\n');",
+        "process.stdout.write('[API Error: 400 Bad request]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
   });
 

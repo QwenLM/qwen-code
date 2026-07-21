@@ -134,6 +134,10 @@ function recoverableApiError(output) {
     const last = wrapped[wrapped.length - 1];
     const kind = classifyApiError(last);
     if (kind) return { error: last, kind };
+    // Terminal wrapped error — do NOT fall through to the OAuth fallback.
+    // The standalone quota form only appears when there is NO [API Error:]
+    // wrapper at all; matching it here would override a terminal verdict.
+    return { error: '', kind: '' };
   }
   // Some quota errors are never wrapped in [API Error: ...] (e.g. Qwen OAuth
   // quota returns early before formatting) - catch the known standalone form.
