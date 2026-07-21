@@ -1309,7 +1309,7 @@ export class DingtalkChannel extends ChannelBase {
 
       // Strip first @mention (the bot) from text, keep other @mentions intact.
       // Anchor to start-of-string so @ symbols inside URLs or emails
-      // (e.g. git@host:path) are not accidentally stripped (#7396).
+      // (e.g. git@host:path) are not accidentally stripped (#7402).
       if (isMentioned) {
         cleanText = cleanText.replace(/^\s*@[^\s\p{Cf}]+/u, '').trim();
       }

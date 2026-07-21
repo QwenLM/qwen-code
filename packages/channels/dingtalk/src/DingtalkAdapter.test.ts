@@ -1571,7 +1571,7 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
-  it('preserves @ in git URLs and emails when stripping bot mention (#7396)', () => {
+  it('preserves @ in git URLs and emails when stripping bot mention (#7402)', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
@@ -1613,7 +1613,7 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
-  it('does not strip @ in URLs when bot mention is absent from text (#7396)', () => {
+  it('does not strip @ in URLs when bot mention is absent from text (#7402)', () => {
     const channel = createChannel();
     const downstream = {
       data: JSON.stringify({
