@@ -539,7 +539,7 @@ function registerScheduledTaskCrudRoutes(
     res.status(201).json(toView(task));
   });
 
-  // ── Update (name / enabled / cron / prompt / recurring) ────────────
+  // ── Update (name / enabled / cron / prompt / recurring / delivery) ──
   app.patch(`${base}/:id`, mutate(), async (req, res) => {
     const target = resolveTarget(req, res);
     if (!target) return;
@@ -558,6 +558,7 @@ function registerScheduledTaskCrudRoutes(
     // would mean holding the lock to reject a bad request.
     const patch: Partial<DurableCronTask> = {};
     let clearName = false;
+    let clearDelivery = false;
 
     const removedPatchField = findRemovedTaskField(body);
     if (removedPatchField) {
@@ -625,7 +626,20 @@ function registerScheduledTaskCrudRoutes(
       }
       patch.enabled = body['enabled'];
     }
-    if (Object.keys(patch).length === 0 && !clearName) {
+    if ('delivery' in body) {
+      if (body['delivery'] === null) {
+        clearDelivery = true;
+      } else {
+        try {
+          patch.delivery = parseChannelDelivery(body['delivery']);
+        } catch (err) {
+          if (!isChannelDeliveryError(err)) throw err;
+          res.status(400).json({ error: err.message, code: err.code });
+          return;
+        }
+      }
+    }
+    if (Object.keys(patch).length === 0 && !clearName && !clearDelivery) {
       res.status(400).json({
         error: 'No updatable fields provided',
         code: 'empty_patch',
@@ -668,6 +682,7 @@ function registerScheduledTaskCrudRoutes(
         // `name: null/""` clears the field rather than storing an empty name,
         // so toView reports it as unnamed and isValidTask never sees a "".
         if (clearName) delete next.name;
+        if (clearDelivery) delete next.delivery;
         // Re-seat the task's schedule anchor to "now" whenever an edit would
         // otherwise let the scheduler retroactively fire an already-past slot.
         const justReEnabled =
@@ -773,6 +788,13 @@ function registerScheduledTaskCrudRoutes(
         recurring: updated.recurring,
         lastFiredAt: updated.lastFiredAt ?? undefined,
       });
+    }
+    if (clearDelivery && updated.sessionId) {
+      channelDeliveryAuthorizations?.revokeScheduledTask(
+        workspaceCwd,
+        updated.sessionId,
+        updated.id,
+      );
     }
     res.status(200).json(toView(updated));
   });

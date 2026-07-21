@@ -222,6 +222,136 @@ describe('scheduled-tasks routes', () => {
     expect(h.bridge.spawned).toEqual([]);
   });
 
+  it('updates delivery via PATCH (sole field)', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      },
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    const sid = created.body.sessionId as string;
+
+    const newDelivery = {
+      kind: 'channel',
+      target: { channelName: 'feishu', type: 'chat' as const, id: 'chat-2' },
+    };
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery: newDelivery });
+    expect(patch.status).toBe(200);
+    expect(patch.body.delivery).toEqual(newDelivery);
+
+    // The authorization store reflects the new target.
+    const firedAt = patch.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: newDelivery.target,
+      }),
+    ).toBe(true);
+  });
+
+  it('clears delivery via PATCH with null', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      },
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.id as string;
+    const sid = created.body.sessionId as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery: null });
+    expect(patch.status).toBe(200);
+    expect(patch.body.delivery).toBeUndefined();
+
+    // The authorization is revoked — a delivery against the old target fails.
+    const firedAt = patch.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      }),
+    ).toBe(false);
+  });
+
+  it('rejects malformed delivery via PATCH (400, task unchanged)', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'p',
+      delivery: {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+      },
+    });
+    const id = created.body.id as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery: { kind: 'channel', bad: true } });
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('channel_delivery_invalid');
+
+    // The stored delivery is untouched.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].delivery).toEqual({
+      kind: 'channel',
+      target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+    });
+  });
+
+  it('adds delivery to a task that had none via PATCH', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'p' });
+    expect(created.status).toBe(201);
+    expect(created.body.delivery).toBeUndefined();
+    const id = created.body.id as string;
+    const sid = created.body.sessionId as string;
+
+    const delivery = {
+      kind: 'channel',
+      target: { channelName: 'feishu', type: 'user' as const, id: 'user-9' },
+    };
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ delivery });
+    expect(patch.status).toBe(200);
+    expect(patch.body.delivery).toEqual(delivery);
+
+    // The authorization store now accepts deliveries for the new target.
+    const firedAt = patch.body.lastFiredAt + 60_000;
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: delivery.target,
+      }),
+    ).toBe(true);
+  });
+
   it('binds a created task to a freshly minted session', async () => {
     const res = await create({ cron: '0 9 * * *', prompt: 'p' });
     expect(res.status).toBe(201);
