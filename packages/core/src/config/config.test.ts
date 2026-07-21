@@ -4191,6 +4191,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should update the session working roots', async () => {
     const config = new Config(baseParams);
+    const disposeResidentAgents = vi.spyOn(
+      config.getBackgroundTaskRegistry(),
+      'disposeResidentAgents',
+    );
     const newDir = path.resolve('/path/to/other');
     const workspaceContext = config.getWorkspaceContext();
     const directoriesChanged = vi.fn();
@@ -4210,6 +4214,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getWorkspaceContext()).toBe(workspaceContext);
     expect(config.getWorkspaceContext().getDirectories()[0]).toBe(newDir);
     expect(config.storage.getProjectRoot()).toBe(newDir);
+    expect(disposeResidentAgents).toHaveBeenCalledOnce();
     expect(directoriesChanged).toHaveBeenCalled();
     expect(loadServerHierarchicalMemory).toHaveBeenCalledWith(
       newDir,
@@ -4413,6 +4418,10 @@ describe('Server Config (config.ts)', () => {
 
   it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
     const config = new Config({ ...baseParams, chatRecording: true });
+    const disposeResidentAgents = vi.spyOn(
+      config.getBackgroundTaskRegistry(),
+      'disposeResidentAgents',
+    );
     const oldDir = config.getTargetDir();
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
@@ -4466,6 +4475,7 @@ describe('Server Config (config.ts)', () => {
     expect(config.getTargetDir()).toBe(oldDir);
     expect(config.storage.getProjectRoot()).toBe(oldDir);
     expect(config.getTranscriptPath()).toBe(oldTranscriptPath);
+    expect(disposeResidentAgents).not.toHaveBeenCalled();
 
     chdirSpy.mockRestore();
     cwdSpy.mockRestore();

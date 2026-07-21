@@ -437,6 +437,16 @@ export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
  */
 export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
 
+/**
+ * Session-scoped handle for a background agent whose runtime remains alive
+ * after a completed turn. The handle is deliberately not part of AgentTask:
+ * task state is serializable, while the live runtime is process-local.
+ */
+export interface ResidentBackgroundAgent {
+  continue(message: string): boolean;
+  dispose(): void;
+}
+
 type MessageWaiter = () => void;
 
 export interface BackgroundTaskRegistryOptions {
@@ -477,6 +487,7 @@ const BACKGROUND_SLOT_WAIT_CANCELLED =
 
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
+  private readonly residentAgents = new Map<string, ResidentBackgroundAgent>();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
   private readonly waitQueue: BackgroundSlotWaiter[] = [];
   // Maps each outstanding slot reservation to the concrete model ID it was
@@ -639,6 +650,9 @@ export class BackgroundTaskRegistry {
         }
       }
     }
+    if (existing && existing !== registration) {
+      this.disposeResidentAgent(registration.agentId);
+    }
 
     // Mutate the registration in place to graduate it to an `AgentTask`.
     // Returning the same reference lets callers (e.g. the resume service)
@@ -692,6 +706,87 @@ export class BackgroundTaskRegistry {
     return entry;
   }
 
+  /**
+   * Restart a completed background task for another turn while preserving its
+   * resident runtime. Capacity is checked before mutating the entry so a
+   * rejected restart leaves the completed task intact.
+   */
+  restartCompletedAgent(
+    agentId: string,
+    abortController: AbortController,
+  ): AgentTask | undefined {
+    const entry = this.agents.get(agentId);
+    if (!entry || !entry.isBackgrounded || entry.status !== 'completed') {
+      return undefined;
+    }
+
+    this.assertCanStartBackgroundAgent(entry.model);
+
+    entry.status = 'running';
+    entry.startTime = Date.now();
+    entry.endTime = undefined;
+    entry.abortController = abortController;
+    entry.result = undefined;
+    entry.error = undefined;
+    entry.resumeBlockedReason = undefined;
+    entry.stats = undefined;
+    entry.recentActivities = [];
+    entry.pendingApprovals = [];
+    entry.persistedCancellationStatus = undefined;
+
+    return this.register(entry);
+  }
+
+  registerResidentAgent(
+    agentId: string,
+    resident: ResidentBackgroundAgent,
+  ): void {
+    const existing = this.residentAgents.get(agentId);
+    if (existing === resident) return;
+    if (existing) {
+      this.disposeResidentAgent(agentId, existing);
+    }
+    this.residentAgents.set(agentId, resident);
+  }
+
+  continueResidentAgent(agentId: string, message: string): boolean {
+    const entry = this.agents.get(agentId);
+    const resident = this.residentAgents.get(agentId);
+    if (!resident || entry?.status !== 'completed') return false;
+    return resident.continue(message);
+  }
+
+  unregisterResidentAgent(
+    agentId: string,
+    resident?: ResidentBackgroundAgent,
+  ): boolean {
+    const current = this.residentAgents.get(agentId);
+    if (!current || (resident && current !== resident)) return false;
+    return this.residentAgents.delete(agentId);
+  }
+
+  disposeResidentAgent(
+    agentId: string,
+    resident?: ResidentBackgroundAgent,
+  ): boolean {
+    const current = this.residentAgents.get(agentId);
+    if (!current || (resident && current !== resident)) return false;
+    this.residentAgents.delete(agentId);
+    try {
+      current.dispose();
+    } catch (error) {
+      debugLogger.error(
+        `Failed to dispose resident background agent ${agentId}:`,
+        error,
+      );
+    }
+    return true;
+  }
+
+  disposeResidentAgents(): void {
+    this.disposeAllResidentAgents();
+  }
+
   // Transition a still-running entry to 'completed' and emit the terminal
   // notification. No-op if the entry is already terminal *and* has been
   // notified — protects against duplicate emission when cancel aborts the
@@ -710,6 +805,7 @@ export class BackgroundTaskRegistry {
     if (entry.status !== 'running' && entry.status !== 'cancelled') return;
     if (entry.notified) return;
 
+    const wasCancelled = entry.status === 'cancelled';
     entry.status = 'completed';
     entry.endTime = Date.now();
     entry.result = result;
@@ -717,6 +813,9 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Background agent completed: ${agentId}`);
 
     this.rejectPendingApprovals(entry);
+    if (wasCancelled) {
+      this.disposeResidentAgent(agentId);
+    }
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.drainWaitQueue();
@@ -749,7 +848,7 @@ export class BackgroundTaskRegistry {
     // complete/fail/cancel/finalize ordering on purpose — those
     // keep the entry around (terminal state) so callbacks can inspect
     // it on re-read; unregister removes it outright.
-    this.agents.delete(agentId);
+    this.deleteAgent(agentId);
     this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
     this.drainWaitQueue();
@@ -771,6 +870,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -807,6 +907,7 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     entry.persistedCancellationStatus = persistedStatus;
+    this.disposeResidentAgent(agentId);
     if (entry.metaPath) {
       patchAgentMeta(entry.metaPath, {
         status: persistedStatus,
@@ -852,6 +953,7 @@ export class BackgroundTaskRegistry {
     debugLogger.info(`Abandoned paused background agent: ${agentId}`);
     this.rejectPendingApprovals(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -877,6 +979,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -896,6 +999,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -1215,6 +1319,7 @@ export class BackgroundTaskRegistry {
       | AgentTask
       | undefined;
     if (!firstEntry) {
+      this.disposeAllResidentAgents();
       this.rejectWaitQueue();
       return;
     }
@@ -1229,6 +1334,7 @@ export class BackgroundTaskRegistry {
     }
     this.rejectWaitQueue();
     this.agents.clear();
+    this.disposeAllResidentAgents();
     this.emitStatusChange(firstEntry);
   }
 
@@ -1367,6 +1473,7 @@ export class BackgroundTaskRegistry {
       // notification here to honour the one-notification-per-agent contract.
       this.finalizeCancellationIfPending(entry.agentId);
     }
+    this.disposeAllResidentAgents();
     debugLogger.info('Aborted all background agents');
   }
 
@@ -1506,8 +1613,19 @@ export class BackgroundTaskRegistry {
     while (evictable.length > MAX_RETAINED_TERMINAL_AGENTS) {
       const oldest = evictable.shift();
       if (oldest) {
-        this.agents.delete(oldest.agentId);
+        this.deleteAgent(oldest.agentId);
       }
+    }
+  }
+
+  private deleteAgent(agentId: string): boolean {
+    this.disposeResidentAgent(agentId);
+    return this.agents.delete(agentId);
+  }
+
+  private disposeAllResidentAgents(): void {
+    for (const agentId of Array.from(this.residentAgents.keys())) {
+      this.disposeResidentAgent(agentId);
     }
   }
 

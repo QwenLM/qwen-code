@@ -226,6 +226,8 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /** Rounds already completed in the same logical turn. */
+  roundOffset?: number;
   /**
    * Optional callback to drain external messages between model rounds.
    * Returned inputs are appended to the next model request as user-role
@@ -293,6 +295,7 @@ export interface ExecutionStats {
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
   readonly runtimeContext: Config;
@@ -805,7 +808,8 @@ export class AgentCore {
       const roundAbortController = createChildAbortController(abortController);
 
       try {
-        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
+        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
+        turnCounter += 1;
 
         const messageParams = {
           message: currentMessages[0]?.parts || [],
@@ -1000,8 +1004,9 @@ export class AgentCore {
           } as AgentRoundTextEvent);
         }
 
-        this.executionStats.rounds = turnCounter;
-        this.stats.setRounds(turnCounter);
+        const cumulativeRounds = (options?.roundOffset ?? 0) + turnCounter;
+        this.executionStats.rounds = cumulativeRounds;
+        this.stats.setRounds(cumulativeRounds);
 
         durationMin = (Date.now() - startTime) / (1000 * 60);
         if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
@@ -1834,6 +1839,22 @@ export class AgentCore {
   }
 
   // ─── Stats & Events ───────────────────────────────────────
+
+  resetExecutionStats(): void {
+    this.executionStats = {
+      startTimeMs: 0,
+      totalDurationMs: 0,
+      rounds: 0,
+      totalToolCalls: 0,
+      successfulToolCalls: 0,
+      failedToolCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    };
+    this.toolUsage.clear();
+    this.stats.reset();
+  }
 
   getEventEmitter(): AgentEventEmitter {
     return this.eventEmitter;
