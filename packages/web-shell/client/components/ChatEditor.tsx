@@ -131,6 +131,8 @@ interface ChatEditorProps {
   currentMode?: string;
   currentModel?: string;
   gitBranch?: string;
+  /** Whether the session is in a worktree (styles the git chip purple). */
+  gitWorktree?: boolean;
   /** Enriched working-tree summary (dirty / ahead-behind / stash / operation). */
   gitStatus?: DaemonWorkspaceGitStatus;
   /** Opens the working-tree Changes dialog; makes the git chip clickable. */
@@ -1145,6 +1147,7 @@ export const ChatEditor = memo(
       currentMode = 'default',
       currentModel = '',
       gitBranch,
+      gitWorktree,
       gitStatus,
       onOpenGitDiff,
       workspaceName,
@@ -2121,6 +2124,7 @@ export const ChatEditor = memo(
                       status={gitStatus}
                       compact={!showGitBranchLabel}
                       onOpenDiff={onOpenGitDiff}
+                      worktree={gitWorktree}
                     />
                   )}
                   {showModeAction && (
@@ -2446,6 +2450,7 @@ export const ChatEditor = memo(
                       branch={gitBranch}
                       status={gitStatus}
                       compact
+                      worktree={gitWorktree}
                     />
                   </span>
                   <span
@@ -2456,6 +2461,7 @@ export const ChatEditor = memo(
                       branch={gitBranch}
                       status={gitStatus}
                       compact={false}
+                      worktree={gitWorktree}
                     />
                   </span>
                 </>

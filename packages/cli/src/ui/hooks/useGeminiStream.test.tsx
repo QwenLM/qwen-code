@@ -96,6 +96,23 @@ const mockActiveGoalEquals = vi.hoisted(() => vi.fn());
 const mockSetActiveGoal = vi.hoisted(() => vi.fn());
 const mockClearActiveGoal = vi.hoisted(() => vi.fn());
 const mockRefreshMemoryAfterManagedWrite = vi.hoisted(() => vi.fn());
+const mockCleanupReviewWorktreeLeases = vi.hoisted(() => vi.fn());
+const mockUseDualOutput = vi.hoisted(() => vi.fn());
+const mockDualOutput = vi.hoisted(() => ({
+  startAssistantMessage: vi.fn(),
+  processEvent: vi.fn(),
+  finalizeAssistantMessage: vi.fn(),
+  emitToolResult: vi.fn(),
+  emitUserMessage: vi.fn(),
+}));
+
+vi.mock('../../services/review-worktree-lease.js', () => ({
+  cleanupReviewWorktreeLeases: mockCleanupReviewWorktreeLeases,
+}));
+
+vi.mock('../../dualOutput/DualOutputContext.js', () => ({
+  useDualOutput: mockUseDualOutput,
+}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actualCoreModule = (await importOriginal()) as any;
@@ -292,6 +309,8 @@ describe('useGeminiStream', () => {
       .mockReturnValue((async function* () {})());
     handleAtCommandSpy = vi.spyOn(atCommandProcessor, 'handleAtCommand');
     mockRunVisionBridge.mockReset();
+    mockCleanupReviewWorktreeLeases.mockReset();
+    mockUseDualOutput.mockReset().mockReturnValue(null);
   });
 
   afterEach(() => {
@@ -1464,6 +1483,257 @@ describe('useGeminiStream', () => {
     );
   });
 
+  it('processes queued /goal clear at the next sampling boundary', async () => {
+    const goalCommand = '/goal clear';
+    const restoreSteer = vi.fn();
+    mockHandleSlashCommand.mockResolvedValue({ type: 'handled' });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([goalCommand])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the goal');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      steerInput = await sendOptions.getSteerInput!(
+        new AbortController().signal,
+      );
+    });
+
+    expect(mockHandleSlashCommand).toHaveBeenCalledWith(goalCommand);
+    expect(steerInput).toBeUndefined();
+    expect(restoreSteer).not.toHaveBeenCalled();
+  });
+
+  it('steers with the replacement prompt from a queued /goal command', async () => {
+    const goalCommand = '/goal replace the active goal';
+    const replacementPrompt = [{ text: 'new goal instruction' }];
+    const restoreSteer = vi.fn();
+    mockHandleSlashCommand.mockResolvedValue({
+      type: 'submit_prompt',
+      content: replacementPrompt,
+    });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([goalCommand])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the goal');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      steerInput = await sendOptions.getSteerInput!(
+        new AbortController().signal,
+      );
+    });
+
+    expect(mockHandleSlashCommand).toHaveBeenCalledWith(goalCommand);
+    expect(steerInput?.parts).toEqual(replacementPrompt);
+    steerInput?.restore();
+    expect(restoreSteer).not.toHaveBeenCalled();
+  });
+
+  it('uses only the final prompt from queued goal replacements', async () => {
+    mockHandleSlashCommand
+      .mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [{ text: 'first goal instruction' }],
+      })
+      .mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [{ text: 'final goal instruction' }],
+      });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce([
+        '/goal first',
+        'plain before final goal',
+        '/goal final',
+        'plain after final goal',
+      ])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the goal');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+
+    const steerInput = await sendOptions.getSteerInput!(
+      new AbortController().signal,
+    );
+
+    expect(steerInput?.parts).toEqual([
+      { text: 'plain before final goal' },
+      { text: '\n\n' },
+      { text: 'final goal instruction' },
+      { text: '\n\n' },
+      { text: 'plain after final goal' },
+    ]);
+  });
+
+  it('drops a queued replacement prompt when a later goal command clears it', async () => {
+    const activeGoal = {
+      condition: 'first',
+      iterations: 0,
+      setAt: 123,
+      tokensAtStart: 0,
+      hookId: 'first-goal-hook',
+    };
+    mockGetActiveGoal
+      .mockReturnValueOnce(undefined)
+      .mockReturnValueOnce(activeGoal)
+      .mockReturnValueOnce(activeGoal)
+      .mockReturnValueOnce(undefined);
+    mockHandleSlashCommand
+      .mockResolvedValueOnce({
+        type: 'submit_prompt',
+        content: [{ text: 'first goal instruction' }],
+      })
+      .mockResolvedValueOnce({ type: 'handled' });
+    mockSendMessageStream.mockImplementation(() => (async function* () {})());
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce(['/goal first', '/goal clear'])
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the goal');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+
+    const steerInput = await sendOptions.getSteerInput!(
+      new AbortController().signal,
+    );
+
+    expect(steerInput).toBeUndefined();
+  });
+
   it('restores drained steer input when attachment resolution is cancelled', async () => {
     const steeredPrompt = 'inspect @/tmp/slow.png';
     const restoreSteer = vi.fn();
@@ -1524,6 +1794,81 @@ describe('useGeminiStream', () => {
       { type: MessageType.NOTIFICATION, text: steeredPrompt },
       expect.any(Number),
     );
+  });
+
+  it('restores later messages when cancellation races with @ resolution', async () => {
+    const messages = [
+      'inspect @/tmp/slow.png',
+      'keep this queued message',
+      '/goal clear',
+    ];
+    const restoreSteer = vi.fn();
+    let resolveAtCommand!: (
+      value: Awaited<
+        ReturnType<typeof atCommandProcessor.resolveAtCommandQuery>
+      >,
+    ) => void;
+    vi.spyOn(atCommandProcessor, 'resolveAtCommandQuery').mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveAtCommand = resolve;
+        }),
+    );
+    const drainSteer = vi
+      .fn<() => string[]>()
+      .mockReturnValueOnce(messages)
+      .mockReturnValue([]);
+
+    const { result } = renderHook(() =>
+      useGeminiStream(
+        new MockedGeminiClientClass(mockConfig),
+        [],
+        mockAddItem,
+        mockConfig,
+        true,
+        mockLoadedSettings,
+        mockOnDebugMessage,
+        mockHandleSlashCommand,
+        false,
+        () => 'vscode' as EditorType,
+        () => {},
+        () => Promise.resolve(),
+        false,
+        () => {},
+        () => {},
+        () => {},
+        () => {},
+        80,
+        24,
+        { current: drainSteer },
+        undefined,
+        undefined,
+        undefined,
+        { current: restoreSteer },
+      ),
+    );
+
+    await act(async () => {
+      await result.current.submitQuery('start the analysis');
+    });
+    const sendOptions = mockSendMessageStream.mock.calls[0][3] as {
+      getSteerInput?: (signal: AbortSignal) => Promise<SteerInput | undefined>;
+    };
+    const abort = new AbortController();
+    let steerInput: SteerInput | undefined;
+    await act(async () => {
+      const pending = sendOptions.getSteerInput!(abort.signal);
+      await vi.waitFor(() => expect(resolveAtCommand).toBeDefined());
+      resolveAtCommand({
+        processedQuery: [{ text: messages[0] }],
+        shouldProceed: true,
+      });
+      abort.abort();
+      steerInput = await pending;
+    });
+
+    expect(steerInput).toBeUndefined();
+    expect(restoreSteer).toHaveBeenCalledWith(messages);
   });
 
   it('resolves mid-turn @ image messages before submitting tool results', async () => {
@@ -7997,7 +8342,8 @@ describe('useGeminiStream', () => {
       );
     });
 
-    it('should commit thought to history on UserCancelled', async () => {
+    it('should commit thought and finalize dual output on UserCancelled', async () => {
+      mockUseDualOutput.mockReturnValue(mockDualOutput);
       mockSendMessageStream.mockReturnValue(
         (async function* () {
           yield {
@@ -8023,6 +8369,41 @@ describe('useGeminiStream', () => {
           }),
           expect.any(Number),
         ),
+      );
+      expect(mockDualOutput.startAssistantMessage).toHaveBeenCalledOnce();
+      expect(mockDualOutput.finalizeAssistantMessage).toHaveBeenCalledOnce();
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
+    });
+
+    it('should clean up review lease when the stream throws', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'partial',
+          };
+          throw new Error('stream blew up');
+        })(),
+      );
+
+      const { result } = renderTestHook();
+
+      await act(async () => {
+        await result.current.submitQuery('error query');
+      });
+
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
       );
     });
 
@@ -9100,6 +9481,13 @@ describe('useGeminiStream', () => {
           typeof result.current.loopDetectionConfirmationRequest?.onComplete,
         ).toBe('function');
       });
+      await waitFor(() =>
+        expect(mockCleanupReviewWorktreeLeases).toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          promptId: 'test-session-id########5',
+          repositoryRoot: '/test/dir',
+        }),
+      );
     });
 
     it('should disable loop detection and show message when user selects "disable"', async () => {

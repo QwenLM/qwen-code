@@ -67,6 +67,19 @@ export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
+/** @internal */
+export {
+  type PlanModeShellDecision,
+  evaluatePlanModeShellPolicy,
+  validatePlanModeShellContext,
+  decoratePlanModeShellConfirmation,
+  validatePlanModeShellApproval,
+} from './core/plan-mode-shell-policy.js';
+/** @internal */
+export {
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+  findPlanModeEntryBatchBoundaryIndex,
+} from './core/plan-mode-entry-policy.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/inlineMediaLimit.js';
@@ -239,6 +252,7 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
@@ -261,6 +275,7 @@ export type {
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
 export * from './utils/transcript-records.js';
+export * from './utils/conversation-branches.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
 // Named exports keep @internal test helpers out of the barrel.

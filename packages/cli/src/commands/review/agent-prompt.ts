@@ -1257,6 +1257,22 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
     recordPrompt(planPath, key, prompt);
     return `───── agent ${i + 1} of ${roster.length} — ${rosterLabel(req)} ─────\n\n${prompt}`;
   });
+  // Worktree-mode reviews: remind the orchestrator of the exact Agent tool
+  // parameters at the point of action. A run that passed both `working_dir`
+  // and `isolation: "worktree"` failed all 11 agents (mutually exclusive) and
+  // the review produced nothing. The roster is the last text the orchestrator
+  // reads before constructing agent calls — a reminder here is worth more than
+  // one 400 lines back in SKILL.md.
+  const wt = report.worktreePath;
+  const paramNote =
+    typeof wt === 'string' && wt
+      ? `\n\n**Agent tool parameters (worktree mode):** Set ` +
+        `\`working_dir: "${wt}"\` and ` +
+        `\`subagent_type: "general-purpose"\`, \`run_in_background: false\` ` +
+        `on EVERY agent call below. Do NOT set \`isolation\` — the worktree ` +
+        `already exists; \`isolation\` creates a new copy and is mutually ` +
+        `exclusive with \`working_dir\`.`
+      : '';
   writeStdoutLine(
     [
       `${roster.length} agents required. Launch one agent per block below, ` +
@@ -1268,7 +1284,8 @@ function runRoster(report: PlanReport, planPath: string, rules?: string): void {
         `either is missing, this output was truncated in transit: every prompt ` +
         `is also recorded on disk, so rebuild just the missing blocks with ` +
         `--chunk <id>, or --role <r> (--file <path> for an invariant agent), ` +
-        `plus the same --rules this call was given.`,
+        `plus the same --rules this call was given.` +
+        paramNote,
       ...blocks,
       `───── end of roster — ${roster.length} agents ─────`,
     ].join('\n\n'),

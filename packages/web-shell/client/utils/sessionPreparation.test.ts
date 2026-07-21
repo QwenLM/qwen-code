@@ -133,7 +133,7 @@ describe('createAndAttachSessionForPrompt', () => {
         modeId: 'yolo',
         warn,
       }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({});
 
     expect(order).toEqual(['create', 'attach', 'model']);
     expect(warn).toHaveBeenCalledWith(

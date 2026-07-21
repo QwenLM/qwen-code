@@ -87,7 +87,18 @@ import {
   isAutoEditApproved,
 } from './permissionFlow.js';
 import {
+  decoratePlanModeShellConfirmation,
+  evaluatePlanModeShellPolicy,
+  validatePlanModeShellApproval,
+  validatePlanModeShellContext,
+} from './plan-mode-shell-policy.js';
+import {
+  findPlanModeEntryBatchBoundaryIndex,
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+} from './plan-mode-entry-policy.js';
+import {
   applyAutoModeDecision,
+  decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
   shouldClassifyAllShellForAutoMode,
@@ -178,14 +189,14 @@ function dedupeRequestsByCallId(
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
-// Tools that bound their own output and must bypass the persistence gate.
-// read_file pages/truncates itself; read_mcp_resource caps text in
-// formatMcpResourceContents and sets maxOutputChars=Infinity — but this gate
-// runs first, so without the exemption a 28k–100k resource is spilled to a
-// stub before that self-cap takes effect and the model never sees the body.
+// Tools whose output must bypass the persistence gate. read_file pages itself,
+// and read_mcp_resource caps text in formatMcpResourceContents. enter_plan_mode
+// returns lifecycle policy that must remain inline. This gate runs before
+// per-tool limits, so each requires an explicit exemption here.
 const GATE_EXEMPT_TOOLS = new Set<string>([
   ToolNames.READ_FILE,
   ToolNames.READ_MCP_RESOURCE,
+  ToolNames.ENTER_PLAN_MODE,
 ]);
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
@@ -2080,6 +2091,9 @@ export class CoreToolScheduler {
       const requestsToProcess = dedupeRequestsByCallId(
         Array.isArray(request) ? request : [request],
       );
+      const planModeEntryBoundaryIndex = findPlanModeEntryBatchBoundaryIndex(
+        requestsToProcess.map((item) => canonicalToolName(item.name)),
+      );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
       // "<toolName>:<errorMessage>"; retain counters only for tools actually
@@ -2099,7 +2113,44 @@ export class CoreToolScheduler {
       }
 
       const newToolCalls: ToolCall[] = [];
-      for (const reqInfo of requestsToProcess) {
+      const retryErrorsRecordedInBatch = new Map<string, number>();
+      const recordBatchRetryableToolError = (
+        toolName: string,
+        errorMessage: string,
+      ): number => {
+        const key = `${toolName}:${errorMessage}`;
+        const existingCount = retryErrorsRecordedInBatch.get(key);
+        if (existingCount !== undefined) {
+          for (const trackedKey of this.validationRetryCounts.keys()) {
+            if (trackedKey.startsWith(`${toolName}:`)) {
+              this.validationRetryCounts.delete(trackedKey);
+            }
+          }
+          this.validationRetryCounts.set(key, existingCount);
+          return existingCount;
+        }
+        const count = this.recordRetryableToolError(toolName, errorMessage);
+        retryErrorsRecordedInBatch.set(key, count);
+        return count;
+      };
+      for (const [requestIndex, reqInfo] of requestsToProcess.entries()) {
+        if (
+          planModeEntryBoundaryIndex !== undefined &&
+          requestIndex !== planModeEntryBoundaryIndex
+        ) {
+          newToolCalls.push({
+            status: 'error',
+            request: reqInfo,
+            response: createErrorResponse(
+              reqInfo,
+              new Error(PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE),
+              ToolErrorType.EXECUTION_DENIED,
+            ),
+            durationMs: 0,
+          });
+          continue;
+        }
+
         const canonicalName = canonicalToolName(reqInfo.name);
 
         // Check if the tool is excluded due to permissions/environment restrictions
@@ -2172,7 +2223,7 @@ export class CoreToolScheduler {
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
         if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const count = this.recordRetryableToolError(
+          const count = recordBatchRetryableToolError(
             reqInfo.name,
             TRUNCATION_EDIT_REJECTION,
           );
@@ -2211,7 +2262,7 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const count = this.recordRetryableToolError(
+          const count = recordBatchRetryableToolError(
             reqInfo.name,
             invocationOrError.message,
           );
@@ -2315,7 +2366,7 @@ export class CoreToolScheduler {
           // =================================================================
 
           // ---- L3→L4: Shared permission flow ----
-          const toolParams = invocation.params as Record<string, unknown>;
+          let toolParams = invocation.params as Record<string, unknown>;
           const flowResult = await evaluatePermissionFlow(
             this.config,
             invocation,
@@ -2334,6 +2385,10 @@ export class CoreToolScheduler {
           // ---- L5: Final decision based on permission + ApprovalMode ----
           const approvalMode = this.config.getApprovalMode();
           const isPlanMode = approvalMode === ApprovalMode.PLAN;
+          const isPlanShellCall =
+            isPlanMode &&
+            (canonicalName === ToolNames.SHELL ||
+              canonicalName === ToolNames.MONITOR);
           const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
           const isEnterPlanModeTool =
             canonicalName === ToolNames.ENTER_PLAN_MODE;
@@ -2399,7 +2454,96 @@ export class CoreToolScheduler {
             continue;
           }
 
-          if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
+          if (finalPermission === 'deny') {
+            // Hard deny: security violation or PM explicit deny
+            this.setStatusInternal(
+              reqInfo.callId,
+              'error',
+              createErrorResponse(
+                reqInfo,
+                new Error(denyMessage ?? `Tool "${reqInfo.name}" is denied.`),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_PERMISSION_DENIED,
+              TOOL_SPAN_STATUS_PERMISSION_DENIED,
+            );
+            this.finalizeToolSpan(reqInfo.callId);
+            continue;
+          }
+
+          let planShellAmbientWorkingDirectory: string | undefined;
+          if (isPlanShellCall) {
+            const directory = toolParams['directory'];
+            planShellAmbientWorkingDirectory =
+              typeof directory === 'string' && directory.length > 0
+                ? undefined
+                : this.config.getTargetDir();
+            invocation.params = {
+              ...structuredClone(invocation.params),
+              directory:
+                typeof directory === 'string' && directory.length > 0
+                  ? directory
+                  : planShellAmbientWorkingDirectory,
+            };
+            toolParams = invocation.params as Record<string, unknown>;
+          }
+
+          const planShellDecision = isPlanShellCall
+            ? await evaluatePlanModeShellPolicy({
+                config: this.config,
+                toolName: canonicalName,
+                requestArgs: reqInfo.args,
+                invocationParams: toolParams,
+                permissionContext: pmCtx,
+                ambientWorkingDirectory: planShellAmbientWorkingDirectory,
+                signal,
+              })
+            : ({ classification: 'not-applicable' } as const);
+          const rejectPlanShell = (message: string) => {
+            this.setStatusInternal(reqInfo.callId, 'error', {
+              ...createErrorResponse(
+                reqInfo,
+                new Error(message),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+              resultDisplay: message,
+            });
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+            );
+            this.finalizeToolSpan(reqInfo.callId);
+          };
+
+          if (planShellDecision.classification !== 'not-applicable') {
+            const initialPlanShellError = await validatePlanModeShellContext({
+              config: this.config,
+              decision: planShellDecision,
+              requestArgs: reqInfo.args,
+              invocationParams: invocation.params as Record<string, unknown>,
+              signal,
+            });
+            if (initialPlanShellError) {
+              rejectPlanShell(initialPlanShellError);
+              continue;
+            }
+          }
+          if (planShellDecision.classification === 'write') {
+            rejectPlanShell(planShellDecision.writeBlockMessage);
+            continue;
+          }
+          const planShellRequiresConfirmation =
+            planShellDecision.classification === 'unknown';
+
+          if (
+            finalPermission === 'allow' &&
+            !forceAutoReviewForAllow &&
+            !planShellRequiresConfirmation
+          ) {
             // Auto-approve: tool is inherently safe (read-only) or PM allows.
             // In AUTO mode, also reset denialTracking so an L4 allow-rule
             // match counts as a successful call and clears any in-flight
@@ -2422,31 +2566,12 @@ export class CoreToolScheduler {
             continue;
           }
 
-          if (finalPermission === 'deny') {
-            // Hard deny: security violation or PM explicit deny
-            this.setStatusInternal(
-              reqInfo.callId,
-              'error',
-              createErrorResponse(
-                reqInfo,
-                new Error(denyMessage ?? `Tool "${reqInfo.name}" is denied.`),
-                ToolErrorType.EXECUTION_DENIED,
-              ),
-            );
-            setToolSpanFailure(
-              toolSpan,
-              TOOL_FAILURE_KIND_PERMISSION_DENIED,
-              TOOL_SPAN_STATUS_PERMISSION_DENIED,
-            );
-            this.finalizeToolSpan(reqInfo.callId);
-            continue;
-          }
-
           // ── L5: AUTO mode three-layer filter ──────────────────────────
           // Fast-paths run BEFORE the fallback check so safe tools (Read,
           // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
           // fallback state — otherwise every trivially safe tool would
           // force manual approval until the user toggles modes.
+          let autoModeFallbackMessage: string | undefined;
           if (
             !requiresUserInteraction &&
             shouldRunAutoModeForCall(approvalMode, canonicalName)
@@ -2526,11 +2651,14 @@ export class CoreToolScheduler {
               case 'fallback':
                 // Drop through to the manual-approval flow below. The
                 // pending dialog tells the user what's being asked;
-                // operators see the cause in the debug log (only when
-                // fallback was specifically armed by denialTracking —
-                // a pmForcedAsk fallback isn't an audit-worthy event).
-                if (isDenialFallbackReason(outcome.reason)) {
+                // operators see recovery fallbacks in the debug log. A
+                // pmForcedAsk fallback isn't an audit-worthy event.
+                if (
+                  isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable'
+                ) {
                   this.autoModeFallbackCallIds.add(reqInfo.callId);
+                  autoModeFallbackMessage = outcome.message;
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
@@ -2554,7 +2682,7 @@ export class CoreToolScheduler {
 
           if (
             !needsConfirmation(
-              confirmationPermission,
+              planShellRequiresConfirmation ? 'ask' : confirmationPermission,
               approvalMode,
               canonicalName,
               requiresUserInteraction,
@@ -2569,10 +2697,49 @@ export class CoreToolScheduler {
             confirmationDetails =
               await invocation.getConfirmationDetails(signal);
 
+            if (autoModeFallbackMessage) {
+              confirmationDetails = decorateClassifierUnavailableConfirmation(
+                confirmationDetails,
+                autoModeFallbackMessage,
+              );
+            }
+
+            if (planShellDecision.classification !== 'not-applicable') {
+              const preDisplayPlanShellError =
+                await validatePlanModeShellContext({
+                  config: this.config,
+                  decision: planShellDecision,
+                  requestArgs: reqInfo.args,
+                  invocationParams: invocation.params as Record<
+                    string,
+                    unknown
+                  >,
+                  signal,
+                });
+              if (preDisplayPlanShellError) {
+                rejectPlanShell(preDisplayPlanShellError);
+                continue;
+              }
+            }
+
+            try {
+              confirmationDetails = decoratePlanModeShellConfirmation(
+                planShellDecision,
+                confirmationDetails,
+              );
+            } catch {
+              if (planShellDecision.classification === 'unknown') {
+                rejectPlanShell(planShellDecision.noApprovalMessage);
+                continue;
+              }
+              throw new Error('Unable to prepare shell confirmation.');
+            }
+
             // ── Centralised rule injection ──────────────────────────────────
             injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
 
             if (
+              planShellDecision.classification === 'not-applicable' &&
               isPlanModeBlocked(
                 isPlanMode,
                 isExitPlanModeTool,
@@ -2635,7 +2802,14 @@ export class CoreToolScheduler {
               this.config.getInputFormat() !== InputFormat.STREAM_JSON;
 
             if (isNonInteractiveDeny) {
-              const errorMessage = `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+              const errorMessage =
+                planShellDecision.classification === 'unknown'
+                  ? planShellDecision.noApprovalMessage
+                  : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+              if (planShellDecision.classification === 'unknown') {
+                rejectPlanShell(errorMessage);
+                continue;
+              }
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',
@@ -2669,6 +2843,8 @@ export class CoreToolScheduler {
                 canonicalName,
                 (reqInfo.args as Record<string, unknown>) || {},
                 permissionMode,
+                undefined,
+                signal,
               );
 
               if (
@@ -2676,6 +2852,44 @@ export class CoreToolScheduler {
                 (!hookResult.shouldAllow || !requiresUserInteraction)
               ) {
                 if (hookResult.shouldAllow) {
+                  if (planShellDecision.classification !== 'not-applicable') {
+                    const approval = await validatePlanModeShellApproval({
+                      config: this.config,
+                      decision: planShellDecision,
+                      requestArgs: reqInfo.args,
+                      invocationParams: invocation.params as Record<
+                        string,
+                        unknown
+                      >,
+                      signal,
+                      outcome: ToolConfirmationOutcome.ProceedOnce,
+                      payload: hookResult.updatedInput
+                        ? { updatedInput: hookResult.updatedInput }
+                        : undefined,
+                    });
+                    if (approval.outcome === ToolConfirmationOutcome.Cancel) {
+                      await confirmationDetails.onConfirm(
+                        approval.outcome,
+                        approval.payload,
+                      );
+                      rejectPlanShell(
+                        approval.payload?.cancelMessage ??
+                          planShellDecision.noApprovalMessage,
+                      );
+                      continue;
+                    }
+                    await confirmationDetails.onConfirm(
+                      approval.outcome,
+                      approval.payload,
+                    );
+                    this.recordAutoModeFallbackResolution(
+                      reqInfo.callId,
+                      approval.outcome,
+                    );
+                    this.setToolCallOutcome(reqInfo.callId, approval.outcome);
+                    this.setStatusInternal(reqInfo.callId, 'scheduled');
+                    continue;
+                  }
                   // Hook granted permission - apply updated input if provided and proceed
                   if (
                     hookResult.updatedInput &&
@@ -2741,7 +2955,14 @@ export class CoreToolScheduler {
             // Background agents can't show interactive prompts.
             // Auto-deny after hooks have had a chance to decide.
             if (this.config.getShouldAvoidPermissionPrompts?.()) {
-              const errorMessage = `Tool "${reqInfo.name}" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
+              const errorMessage =
+                planShellDecision.classification === 'unknown'
+                  ? planShellDecision.noApprovalMessage
+                  : `Tool "${reqInfo.name}" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
+              if (planShellDecision.classification === 'unknown') {
+                rejectPlanShell(errorMessage);
+                continue;
+              }
               this.setStatusInternal(
                 reqInfo.callId,
                 'error',
@@ -2780,14 +3001,38 @@ export class CoreToolScheduler {
               continue;
             }
 
+            if (planShellDecision.classification !== 'not-applicable') {
+              const finalPreDisplayPlanShellError =
+                await validatePlanModeShellContext({
+                  config: this.config,
+                  decision: planShellDecision,
+                  requestArgs: reqInfo.args,
+                  invocationParams: invocation.params as Record<
+                    string,
+                    unknown
+                  >,
+                  signal,
+                });
+              if (finalPreDisplayPlanShellError) {
+                rejectPlanShell(finalPreDisplayPlanShellError);
+                continue;
+              }
+            }
+
             // Allow IDE to resolve confirmation
-            this.openIdeDiffIfEnabled(
-              confirmationDetails,
-              reqInfo.callId,
-              signal,
-            );
+            if (
+              confirmationDetails.type !== 'edit' ||
+              !confirmationDetails.skipIdeDiff
+            ) {
+              this.openIdeDiffIfEnabled(
+                confirmationDetails,
+                reqInfo.callId,
+                signal,
+              );
+            }
 
             const originalOnConfirm = confirmationDetails.onConfirm;
+            let planShellResponseClaimed = false;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
               // When PM has an explicit 'ask' rule, 'always allow' would be
@@ -2796,17 +3041,48 @@ export class CoreToolScheduler {
               ...(pmForcedAsk || requiresUserInteraction
                 ? { hideAlwaysAllow: true }
                 : {}),
-              onConfirm: (
+              onConfirm: async (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
-              ) =>
-                this.handleConfirmationResponse(
+              ) => {
+                if (planShellDecision.classification !== 'not-applicable') {
+                  if (planShellResponseClaimed) return;
+                  planShellResponseClaimed = true;
+                  const currentCall = this.toolCalls.find(
+                    (call) =>
+                      call.request.callId === reqInfo.callId &&
+                      call.status === 'awaiting_approval',
+                  ) as WaitingToolCall | undefined;
+                  if (!currentCall) return;
+                  const approval = await validatePlanModeShellApproval({
+                    config: this.config,
+                    decision: planShellDecision,
+                    requestArgs: currentCall.request.args,
+                    invocationParams: currentCall.invocation.params as Record<
+                      string,
+                      unknown
+                    >,
+                    signal,
+                    outcome,
+                    payload,
+                  });
+                  await this.handleConfirmationResponse(
+                    reqInfo.callId,
+                    originalOnConfirm,
+                    approval.outcome,
+                    signal,
+                    approval.payload,
+                  );
+                  return;
+                }
+                await this.handleConfirmationResponse(
                   reqInfo.callId,
                   originalOnConfirm,
                   outcome,
                   signal,
                   payload,
-                ),
+                );
+              },
             };
             this.setStatusInternal(
               reqInfo.callId,
@@ -3021,7 +3297,17 @@ export class CoreToolScheduler {
     signal: AbortSignal,
     payload?: ToolConfirmationPayload,
   ): Promise<void> {
-    await originalOnConfirm(outcome, payload);
+    const shouldSwitchToDefault =
+      outcome === ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault;
+    const normalizedOutcome = shouldSwitchToDefault
+      ? ToolConfirmationOutcome.ProceedOnce
+      : outcome;
+
+    await originalOnConfirm(normalizedOutcome, payload);
+    if (shouldSwitchToDefault) {
+      this.config.setApprovalMode(ApprovalMode.DEFAULT);
+    }
+    outcome = normalizedOutcome;
 
     if (
       outcome === ToolConfirmationOutcome.ProceedAlways ||
@@ -3174,12 +3460,11 @@ export class CoreToolScheduler {
   ): void {
     const wasAutoModeFallback = this.autoModeFallbackCallIds.delete(callId);
 
-    // AUTO-mode denialTracking recovery: when the user manually approves a
-    // call that fell back because denialTracking was armed, clear the armed
-    // counters so subsequent calls return to classifier flow. Ordinary AUTO
-    // approvals for ask rules must not clear cumulative denial totals.
-    // Cancel / abort do NOT reset — spec §9.1.4 treats rejection as a
-    // signal that the classifier was correct to block.
+    // AUTO-mode recovery: when the user manually approves a call that fell
+    // back because denialTracking was armed or the classifier was unavailable,
+    // clear the counters so subsequent calls return to classifier flow.
+    // Ordinary AUTO approvals for ask rules must not clear cumulative totals.
+    // Cancel / abort do not reset because the user declined the action.
     if (
       this.config.getApprovalMode() === ApprovalMode.AUTO &&
       wasAutoModeFallback &&
@@ -4792,7 +5077,7 @@ export class CoreToolScheduler {
     toolName: string,
     content: PartListUnion,
   ): Promise<PartListUnion> {
-    if (GATE_EXEMPT_TOOLS.has(toolName)) return content;
+    if (GATE_EXEMPT_TOOLS.has(canonicalToolName(toolName))) return content;
 
     const text = extractTextFromPartListUnion(content);
     if (!text || isAlreadyTruncated(text)) return content;
@@ -4912,6 +5197,10 @@ export class CoreToolScheduler {
   private async offloadCallOutput(
     call: CompletedToolCall,
   ): Promise<CompletedToolCall | null> {
+    if (canonicalToolName(call.request.name) === ToolNames.ENTER_PLAN_MODE) {
+      return null;
+    }
+
     const parts = call.response.responseParts;
     if (parts.length !== 1) return null;
     const fr = parts[0]?.functionResponse;
@@ -4982,6 +5271,8 @@ export class CoreToolScheduler {
       (call) =>
         call.status === 'awaiting_approval' &&
         call.request.callId !== triggeringCallId &&
+        (!('hideAlwaysAllow' in call.confirmationDetails) ||
+          call.confirmationDetails.hideAlwaysAllow !== true) &&
         // A tool bounced by a PreToolUse 'ask' must NOT be auto-approved as a
         // side effect of approving a sibling: the hook explicitly requested
         // confirmation, and re-execution skips the hook — auto-approving here
@@ -5106,10 +5397,23 @@ export class CoreToolScheduler {
               break;
             }
             case 'fallback':
-              if (fallback.fallback) {
+              if (
+                isDenialFallbackReason(outcome.reason) ||
+                outcome.reason === 'classifier_unavailable'
+              ) {
                 this.autoModeFallbackCallIds.add(pendingTool.request.callId);
+                if (outcome.message) {
+                  this.setStatusInternal(
+                    pendingTool.request.callId,
+                    'awaiting_approval',
+                    decorateClassifierUnavailableConfirmation(
+                      pendingTool.confirmationDetails,
+                      outcome.message,
+                    ),
+                  );
+                }
                 debugLogger.warn(
-                  `Auto mode fallback for pending tool (${fallback.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
+                  `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
                 );
               }
               break;

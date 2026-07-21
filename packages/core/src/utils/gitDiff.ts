@@ -509,21 +509,22 @@ async function synthesizeUntrackedHunk(
  * Binary files use `-` for both counts. Only the first `MAX_FILES` entries are
  * retained in `perFileStats`; totals account for every entry.
  */
-export function parseGitNumstat(stdout: string): GitDiffResult {
-  // Drop the trailing empty chunk from the terminating NUL.
+interface NumstatEntry {
+  path: string;
+  oldPath?: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+function forEachNumstatEntry(
+  stdout: string,
+  visit: (entry: NumstatEntry) => void,
+): void {
   const tokens = stdout.split('\0');
   if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
 
-  let added = 0;
-  let removed = 0;
-  let validFileCount = 0;
-  const perFileStats = new Map<string, PerFileStats>();
-
-  // Rename entries span three tokens ({counts}, oldPath, newPath). When we
-  // see an empty path in the counts token we stash the counts here and
-  // consume the next two tokens as the rename pair.
-  let pending: { added: number; removed: number; isBinary: boolean } | null =
-    null;
+  let pending: Omit<NumstatEntry, 'path' | 'oldPath'> | null = null;
   let renameOld: string | null = null;
 
   for (const token of tokens) {
@@ -532,42 +533,46 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
         renameOld = token;
         continue;
       }
-      // Key by the current (post-rename) path so the single-file endpoint can
-      // address it; carry the old path for display. Keying by the synthetic
-      // `old => new` string sent a nonexistent literal path to git, so renamed
-      // rows could never expand.
-      commitEntry(
-        token,
-        pending.added,
-        pending.removed,
-        pending.isBinary,
-        renameOld,
-      );
+      visit({ ...pending, path: token, oldPath: renameOld });
       pending = null;
       renameOld = null;
       continue;
     }
 
-    // Index-based parse — `split('\t')` is unsafe because `-z` preserves
-    // literal tabs inside filenames.
     const firstTab = token.indexOf('\t');
     if (firstTab < 0) continue;
     const secondTab = token.indexOf('\t', firstTab + 1);
     if (secondTab < 0) continue;
     const addStr = token.slice(0, firstTab);
     const remStr = token.slice(firstTab + 1, secondTab);
-    const filePath = token.slice(secondTab + 1);
+    const path = token.slice(secondTab + 1);
     const isBinary = addStr === '-' || remStr === '-';
-    const fileAdded = isBinary ? 0 : parseInt(addStr, 10) || 0;
-    const fileRemoved = isBinary ? 0 : parseInt(remStr, 10) || 0;
+    const added = isBinary ? 0 : parseInt(addStr, 10) || 0;
+    const removed = isBinary ? 0 : parseInt(remStr, 10) || 0;
 
-    if (filePath === '') {
-      // Rename header — wait for oldPath and newPath tokens.
-      pending = { added: fileAdded, removed: fileRemoved, isBinary };
+    if (path === '') {
+      pending = { added, removed, isBinary };
       continue;
     }
-    commitEntry(filePath, fileAdded, fileRemoved, isBinary);
+    visit({ path, added, removed, isBinary });
   }
+}
+
+export function parseGitNumstat(stdout: string): GitDiffResult {
+  let added = 0;
+  let removed = 0;
+  let validFileCount = 0;
+  const perFileStats = new Map<string, PerFileStats>();
+
+  forEachNumstatEntry(stdout, (entry) => {
+    commitEntry(
+      entry.path,
+      entry.added,
+      entry.removed,
+      entry.isBinary,
+      entry.oldPath,
+    );
+  });
 
   function commitEntry(
     filePath: string,
@@ -1384,4 +1389,240 @@ async function countStashEntries(gitRoot: string): Promise<number> {
   } catch {
     return 0;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Git log
+// ---------------------------------------------------------------------------
+
+/** Maximum entries per `fetchGitLog` page. */
+export const MAX_LOG_LIMIT = 200;
+/** Default page size for `fetchGitLog`. */
+export const DEFAULT_LOG_LIMIT = 50;
+
+export interface GitLogEntry {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Unix timestamp in seconds. */
+  authorDate: number;
+  subject: string;
+  /** `%D` output, e.g. `"HEAD -> main, origin/main, v1.2.0"`. */
+  refs: string;
+  /** Parent SHAs (length > 1 ⇒ merge commit). */
+  parents: string[];
+}
+
+export interface GitLogResult {
+  entries: GitLogEntry[];
+  hasMore: boolean;
+}
+
+export interface GitCommitFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+export interface GitCommitDetail {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  authorDate: number;
+  subject: string;
+  body: string;
+  refs: string;
+  parents: string[];
+  files: GitCommitFileStat[];
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  hiddenCount: number;
+}
+
+const LOG_FORMAT = '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P';
+const LOG_DETAIL_FORMAT =
+  '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P%x00%b';
+
+function parseLogFields(parts: string[]): GitLogEntry | null {
+  if (parts.length !== 8) return null;
+  return {
+    sha: parts[0],
+    shortSha: parts[1],
+    authorName: parts[2],
+    authorEmail: parts[3],
+    authorDate: parseInt(parts[4], 10) || 0,
+    subject: parts[5],
+    refs: parts[6],
+    parents: parts[7] ? parts[7].split(' ').filter(Boolean) : [],
+  };
+}
+
+/**
+ * Fetch a page of commit log entries (newest first).
+ *
+ * Returns `null` when not inside a git repo or when git fails. An empty
+ * repo (no commits) returns `{ entries: [], hasMore: false }`.
+ */
+export async function fetchGitLog(
+  cwd: string,
+  options?: { limit?: number; skip?: number },
+): Promise<GitLogResult | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const limit = Math.min(
+    Math.max(options?.limit ?? DEFAULT_LOG_LIMIT, 1),
+    MAX_LOG_LIMIT,
+  );
+  const skip = Math.max(options?.skip ?? 0, 0);
+
+  const stdout = await runGit(
+    [
+      '--no-optional-locks',
+      'log',
+      '-z',
+      `--format=${LOG_FORMAT}`,
+      '-n',
+      String(limit + 1),
+      ...(skip > 0 ? ['--skip', String(skip)] : []),
+    ],
+    gitRoot,
+  );
+  if (stdout === null) {
+    // git log fails on an empty repo (no commits yet). Distinguish that from
+    // a real failure by probing HEAD: if HEAD doesn't resolve either, the
+    // repo simply has no commits.
+    const head = await runGit(['rev-parse', '--verify', 'HEAD'], gitRoot);
+    return head === null ? { entries: [], hasMore: false } : null;
+  }
+
+  const fields = stdout.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  const recordCount = Math.floor(fields.length / 8);
+  const hasMore = recordCount > limit;
+  const pageCount = hasMore ? limit : recordCount;
+
+  const entries: GitLogEntry[] = [];
+  for (let i = 0; i < pageCount; i++) {
+    const entry = parseLogFields(fields.slice(i * 8, i * 8 + 8));
+    if (entry) entries.push(entry);
+  }
+  return { entries, hasMore };
+}
+
+/**
+ * Fetch full detail for a single commit: metadata (including body) plus
+ * per-file numstat.
+ *
+ * Returns `null` when not inside a git repo, the sha is invalid / not found,
+ * or git fails.
+ */
+export async function fetchGitCommitDetail(
+  cwd: string,
+  sha: string,
+): Promise<GitCommitDetail | null> {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const metaRaw = await runGit(
+    [
+      '--no-optional-locks',
+      'log',
+      '-1',
+      '-z',
+      `--format=${LOG_DETAIL_FORMAT}`,
+      sha,
+    ],
+    gitRoot,
+  );
+  if (metaRaw === null) return null;
+
+  const parts = metaRaw.split('\0');
+  if (parts.at(-1) === '') parts.pop();
+  if (parts.length !== 9) return null;
+
+  const parents = parts[7] ? parts[7].split(' ').filter(Boolean) : [];
+
+  // Per-file stats via diff-tree. `--root` handles the initial commit (no
+  // parent). For merge commits, plain diff-tree outputs nothing; diff against
+  // the first parent to show what the merge introduced.
+  const diffTreeArgs =
+    parents.length > 1
+      ? [
+          '--no-optional-locks',
+          'diff-tree',
+          '--no-commit-id',
+          '--numstat',
+          // Detect renames so `git mv` counts as one file (by its new path),
+          // matching the main `git diff` path — diff-tree is plumbing and does
+          // NOT honour diff.renames, so without -M a rename splits into a
+          // delete + add pair. The three-token `-z` rename sequence it then
+          // emits is handled by the pending-rename state machine below.
+          '-M',
+          '-r',
+          '-z',
+          `${sha}^1`,
+          sha,
+        ]
+      : [
+          '--no-optional-locks',
+          'diff-tree',
+          '--no-commit-id',
+          '--numstat',
+          // Detect renames so `git mv` counts as one file (by its new path),
+          // matching the main `git diff` path — diff-tree is plumbing and does
+          // NOT honour diff.renames, so without -M a rename splits into a
+          // delete + add pair. The three-token `-z` rename sequence it then
+          // emits is handled by the pending-rename state machine below.
+          '-M',
+          '-r',
+          '-z',
+          '--root',
+          sha,
+        ];
+  const numstatRaw = await runGit(diffTreeArgs, gitRoot);
+
+  const files: GitCommitFileStat[] = [];
+  let filesCount = 0;
+  let linesAdded = 0;
+  let linesRemoved = 0;
+
+  if (numstatRaw) {
+    forEachNumstatEntry(numstatRaw, (entry) => {
+      filesCount++;
+      linesAdded += entry.added;
+      linesRemoved += entry.removed;
+      if (files.length < MAX_FILES) {
+        files.push({
+          path: entry.path,
+          added: entry.added,
+          removed: entry.removed,
+          isBinary: entry.isBinary,
+        });
+      }
+    });
+  }
+
+  return {
+    sha: parts[0],
+    shortSha: parts[1],
+    authorName: parts[2],
+    authorEmail: parts[3],
+    authorDate: parseInt(parts[4], 10) || 0,
+    subject: parts[5],
+    refs: parts[6],
+    parents,
+    body: parts[8].replace(/\n$/, ''),
+    files,
+    filesCount,
+    linesAdded,
+    linesRemoved,
+    hiddenCount: Math.max(filesCount - files.length, 0),
+  };
 }

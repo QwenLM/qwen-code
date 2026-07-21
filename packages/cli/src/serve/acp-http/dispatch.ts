@@ -13,6 +13,7 @@ import {
   GROUP_COLOR_OPTIONS,
   SessionService,
   SessionOrganizationError,
+  SESSION_WRITER_RPC_CODES,
   type SessionGroupColor,
   type SessionGroupPresetColor,
   BuiltinAgentRegistry,
@@ -138,6 +139,53 @@ import {
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
+}
+
+const SESSION_WRITER_RPC_ERRORS = {
+  session_writer_conflict: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_conflict,
+    message: 'This session is already open in another Qwen process.',
+  },
+  session_writer_lost: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_lost,
+    message: 'Write ownership for this session was lost.',
+  },
+  session_transcript_changed: {
+    code: SESSION_WRITER_RPC_CODES.session_transcript_changed,
+    message: 'The session transcript changed outside its active writer.',
+  },
+  session_writer_unavailable: {
+    code: SESSION_WRITER_RPC_CODES.session_writer_unavailable,
+    message: 'Session write ownership could not be verified.',
+  },
+} as const;
+
+function sessionWriterRpcError(err: unknown):
+  | {
+      code: number;
+      message: string;
+      data: { errorKind: keyof typeof SESSION_WRITER_RPC_ERRORS };
+    }
+  | undefined {
+  if (!err || typeof err !== 'object') return undefined;
+  const candidate = err as Record<string, unknown>;
+  const data = isObject(candidate['data']) ? candidate['data'] : undefined;
+  const errorKind = data?.['errorKind'] ?? candidate['errorKind'];
+  if (
+    typeof errorKind !== 'string' ||
+    !(errorKind in SESSION_WRITER_RPC_ERRORS)
+  ) {
+    return undefined;
+  }
+  const typedKind = errorKind as keyof typeof SESSION_WRITER_RPC_ERRORS;
+  const expected = SESSION_WRITER_RPC_ERRORS[typedKind];
+  const code = candidate['code'] ?? candidate['rpcCode'];
+  if (code !== expected.code) return undefined;
+  return {
+    code: expected.code,
+    message: expected.message,
+    data: { errorKind: typedKind },
+  };
 }
 
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
@@ -449,6 +497,8 @@ function toRpcError(err: unknown): {
   message: string;
   data?: Record<string, unknown>;
 } {
+  const writerError = sessionWriterRpcError(err);
+  if (writerError) return writerError;
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -1402,25 +1452,21 @@ export class AcpDispatcher {
           conn.ownedSessions.delete(sessionId);
           conn.closingSessions.add(sessionId);
           let closeStarted = false;
+          const closeLocalSessionStream = () => {
+            try {
+              conn.closeSessionStream(sessionId);
+            } catch (teardownErr) {
+              writeStderrLine(
+                `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
+              );
+            }
+          };
           const closeSession = async () => {
             closeStarted = true;
-            try {
-              await this.bridge.closeSession(
-                sessionId,
-                this.sessionCtx(conn, sessionId, loopback),
-              );
-            } finally {
-              // Local teardown must run even if the bridge close throws —
-              // otherwise the SSE stream, abort controller, buffered frames and
-              // pending permissions leak until idle TTL.
-              try {
-                conn.closeSessionStream(sessionId);
-              } catch (teardownErr) {
-                writeStderrLine(
-                  `qwen serve: /acp session/close local teardown failed (${logSafe(sessionId)}): ${logSafe(errMsg(teardownErr))}`,
-                );
-              }
-            }
+            await this.bridge.closeSession(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
           };
           try {
             try {
@@ -1446,11 +1492,19 @@ export class AcpDispatcher {
           } catch (err) {
             if (!closeStarted) {
               conn.ownedSessions.add(sessionId);
+            } else {
+              try {
+                this.bridge.getSessionSummary(sessionId);
+                conn.ownedSessions.add(sessionId);
+              } catch {
+                closeLocalSessionStream();
+              }
             }
             throw err;
           } finally {
             conn.closingSessions.delete(sessionId);
           }
+          closeLocalSessionStream();
           this.replyConn(conn, id, {});
           return;
         }

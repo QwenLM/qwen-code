@@ -16,20 +16,17 @@ import type {
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
+import { useI18n } from '../../i18n';
 import {
   readWorkspaceCollapsedGroupIds,
   writeWorkspaceCollapsedGroupIds,
 } from './collapsedSessionSections';
+import { workspaceLabel } from '../../utils/workspace';
 import { SessionGroupSection } from './SessionGroupSection';
 import styles from './WorkspaceSection.module.css';
 
 function cx(...classes: Array<string | false | undefined>): string {
   return classes.filter(Boolean).join(' ');
-}
-
-function getWorkspaceName(cwd: string): string {
-  const parts = cwd.split(/[\\/]+/).filter(Boolean);
-  return parts.at(-1) ?? cwd;
 }
 
 // The cwd-qualified daemon route only accepts a workspace id or absolute path.
@@ -127,6 +124,7 @@ export function WorkspaceSection({
   excludePinned = false,
   onOpenGitDiff,
 }: WorkspaceSectionProps) {
+  const { t } = useI18n();
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>([]);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [loadError, setLoadError] = useState(false);
@@ -338,9 +336,7 @@ export function WorkspaceSection({
                 <WorkspaceFolderIcon open={expanded} />
               </span>
               <span className={styles.headerContent}>
-                <span className={styles.name}>
-                  {getWorkspaceName(workspace.cwd)}
-                </span>
+                <span className={styles.name}>{workspaceLabel(workspace)}</span>
               </span>
               {!workspace.trusted && (
                 <span className={styles.badge}>{untrustedLabel}</span>
@@ -352,14 +348,18 @@ export function WorkspaceSection({
           )}
         </button>
         {onOpenGitDiff && workspace.trusted && gitStatus?.branch && (
-          <span className={styles.gitPill}>
+          <button
+            type="button"
+            className={styles.gitPill}
+            aria-label={`${t('gitDiff.title')} — ${gitStatus.branch}`}
+            onClick={() => onOpenGitDiff(workspace.cwd)}
+          >
             <GitBranchIndicator
               branch={gitStatus.branch}
               status={gitStatus}
               compact
-              onOpenDiff={() => onOpenGitDiff(workspace.cwd)}
             />
-          </span>
+          </button>
         )}
         {headerActions?.(actionsVisible)}
       </div>

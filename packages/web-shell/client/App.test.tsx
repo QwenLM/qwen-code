@@ -84,6 +84,7 @@ const {
       workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
       workspaceSkills: loadSkillsStatus,
     })),
+    sessionStatus: vi.fn(() => Promise.resolve({})),
   };
   return {
     mockConnection: connection,
@@ -357,13 +358,18 @@ vi.mock('./components/MessageList', async () => {
   }
   return {
     MessageList: React.forwardRef(function MessageList(
-      props: { showRetryHint?: boolean; onRetryClick?: () => void },
+      props: {
+        showRetryHint?: boolean;
+        onRetryClick?: () => void;
+        welcomeHeader?: React.ReactNode;
+      },
       ref: React.ForwardedRef<{ scrollToBottom: () => void }>,
     ) {
       React.useImperativeHandle(ref, () => ({ scrollToBottom: vi.fn() }));
       return React.createElement(
         'div',
         { 'data-testid': 'messages' },
+        props.welcomeHeader ?? null,
         React.createElement(InteractionBlockerProbe),
         props.showRetryHint
           ? React.createElement(
@@ -457,6 +463,7 @@ vi.mock('./components/dialogs/GitDiffDialog', async () => {
   return {
     GitDiffDialog: () =>
       React.createElement(DialogShell, null, 'changes dialog'),
+    GitDiffContent: () => React.createElement('div', null, 'changes dialog'),
   };
 });
 
@@ -1059,6 +1066,139 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceCwd: '/work/secondary' }),
     );
+  });
+
+  describe('worktree welcome toggle', () => {
+    beforeEach(() => {
+      mockConnection.sessionId = undefined;
+      mockWorkspace.capabilities = {
+        workspaces: [
+          { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+        ],
+      };
+      mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+        workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+        workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      }));
+    });
+
+    const toggleSelector = '[data-testid="worktree-welcome-toggle"]';
+    const cancelSelector = '[data-testid="worktree-welcome-cancel"]';
+    const badgeDesc = 'Changes happen';
+
+    async function waitForToggle(container: HTMLElement): Promise<void> {
+      await vi.waitFor(() => {
+        expect(container.querySelector(toggleSelector)).not.toBeNull();
+      });
+    }
+
+    async function clickButton(
+      container: HTMLElement,
+      selector: string,
+    ): Promise<void> {
+      await act(async () => {
+        container.querySelector<HTMLButtonElement>(selector)?.click();
+      });
+    }
+
+    it('shows the toggle in the empty state for a trusted git workspace', async () => {
+      const { container } = renderApp();
+      await waitForToggle(container);
+    });
+
+    it('hides the toggle for an untrusted workspace', async () => {
+      mockWorkspace.capabilities = {
+        workspaces: [
+          { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
+        ],
+      };
+      const { container } = renderApp();
+      await flush();
+      await flush();
+      expect(container.querySelector(toggleSelector)).toBeNull();
+    });
+
+    it('hides the toggle when the workspace is not a git repository', async () => {
+      mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+        workspaceGit: vi.fn().mockRejectedValue(new Error('not a git repo')),
+        workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+      }));
+      const { container } = renderApp();
+      await flush();
+      await flush();
+      expect(container.querySelector(toggleSelector)).toBeNull();
+    });
+
+    it('toggles the pending badge on and off', async () => {
+      const { container } = renderApp();
+      await waitForToggle(container);
+
+      await clickButton(container, toggleSelector);
+      expect(container.textContent).toContain(badgeDesc);
+      expect(container.querySelector(toggleSelector)).toBeNull();
+
+      await clickButton(container, cancelSelector);
+      expect(container.textContent).not.toContain(badgeDesc);
+      expect(container.querySelector(toggleSelector)).not.toBeNull();
+    });
+
+    it('creates the session with worktree when the toggle is enabled', async () => {
+      const { container } = renderApp();
+      await waitForToggle(container);
+      await clickButton(container, toggleSelector);
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('work in isolation');
+        await vi.waitFor(() => {
+          expect(mockSessionActions.createSession).toHaveBeenCalled();
+        });
+      });
+      const arg = mockSessionActions.createSession.mock.calls[0]?.[0] as
+        | Record<string, unknown>
+        | undefined;
+      expect(arg?.['worktree']).toEqual({});
+    });
+
+    it('creates the session without worktree when the toggle is off', async () => {
+      renderApp();
+      await flush();
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('regular session');
+        await vi.waitFor(() => {
+          expect(mockSessionActions.createSession).toHaveBeenCalled();
+        });
+      });
+      const arg = mockSessionActions.createSession.mock.calls[0]?.[0] as
+        | Record<string, unknown>
+        | undefined;
+      expect(arg?.['worktree']).toBeUndefined();
+    });
+
+    it('clears the pending worktree intent when starting a new session from the sidebar', async () => {
+      const { container } = renderApp();
+      await waitForToggle(container);
+      await clickButton(container, toggleSelector);
+      expect(container.textContent).toContain(badgeDesc);
+
+      await act(async () => {
+        container
+          .querySelector<HTMLButtonElement>('[data-testid="new-session"]')
+          ?.click();
+        await Promise.resolve();
+      });
+
+      await act(async () => {
+        testState.latestChatEditorProps?.onSubmit('regular session');
+        await vi.waitFor(() => {
+          expect(mockSessionActions.createSession).toHaveBeenCalled();
+        });
+      });
+      const arg = mockSessionActions.createSession.mock.calls[0]?.[0] as
+        | Record<string, unknown>
+        | undefined;
+      expect(arg?.['worktree']).toBeUndefined();
+    });
   });
 
   it('reloads skills from the target workspace when starting a new session', async () => {
@@ -2256,6 +2396,130 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(editorCommit).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
+  });
+
+  it('notifies the host before forwarding a slash command', async () => {
+    const onSlashCommand = vi.fn();
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/Deploy staging';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'staging',
+      input: '/Deploy staging',
+    });
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/Deploy staging',
+      expect.any(Object),
+    );
+  });
+
+  it('lets the host handle a slash command instead of forwarding it', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/deploy production';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'production',
+      input: '/deploy production',
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('lets the host override a built-in slash command', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'settings',
+      args: '',
+      input: '/settings',
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('does not treat an absolute path as a slash command', async () => {
+    const onSlashCommand = vi.fn(() => true);
+    const { container } = renderApp({ onSlashCommand });
+    await flush();
+
+    testState.prompt = '/usr/local/bin/tool';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/usr/local/bin/tool',
+      expect.any(Object),
+    );
+  });
+
+  it('lets the host handle a slash command while the daemon is unavailable', async () => {
+    mockConnection.status = 'error';
+    const onSlashCommand = vi.fn(() => true);
+    const onToast = vi.fn();
+    const { container } = renderApp({ onSlashCommand, onToast });
+    await flush();
+
+    testState.prompt = '/deploy production';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('reports a host slash command error and continues default handling', async () => {
+    const error = new Error('host handler exploded');
+    const onSlashCommand = vi.fn(() => {
+      throw error;
+    });
+    const onToast = vi.fn();
+    const { container } = renderApp({ onSlashCommand, onToast });
+    await flush();
+
+    testState.prompt = '/deploy staging';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onToast).toHaveBeenCalledWith('error', 'host handler exploded');
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
+      '/deploy staging',
+      expect.any(Object),
+    );
+  });
+
+  it('uses the latest slash command handler after a rerender', async () => {
+    const firstHandler = vi.fn();
+    const secondHandler = vi.fn(() => true);
+    const { container, rerender } = renderApp({
+      onSlashCommand: firstHandler,
+    });
+    await flush();
+
+    rerender({ onSlashCommand: secondHandler });
+    await flush();
+
+    testState.prompt = '/deploy staging';
+    await clickSubmit(container);
+    await flush();
+    expect(firstHandler).not.toHaveBeenCalled();
+    expect(secondHandler).toHaveBeenCalledTimes(1);
   });
 
   it('forwards input annotations for /plan prompts in active sessions', async () => {

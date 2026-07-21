@@ -120,8 +120,22 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe('WorkspaceSection label', () => {
+  it('prefers the workspace display name over the cwd basename', () => {
+    renderSection({
+      workspace: {
+        ...trustedWorkspace,
+        displayName: 'Payments API',
+      },
+    });
+
+    expect(container.textContent).toContain('Payments API');
+    expect(container.textContent).not.toContain('project');
+  });
+});
+
 describe('WorkspaceSection git chip', () => {
-  it('renders a clickable git chip for a trusted repo and opens its diff', async () => {
+  it('renders a clickable git chip for a trusted repo', async () => {
     const status: DaemonWorkspaceGitStatus = {
       v: 2,
       workspaceCwd: '/tmp/project',
@@ -136,15 +150,20 @@ describe('WorkspaceSection git chip', () => {
 
     const chip = gitChip();
     expect(chip).not.toBeNull();
-    expect(chip?.tagName).toBe('BUTTON');
+    // The chip is a read-only OUTPUT inside a button that opens the changes
+    // view on click.
+    expect(chip?.tagName).toBe('OUTPUT');
     expect(chip?.getAttribute('data-dirty')).toBe('true');
-    // Icon-only (compact) form: the branch name is not shown as inline text but
-    // stays reachable via the accessible name (the hover tooltip).
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
 
+    // The chip itself is a read-only OUTPUT; the wrapping button is what opens
+    // the Changes view. Click it to prove the onClick handler is actually wired
+    // — a miswire (e.g. a deleted onClick) would otherwise go undetected.
+    const button = chip?.closest('button');
+    expect(button).not.toBeNull();
     act(() => {
-      chip?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
   });

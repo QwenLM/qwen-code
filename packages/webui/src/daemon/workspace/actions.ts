@@ -883,6 +883,14 @@ export function createDaemonWorkspaceActions({
       return result as DaemonWorkspacePathSuggestions;
     },
 
+    async updateWorkspace(workspaceSelector, update) {
+      const client = requireClient(getClient, 'Update workspace failed');
+      return withActionTimeout(
+        client.updateWorkspace(workspaceSelector, update),
+        'Update workspace timed out',
+      );
+    },
+
     async removeWorkspace(workspaceId, options) {
       const client = requireClient(getClient, 'Remove workspace failed');
       const removal = client.workspaceById(workspaceId).remove(options);

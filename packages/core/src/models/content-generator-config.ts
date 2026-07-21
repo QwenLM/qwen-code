@@ -82,6 +82,10 @@ export function buildAgentContentGeneratorConfig(
     return nextConfig;
   }
 
+  if (modelId && modelId !== parentConfig.model) {
+    nextConfig.thinkingMandatory = undefined;
+  }
+
   nextConfig.apiKey = resolveCredentialField(
     authOverrides.apiKey,
     sameProvider ? parentConfig.apiKey : undefined,
@@ -163,12 +167,12 @@ function applyResolvedModelConfig(
       : undefined;
   }
 
-  // Apply registry-defined generation config fields. Cross-provider
-  // clearing is already handled by buildAgentContentGeneratorConfig,
-  // so here we only overwrite when the registry provides a value.
+  // Cross-provider fields are cleared by buildAgentContentGeneratorConfig.
+  // Same-provider fields inherit unless the registry overrides them, except
+  // model capabilities such as thinkingMandatory, which must not leak.
   for (const field of MODEL_GENERATION_CONFIG_FIELDS) {
     const registryValue = resolvedModel.generationConfig[field];
-    if (registryValue !== undefined) {
+    if (registryValue !== undefined || field === 'thinkingMandatory') {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       (targetConfig as any)[field] = registryValue;
     }

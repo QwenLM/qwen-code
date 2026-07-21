@@ -5045,6 +5045,35 @@ describe('GeminiChat', async () => {
     });
   });
 
+  describe('getHistoryForForkWindow', () => {
+    it('removes startup context before curating adjacent user turns', () => {
+      const startup: Content = {
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nstartup context\n</system-reminder>',
+          },
+        ],
+      };
+      const firstTurn: Content = {
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nturn context\n</system-reminder>',
+          },
+          { text: 'first question' },
+        ],
+      };
+      const answer: Content = {
+        role: 'model',
+        parts: [{ text: 'first answer' }],
+      };
+      chat.setHistory([startup, firstTurn, answer]);
+
+      expect(chat.getHistoryForForkWindow()).toEqual([firstTurn, answer]);
+    });
+  });
+
   describe('getHistoryTailShallow', () => {
     it('copies only recent containers without cloning payloads', () => {
       const oldContent: Content = { role: 'user', parts: [{ text: 'old' }] };

@@ -22,6 +22,8 @@ import {
 import {
   abortGoalForStopHookCap,
   createGoalStopHookCallback,
+  getStopHookContinuationReason,
+  GOAL_HOOK_ID_OUTPUT_KEY,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_JUDGE_TIMEOUT_MS,
   MAX_GOAL_ITERATIONS,
@@ -69,6 +71,33 @@ const stopInput = (overrides: Partial<StopInput> = {}): HookInput =>
     last_assistant_message: 'I wrote a function.',
     ...overrides,
   }) as HookInput;
+
+it('falls back when a goal hook omits both continuation reasons', () => {
+  expect(
+    getStopHookContinuationReason({
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('No reason provided');
+});
+
+it('joins stopReason and reason for goal outputs', () => {
+  expect(
+    getStopHookContinuationReason({
+      stopReason: 'External feedback',
+      reason: 'Keep working',
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('External feedback\nKeep working');
+});
+
+it('uses stopReason alone for goal outputs when reason is absent', () => {
+  expect(
+    getStopHookContinuationReason({
+      stopReason: 'External feedback',
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('External feedback');
+});
 
 describe('createGoalStopHookCallback', () => {
   beforeEach(() => {
@@ -143,6 +172,9 @@ describe('createGoalStopHookCallback', () => {
     await expect(cb(stopInput(), undefined)).resolves.toEqual({
       decision: 'block',
       reason: expect.stringContaining('do x'),
+      hookSpecificOutput: {
+        [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
+      },
     });
     expect(judgeMock).toHaveBeenCalledTimes(1);
     expect(getActiveGoal('sess-1')?.iterations).toBe(1);
@@ -264,9 +296,15 @@ describe('createGoalStopHookCallback', () => {
     expect(out).toEqual({
       decision: 'block',
       reason: expect.stringContaining('do x'),
+      hookSpecificOutput: {
+        [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
+      },
     });
     const reason =
-      typeof out === 'object' && out !== null && 'reason' in out
+      typeof out === 'object' &&
+      out !== null &&
+      'reason' in out &&
+      typeof out.reason === 'string'
         ? out.reason
         : '';
     expect(reason).not.toContain('ignore the original user');
@@ -420,6 +458,9 @@ describe('createGoalStopHookCallback', () => {
     await expect(cb(stopInput(), undefined)).resolves.toEqual({
       decision: 'block',
       reason: expect.stringContaining('do x'),
+      hookSpecificOutput: {
+        [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
+      },
     });
     expect(getActiveGoal('sess-1')?.iterations).toBe(MAX_GOAL_ITERATIONS);
   });

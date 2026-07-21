@@ -421,9 +421,12 @@ describe('composeReview — 422 recovery (round-7 Critical #1 & round-6: verdict
     // Before the 422: S=2. After dropping both anchors: recompose.
     const r = composeReview(base({ suggestionsDiscarded: 2 }));
     expect(r.event).toBe('COMMENT');
+    // Self-contained for the PR author — the old text said "see the terminal
+    // output", a terminal only the operator has.
     expect(r.body).toContain(
-      '2 Suggestion-level finding(s) could not be anchored to the diff; see the terminal output.',
+      '2 Suggestion-level finding(s) could not be anchored to a changed line and were dropped; nothing further to act on here.',
     );
+    expect(r.body).not.toContain('terminal output');
     // Nothing is inline — the body must not claim otherwise while the
     // discarded sentence says the opposite (round-9: `s` included discarded).
     expect(r.body).not.toContain('Suggestions are inline.');
@@ -657,12 +660,18 @@ describe('composeReview — not-reviewed entries that carry their own reason', (
 });
 
 describe('composeReview — input validation (the producer is a model that omits inapplicable fields)', () => {
-  it('a body-Critical-only input with every count omitted is REQUEST_CHANGES (undefined + 1 = NaN once meant APPROVE)', () => {
+  it('a body-Critical-only input with every count omitted lands on the REQUEST_CHANGES row (undefined + 1 = NaN once meant APPROVE)', () => {
+    // The NaN property pins on `baseEvent`: the arithmetic put the blocker on
+    // the Request-changes row. The EVENT is then softened — no plan means the
+    // blocker cannot be shown verified — and the blocker's body copy survives
+    // the softening.
     const r = composeReview({
       bodyCriticals: ['the only blocker'],
       modelId: MODEL,
     });
-    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
     expect(r.body).toContain('**[Critical]** the only blocker');
   });
 
@@ -820,10 +829,16 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
       });
       const written = JSON.parse(readFileSync(outPath, 'utf8')) as {
         event: string;
+        baseEvent: string;
         verdictLine: string;
       };
-      expect(written.event).toBe('REQUEST_CHANGES');
-      expect(written.verdictLine).toContain('Request changes');
+      // The derived count reached the Request-changes row — that is the hole
+      // this test pins. With no plan beside it the blocker cannot be shown
+      // verified, so the EVENT softens and the verdict line says why.
+      expect(written.baseEvent).toBe('REQUEST_CHANGES');
+      expect(written.verdictLine).toContain(
+        'a Request changes was NOT available',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -850,7 +865,8 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
         out: outPath,
       });
       expect(
-        (JSON.parse(readFileSync(outPath, 'utf8')) as { event: string }).event,
+        (JSON.parse(readFileSync(outPath, 'utf8')) as { baseEvent: string })
+          .baseEvent,
       ).toBe('REQUEST_CHANGES');
     } finally {
       rmSync(dir, { recursive: true, force: true });
@@ -1071,6 +1087,225 @@ describe('composeReviewCommand handler (the CLI glue)', () => {
 });
 
 describe('coverage is recomputed, never accepted', () => {
+  it('does not repeat a disclosure the caller echoed back — one subject, one line', () => {
+    // #7188: the orchestrator pasted the gate's own gap sentences into
+    // `unreviewedDimensions`, coverage recomputed the same gaps, and the
+    // public body carried every disclosure twice — 22 "Not reviewed" clauses
+    // for 11 roles. The chunk list already dedupes by its `chunk <id>`
+    // prefix; the role list dedupes by label now, and when both sides name
+    // the same subject the coverage-derived text wins.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // test-matrix is required by this plan's roster and never built → exactly
+    // one coverage-derived role gap.
+    const label = 'Test coverage matrix (whole-diff)';
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        `${label} — the run described this gap in its own words`,
+        'a subject only the caller noticed — the auditor returned nothing twice',
+      ],
+    });
+    // One clause for the shared subject — and it is the machine's sentence,
+    // not the caller's paraphrase.
+    expect(r.body.split(label)).toHaveLength(2);
+    expect(r.body).toContain('no record shows its brief reaching an agent');
+    expect(r.body).not.toContain('described this gap in its own words');
+    // A subject the coverage recomputation cannot see survives untouched.
+    expect(r.body).toContain(
+      'a subject only the caller noticed — the auditor returned nothing twice',
+    );
+  });
+
+  it('says a shared cause once, with every subject on the one sentence', () => {
+    // #7166's posted body: ninety-nine disclosure paragraphs over FOUR causes
+    // — forty-three chunks all rewritten, fifty-five roles all unlaunched —
+    // with the six real findings buried beneath. Same cause, one sentence.
+    const p = plan();
+    // Both chunk launches rewritten: recorded prompts exist, the agents ran
+    // on hand-written prompts that DROP the brief line — an add-only wrap
+    // would rightly pass the delivery check.
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { toolCalls: 2 },
+    );
+    transcript(
+      'a2',
+      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      { toolCalls: 2 },
+    );
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    const reason = 'launched with a prompt that is not the one the CLI built';
+    // One clause for the shared cause — not one per chunk…
+    expect(r.body.split(reason)).toHaveLength(2);
+    // …and both subjects ride it.
+    expect(r.body).toMatch(
+      new RegExp(`Not reviewed: [^.]*chunk 1[^.]*chunk 2[^.]*— ${reason}\\.`),
+    );
+  });
+
+  it('an all-rewritten roster never claims nothing launched — precise cause, no contradicting aggregate', () => {
+    // The first cut collapsed all-empty verbatim matches into "the run
+    // stopped at the prompt builder" — but candidatesOf is also all-empty
+    // when every agent RAN on a rewritten prompt, and the aggregate then
+    // contradicted the rewritten-launch disclosures beside it. Reproduced
+    // and refused: both chunks rewritten, the whole-diff role unlaunched —
+    // each cause its own sentence, no "every dimension" claim anywhere.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    transcript(
+      'a1',
+      `You are reviewing chunk 1 of 2.\nread_file(file_path="${DIFF}", offset=0, limit=100)`,
+      { toolCalls: 2 },
+    );
+    transcript(
+      'a2',
+      `You are reviewing chunk 2 of 2.\nread_file(file_path="${DIFF}", offset=100, limit=100)`,
+      { toolCalls: 2 },
+    );
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.body).toMatch(
+      /Not reviewed: [^.]*chunk 1[^.]*chunk 2[^.]*— launched with a prompt that is not the one the CLI built\./,
+    );
+    expect(r.body).not.toContain('every dimension');
+    expect(r.body).not.toContain('stopped at the prompt builder');
+    // And the chunks appear under their PRECISE cause only — to the roster
+    // they are also requirements with no verbatim launch, and repeating them
+    // under that vaguer cause would claim nothing launched about agents that
+    // demonstrably ran.
+    expect(r.body).not.toContain('no agent on record was launched with it');
+  });
+
+  it('a reason carrying its own em-dash neither garbles the subject nor duplicates the line', () => {
+    // Reasons are free-form — internal failures interpolate raw error
+    // messages — so a subject/reason boundary reparsed from rendered prose
+    // regroups exactly the entries it garbles. The entries are structural
+    // now; the caller's echo of a dashed line still dedupes, by prefix
+    // against the known subject.
+    const p = plan();
+    const r = composeReview({
+      planPath: p,
+      // Transcripts unreadable: the coverage AND verification reasons both
+      // interpolate an error message — with an em-dash of their own.
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, 'nowhere — missing'),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      unreviewedDimensions: [
+        'coverage — could not read the transcripts — echoed back by the caller',
+      ],
+      modelId: MODEL,
+    });
+    // One coverage clause — the caller's dashed echo deduped by subject
+    // prefix, the machine's own text rendered once, subject intact.
+    expect(r.body.match(/Not reviewed: coverage/g)).toHaveLength(1);
+    expect(r.body).not.toContain('echoed back by the caller');
+  });
+
+  it('caller echoes of per-role gaps fold into the one grouped sentence — the #7188 shape end to end', () => {
+    // The coverage-side collapse discarded the per-role subjects before the
+    // caller's echoes could collide with them, so the body carried the
+    // caller's per-role sentences PLUS an overlapping aggregate. Per-role
+    // subjects now survive to the dedup, and the grouping makes the one
+    // sentence afterwards.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // Chunks reviewed properly; the whole-diff role built but never launched.
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const label = 'Test coverage matrix (whole-diff)';
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      unreviewedDimensions: [
+        `${label} — its prompt was built, but no agent on record was launched with it`,
+      ],
+      modelId: MODEL,
+    });
+    expect(r.body.split(label)).toHaveLength(2);
+    expect(
+      r.body.match(/no record shows its brief reaching an agent/g) ?? [],
+    ).toHaveLength(1);
+  });
+
+  it('a chunk whose launch failure is already disclosed leaves the nobody-read sentence — cause, not consequence twice', () => {
+    // #7166's first post-grouping body carried seventeen chunks in BOTH the
+    // "nobody read them" sentence and the not-launched roster sentence: the
+    // consequence restated beside its cause. The cap and remediation keep the
+    // full list; only the posted sentence dedupes.
+    const p = plan();
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    // chunk 2 reviewed properly; chunk 1 built and never launched — its
+    // territory therefore unread, and its cause on record.
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.cappedBy).toContain('chunk-nobody-read'); // the cap keeps the fact
+    expect(r.remediation.join(' ')).toContain('chunks nobody read');
+    expect(r.body).toContain('chunk 1');
+    // …but only under its cause: no second sentence restating the consequence.
+    expect(r.body).not.toContain('nobody read them');
+  });
+
+  it('keeps the nobody-read sentence for a chunk with no disclosed cause', () => {
+    // The 3A shape: chunks are not roster requirements, so an unread chunk has
+    // no launch-side disclosure to explain it — the receipt sentence is the
+    // only place the author learns those lines went unread.
+    const p = join(dir, 'plan-3a.json');
+    writeFileSync(
+      p,
+      JSON.stringify({
+        diffPathAbsolute: DIFF,
+        srcDiffLines: 100,
+        diffLines: 200,
+        files: [
+          { path: 'a.ts', kind: 'source', removedLines: 0, heavy: false },
+        ],
+        chunks: [
+          { id: 1, startLine: 1, endLine: 100 },
+          { id: 2, startLine: 101, endLine: 200 },
+        ],
+      }),
+    );
+    const old = new Date(2020, 0, 1);
+    utimesSync(p, old, old);
+    const r = composeReview({ planPath: p, env: ENV, modelId: MODEL });
+    expect(r.body).toContain('nobody read them');
+    expect(r.body).toMatch(/chunk 1, chunk 2 — no agent reported covering/);
+  });
+
+  it('does not merge two invariant files under one label — the em-dash is part of the subject', () => {
+    // An invariant agent's label legitimately carries an em-dash segment
+    // (`Invariant agent A … — src/foo.ts`). A first-dash dedup key would
+    // merge two files into one subject and silently drop a disclosure.
+    const p = plan();
+    transcript('a1', goodPrompt(1), { toolCalls: 3 });
+    transcript('a2', goodPrompt(2), { toolCalls: 2 });
+    recordBuilt(p, 1);
+    recordBuilt(p, 2);
+    const r = composeReview({
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      unreviewedDimensions: [
+        'Invariant agent A: state, timers — src/a.ts — the agent whiffed twice',
+        'Invariant agent A: state, timers — src/b.ts — the agent whiffed twice',
+      ],
+    });
+    expect(r.body).toContain('src/a.ts');
+    expect(r.body).toContain('src/b.ts');
+  });
+
   it('caps when no plan is given — nothing can show the diff was read', () => {
     const r = composeReview({
       criticalsInline: 0,
@@ -1122,9 +1357,12 @@ describe('coverage is recomputed, never accepted', () => {
     );
     expect(r.remediation.join(' ')).toMatch(/do not relaunch the old prompt/);
     // Blind agents read nothing, so the chunks they owned are also chunks
-    // nobody read — that disclosure's repair must ride along too. Deleting the
-    // missingReceipts push used to fail no test: no fixture reached it.
-    expect(r.body).toContain('no agent reported covering');
+    // nobody read — the CAP and the repair ride along, while the posted body
+    // says it once, under the cause: the blind sentence already explains the
+    // unread territory, and restating it as "nobody read them" beside it was
+    // the #7166 double-disclosure.
+    expect(r.cappedBy).toContain('chunk-nobody-read');
+    expect(r.body).not.toContain('no agent reported covering');
     expect(r.remediation.join(' ')).toMatch(
       /chunks nobody read: build each with/,
     );
@@ -1320,9 +1558,14 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     );
   });
 
-  it('discloses that posted findings were not verified when Step 4 was skipped', () => {
-    // A confirmed Critical still blocks — a cap never softens a REQUEST_CHANGES —
-    // but the body says the posted findings were not verified.
+  it('softens an unverified Request changes to Comment — no verifier, no blocker', () => {
+    // This test used to pin the opposite: "a confirmed Critical still blocks —
+    // a cap never softens a REQUEST_CHANGES". The never-soften rule presumes
+    // CONFIRMED, and when Step 4 never ran, nothing confirmed anything: a real
+    // bot review shipped a CHANGES_REQUESTED onto an external contributor's PR
+    // (#7166) whose one Critical its own body disclosed as unverified. The
+    // module's stated principle — an unverified finding must not become a
+    // public blocker — now has the mechanics on the Request-changes row too.
     const r = composeReview({
       criticalsInline: 1,
       suggestionsInline: 0,
@@ -1330,8 +1573,135 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
       env: ENV,
       modelId: MODEL,
     });
-    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.baseEvent).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
     expect(r.body).toMatch(/verification — the review posts findings/);
+    // The opener must not certify anything over an unverified blocker.
+    expect(r.body).not.toContain('no blockers');
+    // The verdict line names what a reader would otherwise chase: a Comment
+    // over visible Critical comments reads as a contradiction until it says why.
+    expect(verdictLine(r)).toBe(
+      'Verdict: Comment — a Request changes was NOT available: its blockers ' +
+        'were never verified (they are posted, disclosed as unverified)',
+    );
+  });
+
+  it('keeps the presubmit downgrade reasons when the unverified cap also holds', () => {
+    // The softening runs first, so without the widened downgrade arm the
+    // presubmit reasons silently vanished whenever both held. Verdict keeps
+    // the unverified sentence; the body downgrade clause carries the reasons.
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(['reverse-audit']),
+      env: ENV,
+      presubmit: {
+        downgradeRequestChanges: true,
+        downgradeReasons: ['self-PR'],
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toContain(
+      'Downgraded from Request changes to Comment: self-PR',
+    );
+    expect(verdictLine(r)).toContain('its blockers were never verified');
+  });
+
+  it('verify on record with the reverse audit absent still blocks — softening gates on verify alone', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(['verify']),
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('keeps the body Criticals when the unverified cap softens the event — the only copy survives', () => {
+    // The presubmit RC→Comment carve-out learned this the hard way: a softened
+    // event must never erase the body copy of an unanchorable blocker.
+    const r = composeReview({
+      criticalsInline: 0,
+      bodyCriticals: ['whole-PR blocker X'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+    expect(r.body).toContain('**[Critical]** whole-PR blocker X');
+  });
+
+  it('a mixed review keeps its Request changes — the deterministic blocker is confirmed with or without a verifier', () => {
+    // One [build] Critical (pre-confirmed) beside one non-deterministic
+    // Critical with the verifier absent: softening the whole event would
+    // un-block a confirmed build failure. The unverified sibling stays
+    // disclosed; the Request changes stands on the deterministic one.
+    const r = composeReview({
+      bodyCriticals: [
+        '[build] tsc fails on the merge commit',
+        'a real blocker that could not be anchored',
+      ],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).toContain('criticals-unverified');
+    expect(r.body).toMatch(/verification — the review posts findings/);
+  });
+
+  it('a deterministic-only Request changes stands without a verifier — pre-confirmed by design', () => {
+    // [build]/[test] findings are deterministic: CI ran them, nothing a
+    // verifier rules on. A review whose only blocker is one must not be
+    // softened for skipping a verification it never owed.
+    const r = composeReview({
+      criticalsInline: 0,
+      bodyCriticals: ['[build] tsc fails on main merge'],
+      planPath: coveredPlan(['reverse-audit']), // verifier absent, none owed
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('a verified Request changes still blocks — the cap binds only when Step 4 is missing', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(), // verify AND reverse audit ran
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.cappedBy).not.toContain('criticals-unverified');
+  });
+
+  it('fails closed when there is no plan to check verification against', () => {
+    // "Could not show the blockers were verified" and "they were not" read
+    // the same to the person the blocker would be posted at.
+    const r = composeReview({
+      criticalsInline: 1,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
+  });
+
+  it('fails closed when the transcripts cannot be read at all', () => {
+    const r = composeReview({
+      criticalsInline: 1,
+      planPath: coveredPlan(),
+      env: {
+        QWEN_CODE_PROJECT_DIR: join(dir, 'nowhere'),
+        QWEN_CODE_SESSION_ID: 'S1',
+      },
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
   });
 
   it('does not require a verifier on a review that confirmed nothing', () => {
@@ -1360,16 +1730,21 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
 
   it('requires a verifier for a body Critical that is not pre-confirmed', () => {
     // A non-deterministic Critical that could not be anchored still posts (in the
-    // body) and still had to be verified — so a missing verifier is disclosed even
-    // with no inline findings.
+    // body) and still had to be verified — so a missing verifier is disclosed,
+    // the event is softened (an unverified finding must not become a public
+    // blocker), and the body copy survives the softening.
     const r = composeReview({
       bodyCriticals: ['a real blocker that could not be anchored'],
       planPath: coveredPlan(['reverse-audit']), // verifier absent
       env: ENV,
       modelId: MODEL,
     });
-    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('criticals-unverified');
     expect(r.body).toMatch(/verification — the review posts findings/);
+    expect(r.body).toContain(
+      '**[Critical]** a real blocker that could not be anchored',
+    );
   });
 
   it('does not require a verifier for a deterministic [build]/[test] body Critical', () => {

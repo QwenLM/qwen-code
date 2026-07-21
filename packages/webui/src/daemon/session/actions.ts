@@ -61,7 +61,10 @@ export interface CreateDaemonSessionActionsArgs {
   getCreateSessionRequest: () => CreateSessionRequest;
   createDetachedSession: (
     workspaceCwd?: string,
-    overrides?: Pick<CreateSessionRequest, 'approvalMode' | 'sourceType'>,
+    overrides?: Pick<
+      CreateSessionRequest,
+      'approvalMode' | 'sourceType' | 'worktree'
+    >,
   ) => Promise<DaemonSessionClient>;
   getConnection: () => DaemonConnectionState;
   hasSessionActivePrompt: () => boolean;
@@ -619,6 +622,7 @@ export function createDaemonSessionActions({
       workspaceCwd?: string;
       approvalMode?: DaemonApprovalMode;
       sourceType?: string;
+      worktree?: { slug?: string };
     }) {
       try {
         manualSessionClearRef.current = false;
@@ -634,6 +638,9 @@ export function createDaemonSessionActions({
             : {}),
           ...(options?.sourceType !== undefined
             ? { sourceType: options.sourceType }
+            : {}),
+          ...(options?.worktree !== undefined
+            ? { worktree: options.worktree }
             : {}),
         };
         const session = sessionRef.current;

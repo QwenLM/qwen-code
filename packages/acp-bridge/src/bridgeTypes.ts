@@ -94,6 +94,8 @@ export interface BridgeSpawnRequest {
   /** Optional source-specific identifier. Valid only with `sourceType`. */
   sourceId?: string;
   approvalMode?: ApprovalMode;
+  /** Worktree isolation metadata, set by the daemon route before spawn. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeSession {
@@ -126,6 +128,8 @@ export interface BridgeSession {
   sourceId?: string;
   /** True iff the source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -266,6 +270,14 @@ export interface BridgeForkAgentResult {
 
 export interface ChangeSessionCwdRequest {
   path: string;
+  /**
+   * Server-controlled containment roots. When present, the agent-side
+   * sessionCd handler verifies (after its own realpath) that the
+   * canonical target is under one of these roots. Only set by the
+   * daemon's worktree create/restore paths; direct user cd omits this
+   * field, preserving existing behavior.
+   */
+  allowedRoots?: string[];
 }
 
 export interface ChangeSessionCwdResult {
@@ -406,6 +418,8 @@ export interface BridgeSessionSummary {
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: SessionGroupPresetColor | null;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 /**
@@ -433,7 +447,11 @@ export interface SessionMetadataUpdate {
 export interface CloseSessionOpts {
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
-  /** Require the ACP child to acknowledge session close before resolving. */
+  /**
+   * Require pending recorder writes to flush successfully. All closes await
+   * the ACP child acknowledgement and may cancel in-flight turns even when
+   * the close attempt ultimately fails.
+   */
   requireAgentClose?: boolean;
 }
 
@@ -716,6 +734,17 @@ export interface AcpSessionBridge {
     req: ChangeSessionCwdRequest,
     context?: BridgeClientRequestContext,
   ): Promise<ChangeSessionCwdResult>;
+
+  /**
+   * Set worktree metadata on an existing session entry. Used when
+   * restoring a worktree session after daemon restart — the sidecar
+   * file provides the metadata, and this populates the in-memory entry
+   * so `getSessionSummary` returns it.
+   */
+  setSessionWorktree(
+    sessionId: string,
+    worktree: { slug: string; path: string; branch: string },
+  ): void;
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same

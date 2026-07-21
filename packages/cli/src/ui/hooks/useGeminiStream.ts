@@ -117,7 +117,9 @@ import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
+import { GOAL_COMMAND_RE } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -162,6 +164,7 @@ interface PendingDuplicateToolResponses {
 interface ResolvedSteerMessages {
   parts: Part[];
   accept: () => void;
+  restoreMessages: string[];
 }
 
 /**
@@ -2071,7 +2074,7 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
-              break;
+              return StreamProcessingStatus.UserCancelled;
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp);
@@ -2230,8 +2233,8 @@ export const useGeminiStream = (
         commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
+        dualOutput?.finalizeAssistantMessage();
       }
-      dualOutput?.finalizeAssistantMessage();
       // When a loop was detected, halt without scheduling the calls collected
       // before the guard fired. The core splice/clear only touches
       // turn.pendingToolCalls, which the TUI does not execute from — without
@@ -2358,19 +2361,46 @@ export const useGeminiStream = (
     async (
       messages: string[],
       signal: AbortSignal,
-    ): Promise<ResolvedSteerMessages | undefined> => {
-      const resolvedMessages: Part[] = [];
+    ): Promise<ResolvedSteerMessages> => {
+      const resolvedSegments: Part[][] = [];
       const resolvedForRecording: Array<{
         message: string;
         parts: Part[];
         sideEffects: Array<() => void>;
       }> = [];
+      const restoreMessages: string[] = [];
+      let pendingGoalSegmentIndex: number | undefined;
       const timestamp = Date.now();
 
       for (let index = 0; index < messages.length; index += 1) {
-        if (signal.aborted) break;
+        if (signal.aborted) {
+          restoreMessages.push(...messages.slice(index));
+          break;
+        }
 
         const message = messages[index];
+        if (GOAL_COMMAND_RE.test(message)) {
+          const activeGoalBeforeCommand = getActiveGoal(config.getSessionId());
+          const result = await handleSlashCommand(message);
+          const activeGoalAfterCommand = getActiveGoal(config.getSessionId());
+          if (result && result.type === 'submit_prompt') {
+            if (pendingGoalSegmentIndex !== undefined) {
+              resolvedSegments[pendingGoalSegmentIndex] = [];
+            }
+            pendingGoalSegmentIndex = resolvedSegments.length;
+            resolvedSegments.push(normalizePartList(result.content));
+          } else if (
+            activeGoalBeforeCommand?.hookId !== activeGoalAfterCommand?.hookId
+          ) {
+            if (pendingGoalSegmentIndex !== undefined) {
+              resolvedSegments[pendingGoalSegmentIndex] = [];
+              pendingGoalSegmentIndex = undefined;
+            }
+          }
+          continue;
+        }
+
+        restoreMessages.push(message);
         const sideEffects: Array<() => void> = [];
         let resolvedQuery: PartListUnion = [{ text: message }];
         if (isAtCommand(message)) {
@@ -2443,7 +2473,10 @@ export const useGeminiStream = (
           } finally {
             clearTimeout(timeoutId);
           }
-          if (signal.aborted) break;
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
         }
 
         const bridgeResult = await applyVisionBridgeIfNeeded(
@@ -2452,7 +2485,10 @@ export const useGeminiStream = (
           signal,
         );
         if (!bridgeResult.shouldProceed) {
-          if (signal.aborted) break;
+          if (signal.aborted) {
+            restoreMessages.push(...messages.slice(index + 1));
+            break;
+          }
           continue;
         }
 
@@ -2472,10 +2508,7 @@ export const useGeminiStream = (
           );
         }
 
-        if (resolvedMessages.length > 0 && messageParts.length > 0) {
-          resolvedMessages.push({ text: '\n\n' });
-        }
-        resolvedMessages.push(...messageParts);
+        resolvedSegments.push(messageParts);
         resolvedForRecording.push({
           message,
           parts: messageParts,
@@ -2483,9 +2516,18 @@ export const useGeminiStream = (
         });
       }
 
-      if (signal.aborted) return undefined;
+      const resolvedMessages: Part[] = [];
+      for (const segment of resolvedSegments) {
+        if (segment.length === 0) continue;
+        if (resolvedMessages.length > 0) {
+          resolvedMessages.push({ text: '\n\n' });
+        }
+        resolvedMessages.push(...segment);
+      }
+
       return {
         parts: resolvedMessages,
+        restoreMessages,
         accept: () => {
           for (const { message, parts, sideEffects } of resolvedForRecording) {
             for (const sideEffect of sideEffects) sideEffect();
@@ -2500,7 +2542,13 @@ export const useGeminiStream = (
         },
       };
     },
-    [addItem, applyVisionBridgeIfNeeded, config, onDebugMessage],
+    [
+      addItem,
+      applyVisionBridgeIfNeeded,
+      config,
+      handleSlashCommand,
+      onDebugMessage,
+    ],
   );
 
   const resolveDrainedSteerMessages = useCallback(
@@ -2511,10 +2559,12 @@ export const useGeminiStream = (
       try {
         const resolved = await resolveSteeredMessages(messages, signal);
         if (signal.aborted) {
-          midTurnRestoreRef?.current?.(messages);
+          if (resolved.restoreMessages.length > 0) {
+            midTurnRestoreRef?.current?.(resolved.restoreMessages);
+          }
           return undefined;
         }
-        if (!resolved || resolved.parts.length === 0) return undefined;
+        if (resolved.parts.length === 0) return undefined;
         let settled = false;
         return {
           parts: resolved.parts,
@@ -2526,7 +2576,9 @@ export const useGeminiStream = (
           restore: () => {
             if (settled) return;
             settled = true;
-            midTurnRestoreRef?.current?.(messages);
+            if (resolved.restoreMessages.length > 0) {
+              midTurnRestoreRef?.current?.(resolved.restoreMessages);
+            }
           },
         };
       } catch (error) {
@@ -2777,6 +2829,7 @@ export const useGeminiStream = (
           streamingResponseLengthRef.current = 0;
         }
 
+        let cleanupReviewLease = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -2816,6 +2869,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             metadata?.onDeliveryFailed?.();
@@ -2846,6 +2900,7 @@ export const useGeminiStream = (
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {
+            cleanupReviewLease = true;
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
@@ -2887,6 +2942,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
@@ -2904,6 +2960,13 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          if (cleanupReviewLease) {
+            cleanupReviewWorktreeLeases({
+              sessionId: config.getSessionId(),
+              promptId: prompt_id!,
+              repositoryRoot: config.getProjectRoot(),
+            });
+          }
           submitPromptOnCompleteRef.current = null;
           activeModelStreamsRef.current = Math.max(
             0,
