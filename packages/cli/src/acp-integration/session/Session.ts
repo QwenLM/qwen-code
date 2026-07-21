@@ -2105,17 +2105,17 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
       if (channelDelivery && result.stopReason === 'end_turn') {
-        const text = normalizeChannelDeliveryText(
-          channelDeliveryCollector?.join('') ?? '',
-        );
-        this.#scheduleChannelDelivery({
-          sessionId: this.sessionId,
-          deliveryId: channelDelivery.deliveryId,
-          source: 'prompt',
-          target: channelDelivery.target,
-          text,
-          promptId: channelDelivery.deliveryId,
-        });
+        const rawText = channelDeliveryCollector?.join('') ?? '';
+        if (rawText.trim().length > 0) {
+          this.#scheduleChannelDelivery({
+            sessionId: this.sessionId,
+            deliveryId: channelDelivery.deliveryId,
+            source: 'prompt',
+            target: channelDelivery.target,
+            text: normalizeChannelDeliveryText(rawText),
+            promptId: channelDelivery.deliveryId,
+          });
+        }
       }
       return result;
     } catch (error) {
@@ -3660,8 +3660,8 @@ export class Session implements SessionContext {
     await this.client.sessionUpdate(params);
   }
 
-  #collectChannelDeliveryText(text: string, thought?: boolean): void {
-    if (!thought && this.channelDeliveryCollector) {
+  #collectChannelDeliveryText(text: string): void {
+    if (this.channelDeliveryCollector) {
       this.channelDeliveryCollector.push(text);
     }
   }
@@ -4897,17 +4897,18 @@ export class Session implements SessionContext {
           item.taskId &&
           item.firedAt !== undefined
         ) {
-          this.#scheduleChannelDelivery({
-            sessionId: this.sessionId,
-            deliveryId: `${item.taskId}:${item.firedAt}`,
-            source: 'scheduled',
-            target: item.delivery.target,
-            text: normalizeChannelDeliveryText(
-              channelDeliveryCollector?.join('') ?? '',
-            ),
-            taskId: item.taskId,
-            firedAt: item.firedAt,
-          });
+          const rawText = channelDeliveryCollector?.join('') ?? '';
+          if (rawText.trim().length > 0) {
+            this.#scheduleChannelDelivery({
+              sessionId: this.sessionId,
+              deliveryId: `${item.taskId}:${item.firedAt}`,
+              source: 'scheduled',
+              target: item.delivery.target,
+              text: normalizeChannelDeliveryText(rawText),
+              taskId: item.taskId,
+              firedAt: item.firedAt,
+            });
+          }
         }
       },
     );
