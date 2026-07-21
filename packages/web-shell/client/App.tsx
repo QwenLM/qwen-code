@@ -1335,25 +1335,36 @@ export function App({
   const [sessionWorktree, setSessionWorktree] = useState<
     { slug: string; path: string; branch: string } | undefined
   >(undefined);
-  // Restore worktree info from the server when switching to an existing session.
+  // Tracks the session id from the latest effect run. In-flight fetches
+  // compare their captured sid against this ref on resolve: a match means
+  // the response is still relevant and may set OR clear the worktree state;
+  // a mismatch means connection.sessionId moved on (reconnect cycling or a
+  // user-initiated switch) and the stale response is dropped.
+  const worktreeSessionIdRef = useRef<string | undefined>(undefined);
+  // Restore worktree info from the server when switching to an existing
+  // session. The effect intentionally does NOT cancel in-flight fetches on
+  // cleanup: connection.sessionId can cycle through several sessions during
+  // the DaemonSessionProvider reconnection loop, and cancelling would
+  // discard the one response we actually need.
   useEffect(() => {
     const sid = connection.sessionId;
+    worktreeSessionIdRef.current = sid;
     if (!sid) {
       setSessionWorktree(undefined);
       return;
     }
-    let cancelled = false;
     workspace.client
       .sessionStatus(sid)
       .then((summary) => {
-        if (!cancelled) setSessionWorktree(summary.worktree);
+        if (worktreeSessionIdRef.current === sid) {
+          setSessionWorktree(summary.worktree);
+        }
       })
       .catch(() => {
-        if (!cancelled) setSessionWorktree(undefined);
+        if (worktreeSessionIdRef.current === sid) {
+          setSessionWorktree(undefined);
+        }
       });
-    return () => {
-      cancelled = true;
-    };
   }, [connection.sessionId, workspace.client]);
   // Active workspace: the connected session's workspace, else the workspace
   // picked for the next session (locked / selected / primary). Computed once
