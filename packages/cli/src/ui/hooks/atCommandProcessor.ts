@@ -647,7 +647,22 @@ export async function resolveAtCommandQuery({
           config.getProjectRoot(),
         ).findSessionsByTitle(ref.title);
       } catch {
-        // title scan failure → fall through to the not-found path
+        const reason = `Could not look up sessions matching "@${originalAtPath.substring(1)}" (I/O error); try a session id instead.`;
+        onDebugMessage(reason);
+        scopedMentionEntries.push({
+          originalAtPath,
+          part: { text: '' },
+          label: buildSessionRef(ref.title ?? originalAtPath),
+          display: {
+            callId,
+            name: 'Referenced Session',
+            description: `Reference session "${ref.title ?? ''}"`,
+            status: ToolCallStatus.Error,
+            resultDisplay: reason,
+            confirmationDetails: undefined,
+          },
+        });
+        continue;
       }
       if (matches.length === 1) {
         sessionId = matches[0].sessionId;
@@ -693,9 +708,29 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
-    const resolved = await new SessionReferenceService(
-      config.getProjectRoot(),
-    ).resolve(sessionId, ref.title ? { title: ref.title } : {});
+    let resolved;
+    try {
+      resolved = await new SessionReferenceService(
+        config.getProjectRoot(),
+      ).resolve(sessionId, ref.title ? { title: ref.title } : {});
+    } catch {
+      const reason = `Failed to load session "${sessionId}" (I/O error); the transcript may be corrupted or unreadable.`;
+      onDebugMessage(reason);
+      scopedMentionEntries.push({
+        originalAtPath,
+        part: { text: '' },
+        label: buildSessionRef(sessionId),
+        display: {
+          callId,
+          name: 'Referenced Session',
+          description: `Reference session ${sessionId}`,
+          status: ToolCallStatus.Error,
+          resultDisplay: reason,
+          confirmationDetails: undefined,
+        },
+      });
+      continue;
+    }
 
     if ('notFound' in resolved) {
       const reason = `Session "${sessionId}" not found in this project.`;

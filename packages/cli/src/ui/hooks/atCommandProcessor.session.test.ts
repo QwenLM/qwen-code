@@ -189,10 +189,33 @@ describe('handleAtCommand @session:', () => {
     expect(result.shouldProceed).toBe(true);
     const joined = JSON.stringify(result.processedQuery);
     expect(joined).toContain('@session:Some Title');
-    expect(
-      result.toolDisplays?.some(
-        (d) => d.name === 'Referenced Session' && d.status !== undefined,
-      ),
-    ).toBe(true);
+    const card = result.toolDisplays?.find(
+      (d) => d.name === 'Referenced Session',
+    );
+    expect(card).toBeDefined();
+    expect(card!.resultDisplay).toContain('I/O error');
+    expect(mockResolve).not.toHaveBeenCalled();
+  });
+
+  it('survives a load error during session resolve', async () => {
+    mockResolve.mockRejectedValue(
+      Object.assign(new Error('corrupted JSONL'), { code: 'EIO' }),
+    );
+    const result = await handleAtCommand({
+      query: `see @session:${UUID} please`,
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 6,
+      signal: abortController.signal,
+    });
+    expect(result.shouldProceed).toBe(true);
+    const joined = JSON.stringify(result.processedQuery);
+    expect(joined).toContain(`@session:${UUID}`);
+    const card = result.toolDisplays?.find(
+      (d) => d.name === 'Referenced Session',
+    );
+    expect(card).toBeDefined();
+    expect(card!.resultDisplay).toContain('I/O error');
   });
 });
