@@ -218,7 +218,21 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
     );
-    expect(workflow).toContain("MAX_ROUNDS: '5'");
+    // The round budgets are tuning knobs; what must hold is their ORDERING.
+    // Asserting the literal numbers only detected edits — it would not catch
+    // a cap that stopped binding, which is the failure that matters.
+    const num = (key) =>
+      Number(workflow.match(new RegExp(`${key}: '(\\d+)'`))?.[1]);
+    const strictRounds = num('MAX_ROUNDS');
+    const takeoverRounds = num('TAKEOVER_MAX_ROUNDS');
+    const authRounds = num('API_AUTH_MAX_ROUNDS');
+    // A strict cap at or above the takeover cap makes the takeover label a
+    // no-op; an auth sub-cap at or above the strict cap stops short-circuiting
+    // the retries only a maintainer can fix, which is what it exists for.
+    expect(strictRounds).toBeGreaterThan(0);
+    expect(strictRounds).toBeLessThan(takeoverRounds);
+    expect(authRounds).toBeGreaterThan(0);
+    expect(authRounds).toBeLessThan(strictRounds);
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
     expect(reviewScanJob).toContain('not an open main-targeting PR');
