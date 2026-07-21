@@ -3124,7 +3124,9 @@ describe('qwen-autofix workflow', () => {
         /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n {6}- name: )/,
       )?.[0] ?? '';
     // Every per-PR terminal decision records a row, so a PR cannot fall out of
-    // the table just because its branch of the loop returned early.
+    // the table just because its branch of the loop returned early. The
+    // target-budget break emits a single summary row (PR '-') standing in for
+    // the un-inspected tail; those candidates are not enumerated individually.
     for (const state of [
       'busy',
       'unknown',
@@ -3182,6 +3184,8 @@ describe('qwen-autofix workflow', () => {
           "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
           "fleet_row 7333 'idle' 'nothing new since 2026-07-20T13:54:18Z'",
           "fleet_row 7208 'round-capped' 'round 100/100 - needs a human'",
+          "fleet_row - 'deferred' 'target budget (3) reached'",
+          "fleet_row 7340 'skipped' 'fork head | pipe in detail'",
           render,
           'cat "${SUMMARY_FILE}"',
           'rm -f "${SUMMARY_FILE}"',
@@ -3196,6 +3200,11 @@ describe('qwen-autofix workflow', () => {
     );
     expect(out).toContain('| #7333 | idle |');
     expect(out).toContain('| #7208 | round-capped |');
+    // The budget summary row (PR '-') renders an em dash, not '#-'.
+    expect(out).toContain('| — | deferred | target budget (3) reached |');
+    expect(out).not.toContain('| #- |');
+    // A literal '|' in a detail value is escaped so it cannot break columns.
+    expect(out).toContain('fork head \\| pipe in detail');
 
     // An empty fleet still renders a table rather than a bare heading.
     const empty = execFileSync(

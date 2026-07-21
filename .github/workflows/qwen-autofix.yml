@@ -1486,6 +1486,7 @@ jobs:
           # markers, cross-check checks and fork state) was the only way to see
           # a stall, so stalls stayed invisible until someone went looking.
           FLEET_FILE="$(mktemp)"
+          trap 'rm -f "${FLEET_FILE}"' EXIT
           fleet_row() {
             printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
           }
@@ -1980,13 +1981,17 @@ jobs:
             echo '| --- | --- | --- |'
             if [[ -s "${FLEET_FILE}" ]]; then
               while IFS=$'\t' read -r f_pr f_state f_detail; do
-                printf '| #%s | %s | %s |\n' "${f_pr}" "${f_state}" "${f_detail}"
+                f_detail="${f_detail//|/\\|}"
+                if [[ "${f_pr}" == '-' ]]; then
+                  printf '| — | %s | %s |\n' "${f_state}" "${f_detail}"
+                else
+                  printf '| #%s | %s | %s |\n' "${f_pr}" "${f_state}" "${f_detail}"
+                fi
               done < "${FLEET_FILE}"
             else
               echo '| - | no managed PRs inspected | - |'
             fi
           } >> "${GITHUB_STEP_SUMMARY}"
-          rm -f "${FLEET_FILE}"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
