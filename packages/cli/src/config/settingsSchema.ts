@@ -1961,10 +1961,12 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Additional directories to scan for skills (SKILL.md files). ' +
-          'Paths support ~ expansion. Each directory is scanned one level ' +
-          'deep for subdirectories containing a SKILL.md file. Skills from ' +
-          'these directories are loaded at user level, after the default ' +
-          '~/.qwen/skills/ directory.',
+          'Entries should be absolute paths or ~-prefixed; relative paths ' +
+          'resolve against the working directory. Each directory is scanned ' +
+          'one level deep for subdirectories containing a SKILL.md file. ' +
+          'Skills from these directories are loaded at user level, after ' +
+          'the default skill directories. Only point this at trusted ' +
+          'locations, since skills can define hooks and commands.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },
