@@ -932,8 +932,15 @@ jobs:
     # ephemeral, which suits the sandboxed conflict-resolution job.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 120
+    # Shared with qwen-autofix.yml's review-address job — see the rationale
+    # there. GitHub concurrency groups are repository-scoped, so the identical
+    # prefix is what serialises the two workflows against each other; both
+    # merge the base branch and push to this PR's head, and racing them costs a
+    # whole agent run on the loser (observed on #7355). The prefix must stay
+    # byte-identical in both files; a test pins that, because renaming one side
+    # alone re-opens the race with nothing failing.
     concurrency:
-      group: 'qwen-resolve-${{ github.event.issue.number || github.event.inputs.pr_number }}'
+      group: 'qwen-pr-head-write-${{ github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: false
     # Least-privilege: every write in this job (push, PR comments, the
     # acknowledge reaction) uses an explicit PAT, so the implicit GITHUB_TOKEN

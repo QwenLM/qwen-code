@@ -2113,8 +2113,26 @@ jobs:
       max-parallel: 5
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
+    # Serialises every writer of THIS PR's head branch, across workflows.
+    # GitHub concurrency groups are repository-scoped, so sharing one name with
+    # qwen-code-pr-review.yml's resolve-pr job is what makes the two mutually
+    # exclusive — a per-workflow name only guards against itself.
+    # Without this, a `@qwen-code /resolve` and this job's own conflict path
+    # both merge the base branch and both push. Observed on #7355: /resolve
+    # pushed at 03:51, this job pushed at 04:05 and was rejected `fetch first`,
+    # discarding a full agent run and leaving no marker to show for it.
+    # Serialising is strictly better than racing: this job fetches the head by
+    # NAME at job start, so the second run reads the winner's result instead of
+    # a stale base — its work is usable and its push lands, rather than being
+    # rejected and thrown away. It may still spend an agent run: the
+    # address-time recheck re-verifies lifecycle and consent (state, labels,
+    # author, base, head branch) but not whether the conflict is still there.
+    # The prefix is a LITERAL on both sides: job-level `concurrency` cannot read
+    # the `env` context, so the two files cannot share a constant. A test pins
+    # them equal instead, because a rename in one file alone silently unlocks
+    # the race again with nothing failing.
     concurrency:
-      group: 'qwen-autofix-review-${{ matrix.target.pr }}'
+      group: 'qwen-pr-head-write-${{ matrix.target.pr }}'
       cancel-in-progress: false
     env:
       REPO: '${{ github.repository }}'
