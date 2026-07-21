@@ -1,8 +1,7 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { spawnSync } from 'node:child_process';
 import {
   chmodSync,
-  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -11,6 +10,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it } from 'node:test';
+import { parse } from 'yaml';
 import { shouldAutoSkipChangelog } from './classify-release-notes.mjs';
 
 describe('release note classification', () => {
@@ -194,137 +194,92 @@ describe('release note classification', () => {
     }
   });
 
-  it('rejects invalid pull request environment before invoking gh', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
-    try {
-      const marker = join(dir, 'gh-invoked');
-      const gh = join(dir, 'gh');
-      writeFileSync(
-        gh,
-        [
-          '#!/usr/bin/env node',
-          `require('node:fs').writeFileSync(${JSON.stringify(marker)}, '1');`,
-          'process.exit(1);',
-        ].join('\n'),
-      );
-      chmodSync(gh, 0o755);
-
-      for (const env of [
-        { GITHUB_REPOSITORY: 'QwenLM/qwen-code/extra', PR_NUMBER: '1' },
-        { GITHUB_REPOSITORY: 'QwenLM/qwen-code', PR_NUMBER: 'abc' },
-      ]) {
-        assert.throws(() =>
-          execFileSync(
-            process.execPath,
-            [join(import.meta.dirname, 'classify-release-notes.mjs')],
-            {
-              env: {
-                ...process.env,
-                ...env,
-                PATH: `${dir}:${process.env.PATH}`,
-              },
-            },
-          ),
-        );
-        assert.equal(existsSync(marker), false);
-      }
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('keeps renamed production files by checking their previous paths', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
-    try {
-      const gh = join(dir, 'gh');
-      writeFileSync(
-        gh,
-        [
-          '#!/usr/bin/env node',
-          'const args = process.argv.slice(2);',
-          "if (args[0] === 'pr') { process.stdout.write(JSON.stringify({ title: 'ci: move runtime', labels: [] })); process.exit(0); }",
-          "if (args.includes('.[] | .filename, (.previous_filename // empty)')) { process.stdout.write('.github/scripts/runtime.ts\\npackages/core/src/runtime.ts\\n'); process.exit(0); }",
-          'process.exit(1);',
-        ].join('\n'),
-      );
-      chmodSync(gh, 0o755);
-
-      const decision = execFileSync(
-        process.execPath,
-        [join(import.meta.dirname, 'classify-release-notes.mjs')],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-            PATH: `${dir}:${process.env.PATH}`,
-            PR_NUMBER: '1',
-          },
-        },
-      );
-
-      assert.equal(decision, 'include\n');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('prints skip for internal CI changes through main', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
-    try {
-      const gh = join(dir, 'gh');
-      writeFileSync(
-        gh,
-        [
-          '#!/usr/bin/env node',
-          'const args = process.argv.slice(2);',
-          "if (args[0] === 'pr') { process.stdout.write(JSON.stringify({ title: 'ci: speed up checks', labels: [] })); process.exit(0); }",
-          "if (args.includes('.[] | .filename, (.previous_filename // empty)')) { process.stdout.write('.github/workflows/ci.yml\\n'); process.exit(0); }",
-          'process.exit(1);',
-        ].join('\n'),
-      );
-      chmodSync(gh, 0o755);
-
-      const decision = execFileSync(
-        process.execPath,
-        [join(import.meta.dirname, 'classify-release-notes.mjs')],
-        {
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
-            PATH: `${dir}:${process.env.PATH}`,
-            PR_NUMBER: '1',
-          },
-        },
-      );
-
-      assert.equal(decision, 'skip\n');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('wires reclassification and exclusion to the same automatic label', () => {
-    const workflow = readFileSync(
-      join(import.meta.dirname, '../workflows/classify-release-notes.yml'),
+  it('wires batch labeling and exclusion through release.yml', () => {
+    const release = readFileSync(
+      join(import.meta.dirname, '../workflows/release.yml'),
       'utf8',
     );
-    const release = readFileSync(
+    const changelog = readFileSync(
       join(import.meta.dirname, '../release.yml'),
       'utf8',
     );
-
-    for (const action of ['synchronize', 'edited', 'labeled', 'unlabeled']) {
-      assert.match(workflow, new RegExp(`- '${action}'`));
-    }
-    assert.match(workflow, /AUTO_LABEL: 'skip-changelog-auto'/);
-    assert.match(
-      workflow,
-      /github\.event\.label\.name != 'skip-changelog-auto'/,
+    const workflow = parse(release);
+    const publish = workflow.jobs.publish;
+    const autoLabel = publish.steps.find(
+      (step) =>
+        step.name === 'Auto-label internal CI PRs for release notes exclusion',
     );
-    assert.match(workflow, /classification failed; including this PR/);
-    assert.doesNotMatch(workflow, /decision=unchanged/);
-    assert.match(release, /- 'skip-changelog-auto'/);
+
+    assert.match(changelog, /- 'skip-changelog-auto'/);
+    assert.equal(autoLabel['continue-on-error'], true);
+    assert.equal(autoLabel.env.GITHUB_TOKEN, '${{ github.token }}');
+    assert.equal(publish.permissions.issues, 'write');
+    assert.equal(publish.permissions['pull-requests'], 'write');
+    assert.match(autoLabel.run, /classify-release-notes\.mjs/);
+    assert.match(autoLabel.run, /commits="\$\(git rev-list/);
+    assert.match(autoLabel.run, /Cannot enumerate commits/);
+    assert.match(autoLabel.run, /Failed to fetch PRs for commit/);
+  });
+
+  it('updates labels after a lookup failure and exits non-zero', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'release-note-classifier-'));
+    try {
+      const updates = join(dir, 'updates.txt');
+      const gh = join(dir, 'gh');
+      writeFileSync(
+        gh,
+        [
+          '#!/usr/bin/env node',
+          'const args = process.argv.slice(2);',
+          "if (args[0] === 'api' && args.includes('.[] | .filename, (.previous_filename // empty)')) {",
+          "  if (args.some((arg) => arg.endsWith('/pulls/11/files'))) { process.stderr.write('lookup failed\\n'); process.exit(1); }",
+          "  process.stdout.write('.github/workflows/ci.yml\\n');",
+          '  process.exit(0);',
+          '}',
+          "if (args[0] === 'pr' && args[1] === 'edit') {",
+          `  const action = args.includes('--remove-label') ? 'remove' : 'add';`,
+          `  require('node:fs').appendFileSync(${JSON.stringify(updates)}, args[2] + ' ' + action + '\\n');`,
+          '  process.exit(0);',
+          '}',
+          'process.exit(1);',
+        ].join('\n'),
+      );
+      chmodSync(gh, 0o755);
+
+      const input = JSON.stringify([
+        { number: 10, title: 'ci: speed up checks', labels: [] },
+        { number: 11, title: 'ci: broken lookup', labels: [] },
+        {
+          number: 12,
+          title: 'fix: user-visible bug',
+          labels: [{ name: 'skip-changelog-auto' }],
+        },
+        { number: 13, title: 'feat: new feature', labels: [] },
+      ]);
+
+      const result = spawnSync(
+        process.execPath,
+        [join(import.meta.dirname, 'classify-release-notes.mjs')],
+        {
+          encoding: 'utf8',
+          input,
+          env: {
+            ...process.env,
+            GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+            PATH: `${dir}:${process.env.PATH}`,
+          },
+        },
+      );
+
+      assert.equal(result.status, 1);
+      assert.match(result.stdout, /Labeled: 10/);
+      assert.match(result.stdout, /Unlabeled: 12/);
+      assert.match(result.stderr, /Failed to process PR #11/);
+      assert.match(result.stderr, /lookup failed/);
+      const updateContent = readFileSync(updates, 'utf8').trim();
+      assert.equal(updateContent, '10 add\n12 remove');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

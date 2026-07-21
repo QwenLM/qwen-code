@@ -17,7 +17,7 @@
  * `buildComment`) are exported and tested. The file also runs as a CLI for the
  * workflow:
  *   node web-shell-visuals-publish.mjs stage   <screenshotsDir> <gifsDir> <stageDir>
- *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile>
+ *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile> [changedPathsFile]
  */
 
 import {
@@ -26,6 +26,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   statSync,
   writeFileSync,
@@ -115,6 +116,60 @@ export function selectImages(candidates, opts = {}) {
   return { accepted, warnings };
 }
 
+/**
+ * Directories that feed the rendered bundle. Kept in sync with the `paths:`
+ * trigger in .github/workflows/web-shell-visuals.yml — that trigger decides
+ * whether we render at all; this decides whether a "nothing changed" RESULT
+ * deserves a second look.
+ */
+const RENDER_SHAPING_PREFIXES = [
+  'packages/web-shell/client/',
+  'packages/webui/src/',
+];
+
+/**
+ * Extensions that change what a view LOOKS like. Deliberately narrow: a `.ts`
+ * hook/util/type edit routinely lands with no visual delta, and flagging those
+ * would train everyone to ignore the prompt. `.css` covers `.module.css`; every
+ * `.svg` under the render surface is a bundled UI icon (client/assets/icons),
+ * so a changed icon that moves no pixel is the same coverage signal.
+ */
+const RENDER_SHAPING_EXT = /\.(tsx|css|svg)$/i;
+
+/** Test + scenario code DRIVES the preview; it is not the UI under preview. */
+const NOT_PRODUCT_UI =
+  /(^|\/)(__tests__|__mocks__|e2e)\/|\.(test|spec)\.[jt]sx?$/i;
+
+/** How many paths to name before collapsing the rest into a count. */
+export const MAX_LISTED_PATHS = 8;
+
+/**
+ * Pick the changed paths that shape rendering, from the PR's full file list.
+ * Returns `{ files, total }` — `files` capped at `maxListed`, `total` the full
+ * count, so the caller can say "and N more" without re-deriving it.
+ *
+ * This exists because "no view changed" is ambiguous: it means either "this
+ * change genuinely has no visual effect" or "no scenario renders this UI at
+ * all". The second is a COVERAGE gap that has shipped silently three times
+ * (#7035 primary label, #7221 worktree badge, #7365 empty-state toggle), each
+ * time caught only because a human happened to notice the missing image.
+ */
+export function selectRenderShapingFiles(paths, opts = {}) {
+  const maxListed = opts.maxListed ?? MAX_LISTED_PATHS;
+  const matched = [];
+  for (const raw of paths ?? []) {
+    const p = String(raw).trim();
+    if (!p) continue;
+    if (!RENDER_SHAPING_PREFIXES.some((prefix) => p.startsWith(prefix)))
+      continue;
+    if (!RENDER_SHAPING_EXT.test(p)) continue;
+    if (NOT_PRODUCT_UI.test(p)) continue;
+    matched.push(p);
+  }
+  matched.sort();
+  return { files: matched.slice(0, maxListed), total: matched.length };
+}
+
 /** Self-defending HTML escaping for interpolated values. */
 export const esc = (s) =>
   String(s)
@@ -127,8 +182,17 @@ export const pretty = (s) =>
   s.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
 /**
+ * Render a path inside a code span without letting it escape. Backticks would
+ * close the span (and let the rest of the path inject markdown/HTML), so they
+ * go; `esc` then neutralises the remainder. Both are no-ops for real paths.
+ */
+const codePath = (p) => `\`${esc(String(p).replace(/[`\r\n]/g, ''))}\``;
+
+/**
  * Pure comment builder. `files` is the list of staged filenames (png + gif).
- * `ctx` is `{ rawBase, shortSha, runUrl }`. Returns the markdown body.
+ * `ctx` is `{ rawBase, shortSha, runUrl, changedPaths }`, where `changedPaths`
+ * is the PR's full changed-file list (used only to triage an empty preview).
+ * Returns the markdown body.
  */
 export function buildComment(files, ctx = {}) {
   const rawBase = ctx.rawBase ?? '';
@@ -161,8 +225,31 @@ export function buildComment(files, ctx = {}) {
       out.push('');
     }
   } else {
-    out.push('✅ _No screenshot changes against the PR base._');
-    out.push('');
+    // An empty preview is ambiguous, so say WHICH of the two things it means.
+    // "No view changed" is only a clean bill of health if nothing that shapes a
+    // view was touched; when render-shaping files DID change, the same result
+    // may instead mean no scenario renders them — a coverage gap that reads as
+    // reassurance if we print a bare green check (see selectRenderShapingFiles).
+    const shaping = selectRenderShapingFiles(ctx.changedPaths);
+    if (shaping.total > 0) {
+      const noun = shaping.total === 1 ? 'file' : 'files';
+      out.push(
+        `ℹ️ _No screenshot changed against the PR base_ — but this PR edits ${shaping.total} render-shaping ${noun}:`,
+      );
+      out.push('');
+      for (const f of shaping.files) out.push(`- ${codePath(f)}`);
+      if (shaping.total > shaping.files.length) {
+        out.push(`- _…and ${shaping.total - shaping.files.length} more._`);
+      }
+      out.push('');
+      out.push(
+        'Either the change has no visual effect (logic, plumbing, a state the scenarios never reach), or **no scenario renders this UI** — in which case the preview cannot see it, and an empty result is a coverage gap rather than a clean bill of health. To make it visible, add a scenario to `packages/web-shell/client/e2e/visuals/screenshots.spec.ts` that seeds whatever state the UI is gated on; it then appears here as a head-only (NEW) capture.',
+      );
+      out.push('');
+    } else {
+      out.push('✅ _No screenshot changes against the PR base._');
+      out.push('');
+    }
   }
 
   if (gifs.length > 0) {
@@ -246,14 +333,26 @@ function stageCli(screenshotsDir, gifsDir, stageDir) {
   process.stdout.write(`${accepted.length}\n`);
 }
 
-function commentCli(stageDir, rawBase, shortSha, runUrl, bodyFile) {
+function commentCli(stageDir, rawBase, shortSha, runUrl, bodyFile, pathsFile) {
   let files = [];
   try {
     files = readdirSync(stageDir);
   } catch {
     // Missing stage dir → empty preview body.
   }
-  const body = buildComment(files, { rawBase, shortSha, runUrl });
+  // Newline-delimited changed paths, via a file rather than argv: a PR can
+  // change thousands of files, and paths are attacker-influenced (fork PRs).
+  // Best-effort — if the workflow's API call failed the file is absent/empty,
+  // and the comment falls back to the plain "no screenshot changes" line.
+  let changedPaths = [];
+  if (pathsFile) {
+    try {
+      changedPaths = readFileSync(pathsFile, 'utf8').split('\n');
+    } catch {
+      // Unreadable → treat as "unknown", not as "nothing changed".
+    }
+  }
+  const body = buildComment(files, { rawBase, shortSha, runUrl, changedPaths });
   writeFileSync(bodyFile, body);
   process.stderr.write(`Comment body: ${body.split('\n').length} lines.\n`);
 }
@@ -263,7 +362,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   if (cmd === 'stage') {
     stageCli(rest[0], rest[1], rest[2]);
   } else if (cmd === 'comment') {
-    commentCli(rest[0], rest[1], rest[2], rest[3], rest[4]);
+    commentCli(rest[0], rest[1], rest[2], rest[3], rest[4], rest[5]);
   } else {
     process.stderr.write(`unknown command: ${cmd ?? '(none)'}\n`);
     process.exit(2);
