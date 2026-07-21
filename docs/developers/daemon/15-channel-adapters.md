@@ -214,6 +214,7 @@ Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilin
 - **No DingTalk / WeChat / Telegram / Feishu reverse-call** — channels are one-way (chat → daemon → chat). The IM platform's native push path, such as a DingTalk card callback, is not wired into the bridge yet.
 - **Polling adapters (GitHub/GitLab/Gitea) use `sendThreadMessage` instead of `sendMessage`.** The base class routes proactive sends through `sendThreadMessage(chatId, threadId, text)`. Without a `threadId`, a new issue is created; with one, a comment is posted. `sendMessage` throws — polling channels do not support bare chat-target sends.
 - **Poll cursors are persisted to `~/.qwen/channels/<name>-poll-cursor.txt`.** The cursor stores the last processed timestamp and a set of IDs at that timestamp to handle same-timestamp deduplication. Corrupted cursor files are handled gracefully (reset to empty).
+- **Polling adapters (GitHub/Gitea) only fetch `latest_comment_url` per notification thread (MVP).** When multiple comments arrive on the same issue/PR between two poll cycles, only the latest comment is processed; intermediate comments are silently dropped. This is acceptable for the current MVP scope where the user triggers a mention and no new mentions arrive before the agent replies. The planned upgrade is to treat notifications as wake-up signals and call `listComments` / `listReviewComments` to enumerate all new comments per thread, with per-repo comment-ID watermarks for deduplication.
 
 ## References
 

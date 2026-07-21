@@ -78,6 +78,10 @@ With `sessionScope: thread`, each issue or pull request gets its own isolated se
 
 The adapter resolves the sender from the latest comment when available, falling back to the issue or PR author.
 
+### Known Limitation (MVP)
+
+The adapter fetches only the `latest_comment_url` from each notification thread. If multiple comments arrive on the same issue or PR between two poll cycles, only the latest comment is processed — intermediate comments are silently dropped. This is acceptable for the current MVP scope where you mention the bot and no new mentions arrive before the agent replies. A future upgrade will treat notifications as wake-up signals and enumerate all new comments per thread.
+
 ## Proactive Sends
 
 The agent can proactively create issues or post comments without an inbound notification. Without a `threadId`, a new issue is created. With a `threadId`, a comment is added to the existing issue or pull request.
