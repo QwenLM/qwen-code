@@ -20,6 +20,7 @@ const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
 const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
+const mockRecordChannelMemoryRecallMetrics = vi.hoisted(() => vi.fn());
 const mockParseCron = vi.hoisted(() => vi.fn());
 const mockNextFireTime = vi.hoisted(() =>
   vi.fn((cron: string) => {
@@ -113,6 +114,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   normalizeProxyUrl: mockNormalizeProxyUrl,
   parseCron: mockParseCron,
   readChannelMemory: mockReadChannelMemory,
+  recordChannelMemoryRecallMetrics: mockRecordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
   updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
   Storage: {
@@ -884,6 +886,7 @@ describe('startCommand.handler', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
   });
@@ -926,6 +929,7 @@ describe('startCommand.handler', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
       }),
     );
     expect(mockCreateChannel).toHaveBeenNthCalledWith(

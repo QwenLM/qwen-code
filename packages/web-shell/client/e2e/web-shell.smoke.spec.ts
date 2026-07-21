@@ -305,15 +305,17 @@ test('selects and scrolls scheduled-task prompt references @smoke', async ({
     .toBeGreaterThan(0);
 
   await page.getByRole('option', { name: /extension-20 Extension 20/ }).click();
-  await expect(prompt).toContainText('extension-20');
+  const tag = prompt.locator(
+    '[data-prompt-tag-serialized="@ext:extension-20"]',
+  );
+  await expect(tag).toBeVisible();
   const promptBox = await prompt.boundingBox();
   if (!promptBox) throw new Error('Prompt editor has no bounding box');
   const blankPosition = {
     x: promptBox.width - 40,
     y: promptBox.height / 2,
   };
-  const tag = prompt.locator('[data-prompt-tag-serialized]');
-  const remove = prompt.locator('[data-prompt-tag-remove]');
+  const remove = tag.locator('[data-prompt-tag-remove]');
 
   await prompt.hover({ position: blankPosition });
   await expect(
@@ -323,7 +325,33 @@ test('selects and scrolls scheduled-task prompt references @smoke', async ({
   await expect(tag).toBeVisible();
 
   await remove.click();
-  await expect(prompt).not.toContainText('extension-20');
+  await expect(tag).toHaveCount(0);
+});
+
+test('gates voice dictation on the workspace voice setting @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    voice: {
+      enabled: false,
+    },
+  });
+  scenario.capabilities.features = [
+    ...scenario.capabilities.features,
+    'voice_transcribe',
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  const voiceButton = page.getByRole('button', {
+    name: 'Start voice dictation',
+  });
+
+  await gotoSession(page, scenario, daemon);
+  await expect(voiceButton).toHaveCount(0);
+
+  scenario.voice.enabled = true;
+  await page.reload();
+  await completeReplay(page, daemon);
+  await expect(voiceButton).toBeVisible();
 });
 
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {

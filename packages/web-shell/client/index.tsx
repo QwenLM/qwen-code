@@ -126,6 +126,8 @@ export type {
   WebShellApi,
   WebShellComposerPlaceholders,
   WebShellComposerPlaceholderState,
+  WebShellSlashCommand,
+  WebShellSlashCommandHandler,
   WebShellProps,
   WebShellSidebarOptions,
   BugReportInfo,

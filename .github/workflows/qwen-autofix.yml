@@ -127,6 +127,12 @@ env:
   # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
   # stop' removes it). Matched EXACTLY against the trimmed comment body.
   TAKEOVER_COMMAND: '@qwen-code /takeover'
+  # Re-arm sugar. Recovering a stranded PR previously meant DELETING the
+  # bot's autofix-eval marker comment by hand (undiscoverable, destructive,
+  # and it erases the audit trail). This command instead posts an
+  # 'autofix-rearm' marker that supersedes the earlier evaluation markers:
+  # the scan re-reads the feedback from scratch and the round counter resets.
+  RETRY_COMMAND: '@qwen-code /retry'
   # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
   # need dozens of feedback rounds — that is the point of takeover — so the
   # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
@@ -147,8 +153,10 @@ jobs:
     # gates (exact body match, sender authorization) live in 'Decide phases'.
     # Nuance: a body with LEADING whitespace dies here even though the decide
     # branch would trim it — fail closed, command must start the comment.
+    # Both commands are prefiltered here (/takeover toggles the label, /retry
+    # re-arms a stranded PR); everything else never starts a job.
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '@qwen-code /takeover'))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:
@@ -198,6 +206,7 @@ jobs:
       takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'
       ack_pr: '${{ steps.decide.outputs.ack_pr }}'
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
+      retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
     steps:
       - name: 'Decide phases'
@@ -235,6 +244,7 @@ jobs:
           TAKEOVER_ACK=''
           TAKEOVER_CMD=''
           CMD_PR=''
+          RETRY_PR=''
           DRY_RUN="${DRY_RUN_INPUT:-false}"
           sanitize_number() {
             local value="${1//$'\r'/}"
@@ -323,14 +333,19 @@ jobs:
                 CMD=''
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND}" ]] && CMD='add'
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND} stop" ]] && CMD='remove'
+                # Re-arm shares the takeover command's authorization exactly:
+                # both summon bot activity on a managed PR, so inventing a
+                # second policy would only add surface.
+                RETRY_REQ=''
+                [[ "${BODY_TRIMMED}" == "${RETRY_COMMAND}" ]] && RETRY_REQ='true'
                 if [[ -z "${HAS_PR_URL}" ]]; then
-                  echo "🧭 takeover command ignored: not a PR comment"
-                elif [[ -z "${CMD}" ]]; then
-                  echo "🧭 takeover command ignored: body is not an exact command"
+                  echo "🧭 command ignored: not a PR comment"
+                elif [[ -z "${CMD}" && -z "${RETRY_REQ}" ]]; then
+                  echo "🧭 command ignored: body is not an exact command"
                 elif [[ "${ISSUE_STATE}" != 'open' ]]; then
-                  echo "🧭 takeover command ignored: PR is not open"
+                  echo "🧭 command ignored: PR is not open"
                 elif [[ -z "${SENDER_LOGIN}" || "${SENDER_LOGIN}" == "${AUTOFIX_BOT}" ]]; then
-                  echo "🧭 takeover command ignored: sender '${SENDER_LOGIN:-n/a}'"
+                  echo "🧭 command ignored: sender '${SENDER_LOGIN:-n/a}'"
                 else
                   sender_is_authorized=false
                   sender_permission=''
@@ -371,11 +386,16 @@ jobs:
                     rm -f "${api_error_file}"
                   fi
                   if [[ "${sender_is_authorized}" == 'true' ]]; then
-                    TAKEOVER_CMD="${CMD}"
-                    CMD_PR="$(sanitize_number "${ISSUE_NUMBER}")"
-                    echo "🧭 takeover command accepted: ${CMD} ${TAKEOVER_LABEL} on PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    if [[ -n "${RETRY_REQ}" ]]; then
+                      RETRY_PR="$(sanitize_number "${ISSUE_NUMBER}")"
+                      echo "🧭 retry command accepted: re-arm PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    else
+                      TAKEOVER_CMD="${CMD}"
+                      CMD_PR="$(sanitize_number "${ISSUE_NUMBER}")"
+                      echo "🧭 takeover command accepted: ${CMD} ${TAKEOVER_LABEL} on PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    fi
                   else
-                    echo "🧭 takeover command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
+                    echo "🧭 command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
                   fi
                 fi
               fi
@@ -480,6 +500,7 @@ jobs:
           echo "takeover_ack=${TAKEOVER_ACK}" >> "${GITHUB_OUTPUT}"
           echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
           echo "takeover_cmd=${TAKEOVER_CMD}" >> "${GITHUB_OUTPUT}"
+          echo "retry_pr=${RETRY_PR}" >> "${GITHUB_OUTPUT}"
           echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
@@ -525,6 +546,7 @@ jobs:
       - name: 'Stage trusted schema gate'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
 
       - name: 'Check bot credentials'
         env:
@@ -1035,12 +1057,26 @@ jobs:
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
@@ -1315,6 +1351,51 @@ jobs:
   # a PR via the takeover label. Label events are explicit user actions, so
   # every toggle acks (no dedup wanted). In-repo PRs only reach this job.
   # ===========================================================================
+  # Re-arm a stranded PR without deleting anything. Recovery previously meant
+  # `gh api -X DELETE` on the bot's own autofix-eval marker comment: raw API
+  # access, an erased audit trail, and undiscoverable unless you had read the
+  # workflow. This posts ONE marker instead — the scan then re-reads the
+  # feedback (the marker releases the watermark those older markers held) and
+  # the round counter resets, because the marker also opens a fresh counting
+  # window exactly like an engage ack.
+  retry-command:
+    needs: 'route'
+    if: |-
+      ${{ needs.route.outputs.retry_pr != '' }}
+    # Queued (never cancelled) per PR so two quick /retry comments cannot
+    # interleave their marker writes.
+    concurrency:
+      group: 'qwen-autofix-retry-cmd-${{ needs.route.outputs.retry_pr }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      PR: '${{ needs.route.outputs.retry_pr }}'
+      GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+    steps:
+      - name: 'Post re-arm marker'
+        run: |-
+          # The marker only counts when the AUTOFIX_BOT authored it (both the
+          # scan and the address-side recheck filter markers by that login), so
+          # a mis-scoped PAT would post a comment that silently does nothing.
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+          gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '\U0001F504 AutoFix re-armed. The next scan re-reads this PR'"'"'s feedback from the start and the round counter resets. Nothing was deleted — this marker supersedes the evaluation markers above it.\n\n<details>\n<summary>中文说明</summary>\n\n\U0001F504 已重新武装 AutoFix。下一次扫描会从头重新读取本 PR 的反馈，轮次计数也已重置。未删除任何内容 —— 本标记使其上方的评估标记失效。\n\n</details>\n\n<!-- autofix-rearm -->')"
+          echo "🔄 re-armed PR #${PR}"
+
   takeover-ack:
     needs: 'route'
     if: |-
@@ -1682,9 +1763,9 @@ jobs:
             # Inserting or reordering a field here or at any write site silently
             # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
-              [ .[] | select((.user.login // "") == $ab) | (.body // "")
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
+                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
             # The watermark is GLOBAL across all markers — feedback already
             # evaluated stays evaluated, no matter how counting windows move.
             # The terminal-handoff SENTINEL ts is excluded: it is a flag, not
@@ -1692,7 +1773,19 @@ jobs:
             # filter all future feedback forever — making a re-arm after a
             # terminal handoff dead on arrival (terminal skipping itself is
             # round-based and window-scoped, so re-arm properly clears it).
-            EVAL_WM="$(jq -r 'map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${MARKERS}")"
+            REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- autofix-rearm -->"))
+                | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+            # A maintainer '@qwen-code /retry' posts that marker to say
+            # "evaluate this feedback again": markers written BEFORE it stop
+            # holding the watermark down. This is the sanctioned exception to
+            # the global rule above, and it replaces the old recovery -
+            # deleting the bot's marker comment by hand, which erased the
+            # audit trail and needed raw API access to do at all.
+            EVAL_WM="$(jq -r --arg rearm "${REARM_AT}" '
+              map(select($rearm == "" or (.at > $rearm)))
+              | map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${MARKERS}")"
             # ROUND counting is windowed by KEY EQUALITY, not timestamps: the
             # current window key is the created_at of the latest
             # '<!-- takeover-ack engaged -->' comment ('none' before any
@@ -1706,7 +1799,8 @@ jobs:
             # scan skip regardless of order).
             REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab)
-                | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                    or ((.body // "") | contains("<!-- autofix-rearm -->")))
                 | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
             ROUND="$(jq -r --arg key "${REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${MARKERS}")"
 
@@ -1806,7 +1900,7 @@ jobs:
             # bot's own eval markers, and known non-actionable bot comments
             # (triage stages, coverage reports, legacy suggestion summaries,
             # force-push reminders).
-            BOT_COMMENT_FILTER='<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
             # Command-style comments (@qwen-code /takeover, /triage, /review …)
             # are INSTRUCTIONS to tooling, not review feedback on the diff:
             # counting them as actionable burns a full agent cycle to post a
@@ -1931,6 +2025,7 @@ jobs:
       - name: 'Stage trusted schema gate and agent runner'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
           # The agent step runs AFTER prepare checks out the PR branch, so
           # invoking the runner from the working tree would execute
           # branch-controlled code on the host with the model key in env
@@ -2169,7 +2264,7 @@ jobs:
             + (.[2] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -2196,17 +2291,25 @@ jobs:
           # is a stale duplicate and discards itself.
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-            [ .[] | select((.user.login // "") == $ab) | (.body // "")
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
-          LIVE_EVAL_WM="$(jq -r 'map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${LIVE_MARKS}")"
+              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+          LIVE_REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.body // "") | contains("<!-- autofix-rearm -->"))
+              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          # Mirrors the scan: a /retry marker releases the watermark it holds.
+          LIVE_EVAL_WM="$(jq -r --arg rearm "${LIVE_REARM_AT}" '
+            map(select($rearm == "" or (.at > $rearm)))
+            | map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${LIVE_MARKS}")"
           # Round counting mirrors the scan: keyed to the CURRENT window (the
           # latest engage ack's created_at, 'none' before any takeover), so
           # pre-re-arm markers can neither trip the cap nor inflate the live
           # round here.
           LIVE_REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
-              | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+              | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                    or ((.body // "") | contains("<!-- autofix-rearm -->")))
               | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
           # A re-arm SUPERSEDES every job selected under the old window key:
@@ -2232,7 +2335,7 @@ jobs:
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -2309,7 +2412,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"
@@ -2413,6 +2516,20 @@ jobs:
         if: |-
           ${{ always() && steps.prepare.outputs.stale != 'true' }}
         run: |-
+          # Record whether the agent left a commit FIRST — this is a ref-only
+          # diff, so it runs before the failure.md early-exits and covers an
+          # agent that commits and then aborts. The failure handoff keys its
+          # "was NOT pushed / commit discarded" wording on this, NOT on
+          # outcome=failed: abort / pre-commit-gate paths that never committed
+          # keep the neutral framing. `git diff --quiet` exits 1 for a real diff
+          # (committed) but 128 on a bad ref — only 1 counts as a commit, so a
+          # git error is not misreported as a discarded commit.
+          committed_rc=0
+          git diff --quiet "origin/${BRANCH}...${BRANCH}" || committed_rc=$?
+          if [[ "${committed_rc}" -eq 1 ]]; then
+            echo "committed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
@@ -2476,12 +2593,26 @@ jobs:
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
@@ -2634,6 +2765,7 @@ jobs:
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          COMMITTED: '${{ steps.verify.outputs.committed }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -2768,7 +2900,19 @@ jobs:
               echo "${HEADLINE}"
               echo
               if [[ -n "${DETAIL_FILE}" ]]; then
-                echo "**What I found before stopping:**"
+                if [[ "${COMMITTED}" == "true" ]]; then
+                  # The agent committed (verify recorded committed=true before
+                  # any gate could fail), but every path that reaches this
+                  # handoff skipped "Push and report" — nothing landed on the
+                  # branch. Say so before the agent's address-summary.md, which
+                  # can read like a success and cite that now-discarded commit
+                  # SHA. Keyed on committed, NOT outcome=failed: the abort/no-op
+                  # paths (failure.md, dirty tree, unchanged branch, missing
+                  # summary) made no commit and keep the neutral framing below.
+                  echo "⚠️ This change was NOT pushed — any commit referenced below was made only in the runner workspace and has been discarded. What the agent reported:"
+                else
+                  echo "**What I found before stopping:**"
+                fi
                 # -c drops any partial multi-byte sequence a byte-level head -c may
                 # have split, so the comment body stays valid UTF-8. iconv -c still
                 # EXITS 1 when it discards a byte, which under this shell's
