@@ -564,6 +564,33 @@ export class BackgroundTaskRegistry {
     }
   }
 
+  updateRunningAgentModel(
+    agentId: string,
+    model: string | undefined,
+  ): AgentTask | undefined {
+    const entry = this.agents.get(agentId);
+    if (!entry || !entry.isBackgrounded || entry.status !== 'running') {
+      return undefined;
+    }
+    if (entry.model === model) return entry;
+
+    const perModelCap = this.resolvePerModelCap(model);
+    if (perModelCap !== undefined) {
+      const claimedForModel = this.getClaimedBackgroundSlotCount(model);
+      if (claimedForModel >= perModelCap) {
+        throw new Error(
+          `Cannot start background agent: maximum concurrent background agents ` +
+            `for model "${model}" (${perModelCap}) reached. Stop an existing ` +
+            `agent on that model first.`,
+        );
+      }
+    }
+
+    entry.model = model;
+    this.drainWaitQueue();
+    return entry;
+  }
+
   /** Configured per-model cap for `model`, or undefined when none applies. */
   private resolvePerModelCap(model?: string): number | undefined {
     if (model === undefined) {

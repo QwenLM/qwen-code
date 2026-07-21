@@ -813,6 +813,29 @@ describe('BackgroundTaskRegistry', () => {
   });
 
   describe('per-model background concurrency limit', () => {
+    it('reclassifies a running agent and releases its previous model slot', async () => {
+      registry = new BackgroundTaskRegistry({
+        maxConcurrentBackgroundAgents: 3,
+        maxConcurrentBackgroundAgentsByModel: {
+          'old-model': 1,
+          'runtime-model': 1,
+        },
+      });
+      registry.register(makeRegistration('bg-1', { model: 'old-model' }));
+      const oldModelWaiter = registry.waitForBackgroundSlot(
+        new AbortController().signal,
+        'old-model',
+      );
+
+      const updated = registry.updateRunningAgentModel('bg-1', 'runtime-model');
+      const reservation = await oldModelWaiter;
+
+      expect(updated?.model).toBe('runtime-model');
+      expect(registry.get('bg-1')?.model).toBe('runtime-model');
+      expect(reservation.model).toBe('old-model');
+      registry.releaseBackgroundSlot(reservation);
+    });
+
     it('caps a single model while leaving room for others', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 10,

@@ -1926,7 +1926,17 @@ export class Session implements SessionContext {
     return content.parts.some((part) => 'text' in part && part.text);
   }
 
-  async cancelPendingPrompt(): Promise<void> {
+  async cancelPendingPrompt(
+    options: {
+      preserveAutomaticQueues?: boolean;
+      waitForCompletion?: boolean;
+    } = {},
+  ): Promise<void> {
+    const activeCompletions = [
+      this.pendingPromptCompletion,
+      this.cronCompletion,
+      this.notificationCompletion,
+    ].filter((completion): completion is Promise<void> => completion !== null);
     const hadPrompt = !!this.pendingPrompt;
     const hadCron = !!this.cronAbortController;
     const hadNotification =
@@ -1950,17 +1960,27 @@ export class Session implements SessionContext {
     // Cancel any in-progress cron execution
     if (this.cronAbortController) {
       this.cronAbortController.abort();
-      this.cronAbortController = null;
-      this.cronQueue = [];
-      this.cronProcessing = false;
+      if (!options.preserveAutomaticQueues) {
+        this.cronAbortController = null;
+        this.cronQueue = [];
+        this.cronProcessing = false;
+      }
     }
 
     if (this.notificationAbortController) {
       this.notificationAbortController.abort();
-      this.notificationAbortController = null;
+      if (!options.preserveAutomaticQueues) {
+        this.notificationAbortController = null;
+      }
     }
-    this.notificationQueue = [];
-    this.notificationProcessing = false;
+    if (!options.preserveAutomaticQueues) {
+      this.notificationQueue = [];
+      this.notificationProcessing = false;
+    }
+
+    if (options.waitForCompletion) {
+      await Promise.allSettled(activeCompletions);
+    }
 
     // Stop scheduler and emit exit summary
     const scheduler = this.config.isCronEnabled()
@@ -4347,7 +4367,7 @@ export class Session implements SessionContext {
     });
 
     try {
-      while (this.cronQueue.length > 0) {
+      while (!this.closing && !this.disposed && this.cronQueue.length > 0) {
         const nextIndex = this.#nextCronQueueIndex();
         if (nextIndex < 0) break;
         const [item] = this.cronQueue.splice(nextIndex, 1);
@@ -4957,7 +4977,11 @@ export class Session implements SessionContext {
     });
 
     try {
-      while (this.notificationQueue.length > 0) {
+      while (
+        !this.closing &&
+        !this.disposed &&
+        this.notificationQueue.length > 0
+      ) {
         if (
           this.pendingPrompt ||
           this.cronProcessing ||

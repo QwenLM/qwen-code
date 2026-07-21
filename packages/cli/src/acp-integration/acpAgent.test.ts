@@ -10871,12 +10871,27 @@ describe('QwenAgent extMethod renameSession routing', () => {
     expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
     expect(innerConfig.shutdown).not.toHaveBeenCalled();
 
-    await expect(
-      agent.extMethod('qwen/control/session/close', {
-        sessionId: liveSessionId,
-        requireFlush: false,
-      }),
-    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    let releaseDispose!: () => void;
+    const disposeGate = new Promise<void>((resolve) => {
+      releaseDispose = resolve;
+    });
+    const liveSession = vi.mocked(Session).mock.results.at(-1)?.value as
+      | { dispose: ReturnType<typeof vi.fn> }
+      | undefined;
+    liveSession?.dispose.mockReturnValueOnce(disposeGate);
+
+    const close = agent.extMethod('qwen/control/session/close', {
+      sessionId: liveSessionId,
+      requireFlush: false,
+    });
+    await vi.waitFor(() => expect(liveSession?.dispose).toHaveBeenCalledOnce());
+    expect(toolRegistry.stop).not.toHaveBeenCalled();
+
+    releaseDispose();
+    await expect(close).resolves.toEqual({
+      sessionId: liveSessionId,
+      closed: true,
+    });
     expect(recording.flush).toHaveBeenCalledTimes(3);
     expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
     expect(innerConfig.shutdown).toHaveBeenCalledOnce();

@@ -2771,6 +2771,82 @@ describe('Session', () => {
       });
     });
 
+    it('waits for active automatic work and preserves queued work across a failed close', async () => {
+      let releaseNotification!: () => void;
+      const notificationGate = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      async function* notificationStream() {
+        await notificationGate;
+        yield* createEmptyStream();
+      }
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(notificationStream())
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'start background work' }],
+      });
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+
+      callback('active notification', 'active model notification', {
+        agentId: 'active-agent',
+        status: 'completed',
+      });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      });
+      callback('old notification', 'old model notification', {
+        agentId: 'old-agent',
+        status: 'completed',
+      });
+
+      session.beginClose();
+      let cancellationSettled = false;
+      const cancellation = session
+        .cancelPendingPrompt({
+          preserveAutomaticQueues: true,
+          waitForCompletion: true,
+        })
+        .finally(() => {
+          cancellationSettled = true;
+        });
+      await Promise.resolve();
+      expect(cancellationSettled).toBe(false);
+      callback('new notification', 'new model notification', {
+        agentId: 'new-agent',
+        status: 'completed',
+      });
+
+      releaseNotification();
+      await cancellation;
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      session.cancelClose();
+
+      await vi.waitFor(() => {
+        expect(
+          mockChatRecordingService.recordNotification,
+        ).toHaveBeenCalledTimes(3);
+      });
+      expect(
+        mockChatRecordingService.recordNotification.mock.calls.map(
+          ([, displayText]) => displayText,
+        ),
+      ).toEqual([
+        'active notification',
+        'old notification',
+        'new notification',
+      ]);
+    });
+
     it('fires MessageDisplay with cumulative text and a single is_final for a background notification response', async () => {
       // The background-notification loop (Session.ts ~line 3638) creates its
       // own MessageDisplayDispatcher, independent of the ACP prompt path's —

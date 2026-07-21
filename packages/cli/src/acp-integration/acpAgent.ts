@@ -3275,7 +3275,7 @@ class QwenAgent implements Agent {
   ): Promise<void> {
     if (this.sessions.get(sessionId) !== session) return;
     try {
-      session.dispose();
+      await session.dispose();
     } catch (error) {
       cleanupErrors.push(error);
     }
@@ -3446,7 +3446,14 @@ class QwenAgent implements Agent {
       await waitForSessionDrain(
         (async () => {
           try {
-            await session.cancelPendingPrompt();
+            if (requireFlush) {
+              await session.cancelPendingPrompt({
+                preserveAutomaticQueues: true,
+                waitForCompletion: true,
+              });
+            } else {
+              await session.cancelPendingPrompt();
+            }
           } catch (err) {
             debugLogger.debug(
               `Session ${sessionId} cancel during close failed: ${

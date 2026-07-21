@@ -62,13 +62,20 @@ describe('BackgroundAgentResumeService', () => {
     } = {},
   ) {
     const subagentManager = {
-      loadSubagent: vi.fn(async (name: string) =>
-        name === 'researcher'
-          ? {
-              name: 'researcher',
-              color: 'cyan',
-            }
-          : null,
+      loadSubagent: vi.fn(
+        async (
+          name: string,
+        ): Promise<{
+          name: string;
+          color: string;
+          model?: string;
+        } | null> =>
+          name === 'researcher'
+            ? {
+                name: 'researcher',
+                color: 'cyan',
+              }
+            : null,
       ),
       createAgentHeadless: vi.fn(),
     };
@@ -729,6 +736,8 @@ describe('BackgroundAgentResumeService', () => {
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
       isBackgrounded: true,
+      model: 'old-model',
+      persistedCliFlags: { model: 'old-model' },
     });
     fs.writeFileSync(
       outputFile,
@@ -758,7 +767,10 @@ describe('BackgroundAgentResumeService', () => {
     const subagent = {
       execute: vi.fn(async () => undefined),
       setExternalMessageProvider: vi.fn(),
-      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getCore: () => ({
+        modelConfig: { model: 'runtime-model' },
+        getEventEmitter: () => new AgentEventEmitter(),
+      }),
       getExecutionSummary: () => ({
         totalTokens: 0,
         outputTokens: 0,
@@ -780,6 +792,8 @@ describe('BackgroundAgentResumeService', () => {
     expect(metaAtNotification).toMatchObject({
       status: 'completed',
       isBackgrounded: true,
+      model: 'runtime-model',
+      persistedCliFlags: { model: 'runtime-model' },
     });
 
     registry = new BackgroundTaskRegistry();
@@ -792,6 +806,7 @@ describe('BackgroundAgentResumeService', () => {
       agentId,
       status: 'completed',
       isBackgrounded: true,
+      model: 'runtime-model',
     });
   });
 
@@ -1283,6 +1298,104 @@ describe('BackgroundAgentResumeService', () => {
       'maximum concurrent background agents (1) reached',
     );
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
+  it('accounts a resumed agent against the model its rebuilt runtime uses', async () => {
+    registry = new BackgroundTaskRegistry({
+      maxConcurrentBackgroundAgents: 3,
+      maxConcurrentBackgroundAgentsByModel: { 'model-b': 1 },
+    });
+    const sessionId = 'session-resume-model-change';
+    const agentId = 'agent-resume-model-change';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    registry.register({
+      agentId: 'model-b-running',
+      description: 'Already using model B',
+      subagentType: 'researcher',
+      model: 'model-b',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: '/tmp/model-b-running.jsonl',
+    });
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume after model change',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+      model: 'model-a',
+      persistedCliFlags: { model: 'model-a' },
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Resume after model change' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Resume after model change',
+      subagentType: 'researcher',
+      model: 'model-a',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+
+    const eventEmitter = new AgentEventEmitter();
+    const execute = vi.fn(async () => undefined);
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    const { service, subagentManager } = createService();
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: 'model-b',
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent: {
+        execute,
+        getCore: () => ({
+          modelConfig: { model: 'model-b' },
+          getEventEmitter: () => eventEmitter,
+        }),
+      },
+      dispose,
+    });
+
+    await expect(
+      service.resumeBackgroundAgent(agentId, 'continue'),
+    ).resolves.toBeUndefined();
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(registry.get(agentId)).toMatchObject({
+      status: 'paused',
+      model: 'model-a',
+    });
+    expect(registry.get(agentId)?.error).toContain(
+      'maximum concurrent background agents for model "model-b" (1) reached',
+    );
+    expect(readAgentMeta(metaPath)?.model).toBe('model-a');
   });
 
   it('passes the sidechain transcript path to SubagentStop hooks on resume', async () => {
@@ -2043,9 +2156,12 @@ describe('BackgroundAgentResumeService', () => {
       setExternalMessageProvider: vi.fn(),
       setExternalMessageWaiter: vi.fn(),
       setExternalMessageWaitPredicate: vi.fn(),
-      getCore: vi.fn(() => {
-        throw new Error('setup failed');
-      }),
+      getCore: vi
+        .fn()
+        .mockReturnValueOnce({ modelConfig: { model: 'parent-model' } })
+        .mockImplementationOnce(() => {
+          throw new Error('setup failed');
+        }),
       getExecutionSummary: () => ({
         totalTokens: 0,
         outputTokens: 0,

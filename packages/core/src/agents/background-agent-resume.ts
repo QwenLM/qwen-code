@@ -117,6 +117,7 @@ interface ResumeOperation {
 
 interface RestorePausedEntryOptions {
   error?: string;
+  model?: string;
   resumeBlockedReason?: string;
   suppressRegisterCallback?: boolean;
 }
@@ -759,6 +760,8 @@ export class BackgroundAgentResumeService {
     }
 
     const bgAbortController = new AbortController();
+    let resumeAccountingModel =
+      existing.model ?? meta.model ?? meta.persistedCliFlags?.model;
 
     let ownedEntry: AgentTask;
     try {
@@ -774,6 +777,7 @@ export class BackgroundAgentResumeService {
           stats: undefined,
           recentActivities: [],
           pendingMessages: [...(existing.pendingMessages ?? [])],
+          model: undefined,
         },
         { suppressRegisterCallback: true },
       );
@@ -789,6 +793,7 @@ export class BackgroundAgentResumeService {
       });
       this.restorePausedEntry(agentId, {
         error: errorMessage,
+        model: resumeAccountingModel,
         suppressRegisterCallback: true,
       });
       return undefined;
@@ -841,6 +846,7 @@ export class BackgroundAgentResumeService {
           lastUpdatedAt: new Date().toISOString(),
         });
         this.restorePausedEntry(agentId, {
+          model: resumeAccountingModel,
           resumeBlockedReason: reason,
           suppressRegisterCallback: true,
         });
@@ -924,6 +930,7 @@ export class BackgroundAgentResumeService {
           lastUpdatedAt: new Date().toISOString(),
         });
         this.restorePausedEntry(agentId, {
+          model: resumeAccountingModel,
           resumeBlockedReason: reason,
           suppressRegisterCallback: true,
         });
@@ -937,6 +944,7 @@ export class BackgroundAgentResumeService {
           lastUpdatedAt: new Date().toISOString(),
         });
         this.restorePausedEntry(agentId, {
+          model: resumeAccountingModel,
           resumeBlockedReason: reason,
           suppressRegisterCallback: true,
         });
@@ -954,6 +962,7 @@ export class BackgroundAgentResumeService {
           lastUpdatedAt: new Date().toISOString(),
         });
         this.restorePausedEntry(agentId, {
+          model: resumeAccountingModel,
           resumeBlockedReason: reason,
           suppressRegisterCallback: true,
         });
@@ -989,6 +998,24 @@ export class BackgroundAgentResumeService {
       }
       if (await stopStaleSetup()) return undefined;
 
+      const runtimeModel =
+        subagent.getCore().modelConfig?.model || activeAgentConfig.getModel();
+      ownedEntry =
+        registry.updateRunningAgentModel(
+          agentId,
+          runtimeModel?.trim() || undefined,
+        ) ?? ownedEntry;
+      resumeAccountingModel = ownedEntry.model;
+      if (resumeAccountingModel) {
+        patchAgentMeta(metaPath, {
+          model: resumeAccountingModel,
+          persistedCliFlags: {
+            ...meta.persistedCliFlags,
+            model: resumeAccountingModel,
+          },
+        });
+      }
+
       const projectRoot = this.config.getProjectRoot();
       cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
         agentId: meta.agentId,
@@ -1009,6 +1036,7 @@ export class BackgroundAgentResumeService {
         isBackgrounded: true,
         lastUpdatedAt: new Date().toISOString(),
         resolvedApprovalMode,
+        ...(resumeAccountingModel ? { model: resumeAccountingModel } : {}),
         subagentName: target.agentName,
         agentColor: target.subagentConfig?.color ?? meta.agentColor,
         resumeCount: nextResumeCount,
@@ -1261,6 +1289,7 @@ export class BackgroundAgentResumeService {
         } else {
           this.restorePausedEntry(agentId, {
             error: errorMessage,
+            model: resumeAccountingModel,
             suppressRegisterCallback: true,
           });
         }
@@ -1338,6 +1367,7 @@ export class BackgroundAgentResumeService {
       endTime: undefined,
       result: undefined,
       error: options.error,
+      model: options.model ?? latest.model,
       resumeBlockedReason: options.resumeBlockedReason,
       stats: undefined,
       recentActivities: [],
