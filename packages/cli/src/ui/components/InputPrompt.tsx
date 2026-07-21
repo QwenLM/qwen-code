@@ -918,6 +918,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       if (
         fleetViewEnabled &&
         !commandSearchActive &&
+        !reverseSearchActive &&
         key.name === 'left' &&
         !key.ctrl &&
         !key.meta &&

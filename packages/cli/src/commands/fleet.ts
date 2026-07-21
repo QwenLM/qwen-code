@@ -21,7 +21,7 @@ export const fleetCommand: CommandModule = {
 
     if (selectedSessionId) {
       writeStdoutLine(`Selected session: ${selectedSessionId}`);
-      writeStdoutLine(`Run: qwen-code --resume ${selectedSessionId}`);
+      writeStdoutLine(`Run: qwen --resume ${selectedSessionId}`);
     }
     process.exit(0);
   },

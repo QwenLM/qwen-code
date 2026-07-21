@@ -12,7 +12,7 @@ import {
 import { useConfig } from '../contexts/ConfigContext.js';
 
 const POLL_INTERVAL_MS = 3000;
-const SESSION_LIST_SIZE = 100;
+export const SESSION_LIST_SIZE = 100;
 
 export interface UseFleetViewSessionsResult {
   sessions: FleetSessionEntry[];

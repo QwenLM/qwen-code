@@ -14,23 +14,15 @@ import { theme } from '../../semantic-colors.js';
 import type { FleetSessionEntry } from '../../contexts/FleetViewContext.js';
 import type { SessionService } from '@qwen-code/qwen-code-core';
 
-type FleetSessionState =
-  | 'needs_input'
-  | 'working'
-  | 'completed'
-  | 'idle'
-  | 'active';
+type FleetSessionState = 'working' | 'idle';
 
 const STATE_ICONS: Record<FleetSessionState, string> = {
-  active: '✽',
   working: '✽',
-  needs_input: '✻',
   idle: '✻',
-  completed: '✻',
 };
 
 function formatTimeAgo(mtime: number): string {
-  const diff = Date.now() - mtime;
+  const diff = Math.max(0, Date.now() - mtime);
   const seconds = Math.floor(diff / 1000);
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
@@ -60,12 +52,7 @@ function getSessionState(entry: FleetSessionEntry): FleetSessionState {
 function getIconColor(state: FleetSessionState): string {
   switch (state) {
     case 'working':
-    case 'active':
       return theme.text.accent;
-    case 'needs_input':
-      return theme.status.warning;
-    case 'completed':
-      return theme.status.success;
     case 'idle':
       return theme.text.secondary;
     default:
@@ -101,7 +88,6 @@ const SessionRow: React.FC<SessionRowProps> = ({ entry, selected, width }) => {
 
   return (
     <Box>
-      <Text>{selected ? ' ' : ' '}</Text>
       <Text color={iconColor}>{icon} </Text>
       <Text
         color={selected ? theme.text.primary : theme.text.secondary}
@@ -120,13 +106,11 @@ const SessionRow: React.FC<SessionRowProps> = ({ entry, selected, width }) => {
 
 interface GroupHeaderProps {
   label: string;
-  selected: boolean;
 }
 
-const GroupHeader: React.FC<GroupHeaderProps> = ({ label, selected }) => (
+const GroupHeader: React.FC<GroupHeaderProps> = ({ label }) => (
   <Box marginTop={1}>
     <Text color={theme.text.secondary} bold>
-      {selected ? ' ' : ' '}
       {label}
     </Text>
   </Box>
@@ -153,17 +137,17 @@ function groupByDirectory(
 ): Array<{ label: string; entries: FleetSessionEntry[] }> {
   const byDir = new Map<string, FleetSessionEntry[]>();
   for (const s of sessions) {
-    const key = shortenPath(s.cwd || 'unknown', 60);
+    const key = s.cwd || 'unknown';
     if (!byDir.has(key)) byDir.set(key, []);
     byDir.get(key)!.push(s);
   }
   return Array.from(byDir.entries()).map(([dir, entries]) => ({
-    label: dir,
+    label: shortenPath(dir, 60),
     entries,
   }));
 }
 
-type ViewMode = 'list' | 'peek' | 'confirm-stop';
+type ViewMode = 'list' | 'peek';
 
 export interface FleetViewProps {
   sessions: FleetSessionEntry[];
@@ -182,6 +166,8 @@ export interface FleetViewProps {
   isActive?: boolean;
   sessionService?: SessionService;
   onRefresh?: () => void;
+  /** Skip AlternateScreen escapes when the parent already owns the alt screen (VP mode). */
+  disableAlternateScreen?: boolean;
 }
 
 export const FleetView: React.FC<FleetViewProps> = ({
@@ -201,12 +187,13 @@ export const FleetView: React.FC<FleetViewProps> = ({
   isActive = true,
   sessionService,
   onRefresh,
+  disableAlternateScreen,
 }) => {
   const { rows, columns } = useTerminalSize();
   const [viewMode, setViewMode] = useState<ViewMode>('list');
   const [inputValue, setInputValue] = useState('');
-  const [stopPendingId, setStopPendingId] = useState<string | null>(null);
-  const stopTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [deletePendingId, setDeletePendingId] = useState<string | null>(null);
+  const deleteTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [renaming, setRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState('');
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
@@ -215,7 +202,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
   useEffect(
     () => () => {
       if (statusTimerRef.current) clearTimeout(statusTimerRef.current);
-      if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
+      if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
     },
     [],
   );
@@ -249,6 +236,17 @@ export const FleetView: React.FC<FleetViewProps> = ({
     }
   }, [clampedIndex, selectedIndex, flatEntries.length, onSelect]);
   const selectedEntry = flatEntries[clampedIndex];
+
+  // Clear pending delete when selection changes
+  useEffect(() => {
+    if (deletePendingId && selectedEntry?.sessionId !== deletePendingId) {
+      setDeletePendingId(null);
+      if (deleteTimerRef.current) {
+        clearTimeout(deleteTimerRef.current);
+        deleteTimerRef.current = null;
+      }
+    }
+  }, [deletePendingId, selectedEntry?.sessionId]);
 
   // Count stats
   const workingCount = sessions.filter((s) => s.status === 'active').length;
@@ -309,7 +307,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
         return;
       }
 
-      // Printable chars go to dispatch input
+      // Printable chars go to dispatch input (space only when input is non-empty)
       if (
         key.sequence &&
         key.sequence.length === 1 &&
@@ -321,7 +319,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
         key.name !== 'down' &&
         key.name !== 'left' &&
         key.name !== 'right' &&
-        key.name !== 'space' &&
+        !(key.name === 'space' && inputValue.length === 0) &&
         key.name !== 'backspace' &&
         key.name !== 'delete' &&
         key.name !== 'tab'
@@ -353,6 +351,24 @@ export const FleetView: React.FC<FleetViewProps> = ({
           onAttach(selectedEntry.sessionId);
           return;
         }
+        if (key.ctrl && key.name === 'x' && selectedEntry) {
+          setViewMode('list');
+          if (deletePendingId === selectedEntry.sessionId) {
+            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+            setDeletePendingId(null);
+            onDelete(selectedEntry.sessionId);
+            showStatus('Session deleted');
+          } else {
+            setDeletePendingId(selectedEntry.sessionId);
+            showStatus('Press Ctrl+X again to confirm deletion');
+            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+            deleteTimerRef.current = setTimeout(() => {
+              setDeletePendingId(null);
+              deleteTimerRef.current = null;
+            }, 2000);
+          }
+          return;
+        }
         return;
       }
 
@@ -381,21 +397,21 @@ export const FleetView: React.FC<FleetViewProps> = ({
           onClose();
         }
       } else if (key.ctrl && key.name === 'x' && selectedEntry) {
-        // Ctrl+X: stop, then delete on second press within 2s
-        if (stopPendingId === selectedEntry.sessionId) {
-          // Second press — delete
-          clearTimeout(stopTimerRef.current!);
-          setStopPendingId(null);
+        // Ctrl+X: delete on second press within 2s
+        if (deletePendingId === selectedEntry.sessionId) {
+          // Second press — confirm deletion
+          if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+          setDeletePendingId(null);
           onDelete(selectedEntry.sessionId);
           showStatus('Session deleted');
         } else {
-          // First press — stop
-          setStopPendingId(selectedEntry.sessionId);
-          showStatus('Press Ctrl+X again to delete');
-          if (stopTimerRef.current) clearTimeout(stopTimerRef.current);
-          stopTimerRef.current = setTimeout(() => {
-            setStopPendingId(null);
-            stopTimerRef.current = null;
+          // First press — arm deletion
+          setDeletePendingId(selectedEntry.sessionId);
+          showStatus('Press Ctrl+X again to confirm deletion');
+          if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+          deleteTimerRef.current = setTimeout(() => {
+            setDeletePendingId(null);
+            deleteTimerRef.current = null;
           }, 2000);
         }
       } else if (key.ctrl && key.name === 's') {
@@ -415,7 +431,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
       clampedIndex,
       flatEntries.length,
       selectedEntry,
-      stopPendingId,
+      deletePendingId,
       onSelect,
       onAttach,
       onClose,
@@ -435,7 +451,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
   const entryRowIndex = useMemo(() => {
     let row = 0;
     for (const group of groups) {
-      row++;
+      row += 2; // group header (1 content + 1 marginTop)
       for (const entry of group.entries) {
         if (entry === selectedEntry) return row;
         row++;
@@ -444,7 +460,10 @@ export const FleetView: React.FC<FleetViewProps> = ({
     return 0;
   }, [groups, selectedEntry]);
 
-  const maxVisibleRows = rows - 8; // header + stats + footer + input
+  const maxVisibleRows = Math.max(
+    3,
+    rows - 8 - (viewMode === 'peek' ? 6 : 0) - (statusMessage ? 1 : 0),
+  );
   const scrollOffset = useMemo(() => {
     if (entryRowIndex < maxVisibleRows) return 0;
     return Math.max(0, entryRowIndex - maxVisibleRows + 1);
@@ -456,12 +475,12 @@ export const FleetView: React.FC<FleetViewProps> = ({
     if (viewMode === 'peek')
       return 'enter to open · space to close · ctrl+x to delete';
     if (selectedEntry)
-      return 'enter to open · space to reply · ctrl+x to delete · ? for shortcuts';
-    return '? for shortcuts';
+      return 'enter to open · space to preview · ctrl+x to delete';
+    return '';
   }, [renaming, viewMode, selectedEntry]);
 
   return (
-    <AlternateScreen>
+    <AlternateScreen disabled={disableAlternateScreen}>
       <Box flexDirection="column" height={rows} width={columns}>
         {/* Header — no border, plain text like Claude Code */}
         <Box flexDirection="column" paddingX={1} flexShrink={0}>
@@ -477,12 +496,12 @@ export const FleetView: React.FC<FleetViewProps> = ({
           </Text>
         </Box>
 
-        {/* Status message */}
-        {statusMessage && (
-          <Box paddingX={1}>
+        {/* Status message — fixed height to avoid list shift */}
+        <Box paddingX={1} height={1}>
+          {statusMessage && (
             <Text color={theme.status.warning}>{statusMessage}</Text>
-          </Box>
-        )}
+          )}
+        </Box>
 
         {/* Error display */}
         {error && (
@@ -496,7 +515,9 @@ export const FleetView: React.FC<FleetViewProps> = ({
           {sessions.length === 0 && !loading ? (
             <Box paddingX={1} paddingY={1}>
               <Text color={theme.text.secondary}>
-                No sessions. Type a task below and press Enter to start one.
+                {onDispatch
+                  ? 'No sessions. Type a task below and press Enter to start one.'
+                  : 'No sessions found.'}
               </Text>
             </Box>
           ) : (
@@ -505,11 +526,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
               let globalIdx = 0;
               for (const group of groups) {
                 rowNodes.push(
-                  <GroupHeader
-                    key={`g-${group.label}`}
-                    label={group.label}
-                    selected={false}
-                  />,
+                  <GroupHeader key={`g-${group.label}`} label={group.label} />,
                 );
                 for (const entry of group.entries) {
                   rowNodes.push(
@@ -545,37 +562,41 @@ export const FleetView: React.FC<FleetViewProps> = ({
               {selectedEntry.displayName}
             </Text>
             <Text color={theme.text.secondary}>
-              {selectedEntry.prompt || 'No recent output'}
+              {(selectedEntry.prompt || 'No recent output').slice(0, 200)}
             </Text>
           </Box>
         )}
 
-        {/* Bottom input — the core interaction, like Claude Code */}
-        <Box flexDirection="column" flexShrink={0}>
-          <Box paddingX={0}>
-            <Text color={theme.text.secondary}>{'─'.repeat(columns)}</Text>
+        {/* Bottom input — shown when renaming or dispatch is available */}
+        {(renaming || onDispatch) && (
+          <Box flexDirection="column" flexShrink={0}>
+            <Box paddingX={0}>
+              <Text color={theme.text.secondary}>{'─'.repeat(columns)}</Text>
+            </Box>
+            <Box paddingX={1}>
+              <Text color={theme.text.accent}>❯ </Text>
+              {renaming ? (
+                <Text color={theme.text.primary}>{renameValue}▏</Text>
+              ) : (
+                <Text
+                  color={inputValue ? theme.text.primary : theme.text.secondary}
+                >
+                  {inputValue || 'describe a task for a new session'}
+                </Text>
+              )}
+            </Box>
+            <Box paddingX={0}>
+              <Text color={theme.text.secondary}>{'─'.repeat(columns)}</Text>
+            </Box>
           </Box>
-          <Box paddingX={1}>
-            <Text color={theme.text.accent}>❯ </Text>
-            {renaming ? (
-              <Text color={theme.text.primary}>{renameValue}▏</Text>
-            ) : (
-              <Text
-                color={inputValue ? theme.text.primary : theme.text.secondary}
-              >
-                {inputValue || 'describe a task for a new session'}
-              </Text>
-            )}
-          </Box>
-          <Box paddingX={0}>
-            <Text color={theme.text.secondary}>{'─'.repeat(columns)}</Text>
-          </Box>
+        )}
 
-          {/* Context-aware footer shortcuts */}
+        {/* Context-aware footer shortcuts */}
+        {footerHint ? (
           <Box paddingX={1}>
             <Text color={theme.text.secondary}>{footerHint}</Text>
           </Box>
-        </Box>
+        ) : null}
       </Box>
     </AlternateScreen>
   );

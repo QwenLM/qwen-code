@@ -861,7 +861,7 @@ const SETTINGS_SCHEMA = {
         default: false,
         description:
           'When true, start in Fleet View instead of a new session. Only works when a daemon is running. (Reserved for future use — not yet implemented.)',
-        showInDialog: true,
+        showInDialog: false,
       },
       fleetViewGroupMode: {
         type: 'string',

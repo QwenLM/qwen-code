@@ -53,9 +53,10 @@ const FleetViewContainer: React.FC = () => {
     (sessionId: string) => {
       uiActions.setFleetDoubleTapPending(false);
       uiActions.closeFleetView();
+      if (sessionId === config.getSessionId()) return;
       void uiActions.handleResume(sessionId);
     },
-    [uiActions],
+    [uiActions, config],
   );
 
   const handleClose = useCallback(() => {
@@ -65,15 +66,28 @@ const FleetViewContainer: React.FC = () => {
 
   const handleDelete = useCallback(
     (sessionId: string) => {
-      void sessionService.removeSession(sessionId).then(() => refresh());
+      if (sessionId === config.getSessionId()) return;
+      void sessionService
+        .removeSession(sessionId)
+        .then(() => refresh())
+        .catch(() => refresh());
     },
-    [sessionService, refresh],
+    [sessionService, refresh, config],
   );
 
   const handleCreateNew = useCallback(() => {
     uiActions.setFleetDoubleTapPending(false);
     uiActions.closeFleetView();
   }, [uiActions]);
+
+  const handleDispatch = useCallback(
+    (prompt: string) => {
+      uiActions.setFleetDoubleTapPending(false);
+      uiActions.closeFleetView();
+      uiActions.handleFinalSubmit(prompt);
+    },
+    [uiActions],
+  );
 
   const handleCycleGroupMode = useCallback(
     () => setGroupMode((prev) => (prev === 'state' ? 'directory' : 'state')),
@@ -93,9 +107,11 @@ const FleetViewContainer: React.FC = () => {
       onDelete={handleDelete}
       onCreateNew={handleCreateNew}
       onCycleGroupMode={handleCycleGroupMode}
+      onDispatch={handleDispatch}
       workspaceCwd={config.getWorkingDir()}
       sessionService={sessionService}
       onRefresh={refresh}
+      disableAlternateScreen={uiState.useTerminalBuffer}
     />
   );
 };
@@ -227,7 +243,9 @@ export const DefaultAppLayout: React.FC = () => {
       )}
 
       {/* Tab bar: visible whenever in-process agents exist and input is active */}
-      {hasAgents && !uiState.dialogsVisible && <AgentTabBar />}
+      {hasAgents && !uiState.dialogsVisible && !uiState.isFleetViewOpen && (
+        <AgentTabBar />
+      )}
     </Box>
   );
 };

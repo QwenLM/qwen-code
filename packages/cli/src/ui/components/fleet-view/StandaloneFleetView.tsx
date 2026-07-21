@@ -6,29 +6,15 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { render, Box, useApp } from 'ink';
-import { SessionService, type Config } from '@qwen-code/qwen-code-core';
+import { SessionService } from '@qwen-code/qwen-code-core';
 import { KeypressProvider } from '../../contexts/KeypressContext.js';
-import { ConfigContext } from '../../contexts/ConfigContext.js';
-import { SettingsContext } from '../../contexts/SettingsContext.js';
-import type { LoadedSettings } from '../../../config/settings.js';
 import { FleetView } from './FleetView.js';
 import {
   toFleetEntry,
   type FleetSessionEntry,
 } from '../../contexts/FleetViewContext.js';
 import { TerminalOutputProvider } from '../../contexts/TerminalOutputContext.js';
-
-const STUB_CONFIG = {
-  getShouldUseNodePtyShell: () => false,
-  getIdeMode: () => false,
-  isTrustedFolder: () => false,
-  getToolRegistry: () => ({ getTool: () => undefined }),
-  getContentGenerator: () => ({ useSummarizedThinking: () => false }),
-} as unknown as Config;
-
-const STUB_SETTINGS = {
-  merged: { ui: {} },
-} as unknown as LoadedSettings;
+import { SESSION_LIST_SIZE } from '../../hooks/use-fleet-view-sessions.js';
 
 interface StandaloneFleetViewScreenProps {
   sessionService: SessionService;
@@ -54,7 +40,9 @@ function StandaloneFleetViewScreen({
   const fetchSessions = useCallback(async () => {
     try {
       setLoading(true);
-      const result = await sessionService.listSessions({ size: 100 });
+      const result = await sessionService.listSessions({
+        size: SESSION_LIST_SIZE,
+      });
       setSessions(result.items.map((item) => toFleetEntry(item, null)));
       setError(null);
     } catch (err) {
@@ -80,36 +68,37 @@ function StandaloneFleetViewScreen({
   }
 
   return (
-    <ConfigContext.Provider value={STUB_CONFIG}>
-      <SettingsContext.Provider value={STUB_SETTINGS}>
-        <FleetView
-          sessions={sessions}
-          selectedIndex={selectedIndex}
-          loading={loading}
-          error={error}
-          groupMode={groupMode}
-          onSelect={setSelectedIndex}
-          onAttach={(sessionId) => {
-            onSelect(sessionId);
-            setIsExiting(true);
-            exit();
-          }}
-          onClose={handleExit}
-          onDelete={(sessionId) => {
-            void sessionService.removeSession(sessionId).then(() => {
-              void fetchSessions();
-            });
-          }}
-          onCreateNew={handleExit}
-          onCycleGroupMode={() =>
-            setGroupMode((prev) => (prev === 'state' ? 'directory' : 'state'))
-          }
-          workspaceCwd={workspaceCwd}
-          sessionService={sessionService}
-          onRefresh={() => void fetchSessions()}
-        />
-      </SettingsContext.Provider>
-    </ConfigContext.Provider>
+    <FleetView
+      sessions={sessions}
+      selectedIndex={selectedIndex}
+      loading={loading}
+      error={error}
+      groupMode={groupMode}
+      onSelect={setSelectedIndex}
+      onAttach={(sessionId) => {
+        onSelect(sessionId);
+        setIsExiting(true);
+        exit();
+      }}
+      onClose={handleExit}
+      onDelete={(sessionId) => {
+        void sessionService
+          .removeSession(sessionId)
+          .then(() => {
+            void fetchSessions();
+          })
+          .catch(() => {
+            void fetchSessions();
+          });
+      }}
+      onCreateNew={handleExit}
+      onCycleGroupMode={() =>
+        setGroupMode((prev) => (prev === 'state' ? 'directory' : 'state'))
+      }
+      workspaceCwd={workspaceCwd}
+      sessionService={sessionService}
+      onRefresh={() => void fetchSessions()}
+    />
   );
 }
 
@@ -121,7 +110,7 @@ export async function showStandaloneFleetView(
   return new Promise<string | null>((resolve) => {
     let selectedId: string | null = null;
 
-    const instance = render(
+    const { unmount, waitUntilExit } = render(
       <TerminalOutputProvider value={(data) => process.stdout.write(data)}>
         <KeypressProvider kittyProtocolEnabled={false}>
           <StandaloneFleetViewScreen
@@ -136,11 +125,18 @@ export async function showStandaloneFleetView(
           />
         </KeypressProvider>
       </TerminalOutputProvider>,
+      { exitOnCtrlC: false },
     );
 
-    instance.waitUntilExit().then(
-      () => resolve(selectedId),
-      () => resolve(null),
+    waitUntilExit().then(
+      () => {
+        unmount();
+        resolve(selectedId);
+      },
+      () => {
+        unmount();
+        resolve(null);
+      },
     );
   });
 }
