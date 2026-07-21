@@ -1641,10 +1641,20 @@ export function registerSessionRoutes(
                 branch: sidecar.worktreeBranch,
               };
               try {
-                await runtime.bridge.changeSessionCwd(sessionId, {
-                  path: wt.path,
-                  allowedRoots: candidateRoots,
-                });
+                // changeSessionCwd chains onto the prompt queue and
+                // blocks until any in-flight prompt finishes. When the
+                // session is actively running a task this would hang the
+                // HTTP response indefinitely, making the session
+                // unopenable in the Web Shell. Skip the cwd relocation
+                // in that case — the bridge entry already has the
+                // correct cwd from the original spawn, and the metadata
+                // is enough for the UI to show the worktree badge/chip.
+                if (!session.hasActivePrompt) {
+                  await runtime.bridge.changeSessionCwd(sessionId, {
+                    path: wt.path,
+                    allowedRoots: candidateRoots,
+                  });
+                }
                 runtime.bridge.setSessionWorktree(sessionId, wt);
                 session.worktree = wt;
               } catch (restoreErr) {
