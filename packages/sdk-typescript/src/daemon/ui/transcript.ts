@@ -511,17 +511,11 @@ function clearActiveAssistant(
 }
 
 /**
- * Fold a round's token usage onto the active top-level assistant block. The
- * daemon emits usage right after that round's assistant text, so the active
- * block is the one it belongs to; multiple rounds accumulate, and renderers sum
- * a turn's blocks for the total.
- *
- * Sub-agent rounds (which arrive with a parentToolCallId) are folded in too:
- * their tokens are part of the spawning turn's real cost, and the parent is
- * blocked on the Task call while they run, so the top-level active block is
- * still that turn's. Excluding them made the turn under-count badly against
- * /stats. The sub-agent's own *text* still lives on its parent-keyed block; only
- * the usage counter rides the top-level block.
+ * Fold a round's token usage onto its active assistant block. Main-agent usage
+ * uses the top-level pointer; sub-agent usage uses the parent-keyed pointer so
+ * it is not also counted as main-agent usage. Multiple rounds accumulate, and
+ * renderers combine main usage with the root sub-agent execution summaries for
+ * the spawning turn's total.
  *
  * No active block (a rare usage frame with no preceding top-level assistant
  * text) drops the count rather than minting a stray empty block.
@@ -530,7 +524,10 @@ function applyAssistantUsage(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
 ): void {
-  const block = getWritableBlockById(state, state.activeAssistantBlockId);
+  const blockId = event.parentToolCallId
+    ? state.activeAssistantBlockByParent[event.parentToolCallId]
+    : state.activeAssistantBlockId;
+  const block = getWritableBlockById(state, blockId);
   if (!block || block.kind !== 'assistant') return;
   const prev = block.usage;
   block.usage = {

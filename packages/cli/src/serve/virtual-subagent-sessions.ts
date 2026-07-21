@@ -216,6 +216,7 @@ function replayCursorState(
 class VirtualSubagentTarget {
   private readonly bus = new EventBus(1_024, 8);
   private readonly events: BridgeEvent[] = [];
+  private snapshotDelivered = false;
   private offset = 0;
   private streamOffset = 0;
   private streamReady = false;
@@ -224,6 +225,7 @@ class VirtualSubagentTarget {
   private replayState: unknown;
   private initialized = false;
   private refreshPromise: Promise<void> = Promise.resolve();
+  private snapshotPromise: Promise<void> = Promise.resolve();
   private pollTimer: NodeJS.Timeout | undefined;
   private subscribers = 0;
   private retentionTimer: NodeJS.Timeout | undefined;
@@ -242,6 +244,10 @@ class VirtualSubagentTarget {
       clearInterval(this.pollTimer);
       this.pollTimer = undefined;
     }
+  }
+
+  private rememberEvent(event: BridgeEvent | undefined): void {
+    if (event && !this.snapshotDelivered) this.events.push(event);
   }
 
   private async readNewRecords(): Promise<ChatRecord[]> {
@@ -333,7 +339,7 @@ class VirtualSubagentTarget {
             ...(record.thought ? { thought: true } : {}),
           }),
         });
-        if (event) this.events.push(event);
+        this.rememberEvent(event);
         this.streamedSinceCanonical = true;
       }
     } catch (error) {
@@ -404,7 +410,7 @@ class VirtualSubagentTarget {
           return event ? [event] : [];
         })
       : this.bus.seedReplayEvents(inputs);
-    this.events.push(...published);
+    if (!this.snapshotDelivered) this.events.push(...published);
     this.initialized = true;
   };
 
@@ -413,13 +419,41 @@ class VirtualSubagentTarget {
       .catch(() => undefined)
       .then(async () => {
         await this.refreshOnce();
-        await this.readStreamUpdates();
+        if (this.task.status === 'running') await this.readStreamUpdates();
       });
     return this.refreshPromise;
   }
 
+  private async createSnapshotOnce(): Promise<BridgeEvent[]> {
+    if (!this.snapshotDelivered) {
+      await this.refreshLive();
+      const snapshot = [...this.events];
+      this.events.length = 0;
+      this.snapshotDelivered = true;
+      return snapshot;
+    }
+    const target = new VirtualSubagentTarget(
+      this.sessionId,
+      this.parentSessionId,
+      this.task,
+      this.workspaceCwd,
+      () => undefined,
+    );
+    await target.refreshLive();
+    return [...target.events];
+  }
+
+  private createSnapshot(): Promise<BridgeEvent[]> {
+    const snapshot = this.snapshotPromise.then(() => this.createSnapshotOnce());
+    this.snapshotPromise = snapshot.then(
+      () => undefined,
+      () => undefined,
+    );
+    return snapshot;
+  }
+
   async load(clientId?: string) {
-    await this.refreshLive();
+    const compactedReplay = await this.createSnapshot();
     if (this.subscribers === 0) this.scheduleRetention();
     return {
       sessionId: this.sessionId,
@@ -429,7 +463,7 @@ class VirtualSubagentTarget {
       createdAt: new Date(this.task.startTime).toISOString(),
       hasActivePrompt: this.task.status === 'running',
       state: {},
-      compactedReplay: [...this.events],
+      compactedReplay,
       liveJournal: [],
       historyHasMore: false,
       lastEventId: this.bus.lastEventId,
@@ -447,6 +481,10 @@ class VirtualSubagentTarget {
     }
     this.subscribers++;
     await this.refreshLive();
+    if (!this.snapshotDelivered) {
+      this.events.length = 0;
+      this.snapshotDelivered = true;
+    }
     if (this.task.status === 'running' && !this.pollTimer) {
       this.pollTimer = setInterval(() => {
         void this.refreshLive().catch(() => undefined);
@@ -702,7 +740,7 @@ export class VirtualSubagentSessions {
     );
     if (!task) return undefined;
     const sessionId = createVirtualSubagentSessionId(parentSessionId, task.id);
-    const status = metrics?.status ?? task.status;
+    const status = task.status;
     this.targets
       .get(`${runtime.workspaceId}:${sessionId}`)
       ?.updateStatus(status);

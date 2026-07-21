@@ -43,32 +43,13 @@ function getSubagentMetrics(
     raw['executionSummary'] !== null
       ? (raw['executionSummary'] as Record<string, unknown>)
       : undefined;
-  const rawStatus = raw?.['status'];
-  const resolutionIsTerminal = [
-    'completed',
-    'success',
-    'failed',
-    'error',
-    'cancelled',
-    'canceled',
-    'paused',
-  ].includes(resolution.status);
-  const status = resolutionIsTerminal
-    ? resolution.status
-    : typeof rawStatus === 'string'
-      ? rawStatus === 'background'
-        ? 'running'
-        : rawStatus
-      : rootTool.status === 'in_progress'
-        ? 'running'
-        : rootTool.status || resolution.status;
   const summaryDuration = summary?.['totalDurationMs'];
   const inputTokens = summary?.['inputTokens'];
   const outputTokens = summary?.['outputTokens'];
   const cachedTokens = summary?.['cachedTokens'];
 
   return {
-    status,
+    status: resolution.status,
     durationMs:
       typeof summaryDuration === 'number'
         ? summaryDuration

@@ -507,7 +507,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
-  it('folds sub-agent usage (parentToolCallId) into the parent turn total', () => {
+  it('folds sub-agent usage onto its parent-keyed assistant block', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
@@ -517,7 +517,11 @@ describe('daemon UI normalizer and transcript reducer', () => {
           type: 'assistant.usage',
           usage: { inputTokens: 100, outputTokens: 20 },
         },
-        // A round from a spawned sub-agent — part of the turn's real cost.
+        {
+          type: 'assistant.text.delta',
+          text: 'sub-agent answer',
+          parentToolCallId: 'sub-1',
+        },
         {
           type: 'assistant.usage',
           usage: { inputTokens: 5000, outputTokens: 800 },
@@ -531,7 +535,13 @@ describe('daemon UI normalizer and transcript reducer', () => {
       {
         kind: 'assistant',
         text: 'answer',
-        usage: { inputTokens: 5100, outputTokens: 820 },
+        usage: { inputTokens: 100, outputTokens: 20 },
+      },
+      {
+        kind: 'assistant',
+        text: 'sub-agent answer',
+        parentToolCallId: 'sub-1',
+        usage: { inputTokens: 5000, outputTokens: 800 },
       },
     ]);
   });

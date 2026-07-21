@@ -168,9 +168,13 @@ describe('VirtualSubagentSessions', () => {
         break;
       }
     }
+    const reloaded = await sessions.load(runtime, resolved!.sessionId);
     abort.abort();
     await iterator.return?.();
     expect(streamed?.value).toMatchObject({ type: 'session_update' });
+    expect(JSON.stringify(reloaded?.compactedReplay)).toContain(
+      'streamed thought',
+    );
   });
 
   it('isolates cached targets by workspace runtime', async () => {
@@ -181,6 +185,16 @@ describe('VirtualSubagentSessions', () => {
       await fs.writeFile(
         outputFile,
         `${JSON.stringify(record('one', null, 'user', text))}\n`,
+      );
+      await fs.writeFile(
+        `${outputFile}.stream`,
+        `${JSON.stringify({
+          v: 1,
+          round: 1,
+          text: `${text} stale stream`,
+          thought: false,
+          timestamp: Date.now(),
+        })}\n`,
       );
       return {
         workspaceId,
@@ -225,9 +239,12 @@ describe('VirtualSubagentSessions', () => {
     expect(JSON.stringify(second?.compactedReplay)).not.toContain(
       'first workspace',
     );
+    expect(JSON.stringify(second?.compactedReplay)).not.toContain(
+      'stale stream',
+    );
   });
 
-  it('uses live task metrics without reading stale terminal parent metrics', async () => {
+  it('keeps task status while supplementing terminal metrics', async () => {
     const runtimeDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-subagent-runtime-'),
     );
@@ -253,7 +270,7 @@ describe('VirtualSubagentSessions', () => {
           status: 'success',
           resultDisplay: {
             type: 'task_execution',
-            status: 'completed',
+            status: 'running',
             executionSummary: { totalTokens: 999 },
           },
         },

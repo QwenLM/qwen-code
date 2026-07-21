@@ -686,7 +686,7 @@
   right: 20px;
   bottom: calc(100% + 8px);
   left: 20px;
-  z-index: 6;
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
   pointer-events: auto;
 }
 
