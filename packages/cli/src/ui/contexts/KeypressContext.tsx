@@ -954,7 +954,8 @@ export function KeypressProvider({
       // emit this form for Shift/Ctrl/Alt+Enter by default, and parseKittyPrefix
       // decodes it. Only the 27-marker prefix opts in, so ordinary keys that
       // readline already parses cleanly are left untouched.
-      const isModifyOtherKeysSequence = key.sequence.startsWith(`${ESC}[27`);
+      const isModifyOtherKeysSequence =
+        key.sequence?.startsWith(`${ESC}[27`) ?? false;
 
       if (
         kittyProtocolEnabled ||
