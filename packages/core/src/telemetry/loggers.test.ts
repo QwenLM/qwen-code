@@ -40,6 +40,7 @@ import {
   EVENT_EXTENSION_UNINSTALL,
   EVENT_TOOL_OUTPUT_TRUNCATED,
   EVENT_PROTOCOL_TAG_SANITIZED,
+  EVENT_MEMORY_RECALL_DELIVERY,
 } from './constants.js';
 import {
   logApiRequest,
@@ -62,6 +63,7 @@ import {
   logApiError,
   logApiRetry,
   logProtocolTagSanitized,
+  logMemoryRecallDelivery,
 } from './loggers.js';
 import * as metrics from './metrics.js';
 import { apiActivityTracker } from './api-activity-tracker.js';
@@ -90,6 +92,7 @@ import {
   ApiErrorEvent,
   ApiRetryEvent,
   ProtocolTagSanitizedEvent,
+  MemoryRecallDeliveryEvent,
 } from './types.js';
 import { FileOperation } from './metrics.js';
 import type {
@@ -195,6 +198,57 @@ describe('loggers', () => {
       });
       expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
         /response_text|reasoning|tool_name|arguments/,
+      );
+    });
+  });
+
+  describe('logMemoryRecallDelivery', () => {
+    beforeEach(() => {
+      vi.spyOn(metrics, 'recordMemoryRecallDeliveryMetrics');
+    });
+
+    it('emits low-cardinality delivery telemetry without memory content or paths', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = new MemoryRecallDeliveryEvent({
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+        docs_selected: 2,
+        latency_ms: 123,
+      });
+
+      logMemoryRecallDelivery(config, event);
+
+      expect(mockLogger.emit).toHaveBeenCalledWith({
+        body: 'Memory recall delivery: phase=refined. delivery_point=discarded. Selected 2 doc(s).',
+        attributes: {
+          'event.name': EVENT_MEMORY_RECALL_DELIVERY,
+          'event.timestamp': '2025-01-01T00:00:00.000Z',
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'reset',
+          strategy: 'model',
+          docs_selected: 2,
+          latency_ms: 123,
+        },
+      });
+      expect(mockLogger.emit.mock.calls[0][0].attributes).not.toHaveProperty(
+        'session.id',
+      );
+      expect(metrics.recordMemoryRecallDeliveryMetrics).toHaveBeenCalledWith(
+        config,
+        123,
+        {
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'reset',
+          strategy: 'model',
+          docs_selected: 2,
+        },
+      );
+      expect(JSON.stringify(mockLogger.emit.mock.calls[0])).not.toMatch(
+        /query|hash|content|filePath|projectPath|session|message|raw_error|secret/i,
       );
     });
   });

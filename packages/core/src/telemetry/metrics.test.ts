@@ -81,6 +81,7 @@ describe('Telemetry Metrics', () => {
   let recordPerformanceRegressionModule: typeof import('./metrics.js').recordPerformanceRegression;
   let recordBaselineComparisonModule: typeof import('./metrics.js').recordBaselineComparison;
   let recordChannelMemoryRecallMetricsModule: typeof import('./metrics.js').recordChannelMemoryRecallMetrics;
+  let recordMemoryRecallDeliveryMetricsModule: typeof import('./metrics.js').recordMemoryRecallDeliveryMetrics;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -110,6 +111,8 @@ describe('Telemetry Metrics', () => {
     recordBaselineComparisonModule = metricsJsModule.recordBaselineComparison;
     recordChannelMemoryRecallMetricsModule =
       metricsJsModule.recordChannelMemoryRecallMetrics;
+    recordMemoryRecallDeliveryMetricsModule =
+      metricsJsModule.recordMemoryRecallDeliveryMetrics;
 
     const otelApiModule = await import('@opentelemetry/api');
 
@@ -845,6 +848,30 @@ describe('Telemetry Metrics', () => {
   });
 
   describe('metric attribute cardinality controls', () => {
+    it('records memory recall delivery with low-cardinality attributes', () => {
+      const config = makeFakeConfig({ sessionId: 'cardinality-test' });
+      initializeMetricsModule(config);
+      mockCounterAddFn.mockClear();
+      mockHistogramRecordFn.mockClear();
+
+      recordMemoryRecallDeliveryMetricsModule(config, 42, {
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+        docs_selected: 3,
+      });
+
+      const expectedAttrs = {
+        phase: 'refined',
+        delivery_point: 'discarded',
+        discard_reason: 'reset',
+        strategy: 'model',
+      };
+      expect(mockCounterAddFn).toHaveBeenCalledWith(1, expectedAttrs);
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(42, expectedAttrs);
+    });
+
     it('omits session.id from metric attributes by default', () => {
       const config = makeFakeConfig({ sessionId: 'cardinality-test' });
       initializeMetricsModule(config);

@@ -58,6 +58,8 @@ const MEMORY_RECALL_DURATION = `${SERVICE_NAME}.memory.recall.duration`;
 const CHANNEL_MEMORY_RECALL_COUNT = `${SERVICE_NAME}.channel.memory.recall.count`;
 const CHANNEL_MEMORY_RECALL_DURATION = `${SERVICE_NAME}.channel.memory.recall.duration`;
 const CHANNEL_MEMORY_RECALL_SELECTED_COUNT = `${SERVICE_NAME}.channel.memory.recall.selected_count`;
+const MEMORY_RECALL_DELIVERY_COUNT = `${SERVICE_NAME}.memory.recall.delivery.count`;
+const MEMORY_RECALL_DELIVERY_LATENCY = `${SERVICE_NAME}.memory.recall.delivery.latency`;
 
 const baseMetricDefinition = {
   // session.id on metrics is opt-in: each session is a new value, so
@@ -406,6 +408,8 @@ let memoryRecallDurationHistogram: Histogram | undefined;
 let channelMemoryRecallCounter: Counter | undefined;
 let channelMemoryRecallDurationHistogram: Histogram | undefined;
 let channelMemoryRecallSelectedCountHistogram: Histogram | undefined;
+let memoryRecallDeliveryCounter: Counter | undefined;
+let memoryRecallDeliveryLatencyHistogram: Histogram | undefined;
 
 let isMetricsInitialized = false;
 let isPerformanceMonitoringEnabled = false;
@@ -534,6 +538,23 @@ export function initializeMetrics(config: TelemetryRuntimeConfig): void {
     CHANNEL_MEMORY_RECALL_SELECTED_COUNT,
     {
       description: 'Number of channel memory entries selected per attempt.',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryRecallDeliveryCounter = meter.createCounter(
+    MEMORY_RECALL_DELIVERY_COUNT,
+    {
+      description:
+        'Counts auto-memory recall delivery outcomes, tagged by phase and delivery point.',
+      valueType: ValueType.INT,
+    },
+  );
+  memoryRecallDeliveryLatencyHistogram = meter.createHistogram(
+    MEMORY_RECALL_DELIVERY_LATENCY,
+    {
+      description:
+        'Latency from auto-memory recall prefetch start to delivery or discard.',
+      unit: 'ms',
       valueType: ValueType.INT,
     },
   );
@@ -1086,4 +1107,35 @@ export function recordChannelMemoryRecallMetrics(observation: {
     observation.selectedCount,
     attributes,
   );
+}
+
+export function recordMemoryRecallDeliveryMetrics(
+  config: Config,
+  latencyMs: number,
+  attrs: {
+    phase: 'fast' | 'refined';
+    delivery_point: 'initial' | 'tool_result' | 'discarded';
+    discard_reason?:
+      | 'not_ready'
+      | 'no_safe_delivery_point'
+      | 'new_query'
+      | 'reset'
+      | 'abort'
+      | 'shutdown'
+      | 'superseded';
+    strategy: 'none' | 'heuristic' | 'model';
+    docs_selected: number;
+  },
+): void {
+  if (!isMetricsInitialized) return;
+  const common = baseMetricDefinition.getCommonAttributes(config);
+  const metricAttributes = {
+    ...common,
+    phase: attrs.phase,
+    delivery_point: attrs.delivery_point,
+    strategy: attrs.strategy,
+    ...(attrs.discard_reason ? { discard_reason: attrs.discard_reason } : {}),
+  };
+  memoryRecallDeliveryCounter?.add(1, metricAttributes);
+  memoryRecallDeliveryLatencyHistogram?.record(latencyMs, metricAttributes);
 }

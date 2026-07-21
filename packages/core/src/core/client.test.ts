@@ -51,6 +51,7 @@ import {
   type ServerGeminiStreamEvent,
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
+import { logMemoryRecallDelivery } from '../telemetry/index.js';
 
 type MockSessionStartProfiler = {
   time: Mock;
@@ -318,6 +319,7 @@ const mockUiTelemetryService = vi.hoisted(() => ({
   resetSession: vi.fn(),
   addEvent: vi.fn(),
 }));
+const mockLogMemoryRecallDelivery = vi.hoisted(() => vi.fn());
 vi.mock('../telemetry/tracer.js', () => ({
   API_CALL_ABORTED_SPAN_STATUS_MESSAGE: 'API call aborted',
   API_CALL_FAILED_SPAN_STATUS_MESSAGE: 'API call failed',
@@ -328,6 +330,7 @@ vi.mock('../telemetry/index.js', async (importOriginal) => {
   return {
     ...actual,
     uiTelemetryService: mockUiTelemetryService,
+    logMemoryRecallDelivery: mockLogMemoryRecallDelivery,
     // We keep the real implementations of logChatCompression, etc.
     // but we can spy on QwenLogger if needed
   };
@@ -4610,13 +4613,121 @@ hello
       );
     });
 
+    it('should log initial delivery when auto-memory is injected on UserQuery', async () => {
+      mockMemoryManager.recall.mockResolvedValue({
+        prompt: '## Relevant memory\n\nInitial memory result.',
+        selectedDocs: [
+          {
+            type: 'user',
+            filePath: '/test/project/root/.qwen/memory/user.md',
+            relativePath: 'user.md',
+            filename: 'user.md',
+            title: 'User Memory',
+            description: 'User preferences',
+            body: '- User prefers terse responses.',
+            mtimeMs: 1,
+          },
+        ],
+        strategy: 'model',
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-initial-memory-delivery',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'initial',
+          strategy: 'model',
+          docs_selected: 1,
+          latency_ms: expect.any(Number),
+        }),
+      );
+    });
+
+    it('should log discard telemetry when auto-memory selects no docs', async () => {
+      mockMemoryManager.recall.mockResolvedValue({
+        prompt: '',
+        selectedDocs: [],
+        strategy: 'none',
+      });
+
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Quick question' }],
+        new AbortController().signal,
+        'prompt-id-empty-memory-discard',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(mockTurnRunFn).toHaveBeenCalledWith(
+        'test-model',
+        expect.not.arrayContaining([
+          expect.stringContaining('Relevant memory'),
+        ]),
+        expect.any(AbortSignal),
+      );
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          strategy: 'none',
+          docs_selected: 0,
+          latency_ms: expect.any(Number),
+        }),
+      );
+      const [, deliveryEvent] = vi.mocked(logMemoryRecallDelivery).mock
+        .calls[0];
+      expect(deliveryEvent.discard_reason).toBeUndefined();
+    });
+
     it('should inject auto-memory on first ToolResult when recall settles after UserQuery', async () => {
       // Controllable promise — recall stays pending across the UserQuery turn
       // and only settles before the ToolResult turn runs.
       let resolveRecall:
         | ((value: {
             prompt: string;
-            selectedDocs: never[];
+            selectedDocs: Array<{
+              type: 'user';
+              filePath: string;
+              relativePath: string;
+              filename: string;
+              title: string;
+              description: string;
+              body: string;
+              mtimeMs: number;
+            }>;
             strategy: 'model';
           }) => void)
         | undefined;
@@ -4659,7 +4770,18 @@ hello
       // Recall settles between turns
       resolveRecall!({
         prompt: '## Relevant memory\n\nDeferred memory result.',
-        selectedDocs: [],
+        selectedDocs: [
+          {
+            type: 'user',
+            filePath: '/test/project/root/.qwen/memory/user.md',
+            relativePath: 'user.md',
+            filename: 'user.md',
+            title: 'User Memory',
+            description: 'User preferences',
+            body: '- User prefers terse responses.',
+            mtimeMs: 1,
+          },
+        ],
         strategy: 'model',
       });
       // Drain microtasks so the settledAt finally() callback runs
@@ -4694,6 +4816,16 @@ hello
       );
       expect(functionResponseIdx).toBeGreaterThanOrEqual(0);
       expect(memoryIdx).toBeGreaterThan(functionResponseIdx);
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'tool_result',
+          strategy: 'model',
+          docs_selected: 1,
+          latency_ms: expect.any(Number),
+        }),
+      );
     });
 
     it('should abort the pending prefetch when the caller signal aborts', async () => {
@@ -4783,6 +4915,17 @@ hello
       expect(abortSignals.length).toBe(2);
       expect(abortSignals[0].aborted).toBe(true);
       expect(abortSignals[1].aborted).toBe(false);
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'new_query',
+          strategy: 'none',
+          docs_selected: 0,
+          latency_ms: expect.any(Number),
+        }),
+      );
     });
 
     it('should abort the pending prefetch on resetChat', async () => {
@@ -4820,6 +4963,45 @@ hello
       await client.resetChat();
       expect(abortHandlerInvoked).toBe(true);
       expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should log discard telemetry when pending auto-memory is reset', async () => {
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      } as unknown as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'first' }],
+        new AbortController().signal,
+        'prompt-id-reset-telemetry',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      await client.resetChat();
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'reset',
+          strategy: 'none',
+          docs_selected: 0,
+          latency_ms: expect.any(Number),
+        }),
+      );
     });
 
     it('should abort the pending prefetch when LoopDetected fires mid-stream', async () => {

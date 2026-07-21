@@ -1464,3 +1464,43 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.duration_ms = params.duration_ms;
   }
 }
+
+export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
+export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
+export type MemoryRecallDiscardReason =
+  | 'not_ready'
+  | 'no_safe_delivery_point'
+  | 'new_query'
+  | 'reset'
+  | 'abort'
+  | 'shutdown'
+  | 'superseded';
+
+export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall.delivery';
+  'event.timestamp': string;
+  phase: MemoryRecallDeliveryPhase;
+  delivery_point: MemoryRecallDeliveryPoint;
+  discard_reason?: MemoryRecallDiscardReason;
+  strategy: 'none' | 'heuristic' | 'model';
+  docs_selected: number;
+  latency_ms: number;
+
+  constructor(params: {
+    phase: MemoryRecallDeliveryPhase;
+    delivery_point: MemoryRecallDeliveryPoint;
+    discard_reason?: MemoryRecallDiscardReason;
+    strategy: 'none' | 'heuristic' | 'model';
+    docs_selected: number;
+    latency_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall.delivery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.phase = params.phase;
+    this.delivery_point = params.delivery_point;
+    this.discard_reason = params.discard_reason;
+    this.strategy = params.strategy;
+    this.docs_selected = params.docs_selected;
+    this.latency_ms = params.latency_ms;
+  }
+}
