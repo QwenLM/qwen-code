@@ -79,7 +79,7 @@ import { ObservedChannelContactStore } from './observed-contact-store.js';
 const SESSION_SHELL_COMMAND_FEATURE = 'session_shell_command';
 const MAX_ACTIVE_WEBHOOK_TASKS = 16;
 const MAX_ACTIVE_CHANNEL_DELIVERIES = 16;
-const WEBHOOK_TASK_SHUTDOWN_DRAIN_MS = 10_000;
+const WORKER_SHUTDOWN_DRAIN_MS = 10_000;
 
 interface DaemonCapabilitiesLike {
   features: string[];
@@ -1014,10 +1014,7 @@ export const daemonWorkerCommand: CommandModule<unknown, DaemonWorkerArgs> = {
                   ...activeWebhookTasks.values(),
                 ]),
                 new Promise<void>((resolve) => {
-                  const timer = setTimeout(
-                    resolve,
-                    WEBHOOK_TASK_SHUTDOWN_DRAIN_MS,
-                  );
+                  const timer = setTimeout(resolve, WORKER_SHUTDOWN_DRAIN_MS);
                   timer.unref();
                 }),
               ]);
