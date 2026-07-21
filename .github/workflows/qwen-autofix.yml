@@ -127,6 +127,12 @@ env:
   # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
   # stop' removes it). Matched EXACTLY against the trimmed comment body.
   TAKEOVER_COMMAND: '@qwen-code /takeover'
+  # Re-arm sugar. Recovering a stranded PR previously meant DELETING the
+  # bot's autofix-eval marker comment by hand (undiscoverable, destructive,
+  # and it erases the audit trail). This command instead posts an
+  # 'autofix-rearm' marker that supersedes the earlier evaluation markers:
+  # the scan re-reads the feedback from scratch and the round counter resets.
+  RETRY_COMMAND: '@qwen-code /retry'
   # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
   # need dozens of feedback rounds — that is the point of takeover — so the
   # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
@@ -147,8 +153,10 @@ jobs:
     # gates (exact body match, sender authorization) live in 'Decide phases'.
     # Nuance: a body with LEADING whitespace dies here even though the decide
     # branch would trim it — fail closed, command must start the comment.
+    # Both commands are prefiltered here (/takeover toggles the label, /retry
+    # re-arms a stranded PR); everything else never starts a job.
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && startsWith(github.event.comment.body, '@qwen-code /takeover'))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     concurrency:
@@ -198,6 +206,7 @@ jobs:
       takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'
       ack_pr: '${{ steps.decide.outputs.ack_pr }}'
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
+      retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
     steps:
       - name: 'Decide phases'
@@ -235,6 +244,7 @@ jobs:
           TAKEOVER_ACK=''
           TAKEOVER_CMD=''
           CMD_PR=''
+          RETRY_PR=''
           DRY_RUN="${DRY_RUN_INPUT:-false}"
           sanitize_number() {
             local value="${1//$'\r'/}"
@@ -264,21 +274,53 @@ jobs:
               if [[ "${EVENT_NAME}" == 'schedule' ]]; then
                 DO_ISSUE=true
               fi
-              # Real-time review triggers: only process in-repo bot PRs with
-              # reviews from trusted senders (collaborators or the review bot).
-              # This prevents arbitrary commenters from forcing expensive
+              # Real-time review triggers: process the SAME managed set the
+              # scheduled scan does, so feedback is picked up seconds after the
+              # review instead of waiting for a schedule GitHub throttles hard
+              # (the */10 cron actually lands every 40-70min on this repo).
+              # Reviews must come from trusted senders (collaborators or the
+              # review bot) so arbitrary commenters cannot force expensive
               # review-scan runs. Only pull_request_review:submitted triggers
-              # (not per-comment events) to avoid redundant runs on multi-comment
-              # reviews.
+              # (not per-comment events) to avoid redundant runs on
+              # multi-comment reviews.
               if [[ "${EVENT_NAME}" == 'pull_request_review' ]]; then
                 DO_ISSUE=false
-                if [[ "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
-                  echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
-                elif [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
-                  echo "🧭 review event ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
-                elif [[ "${PR_BASE_REF}" != "main" ]]; then
+                pr_is_managed=false
+                if [[ "${PR_BASE_REF}" != "main" ]]; then
                   echo "🧭 review event ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                elif [[ "${PR_HEAD_REPO}" == "${REPO}" ]]; then
+                  if [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
+                    pr_is_managed=true
+                  else
+                    echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
+                  fi
                 else
+                  # Fork PR. The scheduled scan already admits these for
+                  # takeover, so real-time pickup applies the SAME admission
+                  # (allow-edits on, and either the bot's own fork or an
+                  # explicit TAKEOVER_LABEL) rather than making the takeover
+                  # PRs — the ones a maintainer is actively waiting on — sit
+                  # through a throttled schedule. This event runs in BASE-repo
+                  # context, and review-address independently re-verifies
+                  # allow-edits, a live write+ author and a matching live head
+                  # repo before it touches the branch, so this only decides
+                  # WHEN that same gated work happens, never whether it may.
+                  fork_meta=''
+                  if fork_meta="$(gh pr view "${PR_NUMBER_EVENT}" --repo "${REPO}" --json labels,maintainerCanModify 2> /dev/null)"; then
+                    fork_allows_edits="$(jq -r '.maintainerCanModify == true' <<< "${fork_meta}")"
+                    fork_has_takeover="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${fork_meta}")"
+                    if [[ "${fork_allows_edits}" != 'true' ]]; then
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits"
+                    elif [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" || "${fork_has_takeover}" == 'true' ]]; then
+                      pr_is_managed=true
+                    else
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} is neither ${AUTOFIX_BOT}'s own fork nor ${TAKEOVER_LABEL}-labeled"
+                    fi
+                  else
+                    echo "🧭 review event ignored: could not read fork PR #${PR_NUMBER_EVENT} metadata"
+                  fi
+                fi
+                if [[ "${pr_is_managed}" == 'true' ]]; then
                   # Verify the reviewer/commenter is trusted (prompt-injection gate).
                   sender_permission=''
                   sender_is_trusted=false
@@ -323,14 +365,19 @@ jobs:
                 CMD=''
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND}" ]] && CMD='add'
                 [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND} stop" ]] && CMD='remove'
+                # Re-arm shares the takeover command's authorization exactly:
+                # both summon bot activity on a managed PR, so inventing a
+                # second policy would only add surface.
+                RETRY_REQ=''
+                [[ "${BODY_TRIMMED}" == "${RETRY_COMMAND}" ]] && RETRY_REQ='true'
                 if [[ -z "${HAS_PR_URL}" ]]; then
-                  echo "🧭 takeover command ignored: not a PR comment"
-                elif [[ -z "${CMD}" ]]; then
-                  echo "🧭 takeover command ignored: body is not an exact command"
+                  echo "🧭 command ignored: not a PR comment"
+                elif [[ -z "${CMD}" && -z "${RETRY_REQ}" ]]; then
+                  echo "🧭 command ignored: body is not an exact command"
                 elif [[ "${ISSUE_STATE}" != 'open' ]]; then
-                  echo "🧭 takeover command ignored: PR is not open"
+                  echo "🧭 command ignored: PR is not open"
                 elif [[ -z "${SENDER_LOGIN}" || "${SENDER_LOGIN}" == "${AUTOFIX_BOT}" ]]; then
-                  echo "🧭 takeover command ignored: sender '${SENDER_LOGIN:-n/a}'"
+                  echo "🧭 command ignored: sender '${SENDER_LOGIN:-n/a}'"
                 else
                   sender_is_authorized=false
                   sender_permission=''
@@ -371,11 +418,16 @@ jobs:
                     rm -f "${api_error_file}"
                   fi
                   if [[ "${sender_is_authorized}" == 'true' ]]; then
-                    TAKEOVER_CMD="${CMD}"
-                    CMD_PR="$(sanitize_number "${ISSUE_NUMBER}")"
-                    echo "🧭 takeover command accepted: ${CMD} ${TAKEOVER_LABEL} on PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    if [[ -n "${RETRY_REQ}" ]]; then
+                      RETRY_PR="$(sanitize_number "${ISSUE_NUMBER}")"
+                      echo "🧭 retry command accepted: re-arm PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    else
+                      TAKEOVER_CMD="${CMD}"
+                      CMD_PR="$(sanitize_number "${ISSUE_NUMBER}")"
+                      echo "🧭 takeover command accepted: ${CMD} ${TAKEOVER_LABEL} on PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    fi
                   else
-                    echo "🧭 takeover command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
+                    echo "🧭 command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
                   fi
                 fi
               fi
@@ -480,6 +532,7 @@ jobs:
           echo "takeover_ack=${TAKEOVER_ACK}" >> "${GITHUB_OUTPUT}"
           echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
           echo "takeover_cmd=${TAKEOVER_CMD}" >> "${GITHUB_OUTPUT}"
+          echo "retry_pr=${RETRY_PR}" >> "${GITHUB_OUTPUT}"
           echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
           echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
@@ -1330,6 +1383,51 @@ jobs:
   # a PR via the takeover label. Label events are explicit user actions, so
   # every toggle acks (no dedup wanted). In-repo PRs only reach this job.
   # ===========================================================================
+  # Re-arm a stranded PR without deleting anything. Recovery previously meant
+  # `gh api -X DELETE` on the bot's own autofix-eval marker comment: raw API
+  # access, an erased audit trail, and undiscoverable unless you had read the
+  # workflow. This posts ONE marker instead — the scan then re-reads the
+  # feedback (the marker releases the watermark those older markers held) and
+  # the round counter resets, because the marker also opens a fresh counting
+  # window exactly like an engage ack.
+  retry-command:
+    needs: 'route'
+    if: |-
+      ${{ needs.route.outputs.retry_pr != '' }}
+    # Queued (never cancelled) per PR so two quick /retry comments cannot
+    # interleave their marker writes.
+    concurrency:
+      group: 'qwen-autofix-retry-cmd-${{ needs.route.outputs.retry_pr }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      PR: '${{ needs.route.outputs.retry_pr }}'
+      GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+    steps:
+      - name: 'Post re-arm marker'
+        run: |-
+          # The marker only counts when the AUTOFIX_BOT authored it (both the
+          # scan and the address-side recheck filter markers by that login), so
+          # a mis-scoped PAT would post a comment that silently does nothing.
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+          gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '\U0001F504 AutoFix re-armed. The next scan re-reads this PR'"'"'s feedback from the start and the round counter resets. Nothing was deleted — this marker supersedes the evaluation markers above it.\n\n<details>\n<summary>中文说明</summary>\n\n\U0001F504 已重新武装 AutoFix。下一次扫描会从头重新读取本 PR 的反馈，轮次计数也已重置。未删除任何内容 —— 本标记使其上方的评估标记失效。\n\n</details>\n\n<!-- autofix-rearm -->')"
+          echo "🔄 re-armed PR #${PR}"
+
   takeover-ack:
     needs: 'route'
     if: |-
@@ -1426,15 +1524,44 @@ jobs:
           # input and silently green-no-op'd all forced dispatches.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels 2> /dev/null || echo '{}')"
+              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null || echo '{}')"
+            # Same admission as the scheduled scan below. In-repo PRs fail
+            # CLOSED on a missing isCrossRepository field (`.isCrossRepository
+            # == false`, never a `// true | not` default — jq's // treats false
+            # as empty, so that form is false for EVERY input and silently
+            # green-no-op'd all forced dispatches). Fork PRs are admitted under
+            # the scan's OWN fork rules (allow-edits on; the live write+ author
+            # gate runs in the shell case just below, mirroring the scan's
+            # per-candidate permission call) so the real-time route's fork
+            # pickup is not silently discarded here.
             OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" \
               '(((.state // "") == "OPEN")
                  and (((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null))
                  and ([.labels[]?.name] | index($skip) | not)
-                 and (.isCrossRepository == false)
-                 and ((.baseRefName // "") == "main"))' <<< "${META}")"
+                 and ((.baseRefName // "") == "main")
+                 and (if (.isCrossRepository == true)
+                        then (.maintainerCanModify == true)
+                        else (.isCrossRepository == false)
+                      end))' <<< "${META}")"
+            # Fork only: the author must hold write+ RIGHT NOW (the same
+            # live-privilege rule the scan applies per candidate and
+            # review-address re-checks before pushing). In-repo PRs are gated
+            # by author/label alone.
+            if [[ "${OK}" == 'true' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
+              FORK_AUTHOR="$(jq -r '.author.login // ""' <<< "${META}")"
+              FPERM="$(gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              case "${FPERM}" in
+                admin|maintain|write)
+                  echo "🌿 forced fork PR #${FORCED_PR} admitted (author ${FORK_AUTHOR}=${FPERM})"
+                  ;;
+                *)
+                  echo "🧭 forced fork PR #${FORCED_PR} rejected: author ${FORK_AUTHOR} permission='${FPERM:-none}' below write"
+                  OK='false'
+                  ;;
+              esac
+            fi
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); fork takeover PRs are engaged by the scheduled scan, not manual dispatch"
+              echo "❌ #${FORCED_PR} is not an open main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); a fork PR additionally needs maintainer edits allowed and a live write+ author"
               echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
@@ -1697,9 +1824,9 @@ jobs:
             # Inserting or reordering a field here or at any write site silently
             # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
-              [ .[] | select((.user.login // "") == $ab) | (.body // "")
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
                 | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
+                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
             # The watermark is GLOBAL across all markers — feedback already
             # evaluated stays evaluated, no matter how counting windows move.
             # The terminal-handoff SENTINEL ts is excluded: it is a flag, not
@@ -1707,7 +1834,19 @@ jobs:
             # filter all future feedback forever — making a re-arm after a
             # terminal handoff dead on arrival (terminal skipping itself is
             # round-based and window-scoped, so re-arm properly clears it).
-            EVAL_WM="$(jq -r 'map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${MARKERS}")"
+            REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- autofix-rearm -->"))
+                | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+            # A maintainer '@qwen-code /retry' posts that marker to say
+            # "evaluate this feedback again": markers written BEFORE it stop
+            # holding the watermark down. This is the sanctioned exception to
+            # the global rule above, and it replaces the old recovery -
+            # deleting the bot's marker comment by hand, which erased the
+            # audit trail and needed raw API access to do at all.
+            EVAL_WM="$(jq -r --arg rearm "${REARM_AT}" '
+              map(select($rearm == "" or (.at > $rearm)))
+              | map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${MARKERS}")"
             # ROUND counting is windowed by KEY EQUALITY, not timestamps: the
             # current window key is the created_at of the latest
             # '<!-- takeover-ack engaged -->' comment ('none' before any
@@ -1721,7 +1860,8 @@ jobs:
             # scan skip regardless of order).
             REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
               [ .[] | select((.user.login // "") == $ab)
-                | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                    or ((.body // "") | contains("<!-- autofix-rearm -->")))
                 | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
             ROUND="$(jq -r --arg key "${REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${MARKERS}")"
 
@@ -1821,7 +1961,7 @@ jobs:
             # bot's own eval markers, and known non-actionable bot comments
             # (triage stages, coverage reports, legacy suggestion summaries,
             # force-push reminders).
-            BOT_COMMENT_FILTER='<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
             # Command-style comments (@qwen-code /takeover, /triage, /review …)
             # are INSTRUCTIONS to tooling, not review feedback on the diff:
             # counting them as actionable burns a full agent cycle to post a
@@ -2185,7 +2325,7 @@ jobs:
             + (.[2] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -2212,17 +2352,25 @@ jobs:
           # is a stale duplicate and discards itself.
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
-            [ .[] | select((.user.login // "") == $ab) | (.body // "")
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
               | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
-              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none")} ]' "${WORKDIR}/ic.json")"
-          LIVE_EVAL_WM="$(jq -r 'map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${LIVE_MARKS}")"
+              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+          LIVE_REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.body // "") | contains("<!-- autofix-rearm -->"))
+              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          # Mirrors the scan: a /retry marker releases the watermark it holds.
+          LIVE_EVAL_WM="$(jq -r --arg rearm "${LIVE_REARM_AT}" '
+            map(select($rearm == "" or (.at > $rearm)))
+            | map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${LIVE_MARKS}")"
           # Round counting mirrors the scan: keyed to the CURRENT window (the
           # latest engage ack's created_at, 'none' before any takeover), so
           # pre-re-arm markers can neither trip the cap nor inflate the live
           # round here.
           LIVE_REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab)
-              | select((.body // "") | contains("<!-- takeover-ack engaged -->"))
+              | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                    or ((.body // "") | contains("<!-- autofix-rearm -->")))
               | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
           # A re-arm SUPERSEDES every job selected under the old window key:
@@ -2248,7 +2396,7 @@ jobs:
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -2325,7 +2473,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"

@@ -221,7 +221,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("MAX_ROUNDS: '5'");
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
-    expect(reviewScanJob).toContain('not an open in-repo main-targeting PR');
+    expect(reviewScanJob).toContain('not an open main-targeting PR');
     // Candidates fail CLOSED on the fork field, matching the forced path
     // and the NOTE that documents the jq // false trap.
     expect(reviewScanJob).toContain('select(.isCrossRepository == false)');
@@ -731,20 +731,27 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('routes submitted review events only for trusted in-repo bot PRs', () => {
+  it('routes submitted review events only for trusted managed PRs', () => {
     expect(routeStep).toContain('PR_AUTHOR');
     expect(routeStep).toContain('PR_NUMBER_EVENT');
     expect(routeStep).toContain(
       'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
     );
-    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
-    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    // In-repo PRs are managed only when the bot authored them; forks only
+    // under the scan's takeover rules (allow-edits + bot fork or the label).
+    expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    expect(routeStep).toContain('.maintainerCanModify == true');
+    expect(routeStep).toContain('index($t) != null');
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
     );
     expect(routeStep).toContain(
       "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
+    );
+    expect(routeStep).toContain(
+      'review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits',
     );
   });
 
@@ -1588,7 +1595,10 @@ describe('qwen-autofix workflow', () => {
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
     // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip
-    // vetoes even a takeover-labeled PR; closed and fork PRs never pass.
+    // vetoes even a takeover-labeled PR; closed PRs never pass. A fork PR
+    // passes the structural predicate only with maintainer edits allowed — the
+    // live write+ author gate is a shell step below (asserted separately),
+    // mirroring the scheduled scan's per-candidate fork admission.
     const okProgram = reviewScanJob.match(
       /OK="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg take "\$\{TAKEOVER_LABEL\}" --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)'/,
     )?.[1];
@@ -1629,6 +1639,26 @@ describe('qwen-autofix workflow', () => {
     expect(ok(meta('human', ['autofix/takeover'], { state: 'CLOSED' }))).toBe(
       'false',
     );
+    // Fork PRs: admitted structurally only when maintainer edits are allowed
+    // (the bot's own fork or a takeover-labelled fork). The live write+ author
+    // check is the shell gate asserted below; without allow-edits a fork still
+    // fails closed here.
+    expect(
+      ok(
+        meta('human', ['autofix/takeover'], {
+          isCrossRepository: true,
+          maintainerCanModify: true,
+        }),
+      ),
+    ).toBe('true');
+    expect(
+      ok(
+        meta('qwen-code-dev-bot', [], {
+          isCrossRepository: true,
+          maintainerCanModify: true,
+        }),
+      ),
+    ).toBe('true');
     expect(
       ok(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
     ).toBe('false');
@@ -1641,6 +1671,16 @@ describe('qwen-autofix workflow', () => {
     expect(ok(missing)).toBe('false');
     expect(reviewScanJob).toContain('.isCrossRepository == false');
     expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
+    // The forced path queries maintainerCanModify and re-checks a fork author's
+    // live permission exactly like the scheduled scan's per-candidate gate, so
+    // a fork the route admitted in real time is not silently discarded here.
+    expect(reviewScanJob).toContain(
+      '--json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify',
+    );
+    expect(reviewScanJob).toContain('forced fork PR #${FORCED_PR} admitted');
+    expect(reviewScanJob).toContain(
+      'gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission"',
+    );
   });
 
   it('exposes exactly one comment command: label-toggle takeover sugar', () => {
@@ -1829,16 +1869,19 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
-    // Route step must check PR author against AUTOFIX_BOT for review events.
-    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
+    // Route step must check PR author against AUTOFIX_BOT for review events
+    // (an in-repo PR is managed only when the bot authored it).
+    expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
     // Must verify sender is trusted (collaborator or review bot).
     expect(routeStep).toContain('"${SENDER_LOGIN}" == "${REVIEW_BOT}"');
     expect(routeStep).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
-    // Must reject fork PRs and non-main targets.
-    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    // Non-main targets are rejected; forks are admitted only under the scan's
+    // own takeover rules (allow-edits + bot fork or takeover label).
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
+    expect(routeStep).toContain('--json labels,maintainerCanModify');
     // Must set ROUTE_PR from the event payload.
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
@@ -1856,6 +1899,127 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "ref: '${{ github.event.repository.default_branch }}'",
     );
+  });
+
+  it('admits managed fork PRs to the real-time review trigger, not just in-repo bot PRs', () => {
+    // The */10 schedule is throttled to 40-70min on this repo, so a takeover PR
+    // that only the scan could pick up waited up to an hour for feedback the
+    // event already carried. Real-time pickup now applies the scan's OWN fork
+    // admission (allow-edits + the bot's own fork or an explicit takeover
+    // label); review-address still re-verifies allow-edits, a live write+
+    // author and a matching head repo before touching the branch.
+    const block = routeStep.match(
+      /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request_review' \]\]; then[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(block).toBeTruthy();
+
+    const run = ({
+      headRepo,
+      author,
+      base = 'main',
+      sender = 'alice',
+      allowEdits = true,
+      labels = [],
+      perm = 'write',
+      metaOk = true,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'route-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const meta = JSON.stringify({
+        maintainerCanModify: allowEdits,
+        labels: labels.map((name) => ({ name })),
+      });
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `if [[ "$*" == *"--json labels,maintainerCanModify"* ]]; then ${
+            metaOk ? `printf '%s' ${JSON.stringify(meta)}; exit 0` : 'exit 1'
+          }; fi`,
+          `if [[ "$*" == *permission* ]]; then printf '%s' ${JSON.stringify(perm)}; exit 0; fi`,
+          'exit 1',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            'sanitize_number() { printf "%s" "${1//[^0-9]/}"; }',
+            'DO_ISSUE=true; DO_REVIEW=false; ROUTE_PR=""',
+            block,
+            'printf "DO_REVIEW=%s ROUTE_PR=%s" "${DO_REVIEW}" "${ROUTE_PR}"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            EVENT_NAME: 'pull_request_review',
+            REPO: 'QwenLM/qwen-code',
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            REVIEW_BOT: 'qwen-code-ci-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            PR_NUMBER_EVENT: '7259',
+            PR_HEAD_REPO: headRepo,
+            PR_AUTHOR: author,
+            PR_BASE_REF: base,
+            SENDER_LOGIN: sender,
+          },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out;
+    };
+
+    const IN_REPO = 'QwenLM/qwen-code';
+    const FORK = 'wenshao/qwen-code';
+    // Unchanged: an in-repo bot PR is admitted, a human in-repo PR is not.
+    expect(run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot' })).toContain(
+      'DO_REVIEW=true',
+    );
+    expect(run({ headRepo: IN_REPO, author: 'someone' })).toContain(
+      'DO_REVIEW=false',
+    );
+    // NEW: the bot's own fork, and a takeover-labelled human fork, are admitted
+    // in real time and route to that exact PR.
+    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
+      'DO_REVIEW=true',
+    );
+    expect(
+      run({ headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] }),
+    ).toContain('DO_REVIEW=true');
+    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
+      'ROUTE_PR=7259',
+    );
+    // Still rejected: no allow-edits, an unlabelled human fork, a non-main
+    // base, and an untrusted sender.
+    expect(
+      run({ headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false }),
+    ).toContain('DO_REVIEW=false');
+    expect(run({ headRepo: FORK, author: 'wenshao' })).toContain(
+      'DO_REVIEW=false',
+    );
+    expect(
+      run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', base: 'release' }),
+    ).toContain('DO_REVIEW=false');
+    expect(
+      run({
+        headRepo: FORK,
+        author: 'wenshao',
+        labels: ['autofix/takeover'],
+        perm: 'read',
+      }),
+    ).toContain('DO_REVIEW=false');
+    // A metadata read failure fails CLOSED: the event is ignored rather than
+    // admitting a fork whose allow-edits/labels could not be verified.
+    expect(
+      run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
+    ).toContain('DO_REVIEW=false');
   });
 
   it('treats Suggestion-level review findings as actionable feedback', () => {
@@ -2362,10 +2526,10 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
-    // The prepare step must not gate the unconditional build-output restore on
-    // a diff check; `git diff --quiet` only appears in a comment documenting
-    // the verification gate, never as an executed guard here.
     expect(prepareBranchAndFeedbackStep).not.toContain('if git diff --quiet');
+    expect(prepareBranchAndFeedbackStep).not.toContain(
+      'if ! git diff --quiet || ! git diff --cached --quiet; then',
+    );
   });
 
   it('clears persistent autofix workdirs before agent steps run', () => {
@@ -3112,6 +3276,298 @@ describe('qwen-autofix workflow', () => {
         ),
       ),
     ).toBe(0);
+  });
+
+  it('re-arms a stranded PR from a marker instead of a deleted comment', () => {
+    // Recovery used to mean `gh api -X DELETE` on the bot's own eval marker:
+    // raw API access, an erased audit trail, undiscoverable. `@qwen-code
+    // /retry` posts an autofix-rearm marker instead, which must do BOTH halves
+    // of what the deletion did - release the watermark those older markers
+    // held, and reset the round counter - or the PR stays stuck.
+    const scan =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    const block = scan.match(
+      /(MARKERS="\$\(jq[\s\S]*?ROUND="\$\(jq[^\n]*\n)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+
+    const BOT = 'qwen-code-dev-bot';
+    const evalMarker = (at, ts, round) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
+    });
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'rearm-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$EVAL_WM" "$REARM_KEY" "$ROUND"`,
+        ],
+        {
+          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out.split('|');
+    };
+
+    const evaluated = [
+      evalMarker('2026-07-20T08:00:00Z', '2026-07-20T07:00:00Z', 1),
+      evalMarker('2026-07-20T09:00:00Z', '2026-07-20T08:30:00Z', 2),
+    ];
+    // Stranded: the watermark sits at the newest evaluated feedback and the
+    // round has climbed, so the scan reports "nothing new" forever.
+    const [wmBefore, keyBefore, roundBefore] = run(evaluated);
+    expect(wmBefore).toBe('2026-07-20T08:30:00Z');
+    expect(keyBefore).toBe('none');
+    expect(roundBefore).toBe('2');
+
+    // After /retry both halves clear: no marker holds the watermark, and the
+    // marker opens a fresh counting window so the round restarts at 0.
+    const [wmAfter, keyAfter, roundAfter] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmAfter).toBe('');
+    expect(keyAfter).toBe('2026-07-20T10:00:00Z');
+    expect(roundAfter).toBe('0');
+
+    // A marker written AFTER the re-arm counts again (the exception is scoped
+    // to the re-arm instant, it does not disable the watermark forever).
+    const [wmNext] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+      evalMarker('2026-07-20T11:00:00Z', '2026-07-20T10:30:00Z', 1),
+    ]);
+    expect(wmNext).toBe('2026-07-20T10:30:00Z');
+
+    // A re-arm posted by anyone other than the bot is ignored: both scanners
+    // filter markers by author, so a spoofed comment must not re-arm.
+    const [wmSpoof] = run([
+      ...evaluated,
+      {
+        user: { login: 'someone-else' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+  });
+
+  it('address-side stale check mirrors the scan-side re-arm logic under bash', () => {
+    // The scan-side and address-side jq blocks are copy-pasted (~40 lines
+    // each, 4 jq expressions). Drift between them is the class of bug the
+    // re-arm feature prevents: a queued address job could stamp an
+    // old-sequence eval marker into a fresh window after /retry. This test
+    // runs the address-side block under bash with the same fixtures and
+    // asserts identical outputs.
+    const block = prepareBranchAndFeedbackStep.match(
+      /(LIVE_MARKS="\$\(jq[\s\S]*?LIVE_MAX_ROUND="\$\(jq[^\n]*\n)/,
+    )?.[1];
+    expect(block).toBeTruthy();
+
+    const BOT = 'qwen-code-dev-bot';
+    const evalMarker = (at, ts, round) => ({
+      user: { login: BOT },
+      created_at: at,
+      body: `<!-- autofix-eval ts=${ts} acted=false round=${round} win=none -->`,
+    });
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'rearm-live-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${block}\nprintf '%s|%s|%s' "$LIVE_EVAL_WM" "$LIVE_REARM_KEY" "$LIVE_MAX_ROUND"`,
+        ],
+        {
+          env: { ...process.env, WORKDIR: dir, AUTOFIX_BOT: BOT },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out.split('|');
+    };
+
+    const evaluated = [
+      evalMarker('2026-07-20T08:00:00Z', '2026-07-20T07:00:00Z', 1),
+      evalMarker('2026-07-20T09:00:00Z', '2026-07-20T08:30:00Z', 2),
+    ];
+    const [wmBefore, keyBefore, roundBefore] = run(evaluated);
+    expect(wmBefore).toBe('2026-07-20T08:30:00Z');
+    expect(keyBefore).toBe('none');
+    expect(roundBefore).toBe('2');
+
+    const [wmAfter, keyAfter, roundAfter] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmAfter).toBe('');
+    expect(keyAfter).toBe('2026-07-20T10:00:00Z');
+    expect(roundAfter).toBe('0');
+
+    const [wmNext] = run([
+      ...evaluated,
+      {
+        user: { login: BOT },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+      evalMarker('2026-07-20T11:00:00Z', '2026-07-20T10:30:00Z', 1),
+    ]);
+    expect(wmNext).toBe('2026-07-20T10:30:00Z');
+
+    const [wmSpoof] = run([
+      ...evaluated,
+      {
+        user: { login: 'someone-else' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: '<!-- autofix-rearm -->',
+      },
+    ]);
+    expect(wmSpoof).toBe('2026-07-20T08:30:00Z');
+  });
+
+  it('routes @qwen-code /retry through the takeover command authorization', () => {
+    // Prefilter must let the command reach route at all, and the marker must
+    // be a CONTROL comment so the agent never sees it as feedback to address.
+    expect(workflow).toContain(
+      "startsWith(github.event.comment.body, '@qwen-code /retry')",
+    );
+    expect(workflow).toContain("RETRY_COMMAND: '@qwen-code /retry'");
+    expect(workflow).toContain('<!-- autofix-rearm -->');
+    expect(workflow).toContain('<!-- (autofix-eval|autofix-rearm|qwen-triage|');
+    // Verify all four filter sites (scan + 3 address) include autofix-rearm
+    const filterMatches = [
+      ...workflow.matchAll(/autofix-eval\|autofix-rearm\|qwen-triage/g),
+    ];
+    expect(filterMatches.length).toBeGreaterThanOrEqual(4);
+    // The re-arm marker is posted by the bot itself (both scanners filter by
+    // that login), so the job verifies the PAT identity before commenting.
+    const job = workflow.match(
+      /- name: 'Post re-arm marker'[\s\S]*?(?=\n {2}[a-z-]+:\n)/,
+    )?.[0];
+    expect(job).toBeTruthy();
+    expect(job).toContain("gh api user --jq '.login'");
+    expect(job).toContain('expected ${AUTOFIX_BOT}');
+    expect(job).toContain('gh pr comment "${PR}"');
+    // Re-arm reuses the takeover command's authorization rather than adding a
+    // second policy: same live permission check, same author rules.
+    expect(routeStep).toContain("RETRY_REQ=''");
+    expect(routeStep).toContain(
+      'RETRY_PR="$(sanitize_number "${ISSUE_NUMBER}")"',
+    );
+    expect(routeStep).toContain('retry_pr=${RETRY_PR}');
+  });
+
+  it('behaviorally posts the re-arm marker only after verifying the PAT identity', () => {
+    // The retry-command job's bash is extracted and executed against a stubbed
+    // `gh` so the identity guard and the posted comment body are exercised, not
+    // merely string-matched: a malformed printf body or a broken quote escape
+    // would post a marker the scanners ignore while still printing "re-armed",
+    // and the structural toContain('<!-- autofix-rearm -->') check matches the
+    // marker at several workflow sites so it would not catch a typo in the body.
+    const BOT = 'qwen-code-dev-bot';
+    const rearmStep = workflow.match(
+      /- name: 'Post re-arm marker'\n {8}run: \|-\n {10}([\s\S]*?)\n\n {2}takeover-ack:/,
+    )?.[1];
+    expect(rearmStep).toBeTruthy();
+    const block = rearmStep.replace(/\n {10}/g, '\n');
+
+    const runRearm = ({ actor = BOT, apiFail = false } = {}) => {
+      const dir = mkdtempSync(join(tmpdir(), 'autofix-rearm-'));
+      try {
+        writeFileSync(
+          join(dir, 'gh'),
+          [
+            '#!/bin/bash',
+            `echo "$1 $2" >> '${join(dir, 'calls.log')}'`,
+            'if [[ "$1" == "api" && "$2" == "user" ]]; then',
+            `  if [[ "${apiFail}" == "true" ]]; then echo "HTTP 401: Bad credentials" >&2; exit 1; fi`,
+            `  printf '%s' "${actor}"`,
+            'elif [[ "$1" == "pr" && "$2" == "comment" ]]; then',
+            `  printf '%s' "$7" > '${join(dir, 'body.txt')}'`,
+            'fi',
+          ].join('\n'),
+        );
+        chmodSync(join(dir, 'gh'), 0o755);
+        writeFileSync(join(dir, 'calls.log'), '');
+        const res = spawnSync('bash', ['-c', block], {
+          env: {
+            ...process.env,
+            PATH: `${dir}:${process.env.PATH}`,
+            GITHUB_TOKEN: 'x',
+            PR: '7354',
+            REPO: 'QwenLM/qwen-code',
+            AUTOFIX_BOT: BOT,
+          },
+          encoding: 'utf8',
+        });
+        return {
+          status: res.status,
+          stdout: res.stdout ?? '',
+          calls: readFileSync(join(dir, 'calls.log'), 'utf8'),
+          body: existsSync(join(dir, 'body.txt'))
+            ? readFileSync(join(dir, 'body.txt'), 'utf8')
+            : '',
+        };
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    };
+
+    // Happy path: identity verified via gh api user, then the marker is posted
+    // with the scanner marker line in the bilingual collapsed format.
+    const ok = runRearm({ actor: BOT });
+    expect(ok.status).toBe(0);
+    expect(ok.calls).toContain('api user');
+    expect(ok.calls).toContain('pr comment');
+    expect(ok.stdout).toContain('re-armed PR #7354');
+    expect(ok.body).toContain('AutoFix re-armed');
+    expect(ok.body).toContain('<!-- autofix-rearm -->');
+    expect(ok.body).toContain('<details>');
+    expect(ok.body).toContain('中文说明');
+    // No line may be indented 4+ spaces, or the marker renders as a code block
+    // and the scanners' marker match silently fails.
+    expect(ok.body).not.toMatch(/^ {4,}/m);
+
+    // Actor mismatch: the PAT authenticates as someone else -> the guard exits
+    // non-zero and posts nothing (a mis-scoped PAT must not leave a stranded PR
+    // behind a fake "re-armed" line).
+    const mismatch = runRearm({ actor: 'someone-else' });
+    expect(mismatch.status).toBe(1);
+    expect(mismatch.calls).toContain('api user');
+    expect(mismatch.calls).not.toContain('pr comment');
+    expect(mismatch.body).toBe('');
+    expect(mismatch.stdout).toContain(`expected ${BOT}`);
+
+    // API failure: gh api user fails -> exits non-zero, posts nothing, and
+    // surfaces the captured gh stderr in the error message.
+    const failed = runRearm({ apiFail: true });
+    expect(failed.status).toBe(1);
+    expect(failed.calls).not.toContain('pr comment');
+    expect(failed.body).toBe('');
+    expect(failed.stdout).toContain('Failed to verify CI_DEV_BOT_PAT identity');
+    expect(failed.stdout).toContain('Bad credentials');
   });
 
   it('replays the handoff decision and terminal-round transitions under bash', () => {
