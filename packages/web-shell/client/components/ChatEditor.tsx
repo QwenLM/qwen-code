@@ -1186,6 +1186,7 @@ export const ChatEditor = memo(
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
+      parseUserMessageContent,
     } = useWebShellCustomization();
 
     const core = useComposerCore({
@@ -1213,6 +1214,7 @@ export const ChatEditor = memo(
       atProviders,
       atWorkspaceCwd,
       composerTagIcons,
+      parseUserMessageContent,
       renderComposerTag,
       renderComposerTagTooltip,
       onComposerTagClick,
@@ -1551,6 +1553,7 @@ export const ChatEditor = memo(
       searchInputRef,
       searchUiRef,
       closeSearch,
+      restoreSearchMatch,
       handleSearchKeyDown,
       handleSearchInput,
       handleSearchCompositionEnd,
@@ -1864,7 +1867,11 @@ export const ChatEditor = memo(
                         }`}
                         onMouseDown={(event) => {
                           event.preventDefault();
-                          core.replaceEditorText(match);
+                          if (restoreSearchMatch) {
+                            restoreSearchMatch(match);
+                          } else {
+                            core.replaceEditorText(match);
+                          }
                           closeSearch(false);
                         }}
                       >
