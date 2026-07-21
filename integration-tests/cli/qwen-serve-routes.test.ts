@@ -155,11 +155,6 @@ beforeAll(async () => {
         ),
         HOME: homeDir,
         QWEN_HOME: path.join(homeDir, '.qwen'),
-        // Pin the runtime dir so session-writer lock files land inside
-        // the per-test temp dir. Without this the locks resolve through
-        // Storage.getRuntimeBaseDir() which can fall outside homeDir in
-        // Docker CI, causing cross-test-file lock conflicts (#7435).
-        QWEN_RUNTIME_DIR: path.join(homeDir, '.qwen'),
         OPENAI_API_KEY: 'fake-key',
         OPENAI_BASE_URL: 'http://127.0.0.1:9/v1',
         OPENAI_MODEL: 'fake-model',
