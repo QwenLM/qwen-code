@@ -1,0 +1,19 @@
+[Unit]
+Description=Queue the latest Qwen Code stable release benchmark
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ecs-user
+Group=ecs-user
+WorkingDirectory=/srv/qwen-benchmark
+EnvironmentFile=/srv/qwen-benchmark/config/benchmark.env
+EnvironmentFile=/srv/qwen-benchmark/config/benchmark.secret.env
+ExecStart=/srv/qwen-benchmark/venv/bin/qwen-benchmark-release-poller --once
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/qwen-benchmark
+

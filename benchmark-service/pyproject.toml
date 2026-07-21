@@ -20,6 +20,7 @@ test = ["pytest>=8,<9"]
 [project.scripts]
 qwen-benchmark-api = "qwen_benchmark.api:main"
 qwen-benchmark-worker = "qwen_benchmark.worker:main"
+qwen-benchmark-release-poller = "qwen_benchmark.release_poller:main"
 
 [tool.setuptools.package-data]
 qwen_benchmark = ["suites.json"]

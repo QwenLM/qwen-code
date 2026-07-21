@@ -36,6 +36,7 @@ class Settings:
     allowed_workflow: str | None
     poll_seconds: float
     github_token: str | None
+    release_poll_suite: str = "swebench_verified_harbor_smoke"
     harbor_binary: Path = Path("/srv/qwen-benchmark/venv/bin/harbor")
     harbor_jobs_root: Path = Path("/srv/qwen-benchmark/harbor/jobs")
     benchmark_model: str | None = None
@@ -74,6 +75,9 @@ class Settings:
             allowed_workflow=os.environ.get("BENCHMARK_ALLOWED_WORKFLOW"),
             poll_seconds=float(os.environ.get("BENCHMARK_POLL_SECONDS", "5")),
             github_token=os.environ.get("BENCHMARK_GITHUB_TOKEN"),
+            release_poll_suite=os.environ.get(
+                "BENCHMARK_RELEASE_POLL_SUITE", "swebench_verified_harbor_smoke"
+            ),
             harbor_binary=Path(
                 os.environ.get(
                     "BENCHMARK_HARBOR_BINARY", "/srv/qwen-benchmark/venv/bin/harbor"
