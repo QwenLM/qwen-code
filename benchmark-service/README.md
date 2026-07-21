@@ -50,6 +50,28 @@ the open-source Harbor Framework, pins the Qwen Code npm version from `qwen_ref`
 agent version. The release request should include the immutable 40-character
 `qwen_commit` so the ECS does not need to fetch GitHub to resolve the tag.
 
+## Outbound-only GitHub Release pipeline
+
+No public API endpoint, domain, or inbound security-group rule is needed for the
+single-node ECS POC. `qwen-benchmark-release-poller --once` retrieves the
+latest non-draft, non-prerelease Release from `QwenLM/qwen-code` and creates an
+idempotent run keyed by its GitHub `release.id`. The worker passes the Release
+tag to Harbor, which waits for and installs the matching published
+`@qwen-code/qwen-code` npm version. It rejects a trial that reports a different
+Qwen Code version.
+
+Install `deploy/qwen-benchmark-release-poller.service` and
+`deploy/qwen-benchmark-release-poller.timer` on ECS. The timer runs every five
+minutes. On first enable it queues only the current newest stable Release, not
+the repository's historical releases.
+
+Set `BENCHMARK_GITHUB_TOKEN` in the ECS-only secret file. Prefer a GitHub App
+installation token limited to `QwenLM/qwen-code`; it needs Contents read/write
+to read and update Releases and Checks write to create the completion Check
+Run. On success, the worker updates the triggering Release body with only the
+suite, version, commit, aggregate result, and run ID. Raw trajectories and
+private artifacts remain on ECS/OSS.
+
 ## Target deployment
 
 Install this package into `/mnt/workspace/qwen-benchmark/venv`, copy an edited
