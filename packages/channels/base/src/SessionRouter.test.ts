@@ -224,6 +224,13 @@ describe('SessionRouter', () => {
       expect(s1).toBe(s2);
     });
 
+    it('thread scope: different chatIds with same threadId get different sessions', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const s1 = await router.resolve('ch', 'alice', 'repo-a', 'issue:42');
+      const s2 = await router.resolve('ch', 'alice', 'repo-b', 'issue:42');
+      expect(s1).not.toBe(s2);
+    });
+
     it('single scope: all messages share one session per channel', async () => {
       const router = new SessionRouter(bridge, '/tmp', 'single');
       const s1 = await router.resolve('ch', 'alice', 'chat1');

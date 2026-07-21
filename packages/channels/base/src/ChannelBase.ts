@@ -1787,7 +1787,9 @@ export abstract class ChannelBase {
       );
       return;
     }
-    await this.sendThreadMessage(chatId, target.threadId, text);
+    const active = this.activePrompts.get(sessionId);
+    const threadId = active?.threadId ?? target.threadId;
+    await this.sendThreadMessage(chatId, threadId, text);
   }
 
   /**
@@ -4460,6 +4462,12 @@ export abstract class ChannelBase {
       if (filePaths.length > 0) {
         promptText = promptText + '\n\n' + filePaths.join('\n');
       }
+    }
+
+    if (envelope.metadata) {
+      promptText = promptText
+        ? `${promptText}\n\n${envelope.metadata}`
+        : envelope.metadata;
     }
 
     // Resolve dispatch mode: per-group override → channel config → default

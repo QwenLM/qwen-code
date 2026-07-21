@@ -27,7 +27,6 @@ export class GithubChannel extends ChannelBase {
   private pollGeneration = 0;
   private lastProcessedAt: string;
   private processedIdsAtCursor: Set<string> = new Set();
-  private handleInboundFailCount = 0;
   private readonly pollIntervalMs: number;
   private botUsername: string | null = null;
 
@@ -205,19 +204,19 @@ export class GithubChannel extends ChannelBase {
       }
       try {
         await this.handleInbound(envelope);
-        this.handleInboundFailCount = 0;
       } catch (err) {
-        this.handleInboundFailCount++;
-        if (this.handleInboundFailCount < 3) {
-          process.stderr.write(
-            `[GitHub:${this.name}] error processing notification ${nid} (${this.handleInboundFailCount}/3): ${err instanceof Error ? err.message : err}\n`,
-          );
-          continue;
-        }
-        this.handleInboundFailCount = 0;
         process.stderr.write(
-          `[GitHub:${this.name}] notification ${nid} failed 3 times, force advancing cursor: ${err instanceof Error ? err.message : err}\n`,
+          `[GitHub:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
         );
+        try {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            'Sorry, something went wrong processing your message.',
+          );
+        } catch {
+          // best effort
+        }
       }
       this.advanceCursor(updatedAt, nid);
       try {
@@ -351,6 +350,7 @@ export class GithubChannel extends ChannelBase {
         ? stripBotMention(body, this.botUsername)
         : (body ?? '');
 
+    const isCommand = /^\/[a-zA-Z0-9_:-]+/.test(content);
     return {
       channelName: this.name,
       senderId: senderLogin,
@@ -358,7 +358,8 @@ export class GithubChannel extends ChannelBase {
       chatId: repoName,
       threadId: extracted ? `${extracted.type}:${extracted.number}` : undefined,
       messageId: notification.id,
-      text: content ? `${content}\n\n${metadata}` : metadata,
+      text: content,
+      metadata: !isCommand ? metadata : undefined,
       isGroup: true,
       isMentioned: MENTION_REASONS.has(notification.reason),
       isReplyToBot:

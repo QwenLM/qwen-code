@@ -36,7 +36,6 @@ export class GitlabChannel extends ChannelBase {
   private pollGeneration = 0;
   private lastProcessedAt: string;
   private processedIdsAtCursor: Set<string> = new Set();
-  private handleInboundFailCount = 0;
   private readonly pollIntervalMs: number;
 
   constructor(
@@ -203,19 +202,19 @@ export class GitlabChannel extends ChannelBase {
       if (envelope) {
         try {
           await this.handleInbound(envelope);
-          this.handleInboundFailCount = 0;
         } catch (err) {
-          this.handleInboundFailCount++;
-          if (this.handleInboundFailCount < 3) {
-            process.stderr.write(
-              `[GitLab:${this.name}] error processing todo ${todo.id} (${this.handleInboundFailCount}/3): ${err instanceof Error ? err.message : err}\n`,
-            );
-            continue;
-          }
-          this.handleInboundFailCount = 0;
           process.stderr.write(
-            `[GitLab:${this.name}] todo ${todo.id} failed 3 times, force advancing cursor: ${err instanceof Error ? err.message : err}\n`,
+            `[GitLab:${this.name}] error processing todo ${todo.id}: ${err instanceof Error ? err.message : err}\n`,
           );
+          try {
+            await this.sendThreadMessage(
+              envelope.chatId,
+              envelope.threadId,
+              'Sorry, something went wrong processing your message.',
+            );
+          } catch {
+            // best effort
+          }
         }
       }
       try {
@@ -224,6 +223,7 @@ export class GitlabChannel extends ChannelBase {
         process.stderr.write(
           `[GitLab:${this.name}] failed to dismiss todo ${todo.id}: ${err instanceof Error ? err.message : err}\n`,
         );
+        continue;
       }
       this.advanceCursor(updatedAt, tid);
     }
@@ -272,6 +272,7 @@ export class GitlabChannel extends ChannelBase {
       ...(sourceBranch ? [`Branch: ${sourceBranch}`] : []),
     ].join('\n');
     const content = todo.body ? stripMentions(todo.body) : '';
+    const isCommand = /^\/[a-zA-Z0-9_:-]+/.test(content);
 
     return {
       channelName: this.name,
@@ -280,7 +281,8 @@ export class GitlabChannel extends ChannelBase {
       chatId: projectPath,
       threadId:
         targetIid !== undefined ? `${typePrefix}:${targetIid}` : undefined,
-      text: content ? `${content}\n\n${metadata}` : metadata,
+      text: content,
+      metadata: !isCommand ? metadata : undefined,
       isGroup: true,
       isMentioned: MENTION_ACTIONS.has(todo.action_name),
       isReplyToBot: false,

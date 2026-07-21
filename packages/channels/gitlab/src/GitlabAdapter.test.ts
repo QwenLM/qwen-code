@@ -246,13 +246,13 @@ describe('GitlabChannel', () => {
     });
     channel.disconnect();
 
-    const text = (envelopes[0] as { text: string }).text;
-    expect(text).toContain('Please review');
-    expect(text).not.toContain('@bob');
-    expect(text).toContain(
+    const env = envelopes[0] as { text: string; metadata?: string };
+    expect(env.text).toContain('Please review');
+    expect(env.text).not.toContain('@bob');
+    expect(env.metadata).toContain(
       'URL: https://gitlab.com/owner/repo/-/merge_requests/3',
     );
-    expect(text).toContain('Branch: feature-branch');
+    expect(env.metadata).toContain('Branch: feature-branch');
   });
 
   it('sendThreadMessage creates note on issue', async () => {
@@ -352,7 +352,7 @@ describe('GitlabChannel', () => {
     expect(mockIssuesCreate).not.toHaveBeenCalled();
   });
 
-  it('retries handleInbound failure without advancing cursor', async () => {
+  it('replies error on handleInbound failure and skips cursor advance when done() fails', async () => {
     const bridge = mockBridge();
     (bridge as Record<string, unknown>).prompt = vi
       .fn()
@@ -376,7 +376,7 @@ describe('GitlabChannel', () => {
         author: { name: 'Alice', username: 'alice' },
       },
     ]);
-    mockTodoDone.mockResolvedValue({});
+    mockTodoDone.mockRejectedValue(new Error('done failed'));
 
     const channel = new GitlabChannel(
       'test',
@@ -384,55 +384,18 @@ describe('GitlabChannel', () => {
       bridge,
     );
     await channel.connect();
-    await vi.waitFor(() => expect(mockTodosAll).toHaveBeenCalled(), {
+    await vi.waitFor(() => expect(mockIssueNotesCreate).toHaveBeenCalled(), {
       timeout: 2000,
     });
     channel.disconnect();
 
-    expect(mockTodoDone).not.toHaveBeenCalled();
+    expect(mockIssueNotesCreate).toHaveBeenCalledWith(
+      'owner/repo',
+      1,
+      'Sorry, something went wrong processing your message.',
+    );
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
     expect(cursor.timestamp).toBe('');
-  });
-
-  it('force advances cursor after 3 consecutive handleInbound failures', async () => {
-    const bridge = mockBridge();
-    (bridge as Record<string, unknown>).prompt = vi
-      .fn()
-      .mockRejectedValue(new Error('agent error'));
-
-    mockTodosAll.mockResolvedValue([
-      {
-        id: 50,
-        action_name: 'mentioned',
-        target_type: 'Issue',
-        target: { title: 'Bug', iid: 1 },
-        target_url: 'https://gitlab.com/owner/repo/-/issues/1',
-        body: 'fix this',
-        state: 'pending',
-        created_at: '2026-01-01T00:00:00Z',
-        updated_at: '2026-01-01T00:00:00Z',
-        project: {
-          name: 'repo',
-          path_with_namespace: 'owner/repo',
-        },
-        author: { name: 'Alice', username: 'alice' },
-      },
-    ]);
-    mockTodoDone.mockResolvedValue({});
-
-    const channel = new GitlabChannel(
-      'test',
-      { ...baseConfig, pollInterval: 50 },
-      bridge,
-    );
-    await channel.connect();
-    await vi.waitFor(() => expect(mockTodoDone).toHaveBeenCalled(), {
-      timeout: 5000,
-    });
-    channel.disconnect();
-
-    const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
   });
 
   it('fetches all pages of todos', async () => {

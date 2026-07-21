@@ -107,7 +107,9 @@ export class SessionRouter {
     const scope = this.channelScopes.get(channelName) || this.defaultScope;
     switch (scope) {
       case 'thread':
-        return `${channelName}:${threadId || chatId}`;
+        return threadId
+          ? `${channelName}:${chatId}:${threadId}`
+          : `${channelName}:${chatId}`;
       case 'single':
         return `${channelName}:__single__`;
       case 'user':

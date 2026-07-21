@@ -26,7 +26,6 @@ export class GiteaChannel extends ChannelBase {
   private pollGeneration = 0;
   private lastProcessedAt: string;
   private processedIdsAtCursor: Set<string> = new Set();
-  private handleInboundFailCount = 0;
   private readonly pollIntervalMs: number;
   private botUsername: string | null = null;
 
@@ -62,12 +61,8 @@ export class GiteaChannel extends ChannelBase {
     }
     this.abortController = new AbortController();
     const { signal } = this.abortController;
-    try {
-      const { data: user } = await this.client.user.userGetCurrent();
-      this.botUsername = user.login ?? null;
-    } catch {
-      // bot username unavailable — isMentioned will be conservative
-    }
+    const { data: user } = await this.client.user.userGetCurrent();
+    this.botUsername = user.login ?? null;
     const gen = ++this.pollGeneration;
     this.runPollLoop(signal, gen).catch((err) => {
       if (!signal.aborted && gen === this.pollGeneration) {
@@ -207,19 +202,19 @@ export class GiteaChannel extends ChannelBase {
       }
       try {
         await this.handleInbound(envelope);
-        this.handleInboundFailCount = 0;
       } catch (err) {
-        this.handleInboundFailCount++;
-        if (this.handleInboundFailCount < 3) {
-          process.stderr.write(
-            `[Gitea:${this.name}] error processing notification ${nid} (${this.handleInboundFailCount}/3): ${err instanceof Error ? err.message : err}\n`,
-          );
-          continue;
-        }
-        this.handleInboundFailCount = 0;
         process.stderr.write(
-          `[Gitea:${this.name}] notification ${nid} failed 3 times, force advancing cursor: ${err instanceof Error ? err.message : err}\n`,
+          `[Gitea:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
         );
+        try {
+          await this.sendThreadMessage(
+            envelope.chatId,
+            envelope.threadId,
+            'Sorry, something went wrong processing your message.',
+          );
+        } catch {
+          // best effort
+        }
       }
       this.advanceCursor(updatedAt, nid);
       try {
@@ -247,7 +242,8 @@ export class GiteaChannel extends ChannelBase {
     notification: NotificationThread,
   ): Promise<Envelope> {
     const repoName = notification.repository?.full_name ?? 'unknown';
-    const subjectType = notification.subject?.type ?? 'unknown';
+    const rawSubjectType = notification.subject?.type ?? 'unknown';
+    const subjectType = rawSubjectType.toLowerCase();
     const subjectTitle = notification.subject?.title ?? '';
     const subjectUrl = notification.subject?.url;
 
@@ -327,6 +323,7 @@ export class GiteaChannel extends ChannelBase {
         ).test(body)
       : false;
 
+    const isCommand = /^\/[a-zA-Z0-9_:-]+/.test(content);
     return {
       channelName: this.name,
       senderId: senderUsername,
@@ -334,7 +331,8 @@ export class GiteaChannel extends ChannelBase {
       chatId: repoName,
       threadId: extracted ? `${extracted.type}:${extracted.number}` : undefined,
       messageId: String(notification.id),
-      text: content ? `${content}\n\n${metadata}` : metadata,
+      text: content,
+      metadata: !isCommand ? metadata : undefined,
       isGroup: true,
       isMentioned,
       isReplyToBot: false,

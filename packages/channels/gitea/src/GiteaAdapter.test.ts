@@ -209,7 +209,7 @@ describe('GiteaChannel', () => {
           unread: true,
           subject: {
             title: 'Add feature',
-            type: 'pull',
+            type: 'Pull',
             url: 'https://gitea.com/api/v1/repos/owner/repo/pulls/5',
             latest_comment_url: null,
             html_url: 'https://gitea.com/owner/repo/pulls/5',
@@ -250,11 +250,11 @@ describe('GiteaChannel', () => {
     channel.disconnect();
 
     expect(mockRepoGetPullRequest).toHaveBeenCalledWith('owner', 'repo', 5);
-    const text = (envelopes[0] as { text: string }).text;
-    expect(text).toContain('PR body');
-    expect(text).toContain('@reviewer');
-    expect(text).toContain('URL: https://gitea.com/owner/repo/pulls/5');
-    expect(text).toContain('Branch: feature-branch');
+    const env = envelopes[0] as { text: string; metadata?: string };
+    expect(env.text).toContain('PR body');
+    expect(env.text).toContain('@reviewer');
+    expect(env.metadata).toContain('URL: https://gitea.com/owner/repo/pulls/5');
+    expect(env.metadata).toContain('Branch: feature-branch');
   });
 
   it('sendThreadMessage creates comment on issue', async () => {
@@ -382,60 +382,15 @@ describe('GiteaChannel', () => {
     expect(env.isMentioned).toBe(true);
   });
 
-  it('sets isMentioned false when botUsername is unavailable', async () => {
+  it('throws on connect when bot identity is unavailable', async () => {
     mockUserGetCurrent.mockRejectedValueOnce(new Error('forbidden'));
     const bridge = mockBridge();
 
-    mockNotifyGetList.mockResolvedValueOnce({
-      data: [
-        {
-          id: 1,
-          reason: 'mention',
-          unread: true,
-          subject: {
-            title: 'Fix bug',
-            type: 'issue',
-            url: 'https://gitea.com/api/v1/repos/owner/repo/issues/1',
-            latest_comment_url:
-              'https://gitea.com/api/v1/repos/owner/repo/issues/comments/42',
-            html_url: 'https://gitea.com/owner/repo/issues/1',
-          },
-          repository: {
-            full_name: 'owner/repo',
-            html_url: 'https://gitea.com/owner/repo',
-          },
-          updated_at: '2026-01-01T00:00:00Z',
-        },
-      ],
-    });
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'commenter' }, body: '@alice please review' },
-    });
-    mockNotifyReadThread.mockResolvedValueOnce({});
-
     const channel = new GiteaChannel('test', baseConfig, bridge);
-    const envelopes: unknown[] = [];
-    const origHandleInbound = (
-      channel as unknown as {
-        handleInbound: (e: unknown) => Promise<void>;
-      }
-    ).handleInbound.bind(channel);
-    (
-      channel as unknown as {
-        handleInbound: (e: unknown) => Promise<void>;
-      }
-    ).handleInbound = async (e: unknown) => {
-      envelopes.push(e);
-      await origHandleInbound(e);
-    };
-
-    await channel.connect();
-    await vi.waitFor(() => expect(envelopes.length).toBe(1), {
-      timeout: 2000,
-    });
+    await expect(channel.connect()).rejects.toThrow();
     channel.disconnect();
 
-    expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(false);
+    expect(mockNotifyGetList).not.toHaveBeenCalled();
   });
 
   it('sets isMentioned true when bot username is mentioned in body', async () => {
@@ -494,7 +449,7 @@ describe('GiteaChannel', () => {
     expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(true);
   });
 
-  it('retries handleInbound failure without advancing cursor', async () => {
+  it('advances cursor and replies error on handleInbound failure', async () => {
     const bridge = mockBridge();
 
     const notification = {
@@ -503,53 +458,7 @@ describe('GiteaChannel', () => {
       unread: true,
       subject: {
         title: 'Fix bug',
-        type: 'issue',
-        url: 'https://gitea.com/api/v1/repos/owner/repo/issues/1',
-        latest_comment_url: null,
-        html_url: 'https://gitea.com/owner/repo/issues/1',
-      },
-      repository: {
-        full_name: 'owner/repo',
-        html_url: 'https://gitea.com/owner/repo',
-      },
-      updated_at: '2026-01-01T00:00:00Z',
-    };
-
-    mockNotifyGetList.mockResolvedValue({ data: [notification] });
-
-    const channel = new GiteaChannel(
-      'test',
-      { ...baseConfig, pollInterval: 50 },
-      bridge,
-    );
-    (
-      channel as unknown as {
-        handleInbound: (e: unknown) => Promise<void>;
-      }
-    ).handleInbound = async () => {
-      throw new Error('agent error');
-    };
-    await channel.connect();
-    await vi.waitFor(() => expect(mockNotifyGetList).toHaveBeenCalled(), {
-      timeout: 2000,
-    });
-    channel.disconnect();
-
-    expect(mockNotifyReadThread).not.toHaveBeenCalled();
-    const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('');
-  });
-
-  it('force advances cursor after 3 consecutive handleInbound failures', async () => {
-    const bridge = mockBridge();
-
-    const notification = {
-      id: 1,
-      reason: 'mention',
-      unread: true,
-      subject: {
-        title: 'Fix bug',
-        type: 'issue',
+        type: 'Issue',
         url: 'https://gitea.com/api/v1/repos/owner/repo/issues/1',
         latest_comment_url: null,
         html_url: 'https://gitea.com/owner/repo/issues/1',
@@ -577,10 +486,13 @@ describe('GiteaChannel', () => {
     };
     await channel.connect();
     await vi.waitFor(() => expect(mockNotifyReadThread).toHaveBeenCalled(), {
-      timeout: 5000,
+      timeout: 2000,
     });
     channel.disconnect();
 
+    expect(mockCreateComment).toHaveBeenCalledWith('owner', 'repo', 1, {
+      body: 'Sorry, something went wrong processing your message.',
+    });
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
     expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
   });

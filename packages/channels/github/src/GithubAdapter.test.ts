@@ -321,11 +321,11 @@ describe('GithubChannel', () => {
       repo: 'repo',
       pull_number: 7,
     });
-    const text = (envelopes[0] as { text: string }).text;
-    expect(text).toContain('PR description');
-    expect(text).toContain('@reviewer');
-    expect(text).toContain('URL: https://github.com/owner/repo/pull/7');
-    expect(text).toContain('Branch: feature-branch');
+    const env = envelopes[0] as { text: string; metadata?: string };
+    expect(env.text).toContain('PR description');
+    expect(env.text).toContain('@reviewer');
+    expect(env.metadata).toContain('URL: https://github.com/owner/repo/pull/7');
+    expect(env.metadata).toContain('Branch: feature-branch');
     expect((envelopes[0] as { senderId: string }).senderId).toBe('pr-author');
   });
 
@@ -571,7 +571,7 @@ describe('GithubChannel', () => {
     );
   });
 
-  it('retries handleInbound failure without advancing cursor', async () => {
+  it('advances cursor and replies error on handleInbound failure', async () => {
     const bridge = mockBridge();
 
     const notification = {
@@ -595,54 +595,7 @@ describe('GithubChannel', () => {
     mockGetIssue.mockResolvedValue({
       data: { user: { login: 'author' }, body: 'fix this' },
     });
-
-    const channel = new GithubChannel(
-      'test',
-      { ...baseConfig, pollInterval: 50 },
-      bridge,
-    );
-    (
-      channel as unknown as {
-        handleInbound: (e: unknown) => Promise<void>;
-      }
-    ).handleInbound = async () => {
-      throw new Error('agent error');
-    };
-    await channel.connect();
-    await vi.waitFor(() => expect(mockPaginate).toHaveBeenCalled(), {
-      timeout: 2000,
-    });
-    channel.disconnect();
-
-    expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
-    const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('');
-  });
-
-  it('force advances cursor after 3 consecutive handleInbound failures', async () => {
-    const bridge = mockBridge();
-
-    const notification = {
-      id: '1',
-      reason: 'mention',
-      unread: true,
-      subject: {
-        title: 'Fix bug',
-        type: 'Issue',
-        url: 'https://api.github.com/repos/owner/repo/issues/1',
-        latest_comment_url: null,
-      },
-      repository: {
-        full_name: 'owner/repo',
-        html_url: 'https://github.com/owner/repo',
-      },
-      updated_at: '2026-01-01T00:00:00Z',
-    };
-
-    mockPaginate.mockResolvedValue([notification]);
-    mockGetIssue.mockResolvedValue({
-      data: { user: { login: 'author' }, body: 'fix this' },
-    });
+    mockMarkThreadAsRead.mockResolvedValue({});
 
     const channel = new GithubChannel(
       'test',
@@ -658,10 +611,16 @@ describe('GithubChannel', () => {
     };
     await channel.connect();
     await vi.waitFor(() => expect(mockMarkThreadAsRead).toHaveBeenCalled(), {
-      timeout: 5000,
+      timeout: 2000,
     });
     channel.disconnect();
 
+    expect(mockCreateComment).toHaveBeenCalledWith({
+      owner: 'owner',
+      repo: 'repo',
+      issue_number: 1,
+      body: 'Sorry, something went wrong processing your message.',
+    });
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
     expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
   });
