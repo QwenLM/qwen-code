@@ -196,6 +196,10 @@ export type {
   WebSearchSettings,
 } from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+// Exported for the cross-package contract test in packages/cli (see the
+// function's own doc comment) — the daemon's file-read route must resolve the
+// workspacePath this produces.
+export { buildRecordArtifactReminder } from './tools/write-file.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
