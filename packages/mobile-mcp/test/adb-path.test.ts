@@ -10,7 +10,10 @@ import { getAdbPath } from '../src/android';
 // breaking Android automation on Windows.
 
 function withPlatform(platform: NodeJS.Platform, fn: () => void): void {
-  const original = process.platform;
+  // Capture the full original descriptor so the restore preserves its
+  // attributes (enumerable/writable), rather than leaving behind a plain
+  // { configurable, value } descriptor that would leak to later tests.
+  const original = Object.getOwnPropertyDescriptor(process, 'platform');
   Object.defineProperty(process, 'platform', {
     value: platform,
     configurable: true,
@@ -18,10 +21,11 @@ function withPlatform(platform: NodeJS.Platform, fn: () => void): void {
   try {
     fn();
   } finally {
-    Object.defineProperty(process, 'platform', {
-      value: original,
-      configurable: true,
-    });
+    if (original) {
+      Object.defineProperty(process, 'platform', original);
+    } else {
+      delete (process as unknown as { platform?: NodeJS.Platform }).platform;
+    }
   }
 }
 
