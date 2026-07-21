@@ -4737,8 +4737,20 @@ hello
         }),
       );
 
+      // The model requests a tool call so pendingToolCalls is non-empty and
+      // the prefetch is preserved for the subsequent ToolResult turn.
       const mockStream = (async function* () {
         yield { type: 'content', value: 'Hello' };
+        yield {
+          type: 'tool_call_request',
+          value: {
+            callId: 'call-1',
+            name: 'foo',
+            args: {},
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-user-query',
+          },
+        };
       })();
       mockTurnRunFn.mockReturnValue(mockStream);
 
@@ -4828,6 +4840,46 @@ hello
       );
     });
 
+    it('should discard pending prefetch with no_safe_delivery_point on a no-tool turn', async () => {
+      // Recall stays pending — never settles before the turn completes.
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+
+      // Model responds without tool calls → pendingToolCalls is empty.
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'no tool calls here' }],
+        new AbortController().signal,
+        'prompt-id-no-tool-turn',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'no_safe_delivery_point',
+          strategy: 'none',
+          docs_selected: 0,
+          latency_ms: expect.any(Number),
+        }),
+      );
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
     it('should abort the pending prefetch when the caller signal aborts', async () => {
       let abortHandlerInvoked = false;
       mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
@@ -4845,6 +4897,16 @@ hello
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-keep-alive',
+              name: 'noop',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
         })(),
       );
 
@@ -4880,6 +4942,16 @@ hello
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-keep-alive',
+              name: 'noop',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
         })(),
       );
 
@@ -4900,6 +4972,16 @@ hello
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello again' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-keep-alive',
+              name: 'noop',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
         })(),
       );
       const stream2 = client.sendMessageStream(
@@ -4946,6 +5028,16 @@ hello
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-keep-alive',
+              name: 'noop',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
         })(),
       );
 
@@ -4976,6 +5068,16 @@ hello
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-keep-alive',
+              name: 'noop',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
         })(),
       );
 
@@ -5015,6 +5117,16 @@ hello
       mockTurnRunFn.mockReturnValue(
         (async function* () {
           yield { type: 'content', value: 'Hello' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-keep-alive',
+              name: 'noop',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
         })(),
       );
 
@@ -5355,6 +5467,16 @@ hello
         () =>
           (async function* () {
             yield { type: 'content', value: 'reply' };
+            yield {
+              type: 'tool_call_request',
+              value: {
+                callId: 'call-keep-alive',
+                name: 'noop',
+                args: {},
+                isClientInitiated: false,
+                prompt_id: 'test',
+              },
+            };
           })() as unknown as AsyncGenerator<ServerGeminiStreamEvent>,
       );
 

@@ -9,7 +9,12 @@ import { diag, metrics, ValueType } from '@opentelemetry/api';
 import { SERVICE_NAME, EVENT_CHAT_COMPRESSION } from './constants.js';
 import type { Config } from '../config/config.js';
 import type { TelemetryRuntimeConfig } from './runtime-config.js';
-import type { ModelSlashCommandEvent } from './types.js';
+import type {
+  ModelSlashCommandEvent,
+  MemoryRecallDeliveryPhase,
+  MemoryRecallDeliveryPoint,
+  MemoryRecallDiscardReason,
+} from './types.js';
 
 const TOOL_CALL_COUNT = `${SERVICE_NAME}.tool.call.count`;
 const TOOL_CALL_LATENCY = `${SERVICE_NAME}.tool.call.latency`;
@@ -1113,15 +1118,9 @@ export function recordMemoryRecallDeliveryMetrics(
   config: Config,
   latencyMs: number,
   attrs: {
-    phase: 'fast' | 'refined';
-    delivery_point: 'initial' | 'tool_result' | 'discarded';
-    discard_reason?:
-      | 'no_safe_delivery_point'
-      | 'new_query'
-      | 'reset'
-      | 'abort'
-      | 'shutdown'
-      | 'superseded';
+    phase: MemoryRecallDeliveryPhase;
+    delivery_point: MemoryRecallDeliveryPoint;
+    discard_reason?: MemoryRecallDiscardReason;
     strategy: 'none' | 'heuristic' | 'model';
     docs_selected: number;
   },

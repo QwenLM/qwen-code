@@ -2548,8 +2548,12 @@ export class GeminiClient {
 
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
+      let hasToolCalls = false;
       try {
         for await (const event of resultStream) {
+          if (event.type === GeminiEventType.ToolCallRequest) {
+            hasToolCalls = true;
+          }
           if (messageDisplay && event.type === GeminiEventType.Content) {
             messageDisplay.addChunk(event.value);
           }
@@ -3068,9 +3072,14 @@ export class GeminiClient {
       if (isTopLevelInteraction) {
         endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
       }
-      // Reached the bottom of the try — this turn ended cleanly. Preserve
-      // any still-pending memory prefetch so the next ToolResult turn can
-      // consume it (the whole point of the fire-and-forget design).
+      // Reached the bottom of the try — this turn ended cleanly. If the
+      // model did not request tool calls, no future ToolResult will arrive
+      // to consume the prefetch, so close it out now. When tool calls ARE
+      // pending, preserve the handle so the next ToolResult turn can
+      // consume it (the fire-and-forget design).
+      if (!hasToolCalls) {
+        this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+      }
       normalCompletion = true;
       return turn;
     } finally {
