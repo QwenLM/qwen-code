@@ -592,6 +592,9 @@ describe('useResumeCommand', () => {
       }),
       expect.any(Number),
     );
+    expect(historyManager.loadHistory.mock.invocationCallOrder[0]).toBeLessThan(
+      historyManager.addItem.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('blocks resume when the current session still has running background work', async () => {

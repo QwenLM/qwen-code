@@ -6745,6 +6745,16 @@ describe('setApprovalMode with folder trust', () => {
       vi.clearAllMocks();
     });
 
+    it('registers the background-agent roster tool', async () => {
+      const config = new Config(baseParams);
+      await config.initialize();
+
+      const calls = (ToolRegistry.prototype.registerFactory as Mock).mock.calls;
+      expect(calls.some((call) => call[0] === ToolNames.LIST_AGENTS)).toBe(
+        true,
+      );
+    });
+
     it('should register grep tool when useRipgrep is true and it is available', async () => {
       (canUseRipgrep as Mock).mockResolvedValue(true);
       const config = new Config({ ...baseParams, useRipgrep: true });

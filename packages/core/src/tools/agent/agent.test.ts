@@ -368,8 +368,9 @@ describe('AgentTool', () => {
         'Reuse an existing background agent for related follow-up work',
       );
       expect(tool.description).toContain(
-        'send_message with the `agentId` from its launch result as its `task_id`',
+        'list_agents to inspect the current roster',
       );
+      expect(tool.description).toContain('send_message with its `task_id`');
       expect(tool.description).toContain('next tool-round boundary');
       expect(tool.description).toContain(
         'paused agents resume with it as their first continuation instruction',

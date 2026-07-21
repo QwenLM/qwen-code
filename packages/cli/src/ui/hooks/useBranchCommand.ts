@@ -21,6 +21,13 @@ import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import {
+  hasBlockingBackgroundWork,
+  resetBackgroundStateForSessionSwitch,
+} from '../utils/backgroundWorkUtils.js';
+
+const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
+  "Stop the current session's running background tasks before branching the conversation.";
 
 /**
  * Derives a short one-line title from the first *real* user message in the
@@ -92,6 +99,17 @@ export function useBranchCommand(
   const handleBranch = useCallback(
     async (name?: string) => {
       if (!config) return;
+
+      if (hasBlockingBackgroundWork(config)) {
+        historyManager.addItem(
+          {
+            type: 'error',
+            text: t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+          },
+          Date.now(),
+        );
+        return;
+      }
 
       const oldSessionId = config.getSessionId();
       const newSessionId = randomUUID();
@@ -191,6 +209,7 @@ export function useBranchCommand(
         startNewSession(newSessionId);
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
+        resetBackgroundStateForSessionSwitch(config);
         uiSwapped = true;
 
         // 9. Re-arm /goal under the fork's new sessionId. The branched JSONL

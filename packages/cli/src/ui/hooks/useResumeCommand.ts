@@ -107,6 +107,7 @@ export function useResumeCommand(
       const oldSessionId = config.getSessionId();
       let coreSwapped = false;
       let uiSwapped = false;
+      let recoveredBackgroundAgentsNotice: string | null = null;
 
       try {
         const cwd = config.getTargetDir();
@@ -179,13 +180,9 @@ export function useResumeCommand(
 
         const recovered = await config.loadPausedBackgroundAgents(sessionId);
         if (recovered.length > 0) {
-          const recoveredMessage: HistoryItemWithoutId = {
-            type: MessageType.INFO,
-            text: config
-              .getBackgroundAgentResumeService()
-              .buildRecoveredBackgroundAgentsNotice(recovered.length),
-          };
-          addItem(recoveredMessage, Date.now());
+          recoveredBackgroundAgentsNotice = config
+            .getBackgroundAgentResumeService()
+            .buildRecoveredBackgroundAgentsNotice(recovered.length);
         }
 
         // 2. Swap UI. Once this commits, rolling core back is unsafe —
@@ -195,6 +192,15 @@ export function useResumeCommand(
         setSessionName?.(customTitle ?? null);
         clearItems();
         loadHistory(uiHistoryItems);
+        if (recoveredBackgroundAgentsNotice) {
+          addItem(
+            {
+              type: MessageType.INFO,
+              text: recoveredBackgroundAgentsNotice,
+            },
+            Date.now(),
+          );
+        }
         uiSwapped = true;
 
         // SessionStart hook is handled during chat initialization so its
@@ -209,6 +215,7 @@ export function useResumeCommand(
           // recorder would keep writing new user messages into the
           // orphaned session JSONL while UI still shows the old session.
           try {
+            resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);
           } catch (rollbackErr) {
             config

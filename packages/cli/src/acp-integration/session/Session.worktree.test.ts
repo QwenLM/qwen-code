@@ -26,6 +26,7 @@ import type {
   PromptRequest,
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
+import { handleSlashCommand } from '../../nonInteractiveCliCommands.js';
 
 // Stub the non-interactive CLI commands that Session.ts imports transitively.
 vi.mock('../../nonInteractiveCliCommands.js', () => ({
@@ -67,6 +68,7 @@ describe('Session.pendingWorktreeNotice', () => {
 
   beforeEach(() => {
     capturedMessages = [];
+    vi.mocked(handleSlashCommand).mockReset();
 
     mockChat = {
       sendMessageStream: vi
@@ -251,6 +253,54 @@ describe('Session.pendingWorktreeNotice', () => {
 
     // Stays null after the second call as well.
     expect(session.pendingWorktreeNotice).toBeNull();
+  });
+
+  it('injects a recovered-agents notice into the next prompt once', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice =
+      '2 background agents were restored. Use list_agents to inspect them.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    await session.prompt(makePromptRequest('first prompt'));
+    await session.prompt(makePromptRequest('second prompt'));
+
+    const firstParts = capturedMessages[0] as Array<{ text?: string }>;
+    expect(firstParts.some((part) => part.text?.includes(notice))).toBe(true);
+    const secondParts = capturedMessages[1] as Array<{ text?: string }>;
+    expect(secondParts.some((part) => part.text?.includes(notice))).toBe(false);
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
+  it('does not consume a recovered-agents notice for a slash command', async () => {
+    vi.mocked(handleSlashCommand).mockResolvedValueOnce({
+      type: 'submit_prompt',
+      content: [{ text: 'Prompt from command' }],
+    });
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice = 'Recovered agents are available.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    await session.prompt(makePromptRequest('/testcommand'));
+    await session.prompt(makePromptRequest('ordinary prompt'));
+
+    expect(capturedMessages[0]).toEqual([{ text: 'Prompt from command' }]);
+    expect(capturedMessages[1]).toEqual(
+      expect.arrayContaining([
+        { text: expect.stringContaining(notice) as string },
+        { text: 'ordinary prompt' },
+      ]),
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
   });
 
   // VP4b: sanity — no notice set, prompt works normally, no worktree reminder injected

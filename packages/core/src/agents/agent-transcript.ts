@@ -110,6 +110,14 @@ export interface AgentMeta {
    * `running` as resumable work that was interrupted by process exit.
    */
   status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  /**
+   * Whether the original launch ran asynchronously. Completed entries are
+   * restored only when this is explicitly true so legacy foreground sidecars
+   * are never exposed as reusable background agents.
+   */
+  isBackgrounded?: boolean;
+  /** Whether the original launch used temporary worktree isolation. */
+  isolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
@@ -191,6 +199,16 @@ export function writeAgentMeta(metaPath: string, meta: AgentMeta): void {
     fs.writeFileSync(metaPath, JSON.stringify(meta, null, 2), 'utf8');
   } catch (error) {
     debugLogger.warn(`Failed to write agent meta sidecar ${metaPath}:`, error);
+    return;
+  }
+  try {
+    const now = new Date();
+    fs.utimesSync(path.dirname(metaPath), now, now);
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to refresh agent session directory for ${metaPath}:`,
+      error,
+    );
   }
 }
 

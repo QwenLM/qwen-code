@@ -130,7 +130,7 @@ describe('BackgroundAgentResumeService', () => {
     };
   }
 
-  it('loads only interrupted running background agents as paused entries', async () => {
+  it('restores interrupted and completed background agents without notifying again', async () => {
     const sessionId = 'session-1';
     const runningAgentId = 'agent-running';
     const completedAgentId = 'agent-completed';
@@ -154,6 +154,7 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'running',
+      isBackgrounded: true,
       subagentName: 'researcher',
       resolvedApprovalMode: 'auto-edit',
     });
@@ -165,6 +166,8 @@ describe('BackgroundAgentResumeService', () => {
       parentAgentId: null,
       createdAt: '2026-04-20T00:00:00.000Z',
       status: 'completed',
+      isBackgrounded: true,
+      lastUpdatedAt: '2026-04-20T00:00:02.000Z',
       subagentName: 'researcher',
       resolvedApprovalMode: 'auto-edit',
     });
@@ -196,14 +199,24 @@ describe('BackgroundAgentResumeService', () => {
     );
     fs.writeFileSync(
       getAgentJsonlPath(tempDir, sessionId, completedAgentId),
-      '',
+      JSON.stringify({
+        uuid: 'c1',
+        parentUuid: null,
+        sessionId,
+        agentId: completedAgentId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Already done' }] },
+      }) + '\n',
       'utf8',
     );
 
     const { service, subagentManager } = createService();
+    const onNotification = vi.fn();
+    registry.setNotificationCallback(onNotification);
     const recovered = await service.loadPausedBackgroundAgents(sessionId);
 
-    expect(recovered).toHaveLength(1);
+    expect(recovered).toHaveLength(2);
     expect(recovered[0]).toMatchObject({
       agentId: runningAgentId,
       status: 'paused',
@@ -213,10 +226,125 @@ describe('BackgroundAgentResumeService', () => {
       metaPath: runningMetaPath,
       outputFile: getAgentJsonlPath(tempDir, sessionId, runningAgentId),
     });
+    expect(recovered[1]).toMatchObject({
+      agentId: completedAgentId,
+      status: 'completed',
+      notified: true,
+      description: 'Already done',
+      outputFile: getAgentJsonlPath(tempDir, sessionId, completedAgentId),
+    });
     expect(registry.get(runningAgentId)?.status).toBe('paused');
-    expect(registry.get(completedAgentId)).toBeUndefined();
-    expect(subagentManager.loadSubagent).toHaveBeenCalledTimes(1);
+    expect(registry.get(completedAgentId)?.status).toBe('completed');
+    expect(onNotification).not.toHaveBeenCalled();
+    expect(subagentManager.loadSubagent).toHaveBeenCalledTimes(2);
     expect(subagentManager.loadSubagent).toHaveBeenCalledWith('researcher');
+  });
+
+  it('excludes foreground, legacy completed, and wrong-owner sidecars', async () => {
+    const sessionId = 'session-owned';
+    const cases = [
+      {
+        agentId: 'foreground',
+        isBackgrounded: false,
+        parentSessionId: sessionId,
+      },
+      { agentId: 'legacy-completed', parentSessionId: sessionId },
+      {
+        agentId: 'wrong-owner',
+        isBackgrounded: true,
+        parentSessionId: 'other',
+      },
+    ];
+
+    for (const item of cases) {
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, item.agentId), {
+        agentId: item.agentId,
+        agentType: 'researcher',
+        description: item.agentId,
+        parentSessionId: item.parentSessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'completed',
+        isBackgrounded: item.isBackgrounded,
+        subagentName: 'researcher',
+      });
+    }
+
+    const { service, subagentManager } = createService();
+    expect(await service.loadPausedBackgroundAgents(sessionId)).toEqual([]);
+    expect(subagentManager.loadSubagent).not.toHaveBeenCalled();
+  });
+
+  it('keeps damaged and unsafe retained entries visible but non-continuable', async () => {
+    const sessionId = 'session-unsafe';
+    const missingId = 'missing-transcript';
+    const wrongCwdId = 'wrong-cwd';
+    const worktreeId = 'worktree-agent';
+    for (const agentId of [missingId, wrongCwdId, worktreeId]) {
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+        agentId,
+        agentType: 'researcher',
+        description: agentId,
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'completed',
+        isBackgrounded: true,
+        ...(agentId === worktreeId ? { isolation: 'worktree' as const } : {}),
+        subagentName: 'researcher',
+      });
+    }
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, wrongCwdId),
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        agentId: wrongCwdId,
+        cwd: path.join(tempDir, 'another-workspace'),
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Unsafe cwd' }] },
+      }) + '\n',
+      'utf8',
+    );
+    fs.writeFileSync(
+      getAgentJsonlPath(tempDir, sessionId, worktreeId),
+      JSON.stringify({
+        uuid: 'w1',
+        parentUuid: null,
+        sessionId,
+        agentId: worktreeId,
+        cwd: tempDir,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Worktree task' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    const { service } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    expect(recovered).toHaveLength(3);
+    expect(registry.get(missingId)).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason:
+        'Background task transcript is missing or unreadable.',
+    });
+    expect(registry.get(wrongCwdId)).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason:
+        'Background task working directory does not match the restored session.',
+    });
+    expect(registry.get(worktreeId)).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason:
+        'Background task worktree isolation cannot be reconstructed after session restore.',
+    });
+    expect(
+      await service.reviveCompletedBackgroundAgent(missingId, 'continue'),
+    ).toBeUndefined();
   });
 
   it('preserves model on recovered paused agents for per-model caps', async () => {

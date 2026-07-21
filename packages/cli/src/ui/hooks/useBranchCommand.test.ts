@@ -98,7 +98,77 @@ describe('useBranchCommand', () => {
       getGeminiClient: () => ({ initialize: vi.fn() }),
       startNewSession: startNewSessionConfig,
       getDebugLogger: () => ({ warn: vi.fn() }),
+      getBackgroundTaskRegistry: () => ({
+        hasRunningTasks: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getMonitorRegistry: () => ({
+        getRunning: vi.fn().mockReturnValue([]),
+        reset: vi.fn(),
+      }),
+      getBackgroundShellRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
+      getWorkflowRunRegistry: () => ({
+        hasRunningEntries: vi.fn().mockReturnValue(false),
+        reset: vi.fn(),
+      }),
     };
+  });
+
+  it('blocks branching while background work is running', async () => {
+    config.getBackgroundTaskRegistry = () => ({
+      hasRunningTasks: vi.fn().mockReturnValue(true),
+      reset: vi.fn(),
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('blocked');
+    });
+
+    expect(forkSession).not.toHaveBeenCalled();
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringContaining('running background tasks'),
+      }),
+      expect.any(Number),
+    );
+  });
+
+  it('clears the prior session roster after a successful branch', async () => {
+    const backgroundReset = vi.fn();
+    const monitorReset = vi.fn();
+    const shellReset = vi.fn();
+    const workflowReset = vi.fn();
+    config.getBackgroundTaskRegistry = () => ({
+      hasRunningTasks: vi.fn().mockReturnValue(false),
+      reset: backgroundReset,
+    });
+    config.getMonitorRegistry = () => ({
+      getRunning: vi.fn().mockReturnValue([]),
+      reset: monitorReset,
+    });
+    config.getBackgroundShellRegistry = () => ({
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: shellReset,
+    });
+    config.getWorkflowRunRegistry = () => ({
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: workflowReset,
+    });
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('ready');
+    });
+
+    expect(backgroundReset).toHaveBeenCalledOnce();
+    expect(monitorReset).toHaveBeenCalledOnce();
+    expect(shellReset).toHaveBeenCalledOnce();
+    expect(workflowReset).toHaveBeenCalledOnce();
   });
 
   it('persists and reloads the title before switching core or UI', async () => {
