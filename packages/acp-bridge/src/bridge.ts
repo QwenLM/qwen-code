@@ -48,6 +48,7 @@ import {
   BridgeTimeoutError,
   createIdleWorkspaceExtensionsStatus,
   createIdleWorkspaceHooksStatus,
+  SESSION_CLOSE_QUARANTINED_ERROR_KIND,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
   STATUS_SCHEMA_VERSION,
@@ -202,6 +203,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isDefinitiveAcpRequestError(error: unknown): boolean {
+  if (
+    isRecord(error) &&
+    isRecord(error['data']) &&
+    error['data']['errorKind'] === SESSION_CLOSE_QUARANTINED_ERROR_KIND
+  ) {
+    return false;
+  }
   if (error instanceof RequestError) return true;
   if (!isRecord(error)) return false;
   return (

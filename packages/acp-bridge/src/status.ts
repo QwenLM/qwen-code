@@ -10,6 +10,9 @@ import { SkillError } from '@qwen-code/qwen-code-core';
 
 export const STATUS_SCHEMA_VERSION = 1 as const;
 
+export const SESSION_CLOSE_QUARANTINED_ERROR_KIND =
+  'session_close_quarantined' as const;
+
 /**
  * Closed enumeration of structured error categories surfaced on diagnostic
  * status cells. Cells produced by `/workspace/preflight`, `/workspace/env`,

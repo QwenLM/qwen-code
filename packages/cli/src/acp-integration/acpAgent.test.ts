@@ -822,6 +822,7 @@ import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js'
 import { AcpFileSystemService } from './service/filesystem.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
+  SESSION_CLOSE_QUARANTINED_ERROR_KIND,
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
@@ -1420,6 +1421,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
+        dispose: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -9560,6 +9562,82 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(mcpPool?.drainAll).toHaveBeenCalledOnce();
   });
 
+  it('waits for an in-flight session lifecycle operation before connection teardown', async () => {
+    const innerConfig = await setupSessionMocks('session-in-flight-close');
+    const sessionHookSystem = {
+      fireSessionEndEvent: vi.fn().mockResolvedValue(undefined),
+    };
+    innerConfig.getHookSystem = vi.fn().mockReturnValue(sessionHookSystem);
+    innerConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+    innerConfig.hasHooksForEvent = vi
+      .fn()
+      .mockImplementation((event: string) => event === 'SessionEnd');
+    let releaseConfig!: (config: Config) => void;
+    vi.mocked(loadCliConfig).mockReturnValueOnce(
+      new Promise<Config>((resolve) => {
+        releaseConfig = resolve;
+      }),
+    );
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    const creating = agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await vi.waitFor(() => expect(loadCliConfig).toHaveBeenCalledOnce());
+
+    let teardownSettled = false;
+    mockConnectionState.resolve();
+    void agentPromise.finally(() => {
+      teardownSettled = true;
+    });
+    await Promise.resolve();
+    expect(teardownSettled).toBe(false);
+    expect(Session).not.toHaveBeenCalled();
+
+    releaseConfig(innerConfig as unknown as Config);
+    await creating;
+    const createdSession = lastSessionMock;
+    await agentPromise;
+
+    expect(createdSession?.dispose).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(sessionHookSystem.fireSessionEndEvent).toHaveBeenCalledWith(
+      SessionEndReason.PromptInputExit,
+    );
+  });
+
+  it('coalesces concurrent session disposal', async () => {
+    const innerConfig = await setupSessionMocks('session-concurrent-disposal');
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const liveSession = vi.mocked(Session).mock.results.at(-1)?.value as
+      | { dispose: ReturnType<typeof vi.fn> }
+      | undefined;
+    let releaseDisposal!: () => void;
+    liveSession?.dispose.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDisposal = resolve;
+        }),
+    );
+    const disposableAgent = agent as unknown as {
+      disposeSessions: () => Promise<void>;
+    };
+
+    const firstDisposal = disposableAgent.disposeSessions();
+    await vi.waitFor(() => expect(liveSession?.dispose).toHaveBeenCalledOnce());
+    const secondDisposal = disposableAgent.disposeSessions();
+    expect(liveSession?.dispose).toHaveBeenCalledOnce();
+
+    releaseDisposal();
+    await Promise.all([firstDisposal, secondDisposal]);
+    expect(liveSession?.dispose).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+    expect(liveSession?.dispose).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+  });
+
   it('rewindSession extension method rewinds the active session', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -10965,12 +11043,19 @@ describe('QwenAgent extMethod renameSession routing', () => {
       | { dispose: ReturnType<typeof vi.fn> }
       | undefined;
 
-    await expect(
-      agent.extMethod('qwen/control/session/close', {
+    const closeError = await agent
+      .extMethod('qwen/control/session/close', {
         sessionId: liveSessionId,
         requireFlush: true,
-      }),
-    ).rejects.toThrow('flush failed');
+      })
+      .catch((error: unknown) => error);
+    expect(closeError).toMatchObject({
+      message: 'flush failed',
+      data: {
+        errorKind: SESSION_CLOSE_QUARANTINED_ERROR_KIND,
+        sessionId: liveSessionId,
+      },
+    });
     expect(recording.flush).toHaveBeenCalledTimes(2);
     expect(recording.close).not.toHaveBeenCalled();
     expect(recording.hasWriteOwnership()).toBe(true);
