@@ -228,6 +228,19 @@ jobs:
             RAW_BASE="https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${ASSET_SHA}/imgs"
           fi
 
+          # --- Changed paths, for triaging an EMPTY preview ------------------
+          # "No view changed" means either "no visual effect" or "no scenario
+          # renders this UI"; the script tells those apart by looking at which
+          # files the PR touched (see selectRenderShapingFiles). Read here rather
+          # than in the render job because that one runs untrusted PR code.
+          # Best-effort: on API failure the list stays empty and the comment
+          # falls back to the plain "no screenshot changes" line.
+          CHANGED_PATHS_FILE="${RUNNER_TEMP}/visuals-changed-paths.txt"
+          : > "${CHANGED_PATHS_FILE}"
+          gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}/files" \
+            --paginate --jq '.[].filename' > "${CHANGED_PATHS_FILE}" 2>/dev/null \
+            || echo "::warning::Could not list changed files for PR #${PR}; the preview will not flag coverage gaps."
+
           # --- Build the comment body ---------------------------------------
           # Delegated to the same unit-tested script (light/dark pairing, flow
           # labels, and HTML escaping live in web-shell-visuals-publish.mjs).
@@ -235,7 +248,8 @@ jobs:
           node .github/scripts/web-shell-visuals-publish.mjs comment \
             "${STAGE}" \
             "${RAW_BASE}" \
-            "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}"
+            "${SHORT_SHA}" "${RUN_URL}" "${BODY_FILE}" \
+            "${CHANGED_PATHS_FILE}"
 
           # --- Post or update the PR comment --------------------------------
           # Dedup only against OUR OWN prior comment (bot author + marker), and

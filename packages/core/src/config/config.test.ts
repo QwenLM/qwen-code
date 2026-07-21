@@ -38,6 +38,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../core/contentGenerator.js';
+import { InputFormat } from '../output/types.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
 import {
   AuthType,
@@ -77,6 +78,10 @@ import { HookSystem } from '../hooks/index.js';
 import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLease,
+} from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
 function createToolMock(toolName: string) {
@@ -471,6 +476,7 @@ describe('Server Config (config.ts)', () => {
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
+    chatRecording: false,
     usageStatisticsEnabled: false,
     overrideExtensions: [],
   };
@@ -516,7 +522,14 @@ describe('Server Config (config.ts)', () => {
     it('drops its session entry on shutdown — no daemon leak', async () => {
       const sessionId = 'cfg-shutdown-test-session';
       const config = new Config({ ...baseParams, sessionId });
-      // Registered in the constructor, resolvable while alive.
+      expect(getSessionProjectDir(sessionId)).toBeUndefined();
+      await config.initialize({
+        skipGeminiInitialization: true,
+        skipHooks: true,
+        skipMcpDiscovery: true,
+        skipSkillManager: true,
+        skipFileCheckpointing: true,
+      });
       expect(getSessionProjectDir(sessionId)).toBeDefined();
       await config.shutdown();
       // In daemon mode this is what stops the map growing per session.
@@ -2119,6 +2132,34 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('startNewSession', () => {
+    it('rejects a session switch while the current recorder owns the writer lease', () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const originalSessionId = config.getSessionId();
+      const finalize = vi.fn();
+      const flush = vi.fn().mockResolvedValue(undefined);
+      const recorder = {
+        finalize,
+        flush,
+        hasWriteOwnership: () => true,
+      };
+      (
+        config as unknown as {
+          chatRecordingService: typeof recorder;
+        }
+      ).chatRecordingService = recorder;
+
+      expect(() => config.startNewSession('replacement-session')).toThrow(
+        expect.objectContaining({
+          name: 'SessionWriterUnavailableError',
+          errorKind: 'session_writer_unavailable',
+        }),
+      );
+      expect(config.getSessionId()).toBe(originalSessionId);
+      expect(config.getChatRecordingService()).toBe(recorder);
+      expect(finalize).not.toHaveBeenCalled();
+      expect(flush).not.toHaveBeenCalled();
+    });
+
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
       // file_unchanged placeholder, whose correctness depends on the
@@ -2165,9 +2206,14 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService?: {
             finalize: () => void;
             flush: () => Promise<void>;
+            hasWriteOwnership: () => boolean;
           };
         }
-      ).chatRecordingService = { finalize, flush };
+      ).chatRecordingService = {
+        finalize,
+        flush,
+        hasWriteOwnership: () => false,
+      };
 
       config.startNewSession();
 
@@ -2220,6 +2266,7 @@ describe('Server Config (config.ts)', () => {
         await expect(recorder.flush()).rejects.toBe(error);
 
         expect(listener).toHaveBeenCalledOnce();
+        await expect(config.assertCanStartTurn()).resolves.toBeUndefined();
         expect(listener).toHaveBeenCalledWith({ sessionId, error });
       } finally {
         writeLine.mockRestore();
@@ -2262,6 +2309,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            close: () => Promise<void>;
           };
         }
       ).initialized = true;
@@ -2270,6 +2318,7 @@ describe('Server Config (config.ts)', () => {
           chatRecordingService: {
             finalize: () => void;
             flush: () => Promise<void>;
+            close: () => Promise<void>;
           };
         }
       ).chatRecordingService = {
@@ -2277,6 +2326,7 @@ describe('Server Config (config.ts)', () => {
         flush: async () => {
           notify(config, event);
         },
+        close: async () => {},
       };
 
       await config.shutdown();
@@ -2546,6 +2596,75 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('initialize', () => {
+    it('preserves activation and lease release failures', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        experimentalZedIntegration: true,
+      });
+      const activationError = new SessionTranscriptChangedError();
+      const releaseError = new Error('lease release failed');
+      const release = vi.fn().mockRejectedValue(releaseError);
+      const acquire = vi
+        .spyOn(SessionWriterLease, 'acquire')
+        .mockResolvedValue({
+          transcriptExistedAtAcquire: false,
+          release,
+        } as unknown as SessionWriterLease);
+      vi.spyOn(
+        config.getSessionService(),
+        'getSessionLocation',
+      ).mockRejectedValue(activationError);
+
+      const result = await (
+        config as unknown as { activateChatRecording(): Promise<void> }
+      )
+        .activateChatRecording()
+        .catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        errorKind: 'session_writer_unavailable',
+        rpcCode: -32023,
+        httpStatus: 503,
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([activationError, releaseError]);
+      expect(release).toHaveBeenCalledOnce();
+      acquire.mockRestore();
+    });
+
+    it('preserves initialization and recording close failures', async () => {
+      const config = new Config(baseParams);
+      const initializationError = new Error('initialization failed');
+      const closeError = new Error('recording close failed');
+      vi.spyOn(
+        config as unknown as {
+          initializeInternal: () => Promise<void>;
+        },
+        'initializeInternal',
+      ).mockRejectedValue(initializationError);
+      (
+        config as unknown as {
+          chatRecordingService: { close: () => Promise<void> };
+        }
+      ).chatRecordingService = {
+        close: vi.fn().mockRejectedValue(closeError),
+      };
+
+      const result = await config.initialize().catch((error: unknown) => error);
+
+      expect(result).toMatchObject({
+        name: 'SessionWriterUnavailableError',
+        cause: expect.any(AggregateError),
+      });
+      expect(
+        (result as Error & { cause: AggregateError }).cause.errors,
+      ).toEqual([initializationError, closeError]);
+    });
+
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
         ...baseParams,
@@ -2654,6 +2773,85 @@ describe('Server Config (config.ts)', () => {
         ToolRegistry.prototype.registerFactory as Mock
       ).mock.calls.map((call) => call[0]);
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
+    });
+
+    it.each([
+      ['interactive', { interactive: true }],
+      ['ACP', { experimentalZedIntegration: true }],
+      ['stream-json', { inputFormat: InputFormat.STREAM_JSON }],
+    ] as const)(
+      'registers user-interaction tools in %s sessions',
+      async (_mode, params) => {
+        const config = new Config({ ...baseParams, ...params });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+        expect(registeredNames).toContain(ToolNames.ENTER_PLAN_MODE);
+        expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
+      },
+    );
+
+    it('registers ask_user_question but not plan tools in SDK mode with interaction support', async () => {
+      // ask_user_question is gated only by the resolved interaction mode, while
+      // enter_plan_mode/exit_plan_mode are additionally gated by !sdkMode. Guard
+      // this asymmetry so a future symmetric `!this.sdkMode` on the question gate
+      // cannot silently drop the tool from SDK-mode interactive sessions.
+      const config = new Config({
+        ...baseParams,
+        interactive: true,
+        sdkMode: true,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('does not register user-interaction tools in plain headless sessions', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.EXIT_PLAN_MODE);
+    });
+
+    it('keeps exit_plan_mode available for plan-required teammate filtering', async () => {
+      const config = new Config({
+        ...baseParams,
+        interactive: false,
+        experimentalZedIntegration: false,
+        inputFormat: InputFormat.TEXT,
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+
+      await config.createToolRegistry(undefined, {
+        skipDiscovery: true,
+        forSubAgent: true,
+      });
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
+      expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
+      expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
     });
 
     it('does not register artifact tools when artifacts are disabled', async () => {
@@ -4028,6 +4226,36 @@ describe('Server Config (config.ts)', () => {
     cwdSpy.mockRestore();
   });
 
+  it('relocateWorkingDirectory should preserve leased storage for an ACP cwd change', async () => {
+    const config = new Config(baseParams);
+    const originalStorage = config.storage;
+    const originalPersistenceRoot = originalStorage.getProjectRoot();
+    const newDir = path.resolve('/path/to/other');
+    (
+      config as unknown as {
+        chatRecordingService: { hasWriteOwnership: () => boolean };
+      }
+    ).chatRecordingService = { hasWriteOwnership: () => true };
+
+    await expect(
+      config.relocateWorkingDirectory(newDir, newDir, {
+        skipProcessChdir: true,
+        skipArtifactMigration: true,
+      }),
+    ).resolves.toEqual({});
+
+    expect(config.getTargetDir()).toBe(newDir);
+    expect(config.storage).toBe(originalStorage);
+    expect(config.getSessionService().getProjectRoot()).toBe(
+      originalPersistenceRoot,
+    );
+    await expect(config.relocateWorkingDirectory(newDir)).rejects.toMatchObject(
+      {
+        errorKind: 'session_writer_unavailable',
+      },
+    );
+  });
+
   it('relocateWorkingDirectory should recreate cwd-derived file service', async () => {
     const config = new Config(baseParams);
     const newDir = path.resolve('/path/to/other');
@@ -4057,9 +4285,15 @@ describe('Server Config (config.ts)', () => {
           finalize: () => void;
           flush: () => Promise<void>;
           resetStoragePaths: () => void;
+          hasWriteOwnership: () => boolean;
         };
       }
-    ).chatRecordingService = { finalize, flush, resetStoragePaths };
+    ).chatRecordingService = {
+      finalize,
+      flush,
+      resetStoragePaths,
+      hasWriteOwnership: () => false,
+    };
     const chdirSpy = vi.spyOn(process, 'chdir').mockImplementation(() => {
       // Keep the test process in its original directory.
     });
@@ -4077,7 +4311,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('relocateWorkingDirectory should move current session artifacts to the new workspace', async () => {
-    const config = new Config(baseParams);
+    const config = new Config({ ...baseParams, chatRecording: true });
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
     const oldStorage = new Storage(config.getTargetDir());
@@ -4178,7 +4412,7 @@ describe('Server Config (config.ts)', () => {
   });
 
   it('relocateWorkingDirectory should reject and roll back when session artifact migration fails', async () => {
-    const config = new Config(baseParams);
+    const config = new Config({ ...baseParams, chatRecording: true });
     const oldDir = config.getTargetDir();
     const sessionId = config.getSessionId();
     const newDir = path.resolve('/path/to/other');
@@ -5736,6 +5970,7 @@ describe('setApprovalMode with folder trust', () => {
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('should throw a TrustGateError when setting YOLO mode in an untrusted folder', () => {
@@ -6551,6 +6786,7 @@ describe('disabledTools runtime sync (#4282 fold-in 5 P2-2 / #4297 fold-in 5)', 
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('initializes from `disabledTools` ConfigParameters', () => {
@@ -6613,6 +6849,7 @@ describe('visibleTools', () => {
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('initializes from `visibleTools` ConfigParameters', () => {
@@ -6659,6 +6896,7 @@ describe('computer use settings', () => {
     debugMode: false,
     model: 'test-model',
     cwd: '.',
+    chatRecording: false,
   };
 
   it('exposes the configured idle timeout', () => {
@@ -6697,6 +6935,7 @@ describe('BaseLlmClient Lifecycle', () => {
     userMemory: USER_MEMORY,
     telemetry: TELEMETRY_SETTINGS,
     model: MODEL,
+    chatRecording: false,
     usageStatisticsEnabled: false,
   };
 
@@ -6727,6 +6966,20 @@ describe('BaseLlmClient Lifecycle', () => {
       config,
     );
   });
+
+  it('clears per-model generators when provider config is reloaded', async () => {
+    const config = new Config(baseParams);
+    vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+      config: { model: 'gemini-flash', apiKey: 'test-key' },
+      sources: {},
+    });
+    await config.refreshAuth(AuthType.USE_GEMINI);
+
+    const llmService = config.getBaseLlmClient();
+    config.reloadModelProvidersConfig({});
+
+    expect(llmService.clearPerModelGeneratorCache).toHaveBeenCalledOnce();
+  });
 });
 
 describe('Model Switching and Config Updates', () => {
@@ -6735,6 +6988,7 @@ describe('Model Switching and Config Updates', () => {
     targetDir: '/path/to/target',
     debugMode: false,
     model: 'qwen3-coder-plus',
+    chatRecording: false,
     usageStatisticsEnabled: false,
     telemetry: { enabled: false },
   };

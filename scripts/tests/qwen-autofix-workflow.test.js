@@ -221,7 +221,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("MAX_ROUNDS: '5'");
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
-    expect(reviewScanJob).toContain('not an open in-repo main-targeting PR');
+    expect(reviewScanJob).toContain('not an open main-targeting PR');
     // Candidates fail CLOSED on the fork field, matching the forced path
     // and the NOTE that documents the jq // false trap.
     expect(reviewScanJob).toContain('select(.isCrossRepository == false)');
@@ -231,7 +231,12 @@ describe('qwen-autofix workflow', () => {
     // older PRs for hours whenever cron ticks were sparse.
     expect(reviewScanJob).not.toContain('break # one PR per scheduled scan');
     expect(reviewScanJob).toContain('Fan out: emit EVERY eligible PR');
-    expect(workflow).toContain('max-parallel: 3');
+    // A simultaneity bound must exist — without one, a backlog opens an agent
+    // run per selected PR at once. The VALUE is a tuning knob; the invariant
+    // that it exists AND still binds below MAX_TARGETS_PER_SCAN is pinned by
+    // 'bounds fleet-wide simultaneity below the per-scan target budget'.
+    // Asserting the literal number here only detected edits, not breakage.
+    expect(workflow).toMatch(/max-parallel: \d+/);
     // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
     // bounds runtime and API usage, not just matrix size), the deferral is
     // LOGGED, and the next scan picks up the remainder.
@@ -308,6 +313,33 @@ describe('qwen-autofix workflow', () => {
     // A failed metadata fetch (empty branch) must skip the candidate, not fall
     // through to an address job that fails on `git checkout -B "" origin/`.
     expect(reviewScanJob).toContain('could not fetch PR metadata');
+  });
+
+  it('bounds fleet-wide simultaneity below the per-scan target budget', () => {
+    // max-parallel is the ONE place different PRs wait on each other: the scan
+    // emits every eligible PR (up to MAX_TARGETS_PER_SCAN) and the matrix
+    // decides how many run at once. Measured at 3 on a scan that selected 7,
+    // the 7th leg started 81 minutes late, each new leg beginning 3-4 seconds
+    // after a slot freed.
+    //
+    // The number is a tuning knob and deliberately NOT pinned here. What is
+    // pinned is that a bound exists and still binds: dropping the key, or
+    // raising it to the target budget, both let one backlog open every agent
+    // run at once — which is the thing the cap exists to prevent, and neither
+    // would fail any other test.
+    // review-address is the last job in the file, so there is no trailing
+    // `# ====` separator to anchor on — match to EOF.
+    const addressJob =
+      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
+    expect(addressJob).toContain('matrix:');
+    const parallel = Number(addressJob.match(/max-parallel: (\d+)/)?.[1]);
+    const targetBudget = Number(
+      workflow.match(/MAX_TARGETS_PER_SCAN: '(\d+)'/)?.[1],
+    );
+    expect(Number.isInteger(parallel)).toBe(true);
+    expect(parallel).toBeGreaterThan(0);
+    expect(Number.isInteger(targetBudget)).toBe(true);
+    expect(parallel).toBeLessThan(targetBudget);
   });
 
   it('behaviorally replays the stale-duplicate revalidation, including the conflict-only transition', () => {
@@ -731,20 +763,27 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('routes submitted review events only for trusted in-repo bot PRs', () => {
+  it('routes submitted review events only for trusted managed PRs', () => {
     expect(routeStep).toContain('PR_AUTHOR');
     expect(routeStep).toContain('PR_NUMBER_EVENT');
     expect(routeStep).toContain(
       'if [[ "${EVENT_NAME}" == \'pull_request_review\' ]]; then',
     );
-    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
-    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    // In-repo PRs are managed only when the bot authored them; forks only
+    // under the scan's takeover rules (allow-edits + bot fork or the label).
+    expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    expect(routeStep).toContain('.maintainerCanModify == true');
+    expect(routeStep).toContain('index($t) != null');
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")',
     );
     expect(routeStep).toContain(
       "review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}",
+    );
+    expect(routeStep).toContain(
+      'review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits',
     );
   });
 
@@ -935,12 +974,13 @@ describe('qwen-autofix workflow', () => {
     // one lost Chinese section against a duplicate elsewhere): engage,
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
-    // the cap pause, and the scan-side first-pickup engage ack (fork label
-    // events carry no secrets, so the scan anchors the window itself).
+    // the non-main base refusal, the cap pause, and the scan-side
+    // first-pickup engage ack (fork label events carry no secrets, so the
+    // scan anchors the window itself).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(11);
+    expect(ackBodies).toHaveLength(12);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -1588,7 +1628,10 @@ describe('qwen-autofix workflow', () => {
   it('behaviorally validates forced targets against author, takeover, and skip', () => {
     // Extract the forced-PR OK predicate VERBATIM and replay it: the bot's
     // own PRs pass; a human PR passes only with the takeover label; skip
-    // vetoes even a takeover-labeled PR; closed and fork PRs never pass.
+    // vetoes even a takeover-labeled PR; closed PRs never pass. A fork PR
+    // passes the structural predicate only with maintainer edits allowed — the
+    // live write+ author gate is a shell step below (asserted separately),
+    // mirroring the scheduled scan's per-candidate fork admission.
     const okProgram = reviewScanJob.match(
       /OK="\$\(jq -r --arg ab "\$\{AUTOFIX_BOT\}" --arg take "\$\{TAKEOVER_LABEL\}" --arg skip "\$\{SKIP_LABEL\}" \\\n\s+'([\s\S]*?)'/,
     )?.[1];
@@ -1629,6 +1672,26 @@ describe('qwen-autofix workflow', () => {
     expect(ok(meta('human', ['autofix/takeover'], { state: 'CLOSED' }))).toBe(
       'false',
     );
+    // Fork PRs: admitted structurally only when maintainer edits are allowed
+    // (the bot's own fork or a takeover-labelled fork). The live write+ author
+    // check is the shell gate asserted below; without allow-edits a fork still
+    // fails closed here.
+    expect(
+      ok(
+        meta('human', ['autofix/takeover'], {
+          isCrossRepository: true,
+          maintainerCanModify: true,
+        }),
+      ),
+    ).toBe('true');
+    expect(
+      ok(
+        meta('qwen-code-dev-bot', [], {
+          isCrossRepository: true,
+          maintainerCanModify: true,
+        }),
+      ),
+    ).toBe('true');
     expect(
       ok(meta('human', ['autofix/takeover'], { isCrossRepository: true })),
     ).toBe('false');
@@ -1641,6 +1704,16 @@ describe('qwen-autofix workflow', () => {
     expect(ok(missing)).toBe('false');
     expect(reviewScanJob).toContain('.isCrossRepository == false');
     expect(reviewScanJob).not.toContain('(.isCrossRepository // true) | not');
+    // The forced path queries maintainerCanModify and re-checks a fork author's
+    // live permission exactly like the scheduled scan's per-candidate gate, so
+    // a fork the route admitted in real time is not silently discarded here.
+    expect(reviewScanJob).toContain(
+      '--json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify',
+    );
+    expect(reviewScanJob).toContain('forced fork PR #${FORCED_PR} admitted');
+    expect(reviewScanJob).toContain(
+      'gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission"',
+    );
   });
 
   it('exposes exactly one comment command: label-toggle takeover sugar', () => {
@@ -1829,16 +1902,19 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('gates real-time review triggers on bot author, trusted sender, and in-repo PR', () => {
-    // Route step must check PR author against AUTOFIX_BOT for review events.
-    expect(routeStep).toContain('"${PR_AUTHOR}" != "${AUTOFIX_BOT}"');
+    // Route step must check PR author against AUTOFIX_BOT for review events
+    // (an in-repo PR is managed only when the bot authored it).
+    expect(routeStep).toContain('"${PR_AUTHOR}" == "${AUTOFIX_BOT}"');
     // Must verify sender is trusted (collaborator or review bot).
     expect(routeStep).toContain('"${SENDER_LOGIN}" == "${REVIEW_BOT}"');
     expect(routeStep).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
     );
-    // Must reject fork PRs and non-main targets.
-    expect(routeStep).toContain('"${PR_HEAD_REPO}" != "${REPO}"');
+    // Non-main targets are rejected; forks are admitted only under the scan's
+    // own takeover rules (allow-edits + bot fork or takeover label).
     expect(routeStep).toContain('"${PR_BASE_REF}" != "main"');
+    expect(routeStep).toContain('"${PR_HEAD_REPO}" == "${REPO}"');
+    expect(routeStep).toContain('--json labels,maintainerCanModify');
     // Must set ROUTE_PR from the event payload.
     expect(routeStep).toContain(
       'ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"',
@@ -1856,6 +1932,290 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "ref: '${{ github.event.repository.default_branch }}'",
     );
+  });
+
+  it('admits managed fork PRs to the real-time review trigger, not just in-repo bot PRs', () => {
+    // The */10 schedule is throttled to 40-70min on this repo, so a takeover PR
+    // that only the scan could pick up waited up to an hour for feedback the
+    // event already carried. Real-time pickup now applies the scan's OWN fork
+    // admission (allow-edits + the bot's own fork or an explicit takeover
+    // label); review-address still re-verifies allow-edits, a live write+
+    // author and a matching head repo before touching the branch.
+    const block = routeStep.match(
+      /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request_review' \]\]; then[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(block).toBeTruthy();
+
+    const run = ({
+      headRepo,
+      author,
+      base = 'main',
+      sender = 'alice',
+      allowEdits = true,
+      labels = [],
+      perm = 'write',
+      metaOk = true,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'route-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const meta = JSON.stringify({
+        maintainerCanModify: allowEdits,
+        labels: labels.map((name) => ({ name })),
+      });
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `if [[ "$*" == *"--json labels,maintainerCanModify"* ]]; then ${
+            metaOk ? `printf '%s' ${JSON.stringify(meta)}; exit 0` : 'exit 1'
+          }; fi`,
+          `if [[ "$*" == *permission* ]]; then printf '%s' ${JSON.stringify(perm)}; exit 0; fi`,
+          'exit 1',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            'sanitize_number() { printf "%s" "${1//[^0-9]/}"; }',
+            'DO_ISSUE=true; DO_REVIEW=false; ROUTE_PR=""',
+            block,
+            'printf "DO_REVIEW=%s ROUTE_PR=%s" "${DO_REVIEW}" "${ROUTE_PR}"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            EVENT_NAME: 'pull_request_review',
+            REPO: 'QwenLM/qwen-code',
+            AUTOFIX_BOT: 'qwen-code-dev-bot',
+            REVIEW_BOT: 'qwen-code-ci-bot',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            PR_NUMBER_EVENT: '7259',
+            PR_HEAD_REPO: headRepo,
+            PR_AUTHOR: author,
+            PR_BASE_REF: base,
+            SENDER_LOGIN: sender,
+          },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out;
+    };
+
+    const IN_REPO = 'QwenLM/qwen-code';
+    const FORK = 'wenshao/qwen-code';
+    // Unchanged: an in-repo bot PR is admitted, a human in-repo PR is not.
+    expect(run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot' })).toContain(
+      'DO_REVIEW=true',
+    );
+    expect(run({ headRepo: IN_REPO, author: 'someone' })).toContain(
+      'DO_REVIEW=false',
+    );
+    // NEW: the bot's own fork, and a takeover-labelled human fork, are admitted
+    // in real time and route to that exact PR.
+    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
+      'DO_REVIEW=true',
+    );
+    expect(
+      run({ headRepo: FORK, author: 'wenshao', labels: ['autofix/takeover'] }),
+    ).toContain('DO_REVIEW=true');
+    expect(run({ headRepo: FORK, author: 'qwen-code-dev-bot' })).toContain(
+      'ROUTE_PR=7259',
+    );
+    // Still rejected: no allow-edits, an unlabelled human fork, a non-main
+    // base, and an untrusted sender.
+    expect(
+      run({ headRepo: FORK, author: 'qwen-code-dev-bot', allowEdits: false }),
+    ).toContain('DO_REVIEW=false');
+    expect(run({ headRepo: FORK, author: 'wenshao' })).toContain(
+      'DO_REVIEW=false',
+    );
+    expect(
+      run({ headRepo: IN_REPO, author: 'qwen-code-dev-bot', base: 'release' }),
+    ).toContain('DO_REVIEW=false');
+    expect(
+      run({
+        headRepo: FORK,
+        author: 'wenshao',
+        labels: ['autofix/takeover'],
+        perm: 'read',
+      }),
+    ).toContain('DO_REVIEW=false');
+    // A metadata read failure fails CLOSED: the event is ignored rather than
+    // admitting a fork whose allow-edits/labels could not be verified.
+    expect(
+      run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
+    ).toContain('DO_REVIEW=false');
+  });
+
+  it('refuses a takeover on a non-main base out loud instead of only in the job log', () => {
+    // Observed: #7368 was labelled autofix/takeover, the pull_request:labeled
+    // route ran GREEN, and the loop never engaged it — because the PR targeted
+    // another PR's branch. The only trace was one line in a job log, so the PR
+    // sat unmanaged for hours looking exactly like a managed one.
+    const block = routeStep.match(
+      /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request' \]\]; then[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(block).toBeTruthy();
+
+    const run = ({
+      base = 'main',
+      state = 'open',
+      action = 'labeled',
+      headRepo = 'QwenLM/qwen-code',
+      label = 'autofix/takeover',
+    }) =>
+      // The block also logs its reasoning; only the trailing summary is asserted.
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            'sanitize_number() { printf "%s" "${1//[^0-9]/}"; }',
+            'DO_ISSUE=true; DO_REVIEW=false; ROUTE_PR=""',
+            "TAKEOVER_ACK=''; ACK_BASE=''",
+            block,
+            'printf "ack=%s base=%s review=%s" "${TAKEOVER_ACK}" "${ACK_BASE}" "${DO_REVIEW}"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            EVENT_NAME: 'pull_request',
+            EVENT_ACTION: action,
+            REPO: 'QwenLM/qwen-code',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            ISSUE_LABEL: label,
+            PR_HEAD_REPO: headRepo,
+            PR_STATE: state,
+            PR_BASE_REF: base,
+            PR_NUMBER_EVENT: '7368',
+            SENDER_LOGIN: 'wenshao',
+          },
+          encoding: 'utf8',
+        },
+      )
+        .trim()
+        .split('\n')
+        .pop();
+
+    // The regression: a stacked PR now REFUSES audibly and carries the base
+    // it was refused against, rather than falling through silently.
+    expect(run({ base: 'ci/autofix-gate-crash-retry' })).toBe(
+      'ack=base-refused base=ci/autofix-gate-crash-retry review=false',
+    );
+    // Unchanged: a main-targeting in-repo PR still engages, and engagement
+    // carries no base (the field exists only to name a refusal).
+    expect(run({})).toBe('ack=engaged base= review=true');
+    // Still deliberately silent — these were never engaged and a comment on
+    // them would be noise, not information: a closed PR, a fork (whose label
+    // event carries no secrets to comment with), a non-takeover label, and
+    // releasing a PR that never engaged.
+    expect(run({ state: 'closed' })).toBe('ack= base= review=false');
+    expect(run({ headRepo: 'wenshao/qwen-code' })).toBe(
+      'ack= base= review=false',
+    );
+    expect(run({ label: 'kind/bug' })).toBe('ack= base= review=false');
+    expect(
+      run({ action: 'unlabeled', base: 'ci/autofix-gate-crash-retry' }),
+    ).toBe('ack= base= review=false');
+  });
+
+  it('posts the non-main base refusal without depending on any other API call', () => {
+    const ackBlock = workflow
+      .match(
+        /- name: 'Acknowledge takeover state change'\n {8}run: \|-\n([\s\S]*?)(?=\n {2}# ={10})/,
+      )?.[1]
+      ?.split('\n')
+      .map((line) => line.slice(10))
+      .join('\n');
+    expect(ackBlock).toBeTruthy();
+
+    const runAck = ({ ack, base = '', prViewOk = true }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ack-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `if [[ "$1" == 'api' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
+          `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then : > ${JSON.stringify(join(dir, 'pr-view-called'))}; ${
+            prViewOk
+              ? `printf '%s' '{"labels":[],"author":{"login":"wenshao"}}'; exit 0`
+              : 'exit 1'
+          }; fi`,
+          `if [[ "$1" == 'pr' && "$2" == 'comment' ]]; then printf '%s' "$7" > ${JSON.stringify(join(dir, 'comment.md'))}; exit 0; fi`,
+          'exit 1',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const proc = spawnSync('bash', ['-e', '-c', ackBlock], {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          GITHUB_TOKEN: 'pat',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          REPO: 'QwenLM/qwen-code',
+          SKIP_LABEL: 'autofix/skip',
+          TAKEOVER_LABEL: 'autofix/takeover',
+          TAKEOVER_COMMAND: '@qwen-code /takeover',
+          ACK: ack,
+          PR: '7368',
+          ACK_BASE: base,
+        },
+        encoding: 'utf8',
+      });
+      const commentPath = join(dir, 'comment.md');
+      const result = {
+        status: proc.status,
+        body: existsSync(commentPath) ? readFileSync(commentPath, 'utf8') : '',
+        readPr: existsSync(join(dir, 'pr-view-called')),
+      };
+      rmSync(dir, { recursive: true, force: true });
+      return result;
+    };
+
+    const refused = runAck({
+      ack: 'base-refused',
+      base: 'ci/autofix-gate-crash-retry',
+    });
+    expect(refused.status).toBe(0);
+    expect(refused.body).toContain('<!-- takeover-ack base-refused -->');
+    // Names the actual base and stays actionable + bilingual.
+    expect(refused.body).toContain('`ci/autofix-gate-crash-retry`');
+    expect(refused.body).toContain('<summary>中文说明</summary>');
+    // The advice it gives ("retarget, no re-labelling needed") is only true
+    // while the scan enumerates takeover PRs BY LABEL — retargeting emits no
+    // `labeled` event, so a scan that instead required a fresh engage marker
+    // would silently make this message wrong. Pin the fact it depends on.
+    expect(refused.body).toContain('no re-labelling');
+    expect(reviewScanJob).toContain('--label "${TAKEOVER_LABEL}"');
+    expect(reviewScanJob).toContain('--base main');
+    // The one ack whose entire job is to explain silence must not itself be
+    // silenced by an unrelated API call — it reads no live PR state at all,
+    // so it still posts when that read would have failed.
+    expect(refused.readPr).toBe(false);
+    expect(
+      runAck({ ack: 'base-refused', base: 'release', prViewOk: false }).body,
+    ).toContain('<!-- takeover-ack base-refused -->');
+
+    // Unchanged for every other ack: the live read happens and still fails
+    // CLOSED, so a transient API error cannot turn into a wrong ack.
+    const engaged = runAck({ ack: 'engaged' });
+    expect(engaged.readPr).toBe(true);
+    expect(engaged.body).toContain('<!-- takeover-ack engaged -->');
+    const broken = runAck({ ack: 'engaged', prViewOk: false });
+    expect(broken.status).not.toBe(0);
+    expect(broken.body).toBe('');
   });
 
   it('treats Suggestion-level review findings as actionable feedback', () => {
@@ -3085,11 +3445,13 @@ describe('qwen-autofix workflow', () => {
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL THREE model-output publish
-    // sites, and it must be LINE-INDEPENDENT: a whole-comment strip misses
-    // a marker whose --> sits on another line, while jq scan() matches
-    // across newlines. Proven end-to-end on a split forged marker.
-    expect(workflow.split("sed 's/<!--/<!\\\\-\\\\-/g'").length - 1).toBe(3);
+    // Token-breaking neutralization at ALL FOUR agent-derived publish sites
+    // (the three model-output bodies + the API_ERROR_DETAIL headline, whose
+    // content is agent stdout that can echo external comment text), and it
+    // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
+    // --> sits on another line, while jq scan() matches across newlines.
+    // Proven end-to-end on a split forged marker.
+    expect(workflow.split("sed 's/<!--/<!\\\\-\\\\-/g'").length - 1).toBe(4);
     const forged =
       '<!-- autofix-eval ts=2099-01-01T00:00:00Z\nx acted=true round=99 -->';
     const sedCmd = workflow.match(/sed 's\/<!--\/[^']*\/g'/)?.[0];
@@ -3112,6 +3474,270 @@ describe('qwen-autofix workflow', () => {
         ),
       ),
     ).toBe(0);
+  });
+
+  it('renders the whole managed fleet into the run summary', () => {
+    // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
+    // markers, and cross-checking checks and fork state by hand - so stalls
+    // stayed invisible until someone went looking. The scan already computes
+    // all of it; this surfaces it as one table per run.
+    const scan =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    // Every per-PR terminal decision records a row, so a PR cannot fall out of
+    // the table just because its branch of the loop returned early. The
+    // target-budget break emits a single summary row (PR '-') standing in for
+    // the un-inspected tail; those candidates are not enumerated individually.
+    for (const state of [
+      'busy',
+      'unknown',
+      'waiting',
+      'round-capped',
+      'idle',
+      'SELECTED',
+    ]) {
+      expect(scan).toContain(`fleet_row "\${PR}" '${state}'`);
+    }
+    // 'skipped' has two distinct call sites; assert each by its unique detail
+    // so removing one is caught even though the other survives.
+    expect(scan).toContain(
+      `fleet_row "\${PR}" 'skipped' "fork head unresolved`,
+    );
+    expect(scan).toContain(
+      `fleet_row "\${PR}" 'skipped' "\${SKIP_LABEL} label present"`,
+    );
+    // 'deferred' has two distinct call sites, both summary rows with '-':
+    // the candidate-inspection budget and the target budget.
+    expect(scan).toContain(
+      `fleet_row '-' 'deferred' "candidate-inspection budget`,
+    );
+    expect(scan).toContain(`fleet_row '-' 'deferred' "target budget`);
+    // The table is written to the run summary, not just the job log.
+    expect(scan).toContain('AutoFix fleet (${COUNT} selected this scan)');
+    expect(scan).toContain('} >> "${GITHUB_STEP_SUMMARY}"');
+
+    // Replay the real helper + render block over fixtures.
+    const lines = scan.split('\n');
+    const hi = lines.findIndex((l) => l.trim() === 'FLEET_FILE="$(mktemp)"');
+    const hj = lines.findIndex((l, i) => i > hi && l.trim() === '}');
+    const helper = lines.slice(hi, hj + 1).join('\n');
+    expect(helper).toContain('fleet_row()');
+    const fi = lines.findIndex((l) => l.includes('AutoFix fleet ('));
+    let start = fi;
+    while (lines[start].trim() !== '{') start -= 1;
+    const end = lines.findIndex(
+      (l, i) => i > fi && l.trim().startsWith('} >> "${GITHUB_STEP_SUMMARY}"'),
+    );
+    const render = lines
+      .slice(start, end + 1)
+      .join('\n')
+      .replace('${GITHUB_STEP_SUMMARY}', '${SUMMARY_FILE}');
+
+    const out = execFileSync(
+      'bash',
+      [
+        '-c',
+        [
+          'set -uo pipefail',
+          'SUMMARY_FILE="$(mktemp)"',
+          helper,
+          'COUNT=1',
+          "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
+          "fleet_row 7333 'idle' 'nothing new since 2026-07-20T13:54:18Z'",
+          "fleet_row 7208 'round-capped' 'round 100/100 - needs a human'",
+          "fleet_row - 'deferred' 'target budget (3) reached'",
+          "fleet_row 7340 'skipped' 'fork head | pipe in detail'",
+          render,
+          'cat "${SUMMARY_FILE}"',
+          'rm -f "${SUMMARY_FILE}"',
+        ].join('\n'),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(out).toContain('AutoFix fleet (1 selected this scan)');
+    expect(out).toContain('| PR | State | Detail |');
+    expect(out).toContain(
+      '| #7329 | SELECTED | 1 review + 5 inline new (round 0/5) |',
+    );
+    expect(out).toContain('| #7333 | idle |');
+    expect(out).toContain('| #7208 | round-capped |');
+    // The budget summary row (PR '-') renders an em dash, not '#-'.
+    expect(out).toContain('| — | deferred | target budget (3) reached |');
+    expect(out).not.toContain('| #- |');
+    // A literal '|' in a detail value is escaped so it cannot break columns.
+    expect(out).toContain('fork head \\| pipe in detail');
+
+    // An empty fleet still renders a table rather than a bare heading.
+    const empty = execFileSync(
+      'bash',
+      [
+        '-c',
+        [
+          'set -uo pipefail',
+          'SUMMARY_FILE="$(mktemp)"',
+          helper,
+          'COUNT=0',
+          render,
+          'cat "${SUMMARY_FILE}"',
+          'rm -f "${SUMMARY_FILE}"',
+        ].join('\n'),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(empty).toContain('no managed PRs inspected');
+  });
+
+  it('retries a verification-gate crash instead of burying the fix', () => {
+    // A gate that DECLARES a verdict (outcome=failed) evaluated the agent's
+    // attempt and rejected it - the watermark advances, bounded by MAX_ROUNDS.
+    // A gate that dies WITHOUT a verdict (empty outcome on a failed job) never
+    // judged the work at all; advancing there strands a fix the agent had
+    // already written, which is exactly how the nested-package ENOENT stranded
+    // #7329/#7336 until a human deleted the marker.
+    const decision = reviewAddressReportStep.match(
+      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n {12}\{/,
+    )?.[1];
+    expect(decision).toBeTruthy();
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    const NEWEST = '2026-07-20T10:00:00Z';
+    const run = (env) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${decision}\nprintf '%s|%s|%s' "$MARK_TS" "$MARK_ROUND" "$HEADLINE"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            NEWEST,
+            WATERMARK: '2026-07-20T09:00:00Z',
+            ROUND: '1',
+            MAX_ROUNDS: '5',
+            DETAIL_FILE: '/w/address-summary.md',
+            OUTCOME: '',
+            JOB_STATUS: 'failure',
+            API_AUTH_MAX_ROUNDS: '3',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+
+    // Declared rejection: the agent was judged -> advance the watermark.
+    const rejected = run({ OUTCOME: 'failed' });
+    expect(rejected.split('|')[0]).toBe(NEWEST);
+    expect(rejected).toContain('Could not address the latest feedback');
+
+    // Gate crash (no verdict): keep the feedback live and retry.
+    const crashed = run({ OUTCOME: '' });
+    expect(crashed.split('|')[0]).toBe(SENTINEL);
+    expect(crashed).toContain(
+      'verification-gate error before reaching a verdict',
+    );
+    expect(crashed).toContain('it will retry on the next scan');
+    expect(crashed.split('|')[1]).toBe('2');
+
+    // A no-output crash keeps its own (pre-existing) wording, still a retry.
+    const noOutput = run({ OUTCOME: '', DETAIL_FILE: '' });
+    expect(noOutput.split('|')[0]).toBe(SENTINEL);
+    expect(noOutput).toContain('crashed before it could evaluate the feedback');
+
+    // At the cap the gate crash names the operator fix rather than promising a
+    // retry the scan's round gate would refuse.
+    const capped = run({ OUTCOME: '', ROUND: '4' });
+    expect(capped).toContain('this was the last automatic attempt');
+    expect(capped).toContain('check the gate logs, then re-arm');
+
+    // A successful job never counts as a crash (dry-run reporting path).
+    expect(run({ OUTCOME: '', JOB_STATUS: 'success' }).split('|')[0]).toBe(
+      NEWEST,
+    );
+
+    // MERGE SEAM: this branch's model-error route and the gate-crash route
+    // land in the SAME if-chain. The model cause is tested first as
+    // defense-in-depth: today the gate converts a model death to an explicit
+    // outcome=failed (GATE_CRASHED is false), but if that ever changes, a
+    // provider blip must not be reported as a gate problem.
+    const modelDown = run({
+      OUTCOME: '',
+      API_ERROR_DETAIL: 'terminated (cause: read ECONNRESET)',
+      API_ERROR_KIND: 'transient',
+    });
+    expect(modelDown.split('|')[0]).toBe(SENTINEL);
+    expect(modelDown).toContain(
+      'could not reach the model — terminated (cause: read ECONNRESET)',
+    );
+    expect(modelDown).not.toContain('verification-gate error');
+    // ...and the cause-split retry budget still applies through the merged
+    // chain: an auth error caps at API_AUTH_MAX_ROUNDS, well before MAX_ROUNDS.
+    const authDown = run({
+      OUTCOME: '',
+      API_ERROR_DETAIL: 'do not have access to model',
+      API_ERROR_KIND: 'auth',
+      ROUND: '2',
+    });
+    expect(authDown).toContain('attempt 3/3');
+    expect(authDown).toContain('this was the last automatic attempt');
+    expect(authDown).toContain('check the autofix model key/access');
+    // The model-error clause is deliberately independent of the crash signal:
+    // today run-agent writes failure.md on the API-death path and the gate
+    // converts that to an explicit outcome=failed (GATE_CRASHED is false), so
+    // this clause is the ONLY thing routing a model death to a retry. If the
+    // gate ever changes (continue-on-error, a verdict after a recorded model
+    // error), the if-chain ordering keeps the model cause from being reported
+    // as a gate problem.
+    expect(
+      run({
+        OUTCOME: '',
+        JOB_STATUS: 'success',
+        API_ERROR_DETAIL: 'terminated',
+        API_ERROR_KIND: 'transient',
+      }).split('|')[0],
+    ).toBe(SENTINEL);
+    // A transient error at the same round is NOT capped — it self-heals.
+    expect(
+      run({
+        OUTCOME: '',
+        API_ERROR_DETAIL: 'terminated',
+        API_ERROR_KIND: 'transient',
+        ROUND: '2',
+      }),
+    ).toContain('attempt 3/5');
+  });
+
+  it('makes every known gate rejection declare its verdict', () => {
+    // The retry/advance split above is only sound while each real rejection
+    // writes outcome=failed; an unwired check would read as a gate crash and be
+    // retried instead of reported. Drive the extracted helper for real.
+    const gate = verificationGateSteps[1];
+    for (const check of [
+      "npm run build || reject_fix 'build failed on the agent-committed fix'",
+      "npm run typecheck || reject_fix 'typecheck failed on the agent-committed fix'",
+      "npm run lint || reject_fix 'lint failed on the agent-committed fix'",
+      'reject_fix "tests failed in ${p}"',
+    ]) {
+      expect(gate).toContain(check);
+    }
+    const helper = gate.match(/reject_fix\(\) \{\n[\s\S]*?\n {10}\}/)?.[0];
+    expect(helper).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'reject-'));
+    const out = join(dir, 'gh_output');
+    writeFileSync(out, '');
+    let status = 0;
+    try {
+      execFileSync(
+        'bash',
+        ['-c', `set -eo pipefail\n${helper}\nfalse || reject_fix 'boom'`],
+        { env: { ...process.env, GITHUB_OUTPUT: out }, encoding: 'utf8' },
+      );
+    } catch (e) {
+      status = e.status;
+    }
+    expect(status).not.toBe(0);
+    expect(readFileSync(out, 'utf8')).toContain('outcome=failed');
+    rmSync(dir, { recursive: true, force: true });
   });
 
   it('re-arms a stranded PR from a marker instead of a deleted comment', () => {
@@ -3406,6 +4032,89 @@ describe('qwen-autofix workflow', () => {
     expect(failed.stdout).toContain('Bad credentials');
   });
 
+  it('resolves only the review threads whose findings it implemented', () => {
+    // A human re-reviewing should see what is still OPEN, not re-read every
+    // thread to work out what the bot handled. The agent cannot resolve threads
+    // itself (its sandbox carries no token), so it records the inline-comment
+    // ids it implemented and the push step maps each to its thread.
+    const lines = workflow.split('\n');
+    const i = lines.findIndex((l) =>
+      l.includes('resolved-comments.txt" ]]; then'),
+    );
+    const j = lines.findIndex(
+      (l, k) => k > i && l.trim().startsWith('echo "🧵 resolved'),
+    );
+    expect(i).toBeGreaterThan(-1);
+    const block = lines.slice(i, j + 2).join('\n');
+    // feedback.md must carry the handle the agent echoes back.
+    expect(workflow).toContain('- [rc:\\(.id)]');
+
+    const dir = mkdtempSync(join(tmpdir(), 'resolve-'));
+    const bin = join(dir, 'bin');
+    mkdirSync(bin);
+    const resolvedLog = join(dir, 'resolved.log');
+    writeFileSync(resolvedLog, '');
+    writeFileSync(
+      join(dir, 'threads.json'),
+      JSON.stringify({
+        nodes: [
+          {
+            id: 'T_open_1',
+            isResolved: false,
+            comments: { nodes: [{ databaseId: 111 }] },
+          },
+          {
+            id: 'T_open_2',
+            isResolved: false,
+            comments: { nodes: [{ databaseId: 222 }] },
+          },
+          {
+            id: 'T_done',
+            isResolved: true,
+            comments: { nodes: [{ databaseId: 333 }] },
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      }),
+    );
+    writeFileSync(
+      join(bin, 'gh'),
+      [
+        '#!/usr/bin/env bash',
+        'if [[ "$*" == *mutation* ]]; then',
+        '  for a in "$@"; do [[ "$a" == threadId=* ]] && printf "%s\\n" "${a#threadId=}" >> "$RESOLVED_LOG"; done',
+        '  exit 0',
+        'fi',
+        'cat "$THREADS_FIXTURE"',
+      ].join('\n'),
+    );
+    chmodSync(join(bin, 'gh'), 0o755);
+    // 111 was implemented; 333's thread is already resolved; 999 matches
+    // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    const out = execFileSync('bash', ['-c', `set -euo pipefail\n${block}`], {
+      env: {
+        ...process.env,
+        PATH: `${bin}:${process.env.PATH}`,
+        WORKDIR: dir,
+        REPO: 'QwenLM/qwen-code',
+        PR: '7308',
+        RESOLVED_LOG: resolvedLog,
+        THREADS_FIXTURE: join(dir, 'threads.json'),
+      },
+      encoding: 'utf8',
+    });
+    const resolved = readFileSync(resolvedLog, 'utf8')
+      .trim()
+      .split('\n')
+      .filter(Boolean);
+    expect(resolved).toEqual(['T_open_1']);
+    expect(resolved).not.toContain('T_open_2'); // declined stays open
+    expect(resolved).not.toContain('T_done'); // already resolved
+    expect(out).toContain('resolved 1 review thread');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('replays the handoff decision and terminal-round transitions under bash', () => {
     // The agent step is bounded below the 120-minute job timeout so a runaway
     // agent fails the STEP, not the job, leaving the always() report step time to
@@ -3502,6 +4211,9 @@ describe('qwen-autofix workflow', () => {
             WATERMARK: '',
             DETAIL_FILE: '',
             NEWEST: '',
+            API_ERROR_DETAIL: '',
+            API_ERROR_KIND: '',
+            API_AUTH_MAX_ROUNDS: '3',
             ...env,
           },
           encoding: 'utf8',
@@ -3516,6 +4228,17 @@ describe('qwen-autofix workflow', () => {
         DETAIL_FILE: '/tmp/failure.md',
       }),
     ).toBe('2026-07-16T00:00:00Z|3');
+    // 1b. Agent DIED on a model [API Error] (access/quota/5xx) — it produced a
+    //     failure.md but evaluated NOTHING. Must be treated like a no-output
+    //     crash (sentinel ts, RETRY), not an evaluated handoff, so a model
+    //     access/quota blip does not strand the PR. This is the #7220-class fix.
+    expect(
+      runMark({
+        NEWEST: '2026-07-16T00:00:00Z',
+        DETAIL_FILE: '/tmp/failure.md',
+        API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+      }),
+    ).toBe(`${SENTINEL}|3`);
     // 2. Crash BEFORE any verdict (no output) though prepare ran: the watermark
     //    must NOT advance (sentinel ts, excluded from EVAL_WM) so the next scan
     //    RETRIES the same feedback; round still increments to bound the retries.
@@ -3543,6 +4266,9 @@ describe('qwen-autofix workflow', () => {
           WATERMARK: '',
           DETAIL_FILE: '',
           NEWEST: '2026-07-16T00:00:00Z',
+          API_ERROR_DETAIL: '',
+          API_ERROR_KIND: '',
+          API_AUTH_MAX_ROUNDS: '3',
           ...env,
         },
         encoding: 'utf8',
@@ -3554,6 +4280,62 @@ describe('qwen-autofix workflow', () => {
     expect(finalCrash).toContain('last automatic attempt');
     expect(finalCrash).not.toContain('it will retry');
     expect(finalCrash).not.toContain('Run log:');
+    // A model-API failure names the model issue and the operator fix, not a
+    // generic crash/human-takeover — so the maintainer knows to check access.
+    const midApi = runHeadline({
+      ROUND: '2',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+    });
+    expect(midApi).toContain('could not reach the model');
+    expect(midApi).toContain('403 Model access denied');
+    expect(midApi).toContain('it will retry on the next scan');
+    const finalApi = runHeadline({
+      ROUND: '4',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+    });
+    expect(finalApi).toContain('could not reach the model');
+    expect(finalApi).toContain('check the autofix model key/access');
+    expect(finalApi).not.toContain('it will retry');
+    // Auth-capped budget: an auth/access error (401/402/403) never self-heals,
+    // so the workflow caps retries at API_AUTH_MAX_ROUNDS (3) instead of
+    // MAX_ROUNDS (5). At the cap the MARK_ROUND override stamps the terminal
+    // round so the scan's max-round gate skips the PR.
+    expect(
+      runMark({
+        ROUND: '1',
+        NEWEST: '2026-07-16T00:00:00Z',
+        API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+        API_ERROR_KIND: 'auth',
+      }),
+    ).toBe(`${SENTINEL}|2`); // MARK_ROUND=2 < CAUSE_MAX=3: mid-budget
+    expect(
+      runMark({
+        ROUND: '2',
+        NEWEST: '2026-07-16T00:00:00Z',
+        API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+        API_ERROR_KIND: 'auth',
+      }),
+    ).toBe(`${SENTINEL}|5`); // MARK_ROUND=3 == CAUSE_MAX: terminal, override to MAX_ROUNDS
+    const authCapped = runHeadline({
+      ROUND: '2',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+      API_ERROR_KIND: 'auth',
+    });
+    expect(authCapped).toContain('attempt 3/3');
+    expect(authCapped).toContain('check the autofix model key/access');
+    expect(authCapped).not.toContain('it will retry');
+    // MARK_ROUND counts ALL rounds in the window: if earlier rounds were
+    // consumed by real attempts, the first auth error can land past
+    // CAUSE_MAX. The displayed numerator must be clamped to CAUSE_MAX so
+    // the headline never reads "attempt 5/3".
+    const authOverflow = runHeadline({
+      ROUND: '4',
+      API_ERROR_DETAIL: '[API Error: 403 Model access denied.]',
+      API_ERROR_KIND: 'auth',
+    });
+    expect(authOverflow).toContain('attempt 3/3');
+    expect(authOverflow).not.toContain('attempt 5/3');
+    expect(authOverflow).toContain('this was the last automatic attempt');
 
     // Behaviorally replay the pending-staleness jq filter against sample checks so
     // a flipped comparison (which would age out live checks → double-processing)
@@ -3685,6 +4467,341 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'handoff.md'), 'utf8')).toContain(
         'human should take over',
       );
+    });
+  });
+
+  it('flags a model [API Error] so the workflow retries instead of stranding the PR', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      // qwen renders a model access/quota/5xx error inline on stdout, then
+      // exits non-zero — it never evaluated the feedback.
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 403 Model access denied.]\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      // The dedicated marker the handoff step reads to route this to a retry
+      // (sentinel ts, no watermark advance) rather than an evaluated handoff.
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '403 Model access denied',
+      );
+      // The human-visible failure names the model error, not a bare status.
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        '[API Error: 403 Model access denied.]',
+      );
+    });
+  });
+
+  it('does not flag a non-API subprocess failure for retry', () => {
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('some tool blew up\\n');",
+        'process.exit(1);',
+      ]);
+
+      const result = runAddressReview(dir, stub);
+
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
+  it('does not flag an API error that appears after a real verdict or a loop guard', () => {
+    // Case C: the agent wrote its OWN failure.md (a real verdict) and an API
+    // error also appears in the tail — that verdict must advance the watermark,
+    // so NO retry marker.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeWorkdirStub(dir, [
+        "writeFileSync(`${workdir}/failure.md`, 'my verdict\\n');",
+        "process.stdout.write('[API Error: 429 quota exceeded]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+    // Case B: a loop-guard trip is terminal even with an API error in the tail
+    // (a loop run burns the full tool-call cap — retrying it 100× is the
+    // opposite of what we want).
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Loop detection halted the run\\n');",
+        "process.stdout.write('[API Error: 503 upstream overloaded]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+    // Case D: a TIMEOUT is terminal even after an API error was streamed — the
+    // !result.timedOut guard. Uses the spawnSync + QWEN_TIMEOUT_MS override
+    // (a real 50-min timeout can't be waited on): qwen streams the error, then
+    // hangs past the 100 ms budget and is killed.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 503 upstream overloaded]\\n');",
+        'setTimeout(() => process.exit(0), 3000);',
+      ]);
+      const result = spawnSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        {
+          encoding: 'utf8',
+          env: { ...process.env, QWEN_TIMEOUT_MS: '100' },
+          timeout: 3000,
+        },
+      );
+      expect(result.status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
+  it('flags recoverable API renders without a leading status code, and skips non-recoverable ones', () => {
+    // The canonical rate-limit / bad-key renders carry no leading digit — these
+    // must still retry (the 401/429 the loop actually hits in production).
+    for (const render of [
+      '[API Error: Rate limit exceeded (Status: RESOURCE_EXHAUSTED)]',
+      '[API Error: 401 Incorrect API key provided.]',
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeQwenStub(dir, [
+          `process.stdout.write('${render}\\n');`,
+          'process.exit(1);',
+        ]);
+        expect(runAddressReview(dir, stub).status).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      });
+    }
+    // A 400 malformed request fails identically forever — stays terminal.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 400 Bad request: malformed]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+    // The Qwen OAuth quota error is emitted WITHOUT the [API Error: …] wrapper
+    // (it returns early before formatting) — the standalone fallback must catch
+    // it and wrap it, or OAuth quota exhaustion strands the PR.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Qwen OAuth quota exceeded (limit: 100/min)\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      expect(readFileSync(join(dir, 'agent-api-error'), 'utf8')).toContain(
+        '[API Error: Qwen OAuth quota exceeded',
+      );
+    });
+    // A terminal wrapped error must NOT be overridden by an earlier standalone
+    // OAuth quota string in the same tail: the last-error-wins rule applies.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stderr.write('Qwen OAuth quota exceeded (limit: 100/min)\\n');",
+        "process.stdout.write('[API Error: 400 Bad request]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+  });
+
+  it('classifies permanent API failures terminal and records the cause class', () => {
+    // A permanent 400 whose text happens to carry a 3-digit number in 500-599
+    // (a token cap, an index, a request id) must NOT be retried: matching
+    // \b5\d\d\b anywhere in the message retried these forever.
+    for (const render of [
+      '[API Error: 400 Invalid value for max_tokens: must be <= 512]',
+      '[API Error: 400 context length exceeded: 40000 > 32768]',
+      // A 400 whose message says 'does not exist' in a NON-access context
+      // (a tool name, a field name) must stay terminal — the AUTH_API_ERROR
+      // keyword 'does not exist' must not promote it to a retried auth error.
+      "[API Error: 400 Tool 'web_search' does not exist]",
+      "[API Error: 400 Field 'temperature' does not exist in schema]",
+      // A hostname that does not resolve is a misconfigured endpoint: it
+      // repeats forever, so it stays terminal like a bad model name.
+      '[API Error: getaddrinfo ENOTFOUND bad.host]',
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeQwenStub(dir, [
+          `process.stdout.write(${JSON.stringify(render + '\n')});`,
+          'process.exit(1);',
+        ]);
+        expect(runAddressReview(dir, stub).status).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+      });
+    }
+    // The cause class drives the retry budget: a transient error keeps the full
+    // round budget; an auth/access error (including the OpenAI-compatible
+    // "does not exist / no access" render of what a 403 reports) is capped.
+    for (const [render, kind] of [
+      ['[API Error: 429 Too Many Requests]', 'transient'],
+      ['[API Error: 503 upstream unavailable]', 'transient'],
+      // Transport failures never got far enough to have a status code. #7365
+      // stranded at round 2/100 on exactly this render.
+      ['[API Error: terminated (cause: read ECONNRESET)]', 'transient'],
+      ['[API Error: fetch failed]', 'transient'],
+      ['[API Error: socket hang up]', 'transient'],
+      ['[API Error: 速率限制，请稍后重试]', 'transient'],
+      ['[API Error: 配额不足]', 'transient'],
+      ['[API Error: 服务不可用]', 'transient'],
+      ['[API Error: 403 Model access denied.]', 'auth'],
+      [
+        '[API Error: 404 The model does not exist or you do not have access to it]',
+        'auth',
+      ],
+    ]) {
+      withRunnerDir((dir) => {
+        writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+        const stub = writeQwenStub(dir, [
+          `process.stdout.write(${JSON.stringify(render + '\n')});`,
+          'process.exit(1);',
+        ]);
+        expect(runAddressReview(dir, stub).status).not.toBe(0);
+        expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+        expect(
+          readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+        ).toBe(kind);
+      });
+    }
+  });
+
+  it('classifies only the last API error — a terminal error after a transient one stays terminal', () => {
+    // If the output tail contains a transient error (429) followed by a
+    // permanent one (400), the last error represents the terminal state of
+    // the run. Retrying on the earlier transient error would hit the same
+    // permanent error every time.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 429 Too Many Requests]\\n');",
+        "process.stdout.write('[API Error: 400 Bad request: malformed]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
+    });
+    // The reverse order (permanent then transient) retries on the transient —
+    // the last error is the one that killed the run.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 400 Bad request: malformed]\\n');",
+        "process.stdout.write('[API Error: 429 Too Many Requests]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      expect(
+        readFileSync(join(dir, 'agent-api-error-kind'), 'utf8').trim(),
+      ).toBe('transient');
+    });
+  });
+
+  it('keeps the API-error headline valid UTF-8 when the byte cap splits a CJK render', () => {
+    // `cut -c` counts bytes under GNU coreutils and the classifier deliberately
+    // matches Chinese renders, so the 200-byte cap can split a multi-byte
+    // character and emit invalid UTF-8 into the PR comment headline.
+    const line = workflow
+      .split('\n')
+      .find((l) => l.includes('API_ERROR_DETAIL="$(head'));
+    expect(line).toBeTruthy();
+    // The guard must stay in the pipeline, and keep its `|| true`: iconv -c
+    // exits 1 when it discards a byte, which would abort the step under the
+    // step's `set -eo pipefail` before the marker and the gh pr comment.
+    expect(line).toContain('iconv -f utf-8 -t utf-8 -c');
+    expect(line).toContain('|| true');
+    const dir = mkdtempSync(join(tmpdir(), 'apierr-'));
+    try {
+      const render = `[API Error: 服务繁忙，${'负载过高，'.repeat(30)}]`;
+      expect(Buffer.byteLength(render, 'utf8')).toBeGreaterThan(200);
+      writeFileSync(join(dir, 'agent-api-error'), `${render}\n`);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\nWORKDIR=${JSON.stringify(dir)}\n${line.trim()}\nprintf '%s' "$API_ERROR_DETAIL"`,
+        ],
+        { encoding: 'buffer' },
+      );
+      // A strict decode throws on a dangling multi-byte sequence.
+      expect(() =>
+        new TextDecoder('utf-8', { fatal: true }).decode(out),
+      ).not.toThrow();
+      expect(out.length).toBeGreaterThan(0);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('agrees on the agent-api-error marker name end to end (writer↔reader contract)', () => {
+    // Extract the workflow READER *including* the ${WORKDIR}/agent-api-error
+    // read (not just the MARK_TS block the other test drives via env), so a
+    // rename on either side of the writer↔reader boundary breaks this test.
+    const readerBlock = reviewAddressReportStep.match(
+      /(DETAIL_FILE=''[\s\S]*?\n {12}fi)\n {12}\{/,
+    )?.[1];
+    expect(readerBlock).toBeTruthy();
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    const runReader = (dir) =>
+      execFileSync('bash', ['-c', `${readerBlock}\nprintf '%s' "$MARK_TS"`], {
+        env: {
+          ...process.env,
+          WORKDIR: dir,
+          MAX_ROUNDS: '5',
+          ROUND: '2',
+          WATERMARK: '',
+          NEWEST: '2026-07-16T00:00:00Z',
+          // An agent that reached a verdict leaves the job green, so the
+          // sibling gate-crash route is NOT armed here. Omitting this would
+          // make every case in this test read as a crash and the marker-name
+          // contract would pass for the wrong reason.
+          JOB_STATUS: 'success',
+        },
+        encoding: 'utf8',
+      }).trim();
+    // WRITER: the real run-agent.mjs drops agent-api-error on a model error.
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = writeQwenStub(dir, [
+        "process.stdout.write('[API Error: 429 quota exceeded]\\n');",
+        'process.exit(1);',
+      ]);
+      expect(runAddressReview(dir, stub).status).not.toBe(0);
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(true);
+      // The reader, pointed at that SAME workdir, must read the marker and
+      // route to a retry (sentinel). A filename divergence advances instead.
+      expect(runReader(dir)).toBe(SENTINEL);
+    });
+    // No marker present → the reader advances the watermark (a real handoff).
+    withRunnerDir((dir) => {
+      writeFileSync(join(dir, 'failure.md'), 'verdict\n');
+      expect(runReader(dir)).toBe('2026-07-16T00:00:00Z');
     });
   });
 

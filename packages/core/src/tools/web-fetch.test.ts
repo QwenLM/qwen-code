@@ -12,6 +12,7 @@ import {
   WebFetchTool,
   clearWebFetchCache,
   rewriteGitHubBlobUrl,
+  sideQueryTimeoutMs,
 } from './web-fetch.js';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
@@ -89,6 +90,7 @@ describe('WebFetchTool', () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     fs.rmSync(toolResultsDir, { recursive: true, force: true });
   });
 
@@ -160,14 +162,19 @@ describe('WebFetchTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
     });
 
-    it('should return WEB_FETCH_FALLBACK_FAILED on API processing failure', async () => {
+    it('should fall back to raw content when side-query processing fails', async () => {
       vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
       mockGenerateContent.mockRejectedValue(new Error('API error'));
       const tool = new WebFetchTool(mockConfig);
       const params = { url: 'https://public.ip', prompt: 'summarize this' };
       const invocation = tool.build(params);
       const result = await invocation.execute(new AbortController().signal);
-      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Content processing failed');
+      expect(result.llmContent).toContain('Test content');
+      expect(result.returnDisplay).toContain(
+        'processing failed, raw content returned',
+      );
     });
 
     it('should return an error result for non-2xx statuses', async () => {
@@ -568,7 +575,7 @@ describe('WebFetchTool', () => {
       expect(result.llmContent).toContain('Content-Type: text/html');
       expect(result.llmContent).toContain('A summary.');
       expect(result.returnDisplay).toMatch(
-        /^Received 28 bytes \(200 OK\) from example\.com$/,
+        /^Received 28 bytes \(200 OK\) from example\.com in \d+\.\ds$/,
       );
     });
 
@@ -605,6 +612,185 @@ describe('WebFetchTool', () => {
       expect(result.llmContent).toContain(
         'The processing model returned no content',
       );
+    });
+  });
+
+  describe('side-query processing', () => {
+    it('should stream on the fast model with maxAttempts 1 and a combined abort signal', async () => {
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      vi.mocked(mockConfig.getFastModel).mockReturnValue('qwen-flash');
+      let received: {
+        stream?: boolean;
+        model?: string;
+        maxAttempts?: number;
+        abortSignal?: AbortSignal;
+      } = {};
+      mockGenerateContent.mockImplementation((options) => {
+        received = options;
+        return Promise.resolve({ text: 'Summary' });
+      });
+
+      const controller = new AbortController();
+      await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com', prompt: 'summarize' })
+        .execute(controller.signal);
+
+      expect(received.stream).toBe(true);
+      expect(received.model).toBe('qwen-flash');
+      expect(received.maxAttempts).toBe(1);
+      // Combined signal: not the tool signal itself, but aborts with it.
+      expect(received.abortSignal).not.toBe(controller.signal);
+      expect(received.abortSignal?.aborted).toBe(false);
+      controller.abort();
+      expect(received.abortSignal?.aborted).toBe(true);
+    });
+
+    it('should use the main model when no fast model is configured', async () => {
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      let receivedModel: string | undefined;
+      mockGenerateContent.mockImplementation((options) => {
+        receivedModel = options.model;
+        return Promise.resolve({ text: 'Summary' });
+      });
+
+      await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com', prompt: 'summarize' })
+        .execute(new AbortController().signal);
+
+      expect(receivedModel).toBe('qwen-coder');
+    });
+
+    it('should keep the persisted PDF and its extracted text when processing fails', async () => {
+      const pdfBytes = Buffer.concat([
+        Buffer.from('%PDF-1.4\n'),
+        Buffer.from([0xe2, 0xe3, 0xcf, 0xd3, 0x00, 0x01, 0x02]),
+      ]);
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(
+        okResponse({ contentType: 'application/pdf', body: pdfBytes }),
+      );
+      mockExtractPDFText.mockResolvedValue({
+        success: true,
+        text: 'Bid item 24Z010: $1,234.56',
+      });
+      mockGenerateContent.mockRejectedValue(new Error('Request timed out.'));
+
+      const result = await new WebFetchTool(mockConfig)
+        .build({
+          url: 'https://example.com/doc.pdf',
+          prompt: 'list ALL bid items',
+        })
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Content processing failed');
+      expect(result.llmContent).toContain('Bid item 24Z010: $1,234.56');
+      expect(result.resultFilePaths).toHaveLength(1);
+      expect(result.llmContent).toContain('saved to');
+    });
+
+    it('should fall back with raw content when the processing backstop fires, without aborting the tool signal', async () => {
+      vi.stubEnv('QWEN_WEB_FETCH_PROCESSING_TIMEOUT_MS', '50');
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      // Hangs until the composed signal (carrying the backstop timeout)
+      // aborts it — simulating a stalled provider stream.
+      mockGenerateContent.mockImplementation(
+        ({ abortSignal }: { abortSignal: AbortSignal }) =>
+          new Promise((_resolve, reject) => {
+            abortSignal.addEventListener('abort', () =>
+              reject(new Error('Request was aborted.')),
+            );
+          }),
+      );
+
+      const controller = new AbortController();
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com', prompt: 'summarize' })
+        .execute(controller.signal);
+
+      expect(result.error).toBeUndefined();
+      expect(result.llmContent).toContain('Content processing failed');
+      expect(result.llmContent).toContain('Test content');
+      expect(controller.signal.aborted).toBe(false);
+    });
+
+    it('should not return a late side-query success after the user aborts', async () => {
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      const controller = new AbortController();
+      // The final stream chunk can already be queued when the user aborts:
+      // the side query then resolves successfully despite the abort.
+      mockGenerateContent.mockImplementation(() => {
+        controller.abort();
+        return Promise.resolve({ text: 'Late success' });
+      });
+
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com', prompt: 'summarize' })
+        .execute(controller.signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.llmContent).not.toContain('Late success');
+      expect(result.llmContent).not.toContain('Test content');
+    });
+
+    it.each([
+      ['unset', undefined, 300_000],
+      ['empty', '', 300_000],
+      ['fraction', '0.5', 300_000],
+      ['scientific notation', '1e3', 300_000],
+      ['hexadecimal', '0x32', 300_000],
+      ['zero', '0', 300_000],
+      ['negative', '-5', 300_000],
+      ['non-numeric', 'abc', 300_000],
+      ['timer overflow', '2147483648', 300_000],
+      ['max timer delay', '2147483647', 2_147_483_647],
+      ['valid decimal', '50', 50],
+    ])(
+      'should resolve the backstop timeout for %s env values',
+      (_label, envValue, expected) => {
+        if (envValue === undefined) {
+          vi.stubEnv('QWEN_WEB_FETCH_PROCESSING_TIMEOUT_MS', '');
+          delete process.env['QWEN_WEB_FETCH_PROCESSING_TIMEOUT_MS'];
+        } else {
+          vi.stubEnv('QWEN_WEB_FETCH_PROCESSING_TIMEOUT_MS', envValue);
+        }
+        expect(sideQueryTimeoutMs()).toBe(expected);
+      },
+    );
+
+    it('should return a proper error result when aborted with a non-Error reason', async () => {
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      const controller = new AbortController();
+      // Session.ts aborts with a plain string reason; throwIfAborted rethrows
+      // it as-is, so the error path must not assume an Error instance.
+      mockGenerateContent.mockImplementation(() => {
+        controller.abort('qwen:user-cancel');
+        return Promise.resolve({ text: 'Late success' });
+      });
+
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com', prompt: 'summarize' })
+        .execute(controller.signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.llmContent).toContain('qwen:user-cancel');
+      expect(result.llmContent).not.toContain('undefined');
+      expect(result.llmContent).not.toContain('Late success');
+    });
+
+    it('should propagate a user abort instead of fabricating a raw-content result', async () => {
+      vi.spyOn(fetchUtils, 'fetchWithPolicy').mockResolvedValue(okResponse());
+      const controller = new AbortController();
+      mockGenerateContent.mockImplementation(() => {
+        controller.abort();
+        return Promise.reject(new Error('Request was aborted.'));
+      });
+
+      const result = await new WebFetchTool(mockConfig)
+        .build({ url: 'https://example.com', prompt: 'summarize' })
+        .execute(controller.signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.WEB_FETCH_FALLBACK_FAILED);
+      expect(result.llmContent).not.toContain('Test content');
     });
   });
 
