@@ -101,16 +101,17 @@ class Store:
             connection.execute(
                 """
                 INSERT INTO runs (
-                    run_id, idempotency_key, repository, qwen_ref, suite,
+                    run_id, idempotency_key, repository, qwen_ref, qwen_commit, suite,
                     dataset, dataset_revision, runner_mode, status,
                     request_json, expected_instances, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'QUEUED', ?, ?, ?)
                 """,
                 (
                     run_id,
                     idempotency_key,
                     request.repository,
                     request.qwen_ref,
+                    request.qwen_commit,
                     request.suite,
                     suite["dataset"],
                     suite["dataset_revision"],

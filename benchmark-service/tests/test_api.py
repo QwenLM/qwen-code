@@ -22,6 +22,7 @@ def settings(tmp_path: Path) -> Settings:
         allowed_workflow=None,
         poll_seconds=0.01,
         github_token=None,
+        harbor_jobs_root=tmp_path / "harbor-jobs",
     )
 
 

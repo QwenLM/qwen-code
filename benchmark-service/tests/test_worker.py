@@ -19,7 +19,16 @@ class FakeRunner:
         assert qwen_ref == "HEAD"
         return "a" * 40
 
-    def run(self, run_id, qwen_commit, suite, artifacts, on_grading=None) -> RunResult:
+    def run(
+        self,
+        run_id,
+        qwen_commit,
+        suite,
+        artifacts,
+        on_grading=None,
+        qwen_ref=None,
+    ) -> RunResult:
+        assert qwen_ref == "HEAD"
         self.heartbeat()
         if on_grading:
             on_grading()
@@ -51,6 +60,7 @@ def test_worker_completes_and_writes_artifacts(tmp_path: Path) -> None:
         allowed_workflow=None,
         poll_seconds=0.01,
         github_token=None,
+        harbor_jobs_root=tmp_path / "harbor-jobs",
     )
     settings.prepare_directories()
     store = Store(settings.database_path)

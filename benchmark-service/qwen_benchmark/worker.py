@@ -8,6 +8,7 @@ from typing import Any
 
 from .artifacts import Artifacts
 from .config import Settings, Suite, load_suites
+from .harbor_runner import HarborRunner, qwen_version_from_ref
 from .publisher import publish_check
 from .runner import AgentError, InfrastructureError, RunResult, SwebenchRunner
 from .store import Store
@@ -27,9 +28,7 @@ class Worker:
         self.settings = settings
         self.store = store
         self.suites = suites
-        self.runner_factory = runner_factory or (
-            lambda heartbeat: SwebenchRunner(settings, heartbeat)
-        )
+        self.runner_factory = runner_factory
 
     def run_once(self) -> bool:
         run = self.store.claim_run()
@@ -45,6 +44,13 @@ class Worker:
             "manifest.json",
             {
                 "run_id": run_id,
+                "qwen_ref": run["qwen_ref"],
+                "qwen_commit": request.get("qwen_commit"),
+                "qwen_version": (
+                    qwen_version_from_ref(run["qwen_ref"])
+                    if suite["runner_mode"] == "harbor"
+                    else None
+                ),
                 "dataset": suite["dataset"],
                 "dataset_revision": suite["dataset_revision"],
                 "instance_ids": suite["instance_ids"],
@@ -53,9 +59,21 @@ class Worker:
         )
         self._write_status(artifacts, run_id)
 
-        runner = self.runner_factory(lambda: self.store.heartbeat(run_id))
+        if self.runner_factory:
+            runner = self.runner_factory(lambda: self.store.heartbeat(run_id))
+        elif suite["runner_mode"] == "harbor":
+            runner = HarborRunner(
+                self.settings, lambda: self.store.heartbeat(run_id)
+            )
+        else:
+            runner = SwebenchRunner(
+                self.settings, lambda: self.store.heartbeat(run_id)
+            )
         try:
-            qwen_commit = runner.resolve_qwen_commit(run["qwen_ref"])
+            request_commit = request.get("qwen_commit")
+            qwen_commit = request_commit or runner.resolve_qwen_commit(
+                run["qwen_ref"]
+            )
             self.store.transition(run_id, "RUNNING_AGENT", qwen_commit=qwen_commit)
             for instance in instances:
                 self.store.update_instance(run_id, instance["instance_id"], "RUNNING")
@@ -67,6 +85,7 @@ class Worker:
                 suite,
                 artifacts,
                 on_grading=lambda: self._start_grading(artifacts, run_id),
+                qwen_ref=run["qwen_ref"],
             )
             if result.completed != len(suite["instance_ids"]):
                 raise InfrastructureError(
@@ -164,6 +183,11 @@ class Worker:
             "repository": run["repository"],
             "qwen_ref": run["qwen_ref"],
             "qwen_commit": run["qwen_commit"],
+            "qwen_version": (
+                qwen_version_from_ref(run["qwen_ref"])
+                if run["runner_mode"] == "harbor"
+                else None
+            ),
             "suite": run["suite"],
             "dataset": run["dataset"],
             "dataset_revision": run["dataset_revision"],

@@ -44,6 +44,12 @@ The gold suite validates the service, Docker, official dataset, grader, SQLite,
 and OSS without consuming model tokens. The Qwen suite additionally requires
 `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
 
+The production-shaped smoke suite is `swebench_verified_harbor_smoke`. It uses
+the open-source Harbor Framework, pins the Qwen Code npm version from `qwen_ref`
+(for example `v0.19.7`), and rejects a trial when Harbor reports a different
+agent version. The release request should include the immutable 40-character
+`qwen_commit` so the ECS does not need to fetch GitHub to resolve the tag.
+
 ## Target deployment
 
 Install this package into `/mnt/workspace/qwen-benchmark/venv`, copy an edited
@@ -57,6 +63,18 @@ supervisord -c /mnt/workspace/qwen-benchmark/service/deploy/supervisord.conf
 
 Use shared-token mode only for a private POC route. The GitHub workflow expects
 OIDC mode for a public HTTPS endpoint.
+
+### Alibaba Cloud ECS
+
+On a regular Ubuntu ECS host, install `deploy/benchmark.ecs.env` as
+`/srv/qwen-benchmark/config/benchmark.env`, store the shared token separately in
+`benchmark.secret.env` with mode `0600`, and install the two units from
+`deploy/systemd/` under `/etc/systemd/system/`. The API binds only to loopback;
+Nginx or an SSH-based dispatcher is the external entry point.
+
+If the host cannot reach Docker Hub directly, install
+`deploy/docker-daemon.ecs.json` as `/etc/docker/daemon.json` and restart Docker.
+Treat public mirrors as a POC dependency; use ACR replication for stable runs.
 
 ## Reverse proxy
 

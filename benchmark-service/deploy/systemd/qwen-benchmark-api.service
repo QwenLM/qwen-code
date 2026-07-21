@@ -1,0 +1,24 @@
+[Unit]
+Description=Qwen Code benchmark API
+After=network-online.target docker.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ecs-user
+Group=ecs-user
+WorkingDirectory=/srv/qwen-benchmark
+EnvironmentFile=/srv/qwen-benchmark/config/benchmark.env
+EnvironmentFile=/srv/qwen-benchmark/config/benchmark.secret.env
+ExecStart=/srv/qwen-benchmark/venv/bin/qwen-benchmark-api
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/qwen-benchmark
+
+[Install]
+WantedBy=multi-user.target

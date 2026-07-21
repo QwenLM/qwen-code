@@ -1,0 +1,26 @@
+[Unit]
+Description=Qwen Code benchmark worker
+After=network-online.target docker.service qwen-benchmark-api.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ecs-user
+Group=ecs-user
+SupplementaryGroups=docker
+WorkingDirectory=/srv/qwen-benchmark
+EnvironmentFile=/srv/qwen-benchmark/config/benchmark.env
+EnvironmentFile=/srv/qwen-benchmark/config/benchmark.secret.env
+ExecStart=/srv/qwen-benchmark/venv/bin/qwen-benchmark-worker
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=90
+NoNewPrivileges=true
+PrivateTmp=false
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/qwen-benchmark /var/lib/docker /var/run/docker.sock
+
+[Install]
+WantedBy=multi-user.target

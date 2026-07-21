@@ -14,6 +14,7 @@ class RunRequest(BaseModel):
         max_length=160,
         pattern=r"^[A-Za-z0-9][A-Za-z0-9._/@+-]*$",
     )
+    qwen_commit: str | None = Field(default=None, pattern=r"^[0-9a-fA-F]{40}$")
     suite: str = Field(min_length=1, max_length=100)
     trigger: Literal["release", "workflow_dispatch", "manual"]
     release_id: int | None = None

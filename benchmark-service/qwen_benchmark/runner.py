@@ -90,6 +90,7 @@ class SwebenchRunner:
         suite: Suite,
         artifacts: Artifacts,
         on_grading: Callable[[], None] | None = None,
+        qwen_ref: str | None = None,
     ) -> RunResult:
         work_dir = self.settings.work_root / run_id
         work_dir.mkdir(parents=True, exist_ok=True)

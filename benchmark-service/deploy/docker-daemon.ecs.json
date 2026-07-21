@@ -1,0 +1,11 @@
+{
+  "registry-mirrors": [
+    "https://docker.1ms.run",
+    "https://docker.m.daocloud.io"
+  ],
+  "log-driver": "json-file",
+  "log-opts": {
+    "max-size": "100m",
+    "max-file": "3"
+  }
+}
