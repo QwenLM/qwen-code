@@ -86,7 +86,7 @@ describe('managed npm update', () => {
     expect(update.installArgs).toEqual([
       'install',
       '--globalconfig',
-      '/global/npmrc',
+      path.resolve('/global/npmrc'),
       '--prefix',
       update.stagingDir,
       '--global=false',
@@ -162,7 +162,7 @@ describe('managed npm update', () => {
         expect.stringMatching(/npm-cli\.js$/),
         'install',
         '--globalconfig',
-        '/global/npmrc',
+        path.resolve('/global/npmrc'),
         '--prefix',
         expect.any(String),
         '--global=false',
