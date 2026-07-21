@@ -2823,6 +2823,68 @@ describe('runNonInteractive', () => {
     });
   });
 
+  it('emits the effective fork context mode in headless task events', async () => {
+    (mockConfig.getOutputFormat as Mock).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      writes.push(
+        typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'),
+      );
+      return true;
+    });
+    mockBackgroundTaskRegistry.setRegisterCallback.mockImplementation(
+      (callback) => {
+        callback?.({
+          agentId: 'fork-tool-fork-1',
+          toolUseId: 'tool-fork-1',
+          description: 'Inherit parent context',
+          subagentType: 'fork',
+        });
+      },
+    );
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'Fork launched.' },
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 2 },
+          },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Launch a context-inheriting fork',
+      'prompt-headless-fork',
+    );
+
+    const envelopes = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line));
+    expect(envelopes).toContainEqual(
+      expect.objectContaining({
+        type: 'system',
+        subtype: 'task_started',
+        data: expect.objectContaining({
+          task_id: 'fork-tool-fork-1',
+          tool_use_id: 'tool-fork-1',
+          subagent_type: 'fork',
+        }),
+      }),
+    );
+  });
+
   it('flushes terminal monitor notifications before the final headless result', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(
       OutputFormat.STREAM_JSON,

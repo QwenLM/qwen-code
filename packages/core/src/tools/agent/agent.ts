@@ -44,7 +44,6 @@ import {
   buildChildMessage,
   buildPinnedWorktreeNotice,
   buildWorktreeNotice,
-  isForkSubagentEnabled,
   normalizeForkTurns,
   runInForkContext,
   selectForkHistory,
@@ -877,11 +876,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-${
-  isForkSubagentEnabled(this.config)
-    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
-    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
-}
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -908,9 +903,6 @@ Usage notes:
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
 - Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent, so the main agent cannot independently address them as background tasks. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
-${
-  isForkSubagentEnabled(this.config)
-    ? `
 ## When to fork
 
 A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context by default, but its findings do NOT come back to you in a form you can act on. Set \`fork_turns\` to a positive integer string only when a bounded recent window is sufficient. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
@@ -924,12 +916,10 @@ Forks are cheap because they share your prompt cache. Don't set \`model\` on a f
 **Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
 
 **Writing a fork prompt.** With the default full history, the prompt is a *directive* — what to do, not what the situation is. When \`fork_turns\` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
-`
-    : ''
-}
+
 ## Writing the prompt
 
-Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation${isForkSubagentEnabled(this.config) ? '; forks inherit all or the selected recent window' : '.'}
+Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation; forks inherit all or the selected recent window.
 - Explain what you're trying to accomplish and why.
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
@@ -1034,8 +1024,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         return 'Parameter "subagent_type" must be a non-empty string.';
       }
       // `fork` is an explicit pseudo-type resolved by the dispatch logic (not
-      // a loadable subagent), so it never appears in the registered list; when
-      // forking is unavailable, dispatch falls back to general-purpose.
+      // a loadable subagent), so it never appears in the registered list.
       const lowerType = params.subagent_type.toLowerCase();
       if (lowerType !== FORK_SUBAGENT_TYPE) {
         const subagentExists = this.availableSubagents.some(
@@ -2344,45 +2333,40 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     };
 
     try {
-      // Forking is explicit: `subagent_type: "fork"` selects a fork, and only
-      // when forking is available (interactive session). Any other value — or
-      // an omitted subagent_type — resolves to a regular subagent
+      // Forking is explicit: `subagent_type: "fork"` selects a fork. Any other
+      // value — or an omitted subagent_type — resolves to a regular subagent
       // (general-purpose by default). Its execution mode is decided separately
       // below; a fork is opt-in, never the default.
       const requestedType = this.params.subagent_type;
       const isForkRequested =
         requestedType?.toLowerCase() === FORK_SUBAGENT_TYPE;
-      const isFork =
-        isForkRequested &&
-        isForkSubagentEnabled(this.config) &&
-        // v1: fork is a top-level-only capability. A sub-agent — which may now
-        // carry the AgentTool via nesting — that requests a fork falls back to
-        // a general-purpose sub-agent (via effectiveSubagentType below) instead
-        // of opening a nested fork. Fork nesting is deferred past v1.
-        isTopLevelSession();
-      const effectiveSubagentType = isFork
-        ? undefined
-        : isForkRequested
-          ? // Explicit fork requested but unavailable (non-interactive) →
-            // fall back to the general-purpose subagent.
-            DEFAULT_BUILTIN_SUBAGENT_TYPE
-          : (requestedType ?? DEFAULT_BUILTIN_SUBAGENT_TYPE);
-      if (isForkRequested && !isFork) {
+      if (isForkRequested && !isTopLevelSession()) {
         debugLogger.debug(
-          `[AgentTool] Fork request downgraded to a regular sub-agent (${
-            isTopLevelSession()
-              ? 'forking unavailable in this session'
-              : 'forks do not nest'
+          '[AgentTool] Fork request rejected because forks do not nest.',
+        );
+        return this.buildSpawnBlockedResult(
+          'Error: subagent_type "fork" is not supported from within a sub-agent. Complete this task directly with your own tools instead of requesting a nested fork.',
+          'Nested forks are not supported',
+        );
+      }
+      const isFork = isForkRequested;
+      if (isFork) {
+        debugLogger.debug(
+          `[AgentTool] Fork request accepted with inherited context (${
+            this.config.isInteractive() ? 'interactive' : 'headless'
           }).`,
         );
       }
+      const effectiveSubagentType = requestedType
+        ? requestedType
+        : DEFAULT_BUILTIN_SUBAGENT_TYPE;
       let subagentConfig: SubagentConfig;
 
       if (isFork) {
         subagentConfig = FORK_AGENT;
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
-          effectiveSubagentType!,
+          effectiveSubagentType,
         );
         if (!loadedConfig) {
           // loadSubagent() reads from disk, so reaching this point means the
@@ -2403,7 +2387,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             llmContent: notFoundMessage,
             returnDisplay: {
               type: 'task_execution' as const,
-              subagentName: effectiveSubagentType!,
+              subagentName: effectiveSubagentType,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
@@ -2427,12 +2411,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
-      // An explicit tool parameter wins. Otherwise, an agent-level background
-      // flag retains its existing meaning, and safe ordinary one-shot launches
-      // default to background. Caller-owned working_dir launches stay
-      // foreground unless explicitly configured for background, which the
-      // incompatibility guard below rejects. Unavailable fork requests retain
-      // their existing foreground general-purpose fallback.
+      // Headless forks always use the background registry, even when
+      // run_in_background is false. Forks are detached by definition, and a
+      // short-lived non-interactive process must hold open until the inherited
+      // work completes. Otherwise, an explicit tool parameter wins. An
+      // agent-level background flag retains its existing meaning, and safe
+      // ordinary one-shot launches default to background.
       //
       // This is the source of truth for the background-classification rule. Two
       // UI classifiers replicate it from tool-call args (they cannot see
@@ -2442,24 +2426,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       //   - packages/desktop/packages/shared/src/agent/tool-matching.ts
       //     (detectBackgroundEvents)
       //
-      // Background delegation is top-level-only in v1, mirroring the fork
-      // downgrade above: a nested launcher would be handed a completion
-      // contract it cannot honor — the success guidance names send_message
-      // and task_stop (both excluded from sub-agent toolsets), and
+      // Background delegation is top-level-only in v1. A nested launcher would
+      // be handed a completion contract it cannot honor — the success guidance
+      // names send_message and task_stop (both excluded from sub-agent
+      // toolsets), and
       // BackgroundTaskRegistry's single session-level notification callback
       // would inject the child's completion into the top-level conversation
       // while the launcher (typically finished by then) never hears back.
       // Downgrade to an awaited foreground run instead of orphaning the
       // child's results.
       const backgroundRequested =
-        this.params.run_in_background ??
-        (subagentConfig.background === true ||
-          (!isForkRequested &&
-            this.params.working_dir === undefined &&
-            // A `name` passed without an active team falls through to a regular
-            // one-shot agent above; keep it foreground so both UI classifiers
-            // (which exclude `name`) stay consistent with core dispatch.
-            this.params.name === undefined));
+        isFork && !this.config.isInteractive()
+          ? true
+          : (this.params.run_in_background ??
+            (subagentConfig.background === true ||
+              (!isForkRequested &&
+                this.params.working_dir === undefined &&
+                // A `name` passed without an active team falls through to a regular
+                // one-shot agent above; keep it foreground so both UI classifiers
+                // (which exclude `name`) stay consistent with core dispatch.
+                this.params.name === undefined)));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded
@@ -2751,9 +2737,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const hookOpts = {
         agentId: `${subagentConfig.name}-${agentIdSuffix}`,
-        // Resolved config name, not the raw requested type: a fork request
-        // that fell back to the awaitable path (nested / non-interactive)
-        // must report the agent that actually runs — hooks, spans, task
+        // Resolved config name, not the raw requested type. Hooks, spans, task
         // rows, and the meta sidecar all read this field.
         agentType: subagentConfig.name,
         resolvedMode,
