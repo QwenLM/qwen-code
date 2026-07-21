@@ -1017,6 +1017,38 @@ describe('BackgroundTaskRegistry', () => {
     expect(callback).toHaveBeenCalledTimes(2);
   });
 
+  it('aborts and waits for every tracked agent execution to settle', async () => {
+    let resolveFirst!: () => void;
+    let rejectSecond!: (error: Error) => void;
+    const first = new Promise<void>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const second = new Promise<void>((_resolve, reject) => {
+      rejectSecond = reject;
+    });
+    registry.trackAgentExecution(first);
+    const abortAll = vi.spyOn(registry, 'abortAll');
+
+    let settled = false;
+    const wait = registry.abortAllAndWait({ notify: false }).then(() => {
+      settled = true;
+    });
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    registry.trackAgentExecution(second);
+    resolveFirst();
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    rejectSecond(new Error('expected test rejection'));
+    await wait;
+    expect(settled).toBe(true);
+    expect(abortAll).toHaveBeenCalledTimes(2);
+    expect(abortAll).toHaveBeenNthCalledWith(1, { notify: false });
+    expect(abortAll).toHaveBeenNthCalledWith(2, { notify: false });
+  });
+
   it('abortAll({ notify: false }) suppresses terminal notifications from old tasks', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);

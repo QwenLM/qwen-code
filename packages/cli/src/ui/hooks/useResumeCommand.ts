@@ -226,9 +226,7 @@ export function useResumeCommand(
             resetBackgroundStateForSessionSwitch(config);
             config.startNewSession(oldSessionId, undefined);
             try {
-              await config
-                .getBackgroundAgentResumeService()
-                .loadPausedBackgroundAgents(oldSessionId);
+              await config.loadPausedBackgroundAgents(oldSessionId);
             } catch (restoreErr) {
               config
                 .getDebugLogger()

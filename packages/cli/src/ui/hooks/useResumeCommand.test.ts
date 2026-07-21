@@ -803,7 +803,7 @@ describe('useResumeCommand', () => {
     );
   });
 
-  it('rolls core back to the old session when something fails after core swap but before UI swap', async () => {
+  it('rolls core back and restores the old agent roster through the Config notice wrapper', async () => {
     const startNewSession = vi.fn();
     const geminiClient = {
       initialize: vi.fn().mockRejectedValue(new Error('resume init boom')),
@@ -813,6 +813,7 @@ describe('useResumeCommand', () => {
     const monitorReset = vi.fn();
     const workflowReset = vi.fn();
     const restoreOldRoster = vi.fn().mockResolvedValue([]);
+    const directRestoreOldRoster = vi.fn().mockResolvedValue([]);
 
     const config = {
       getSessionId: () => 'old-session-id',
@@ -837,10 +838,10 @@ describe('useResumeCommand', () => {
         reset: workflowReset,
         abortAll: vi.fn(),
       }),
-      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      loadPausedBackgroundAgents: restoreOldRoster,
       getBackgroundAgentResumeService: () => ({
         buildRecoveredBackgroundAgentsNotice: vi.fn(),
-        loadPausedBackgroundAgents: restoreOldRoster,
+        loadPausedBackgroundAgents: directRestoreOldRoster,
       }),
       getChatRecordingService: () => ({ rebuildTurnBoundaries: vi.fn() }),
       getDebugLogger: () => ({
@@ -884,7 +885,9 @@ describe('useResumeCommand', () => {
       'old-session-id',
       undefined,
     );
+    expect(restoreOldRoster).toHaveBeenCalledOnce();
     expect(restoreOldRoster).toHaveBeenCalledWith('old-session-id');
+    expect(directRestoreOldRoster).not.toHaveBeenCalled();
     // UI never swapped.
     expect(startNewSession).not.toHaveBeenCalled();
     expect(historyManager.clearItems).not.toHaveBeenCalled();

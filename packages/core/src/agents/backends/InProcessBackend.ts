@@ -36,6 +36,7 @@ import type {
 } from './types.js';
 import { DISPLAY_MODE } from './types.js';
 import type { AnsiOutput } from '../../utils/terminalSerializer.js';
+import { markToolRegistryRebuilt } from '../../tools/tool-registry-context.js';
 
 const debugLogger = createDebugLogger('IN_PROCESS_BACKEND');
 
@@ -541,6 +542,7 @@ async function createPerAgentConfig(
     agentRegistry = registry;
     registry.copyDiscoveredToolsFrom(base.getToolRegistry());
     override.getToolRegistry = () => registry;
+    markToolRegistryRebuilt(override as Config);
 
     if (authOverrides?.authType) {
       try {

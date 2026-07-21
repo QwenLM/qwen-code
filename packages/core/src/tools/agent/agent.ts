@@ -107,6 +107,10 @@ import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
+  hasRebuiltToolRegistry,
+  markToolRegistryRebuilt,
+} from '../tool-registry-context.js';
+import {
   getAgentJsonlPath,
   getAgentMetaPath,
   attachJsonlTranscriptWriter,
@@ -118,6 +122,11 @@ import {
 import type { BackgroundSlotReservation } from '../../agents/background-tasks.js';
 import { getGitBranch } from '../../utils/gitUtils.js';
 import { buildModelIdContext, resolveModelId } from '../../utils/modelId.js';
+
+export {
+  hasRebuiltToolRegistry,
+  TOOL_REGISTRY_REBUILT,
+} from '../tool-registry-context.js';
 
 // Memoize git branch per cwd for the agent-launch path. `getGitBranch`
 // shells out to `git rev-parse` synchronously; caching avoids the per-launch
@@ -479,35 +488,6 @@ function permissionModeToApprovalMode(mode: PermissionMode): ApprovalMode {
 }
 
 /**
- * Marker that signals "this Config wrapper has rebuilt its own tool
- * registry so bound EditTool / WriteFileTool / ReadFileTool resolve to
- * the wrapper instead of the parent". Stored as a Symbol-keyed property
- * so that JavaScript's normal property lookup (which walks the
- * prototype chain) lets a downstream wrapper detect a rebuild that
- * happened on any ancestor without manually walking the chain.
- *
- * `Symbol.for` is used so the marker survives bundle-deduping; two
- * independent imports of this module observe the same Symbol identity.
- */
-export const TOOL_REGISTRY_REBUILT: unique symbol = Symbol.for(
-  'qwen-code:tool-registry-rebuilt',
-);
-
-/**
- * `true` if any Config in this wrapper's prototype chain has already
- * rebuilt its tool registry via {@link rebuildToolRegistryOnOverride}.
- *
- * Used by spawn sites that may be called with a wrapper-on-wrapper
- * argument (e.g. `subagent-manager.ts:buildSubagentContextOverride`
- * receiving `bgConfig = Object.create(agentConfig)` from the
- * background-agent path) to skip a redundant rebuild.
- */
-export function hasRebuiltToolRegistry(config: Config): boolean {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (config as any)[TOOL_REGISTRY_REBUILT] === true;
-}
-
-/**
  * Rebuilds the tool registry on `override` so core tools resolve
  * `this.config` to `override` instead of `base`. Used by both
  * {@link createApprovalModeOverride} and
@@ -533,7 +513,7 @@ export async function rebuildToolRegistryOnOverride(
   });
   agentRegistry.copyDiscoveredToolsFrom(base.getToolRegistry());
   ov.getToolRegistry = () => agentRegistry;
-  ov[TOOL_REGISTRY_REBUILT] = true;
+  markToolRegistryRebuilt(override);
 }
 
 /**
@@ -3365,6 +3345,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const bgPromise = isFork
           ? runInForkContext(framedBgBody)
           : framedBgBody();
+        registry.trackAgentExecution(bgPromise);
         bgPromise.catch((err) =>
           debugLogger.warn(
             `[Agent] background subagent ${hookOpts.agentId} body raised unexpected rejection: ${err instanceof Error ? err.message : String(err)}`,

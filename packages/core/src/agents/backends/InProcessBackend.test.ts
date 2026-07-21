@@ -12,6 +12,7 @@ import { AgentCore } from '../runtime/agent-core.js';
 import { getTeammateContext } from '../team/identity.js';
 import { createContentGenerator } from '../../core/contentGenerator.js';
 import { ApprovalMode, type Config } from '../../config/config.js';
+import { hasRebuiltToolRegistry } from '../../tools/tool-registry-context.js';
 
 const DEFAULT_MODE = 'default' as ApprovalMode;
 const PLAN_MODE = 'plan' as ApprovalMode;
@@ -641,6 +642,9 @@ describe('InProcessBackend', () => {
     expect(agentContext.getWorkingDir()).toBe(agentCwd);
     expect(agentContext.getTargetDir()).toBe(agentCwd);
     expect(agentContext.getToolRegistry()).toBeDefined();
+    expect(hasRebuiltToolRegistry(agentContext as unknown as Config)).toBe(
+      true,
+    );
   });
 
   it('uses a per-agent approval mode without mutating the parent config', async () => {

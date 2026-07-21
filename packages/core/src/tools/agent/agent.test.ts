@@ -401,7 +401,7 @@ describe('AgentTool', () => {
 
       expect(tool.description).not.toContain('call list_agents');
       expect(tool.description).not.toContain(
-        'call send_message with its `task_id`',
+        'call send_message with that `task_id`',
       );
 
       tool.dispose();
@@ -4303,6 +4303,7 @@ describe('AgentTool', () => {
       queueExternalInput: ReturnType<typeof vi.fn>;
       wakeExternalInputWaiters: ReturnType<typeof vi.fn>;
       appendActivity: ReturnType<typeof vi.fn>;
+      trackAgentExecution: ReturnType<typeof vi.fn>;
     };
 
     const bgSubagent: SubagentConfig = {
@@ -4355,6 +4356,7 @@ describe('AgentTool', () => {
         queueExternalInput: vi.fn(),
         wakeExternalInputWaiters: vi.fn(),
         appendActivity: vi.fn(),
+        trackAgentExecution: vi.fn(),
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);

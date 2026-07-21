@@ -568,6 +568,9 @@ export class BackgroundAgentResumeService {
     ).finally(() => {
       this.resumeOperations.delete(agentId);
     });
+    this.config
+      .getBackgroundTaskRegistry()
+      .trackAgentExecution(operation.promise);
     this.resumeOperations.set(agentId, operation);
     return operation.promise;
   }
@@ -1238,6 +1241,7 @@ export class BackgroundAgentResumeService {
       const execution = target.isFork
         ? runInForkContext(framedRunBody)
         : framedRunBody();
+      registry.trackAgentExecution(execution);
       runtimeLifecycleOwned = true;
       registry.register(entry);
       void execution;
