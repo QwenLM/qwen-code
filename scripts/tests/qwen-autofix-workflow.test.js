@@ -481,16 +481,96 @@ describe('qwen-autofix workflow', () => {
       const emits = body.includes(
         '<!-- autofix-redcheck head=${REPORT_HEAD} -->',
       );
-      const defines = body.includes('REPORT_HEAD="$(gh api');
+      const defines = body.includes('REPORT_HEAD="${CHECKED_OUT_HEAD}"');
       expect(emits).toBe(defines);
       if (emits) emitterSteps += 1;
     }
     expect(emitterSteps).toBe(2);
-    // Taken from the REMOTE head: after a rejected push local HEAD is ahead of
-    // what landed, and recording a sha that never existed would suppress the
-    // reds on the head that does. Empty on failure — matches no marker, so the
-    // reds stay visible.
-    expect(workflow).not.toContain('REPORT_HEAD="$(git rev-parse HEAD)"');
+    // The head is captured in prepare (before agent mutations) and forwarded
+    // via a step output — not re-fetched from the API at report time, which
+    // could return a DIFFERENT head if the branch moved during the run.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'CHECKED_OUT_HEAD="$(git rev-parse HEAD)"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'checked_out_head=${CHECKED_OUT_HEAD}',
+    );
+    expect(workflow).not.toContain('REPORT_HEAD="$(gh api');
+    // The handoff step must NOT stamp the redcheck marker when the agent
+    // evaluated nothing (sentinel ts): doing so would make RED_HEAD ==
+    // LIVE_HEAD and the retry scan would see N_RED_NOW=0, going idle
+    // despite the handoff promising a retry.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${MARK_TS}" != \'9999-12-31T23:59:59Z\' ]]; then',
+    );
+  });
+
+  it('renders persistent red checks into the agent feedback', () => {
+    // The scan selects a PR via N_RED_NOW (currently-red, head unjudged),
+    // but the prepare step's "Failed checks" renderer only shows checks
+    // that completed AFTER the watermark. In the exact case N_RED_NOW
+    // targets (red completed before/equal to the watermark), the agent
+    // would receive an empty "Failed checks" section with no check name
+    // to reproduce. The "Still-red checks" section closes that gap.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '## Still-red checks (persisting from before the last evaluation)',
+    );
+    // The still-red section must use <= (complement of the > in "Failed
+    // checks") so the two sections partition the red checks without overlap
+    // or gap.
+    const stillRedBlock = prepareBranchAndFeedbackStep.match(
+      /Still-red checks[\s\S]*?checks\.json"/,
+    )?.[0];
+    expect(stillRedBlock).toBeTruthy();
+    expect(stillRedBlock).toContain('<= $wm');
+    // Must carry the same conclusion filter as N_RED_NOW (no CANCELLED:
+    // a cancelled check is not a persistent red state).
+    expect(stillRedBlock).toContain(
+      'IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")',
+    );
+    expect(stillRedBlock).not.toContain('CANCELLED');
+    // Must carry the address-check carve-out, same as every other
+    // failed-check selector.
+    expect(stillRedBlock).toContain('startswith("review-address")');
+
+    // Behavioral: the jq filter renders a persistent red check that the
+    // "Failed checks" section (completedAt > wm) would miss.
+    const jqFilter = stillRedBlock.match(
+      /jq -r --arg wm.*?'([\s\S]*?)'\s*\\/,
+    )?.[1];
+    expect(jqFilter).toBeTruthy();
+    const checksJson = JSON.stringify([
+      {
+        name: 'Test / unit',
+        conclusion: 'FAILURE',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T09:00:00Z',
+      },
+      {
+        name: 'Lint',
+        conclusion: 'SUCCESS',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T09:00:00Z',
+      },
+      {
+        name: 'Build',
+        conclusion: 'FAILURE',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T11:00:00Z',
+      },
+    ]);
+    const result = execFileSync(
+      'jq',
+      ['-r', '--arg', 'wm', '2026-01-01T10:00:00Z', jqFilter],
+      { encoding: 'utf8', input: checksJson },
+    );
+    // Test / unit completed BEFORE the watermark: shown in still-red.
+    expect(result).toContain('Test / unit: FAILURE');
+    // Build completed AFTER the watermark: NOT in still-red (it is in
+    // "Failed checks" instead).
+    expect(result).not.toContain('Build');
+    // Green check: never shown.
+    expect(result).not.toContain('Lint');
   });
 
   it('bounds fleet-wide simultaneity below the per-scan target budget', () => {
@@ -2456,13 +2536,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
     );
-    // Three sites: the NEWEST computation, the live-watermark revalidation,
-    // and the feedback rendering — all must share the same address-check
-    // carve-out.
+    // Four sites: the NEWEST computation, the live-watermark revalidation,
+    // the "Failed checks" rendering, and the "Still-red checks" rendering
+    // — all must share the same address-check carve-out.
     expect(
       prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
         [],
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );

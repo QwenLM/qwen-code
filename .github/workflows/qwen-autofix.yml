@@ -2436,6 +2436,12 @@ jobs:
             git checkout -B "${BRANCH}" "origin/${BRANCH}"
           fi
 
+          # The exact SHA the agent will evaluate. Captured HERE, before any
+          # agent mutation, so the marker records what was actually looked at —
+          # not the report-time remote head, which can move during the run.
+          CHECKED_OUT_HEAD="$(git rev-parse HEAD)"
+          echo "checked_out_head=${CHECKED_OUT_HEAD}" >> "${GITHUB_OUTPUT}"
+
           # Does the branch conflict with base? merge-tree computes the merge
           # without touching the tree; exit 1 means conflicts. UNKNOWN/errors are
           # treated as no-conflict so we never block on a transient state.
@@ -2631,6 +2637,20 @@ jobs:
               | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
               | select((.completedAt // .updatedAt // "") > $wm)
+              | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
+              "${WORKDIR}/checks.json"
+            # Checks that turned red BEFORE the watermark and are STILL red.
+            # The section above only shows checks that failed AFTER the
+            # watermark, so a persistent red (the exact case the scan's
+            # N_RED_NOW gate selects) would leave the agent with an empty
+            # "Failed checks" section and no check name to reproduce.
+            echo
+            echo "## Still-red checks (persisting from before the last evaluation)"
+            jq -r --arg wm "${WATERMARK}" '
+              .[]
+              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") <= $wm)
               | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
             # If the LAST round ended in a gate rejection, show the agent WHY.
@@ -2939,13 +2959,13 @@ jobs:
           # Surfaced in the report footer for diagnosis + attribution; a repo
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
-          # The head the reds were evaluated against. Taken from the REMOTE,
-          # not local HEAD: after a rejected push the two differ, and
-          # recording a sha that never landed would suppress the still-red
-          # checks on the head that actually exists. Empty on failure, which
-          # matches no marker and therefore keeps them visible — fail-open.
-          REPORT_HEAD="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha // ""' 2> /dev/null || echo '')"
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
           # Prepare may have adopted a sibling's live round; the matrix value
           # would double-write that round's marker.
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
@@ -3103,13 +3123,13 @@ jobs:
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
-          # The head the reds were evaluated against. Taken from the REMOTE,
-          # not local HEAD: after a rejected push the two differ, and
-          # recording a sha that never landed would suppress the still-red
-          # checks on the head that actually exists. Empty on failure, which
-          # matches no marker and therefore keeps them visible — fail-open.
-          REPORT_HEAD="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha // ""' 2> /dev/null || echo '')"
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
           SUFFIX=''
@@ -3361,7 +3381,14 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
-              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              # A sentinel ts means the agent evaluated NOTHING (crash, API
+              # error, gate crash) and the next scan must retry. Recording a
+              # judged head here would make RED_HEAD == LIVE_HEAD, so the
+              # retry scan sees N_RED_NOW=0 and goes idle despite the handoff
+              # promising a retry.
+              if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
+                echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi
