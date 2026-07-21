@@ -169,6 +169,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   McpTransportPool: vi.fn().mockImplementation(() => ({
     acquire: vi.fn(),
     release: vi.fn(),
+    releaseSession: vi.fn(),
     shutdown: vi.fn().mockResolvedValue(undefined),
     on: vi.fn(),
     off: vi.fn(),
@@ -431,7 +432,7 @@ describe('QwenAgent loadSession — Phase C worktree context restore', () => {
         installRewriter: vi.fn(),
         installGoalTerminalObserver: vi.fn(),
         startCronScheduler: vi.fn(),
-        dispose: vi.fn(),
+        dispose: vi.fn().mockResolvedValue(undefined),
         pendingWorktreeNotice: null as string | null,
         pendingRecoveredAgentsNotice: null as string | null,
       };
