@@ -481,7 +481,12 @@ export class LoadedSettings {
     }
   }
 
-  setValue(scope: SettingScope, key: string, value: unknown): void {
+  setValue(
+    scope: SettingScope,
+    key: string,
+    value: unknown,
+    assertCanCommit?: () => void,
+  ): void {
     // Never persist a runtime snapshot ID to model.name (it re-wraps on restart).
     if (key === 'model.name' && typeof value === 'string') {
       value = stripRuntimeSnapshotPrefix(value);
@@ -491,6 +496,7 @@ export class LoadedSettings {
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
     const replacePath = key === 'mcpServers' ? key.split('.') : [];
+    assertCanCommit?.();
     saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
   }
 
