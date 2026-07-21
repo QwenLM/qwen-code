@@ -677,7 +677,7 @@ describe('extractToolResults', () => {
     })
   })
 
-  it('does NOT emit task_backgrounded for an explicit foreground Agent with agentId in result', () => {
+  it('does NOT emit task_backgrounded for a foreground non-fork Agent with a launch-shaped result', () => {
     toolIndex.register('toolu_agent', 'Agent', {
       _intent: 'Explore codebase',
       prompt: 'Find auth code',
@@ -685,7 +685,10 @@ describe('extractToolResults', () => {
     })
 
     const blocks: ContentBlock[] = [
-      makeToolResultBlock('toolu_agent', 'Found auth in /src/auth.ts\nagentId: fg_agent_xyz'),
+      makeToolResultBlock(
+        'toolu_agent',
+        'Background agent launched successfully.\nagentId: fg_agent_xyz',
+      ),
     ]
 
     const events = extractToolResults(blocks, null, undefined, toolIndex)

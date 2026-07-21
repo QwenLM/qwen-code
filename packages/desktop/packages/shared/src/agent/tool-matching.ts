@@ -423,6 +423,9 @@ function detectBackgroundEvents(
   const normalizedToolName = entry.name.toLowerCase();
   const isTopLevelQwenAgent =
     normalizedToolName === 'agent' && parentToolUseId === undefined;
+  const isForkAgent =
+    typeof entry.input.subagent_type === 'string' &&
+    entry.input.subagent_type.toLowerCase() === 'fork';
   const defaultsToBackground =
     isTopLevelQwenAgent &&
     entry.input.run_in_background === undefined &&
@@ -431,10 +434,10 @@ function detectBackgroundEvents(
     // Args alone cannot distinguish an interactive detached fork from a
     // headless registry-backed fork. The runtime result check below handles
     // the latter.
-    (typeof entry.input.subagent_type !== 'string' ||
-      entry.input.subagent_type.toLowerCase() !== 'fork');
+    !isForkAgent;
   const runtimeReportedBackground =
     isTopLevelQwenAgent &&
+    isForkAgent &&
     resultStr.startsWith('Background agent launched successfully.');
   const wasRunInBackground =
     runtimeReportedBackground ||
