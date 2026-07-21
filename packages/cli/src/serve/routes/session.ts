@@ -1643,12 +1643,14 @@ export function registerSessionRoutes(
               try {
                 // changeSessionCwd chains onto the prompt queue and
                 // blocks until any in-flight prompt finishes. When the
-                // session is actively running a task this would hang the
-                // HTTP response indefinitely, making the session
-                // unopenable in the Web Shell. Skip the cwd relocation
-                // in that case — the bridge entry already has the
-                // correct cwd from the original spawn, and the metadata
-                // is enough for the UI to show the worktree badge/chip.
+                // session is actively running a task this would stall the
+                // HTTP response (bounded by the ~30s changeSessionCwd
+                // timeout), making the session unopenable in the Web
+                // Shell. Skip the cwd relocation in that case.
+                // Invariant: hasActivePrompt implies a live bridge entry
+                // that was spawned directly in the worktree cwd, so
+                // relocation is unnecessary. A cold-restored session
+                // cannot have an in-flight prompt.
                 if (!session.hasActivePrompt) {
                   await runtime.bridge.changeSessionCwd(sessionId, {
                     path: wt.path,
