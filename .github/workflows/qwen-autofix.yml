@@ -2713,22 +2713,32 @@ jobs:
             # DECLINED or deferred are deliberately left open. Best-effort
             # throughout: a resolve failure must never fail a good push.
             if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
-              THREADS_JSON="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
+              # first-100 page cap: threads beyond this page are not resolved
+              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
                 query($owner:String!,$name:String!,$pr:Int!){
                   repository(owner:$owner,name:$name){
                     pullRequest(number:$pr){
-                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}}}
+                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
                     }
                   }
-                }' --jq '.data.repository.pullRequest.reviewThreads.nodes' 2> /dev/null || echo '[]')"
+                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
+              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
+              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved"
+              fi
               RESOLVED_N=0
               while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
+                rc_id="${rc_id%$'\r'}"
+                rc_id="${rc_id#rc:}"
                 [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
                 thread_id="$(jq -r --argjson id "${rc_id}" \
                   'map(select(.isResolved | not)
                      | select(any(.comments.nodes[]; .databaseId == $id)))
                    | .[0].id // ""' <<< "${THREADS_JSON}")"
-                [[ -n "${thread_id}" ]] || continue
+                if [[ -z "${thread_id}" ]]; then
+                  echo "::warning::comment ${rc_id} matched no open review thread"
+                  continue
+                fi
                 if gh api graphql -f threadId="${thread_id}" -f query='
                   mutation($threadId:ID!){
                     resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}

@@ -3430,23 +3430,26 @@ describe('qwen-autofix workflow', () => {
     writeFileSync(resolvedLog, '');
     writeFileSync(
       join(dir, 'threads.json'),
-      JSON.stringify([
-        {
-          id: 'T_open_1',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 111 }] },
-        },
-        {
-          id: 'T_open_2',
-          isResolved: false,
-          comments: { nodes: [{ databaseId: 222 }] },
-        },
-        {
-          id: 'T_done',
-          isResolved: true,
-          comments: { nodes: [{ databaseId: 333 }] },
-        },
-      ]),
+      JSON.stringify({
+        nodes: [
+          {
+            id: 'T_open_1',
+            isResolved: false,
+            comments: { nodes: [{ databaseId: 111 }] },
+          },
+          {
+            id: 'T_open_2',
+            isResolved: false,
+            comments: { nodes: [{ databaseId: 222 }] },
+          },
+          {
+            id: 'T_done',
+            isResolved: true,
+            comments: { nodes: [{ databaseId: 333 }] },
+          },
+        ],
+        pageInfo: { hasNextPage: false },
+      }),
     );
     writeFileSync(
       join(bin, 'gh'),
@@ -3462,8 +3465,8 @@ describe('qwen-autofix workflow', () => {
     chmodSync(join(bin, 'gh'), 0o755);
     // 111 was implemented; 333's thread is already resolved; 999 matches
     // nothing. 222 was DECLINED, so it is deliberately absent and must stay open.
-    writeFileSync(join(dir, 'resolved-comments.txt'), '111\n333\n999\n');
-    const out = execFileSync('bash', ['-c', `set -uo pipefail\n${block}`], {
+    writeFileSync(join(dir, 'resolved-comments.txt'), 'rc:111\r\n333\n999\n');
+    const out = execFileSync('bash', ['-c', `set -euo pipefail\n${block}`], {
       env: {
         ...process.env,
         PATH: `${bin}:${process.env.PATH}`,
