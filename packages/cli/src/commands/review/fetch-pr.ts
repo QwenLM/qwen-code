@@ -29,6 +29,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { createReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { ensureAuthenticated, gh, setGhHost } from './lib/gh.js';
 import { git, gitOpt, gitRaw, refExists, releaseWorktree } from './lib/git.js';
 import { PINNED_DIFF_CONFIG, PINNED_DIFF_FLAGS } from './lib/diff-flags.js';
@@ -139,11 +140,21 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
 
   ensureAuthenticated();
 
+  const ref = reviewBranch(prNumber);
+  const wt = worktreePath(prNumber);
+  createReviewWorktreeLease({
+    sessionId: process.env['QWEN_CODE_SESSION_ID'],
+    promptId: process.env['QWEN_CODE_PROMPT_ID'],
+    target: `pr-${prNumber}`,
+    repositoryRoot: process.cwd(),
+    worktreePath: wt,
+    branch: ref,
+  });
+
   // 1. Clean any stale worktree / branch from an earlier run.
   cleanStale(prNumber);
 
   // 2. Fetch PR HEAD into a unique local ref.
-  const ref = reviewBranch(prNumber);
   try {
     git('fetch', remote, `pull/${prNumber}/head:${ref}`);
   } catch (err) {
@@ -178,7 +189,6 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
   }
 
   // 4. Create the ephemeral worktree.
-  const wt = worktreePath(prNumber);
   try {
     mkdirSync(dirname(wt), { recursive: true });
     git('worktree', 'add', wt, ref);

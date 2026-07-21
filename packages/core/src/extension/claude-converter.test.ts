@@ -128,6 +128,19 @@ describe('convertClaudeAgentConfig', () => {
 
     expect(result['tools']).toEqual(['ReadFile', 'NotebookEdit', 'Edit']);
   });
+
+  it('should map Claude WebSearch to Qwen WebSearch', () => {
+    // WebSearch used to map to 'None' before qwen-code shipped a built-in
+    // web_search; reverting the mapping would silently strip search from
+    // converted Claude extensions.
+    const result = convertClaudeAgentConfig({
+      name: 'search-agent',
+      description: 'Searches the web',
+      tools: ['WebSearch', 'WebFetch'],
+    });
+
+    expect(result['tools']).toEqual(['WebSearch', 'WebFetch']);
+  });
 });
 
 describe('mergeClaudeConfigs', () => {

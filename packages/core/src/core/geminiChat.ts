@@ -95,7 +95,10 @@ import {
 import type { UiTelemetryService } from '../telemetry/uiTelemetry.js';
 import { type ChatCompressionInfo, CompressionStatus } from './turn.js';
 import { getContextLengthExceededInfo } from '../utils/contextLengthError.js';
-import { isSystemReminderContent } from '../utils/environmentContext.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
@@ -3393,6 +3396,11 @@ export class GeminiChat {
       ? extractCuratedHistory(this.history)
       : this.history;
     return history.map(copyContentContainer);
+  }
+
+  getHistoryForForkWindow(): Content[] {
+    const history = this.history.slice(getStartupContextLength(this.history));
+    return extractCuratedHistory(history).map(copyContentContainer);
   }
 
   /**

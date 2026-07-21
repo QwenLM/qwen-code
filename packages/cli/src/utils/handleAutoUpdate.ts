@@ -7,7 +7,6 @@
 import type { UpdateObject } from '../ui/utils/updateCheck.js';
 import type { LoadedSettings } from '../config/settings.js';
 import {
-  getNpmCliPath,
   getInstallationInfo,
   PackageManager,
   resolveUpdateCommand,
@@ -25,8 +24,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 const debugLogger = createDebugLogger('AUTO_UPDATE');
 
 const UPDATE_SUCCESS_MESSAGE =
-  'Update successful! Please restart Qwen Code to use the new version. ' +
-  'Switching model providers before restarting may not work correctly.';
+  'Update successful! The new version will be used on your next run.';
 const UPDATE_FAILED_MESSAGE =
   'Automatic update failed. Please try updating manually.';
 
@@ -97,51 +95,68 @@ export function handleAutoUpdate(
   );
   const platform = os.platform();
   const isWindows = platform === 'win32';
-  const command =
-    installationInfo.packageManager === PackageManager.NPM
-      ? process.execPath
-      : isWindows
-        ? 'cmd.exe'
-        : 'bash';
-  const commandArgs =
-    installationInfo.packageManager === PackageManager.NPM
-      ? [
-          getNpmCliPath(process.execPath, platform),
-          ...updateCommand.split(' ').slice(1),
-        ]
-      : isWindows
-        ? ['/c', updateCommand]
-        : ['-c', updateCommand];
+  const isManagedNpmUpdate =
+    installationInfo.packageManager === PackageManager.NPM;
+  const command = isManagedNpmUpdate
+    ? process.execPath
+    : isWindows
+      ? 'cmd.exe'
+      : 'bash';
+  const commandArgs = isManagedNpmUpdate
+    ? [process.argv[1]!]
+    : isWindows
+      ? ['/c', updateCommand]
+      : ['-c', updateCommand];
   const updateProcess = spawnFn(command, commandArgs, {
-    stdio: ['pipe', 'ignore', 'pipe'],
+    ...(isManagedNpmUpdate
+      ? {
+          detached: true,
+          env: {
+            ...process.env,
+            QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: info.update.latest,
+          },
+          stdio: ['ignore', 'ignore', 'pipe'] as const,
+          windowsHide: true,
+        }
+      : { stdio: ['pipe', 'ignore', 'pipe'] as const }),
   });
   let errorOutput = '';
-  updateProcess.stderr.on('data', (data) => {
+  updateProcess.stderr?.on('data', (data) => {
     errorOutput += data.toString();
   });
 
-  updateProcess.on('close', (code) => {
-    if (code === 0) {
-      updateEventEmitter.emit('update-success', {
-        message: t(UPDATE_SUCCESS_MESSAGE),
-      });
-    } else {
-      debugLogger.warn(
-        `Automatic update command failed: ${updateCommand}; stderr: ${errorOutput.trim()}`,
+  return new Promise<boolean>((resolve) => {
+    let settled = false;
+    const finish = (error?: unknown) => {
+      if (settled) return;
+      settled = true;
+      try {
+        if (error) throw error;
+        updateEventEmitter.emit('update-success', {
+          message: t(UPDATE_SUCCESS_MESSAGE),
+        });
+        resolve(true);
+      } catch (error) {
+        debugLogger.warn('Automatic update failed:', error);
+        updateEventEmitter.emit('update-failed', {
+          message: t(UPDATE_FAILED_MESSAGE),
+        });
+        resolve(false);
+      }
+    };
+    updateProcess.once('close', (code) => {
+      finish(
+        code === 0
+          ? undefined
+          : new Error(
+              `Command failed: ${updateCommand}; stderr: ${errorOutput.trim()}`,
+            ),
       );
-      updateEventEmitter.emit('update-failed', {
-        message: t(UPDATE_FAILED_MESSAGE),
-      });
-    }
-  });
-
-  updateProcess.on('error', (err) => {
-    debugLogger.warn('Automatic update command failed to start:', err);
-    updateEventEmitter.emit('update-failed', {
-      message: t(UPDATE_FAILED_MESSAGE),
+    });
+    updateProcess.once('error', (error) => {
+      finish(error);
     });
   });
-  return updateProcess;
 }
 
 export function setUpdateHandler(
@@ -174,10 +189,16 @@ export function setUpdateHandler(
     }, 60000);
   };
 
-  const handleUpdateFailed = (data?: { message?: string }) => {
+  const handleUpdateFailed = (data?: {
+    message?: string;
+    severity?: 'error' | 'warning';
+  }) => {
     setUpdateInfo(null);
     addItemOrDefer({
-      type: MessageType.ERROR,
+      // Background update-check failures are emitted with severity 'warning'
+      // (#7049); actual update installation failures stay errors.
+      type:
+        data?.severity === 'warning' ? MessageType.WARNING : MessageType.ERROR,
       text: data?.message ?? t(UPDATE_FAILED_MESSAGE),
     });
   };

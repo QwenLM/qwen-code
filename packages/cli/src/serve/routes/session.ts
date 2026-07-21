@@ -50,10 +50,7 @@ import {
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
-import {
-  PromptDeadlineExceededError,
-  resolvePromptDeadlineMs,
-} from '../server/prompt-deadline.js';
+import { resolvePromptDeadlineMs } from '../server/prompt-deadline.js';
 import {
   parseClientIdHeader,
   parseOptionalWorkspaceCwd,
@@ -1646,10 +1643,23 @@ export function registerSessionRoutes(
                 branch: sidecar.worktreeBranch,
               };
               try {
-                await runtime.bridge.changeSessionCwd(sessionId, {
-                  path: wt.path,
-                  allowedRoots: candidateRoots,
-                });
+                // changeSessionCwd chains onto the prompt queue and
+                // blocks until any in-flight prompt finishes. When the
+                // session is actively running a task this would stall the
+                // HTTP response (bounded by the ~30s changeSessionCwd
+                // timeout), making the session unopenable in the Web
+                // Shell. Skip the cwd relocation in that case.
+                // Invariant: hasActivePrompt implies a live bridge entry
+                // that was relocated into the worktree cwd at creation
+                // (before any prompt could run), so relocation is
+                // unnecessary. A cold-restored session cannot have an
+                // in-flight prompt.
+                if (!session.hasActivePrompt) {
+                  await runtime.bridge.changeSessionCwd(sessionId, {
+                    path: wt.path,
+                    allowedRoots: candidateRoots,
+                  });
+                }
                 runtime.bridge.setSessionWorktree(sessionId, wt);
                 session.worktree = wt;
               } catch (restoreErr) {
@@ -2356,19 +2366,16 @@ export function registerSessionRoutes(
         };
         res.once('close', onResClose);
         res.once('finish', onResFinish);
+        // The effective deadline (server cap ∩ request override) is passed
+        // to the bridge, which owns the deadline race: it publishes the
+        // formal `turn_error{code:'prompt_deadline_exceeded'}` terminal,
+        // releases the per-session FIFO, and best-effort cancels the agent.
+        // A route-side timer can't do any of that — it could only abort
+        // this request's signal.
         const effectiveDeadlineMs = resolvePromptDeadlineMs(
           promptDeadlineMs,
           requestDeadlineMs,
         );
-        let deadlineTimer: NodeJS.Timeout | undefined;
-        if (effectiveDeadlineMs !== undefined) {
-          deadlineTimer = setTimeout(() => {
-            if (!abort.signal.aborted) {
-              abort.abort(new PromptDeadlineExceededError(effectiveDeadlineMs));
-            }
-          }, effectiveDeadlineMs);
-          deadlineTimer.unref();
-        }
 
         let promptPromise: ReturnType<AcpSessionBridge['sendPrompt']>;
         try {
@@ -2383,6 +2390,9 @@ export function registerSessionRoutes(
             {
               ...(clientId !== undefined ? { clientId } : {}),
               promptId,
+              ...(effectiveDeadlineMs !== undefined
+                ? { deadlineMs: effectiveDeadlineMs }
+                : {}),
               ...(delivery !== undefined
                 ? {
                     channelDelivery: {
@@ -2399,7 +2409,6 @@ export function registerSessionRoutes(
             sessionId,
             promptId,
           );
-          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
           res.off('close', onResClose);
           res.off('finish', onResFinish);
           if (daemonLog && err instanceof PromptQueueFullError) {
@@ -2448,7 +2457,6 @@ export function registerSessionRoutes(
             },
           )
           .finally(() => {
-            if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
             if (delivery && deps.channelDeliveryAuthorizations) {
               const revokeTimer = setTimeout(() => {
                 deps.channelDeliveryAuthorizations?.revokePrompt(

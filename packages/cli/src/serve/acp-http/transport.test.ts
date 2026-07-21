@@ -192,6 +192,7 @@ class FakeBridge {
   }
 
   loadShouldThrow = false;
+  loadError: unknown;
 
   async loadSession(req: {
     sessionId: string;
@@ -199,6 +200,7 @@ class FakeBridge {
     clientId?: string;
   }) {
     this.loadRequests.push(req);
+    if (this.loadError !== undefined) throw this.loadError;
     if (this.loadShouldThrow) throw new Error('load failed');
     if (this.gate) await this.gate;
     return {
@@ -3658,6 +3660,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/load preserves sanitized session writer RPC errors', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440322';
+      await writeStoredSession(sessionId);
+      bridge.loadError = Object.assign(new Error('private lock details'), {
+        code: -32020,
+        data: { errorKind: 'session_writer_conflict' },
+      });
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 213,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { errorKind?: string };
+        };
+      }>;
+      expect(frame).toEqual({
+        id: 213,
+        error: {
+          code: -32020,
+          message: 'This session is already open in another Qwen process.',
+          data: { errorKind: 'session_writer_conflict' },
+        },
+        jsonrpc: '2.0',
+      });
+    });
+  });
+
   it('session/load holds archive gate while restore is in flight', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440124';
@@ -4544,6 +4586,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('session/close runs local cleanup even if the bridge close throws', async () => {
     bridge.closeShouldThrow = true;
+    bridge.getSessionSummary = () => {
+      throw new Error('session already gone');
+    };
     const connId = await initialize();
     await newSession(connId); // creates + owns sess-1
     await new Promise((r) => setTimeout(r, 30));
@@ -4558,6 +4603,35 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Local teardown ran in `finally` despite the throw → session unowned now.
     const after = await openStream(connId, 'sess-1');
     expect(after.status).toBe(403);
+  });
+
+  it('session/close can be retried when the bridge reports a live refusal', async () => {
+    bridge.closeError = new Error('close drain refused');
+    const connId = await initialize();
+    await newSession(connId);
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 146,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    const stillOwned = await openStream(connId, 'sess-1');
+    expect(stillOwned.status).toBe(200);
+
+    bridge.closeError = undefined;
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 147,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.closedSessions).toEqual(['sess-1', 'sess-1']);
+    const closed = await openStream(connId, 'sess-1');
+    expect(closed.status).toBe(403);
+    await stillOwned.body?.cancel().catch(() => {});
   });
 
   it('connection cap → 503 on initialize', async () => {
