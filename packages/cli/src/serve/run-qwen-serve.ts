@@ -4322,6 +4322,7 @@ async function runQwenServeImpl(
               await runtimeToDrain.bridge.shutdown({ reason });
             }
             bridgeStopped = true;
+            runtimeToDrain.runtimeCoordinator?.completeDisposeAfterBridgeShutdown();
           } finally {
             if (bridgeStopped || reason === 'workspace_removed') {
               subSessionStoppersByWorkspace.delete(runtimeToDrain.workspaceCwd);

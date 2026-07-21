@@ -163,6 +163,39 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('records MCP management as workspace activity', async () => {
+    vi.useFakeTimers();
+    try {
+      const handle = makeChannel({
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.workspaceMcpManage
+            ? {
+                serverName: 'aone',
+                action: 'disable',
+                ok: true,
+              }
+            : method === SERVE_STATUS_EXT_METHODS.workspaceMcp
+              ? { discoveryState: 'completed', servers: [] }
+              : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+
+      vi.setSystemTime(1_000);
+      await bridge.preheat();
+      expect(bridge.lastActivityAt).toBeNull();
+      vi.setSystemTime(2_000);
+
+      await bridge.manageMcpServer('aone', 'disable', undefined);
+
+      expect(bridge.lastActivityAt).toBe(2_000);
+      await bridge.shutdown();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not start MCP management after its channel deadline expires', async () => {
     vi.useFakeTimers();
     const releaseFactory = deferred<void>();
@@ -16740,11 +16773,87 @@ describe('activePromptCount and lastActivityAt', () => {
 
     await bridge.killSession(session.sessionId);
 
-    expect(handle.agent.cancelCalls).toHaveLength(1);
-    expect(handle.agent.cancelCalls[0]?.sessionId).toBe(session.sessionId);
+    await vi.waitFor(() =>
+      expect(handle.agent.cancelCalls.length).toBeGreaterThan(0),
+    );
+    expect(handle.agent.cancelCalls).toContainEqual({
+      sessionId: session.sessionId,
+    });
 
     await promptResult;
     await bridge.shutdown();
+  });
+
+  it('killSession does not wait for a blocked cancel notification write', async () => {
+    let rejectPrompt: ((error?: unknown) => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: () =>
+        new Promise<PromptResponse>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      cancelImpl: () => {
+        rejectPrompt?.(new Error('cancelled'));
+      },
+    });
+    const originalStream = handle.channel.stream;
+    const originalWriter = originalStream.writable.getWriter();
+    let cancelWriteAttempted = false;
+    let releaseCancelWrite!: () => void;
+    const cancelWrite = new Promise<void>((resolve) => {
+      releaseCancelWrite = resolve;
+    });
+    handle.channel.stream = {
+      readable: originalStream.readable,
+      writable: new WritableStream({
+        async write(message) {
+          if ((message as { method?: unknown }).method === 'session/cancel') {
+            cancelWriteAttempted = true;
+            await cancelWrite;
+            return;
+          }
+          await originalWriter.write(message);
+        },
+      }),
+    };
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const promptResult = bridge
+      .sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'test' }],
+      })
+      .catch(() => undefined);
+
+    await vi.waitFor(() => {
+      expect(handle.agent.promptCalls).toHaveLength(1);
+    });
+    const kill = bridge.killSession(session.sessionId);
+    let timeout: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await expect(
+        Promise.race([
+          kill,
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(
+              () => reject(new Error('killSession blocked on cancel write')),
+              500,
+            );
+          }),
+        ]),
+      ).resolves.toBe(true);
+      await vi.waitFor(() => expect(cancelWriteAttempted).toBe(true));
+      expect(bridge.sessionCount).toBe(0);
+    } finally {
+      if (timeout) clearTimeout(timeout);
+      releaseCancelWrite();
+      rejectPrompt?.(new Error('cancelled'));
+      await kill.catch(() => undefined);
+      await promptResult;
+      originalWriter.releaseLock();
+      await bridge.shutdown();
+    }
   });
 
   it('activePromptCount returns to 0 when channel crashes during a hung prompt', async () => {

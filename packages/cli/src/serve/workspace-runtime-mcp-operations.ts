@@ -80,6 +80,8 @@ async function waitUntilDeadline<T>(
   }
 }
 
+// ACP OAuth uses a process-global callback listener, so authentication must be
+// serialized across every workspace runtime in the daemon.
 let activeMcpAuthentication:
   | {
       owner: object;
@@ -165,7 +167,7 @@ export class WorkspaceRuntimeMcpOperations {
     if (action === 'authenticate' && activeMcpAuthentication) {
       throw new WorkspaceRuntimeMcpOperationConflictError(
         'mcp_authentication_lane_busy',
-        'Another MCP authentication is already in progress',
+        'Another MCP authentication is already in progress in this daemon',
       );
     }
     const operationId = crypto.randomUUID();
@@ -289,13 +291,25 @@ export class WorkspaceRuntimeMcpOperations {
       }
     }
     this.activeOperationByTarget.clear();
-    if (activeMcpAuthentication?.owner === this.authenticationLaneOwner) {
+    if (
+      activeMcpAuthentication?.owner === this.authenticationLaneOwner &&
+      !this.runtime.bridge.isChannelLive()
+    ) {
       activeMcpAuthentication = undefined;
     }
     if (this.authenticationBarrier) {
       const barrier = this.authenticationBarrier;
       this.authenticationBarrier = undefined;
       barrier.release();
+    }
+  }
+
+  completeDisposeAfterBridgeShutdown(): void {
+    if (
+      this.disposed &&
+      activeMcpAuthentication?.owner === this.authenticationLaneOwner
+    ) {
+      activeMcpAuthentication = undefined;
     }
   }
 
@@ -349,7 +363,8 @@ export class WorkspaceRuntimeMcpOperations {
     }
     if (
       activeMcpAuthentication?.owner === this.authenticationLaneOwner &&
-      activeMcpAuthentication.operationId === operationId
+      activeMcpAuthentication.operationId === operationId &&
+      (!this.disposed || !this.runtime.bridge.isChannelLive())
     ) {
       activeMcpAuthentication = undefined;
     }

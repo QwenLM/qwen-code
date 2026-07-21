@@ -242,6 +242,10 @@ export class WorkspaceRuntimeCoordinator {
     this.capabilityPhysicalTail.clear();
   }
 
+  completeDisposeAfterBridgeShutdown(): void {
+    this.mcpOperations.completeDisposeAfterBridgeShutdown();
+  }
+
   private runtimeEpoch(): number {
     return (
       this.runtime.bridge.getRuntimeEpoch?.() ??

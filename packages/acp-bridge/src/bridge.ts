@@ -7430,6 +7430,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ),
         `${SERVE_CONTROL_EXT_METHODS.workspaceMcpManage} channel`,
       );
+      touchActivity();
       const authenticationOperationId =
         action === 'authenticate' ? (operationId ?? randomUUID()) : undefined;
       try {
@@ -7858,11 +7859,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       await notifyAgentSessionClose(entry, ci, 'killSession');
       if (hadActivePrompt) {
-        try {
-          await entry.connection.cancel({ sessionId });
-        } catch {
+        void entry.connection.cancel({ sessionId }).catch(() => {
           /* prompt already settled or session already torn down */
-        }
+        });
       }
       // Tombstone the killed sessionId so any in-flight
       // `extNotification` from the (about-to-be-killed) child can't

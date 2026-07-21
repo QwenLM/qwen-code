@@ -1483,9 +1483,9 @@ describe('WorkspaceRuntimeCoordinator', () => {
   });
 
   it('serializes OAuth authentication across workspace runtimes', async () => {
-    const first = new WorkspaceRuntimeCoordinator(
-      makeRuntime('/workspace-a').runtime,
-    );
+    const firstRuntime = makeRuntime('/workspace-a');
+    firstRuntime.setLive(true);
+    const first = new WorkspaceRuntimeCoordinator(firstRuntime.runtime);
     const second = new WorkspaceRuntimeCoordinator(
       makeRuntime('/workspace-b').runtime,
     );
@@ -1499,10 +1499,17 @@ describe('WorkspaceRuntimeCoordinator', () => {
         })),
       ).rejects.toMatchObject({
         code: 'mcp_authentication_lane_busy',
-        message: 'Another MCP authentication is already in progress',
+        message:
+          'Another MCP authentication is already in progress in this daemon',
       });
 
       first.dispose();
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({})),
+      ).rejects.toMatchObject({ code: 'mcp_authentication_lane_busy' });
+
+      firstRuntime.setLive(false);
+      first.completeDisposeAfterBridgeShutdown();
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
       ).resolves.toMatchObject({ operationId: expect.any(String) });
@@ -1938,7 +1945,7 @@ describe('WorkspaceRuntimeCoordinator', () => {
     expect(h.reloadWorkspaceMcp).toHaveBeenCalledTimes(2);
   });
 
-  it('releases the OAuth lane and barrier on dispose even while the channel is live', async () => {
+  it('releases the local barrier on dispose but holds the OAuth lane until bridge shutdown', async () => {
     const h = makeRuntime();
     h.setLive(true);
     const coordinator = new WorkspaceRuntimeCoordinator(h.runtime);
@@ -1951,9 +1958,17 @@ describe('WorkspaceRuntimeCoordinator', () => {
       }));
       expect(coordinator.hasActiveWork()).toBe(true);
 
+      const queued = coordinator.runMcpRuntimeMutation(async () => ({}));
       coordinator.dispose();
 
       expect(coordinator.hasActiveWork()).toBe(false);
+      await expect(queued).rejects.toThrow('Workspace runtime was disposed');
+      await expect(
+        second.runMcpOperation('calendar', 'authenticate', async () => ({})),
+      ).rejects.toMatchObject({ code: 'mcp_authentication_lane_busy' });
+
+      h.setLive(false);
+      coordinator.completeDisposeAfterBridgeShutdown();
       await expect(
         second.runMcpOperation('calendar', 'authenticate', async () => ({})),
       ).resolves.toMatchObject({ operationId: expect.any(String) });
