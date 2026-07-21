@@ -182,9 +182,8 @@ function persistBackgroundCancellation(
 }
 
 function isWhitespaceOnlyAssistant(record: ChatRecord): boolean {
-  if (record.type !== 'assistant' || !record.message?.parts?.length) {
-    return false;
-  }
+  if (record.type !== 'assistant') return false;
+  if (!record.message?.parts?.length) return true;
   const hasFunctionCall = record.message.parts.some(
     (part) => !!part.functionCall,
   );

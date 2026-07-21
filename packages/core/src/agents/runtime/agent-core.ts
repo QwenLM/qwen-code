@@ -990,7 +990,7 @@ export class AgentCore {
           break;
         }
 
-        if (roundText || roundThoughtText || lastUsage) {
+        if (roundText || roundThoughtText) {
           this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
             subagentId: this.subagentId,
             round: turnCounter,

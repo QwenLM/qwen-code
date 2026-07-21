@@ -381,7 +381,7 @@ describe('agent-transcript', () => {
       cleanup();
     });
 
-    it('drops empty ROUND_TEXT to keep the canonical view free of noise', () => {
+    it('drops usage-only ROUND_TEXT to keep the canonical view valid', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
 
@@ -390,6 +390,7 @@ describe('agent-transcript', () => {
         round: 1,
         text: '',
         thoughtText: '',
+        usageMetadata: { totalTokenCount: 42 },
         timestamp: Date.now(),
       });
       cleanup();

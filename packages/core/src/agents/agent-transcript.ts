@@ -424,7 +424,7 @@ export function attachJsonlTranscriptWriter(
   };
 
   const onRoundText = (event: AgentRoundTextEvent) => {
-    if (!event.text && !event.thoughtText && !event.usageMetadata) return;
+    if (!event.text && !event.thoughtText) return;
     append({
       ...baseFields('assistant'),
       message: {
