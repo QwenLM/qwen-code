@@ -1304,6 +1304,41 @@ describe('App session callbacks', () => {
     );
   });
 
+  it('rejects when the daemon does not confirm persistent registration', async () => {
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.addWorkspace.mockResolvedValue({
+      id: 'payments',
+      cwd: '/tmp/payments',
+      primary: false,
+      trusted: true,
+      persisted: false,
+    });
+    renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onOpenExistingWorkspace?.();
+    });
+
+    await expect(
+      testState.latestAddWorkspaceDialogProps?.onAdd('/tmp/payments', true),
+    ).rejects.toThrow(
+      'The daemon did not confirm persistent workspace registration',
+    );
+  });
+
   it('surfaces an inline error when an added folder cannot refresh capabilities', async () => {
     const added = {
       id: 'payments',
@@ -1430,6 +1465,128 @@ describe('App session callbacks', () => {
 
     expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledOnce();
     expect(document.body.textContent).toContain('I checked the workspace list');
+
+    const ackButton = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'I checked the workspace list');
+    expect(ackButton).toBeDefined();
+    mockWorkspaceActions.addScratchWorkspace.mockResolvedValue({
+      id: 'scratch-2',
+      cwd: '/managed/scratch-2',
+      primary: false,
+      trusted: true,
+      persisted: false,
+    });
+    mockWorkspace.refreshCapabilities.mockResolvedValue({
+      features: ['scratch_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'scratch-2',
+          cwd: '/managed/scratch-2',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+    await act(async () => {
+      ackButton?.click();
+      await vi.waitFor(() => {
+        expect(document.body.textContent).not.toContain(
+          'I checked the workspace list',
+        );
+      });
+    });
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledTimes(
+          2,
+        );
+      });
+    });
+  });
+
+  it('reports a definitive 4xx rejection without locking scratch creation', async () => {
+    mockWorkspace.capabilities = {
+      features: ['scratch_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { DaemonHttpError: MockDaemonHttpError } = await import(
+      '@qwen-code/sdk/daemon'
+    );
+    mockWorkspaceActions.addScratchWorkspace.mockRejectedValue(
+      new MockDaemonHttpError(403, {}, 'Forbidden'),
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    renderApp();
+    await flush();
+
+    await act(async () => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledOnce();
+      });
+    });
+    await flush();
+
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell]',
+      expect.stringContaining('Forbidden'),
+      expect.anything(),
+    );
+    expect(document.body.textContent).not.toContain(
+      'I checked the workspace list',
+    );
+
+    mockWorkspaceActions.addScratchWorkspace.mockResolvedValue({
+      id: 'scratch-3',
+      cwd: '/managed/scratch-3',
+      primary: false,
+      trusted: true,
+      persisted: false,
+    });
+    mockWorkspace.refreshCapabilities.mockResolvedValue({
+      features: ['scratch_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'scratch-3',
+          cwd: '/managed/scratch-3',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    });
+    await act(async () => {
+      testState.latestChatEditorProps?.onCreateScratchWorkspace?.();
+      await vi.waitFor(() => {
+        expect(mockWorkspaceActions.addScratchWorkspace).toHaveBeenCalledTimes(
+          2,
+        );
+      });
+    });
+    consoleError.mockRestore();
   });
 
   it('falls back to primary when the draft workspace becomes untrusted', async () => {
@@ -1584,6 +1741,44 @@ describe('App session callbacks', () => {
         expect(mockSessionActions.clearSession).toHaveBeenCalled();
       });
     });
+
+    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('executes one clear when two workspace-switch intents arrive in the same tick', async () => {
+    mockConnection.sessionId = 'session-1';
+    mockConnection.workspaceCwd = '/tmp/project';
+    mockWorkspace.capabilities = {
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+        {
+          id: 'secondary',
+          cwd: '/work/secondary',
+          primary: false,
+          trusted: true,
+        },
+        {
+          id: 'tertiary',
+          cwd: '/work/tertiary',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    renderApp();
+    await flush();
+
+    mockSessionActions.clearSession.mockClear();
+    act(() => {
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/secondary');
+      testState.latestChatEditorProps?.onSelectWorkspace?.('/work/tertiary');
+    });
+    await flush();
 
     expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
   });

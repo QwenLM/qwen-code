@@ -915,6 +915,7 @@ const EN: Messages = {
   'sidebar.addWorkspaceRegister': 'Register',
   'sidebar.addWorkspaceCancel': 'Cancel',
   'sidebar.addWorkspaceError': 'Failed to add workspace',
+  'sidebar.addWorkspaceBusyError': 'Another workspace operation is in progress',
   'sidebar.addWorkspacePersistenceError':
     'The daemon did not confirm persistent workspace registration',
   'sidebar.addWorkspaceRefreshError':
@@ -3090,6 +3091,7 @@ const ZH: Messages = {
   'sidebar.addWorkspaceRegister': '注册',
   'sidebar.addWorkspaceCancel': '取消',
   'sidebar.addWorkspaceError': '添加工作区失败',
+  'sidebar.addWorkspaceBusyError': '另一个工作区操作正在进行中',
   'sidebar.addWorkspacePersistenceError': '守护进程未确认工作区已持久化注册',
   'sidebar.addWorkspaceRefreshError': '工作区已添加，但无法刷新工作区列表',
   'sidebar.addWorkspaceAbsError': '路径必须是绝对路径',

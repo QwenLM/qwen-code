@@ -4090,7 +4090,9 @@ export function App({
   /** Registers an existing directory through the shared mutation lane. */
   const handleAddWorkspace = useCallback(
     async (cwd: string, persist: boolean, displayName?: string) => {
-      if (workspaceMutationTokenRef.current) return;
+      if (workspaceMutationTokenRef.current) {
+        throw new Error(t('sidebar.addWorkspaceBusyError'));
+      }
       const token = Symbol('workspace-mutation');
       workspaceMutationTokenRef.current = token;
       setWorkspaceMutationBusy(true);
@@ -4183,7 +4185,8 @@ export function App({
       }
     } catch (error) {
       const definitelyRejected =
-        error instanceof DaemonHttpError && error.status < 500;
+        error instanceof DaemonHttpError &&
+        (error.status < 500 || error.status === 501);
       if (definitelyRejected) {
         reportError(error, t('sidebar.addWorkspaceError'));
       } else {
