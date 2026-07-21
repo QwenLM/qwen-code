@@ -169,11 +169,11 @@ beforeAll(async () => {
     // un-cleared timer outlives the spawn promise and keeps the
     // vitest event loop alive past the test, manifesting as
     // intermittent `Test timed out` retries on slow CI.
-    // 30s matches the beforeAll timeout and gives docker sandbox enough
-    // headroom for cold-start TS compilation + disk I/O.
+    // 25s is strictly below the 30s beforeAll backstop so this
+    // descriptive rejection fires first on a genuine boot hang.
     const bootTimer = setTimeout(
       () => reject(new Error('daemon boot timeout')),
-      30_000,
+      25_000,
     );
     const onData = (chunk: Buffer) => {
       buf += chunk.toString();
