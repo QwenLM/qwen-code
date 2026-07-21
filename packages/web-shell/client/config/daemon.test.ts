@@ -98,6 +98,7 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
 describe('getDaemonToken', () => {
   beforeEach(() => {
     vi.resetModules();
+    window.sessionStorage.clear();
   });
 
   function setupToken(search: string, hash: string) {
@@ -112,6 +113,9 @@ describe('getDaemonToken', () => {
     setupToken('', '#token=frag-secret');
     const mod = await import('./daemon');
     expect(mod.getDaemonToken()).toBe('frag-secret');
+    expect(window.sessionStorage.getItem('qwen-code-daemon-token')).toBe(
+      'frag-secret',
+    );
   });
 
   it('falls back to the query parameter', async () => {
@@ -124,6 +128,30 @@ describe('getDaemonToken', () => {
     setupToken('?token=query-secret', '#token=frag-secret');
     const mod = await import('./daemon');
     expect(mod.getDaemonToken()).toBe('frag-secret');
+  });
+
+  it('restores the token from session storage after a page refresh', async () => {
+    setupToken('', '#token=frag-secret');
+    const initialLoad = await import('./daemon');
+    expect(initialLoad.getDaemonToken()).toBe('frag-secret');
+
+    vi.resetModules();
+    setupToken('', '');
+    const refreshedPage = await import('./daemon');
+    expect(refreshedPage.getDaemonToken()).toBe('frag-secret');
+    expect(refreshedPage.getDaemonAuthHeaders()).toEqual({
+      Authorization: 'Bearer frag-secret',
+    });
+  });
+
+  it('overwrites a stored token with a token from the URL', async () => {
+    window.sessionStorage.setItem('qwen-code-daemon-token', 'old-secret');
+    setupToken('', '#token=new-secret');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('new-secret');
+    expect(window.sessionStorage.getItem('qwen-code-daemon-token')).toBe(
+      'new-secret',
+    );
   });
 
   it('returns undefined when neither is present', async () => {

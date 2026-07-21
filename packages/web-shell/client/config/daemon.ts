@@ -8,6 +8,7 @@ export function getDaemonBaseUrl(): string {
 }
 
 let cachedDaemonToken: string | undefined;
+const DAEMON_TOKEN_STORAGE_KEY = 'qwen-code-daemon-token';
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
 
@@ -23,10 +24,25 @@ export function getDaemonToken(): string | undefined {
   const fromHash = new URLSearchParams(
     window.location.hash.replace(/^#/, ''),
   ).get('token');
-  cachedDaemonToken =
+  const fromUrl =
     fromHash ||
     new URLSearchParams(window.location.search).get('token') ||
     undefined;
+  if (fromUrl) {
+    cachedDaemonToken = fromUrl;
+    try {
+      window.sessionStorage.setItem(DAEMON_TOKEN_STORAGE_KEY, fromUrl);
+    } catch {
+      // Ignore storage failures in private browsing or locked-down browsers.
+    }
+    return cachedDaemonToken;
+  }
+  try {
+    cachedDaemonToken =
+      window.sessionStorage.getItem(DAEMON_TOKEN_STORAGE_KEY) || undefined;
+  } catch {
+    cachedDaemonToken = undefined;
+  }
   return cachedDaemonToken;
 }
 
