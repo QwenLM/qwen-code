@@ -47,6 +47,8 @@ const RESULT_ENVELOPE_HEADROOM_CHARS = 2_000;
 const MAX_STREAM_CHARS = 2_000_000;
 /** Search-returned URLs that were not opened are capped in the LLM payload. */
 const MAX_CANDIDATE_URLS = 25;
+/** Opened-page URLs are capped symmetrically so the URL sections stay bounded. */
+const MAX_OPENED_URLS = 25;
 const NO_SEARCH_RETRY_BASE_DELAY_MS = 750;
 const NO_SEARCH_RETRY_JITTER_MS = 500;
 
@@ -484,8 +486,10 @@ function formatLlmContent(
   data: CollectedSearchData,
   partialNote: string | undefined,
 ): string {
-  const opened = data.openedUrls;
-  const unopened = data.candidateUrls.filter((url) => !opened.includes(url));
+  const allOpened = data.openedUrls;
+  const opened = allOpened.slice(0, MAX_OPENED_URLS);
+  const omittedOpened = allOpened.length - opened.length;
+  const unopened = data.candidateUrls.filter((url) => !allOpened.includes(url));
   const candidates = unopened.slice(0, MAX_CANDIDATE_URLS);
   const omittedCandidates = unopened.length - candidates.length;
 
@@ -500,7 +504,10 @@ function formatLlmContent(
     if (opened.length > 0) {
       sections.push(
         'Opened evidence pages (read in full by the search agent):\n' +
-          opened.map((url) => `- ${url}`).join('\n'),
+          opened.map((url) => `- ${url}`).join('\n') +
+          (omittedOpened > 0
+            ? `\n[Note: ${omittedOpened} more opened page(s) omitted.]`
+            : ''),
       );
     }
     if (candidates.length > 0) {
@@ -660,6 +667,9 @@ class WebSearchToolInvocation extends BaseToolInvocation<
       tools,
     } as unknown as OpenAI.Responses.ResponseCreateParamsStreaming;
 
+    // The SDK client also has maxRetries: 1, so worst-case request count
+    // exceeds maxAttempts; the shared 60s AbortSignal.timeout bounds total
+    // wall time regardless.
     const maxAttempts = 2;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       let finalResponse: WsResponse | undefined;
@@ -710,7 +720,10 @@ class WebSearchToolInvocation extends BaseToolInvocation<
               if (event.item) {
                 partialItems.push(event.item);
                 streamedChars += JSON.stringify(event.item).length;
-                if (event.item.type === 'web_search_call') {
+                if (
+                  event.item.type === 'web_search_call' &&
+                  event.item.status !== 'failed'
+                ) {
                   const sources = event.item.action?.sources?.length ?? 0;
                   if (sources > 0) {
                     updateOutput?.(`Found ${sources} sources`);

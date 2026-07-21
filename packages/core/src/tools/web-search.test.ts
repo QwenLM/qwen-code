@@ -667,6 +667,33 @@ describe('WebSearchTool execute', () => {
     expect(content).toContain('15 more candidate URL(s) omitted');
   });
 
+  it('caps opened URLs and notes the omission', async () => {
+    const manyOpened = Array.from(
+      { length: 30 },
+      (_, i) => `https://example.com/opened/${i}`,
+    );
+    mockCreate.mockResolvedValueOnce(
+      makeStream(
+        completedEvents([
+          SEARCH_ITEM,
+          {
+            type: 'web_extractor_call',
+            status: 'completed',
+            urls: manyOpened,
+            output: 'content',
+          },
+          MESSAGE_ITEM,
+        ]),
+      ),
+    );
+    const result = await runSearch(makeConfig());
+    const content = result.llmContent as string;
+    expect(content).toContain('Opened evidence pages');
+    expect(content).toContain('https://example.com/opened/24');
+    expect(content).not.toContain('https://example.com/opened/25');
+    expect(content).toContain('5 more opened page(s) omitted');
+  });
+
   it('maps HTTP 429 to WEB_SEARCH_RATE_LIMITED', async () => {
     mockCreate.mockRejectedValueOnce(
       Object.assign(new Error('Too many requests'), { status: 429 }),
@@ -1008,6 +1035,48 @@ describe('WebSearchTool execute', () => {
     });
     expect(updates).toContain('Searching: test query');
     expect(updates).toContain('Found 2 sources');
+  });
+
+  it('does not report sources for a failed web_search_call', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream([
+        { type: 'response.created' },
+        {
+          type: 'response.output_item.done',
+          item: {
+            type: 'web_search_call',
+            status: 'failed',
+            action: {
+              queries: ['test query'],
+              sources: [{ type: 'url', url: 'https://example.com/x' }],
+            },
+          },
+        },
+        {
+          type: 'response.output_item.done',
+          item: SEARCH_ITEM,
+        },
+        { type: 'response.output_item.done', item: MESSAGE_ITEM },
+        {
+          type: 'response.completed',
+          response: {
+            status: 'completed',
+            output: [SEARCH_ITEM, MESSAGE_ITEM],
+          },
+        },
+      ]),
+    );
+    const tool = new WebSearchTool(makeConfig());
+    const invocation = tool.build({ query: 'test query' });
+    const updates: string[] = [];
+    await invocation.execute(new AbortController().signal, (output) => {
+      if (typeof output === 'string') updates.push(output);
+    });
+    // The failed item's sources must not produce a progress update; only
+    // the completed SEARCH_ITEM (2 sources) should.
+    expect(updates.filter((u) => u.startsWith('Found'))).toEqual([
+      'Found 2 sources',
+    ]);
   });
 
   it('fails closed when the gate breaks at execute time', async () => {
