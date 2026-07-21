@@ -1238,6 +1238,12 @@ jobs:
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
         run: |-
+          # The head the reds were evaluated against. Taken from the REMOTE,
+          # not local HEAD: after a rejected push the two differ, and
+          # recording a sha that never landed would suppress the still-red
+          # checks on the head that actually exists. Empty on failure, which
+          # matches no marker and therefore keeps them visible — fail-open.
+          REPORT_HEAD="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha // ""' 2> /dev/null || echo '')"
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
@@ -1744,7 +1750,7 @@ jobs:
             # (the watermark floor below), and labels (the effective round
             # cap) — avoids extra round-trips per candidate PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json headRefName,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
             HEAD_REPO_FULL="${REPO}"
             if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" == "true" ]]; then
               HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_META}")"
@@ -1902,6 +1908,16 @@ jobs:
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-rearm -->"))
                 | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+            # The head this PR's red checks were last reported against. Carried
+            # as its OWN marker inside the eval comment rather than a new field
+            # on autofix-eval, so none of the ts/acted/round parsers change —
+            # and the comment still matches the eval filter, so the agent never
+            # sees it as feedback.
+            RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+                | {sha: .[0], at: ($c.created_at // "")} ]
+              | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
             # A maintainer '@qwen-code /retry' posts that marker to say
             # "evaluate this feedback again": markers written BEFORE it stop
             # holding the watermark down. This is the sanctioned exception to
@@ -1995,6 +2011,28 @@ jobs:
                 | select((.completedAt // .updatedAt // "") > $wm) ]
               | length
             ' <<< "${CHECKS_JSON}")"
+            # A red check is a persistent STATE, not the instant it turned red.
+            # Counting only "failed since the watermark" made a still-failing PR
+            # invisible the moment the watermark passed the failure: measured on
+            # #6451 (3 reds, all completed 09:30-09:51, watermark 10:55),
+            # #7357 (red 07:59, watermark 09:18) and #7390 (red and watermark
+            # both 11:27:37, so a strict `>` hid it the instant it appeared) —
+            # all three sat red for hours while every scan logged "nothing new".
+            #
+            # So: a currently-red check counts as feedback until the head it ran
+            # against has been evaluated. The address job records the head it
+            # reported on; a PR whose recorded head still matches is left alone,
+            # which bounds this to ONE look per head instead of every scan.
+            LIVE_HEAD="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            N_RED_NOW=0
+            if [[ -n "${LIVE_HEAD}" && "${RED_HEAD}" != "${LIVE_HEAD}" ]]; then
+              N_RED_NOW="$(jq '
+                [ .[]
+                  | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                  | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address")))) ]
+                | length
+              ' <<< "${CHECKS_JSON}")"
+            fi
 
             gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
             gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
@@ -2049,14 +2087,14 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${N_RED_NOW}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
-            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new + ${N_RED_NOW} still-red on ${LIVE_HEAD:0:9}, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new + ${N_RED_NOW} still-red (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
@@ -2906,6 +2944,12 @@ jobs:
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
+          # The head the reds were evaluated against. Taken from the REMOTE,
+          # not local HEAD: after a rejected push the two differ, and
+          # recording a sha that never landed would suppress the still-red
+          # checks on the head that actually exists. Empty on failure, which
+          # matches no marker and therefore keeps them visible — fail-open.
+          REPORT_HEAD="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha // ""' 2> /dev/null || echo '')"
           # Prepare may have adopted a sibling's live round; the matrix value
           # would double-write that round's marker.
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
@@ -3011,6 +3055,7 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -3027,6 +3072,7 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
@@ -3313,6 +3359,7 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi

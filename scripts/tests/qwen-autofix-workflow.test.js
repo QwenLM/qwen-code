@@ -294,9 +294,16 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('.conclusion // .state // ""');
     expect(reviewScanJob).toContain('.workflowName // ""');
     expect(reviewScanJob).toContain('startswith("review-address")');
+    // Every failed-check selector must carry the address-check carve-out, or
+    // the loop reads its OWN runs as feedback about the PR. Asserting the
+    // property rather than the count lets a new selector be added, but not
+    // one that forgets the carve-out.
+    const scanCheckSelectors =
+      reviewScanJob.match(/IN\("(?:FAILURE|QUEUED)"/g) ?? [];
+    expect(scanCheckSelectors.length).toBeGreaterThanOrEqual(3);
     expect(
       reviewScanJob.match(/startswith\("review-address"\)/g) ?? [],
-    ).toHaveLength(2);
+    ).toHaveLength(scanCheckSelectors.length);
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
@@ -392,6 +399,78 @@ describe('qwen-autofix workflow', () => {
     expect(run([llm, build])).toBe('true');
     // Unchanged: the branch-mutating sibling in the same workflow still blocks.
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
+  });
+
+  it('keeps a still-red check visible, but only once per head', () => {
+    // A red check is a STATE, not the instant it turned red. Counting only
+    // "failed since the watermark" made a still-failing PR invisible the
+    // moment the watermark passed the failure. Measured: #6451 (3 reds
+    // completed 09:30-09:51, watermark 10:55), #7357 (red 07:59, watermark
+    // 09:18), #7390 (red and watermark BOTH 11:27:37, so a strict `>` hid it
+    // the instant it appeared) — all three sat red for hours while every scan
+    // logged "nothing new".
+    const block = reviewScanJob.match(
+      /LIVE_HEAD="\$\(jq -r[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+    const run = (reds, redHead, liveHead) =>
+      execFileSync(
+        'bash',
+        ['-c', `set -uo pipefail\n${script}\nprintf '%s' "$N_RED_NOW"`],
+        {
+          env: {
+            ...process.env,
+            PR_META: JSON.stringify({ headRefOid: liveHead }),
+            CHECKS_JSON: JSON.stringify(
+              reds.map((name) => ({
+                name,
+                conclusion: 'FAILURE',
+                workflowName: 'CI',
+              })),
+            ),
+            RED_HEAD: redHead,
+          },
+          encoding: 'utf8',
+        },
+      );
+
+    // Never evaluated: the red is visible however old it is.
+    expect(run(['Test'], '', 'abc123')).toBe('1');
+    // Already evaluated on THIS head: left alone. This is what bounds it to
+    // one look per head instead of re-selecting the PR every single scan.
+    expect(run(['Test'], 'abc123', 'abc123')).toBe('0');
+    // A new commit re-opens it — the reds now belong to a head nobody judged.
+    expect(run(['Test'], 'old999', 'abc123')).toBe('1');
+    // Green stays green.
+    expect(run([], '', 'abc123')).toBe('0');
+    expect(run(['a', 'b', 'c'], '', 'abc123')).toBe('3');
+
+    // The count must actually GATE selection — computing it and then not
+    // consulting it is the whole bug, and every other assertion here still
+    // passes without this line.
+    const idleGate = reviewScanJob.match(
+      /if \[\[ "\$\{N_REVIEWS\}" -eq 0[^\n]*\]\]; then/,
+    )?.[0];
+    expect(idleGate).toBeTruthy();
+    expect(idleGate).toContain('"${N_RED_NOW}" -eq 0');
+
+    // The head is recorded by its OWN marker inside the eval comment, so no
+    // ts/acted/round parser changes — and the comment still matches the eval
+    // filter, so the agent never sees it as feedback.
+    expect(reviewScanJob).toContain('autofix-redcheck head=([0-9a-f]+)');
+    expect(
+      workflow.match(/<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g) ?? [],
+    ).toHaveLength(3);
+    // Taken from the REMOTE head: after a rejected push local HEAD is ahead of
+    // what landed, and recording a sha that never existed would suppress the
+    // reds on the head that does. Empty on failure — matches no marker, so the
+    // reds stay visible.
+    expect(
+      workflow.match(/REPORT_HEAD="\$\(gh api "repos\/\$\{REPO\}\/pulls/g) ??
+        [],
+    ).toHaveLength(2);
+    expect(workflow).not.toContain('REPORT_HEAD="$(git rev-parse HEAD)"');
   });
 
   it('bounds fleet-wide simultaneity below the per-scan target budget', () => {
@@ -1379,7 +1458,7 @@ describe('qwen-autofix workflow', () => {
       ).length - 1,
     ).toBe(2);
     expect(reviewScanJob).toContain(
-      '--json headRefName,statusCheckRollup,createdAt,labels',
+      '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels',
     );
     // Command-style comments are instructions, not feedback — excluded at
     // ALL FOUR feedback sites (scan count via $cf; NEWEST, LIVE_NEW, and
