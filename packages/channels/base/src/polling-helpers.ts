@@ -85,9 +85,9 @@ export function loadPollCursor(channelName: string, dir?: string): PollCursor {
   const p = join(dir ?? defaultCursorDir(), cursorFileName(channelName));
   if (!existsSync(p)) return { timestamp: '', processedIds: new Set() };
   try {
-    const lines = readFileSync(p, 'utf-8').trim().split('\n');
-    const timestamp = lines[0] ?? '';
-    const idsLine = lines[1] ?? '';
+    const lines = readFileSync(p, 'utf-8').split('\n');
+    const timestamp = (lines[0] ?? '').trim();
+    const idsLine = (lines[1] ?? '').trim();
     const processedIds = idsLine
       ? new Set(idsLine.split(',').filter(Boolean))
       : new Set<string>();
@@ -117,12 +117,20 @@ export function savePollCursor(
 
 export function stripMentions(text: string): string {
   return text
-    .replace(
-      /(?:(?<=\s|^|[([{"<])@[a-zA-Z0-9_\-/]+(?:\.[a-zA-Z0-9_-]+)+)|(?<=\s|^|[([{"<])@[a-zA-Z0-9_\-/]+/g,
-      (match) => (match.includes('.') ? match : ''),
+    .split('\n')
+    .map((line) =>
+      line
+        .replace(
+          /(?:(?<=\s|^|[([{"<])@[a-zA-Z0-9_\-/]+(?:\.[a-zA-Z0-9_-]+)+)|(?<=\s|^|[([{"<])@[a-zA-Z0-9_\-/]+\s*/g,
+          (match) => {
+            if (match.includes('.')) return match;
+            return /\s$/.test(match) ? ' ' : '';
+          },
+        )
+        .replace(/ {2,}/g, ' ')
+        .trim(),
     )
-    .replace(/\s{2,}/g, ' ')
-    .trim();
+    .join('\n');
 }
 
 export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -140,10 +148,5 @@ export function abortableSleep(ms: number, signal: AbortSignal): Promise<void> {
       resolve();
     };
     signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }
   });
 }
