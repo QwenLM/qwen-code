@@ -25,7 +25,8 @@ owns the model-driven decisions, code changes, and pre-commit verification.
 - Keep changes minimal and scoped. No drive-by refactors.
 - Run required verification commands before committing. Use only these trusted
   project commands: `npm run build`, `npm run typecheck`, `npm run lint`,
-  focused Vitest runs for touched packages or integration tests, and
+  focused Vitest runs for touched packages or integration tests after
+  `npm run bundle`, and
   `npm run generate:settings-schema` when a settings source changed (see the
   generated-artifact rule below). If a command fails, fix the cause and rerun
   it. Do not commit while a required runnable check is failing.
