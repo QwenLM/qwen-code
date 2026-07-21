@@ -31,6 +31,7 @@ import {
   InvalidSessionMetadataError,
   InvalidSessionScopeError,
   NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE,
+  PromptDeadlineExceededError,
   PromptQueueFullError,
   RestoreInProgressError,
   SessionShellClientRequiredError,
@@ -6589,6 +6590,438 @@ describe('createAcpSessionBridge', () => {
       expect(() => bridge.getPendingPrompts('unknown')).toThrow(
         SessionNotFoundError,
       );
+    });
+  });
+
+  describe('prompt terminal exactly-once (DAEMON-002/003/004/005)', () => {
+    /** All formal turn terminals published for one promptId. */
+    const terminalsFor = (events: BridgeEvent[], promptId: string) =>
+      events.filter(
+        (e) =>
+          (e.type === 'turn_complete' || e.type === 'turn_error') &&
+          e.promptId === promptId,
+      );
+
+    /** Fake agent: prompts whose first text block is 'wedge' hang forever
+     * (agent ignores cancel — FakeAgent's cancel only records the call). */
+    const wedgeChannel = () =>
+      makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'wedge') {
+            await new Promise<never>(() => {});
+          }
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+
+    const subscribe = (
+      bridge: ReturnType<typeof makeBridge>,
+      sessionId: string,
+      events: BridgeEvent[],
+    ) => {
+      const sub = (async () => {
+        for await (const ev of bridge.subscribeEvents(sessionId)) {
+          events.push(ev);
+        }
+      })();
+      sub.catch(() => {});
+      return sub;
+    };
+
+    it('publishes exactly one cancelled terminal when a queued prompt is removed (DAEMON-004)', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const firstDone = new Promise<void>((r) => {
+        releaseFirst = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'blocker') {
+            await firstDone;
+          }
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocker' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued victim' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      expect(bridge.removePendingPrompt(session.sessionId, 'prompt-b')).toEqual(
+        { removed: true },
+      );
+      // B's terminal arrives immediately — while A is still running — as a
+      // turn_complete{stopReason:'cancelled'} keyed to B's promptId.
+      await vi.waitFor(() => {
+        const terms = terminalsFor(events, 'prompt-b');
+        expect(terms).toHaveLength(1);
+        expect(terms[0]?.type).toBe('turn_complete');
+        expect((terms[0]?.data as { stopReason?: string }).stopReason).toBe(
+          'cancelled',
+        );
+      });
+      // The pending_prompt_completed{removed} bookkeeping event is unchanged.
+      expect(
+        events.some(
+          (e) =>
+            e.type === 'pending_prompt_completed' &&
+            (e.data as { state?: string }).state === 'removed',
+        ),
+      ).toBe(true);
+
+      releaseFirst!();
+      await expect(p1).resolves.toEqual({ stopReason: 'end_turn' });
+      // Caller-facing rejection semantics are unchanged.
+      await expect(p2).rejects.toMatchObject({ name: 'AbortError' });
+      // B's FIFO node reached the head and threw AbortError — the latch
+      // must have swallowed the would-be second terminal.
+      await new Promise((r) => setTimeout(r, 20));
+      expect(terminalsFor(events, 'prompt-b')).toHaveLength(1);
+      expect(terminalsFor(events, 'prompt-a')).toHaveLength(1);
+      expect(terminalsFor(events, 'prompt-a')[0]?.type).toBe('turn_complete');
+      await bridge.shutdown();
+    });
+
+    it('publishes a deadline turn_error, unlocks the FIFO, and clears active state when the agent wedges (DAEMON-003)', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-wedged', deadlineMs: 50 },
+      );
+      await expect(p1).rejects.toBeInstanceOf(PromptDeadlineExceededError);
+
+      await vi.waitFor(() => {
+        const terms = terminalsFor(events, 'prompt-wedged');
+        expect(terms).toHaveLength(1);
+        expect(terms[0]?.type).toBe('turn_error');
+        expect((terms[0]?.data as { code?: string }).code).toBe(
+          'prompt_deadline_exceeded',
+        );
+      });
+      // Active-prompt bookkeeping cleared even though the agent never
+      // settled — otherwise the reaper would skip this session forever.
+      expect(bridge.getSessionSummary(session.sessionId).hasActivePrompt).toBe(
+        false,
+      );
+      // Best-effort cancel reached the (uncooperative) agent.
+      await vi.waitFor(() => {
+        expect(handle.agent.cancelCalls.length).toBeGreaterThan(0);
+      });
+      // FIFO released: a follow-up prompt dispatches and completes.
+      await expect(
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'after the wedge' }],
+          },
+          undefined,
+          { promptId: 'prompt-after' },
+        ),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(terminalsFor(events, 'prompt-wedged')).toHaveLength(1);
+      await vi.waitFor(() => {
+        expect(terminalsFor(events, 'prompt-after')).toHaveLength(1);
+      });
+      await bridge.shutdown();
+    });
+
+    it('does not publish a stale deadline terminal for a prompt that completed in time (DAEMON-003)', async () => {
+      const handle = makeChannel({
+        promptImpl: () => ({ stopReason: 'end_turn' }),
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'fast' }],
+        },
+        undefined,
+        { promptId: 'prompt-fast', deadlineMs: 60 },
+      );
+      // Wait well past the configured deadline: the timer was cleared (and
+      // the latch guards any straggler), so no second terminal appears.
+      await new Promise((r) => setTimeout(r, 150));
+      const terms = terminalsFor(events, 'prompt-fast');
+      expect(terms).toHaveLength(1);
+      expect(terms[0]?.type).toBe('turn_complete');
+      await bridge.shutdown();
+    });
+
+    it('publishes a deadline terminal for a prompt that expires while still queued (DAEMON-003)', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-head' },
+      );
+      p1.catch(() => {});
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'never dispatches' }],
+        },
+        undefined,
+        { promptId: 'prompt-queued-deadline', deadlineMs: 50 },
+      );
+      p2.catch(() => {});
+
+      await vi.waitFor(() => {
+        const terms = terminalsFor(events, 'prompt-queued-deadline');
+        expect(terms).toHaveLength(1);
+        expect(terms[0]?.type).toBe('turn_error');
+        expect((terms[0]?.data as { code?: string }).code).toBe(
+          'prompt_deadline_exceeded',
+        );
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      expect(terminalsFor(events, 'prompt-queued-deadline')).toHaveLength(1);
+
+      await bridge.shutdown();
+      // Shutdown flushed the still-wedged head prompt exactly once, and the
+      // queued prompt's residual FIFO abort stayed latched.
+      expect(terminalsFor(events, 'prompt-queued-deadline')).toHaveLength(1);
+      const headTerms = terminalsFor(events, 'prompt-head');
+      expect(headTerms).toHaveLength(1);
+      expect(headTerms[0]?.type).toBe('turn_error');
+      expect((headTerms[0]?.data as { code?: string }).code).toBe(
+        'daemon_shutdown',
+      );
+    });
+
+    it('keeps a detached session draining until the last pending prompt settles (DAEMON-005)', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const firstDone = new Promise<void>((r) => {
+        releaseFirst = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          if ((req.prompt[0] as { text?: string }).text === 'blocker') {
+            await firstDone;
+          }
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocker' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued successor' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Sole client leaves while A runs and B is queued — the session must
+      // keep draining instead of closing (close would abort B).
+      await bridge.detachClient(session.sessionId, session.clientId);
+      expect(bridge.getSessionSummary(session.sessionId)).toBeDefined();
+
+      releaseFirst!();
+      await expect(p1).resolves.toEqual({ stopReason: 'end_turn' });
+      // B completing proves the session survived the drain window.
+      await expect(p2).resolves.toEqual({ stopReason: 'end_turn' });
+      // …and only then does the deferred close-on-prompt-complete fire.
+      await vi.waitFor(() => {
+        expect(() => bridge.getSessionSummary(session.sessionId)).toThrow(
+          SessionNotFoundError,
+        );
+      });
+      await bridge.shutdown();
+    });
+
+    it('flushes error terminals for active and queued prompts before session_closed (DAEMON-005)', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      p1.catch(() => {});
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued at close' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      p2.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      await bridge.closeSession(session.sessionId);
+
+      const closedIdx = events.findIndex((e) => e.type === 'session_closed');
+      expect(closedIdx).toBeGreaterThan(-1);
+      for (const promptId of ['prompt-a', 'prompt-b']) {
+        const terms = terminalsFor(events, promptId);
+        expect(terms).toHaveLength(1);
+        expect(terms[0]?.type).toBe('turn_error');
+        expect((terms[0]?.data as { code?: string }).code).toBe(
+          'session_closed',
+        );
+        // The terminal precedes the session_closed frame — subscribers keyed
+        // on promptId observe the turn ending before the session vanishes.
+        expect(events.indexOf(terms[0]!)).toBeLessThan(closedIdx);
+      }
+      await bridge.shutdown();
+    });
+
+    it('publishes exactly one terminal per prompt under cancel + remove + deadline races (DAEMON-002)', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-a', deadlineMs: 60 },
+      );
+      p1.catch(() => {});
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued combatant' }],
+        },
+        undefined,
+        { promptId: 'prompt-b', deadlineMs: 60 },
+      );
+      p2.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Fire all cancellation paths at once and let the deadline land on
+      // top: the latch must keep every promptId at exactly one terminal.
+      void bridge.cancelSession(session.sessionId).catch(() => {});
+      bridge.removePendingPrompt(session.sessionId, 'prompt-b');
+      await new Promise((r) => setTimeout(r, 150));
+
+      expect(terminalsFor(events, 'prompt-a')).toHaveLength(1);
+      expect(terminalsFor(events, 'prompt-b')).toHaveLength(1);
+      await bridge.shutdown();
+      // Shutdown's flush must also stay latched.
+      expect(terminalsFor(events, 'prompt-a')).toHaveLength(1);
+      expect(terminalsFor(events, 'prompt-b')).toHaveLength(1);
+    });
+
+    it('publishes exactly one turn_error per pending prompt when the channel crashes', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-a' },
+      );
+      p1.catch(() => {});
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued at crash' }],
+        },
+        undefined,
+        { promptId: 'prompt-b' },
+      );
+      p2.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      handle.crash({ exitCode: 1, signalCode: null });
+
+      // NOTE: the flush's `channel_closed` terminal and the transport-race
+      // rejection compete to publish first; the latch only guarantees
+      // exactly-once, not which source wins — so assert type+count only.
+      await vi.waitFor(() => {
+        for (const promptId of ['prompt-a', 'prompt-b']) {
+          const terms = terminalsFor(events, promptId);
+          expect(terms).toHaveLength(1);
+          expect(terms[0]?.type).toBe('turn_error');
+        }
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      expect(terminalsFor(events, 'prompt-a')).toHaveLength(1);
+      expect(terminalsFor(events, 'prompt-b')).toHaveLength(1);
+      await bridge.shutdown();
     });
   });
 
@@ -16160,7 +16593,11 @@ describe('activePromptCount and lastActivityAt', () => {
     if (resultB.ok) {
       throw new Error('queued prompt unexpectedly resolved');
     }
-    expect(resultB.error).toBeInstanceOf(SessionNotFoundError);
+    // The crash-time terminal flush aborts residual FIFO nodes so they
+    // skip at the pre-dispatch check — the caller sees an AbortError
+    // (before DAEMON-005 the node reached `assertLivePromptEntry` after
+    // teardown and rejected with SessionNotFoundError instead).
+    expect((resultB.error as Error).name).toBe('AbortError');
 
     await vi.waitFor(() => {
       expect(bridge.activePromptCount).toBe(0);

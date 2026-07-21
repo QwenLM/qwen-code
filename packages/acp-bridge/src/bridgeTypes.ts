@@ -481,6 +481,14 @@ export interface BridgeClientRequestContext {
    * smuggle a continuation through the prompt path.
    */
   continue?: boolean;
+  /**
+   * Absolute wallclock budget (ms) for this prompt, measured from admission
+   * (the 202 semantic point) and covering queue wait. When exceeded, the
+   * bridge publishes a `turn_error{code:'prompt_deadline_exceeded'}` terminal,
+   * releases the FIFO, and best-effort cancels the agent. Populated by the
+   * REST prompt route from `resolvePromptDeadlineMs(serverMs, requestMs)`.
+   */
+  deadlineMs?: number;
 }
 
 /**
@@ -581,6 +589,12 @@ export interface PendingPromptEntry {
   text: string;
   abortController: AbortController;
   state: 'queued' | 'running';
+  /**
+   * Exactly-once latch for the prompt's formal terminal event
+   * (`turn_complete` / `turn_error`). Set by `publishPromptTerminal`;
+   * later publish attempts for the same prompt are suppressed.
+   */
+  terminalPublished?: boolean;
 }
 
 /**
