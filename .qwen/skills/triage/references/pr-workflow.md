@@ -166,20 +166,13 @@ If the author cannot provide a reproduction on re-run, escalate to the maintaine
 
 **1c. Product direction:**
 
+Follow `product-direction.md` before deciding this gate.
+
 Ask the hard questions before reading a single line of code:
 
 - Does this solve a real user problem, or is it a solution looking for a problem?
 - Is it within qwen-code's core mission, or does it pull focus from what matters more?
 - "Can do" ≠ "should do" — technically feasible doesn't mean we should ship it.
-
-CHANGELOG is a reference signal, not the sole criterion:
-
-```bash
-curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md | grep -iC1 "<keywords>"
-```
-
-- **Found** → cite version/line as supporting signal.
-- **Not found** → not a rejection. The area may still be relevant.
 
 **Escalate to maintainer** (never auto-reject): touches auth/sandbox/model selection/telemetry/release/public contract, or direction is genuinely unclear.
 
@@ -205,7 +198,7 @@ Template looks good ✓
 
 Problem: <state whether the problem is an observed bug with evidence, or theoretical hardening without reproduction. If no reproduction exists, say so plainly: "No before/after reproduction is provided. What scenario triggers this issue?">
 
-Direction: <state your honest assessment — aligned and why, or concerns and why>. CHANGELOG <reference if found, or "no direct reference but the area is relevant">.
+Direction: <state your honest assessment — aligned and why, or concerns and why>. Evidence: <state whether configured reference source or the changelog fallback was used>. Arena: <disabled, agreement, disagreement, or degraded>.
 
 Size: <if core paths are touched, report production lines vs. test lines vs. generated/schema lines; mention maintainer awareness for 500+ production lines or the 1000+ advisory when applicable. Otherwise say "not applicable".>
 

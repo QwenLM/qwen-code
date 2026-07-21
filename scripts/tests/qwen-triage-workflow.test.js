@@ -6,11 +6,37 @@
 
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
+import { parse } from 'yaml';
 
 const workflow = readFileSync('.github/workflows/qwen-triage.yml', 'utf8');
+const triageSkill = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
+const issueWorkflow = readFileSync(
+  '.qwen/skills/triage/references/issue-workflow.md',
+  'utf8',
+);
+const prWorkflow = readFileSync(
+  '.qwen/skills/triage/references/pr-workflow.md',
+  'utf8',
+);
+const productDirection = readFileSync(
+  '.qwen/skills/triage/references/product-direction.md',
+  'utf8',
+);
+const directionReviewer = readFileSync(
+  '.qwen/agents/product-direction-reviewer.md',
+  'utf8',
+);
+const directionChallenger = readFileSync(
+  '.qwen/agents/product-direction-challenger.md',
+  'utf8',
+);
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function frontmatter(content) {
+  return parse(content.split('---', 3)[1]);
 }
 
 function step(name) {
@@ -110,6 +136,91 @@ describe('qwen-triage tmux workflow', () => {
     expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
     expect(cleanStep).toContain('echo "stale agent state cleaned"');
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
+  });
+
+  it('prepares optional source and model context for product direction review', () => {
+    const prepareStep = step('Prepare product direction review');
+    const runStep = step('Run Qwen Triage');
+
+    expect(prepareStep).toContain(
+      "REFERENCE_REPO: '${{ vars.QWEN_TRIAGE_REFERENCE_REPO }}'",
+    );
+    expect(prepareStep).toContain(
+      "REFERENCE_REF: '${{ vars.QWEN_TRIAGE_REFERENCE_REF }}'",
+    );
+    expect(prepareStep).toContain(
+      "ARENA_MODEL: '${{ vars.QWEN_TRIAGE_ARENA_MODEL }}'",
+    );
+    expect(prepareStep).toContain(
+      "PRIMARY_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'",
+    );
+    expect(prepareStep).toContain(
+      '^https://github\\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+',
+    );
+    expect(prepareStep).toContain(
+      '[[ "$reference_ref" =~ ^[0-9a-fA-F]{40}$ ]]',
+    );
+    expect(prepareStep).toContain('GIT_TERMINAL_PROMPT=0 timeout 90s bash -c');
+    expect(prepareStep).toContain(
+      'git -C "$2" fetch -q --depth=1 --filter=blob:none origin "$3"',
+    );
+    expect(prepareStep).toContain(
+      '${GITHUB_WORKSPACE:?}/.qwen/triage-reference',
+    );
+    expect(prepareStep).toContain("reference_status='configured-unavailable'");
+    expect(prepareStep).toContain("reference_status='available'");
+    expect(prepareStep).toContain('TRIAGE_REFERENCE_STATUS=$reference_status');
+    expect(prepareStep).toContain(
+      '[[ "$ARENA_MODEL" =~ ^[A-Za-z0-9._:/-]+$ ]]',
+    );
+    expect(prepareStep).toContain('[ "$ARENA_MODEL" != inherit ]');
+    expect(prepareStep).toContain('[ "$ARENA_MODEL" != fast ]');
+    expect(prepareStep).toContain('[ "$ARENA_MODEL" != "$PRIMARY_MODEL" ]');
+    expect(prepareStep).toContain(
+      '.qwen/agents/product-direction-challenger.md',
+    );
+    expect(prepareStep).toContain('TRIAGE_ARENA_ENABLED=$arena_enabled');
+    expect(runStep).toContain(
+      "TRIAGE_REFERENCE_PATH: '${{ env.TRIAGE_REFERENCE_PATH }}'",
+    );
+    expect(runStep).toContain(
+      "TRIAGE_REFERENCE_STATUS: '${{ env.TRIAGE_REFERENCE_STATUS }}'",
+    );
+    expect(runStep).toContain(
+      "TRIAGE_ARENA_ENABLED: '${{ env.TRIAGE_ARENA_ENABLED }}'",
+    );
+  });
+
+  it('keeps product direction fan-out read-only and inside triage', () => {
+    const workflowDoc = parse(workflow);
+    const triageStep = workflowDoc.jobs.triage.steps.find(
+      ({ name }) => name === 'Run Qwen Triage',
+    );
+    const enabledTools = JSON.parse(triageStep.with.settings_json).coreTools;
+
+    expect(triageSkill).toContain('references/product-direction.md');
+    expect(issueWorkflow).toContain('Follow `product-direction.md`');
+    expect(issueWorkflow).not.toContain('Run `/goal');
+    expect(prWorkflow).toContain('Follow `product-direction.md`');
+    expect(productDirection).toContain('TRIAGE_REFERENCE_STATUS=available');
+    expect(productDirection).toContain('TRIAGE_ARENA_ENABLED=true');
+    expect(productDirection).toContain("printf 'TRIAGE_REFERENCE_STATUS=%s\\n");
+    expect(productDirection).toContain(
+      '"${RUNNER_TEMP:?}/claude-code-changelog.md"',
+    );
+    expect(productDirection).not.toContain('/tmp/claude-code-changelog.md');
+    expect(productDirection).toContain('product-direction-reviewer');
+    expect(productDirection).toContain('product-direction-challenger');
+    expect(productDirection).toContain('run_in_background: false');
+    expect(productDirection).toContain('The parent triage agent is the judge');
+    for (const agent of [directionReviewer, directionChallenger]) {
+      const config = frontmatter(agent);
+      expect(config.model).toBe('inherit');
+      expect(config.tools).toBeUndefined();
+      expect([...config.disallowedTools].sort()).toEqual(
+        [...enabledTools].sort(),
+      );
+    }
   });
 
   it('passes triage output through env before bash reads it', () => {

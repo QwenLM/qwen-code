@@ -30,6 +30,29 @@ This is the first bot you will interact with when you create an issue. Its job i
   - If the `status/need-information` label is added, please provide the requested details in a comment.
   - Maintainers can comment `@qwen-code /triage` to run triage again.
 
+#### Maintainer product-direction configuration
+
+Product-direction review has three optional repository Actions variables:
+
+- `QWEN_TRIAGE_REFERENCE_REPO`: a public `https://github.com/` clone URL for a
+  reference implementation such as Claude Code. Triage searches this checkout
+  as advisory product evidence.
+- `QWEN_TRIAGE_REFERENCE_REF`: the reviewed 40-character commit SHA to fetch
+  from the reference repository. The URL and SHA must both be configured. If
+  fetching that commit fails, triage continues and reports that source evidence
+  was unavailable.
+- `QWEN_TRIAGE_ARENA_MODEL`: a second model ID served by the same
+  OpenAI-compatible endpoint as the primary triage model. When configured, the
+  primary and challenger models independently assess feature direction and the
+  parent triage agent judges their results.
+
+With none of these variables set, triage uses its primary model and the fixed
+Claude Code changelog fallback. Setting the reference repository and commit
+enables source-informed single-model review; adding the arena model enables the
+cross-model arena. Reviewer agents explicitly disallow every tool enabled by
+the triage job, and the parent `/triage` workflow remains the only component
+that comments, labels, or reviews.
+
 ### 2. When you open a Pull Request: `Continuous Integration (CI)`
 
 This workflow ensures that all changes meet our quality standards before they can be merged.

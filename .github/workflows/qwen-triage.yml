@@ -248,6 +248,69 @@ jobs:
         with:
           token: '${{ secrets.GITHUB_TOKEN }}'
 
+      - name: 'Prepare product direction review'
+        env:
+          REFERENCE_REPO: '${{ vars.QWEN_TRIAGE_REFERENCE_REPO }}'
+          REFERENCE_REF: '${{ vars.QWEN_TRIAGE_REFERENCE_REF }}'
+          ARENA_MODEL: '${{ vars.QWEN_TRIAGE_ARENA_MODEL }}'
+          PRIMARY_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+        run: |-
+          set -euo pipefail
+          reference_ref="${REFERENCE_REF:-}"
+
+          if [ -n "$REFERENCE_REPO" ]; then
+            reference_path="${GITHUB_WORKSPACE:?}/.qwen/triage-reference"
+            reference_status='configured-unavailable'
+            if [[ "$REFERENCE_REPO" =~ ^https://github\.com/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+(\.git)?/?$ ]] &&
+               [[ "$reference_ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+              rm -rf "$reference_path"
+              # shellcheck disable=SC2016
+              if GIT_TERMINAL_PROMPT=0 timeout 90s bash -c '
+                set -euo pipefail
+                git init -q "$2"
+                git -C "$2" remote add origin "$1"
+                git -C "$2" fetch -q --depth=1 --filter=blob:none origin "$3"
+                git -C "$2" checkout -q --detach FETCH_HEAD
+              ' _ "$REFERENCE_REPO" "$reference_path" "$reference_ref"; then
+                echo "TRIAGE_REFERENCE_PATH=$reference_path" >> "$GITHUB_ENV"
+                reference_status='available'
+              else
+                rm -rf "$reference_path"
+                echo '::warning::Configured triage reference repository could not be cloned; continuing without source evidence.'
+              fi
+            else
+              echo '::warning::QWEN_TRIAGE_REFERENCE_REPO must be a public https://github.com/ clone URL and QWEN_TRIAGE_REFERENCE_REF must be a 40-character commit SHA; continuing without source evidence.'
+            fi
+            echo "TRIAGE_REFERENCE_STATUS=$reference_status" >> "$GITHUB_ENV"
+          else
+            echo 'TRIAGE_REFERENCE_STATUS=not-configured' >> "$GITHUB_ENV"
+          fi
+
+          arena_enabled=false
+          if [ -n "$ARENA_MODEL" ] &&
+             [[ "$ARENA_MODEL" =~ ^[A-Za-z0-9._:/-]+$ ]] &&
+             [ "$ARENA_MODEL" != inherit ] &&
+             [ "$ARENA_MODEL" != fast ] &&
+             [ "$ARENA_MODEL" != "$PRIMARY_MODEL" ]; then
+            ARENA_MODEL="$ARENA_MODEL" node --input-type=module <<'NODE'
+          import { readFileSync, writeFileSync } from 'node:fs';
+
+          const agentPath = '.qwen/agents/product-direction-challenger.md';
+          const source = readFileSync(agentPath, 'utf8');
+          if (!source.includes('model: inherit')) {
+            throw new Error('challenger agent model placeholder is missing');
+          }
+          writeFileSync(
+            agentPath,
+            source.replace('model: inherit', `model: ${process.env.ARENA_MODEL}`),
+          );
+          NODE
+            arena_enabled=true
+          elif [ -n "$ARENA_MODEL" ]; then
+            echo '::warning::QWEN_TRIAGE_ARENA_MODEL is invalid, reserved, or matches the primary model; continuing without arena.'
+          fi
+          echo "TRIAGE_ARENA_ENABLED=$arena_enabled" >> "$GITHUB_ENV"
+
       - name: 'Resolve target number'
         id: 'resolve'
         run: |
@@ -266,6 +329,9 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           REPOSITORY: '${{ github.repository }}'
+          TRIAGE_REFERENCE_PATH: '${{ env.TRIAGE_REFERENCE_PATH }}'
+          TRIAGE_REFERENCE_STATUS: '${{ env.TRIAGE_REFERENCE_STATUS }}'
+          TRIAGE_ARENA_ENABLED: '${{ env.TRIAGE_ARENA_ENABLED }}'
           # Per-run agent home so this run's session/memory cannot leak into the
           # next on the reused self-hosted workspace (reset in "Clean stale
           # agent state"). Must match the QWEN_HOME computed there.

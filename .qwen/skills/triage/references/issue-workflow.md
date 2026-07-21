@@ -128,6 +128,8 @@ gh api -X PATCH repos/$REPO/issues/comments/$COMMENT_ID -F body=@/tmp/triage-com
 
 ### For feature requests:
 
-1. Run `/goal Is this feature request truly aligned with Qwen Code's product direction, and is the proposed approach the best solution?`
-2. Append verdict: accept for exploration, suggest a smaller alternative, or
-   decline as out of direction.
+1. Follow `product-direction.md` using the issue as the proposal and evidence
+   packet.
+2. Append the direction verdict, reference-source status, and arena status:
+   accept for exploration, suggest a smaller alternative, decline as out of
+   direction, or escalate when the evidence is unclear.

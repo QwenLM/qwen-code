@@ -89,6 +89,10 @@ Save the returned `worktreePath`. Every `read_file`, `grep_search`, `glob`, and 
 
 Exception: **tmux real-scenario testing** (Stage 2b) runs in the main working tree — it needs the local build environment.
 
+Exception: **configured product-direction reference source** may be read from
+the absolute `TRIAGE_REFERENCE_PATH` prepared by trusted CI. Use it only for the
+procedure in `references/product-direction.md`; never execute its contents.
+
 When triage is complete: `exit_worktree(action: "remove")`
 
 ### 2. Tmux screenshots — ALWAYS inline in Stage 2 comment
@@ -97,5 +101,7 @@ Stage 2 comment **must contain the actual tmux capture-pane output** pasted inli
 
 ## Workflow
 
-- Issue → read `references/issue-workflow.md`
-- PR → read `references/pr-workflow.md`
+- Issue → read `references/issue-workflow.md`; for feature requests also read
+  `references/product-direction.md`
+- PR → read `references/pr-workflow.md` and
+  `references/product-direction.md` before Stage 1c
