@@ -125,6 +125,7 @@ describe('BackgroundAgentResumeService', () => {
 
     return {
       service: new BackgroundAgentResumeService(config),
+      config,
       subagentManager,
       hookSystem,
       monitorRegistry,

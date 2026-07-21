@@ -931,7 +931,7 @@ export class BackgroundAgentResumeService {
       const needsAutoPermissionLease = () =>
         agentConfig.getApprovalMode() === 'auto' &&
         this.config.getApprovalMode() !== 'auto';
-      const residentWorkingDir = activeAgentConfig.getWorkingDir();
+      const residentWorkingDir = agentConfig.getWorkingDir();
       let runtimeDisposed = false;
       let disposeRequested = false;
       let turnRunning = false;
@@ -1149,7 +1149,7 @@ export class BackgroundAgentResumeService {
           if (!canStayResident || disposeRequested || runtimeDisposed) {
             return false;
           }
-          if (activeAgentConfig.getWorkingDir() !== residentWorkingDir) {
+          if (agentConfig.getWorkingDir() !== residentWorkingDir) {
             requestRuntimeDisposal();
             return false;
           }
