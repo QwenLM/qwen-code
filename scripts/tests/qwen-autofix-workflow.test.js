@@ -3278,6 +3278,118 @@ describe('qwen-autofix workflow', () => {
     ).toBe(0);
   });
 
+  it('renders the whole managed fleet into the run summary', () => {
+    // Diagnosing a stall used to mean listing bot PRs, regexing each one's eval
+    // markers, and cross-checking checks and fork state by hand - so stalls
+    // stayed invisible until someone went looking. The scan already computes
+    // all of it; this surfaces it as one table per run.
+    const scan =
+      workflow.match(
+        /- name: 'Scan for PRs with new feedback'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+    // Every per-PR terminal decision records a row, so a PR cannot fall out of
+    // the table just because its branch of the loop returned early. The
+    // target-budget break emits a single summary row (PR '-') standing in for
+    // the un-inspected tail; those candidates are not enumerated individually.
+    for (const state of [
+      'busy',
+      'unknown',
+      'waiting',
+      'round-capped',
+      'idle',
+      'SELECTED',
+    ]) {
+      expect(scan).toContain(`fleet_row "\${PR}" '${state}'`);
+    }
+    // 'skipped' has two distinct call sites; assert each by its unique detail
+    // so removing one is caught even though the other survives.
+    expect(scan).toContain(
+      `fleet_row "\${PR}" 'skipped' "fork head unresolved`,
+    );
+    expect(scan).toContain(
+      `fleet_row "\${PR}" 'skipped' "\${SKIP_LABEL} label present"`,
+    );
+    // 'deferred' has two distinct call sites, both summary rows with '-':
+    // the candidate-inspection budget and the target budget.
+    expect(scan).toContain(
+      `fleet_row '-' 'deferred' "candidate-inspection budget`,
+    );
+    expect(scan).toContain(`fleet_row '-' 'deferred' "target budget`);
+    // The table is written to the run summary, not just the job log.
+    expect(scan).toContain('AutoFix fleet (${COUNT} selected this scan)');
+    expect(scan).toContain('} >> "${GITHUB_STEP_SUMMARY}"');
+
+    // Replay the real helper + render block over fixtures.
+    const lines = scan.split('\n');
+    const hi = lines.findIndex((l) => l.trim() === 'FLEET_FILE="$(mktemp)"');
+    const hj = lines.findIndex((l, i) => i > hi && l.trim() === '}');
+    const helper = lines.slice(hi, hj + 1).join('\n');
+    expect(helper).toContain('fleet_row()');
+    const fi = lines.findIndex((l) => l.includes('AutoFix fleet ('));
+    let start = fi;
+    while (lines[start].trim() !== '{') start -= 1;
+    const end = lines.findIndex(
+      (l, i) => i > fi && l.trim().startsWith('} >> "${GITHUB_STEP_SUMMARY}"'),
+    );
+    const render = lines
+      .slice(start, end + 1)
+      .join('\n')
+      .replace('${GITHUB_STEP_SUMMARY}', '${SUMMARY_FILE}');
+
+    const out = execFileSync(
+      'bash',
+      [
+        '-c',
+        [
+          'set -uo pipefail',
+          'SUMMARY_FILE="$(mktemp)"',
+          helper,
+          'COUNT=1',
+          "fleet_row 7329 'SELECTED' '1 review + 5 inline new (round 0/5)'",
+          "fleet_row 7333 'idle' 'nothing new since 2026-07-20T13:54:18Z'",
+          "fleet_row 7208 'round-capped' 'round 100/100 - needs a human'",
+          "fleet_row - 'deferred' 'target budget (3) reached'",
+          "fleet_row 7340 'skipped' 'fork head | pipe in detail'",
+          render,
+          'cat "${SUMMARY_FILE}"',
+          'rm -f "${SUMMARY_FILE}"',
+        ].join('\n'),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(out).toContain('AutoFix fleet (1 selected this scan)');
+    expect(out).toContain('| PR | State | Detail |');
+    expect(out).toContain(
+      '| #7329 | SELECTED | 1 review + 5 inline new (round 0/5) |',
+    );
+    expect(out).toContain('| #7333 | idle |');
+    expect(out).toContain('| #7208 | round-capped |');
+    // The budget summary row (PR '-') renders an em dash, not '#-'.
+    expect(out).toContain('| — | deferred | target budget (3) reached |');
+    expect(out).not.toContain('| #- |');
+    // A literal '|' in a detail value is escaped so it cannot break columns.
+    expect(out).toContain('fork head \\| pipe in detail');
+
+    // An empty fleet still renders a table rather than a bare heading.
+    const empty = execFileSync(
+      'bash',
+      [
+        '-c',
+        [
+          'set -uo pipefail',
+          'SUMMARY_FILE="$(mktemp)"',
+          helper,
+          'COUNT=0',
+          render,
+          'cat "${SUMMARY_FILE}"',
+          'rm -f "${SUMMARY_FILE}"',
+        ].join('\n'),
+      ],
+      { encoding: 'utf8' },
+    );
+    expect(empty).toContain('no managed PRs inspected');
+  });
+
   it('retries a verification-gate crash instead of burying the fix', () => {
     // A gate that DECLARES a verdict (outcome=failed) evaluated the agent's
     // attempt and rejected it - the watermark advances, bounded by MAX_ROUNDS.
