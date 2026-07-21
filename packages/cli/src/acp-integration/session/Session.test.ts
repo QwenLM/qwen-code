@@ -2738,6 +2738,39 @@ describe('Session', () => {
       );
     });
 
+    it('restarts automatic work when a pending close is cancelled', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValueOnce(createEmptyStream());
+      const startCronScheduler = vi.spyOn(session, 'startCronScheduler');
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0][0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string; toolUseId?: string },
+      ) => void;
+
+      session.beginClose();
+      callback(
+        'Background agent "worker" completed.',
+        '<task-notification><status>completed</status></task-notification>',
+        {
+          agentId: 'agent-1',
+          status: 'completed',
+          toolUseId: 'tool-1',
+        },
+      );
+      await Promise.resolve();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+      session.cancelClose();
+
+      expect(startCronScheduler).toHaveBeenCalledOnce();
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      });
+    });
+
     it('fires MessageDisplay with cumulative text and a single is_final for a background notification response', async () => {
       // The background-notification loop (Session.ts ~line 3638) creates its
       // own MessageDisplayDispatcher, independent of the ACP prompt path's —
@@ -16131,6 +16164,27 @@ describe('Session', () => {
       release();
       await disposal;
       expect(settled).toBe(true);
+    });
+
+    it('rejects prompts once disposal has started', async () => {
+      let release!: () => void;
+      mockBackgroundTaskRegistry.abortAllAndWait.mockReturnValueOnce(
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+      );
+
+      const disposal = session.dispose();
+      await expect(
+        session.prompt({
+          prompt: [],
+          sessionId: 'test-session-id',
+        }),
+      ).rejects.toThrow('Session test-session-id is closing.');
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+      release();
+      await disposal;
     });
 
     it('is idempotent — repeated dispose() calls do not throw or re-register', () => {

@@ -16,6 +16,13 @@ import {
 
 export type ListAgentsParams = Record<string, never>;
 
+function canSendMessage(config: Config): boolean {
+  return config
+    .getToolRegistry()
+    .getAllToolNames()
+    .includes(ToolNames.SEND_MESSAGE);
+}
+
 class ListAgentsInvocation extends BaseToolInvocation<
   ListAgentsParams,
   ToolResult
@@ -32,6 +39,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
   }
 
   async execute(): Promise<ToolResult> {
+    const messageAvailable = canSendMessage(this.config);
     const agents = this.config
       .getBackgroundTaskRegistry()
       .getAll()
@@ -42,6 +50,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
         description: entry.description,
         status: entry.status,
         can_message:
+          messageAvailable &&
           !entry.resumeBlockedReason &&
           (entry.status === 'running' ||
             entry.status === 'paused' ||
@@ -75,9 +84,12 @@ export class ListAgentsTool extends BaseDeclarativeTool<
     super(
       ListAgentsTool.Name,
       ToolDisplayNames.LIST_AGENTS,
-      'List addressable background agents in the current session, including ' +
-        'agents restored from a prior session run. Use the returned task_id ' +
-        'with send_message to continue a running, paused, or completed agent.',
+      canSendMessage(config)
+        ? 'List addressable background agents in the current session, including ' +
+            'agents restored from a prior session run. Use the returned task_id ' +
+            'with send_message to continue a running, paused, or completed agent.'
+        : 'List retained background agents in the current session. Continuation ' +
+            'is unavailable because send_message is not registered.',
       Kind.Read,
       {
         type: 'object',

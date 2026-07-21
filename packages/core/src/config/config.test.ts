@@ -2223,6 +2223,13 @@ describe('Server Config (config.ts)', () => {
 
     it('clears an unconsumed recovered-agents notice', async () => {
       const config = new Config(baseParams);
+      (
+        config as unknown as {
+          toolRegistry: { getAllToolNames: () => string[] };
+        }
+      ).toolRegistry = {
+        getAllToolNames: () => ['list_agents', 'send_message'],
+      };
       vi.spyOn(config, 'getBackgroundAgentResumeService').mockReturnValue({
         loadPausedBackgroundAgents: vi.fn().mockResolvedValue([{}]),
         buildRecoveredBackgroundAgentsModelNotice: vi
@@ -2238,8 +2245,17 @@ describe('Server Config (config.ts)', () => {
   });
 
   describe('background agent restore notice', () => {
+    const setRegisteredAgentTools = (config: Config, names: string[]) => {
+      (
+        config as unknown as {
+          toolRegistry: { getAllToolNames: () => string[] };
+        }
+      ).toolRegistry = { getAllToolNames: () => names };
+    };
+
     it('stores and consumes the model notice once after recovery', async () => {
       const config = new Config(baseParams);
+      setRegisteredAgentTools(config, ['list_agents', 'send_message']);
       const buildNotice = vi.fn().mockReturnValue('restored agents');
       vi.spyOn(config, 'getBackgroundAgentResumeService').mockReturnValue({
         loadPausedBackgroundAgents: vi.fn().mockResolvedValue([{}, {}]),
@@ -2257,6 +2273,7 @@ describe('Server Config (config.ts)', () => {
 
     it('does not create a notice when recovery finds no agents', async () => {
       const config = new Config(baseParams);
+      setRegisteredAgentTools(config, ['list_agents', 'send_message']);
       vi.spyOn(config, 'getBackgroundAgentResumeService').mockReturnValue({
         loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
         buildRecoveredBackgroundAgentsModelNotice: vi.fn(),
@@ -2269,6 +2286,7 @@ describe('Server Config (config.ts)', () => {
 
     it('does not advertise agent tools in bare mode', async () => {
       const config = new Config({ ...baseParams, bareMode: true });
+      setRegisteredAgentTools(config, ['list_agents', 'send_message']);
       const buildNotice = vi.fn().mockReturnValue('restored agents');
       vi.spyOn(config, 'getBackgroundAgentResumeService').mockReturnValue({
         loadPausedBackgroundAgents: vi.fn().mockResolvedValue([{}]),
@@ -2280,6 +2298,27 @@ describe('Server Config (config.ts)', () => {
       expect(buildNotice).not.toHaveBeenCalled();
       expect(config.consumePendingRecoveredAgentsNotice()).toBeNull();
     });
+
+    it.each([
+      { missingTool: 'list_agents', registeredTools: ['send_message'] },
+      { missingTool: 'send_message', registeredTools: ['list_agents'] },
+    ])(
+      'does not advertise recovered agents without $missingTool',
+      async ({ registeredTools }) => {
+        const config = new Config(baseParams);
+        setRegisteredAgentTools(config, registeredTools);
+        const buildNotice = vi.fn().mockReturnValue('restored agents');
+        vi.spyOn(config, 'getBackgroundAgentResumeService').mockReturnValue({
+          loadPausedBackgroundAgents: vi.fn().mockResolvedValue([{}]),
+          buildRecoveredBackgroundAgentsModelNotice: buildNotice,
+        } as never);
+
+        await config.loadPausedBackgroundAgents('session-with-agents');
+
+        expect(buildNotice).not.toHaveBeenCalled();
+        expect(config.consumePendingRecoveredAgentsNotice()).toBeNull();
+      },
+    );
   });
 
   describe('chat recording failure listeners', () => {

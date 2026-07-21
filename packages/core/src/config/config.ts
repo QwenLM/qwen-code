@@ -6450,7 +6450,13 @@ export class Config {
   ): Promise<ReadonlyArray<import('../agents/background-tasks.js').AgentTask>> {
     const service = this.getBackgroundAgentResumeService();
     const recovered = await service.loadPausedBackgroundAgents(sessionId);
-    if (recovered.length > 0 && !this.getBareMode()) {
+    const toolNames = new Set(this.toolRegistry?.getAllToolNames() ?? []);
+    if (
+      recovered.length > 0 &&
+      !this.getBareMode() &&
+      toolNames.has(ToolNames.LIST_AGENTS) &&
+      toolNames.has(ToolNames.SEND_MESSAGE)
+    ) {
       this.pendingRecoveredAgentsNotice =
         service.buildRecoveredBackgroundAgentsModelNotice(recovered.length);
     }

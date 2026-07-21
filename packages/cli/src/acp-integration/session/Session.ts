@@ -4216,7 +4216,7 @@ export class Session implements SessionContext {
    * `cronQueue` and triggering `#drainCronQueue`.
    */
   async #startCronSchedulerIfNeeded(): Promise<void> {
-    if (this.disposed) return;
+    if (this.closing || this.disposed) return;
     if (!this.config.isCronEnabled()) return;
     if (this.cronDisabledByTokenLimit) return;
     const scheduler = this.config.getCronScheduler();
@@ -4239,7 +4239,7 @@ export class Session implements SessionContext {
 
     // dispose() may have run while the durable load was in flight; its
     // stop() already tore the scheduler down — don't restart the tick.
-    if (this.disposed) return;
+    if (this.closing || this.disposed) return;
 
     if (!scheduler.hasPendingWork) return;
 

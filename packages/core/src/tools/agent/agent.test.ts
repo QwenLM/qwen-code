@@ -172,7 +172,13 @@ describe('AgentTool', () => {
     const stubToolRegistry = {
       copyDiscoveredToolsFrom: vi.fn(),
       getAllTools: vi.fn().mockReturnValue([]),
-      getAllToolNames: vi.fn().mockReturnValue([]),
+      getAllToolNames: vi
+        .fn()
+        .mockReturnValue([
+          ToolNames.LIST_AGENTS,
+          ToolNames.SEND_MESSAGE,
+          ToolNames.TASK_STOP,
+        ]),
       stop: vi.fn().mockResolvedValue(undefined),
     };
     config = {
@@ -405,6 +411,30 @@ describe('AgentTool', () => {
       );
 
       tool.dispose();
+    });
+
+    it('does not advertise unavailable background coordination tools', async () => {
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValueOnce([
+        ToolNames.SEND_MESSAGE,
+      ]);
+      const noListTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+      expect(noListTool.description).toContain(
+        'Reuse an existing background agent',
+      );
+      expect(noListTool.description).not.toContain('call list_agents');
+
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValueOnce([
+        ToolNames.LIST_AGENTS,
+      ]);
+      const noSendTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+      expect(noSendTool.description).not.toContain(
+        'Reuse an existing background agent',
+      );
+
+      noListTool.dispose();
+      noSendTool.dispose();
     });
 
     it('requires bounded delegation and verification of subagent results', async () => {
@@ -4447,6 +4477,66 @@ describe('AgentTool', () => {
         }),
       );
       writeMetaSpy.mockRestore();
+    });
+
+    it('does not suggest send_message when that tool is unavailable', async () => {
+      vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+        ToolNames.TASK_STOP,
+      ]);
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      const result = await invocation.execute();
+      const llmText = partToString(result.llmContent);
+
+      expect(llmText).not.toContain(`Use ${ToolNames.SEND_MESSAGE}`);
+      expect(llmText).toContain(`Use ${ToolNames.TASK_STOP} to cancel.`);
+    });
+
+    it('keeps the tracked execution pending until runtime cleanup finishes', async () => {
+      let releaseBackgroundDispose!: () => void;
+      const backgroundDispose = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseBackgroundDispose = resolve;
+          }),
+      );
+      vi.mocked(mockSubagentManager.createAgentHeadless)
+        .mockResolvedValueOnce({
+          subagent: mockAgent,
+          dispose: vi.fn().mockResolvedValue(undefined),
+        })
+        .mockResolvedValueOnce({
+          subagent: mockAgent,
+          dispose: backgroundDispose,
+        });
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const trackedExecution = mockRegistry.trackAgentExecution.mock
+        .calls[0]?.[0] as Promise<void>;
+      let settled = false;
+      void trackedExecution.then(() => {
+        settled = true;
+      });
+      await vi.waitFor(() => expect(backgroundDispose).toHaveBeenCalledOnce());
+      expect(settled).toBe(false);
+
+      releaseBackgroundDispose();
+      await trackedExecution;
+      expect(settled).toBe(true);
     });
 
     it('marks a completed temporary-worktree agent as non-continuable', async () => {

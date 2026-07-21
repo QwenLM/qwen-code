@@ -1054,9 +1054,11 @@ describe('BackgroundTaskRegistry', () => {
       registry.trackAgentExecution(new Promise<void>(() => {}));
 
       const wait = registry.abortAllAndWait({ notify: false });
-      const rejection = await expect(wait).rejects.toThrow(
-        'Background agents did not stop within 5000ms.',
-      );
+      const rejection = (async () => {
+        await expect(wait).rejects.toThrow(
+          'Background agents did not stop within 5000ms.',
+        );
+      })();
 
       await vi.advanceTimersByTimeAsync(5000);
       await rejection;

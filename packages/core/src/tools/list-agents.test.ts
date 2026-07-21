@@ -12,11 +12,16 @@ import { ListAgentsTool } from './list-agents.js';
 describe('ListAgentsTool', () => {
   let registry: BackgroundTaskRegistry;
   let tool: ListAgentsTool;
+  let registeredTools: string[];
 
   beforeEach(() => {
     registry = new BackgroundTaskRegistry();
+    registeredTools = ['send_message'];
     tool = new ListAgentsTool({
       getBackgroundTaskRegistry: () => registry,
+      getToolRegistry: () => ({
+        getAllToolNames: () => registeredTools,
+      }),
     } as unknown as Config);
   });
 
@@ -146,5 +151,35 @@ describe('ListAgentsTool', () => {
         can_message: false,
       },
     ]);
+  });
+
+  it('marks retained agents as not messageable when send_message is unavailable', async () => {
+    registeredTools = [];
+    tool = new ListAgentsTool({
+      getBackgroundTaskRegistry: () => registry,
+      getToolRegistry: () => ({
+        getAllToolNames: () => registeredTools,
+      }),
+    } as unknown as Config);
+    registry.register({
+      agentId: 'agent-completed',
+      description: 'Finished work',
+      isBackgrounded: true,
+      status: 'completed',
+      startTime: 1,
+      abortController: new AbortController(),
+      outputFile: '/tmp/agent-completed.jsonl',
+    });
+
+    const result = await tool.validateBuildAndExecute(
+      {},
+      new AbortController().signal,
+    );
+    const content = JSON.parse(String(result.llmContent)) as {
+      agents: Array<Record<string, unknown>>;
+    };
+
+    expect(content.agents[0]).toMatchObject({ can_message: false });
+    expect(tool.description).not.toContain('with send_message');
   });
 });

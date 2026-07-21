@@ -2155,7 +2155,13 @@ describe('BackgroundAgentResumeService', () => {
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'done',
     };
-    const dispose = vi.fn().mockResolvedValue(undefined);
+    let releaseDispose!: () => void;
+    const dispose = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseDispose = resolve;
+        }),
+    );
     const starts: string[] = [];
     registry.setRegisterCallback((entry) => starts.push(entry.status));
     const { service, subagentManager, stubToolRegistry } = createService();
@@ -2177,6 +2183,13 @@ describe('BackgroundAgentResumeService', () => {
     registry.abortAll({ notify: false });
     releaseSetup?.();
 
+    let settled = false;
+    void resume.then(() => {
+      settled = true;
+    });
+    await vi.waitFor(() => expect(dispose).toHaveBeenCalledOnce());
+    expect(settled).toBe(false);
+    releaseDispose();
     await expect(resume).resolves.toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('cancelled');
     expect(readMetaStatus(metaPath)).toBe('running');

@@ -851,9 +851,20 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
     const teamGuidance = this.config.isAgentTeamEnabled()
       ? `**For tasks requiring multiple agents to coordinate, communicate, or work as a team**: Use ${ToolNames.TEAM_CREATE} first to create a team, then spawn teammates using the Agent tool with the \`name\` parameter (the active team is selected automatically). Teams enable message passing between agents, shared task lists, and coordinated workflows. If the user asks for agents to collaborate, review each other's work, or produce a consolidated result — create a team.`
       : '';
-    const backgroundReuseGuidance = hasRebuiltToolRegistry(this.config)
-      ? ''
-      : `- Reuse an existing background agent for related follow-up work instead of launching a duplicate: use the \`task_id\` from its launch result, or call ${ToolNames.LIST_AGENTS} when you need to discover retained or restored agents, then call ${ToolNames.SEND_MESSAGE} with that \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.`;
+    const registeredTools = new Set(
+      this.config.getToolRegistry().getAllToolNames(),
+    );
+    const canSendToBackgroundAgent =
+      !hasRebuiltToolRegistry(this.config) &&
+      registeredTools.has(ToolNames.SEND_MESSAGE);
+    const canListBackgroundAgents = registeredTools.has(ToolNames.LIST_AGENTS);
+    const backgroundReuseGuidance = canSendToBackgroundAgent
+      ? `- Reuse an existing background agent for related follow-up work instead of launching a duplicate: use the \`task_id\` from its launch result${
+          canListBackgroundAgents
+            ? `, or call ${ToolNames.LIST_AGENTS} when you need to discover retained or restored agents`
+            : ''
+        }, then call ${ToolNames.SEND_MESSAGE} with that \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.`
+      : '';
 
     const baseDescription = `Launch a new agent to handle complex, multi-step tasks autonomously.
 The Agent tool launches specialized agents (subprocesses) that autonomously handle complex tasks. Each agent type has specific capabilities and tools available to it.
@@ -2893,6 +2904,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           bgSubagent = bgResult.subagent;
           bgSubagentDispose = bgResult.dispose;
           bgTaskPrompt = this.params.prompt;
+          await subagentDispose?.();
+          subagentDispose = undefined;
         }
 
         const registry = this.config.getBackgroundTaskRegistry();
@@ -2983,14 +2996,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             },
             updateOutput,
           );
-          void agentConfig
-            .getToolRegistry()
-            .stop()
-            .catch((stopError) => {
-              debugLogger.warn(
-                `[Agent] ToolRegistry stop after background registration failure failed: ${stopError}`,
-              );
-            });
+          await Promise.allSettled([
+            agentConfig.getToolRegistry().stop(),
+            bgSubagentDispose?.(),
+          ]);
           return {
             llmContent: `${errorMessage}${wtSuffix}`,
             returnDisplay: this.currentDisplay!,
@@ -3294,16 +3303,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // bgSubagent.execute resolves, is safe: by this point the
             // detached body cannot invoke any more tool factories on
             // this registry.
-            void agentConfig
-              .getToolRegistry()
-              .stop()
-              .catch(() => {});
+            await Promise.allSettled([
+              agentConfig.getToolRegistry().stop(),
+              bgSubagentDispose?.(),
+            ]);
             // Per-spawn cleanup from `SubagentManager.createAgentHeadless`
             // (background path). Mirrors the foreground finally: releases
             // agent-scope hook entries and stops the per-agent ToolRegistry
             // owning MCP child processes; not redundant with the parent
             // registry stop above.
-            void bgSubagentDispose?.().catch(() => {});
             // Restore parent PermissionManager's dangerous allow rules
             // if this AUTO override stripped them. Background path:
             // restore fires when the bg agent terminates (complete /
@@ -3353,10 +3361,22 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         );
 
         this.updateDisplay({ status: 'background' as const }, updateOutput);
+        const availableTools = new Set(
+          this.config.getToolRegistry().getAllToolNames(),
+        );
+        let taskControlGuidance = 'internal ID — do not mention to the user.';
+        if (availableTools.has(ToolNames.SEND_MESSAGE)) {
+          taskControlGuidance += ` Use ${ToolNames.SEND_MESSAGE} to continue this agent`;
+          taskControlGuidance += availableTools.has(ToolNames.TASK_STOP)
+            ? `, or ${ToolNames.TASK_STOP} to cancel.`
+            : '.';
+        } else if (availableTools.has(ToolNames.TASK_STOP)) {
+          taskControlGuidance += ` Use ${ToolNames.TASK_STOP} to cancel.`;
+        }
         return {
           llmContent:
             `Background agent launched successfully.\n` +
-            `task_id: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
+            `task_id: ${hookOpts.agentId} (${taskControlGuidance})\n` +
             `The agent is working in the background. You will be notified automatically when it completes.\n` +
             `Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\n` +
             `output_file: ${jsonlPath}\n` +

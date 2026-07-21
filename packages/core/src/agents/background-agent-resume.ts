@@ -802,18 +802,15 @@ export class BackgroundAgentResumeService {
     let runtimeLifecycleOwned = false;
     let setupCleaned = false;
 
-    const cleanupPreparedRuntime = () => {
+    const cleanupPreparedRuntime = async () => {
       if (runtimeLifecycleOwned || setupCleaned) return;
       setupCleaned = true;
       cleanupOwnedMonitorNotifications?.();
       cleanupJsonl?.();
-      if (agentConfig) {
-        void agentConfig
-          .getToolRegistry()
-          .stop()
-          .catch(() => {});
-      }
-      void subagentDispose?.().catch(() => {});
+      await Promise.allSettled([
+        agentConfig?.getToolRegistry().stop(),
+        subagentDispose?.(),
+      ]);
       restoreParentPM?.();
     };
     const stillOwnsRunningEntry = () => {
@@ -825,16 +822,16 @@ export class BackgroundAgentResumeService {
         current.abortController === bgAbortController
       );
     };
-    const stopStaleSetup = () => {
+    const stopStaleSetup = async () => {
       if (stillOwnsRunningEntry()) return false;
-      cleanupPreparedRuntime();
+      await cleanupPreparedRuntime();
       return true;
     };
 
     try {
       const subagentName = meta.subagentName ?? meta.agentType;
       const target = await this.resolveResumeTarget(subagentName);
-      if (stopStaleSetup()) return undefined;
+      if (await stopStaleSetup()) return undefined;
       if (!target.subagentConfig && !target.isFork) {
         const reason =
           target.unavailableReason ||
@@ -914,7 +911,7 @@ export class BackgroundAgentResumeService {
             )[0],
             ...recovery.history,
           ];
-      if (stopStaleSetup()) return undefined;
+      if (await stopStaleSetup()) return undefined;
       const promptMessages = [...operation.continuationMessages];
       const continuationPrompt =
         promptMessages.join('\n\n').trim() ||
@@ -930,7 +927,7 @@ export class BackgroundAgentResumeService {
           resumeBlockedReason: reason,
           suppressRegisterCallback: true,
         });
-        cleanupPreparedRuntime();
+        await cleanupPreparedRuntime();
         return undefined;
       }
       if (target.isFork && !recovery.forkBootstrap) {
@@ -943,7 +940,7 @@ export class BackgroundAgentResumeService {
           resumeBlockedReason: reason,
           suppressRegisterCallback: true,
         });
-        cleanupPreparedRuntime();
+        await cleanupPreparedRuntime();
         return undefined;
       }
       if (
@@ -960,7 +957,7 @@ export class BackgroundAgentResumeService {
           resumeBlockedReason: reason,
           suppressRegisterCallback: true,
         });
-        cleanupPreparedRuntime();
+        await cleanupPreparedRuntime();
         return undefined;
       }
 
@@ -990,7 +987,7 @@ export class BackgroundAgentResumeService {
         subagent = result.subagent;
         subagentDispose = result.dispose;
       }
-      if (stopStaleSetup()) return undefined;
+      if (await stopStaleSetup()) return undefined;
 
       const projectRoot = this.config.getProjectRoot();
       cleanupJsonl = attachJsonlTranscriptWriter(bgEventEmitter, outputFile, {
@@ -1087,7 +1084,7 @@ export class BackgroundAgentResumeService {
         resolvedMode,
         signal: bgAbortController.signal,
       });
-      if (stopStaleSetup()) return undefined;
+      if (await stopStaleSetup()) return undefined;
       const bgEmitter = subagent.getCore().getEventEmitter();
       let liveToolCallCount = 0;
 
@@ -1211,15 +1208,14 @@ export class BackgroundAgentResumeService {
           // run disposes its change-listeners on shared
           // SubagentManager / SkillManager. Without this, every resume
           // accumulates listeners for the rest of the session.
-          void activeAgentConfig
-            .getToolRegistry()
-            .stop()
-            .catch(() => {});
+          await Promise.allSettled([
+            activeAgentConfig.getToolRegistry().stop(),
+            subagentDispose?.(),
+          ]);
           // Per-spawn cleanup from `createAgentHeadless`: releases agent-
           // scope hook entries and stops the per-agent ToolRegistry that
           // the force rebuild created for `mcpServers`. Distinct from the
           // parent registry above (no-op when target.isFork).
-          void subagentDispose?.().catch(() => {});
           // Restore parent PermissionManager's dangerous allow rules if
           // this override stripped them. See createApprovalModeOverride
           // strip-lifecycle comment in agent.ts.
@@ -1247,7 +1243,7 @@ export class BackgroundAgentResumeService {
       void execution;
       return entry;
     } catch (error) {
-      cleanupPreparedRuntime();
+      await cleanupPreparedRuntime();
       if (!stillOwnsRunningEntry()) return undefined;
       const errorMessage =
         error instanceof Error ? error.message : String(error);
