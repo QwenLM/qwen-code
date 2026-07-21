@@ -3278,6 +3278,106 @@ describe('qwen-autofix workflow', () => {
     ).toBe(0);
   });
 
+  it('retries a verification-gate crash instead of burying the fix', () => {
+    // A gate that DECLARES a verdict (outcome=failed) evaluated the agent's
+    // attempt and rejected it - the watermark advances, bounded by MAX_ROUNDS.
+    // A gate that dies WITHOUT a verdict (empty outcome on a failed job) never
+    // judged the work at all; advancing there strands a fix the agent had
+    // already written, which is exactly how the nested-package ENOENT stranded
+    // #7329/#7336 until a human deleted the marker.
+    const decision = reviewAddressReportStep.match(
+      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n {12}\{/,
+    )?.[1];
+    expect(decision).toBeTruthy();
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    const NEWEST = '2026-07-20T10:00:00Z';
+    const run = (env) =>
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          `${decision}\nprintf '%s|%s|%s' "$MARK_TS" "$MARK_ROUND" "$HEADLINE"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            NEWEST,
+            WATERMARK: '2026-07-20T09:00:00Z',
+            ROUND: '1',
+            MAX_ROUNDS: '5',
+            DETAIL_FILE: '/w/address-summary.md',
+            OUTCOME: '',
+            JOB_STATUS: 'failure',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+
+    // Declared rejection: the agent was judged -> advance the watermark.
+    const rejected = run({ OUTCOME: 'failed' });
+    expect(rejected.split('|')[0]).toBe(NEWEST);
+    expect(rejected).toContain('Could not address the latest feedback');
+
+    // Gate crash (no verdict): keep the feedback live and retry.
+    const crashed = run({ OUTCOME: '' });
+    expect(crashed.split('|')[0]).toBe(SENTINEL);
+    expect(crashed).toContain(
+      'verification-gate error before reaching a verdict',
+    );
+    expect(crashed).toContain('it will retry on the next scan');
+    expect(crashed.split('|')[1]).toBe('2');
+
+    // A no-output crash keeps its own (pre-existing) wording, still a retry.
+    const noOutput = run({ OUTCOME: '', DETAIL_FILE: '' });
+    expect(noOutput.split('|')[0]).toBe(SENTINEL);
+    expect(noOutput).toContain('crashed before it could evaluate the feedback');
+
+    // At the cap the gate crash names the operator fix rather than promising a
+    // retry the scan's round gate would refuse.
+    const capped = run({ OUTCOME: '', ROUND: '4' });
+    expect(capped).toContain('this was the last automatic attempt');
+    expect(capped).toContain('check the gate logs, then re-arm');
+
+    // A successful job never counts as a crash (dry-run reporting path).
+    expect(run({ OUTCOME: '', JOB_STATUS: 'success' }).split('|')[0]).toBe(
+      NEWEST,
+    );
+  });
+
+  it('makes every known gate rejection declare its verdict', () => {
+    // The retry/advance split above is only sound while each real rejection
+    // writes outcome=failed; an unwired check would read as a gate crash and be
+    // retried instead of reported. Drive the extracted helper for real.
+    const gate = verificationGateSteps[1];
+    for (const check of [
+      "npm run build || reject_fix 'build failed on the agent-committed fix'",
+      "npm run typecheck || reject_fix 'typecheck failed on the agent-committed fix'",
+      "npm run lint || reject_fix 'lint failed on the agent-committed fix'",
+      'reject_fix "tests failed in ${p}"',
+    ]) {
+      expect(gate).toContain(check);
+    }
+    const helper = gate.match(/reject_fix\(\) \{\n[\s\S]*?\n {10}\}/)?.[0];
+    expect(helper).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'reject-'));
+    const out = join(dir, 'gh_output');
+    writeFileSync(out, '');
+    let status = 0;
+    try {
+      execFileSync(
+        'bash',
+        ['-c', `set -eo pipefail\n${helper}\nfalse || reject_fix 'boom'`],
+        { env: { ...process.env, GITHUB_OUTPUT: out }, encoding: 'utf8' },
+      );
+    } catch (e) {
+      status = e.status;
+    }
+    expect(status).not.toBe(0);
+    expect(readFileSync(out, 'utf8')).toContain('outcome=failed');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
   it('re-arms a stranded PR from a marker instead of a deleted comment', () => {
     // Recovery used to mean `gh api -X DELETE` on the bot's own eval marker:
     // raw API access, an erased audit trail, undiscoverable. `@qwen-code
