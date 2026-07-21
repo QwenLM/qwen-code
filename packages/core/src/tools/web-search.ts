@@ -209,10 +209,16 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
         notice: `WebSearch is enabled with WEB_SEARCH_BASE_URL but the API key variable ${keyEnv} is not set. Set WEB_SEARCH_API_KEY (or DASHSCOPE_API_KEY).`,
       };
     }
+    if (!resolved) {
+      return {
+        ok: false,
+        notice: `WebSearch is enabled but the search model selector "${selector}" could not be resolved.`,
+      };
+    }
     return {
       ok: true,
       backend: {
-        modelId: resolved?.modelId ?? selector,
+        modelId: resolved.modelId,
         apiKeyEnvKey: keyEnv,
         baseUrl: settings.baseUrl,
         webExtractor: settings.webExtractor !== false,
@@ -874,7 +880,12 @@ class WebSearchToolInvocation extends BaseToolInvocation<
         );
       }
 
-      if (status === 'incomplete') {
+      if (
+        status === 'incomplete' &&
+        (data.candidateUrls.length > 0 ||
+          data.openedUrls.length > 0 ||
+          data.answerText.trim())
+      ) {
         return this.finishResult(
           data,
           startedAt,

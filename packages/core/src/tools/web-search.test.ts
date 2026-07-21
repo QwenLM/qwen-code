@@ -422,6 +422,21 @@ describe('evaluateWebSearchGate', () => {
     if (!gate.ok) expect(gate.notice).toContain('WS_E2E_UNSET_KEY_VAR');
   });
 
+  it('rejects an env-declared backend when the selector cannot be resolved', () => {
+    const gate = evaluateWebSearchGate(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'fast',
+          baseUrl: DASHSCOPE_BASE_URL,
+          apiKeyEnv: TEST_ENV_KEY,
+        },
+      }),
+    );
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.notice).toContain('could not be resolved');
+  });
+
   it('accepts the US regional and Token Plan MaaS endpoints', () => {
     for (const baseUrl of [
       'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
