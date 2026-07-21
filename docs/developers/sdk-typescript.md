@@ -164,7 +164,7 @@ The SDK supports different permission modes for controlling tool execution:
 - **`default`**: Write tools are denied unless approved via `canUseTool` callback or in `allowedTools`. Read-only tools execute without confirmation.
 - **`plan`**: Blocks all write tools, instructing AI to present a plan first.
 - **`auto-edit`**: Auto-approve edit tools (`edit`, `write_file`, `notebook_edit`) while other tools require confirmation.
-- **`auto`**: Uses the built-in classifier to auto-approve safe tool calls and route risky ones to manual approval.
+- **`auto`**: Uses the built-in classifier to auto-approve safe tool calls and block risky ones, with manual-approval fallback after repeated policy blocks or classifier outages.
 - **`yolo`**: All tools execute automatically without confirmation.
 
 ### Permission Priority Chain
@@ -178,8 +178,9 @@ The first matching rule wins.
 3. `permissionMode: 'plan'` - Blocks all non-read-only tools
 4. `permissionMode: 'yolo'` - Auto-approves all tools
 5. `allowedTools` / `permissions.allow` - Auto-approves matching tools
-6. `canUseTool` callback - Custom approval logic (if provided, not called for allowed tools)
-7. Default behavior - Auto-deny in SDK mode (write tools require explicit approval)
+6. `permissionMode: 'auto'` - Classifier-mediated approval for remaining tools
+7. `canUseTool` callback - Custom approval logic (if provided, not called for allowed tools)
+8. Default behavior - Auto-deny in SDK mode (write tools require explicit approval)
 
 ## Examples
 
