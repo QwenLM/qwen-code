@@ -826,8 +826,10 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
+    const configModel = (this.contentGeneratorConfig.model ?? '').toLowerCase();
     const thinkingMandatory =
-      this.contentGeneratorConfig.thinkingMandatory === true;
+      this.contentGeneratorConfig.thinkingMandatory === true &&
+      model === configModel;
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -909,17 +911,13 @@ export class ContentGenerationPipeline {
       }
     }
 
-    if (
-      thinkingMandatory &&
-      isDashScope &&
-      (model.startsWith('qwen') || model === 'coder-model')
-    ) {
+    if (thinkingMandatory && isDashScope) {
       const typed = providerRequest as unknown as Record<string, unknown>;
       // DashScope rejects forced tool selection while thinking is enabled.
-      if (
-        typed['enable_thinking'] !== false &&
-        typed['tool_choice'] === 'required'
-      ) {
+      if (typed['enable_thinking'] === false) {
+        delete typed['enable_thinking'];
+      }
+      if (typed['tool_choice'] === 'required') {
         delete typed['tool_choice'];
       }
     }

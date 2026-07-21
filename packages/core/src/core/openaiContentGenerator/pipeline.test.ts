@@ -735,6 +735,31 @@ describe('ContentGenerationPipeline', () => {
         expectedThinking: true,
         expectedToolChoice: undefined,
       },
+      {
+        name: 'not inherit mandatory thinking through request.model overrides',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        requestModel: 'qwen3.7-max',
+        extraBody: { enable_thinking: true },
+        thinkingMandatory: true,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: false,
+        expectedToolChoice: 'required',
+      },
+      {
+        name: 'drop a contradictory thinking disable for aliased mandatory models',
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'token-plan-model-alias',
+        extraBody: { enable_thinking: false },
+        thinkingMandatory: true,
+        reasoning: undefined,
+        includeThoughts: false,
+        expectedThinking: undefined,
+        expectedToolChoice: undefined,
+      },
     ])('should $name', async (testCase) => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
@@ -757,7 +782,9 @@ describe('ContentGenerationPipeline', () => {
       }));
 
       const request: GenerateContentParameters = {
-        model: testCase.model,
+        model:
+          ('requestModel' in testCase ? testCase.requestModel : undefined) ??
+          testCase.model,
         contents: [{ parts: [{ text: 'Summarize' }], role: 'user' }],
         config: {
           thinkingConfig: { includeThoughts: testCase.includeThoughts },
