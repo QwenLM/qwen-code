@@ -6,7 +6,10 @@
 
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
-import { buildSessionRef } from './session-mention-ref.js';
+import {
+  buildSessionRef,
+  SESSION_MENTION_PREFIX,
+} from './session-mention-ref.js';
 import { t } from '../../i18n/index.js';
 
 const MAX_SESSION_SUGGESTIONS = 20;
@@ -31,8 +34,8 @@ export async function getSessionSuggestions(
     return [];
   }
 
-  const stripped = pattern.startsWith('session:')
-    ? pattern.slice('session:'.length)
+  const stripped = pattern.startsWith(SESSION_MENTION_PREFIX)
+    ? pattern.slice(SESSION_MENTION_PREFIX.length)
     : pattern;
   const needle = stripped.trim().toLowerCase();
   return items
