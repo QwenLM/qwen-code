@@ -2495,14 +2495,17 @@ jobs:
           # QUEUES the duplicate rather than discarding it — but that queueing
           # is exactly what makes this check sound: address jobs for one PR run
           # strictly one at a time, so by the time the duplicate runs here, the
-          # first job's eval marker is posted and visible. Two duplicate
+          # first job's eval marker is posted and visible. Three duplicate
           # signatures: (a) a sibling evaluated through a NEWER live ts than
           # our matrix watermark; (b) a conflict-only sibling resolved and
           # marked at the SAME ts — with no newer feedback its marker keeps
           # ts=watermark while its ROUND advances past ours (ours is the max
-          # round observed at scan time). Either way, if there is no live
-          # conflict left and nothing newer than the live watermark, this run
-          # is a stale duplicate and discards itself.
+          # round observed at scan time); (c) a no-op sibling judged THIS exact
+          # head (its redcheck marker matches CHECKED_OUT_HEAD) while keeping
+          # BOTH ts and round unchanged — neither (a) nor (b) fires, but
+          # re-running would post a duplicate report for the same head. Either
+          # way, if there is no live conflict left and nothing newer than the
+          # live watermark, this run is a stale duplicate and discards itself.
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -2526,6 +2529,16 @@ jobs:
                     or ((.body // "") | contains("<!-- autofix-rearm -->")))
               | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
+          # The head a sibling last judged, mirrored from the scan's RED_HEAD
+          # parse. A no-op sibling records this marker while leaving BOTH ts and
+          # round UNCHANGED — so the watermark/round triggers below never fire,
+          # yet a second same-watermark target for the same head would otherwise
+          # run the agent again and post a duplicate report for that head.
+          LIVE_RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+              | {sha: .[0], at: ($c.created_at // "")} ]
+            | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
           # A re-arm SUPERSEDES every job selected under the old window key:
           # the maintainer asked for a fresh start, so a queued old-window job
           # must discard instead of finishing and stamping an old-sequence
@@ -2535,7 +2548,8 @@ jobs:
             echo "🫥 window superseded: selected under key '${WINDOW:-none}' but the live window is '${LIVE_REARM_KEY}' (re-armed while queued) — discarding without action or marker"
           fi
           if [[ -n "${LIVE_EVAL_WM}" && "${CONFLICT}" != "true" ]] \
-            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; }; then
+            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]] \
+              || { [[ -n "${LIVE_RED_HEAD}" ]] && [[ "${LIVE_RED_HEAD}" == "${CHECKED_OUT_HEAD}" ]]; }; }; then
             LIVE_NEW="$(jq -rs \
               --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '

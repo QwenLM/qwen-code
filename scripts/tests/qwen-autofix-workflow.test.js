@@ -627,6 +627,9 @@ describe('qwen-autofix workflow', () => {
       // Default: the job was selected under the CURRENT window (the latest
       // ack, or 'none' before any takeover) — the normal, non-raced case.
       window = undefined,
+      // The head this job checked out (CHECKED_OUT_HEAD). The no-op same-head
+      // duplicate signature compares the live redcheck marker against it.
+      head = 'aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111',
     }) => {
       const effWindow =
         window ?? (acks.length ? acks[acks.length - 1] : 'none');
@@ -638,7 +641,7 @@ describe('qwen-autofix workflow', () => {
             ...marks.map((m) => ({
               user: { login: 'qwen-code-dev-bot' },
               created_at: m.at ?? '2026-07-18T09:00:00Z',
-              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->`,
+              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->${m.head ? `\n<!-- autofix-redcheck head=${m.head} -->` : ''}`,
             })),
             ...acks.map((at) => ({
               user: { login: 'qwen-code-dev-bot' },
@@ -674,6 +677,7 @@ describe('qwen-autofix workflow', () => {
               CONFLICT: conflict,
               MAX_ROUNDS: '5',
               WINDOW: effWindow,
+              CHECKED_OUT_HEAD: head,
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               REVIEW_BOT: 'qwen-code-ci-bot',
               TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
@@ -851,6 +855,51 @@ describe('qwen-autofix workflow', () => {
         commands: ['2026-07-18T08:45:00Z'],
       }).stale,
     ).toBe(true);
+    // No-op same-head duplicate (signature c): two scans both emit the PR with
+    // watermark W; the first serialized job ends in a no-op, recording a
+    // redcheck marker for head H while keeping ts=W and round UNCHANGED.
+    // Neither the watermark nor the round trigger fires, so without the
+    // redcheck re-check the second job would run the agent again and post a
+    // duplicate report for the same head.
+    const H = 'aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111';
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: H,
+      }).stale,
+    ).toBe(true);
+    // A new commit moved the head: the sibling judged a DIFFERENT head, so
+    // this target is real work, not a duplicate.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: 'bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222',
+      }).stale,
+    ).toBe(false);
+    // Same head, but trusted feedback arrived after the watermark the no-op
+    // sibling evaluated through: the queued job has real work and proceeds.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: H,
+        reviews: [F2],
+      }).stale,
+    ).toBe(false);
+    // Same head, but a live conflict is actionable regardless of the redcheck.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'true',
+        round: 2,
+        head: H,
+      }).stale,
+    ).toBe(false);
   });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
