@@ -7633,7 +7633,7 @@ export function App({
                   if (!open) closeArtifactPanel();
                 }}
               >
-                <DrawerContent className="w-[min(520px,calc(100vw-16px))] sm:max-w-[520px]">
+                <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]">
                   <DrawerTitle className="sr-only">Right panel</DrawerTitle>
                   <ArtifactPanel
                     artifacts={artifactPanelArtifacts}

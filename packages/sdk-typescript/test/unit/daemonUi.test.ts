@@ -7007,6 +7007,74 @@ describe('parallel subAgent text interleaving fix', () => {
     expect(state.blocks[1]).not.toHaveProperty('content');
   });
 
+  it('preserves accumulated subagent usage when completed rawOutput has lower totals', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-B',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: { type: 'task_execution', status: 'running' },
+      },
+      {
+        type: 'assistant.usage',
+        usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
+        parentToolCallId: 'agent-task-B',
+      },
+    ] as DaemonUiEvent[]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      rawOutput: {
+        executionSummary: {
+          inputTokens: 5000,
+          outputTokens: 800,
+          cachedTokens: 200,
+          totalTokens: 5800,
+        },
+      },
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-B',
+        toolName: 'agent',
+        status: 'completed',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'completed',
+          executionSummary: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 0,
+          },
+        },
+      },
+    ] as DaemonUiEvent[]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      status: 'completed',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'completed',
+        executionSummary: {
+          inputTokens: 5000,
+          outputTokens: 800,
+          cachedTokens: 200,
+          totalTokens: 5800,
+        },
+      },
+    });
+  });
+
   it('keeps subagent block filtering enabled after store reset', () => {
     const store = createDaemonTranscriptStore({ retainSubagentBlocks: false });
     store.reset();

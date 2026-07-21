@@ -225,6 +225,7 @@ export function SubagentDetail({
   useEffect(() => {
     let cancelled = false;
     let hasResolved = false;
+    let retryCount = 0;
     let refreshTimer: ReturnType<typeof setTimeout> | undefined;
     setResolution(undefined);
     setLoadError(false);
@@ -242,8 +243,14 @@ export function SubagentDetail({
         }
       } catch {
         if (cancelled) return;
-        if (!hasResolved) setLoadError(true);
-        else refreshTimer = setTimeout(() => void refresh(), 3_000);
+        if (!hasResolved && retryCount < 3) {
+          retryCount += 1;
+          refreshTimer = setTimeout(() => void refresh(), 3_000);
+        } else if (!hasResolved) {
+          setLoadError(true);
+        } else {
+          refreshTimer = setTimeout(() => void refresh(), 3_000);
+        }
       }
     };
     void refresh();

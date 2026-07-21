@@ -626,6 +626,7 @@ describe('VirtualSubagentSessions', () => {
     vi.useFakeTimers();
     await vi.advanceTimersByTimeAsync(1_000);
     expect(settled).toBe(false);
+    vi.useRealTimers();
     abort.abort();
     await next;
     await iterator.return?.();

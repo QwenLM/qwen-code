@@ -1171,7 +1171,7 @@ export const ToolLine = memo(function ToolLine({
     const panel = (
       <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
     );
-    if (subagentDetails) {
+    if (subagentDetails && !hideHeader) {
       return (
         <div className={styles.line}>
           <button

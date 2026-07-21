@@ -777,7 +777,36 @@ function upsertToolBlock(
     else if (event.content !== undefined) existing.content = event.content;
     if (event.locations !== undefined) existing.locations = event.locations;
     if (event.rawInput !== undefined) existing.rawInput = event.rawInput;
-    if (rawOutput !== undefined) existing.rawOutput = rawOutput;
+    if (rawOutput !== undefined) {
+      if (
+        compactTaskOutput &&
+        isRecord(rawOutput) &&
+        isRecord(existing.rawOutput)
+      ) {
+        const prevSummary = isRecord(existing.rawOutput['executionSummary'])
+          ? existing.rawOutput['executionSummary']
+          : undefined;
+        const nextSummary = isRecord(rawOutput['executionSummary'])
+          ? rawOutput['executionSummary']
+          : undefined;
+        if (prevSummary && nextSummary) {
+          for (const key of [
+            'inputTokens',
+            'outputTokens',
+            'cachedTokens',
+            'totalTokens',
+          ]) {
+            const prev = finiteNumber(prevSummary[key]);
+            if (prev > finiteNumber(nextSummary[key])) {
+              nextSummary[key] = prev;
+            }
+          }
+        } else if (prevSummary) {
+          rawOutput['executionSummary'] = prevSummary;
+        }
+      }
+      existing.rawOutput = rawOutput;
+    }
     existing.sourceRecordIds = unionStrings(
       existing.sourceRecordIds,
       event.sourceRecordIds,

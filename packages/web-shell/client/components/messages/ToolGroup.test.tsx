@@ -591,6 +591,29 @@ describe('tool row rendering', () => {
     expect(onOpen).toHaveBeenCalledWith(tool);
   });
 
+  it('respects hideHeader for agent tools inside SubagentDetailsProvider', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} hideHeader forceExpanded />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
+  });
+
   it('keeps glob details visible in the header after expanding', () => {
     const pattern =
       '**/very-long-component-pattern-that-crosses-the-expand-threshold-*.tsx';
