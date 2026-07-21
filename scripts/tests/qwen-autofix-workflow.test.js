@@ -231,7 +231,12 @@ describe('qwen-autofix workflow', () => {
     // older PRs for hours whenever cron ticks were sparse.
     expect(reviewScanJob).not.toContain('break # one PR per scheduled scan');
     expect(reviewScanJob).toContain('Fan out: emit EVERY eligible PR');
-    expect(workflow).toContain('max-parallel: 3');
+    // A simultaneity bound must exist — without one, a backlog opens an agent
+    // run per selected PR at once. The VALUE is a tuning knob; the invariant
+    // that it exists AND still binds below MAX_TARGETS_PER_SCAN is pinned by
+    // 'bounds fleet-wide simultaneity below the per-scan target budget'.
+    // Asserting the literal number here only detected edits, not breakage.
+    expect(workflow).toMatch(/max-parallel: \d+/);
     // Pathological-backlog bound: the budget BREAKS the candidate loop (so it
     // bounds runtime and API usage, not just matrix size), the deferral is
     // LOGGED, and the next scan picks up the remainder.
@@ -308,6 +313,33 @@ describe('qwen-autofix workflow', () => {
     // A failed metadata fetch (empty branch) must skip the candidate, not fall
     // through to an address job that fails on `git checkout -B "" origin/`.
     expect(reviewScanJob).toContain('could not fetch PR metadata');
+  });
+
+  it('bounds fleet-wide simultaneity below the per-scan target budget', () => {
+    // max-parallel is the ONE place different PRs wait on each other: the scan
+    // emits every eligible PR (up to MAX_TARGETS_PER_SCAN) and the matrix
+    // decides how many run at once. Measured at 3 on a scan that selected 7,
+    // the 7th leg started 81 minutes late, each new leg beginning 3-4 seconds
+    // after a slot freed.
+    //
+    // The number is a tuning knob and deliberately NOT pinned here. What is
+    // pinned is that a bound exists and still binds: dropping the key, or
+    // raising it to the target budget, both let one backlog open every agent
+    // run at once — which is the thing the cap exists to prevent, and neither
+    // would fail any other test.
+    // review-address is the last job in the file, so there is no trailing
+    // `# ====` separator to anchor on — match to EOF.
+    const addressJob =
+      workflow.match(/\n {2}review-address:[\s\S]*$/)?.[0] ?? '';
+    expect(addressJob).toContain('matrix:');
+    const parallel = Number(addressJob.match(/max-parallel: (\d+)/)?.[1]);
+    const targetBudget = Number(
+      workflow.match(/MAX_TARGETS_PER_SCAN: '(\d+)'/)?.[1],
+    );
+    expect(Number.isInteger(parallel)).toBe(true);
+    expect(parallel).toBeGreaterThan(0);
+    expect(Number.isInteger(targetBudget)).toBe(true);
+    expect(parallel).toBeLessThan(targetBudget);
   });
 
   it('behaviorally replays the stale-duplicate revalidation, including the conflict-only transition', () => {

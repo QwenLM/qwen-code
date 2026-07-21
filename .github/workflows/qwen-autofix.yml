@@ -2095,7 +2095,16 @@ jobs:
       contents: 'read'
     strategy:
       fail-fast: false
-      max-parallel: 3
+      # Simultaneity bound for the whole fleet — the ONLY place different PRs
+      # wait on each other (the per-scan target budget and the inspection
+      # budget are both far from binding at the current pool size).
+      # Measured at 3, on the scan that selected 7 PRs: the legs started
+      # 3-at-a-time and each new one began 3-4s after a slot freed, so the
+      # 7th PR waited 81 minutes for a slot it could have had immediately.
+      # 5 halves that tail while staying a real bound — the point of the cap
+      # is that a backlog cannot open an unbounded number of agent runs at
+      # once, not the specific number.
+      max-parallel: 5
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
     concurrency:
