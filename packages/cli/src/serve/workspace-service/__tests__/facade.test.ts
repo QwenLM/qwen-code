@@ -1392,7 +1392,7 @@ describe('createDaemonWorkspaceService', () => {
       });
     });
 
-    it('publishes the reduced disabled list when enabling a skill', async () => {
+    it('publishes an explicit enabled override for a default-disabled skill', async () => {
       const publishWorkspaceEvent = vi.fn();
       const svc = createDaemonWorkspaceService(
         makeDeps({
@@ -1400,6 +1400,7 @@ describe('createDaemonWorkspaceService', () => {
           persistDisabledSkills: vi.fn().mockResolvedValue({
             changed: true,
             disabled: ['orphan'],
+            settingsChanges: [{ key: 'skills.enabled', value: ['review'] }],
           }),
           invokeWorkspaceCommand: vi.fn().mockResolvedValue({
             sessionsRefreshed: 1,
@@ -1420,8 +1421,8 @@ describe('createDaemonWorkspaceService', () => {
       expect(publishWorkspaceEvent).toHaveBeenCalledWith({
         type: 'settings_changed',
         data: {
-          key: 'skills.disabled',
-          value: ['orphan'],
+          key: 'skills.enabled',
+          value: ['review'],
           scope: 'workspace',
         },
         originatorClientId: 'client-1',
@@ -1601,6 +1602,7 @@ describe('createDaemonWorkspaceService', () => {
           queryWorkspaceStatus: statusQuery(
             skillStatus({
               status: 'disabled',
+              disabledReason: 'inactive_extension',
               level: 'extension',
               extensionName: 'review-ext',
             }),

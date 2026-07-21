@@ -21,6 +21,11 @@ import express, {
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
+  resolveSkillSettings,
+  skillSettingStrings,
+  updateWorkspaceSkillSettingLists,
+} from '../config/skill-settings.js';
+import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
@@ -3203,66 +3208,66 @@ async function runQwenServeImpl(
       withSettingsLock(workspace, async () => {
         const fresh = settingsRuntime.settings.loadSettings(workspace);
         const normalizedName = skillName.trim().toLowerCase();
-        const disabledNames = (value: unknown): string[] =>
-          Array.isArray(value)
-            ? value.filter(
-                (entry): entry is string => typeof entry === 'string',
-              )
-            : [];
-        const lockedScopes = [
-          ['system', fresh.system.settings.skills?.disabled],
-          ['user', fresh.user.settings.skills?.disabled],
-          ['systemDefaults', fresh.systemDefaults.settings.skills?.disabled],
-        ] as const;
-        for (const [scope, names] of lockedScopes) {
-          if (
-            disabledNames(names).some(
-              (name) => name.trim().toLowerCase() === normalizedName,
-            )
-          ) {
-            throw new runtime.WorkspaceSkillNotToggleableError(
-              skillName,
-              'locked',
-              scope,
-            );
-          }
+        const resolved = resolveSkillSettings(fresh);
+        const disablement = resolved.disablements.get(normalizedName);
+        if (disablement?.reason === 'hard' && disablement.lockedScope) {
+          throw new runtime.WorkspaceSkillNotToggleableError(
+            skillName,
+            'locked',
+            disablement.lockedScope,
+          );
         }
 
-        const workspaceDisabled = disabledNames(
-          fresh.workspace.settings.skills?.disabled,
-        );
-        const next: string[] = [];
-        let found = false;
-        let changed = false;
-        for (const name of workspaceDisabled) {
-          if (name.trim().toLowerCase() !== normalizedName) {
-            next.push(name);
-            continue;
-          }
-          if (enabled) {
-            changed = true;
-            continue;
-          }
-          if (!found) {
-            next.push(skillName);
-            found = true;
-            if (name !== skillName) changed = true;
-          } else {
-            changed = true;
-          }
-        }
-        if (!enabled && !found) {
-          next.push(skillName);
-          changed = true;
-        }
-        if (!changed) return { changed: false, disabled: workspaceDisabled };
-
-        fresh.setValue(
+        const workspaceDisabled = skillSettingStrings(
+          fresh,
           WORKSPACE_SETTING_SCOPE,
-          'skills.disabled',
-          next.length > 0 ? next : undefined,
+          'disabled',
         );
-        return { changed: true, disabled: next };
+        const workspaceEnabled = skillSettingStrings(
+          fresh,
+          WORKSPACE_SETTING_SCOPE,
+          'enabled',
+        );
+        const next = updateWorkspaceSkillSettingLists(
+          { disabled: workspaceDisabled, enabled: workspaceEnabled },
+          skillName,
+          enabled,
+          resolved.defaultDisabledNames.has(normalizedName) &&
+            !resolved.enabledNames.has(normalizedName),
+        );
+        const settingsChanges: Array<{
+          key: 'skills.disabled' | 'skills.enabled';
+          value: string[] | undefined;
+        }> = [];
+        if (
+          JSON.stringify(next.disabled) !== JSON.stringify(workspaceDisabled)
+        ) {
+          settingsChanges.push({
+            key: 'skills.disabled',
+            value: next.disabled.length > 0 ? next.disabled : undefined,
+          });
+        }
+        if (JSON.stringify(next.enabled) !== JSON.stringify(workspaceEnabled)) {
+          settingsChanges.push({
+            key: 'skills.enabled',
+            value: next.enabled.length > 0 ? next.enabled : undefined,
+          });
+        }
+        if (settingsChanges.length === 0) {
+          return { changed: false, disabled: workspaceDisabled };
+        }
+
+        fresh.setValues(
+          settingsChanges.map((change) => ({
+            scope: WORKSPACE_SETTING_SCOPE,
+            ...change,
+          })),
+        );
+        return {
+          changed: true,
+          disabled: next.disabled,
+          settingsChanges,
+        };
       });
     const persistSettingFn = (
       workspace: string,

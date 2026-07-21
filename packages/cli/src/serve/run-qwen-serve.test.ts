@@ -176,7 +176,13 @@ describe('workspace skill settings persistence', () => {
     );
     fs.writeFileSync(
       path.join(qwenHome, 'settings.json'),
-      JSON.stringify({ skills: { disabled: ['locked-skill'] } }),
+      JSON.stringify({
+        skills: {
+          disabled: ['locked-skill'],
+          defaultDisabled: ['opt-in-skill', 'inherited-opt-in'],
+          enabled: ['INHERITED-OPT-IN'],
+        },
+      }),
     );
 
     const originalCreateServeApp = serverModule.createServeApp;
@@ -201,12 +207,21 @@ describe('workspace skill settings persistence', () => {
     );
     await handle.runtimeReady;
     expect(persistDisabledSkills).toBeDefined();
+    await expect(
+      persistDisabledSkills!(workspace, 'inherited-opt-in', true),
+    ).resolves.toEqual({
+      changed: false,
+      disabled: ['orphan', ' ReViEw ', 'review'],
+    });
 
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
     ).resolves.toEqual({
       changed: true,
       disabled: ['orphan', 'review'],
+      settingsChanges: [
+        { key: 'skills.disabled', value: ['orphan', 'review'] },
+      ],
     });
     await expect(
       persistDisabledSkills!(workspace, 'review', false),
@@ -222,11 +237,19 @@ describe('workspace skill settings persistence', () => {
     await expect(
       persistDisabledSkills!(workspace, 'review', true),
     ).resolves.toMatchObject({ changed: true });
+    await expect(
+      persistDisabledSkills!(workspace, 'opt-in-skill', true),
+    ).resolves.toEqual({
+      changed: true,
+      disabled: ['orphan', 'alpha', 'beta'],
+      settingsChanges: [{ key: 'skills.enabled', value: ['opt-in-skill'] }],
+    });
 
     const saved = JSON.parse(
       fs.readFileSync(path.join(workspace, '.qwen', 'settings.json'), 'utf8'),
-    ) as { skills: { disabled: string[] } };
+    ) as { skills: { disabled: string[]; enabled: string[] } };
     expect(saved.skills.disabled).toEqual(['orphan', 'alpha', 'beta']);
+    expect(saved.skills.enabled).toEqual(['opt-in-skill']);
     await expect(
       persistDisabledSkills!(workspace, 'locked-skill', true),
     ).rejects.toMatchObject({ reason: 'locked', lockedScope: 'user' });

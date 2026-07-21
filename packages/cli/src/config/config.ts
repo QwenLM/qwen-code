@@ -90,6 +90,7 @@ import {
   validateMaxWallTimeSetting,
 } from '../utils/runBudget.js';
 import { detectSystemLanguage } from '../i18n/index.js';
+import { resolveSkillSettings } from './skill-settings.js';
 
 const debugLogger = createDebugLogger('CONFIG');
 
@@ -1409,7 +1410,7 @@ function parseMcpConfig(
  * Builds the live-read closure for `Config.getDisabledSkillNames()`.
  *
  * The returned function reads through `loadedSettings.merged` on every
- * call, so `LoadedSettings.setValue('skills.disabled', ...)` invocations
+ * call, so `LoadedSettings` skill-setting mutations
  * are reflected without rebuilding `Config`. The closure is over the
  * `LoadedSettings` instance, NOT over its `.merged` snapshot — that
  * distinction matters because `LoadedSettings.setValue` replaces the
@@ -1424,24 +1425,7 @@ function parseMcpConfig(
 export function buildDisabledSkillNamesProvider(
   loadedSettings: LoadedSettings,
 ): () => ReadonlySet<string> {
-  return () => {
-    // Defensive: settings.json is user-editable, so the `disabled` slot
-    // could be a non-array (e.g. `"disabled": "all"` or `"disabled": 42`)
-    // OR an array containing non-strings (e.g. `[42, null]`). The `??`
-    // fallback only catches `null`/`undefined`, so we MUST also guard
-    // against non-array values before `.filter()` — otherwise calling
-    // `"all".filter` throws `TypeError: list.filter is not a function`
-    // and bricks every skill invocation (validateToolParams + execute
-    // both call this provider without a try/catch).
-    const raw = loadedSettings.merged.skills?.disabled;
-    const list = Array.isArray(raw) ? raw : [];
-    return new Set(
-      list
-        .filter((n): n is string => typeof n === 'string')
-        .map((n) => n.trim().toLowerCase())
-        .filter(Boolean),
-    );
-  };
+  return () => resolveSkillSettings(loadedSettings).disabledNames;
 }
 
 export async function loadCliConfig(
@@ -1460,8 +1444,8 @@ export async function loadCliConfig(
   /**
    * Live-read provider for the set of disabled skill names. Forwarded to
    * `ConfigParameters` so that `Config.getDisabledSkillNames()` reflects
-   * `LoadedSettings.merged.skills?.disabled` even after `setValue`
-   * mutations within the same process.
+   * effective skill availability even after `setValue` mutations within the
+   * same process.
    *
    * Callers MUST close over the live `LoadedSettings` instance, NOT over
    * the `settings: Settings` snapshot passed as the first argument here —

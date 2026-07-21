@@ -882,6 +882,20 @@
           "items": {
             "type": "string"
           }
+        },
+        "defaultDisabled": {
+          "description": "Skill names disabled by default unless explicitly enabled through skills.enabled. Matched case-insensitively and UNION-merged across settings scopes. skills.disabled always wins.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "enabled": {
+          "description": "Explicit opt-ins that override matching skills.defaultDisabled entries. Matched case-insensitively and UNION-merged across settings scopes. Cannot override skills.disabled.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },

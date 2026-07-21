@@ -89,7 +89,12 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
     await fsp.writeFile(
       path.join(workspace, '.qwen', 'settings.json'),
-      JSON.stringify({ skills: { disabled: ['disabled'] } }),
+      JSON.stringify({
+        skills: {
+          defaultDisabled: ['disabled', 'enabled'],
+          enabled: ['ENABLED'],
+        },
+      }),
     );
     const provider = createWorkspaceSkillsStatusProvider();
 
@@ -104,6 +109,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       {
         name: 'disabled',
         status: 'disabled',
+        disabledReason: 'default',
         installedPath: '/skills/disabled/SKILL.md',
       },
     ]);

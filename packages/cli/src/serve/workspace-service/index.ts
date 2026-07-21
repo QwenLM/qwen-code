@@ -47,6 +47,7 @@ import {
 import { MCP_RESTART_SERVER_DEADLINE_MS } from '@qwen-code/acp-bridge/mcpTimeouts';
 
 import { loadSettings } from '../../config/settings.js';
+import { resolveSkillSettings } from '../../config/skill-settings.js';
 import { getWorkspaceTrustStatus } from '../../config/trustedFolders.js';
 import { buildPermissionSettings } from '../../config/permission-settings.js';
 import {
@@ -730,17 +731,23 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const disabled = loadSettings(boundWorkspace).merged.skills?.disabled;
-      const disabledNames = new Set(
-        (Array.isArray(disabled) ? disabled : [])
-          .filter((name): name is string => typeof name === 'string')
-          .map((name) => name.trim().toLowerCase())
-          .filter(Boolean),
-      );
+      const needsLegacyInactiveCheck =
+        skill.level === 'extension' &&
+        skill.status === 'disabled' &&
+        skill.disabledReason === undefined;
+      const disabledBySettings =
+        needsLegacyInactiveCheck &&
+        resolveSkillSettings(
+          loadSettings(boundWorkspace, {
+            consumeCorruptionEnvVars: false,
+            skipLoadEnvironment: true,
+          }),
+        ).disabledNames.has(normalizedName);
       if (
         skill.level === 'extension' &&
         skill.status === 'disabled' &&
-        !disabledNames.has(normalizedName)
+        (skill.disabledReason === 'inactive_extension' ||
+          (skill.disabledReason === undefined && !disabledBySettings))
       ) {
         throw new WorkspaceSkillNotToggleableError(
           skill.name,
@@ -789,16 +796,24 @@ export function createDaemonWorkspaceService(
           }
         }
 
-        publishWorkspaceEvent({
-          type: 'settings_changed',
-          data: {
-            key: 'skills.disabled',
+        const settingsChanges = persisted.settingsChanges ?? [
+          {
+            key: 'skills.disabled' as const,
             value:
               persisted.disabled.length > 0 ? persisted.disabled : undefined,
-            scope: 'workspace',
           },
-          originatorClientId: ctx.originatorClientId,
-        });
+        ];
+        for (const change of settingsChanges) {
+          publishWorkspaceEvent({
+            type: 'settings_changed',
+            data: {
+              key: change.key,
+              value: change.value,
+              scope: 'workspace',
+            },
+            originatorClientId: ctx.originatorClientId,
+          });
+        }
       }
 
       return {

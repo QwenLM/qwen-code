@@ -203,7 +203,7 @@ export interface DaemonWorkspaceService {
     enabled: boolean,
   ): Promise<{ toolName: string; enabled: boolean }>;
 
-  /** Toggle a skill in the workspace's skills.disabled settings list. */
+  /** Toggle a skill in the workspace skill settings. */
   setWorkspaceSkillEnabled(
     ctx: WorkspaceRequestContext,
     skillName: string,
@@ -345,6 +345,10 @@ export interface WorkspaceSkillToggleResult {
 export interface PersistDisabledSkillResult {
   changed: boolean;
   disabled: string[];
+  settingsChanges?: Array<{
+    key: 'skills.disabled' | 'skills.enabled';
+    value: string[] | undefined;
+  }>;
 }
 
 export type WorkspaceSkillNotToggleableReason =
