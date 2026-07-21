@@ -106,8 +106,13 @@ env:
   # hostile commenter cannot steer the agent.
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
-  # and leaves the PR for a human.
-  MAX_ROUNDS: '5'
+  # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
+  # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
+  # its five rounds on the verify-gate ENOENT that #7330 fixed), so the ceiling
+  # was near enough to bind on a bad day without any headroom for one. The cap
+  # exists to stop an unproductive LOOP, not to ration ordinary iteration —
+  # a genuinely stuck PR still stops, just later.
+  MAX_ROUNDS: '10'
   # An auth/access model error (401/402/403, "no access"/"does not exist")
   # never self-heals - only a maintainer can fix the key - and every retry
   # costs an agent run AND a PR comment. Cap those attempts far below
