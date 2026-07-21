@@ -136,27 +136,22 @@ jobs:
         runner: ['1', '2', '3']
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen-test']
     steps:
-      - name: 'Install Node.js 22.x system-wide'
+      - name: 'Set up Node.js 22.x'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: 'Persist Node.js in runner PATH'
         shell: 'bash'
         run: |-
           set -euo pipefail
-
-          if command -v node >/dev/null 2>&1 && [[ "$(node -p 'process.versions.node.split(".")[0]')" == "22" ]]; then
-            echo "Node $(node -v) / npm $(npm -v) is already installed."
-            exit 0
-          fi
-
-          sudo -n true
-          setup_script="${RUNNER_TEMP}/nodesource-setup.sh"
-          curl --fail --silent --show-error --location --retry 5 \
-            https://deb.nodesource.com/setup_22.x > "${setup_script}"
-          sudo -E bash "${setup_script}"
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y nodejs
-
-          command -v node
-          command -v npm
-          node -v
-          npm -v
+          node_dir="$(dirname "$(readlink -f "$(command -v node)")")"
+          mkdir -p "${HOME}/bin"
+          for command in node npm npx; do
+            ln -sfn "${node_dir}/${command}" "${HOME}/bin/${command}"
+          done
+          PATH="${HOME}/bin:${PATH}" node -v
+          PATH="${HOME}/bin:${PATH}" npm -v
 
   #
   # Test: Node
