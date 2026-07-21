@@ -1,4 +1,5 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { z } from 'zod';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -15,6 +16,7 @@ import { isScalingAvailable, Image } from './image-utils';
 import { Mobilecli } from './mobilecli';
 import { MobileDevice } from './mobile-device';
 import { validateOutputPath, validateFileExtension } from './utils';
+import { PayloadFilteringTransport } from './payload-filter';
 import {
   isNormalized,
   coordinateScale,
@@ -50,13 +52,23 @@ interface ActiveRecording {
   startedAt: number;
 }
 
+class PayloadFilteredMcpServer extends McpServer {
+  override connect(transport: Transport): Promise<void> {
+    return super.connect(
+      process.env.MCP_MODEL_PAYLOAD_FILTER === '1'
+        ? new PayloadFilteringTransport(transport)
+        : transport,
+    );
+  }
+}
+
 export const getAgentVersion = (): string => {
   const json = require('../package.json');
   return json.version;
 };
 
 export const createMcpServer = (): McpServer => {
-  const server = new McpServer({
+  const server = new PayloadFilteredMcpServer({
     name: 'mobile-mcp',
     version: getAgentVersion(),
     ...(isNormalized()
