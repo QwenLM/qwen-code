@@ -5,6 +5,7 @@
  */
 
 import { Storage } from '../config/storage.js';
+import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
 import { getProjectHash } from '../utils/paths.js';
 import path from 'node:path';
 import fs from 'node:fs';
@@ -1341,6 +1342,10 @@ export class SessionService {
       const activePath = this.getSessionFilePath(sessionId, 'active');
       const active = await this.readProjectSessionHead(sessionId, activePath);
       if (active) {
+        // #7384: the usage-history rebuild reads transcripts, so salvage
+        // the session's usage summary before the file is gone. Never
+        // blocks deletion (the salvage swallows its own errors).
+        await persistUsageBeforeTranscriptDeletion(activePath);
         this.removeFileIfExists(activePath);
         const archivedPath = this.getSessionFilePath(sessionId, 'archived');
         if (fs.existsSync(archivedPath)) {
@@ -1358,6 +1363,7 @@ export class SessionService {
       if (!archived) {
         return false;
       }
+      await persistUsageBeforeTranscriptDeletion(archivedPath);
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
       this.removeFileHistoryBackups(sessionId);
