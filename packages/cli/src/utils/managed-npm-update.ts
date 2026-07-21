@@ -60,7 +60,7 @@ function resolveNpmGlobalConfigPath(): string {
       'globalconfig',
       '--global',
     ],
-    { encoding: 'utf8', timeout: 2000 },
+    { encoding: 'utf8', timeout: 10_000 },
   ).trim();
   if (!output || output === 'null' || output === 'undefined') {
     throw new Error('Unable to resolve the global npm configuration');
@@ -205,7 +205,7 @@ export async function installManagedNpmUpdate(
         {
           cwd: update.stagingDir,
           env,
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'inherit'],
           timeout: 10 * 60_000,
           windowsHide: true,
         },

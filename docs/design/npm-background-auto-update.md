@@ -45,7 +45,9 @@ worker validates the installed manifest and runs a launcher smoke test. A
 missing, malformed, or launcher-mismatched pointer is ignored and the original
 npm package remains the fallback. The pointer also records the base package and
 launcher identity, so a later explicit global npm install supersedes the
-managed version.
+managed version. Because the launcher is not replaced by managed updates,
+existing `active.json` fields are a compatibility contract: future changes may
+add fields but must not remove or reinterpret them.
 
 Version directories are retained because an older live session may still load
 from them. Cleanup is intentionally deferred until disk usage shows that a

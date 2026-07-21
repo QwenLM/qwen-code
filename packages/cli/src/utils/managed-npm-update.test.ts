@@ -176,7 +176,7 @@ describe('managed npm update', () => {
         env: expect.objectContaining({
           NPM_CONFIG_USERCONFIG: path.resolve('config/npmrc'),
         }),
-        stdio: 'ignore',
+        stdio: ['ignore', 'ignore', 'inherit'],
         timeout: 10 * 60_000,
         windowsHide: true,
       }),
