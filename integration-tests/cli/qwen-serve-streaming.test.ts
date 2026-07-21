@@ -164,6 +164,7 @@ beforeAll(async () => {
         ),
         HOME: homeDir,
         QWEN_HOME: path.join(homeDir, '.qwen'),
+        QWEN_RUNTIME_DIR: path.join(homeDir, '.qwen'),
         NO_PROXY: '127.0.0.1,localhost',
         no_proxy: '127.0.0.1,localhost',
         OPENAI_API_KEY: 'fake-key',
