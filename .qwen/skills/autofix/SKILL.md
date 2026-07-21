@@ -140,12 +140,13 @@ Implement the selected issue in the checked-out repository:
    for the behavior.
 5. For TypeScript changes, read the relevant type definitions and preserve
    strict nullability; do not assume optional fields are present.
-6. Run `npm run build`, `npm run typecheck`, `npm run lint`, and focused Vitest
-   tests for touched packages or integration tests. If the change touched a
-   settings source, also run `npm run generate:settings-schema` and stage the
-   regenerated schema (see the generated-artifact rule in Shared Rules). Keep
-   fixing and rerunning runnable checks until they pass. If a required runnable
-   check remains failing, write `<workdir>/failure.md` and stop.
+6. Run `npm run build`, `npm run typecheck`, `npm run lint`, and either focused
+   Vitest tests for touched packages or integration tests after
+   `npm run bundle`. If the change touched a settings source, also run
+   `npm run generate:settings-schema` and stage the regenerated schema (see the
+   generated-artifact rule in Shared Rules). Keep fixing and rerunning runnable
+   checks until they pass. If a required runnable check remains failing, write
+   `<workdir>/failure.md` and stop.
 7. Re-read the full diff as a skeptical reviewer.
 8. Ensure `git status --short` shows only intended files, then create one
    Conventional Commit, e.g. `fix(core): summary (#<issue>)`.
@@ -158,9 +159,11 @@ Implement the selected issue in the checked-out repository:
 Follow `AGENTS.md`, `.qwen/skills/bugfix/SKILL.md`, and
 `.qwen/skills/e2e-testing/SKILL.md`, but this skill's surrogate-verification and
 objective stop rules override the bugfix skill's `NOT_REPRODUCED` and
-`VERIFIED_FIXED` gates. Do not stop merely because confidence is imperfect or
-the exact failing environment is unavailable. Write `<workdir>/failure.md` and
-do not commit only under the objective stop rule in Shared Rules.
+`VERIFIED_FIXED` gates only when the issue is CI-, Docker-, platform-, timing-,
+or environment-specific and the exact environment is unavailable. In that scoped
+case, do not stop merely because confidence is imperfect. Write
+`<workdir>/failure.md` and do not commit only under the objective stop rule in
+Shared Rules.
 
 ## Mode: address-review
 
@@ -188,10 +191,11 @@ unnecessarily.
 Finish with exactly one outcome:
 
 - Made a change: re-read the full diff as a skeptical reviewer, run
-  `npm run build`, `npm run typecheck`, `npm run lint`, and focused Vitest
-  tests for touched packages or integration tests (plus
-  `npm run generate:settings-schema`, staging the regenerated schema, if a
-  settings source changed), commit once only after they pass, then write
+  `npm run build`, `npm run typecheck`, `npm run lint`, and either focused
+  Vitest tests for touched packages or integration tests after
+  `npm run bundle` (plus `npm run generate:settings-schema`, staging the
+  regenerated schema, if a settings source changed), commit once only after they
+  pass, then write
   `<workdir>/address-summary.md` with each feedback point,
   decision, changes, conflict notes, and verification results (bilingual per
   Shared Rules). Also write `<workdir>/resolved-comments.txt`: one inline
