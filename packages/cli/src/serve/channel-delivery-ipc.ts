@@ -6,6 +6,7 @@
 
 import { randomUUID } from 'node:crypto';
 
+// Keep in sync with acp-bridge bridgeOptions.ts / bridgeClient.ts and sdk-typescript events.ts.
 export type ChannelDeliveryErrorCode =
   | 'channel_worker_unavailable'
   | 'channel_delivery_timeout'

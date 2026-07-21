@@ -519,6 +519,7 @@ export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
 
+// Keep in sync with cli channel-delivery-ipc.ts, bridgeClient.ts, and sdk-typescript events.ts.
 export type ChannelDeliveryErrorCode =
   | 'channel_worker_unavailable'
   | 'channel_delivery_timeout'

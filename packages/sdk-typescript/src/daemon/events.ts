@@ -770,6 +770,7 @@ export interface DaemonFollowupSuggestionData {
   [key: string]: unknown;
 }
 
+// Keep in sync with cli channel-delivery-ipc.ts and acp-bridge bridgeOptions.ts / bridgeClient.ts.
 export type DaemonChannelDeliveryErrorCode =
   | 'channel_worker_unavailable'
   | 'channel_delivery_timeout'
@@ -3056,6 +3057,7 @@ function isFollowupSuggestionData(
   );
 }
 
+// Keep in sync with DaemonChannelDeliveryErrorCode above.
 const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
   'channel_worker_unavailable',
   'channel_delivery_timeout',

@@ -69,6 +69,7 @@ const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
 const MAX_CHANNEL_DELIVERY_TEXT_CHARS = 100_000;
 const MAX_CHANNEL_DELIVERY_FIELD_CHARS = 2048;
 const MAX_CHANNEL_DELIVERY_ERROR_CHARS = 500;
+// Keep in sync with ChannelDeliveryErrorCode in bridgeOptions.ts; cli channel-delivery-ipc.ts and sdk-typescript events.ts carry the same set.
 const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
   'channel_worker_unavailable',
   'channel_delivery_timeout',
