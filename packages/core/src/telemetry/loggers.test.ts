@@ -251,6 +251,30 @@ describe('loggers', () => {
         /query|hash|content|filePath|projectPath|session|message|raw_error|secret/i,
       );
     });
+
+    it('omits discard_reason from metrics payload for delivered memory', () => {
+      const config = makeFakeConfig({ sessionId: 'test-session-id' });
+      const event = new MemoryRecallDeliveryEvent({
+        phase: 'refined',
+        delivery_point: 'tool_result',
+        strategy: 'model',
+        docs_selected: 2,
+        latency_ms: 123,
+      });
+
+      logMemoryRecallDelivery(config, event);
+
+      expect(metrics.recordMemoryRecallDeliveryMetrics).toHaveBeenCalledWith(
+        config,
+        123,
+        {
+          phase: 'refined',
+          delivery_point: 'tool_result',
+          strategy: 'model',
+          docs_selected: 2,
+        },
+      );
+    });
   });
 
   describe('logCliConfiguration', () => {

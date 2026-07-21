@@ -1468,7 +1468,6 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
 export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
 export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
 export type MemoryRecallDiscardReason =
-  | 'not_ready'
   | 'no_safe_delivery_point'
   | 'new_query'
   | 'reset'

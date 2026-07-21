@@ -5004,6 +5004,128 @@ hello
       );
     });
 
+    it('should log discard telemetry when pending auto-memory is shut down', async () => {
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(0),
+      } as unknown as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'first' }],
+        new AbortController().signal,
+        'prompt-id-shutdown-telemetry',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      client.requestShutdown();
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'shutdown',
+          strategy: 'none',
+          docs_selected: 0,
+          latency_ms: expect.any(Number),
+        }),
+      );
+    });
+
+    it('should log abort discard telemetry when caller signal is already aborted', async () => {
+      mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {
+        expect(opts.abortSignal?.aborted).toBe(true);
+        return new Promise(() => {});
+      });
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+        })(),
+      );
+
+      const callerController = new AbortController();
+      callerController.abort();
+      const stream = client.sendMessageStream(
+        [{ text: 'already aborted' }],
+        callerController.signal,
+        'prompt-id-pre-aborted',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'abort',
+          strategy: 'none',
+          docs_selected: 0,
+          latency_ms: expect.any(Number),
+        }),
+      );
+    });
+
+    it('should log only one terminal event for the same prefetch handle', () => {
+      const result = {
+        prompt: '## Relevant memory\n\nOne-shot.',
+        selectedDocs: [],
+        strategy: 'model' as const,
+      };
+      const handle = {
+        promise: Promise.resolve(result),
+        settledAt: Date.now(),
+        result,
+        consumed: false,
+        terminalLogged: false,
+        firedAt: Date.now(),
+        controller: new AbortController(),
+      };
+      const privateClient = client as unknown as {
+        logMemoryPrefetchDelivery: (
+          memoryHandle: typeof handle,
+          deliveryPoint: 'initial' | 'tool_result' | 'discarded',
+          recallResult: typeof result,
+          discardReason?: 'reset',
+        ) => void;
+      };
+
+      privateClient.logMemoryPrefetchDelivery(handle, 'initial', result);
+      privateClient.logMemoryPrefetchDelivery(
+        handle,
+        'discarded',
+        result,
+        'reset',
+      );
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledTimes(1);
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          delivery_point: 'initial',
+          strategy: 'model',
+        }),
+      );
+    });
+
     it('should abort the pending prefetch when LoopDetected fires mid-stream', async () => {
       let abortHandlerInvoked = false;
       mockMemoryManager.recall.mockImplementation((_root, _query, opts) => {

@@ -1116,7 +1116,6 @@ export function recordMemoryRecallDeliveryMetrics(
     phase: 'fast' | 'refined';
     delivery_point: 'initial' | 'tool_result' | 'discarded';
     discard_reason?:
-      | 'not_ready'
       | 'no_safe_delivery_point'
       | 'new_query'
       | 'reset'

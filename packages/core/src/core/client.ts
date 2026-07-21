@@ -2113,11 +2113,14 @@ export class GeminiClient {
           // up after firing; we still call removeEventListener on the promise's
           // finally to cover the normal-completion case so a long-lived parent
           // signal doesn't accumulate listeners across many turns.
+          let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
           const onParentAbort = () => {
+            prefetchAbortReason = 'abort';
             controller.abort();
             this.cancelPendingMemoryPrefetch('abort');
           };
           if (signal.aborted) {
+            prefetchAbortReason = 'abort';
             controller.abort();
           } else {
             signal.addEventListener('abort', onParentAbort, { once: true });
@@ -2167,6 +2170,9 @@ export class GeminiClient {
             signal.removeEventListener('abort', onParentAbort);
           });
           this.pendingMemoryPrefetch = handle;
+          if (prefetchAbortReason) {
+            this.cancelPendingMemoryPrefetch(prefetchAbortReason);
+          }
         }
 
         // Track prompt count for commit attribution. Only the user typing a

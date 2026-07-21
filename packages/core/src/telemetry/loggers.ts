@@ -1413,7 +1413,7 @@ export function logMemoryRecallDelivery(
   recordMemoryRecallDeliveryMetrics(config, event.latency_ms, {
     phase: event.phase,
     delivery_point: event.delivery_point,
-    discard_reason: event.discard_reason,
+    ...(event.discard_reason ? { discard_reason: event.discard_reason } : {}),
     strategy: event.strategy,
     docs_selected: event.docs_selected,
   });
