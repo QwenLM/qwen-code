@@ -250,6 +250,74 @@ describe('mapWorkspaceSkills', () => {
 });
 
 describe('updateConnectionFromDaemonEvent', () => {
+  it('updates and clears the authoritative Goal snapshot', () => {
+    const goal = {
+      goalId: 'goal-1',
+      revision: 2,
+      objective: 'ship safely',
+      status: 'active',
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 3,
+      activeTimeMs: 4_000,
+      createdAt: 10,
+      updatedAt: 20,
+    };
+    const active = applyEvent(
+      { status: 'connected', workspaceCwd: '/workspace' },
+      {
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            _meta: { goalState: { v: 2, goal, activity: 'running' } },
+          },
+        },
+      } as DaemonEvent,
+    );
+    expect(active.goalState).toEqual({
+      v: 2,
+      goal,
+      activity: 'running',
+    });
+
+    const cleared = applyEvent(active, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { goalState: { v: 2, goal: null, activity: 'idle' } },
+        },
+      },
+    } as DaemonEvent);
+    expect(cleared.goalState).toEqual({
+      v: 2,
+      goal: null,
+      activity: 'idle',
+    });
+  });
+
+  it('ignores malformed Goal snapshots', () => {
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workspaceCwd: '/workspace',
+      goalState: { v: 2, goal: null, activity: 'idle' },
+    };
+    const next = applyEvent(current, {
+      v: 1,
+      type: 'session_update',
+      data: {
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          _meta: { goalState: { v: 2, goal: {}, activity: 'running' } },
+        },
+      },
+    } as DaemonEvent);
+
+    expect(next.goalState).toBe(current.goalState);
+  });
+
   it('updates and clears the current git branch', () => {
     const changed = applyEvent(
       { status: 'connected', workspaceCwd: '/workspace', gitBranch: 'main' },

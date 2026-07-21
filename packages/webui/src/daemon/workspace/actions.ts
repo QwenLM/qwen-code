@@ -7,6 +7,8 @@
 import {
   EXTENSION_ARCHIVE_UPLOAD_TIMEOUT_MS,
   type DaemonClient,
+  type GoalControlRequest,
+  type GoalStateResponse,
 } from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
@@ -814,6 +816,24 @@ export function createDaemonWorkspaceActions({
         );
       }
       return (await res.json()) as { cleared: boolean };
+    },
+
+    async controlGoal(sessionId: string, request: GoalControlRequest) {
+      requireClient(getClient, 'Control goal failed');
+      const path = `/session/${encodeURIComponent(sessionId)}/goal`;
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify(request),
+        }),
+        'Control goal timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `POST ${path}`));
+      }
+      return (await res.json()) as GoalStateResponse;
     },
 
     async loadEnv() {

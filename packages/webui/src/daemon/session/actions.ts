@@ -24,6 +24,7 @@ import type {
   DaemonSessionArtifactsEnvelope,
   DaemonTranscriptStore,
   DaemonCapabilities,
+  GoalControlRequest,
   PermissionResponse,
 } from '@qwen-code/sdk/daemon';
 import { isDaemonTurnError, type PromptResult } from '@qwen-code/sdk/daemon';
@@ -153,6 +154,7 @@ export function getConnectionAfterSessionClear(
     delete next.displayName;
     delete next.tokenUsage;
     delete next.tokenCount;
+    delete next.goalState;
     // Drop the session-scoped raw snapshots (both carry the cleared
     // sessionId), which also makes the effect's canReuseSessionMetadata
     // check refetch fresh data for the next session.
@@ -1689,6 +1691,62 @@ export function createDaemonSessionActions({
           'Clear goal failed',
           error,
           'clear_goal',
+        );
+      }
+    },
+
+    async getGoal() {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Load goal failed',
+        'load_goal',
+      );
+      try {
+        const response = await withActionTimeout(
+          session.goal(),
+          'Load goal timed out',
+        );
+        setConnection((current) =>
+          current.sessionId === session.sessionId
+            ? { ...current, goalState: response.snapshot }
+            : current,
+        );
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Load goal failed',
+          error,
+          'load_goal',
+        );
+      }
+    },
+
+    async controlGoal(request: GoalControlRequest) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Control goal failed',
+        'control_goal',
+      );
+      try {
+        const response = await withActionTimeout(
+          session.controlGoal(request),
+          'Control goal timed out',
+        );
+        setConnection((current) =>
+          current.sessionId === session.sessionId
+            ? { ...current, goalState: response.snapshot }
+            : current,
+        );
+        return response;
+      } catch (error) {
+        throw dispatchActionError(
+          addNotice,
+          'Control goal failed',
+          error,
+          'control_goal',
         );
       }
     },

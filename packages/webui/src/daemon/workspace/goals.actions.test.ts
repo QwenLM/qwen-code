@@ -114,4 +114,42 @@ describe('goals workspace actions', () => {
       await expect(makeActions().clearGoal('gone')).rejects.toThrow();
     });
   });
+
+  describe('controlGoal', () => {
+    it('POSTs an optimistic-concurrency request to the session goal route', async () => {
+      const response = {
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      };
+      fetchMock.mockResolvedValue(ok(response));
+      const request = {
+        action: 'pause' as const,
+        expectedGoalId: 'goal-1',
+        expectedRevision: 3,
+      };
+
+      await expect(
+        makeActions('tok').controlGoal('a/b c', request),
+      ).resolves.toEqual(response);
+
+      const [url, init] = fetchMock.mock.calls[0];
+      expect(url).toBe('/session/a%2Fb%20c/goal');
+      expect(initOf(fetchMock.mock.calls[0]).method).toBe('POST');
+      expect(headersOf(init)['Authorization']).toBe('Bearer tok');
+      expect(headersOf(init)['Content-Type']).toBe('application/json');
+      expect(initOf(fetchMock.mock.calls[0]).body).toBe(
+        JSON.stringify(request),
+      );
+    });
+
+    it('throws on a non-ok response', async () => {
+      fetchMock.mockResolvedValue(fail(409, { error: 'stale revision' }));
+      await expect(
+        makeActions().controlGoal('s1', {
+          action: 'resume',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 2,
+        }),
+      ).rejects.toThrow();
+    });
+  });
 });

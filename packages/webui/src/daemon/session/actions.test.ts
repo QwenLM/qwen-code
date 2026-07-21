@@ -26,6 +26,7 @@ describe('getConnectionAfterSessionClear', () => {
         clientId: 'client-a',
         displayName: 'Session A',
         tokenCount: 42,
+        goalState: { v: 2, goal: null, activity: 'idle' },
         commands: [commandInfo('old-command')],
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
@@ -52,6 +53,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
     expect(next).not.toHaveProperty('tokenCount');
+    expect(next).not.toHaveProperty('goalState');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
     // Workspace-scoped slash commands and skills survive a clear so skill-backed
@@ -1188,6 +1190,29 @@ describe('createDaemonSessionActions', () => {
     expect(session.submitPrompt).not.toHaveBeenCalled();
   });
 
+  it('reads and controls the authoritative Goal through the session client', async () => {
+    const session = createMockSession('session-a');
+    const snapshot = {
+      v: 2 as const,
+      activity: 'idle' as const,
+      goal: null,
+    };
+    session.goal.mockResolvedValue({ snapshot });
+    session.controlGoal.mockResolvedValue({ snapshot });
+    const { actions, getConnection } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session,
+    });
+    const request = { action: 'create' as const, objective: 'ship safely' };
+
+    await expect(actions.getGoal()).resolves.toEqual({ snapshot });
+    await expect(actions.controlGoal(request)).resolves.toEqual({ snapshot });
+
+    expect(session.goal).toHaveBeenCalledOnce();
+    expect(session.controlGoal).toHaveBeenCalledWith(request);
+    expect(getConnection().goalState).toBe(snapshot);
+  });
+
   it('does not restart the event stream when the admitted prompt is stale', async () => {
     const restartEventStream = vi.fn();
     const session = createMockSession('session-a');
@@ -1788,6 +1813,8 @@ function createMockSession(
     submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
     supportedCommands: vi.fn(async () => supportedCommandsStatus(sessionId)),
     tasks: vi.fn(async () => ({ v: 1 as const, sessionId, tasks: [] })),
+    goal: vi.fn(),
+    controlGoal: vi.fn(),
   };
 }
 
