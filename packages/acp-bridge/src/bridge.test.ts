@@ -2999,6 +2999,124 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('falls back to the live replay when a bounded refresh stays unstable', async () => {
+    let update = 0;
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: async (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        update++;
+        await handle.agentConnection.sessionUpdate({
+          sessionId: params['sessionId'] as string,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `live update ${update}` },
+          },
+        });
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'bounded page' },
+              },
+            },
+          ],
+          hasMore: true,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-race',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(handle.agent.extMethodCalls).toHaveLength(2);
+    expect(refreshed).not.toHaveProperty('historyHasMore');
+    expect(JSON.stringify(refreshed.compactedReplay)).not.toContain(
+      'bounded page',
+    );
+    expect(JSON.stringify(refreshed)).toContain('live update 2');
+
+    await bridge.shutdown();
+  });
+
+  it('rejects a bounded refresh when the session starts closing', async () => {
+    const transcriptPage = deferred<Record<string, unknown>>();
+    const closeResult = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: (method, _params) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return transcriptPage.promise;
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          return closeResult.promise;
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-closing',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    const refresh = bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    await vi.waitFor(() => expect(handle.agent.extMethodCalls).toHaveLength(1));
+
+    const close = bridge.closeSession(loaded.sessionId, {
+      clientId: loaded.clientId,
+    });
+    await vi.waitFor(() => expect(handle.agent.extMethodCalls).toHaveLength(2));
+    transcriptPage.resolve({
+      v: 1,
+      sessionId: loaded.sessionId,
+      events: [],
+      hasMore: false,
+    });
+
+    await expect(refresh).rejects.toBeInstanceOf(SessionNotFoundError);
+    closeResult.resolve({});
+    await close;
+    await bridge.shutdown();
+  });
+
   it('restores artifacts from response-mode load replay when no snapshot is available', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {

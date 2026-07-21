@@ -337,8 +337,9 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionSummary[]>;
   loadSession(
     sessionId: string,
-    options?: { workspaceCwd?: string; signal?: AbortSignal },
+    options?: { workspaceCwd?: string },
   ): Promise<void>;
+  reloadSession(signal: AbortSignal): Promise<void>;
   resumeSession(
     sessionId: string,
     options?: { workspaceCwd?: string },

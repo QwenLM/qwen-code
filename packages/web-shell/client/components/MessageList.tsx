@@ -2295,6 +2295,10 @@ export const MessageList = memo(
         }
       | undefined
     >(undefined);
+    const transcriptBlockCountRef = useRef(transcriptBlockCount);
+    const isRespondingRef = useRef(isResponding);
+    transcriptBlockCountRef.current = transcriptBlockCount;
+    isRespondingRef.current = isResponding;
     const lastUnderfillAutoLoad = useRef<{
       loader: typeof onLoadOlderHistory;
       totalVirtualSize: number;
@@ -2502,7 +2506,7 @@ export const MessageList = memo(
         const lastEventId = transcriptActivity?.getSnapshot().lastEventId;
         if (
           lastEventId === baseline.lastEventId &&
-          transcriptBlockCount <= baseline.blockCount
+          transcriptBlockCountRef.current <= baseline.blockCount
         ) {
           return;
         }
@@ -2511,8 +2515,9 @@ export const MessageList = memo(
       if (
         !onReloadTranscript ||
         reloadTranscriptAbort.current !== undefined ||
-        isResponding ||
-        transcriptBlockCount <= WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS
+        followPausedByUserRef.current ||
+        isRespondingRef.current ||
+        transcriptBlockCountRef.current <= WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS
       ) {
         return;
       }
@@ -2527,12 +2532,14 @@ export const MessageList = memo(
         reloadTranscriptAbort.current = controller;
         void onReloadTranscript(controller.signal)
           .then(() => {
+            if (controller.signal.aborted) return;
             const snapshot = transcriptActivity?.getSnapshot();
             transcriptReloadBaseline.current = {
               ...(snapshot?.lastEventId !== undefined
                 ? { lastEventId: snapshot.lastEventId }
                 : {}),
-              blockCount: snapshot?.blocks?.length ?? transcriptBlockCount,
+              blockCount:
+                snapshot?.blocks?.length ?? transcriptBlockCountRef.current,
             };
           })
           .catch((error: unknown) => {
@@ -2546,20 +2553,13 @@ export const MessageList = memo(
             }
           });
       }, RELOAD_TRANSCRIPT_DELAY_MS);
-    }, [
-      cancelTranscriptReloadTimer,
-      isResponding,
-      onReloadTranscript,
-      transcriptActivity,
-      transcriptBlockCount,
-    ]);
+    }, [cancelTranscriptReloadTimer, onReloadTranscript, transcriptActivity]);
 
     useEffect(() => {
       transcriptReloadBaseline.current = undefined;
     }, [transcriptActivity]);
 
     useEffect(() => {
-      scheduleTranscriptReload();
       if (!transcriptActivity) return cancelTranscriptReload;
       let lastEventId = transcriptActivity.getSnapshot().lastEventId;
       const unsubscribe = transcriptActivity.subscribe(() => {
@@ -2573,6 +2573,10 @@ export const MessageList = memo(
         cancelTranscriptReload();
       };
     }, [transcriptActivity, scheduleTranscriptReload, cancelTranscriptReload]);
+
+    useEffect(() => {
+      scheduleTranscriptReload();
+    }, [isResponding, scheduleTranscriptReload, transcriptBlockCount]);
 
     const scheduleFollowRecheck = useCallback(() => {
       pendingFollowRecheck.current = true;

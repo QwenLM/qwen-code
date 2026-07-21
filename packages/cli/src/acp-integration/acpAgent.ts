@@ -6833,6 +6833,12 @@ class QwenAgent implements Agent {
             'Transcript cursor and direction are mutually exclusive',
           );
         }
+        if (rawBeforeRecordId !== undefined && rawDirection !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript record boundary and direction are mutually exclusive',
+          );
+        }
         const rawLimit = params['limit'];
         if (
           rawLimit !== undefined &&

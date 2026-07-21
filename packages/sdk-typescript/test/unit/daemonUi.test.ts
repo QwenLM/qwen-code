@@ -2943,6 +2943,26 @@ describe('daemon UI time schema (PR-B)', () => {
     });
   });
 
+  it('prefers the nested ACP update timestamp over envelope fallbacks', () => {
+    const events = normalizeDaemonEvent({
+      id: 2,
+      v: 1,
+      type: 'session_update',
+      data: {
+        timestamp: 2_000,
+        _meta: { timestamp: 3_000 },
+        update: {
+          timestamp: 4_000,
+          _meta: { timestamp: 1_000 },
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: 'hello' },
+        },
+      },
+    } as never);
+
+    expect(events[0]).toMatchObject({ serverTimestamp: 1_000 });
+  });
+
   it.each([1_780_905_333_596, '2026-06-08T07:55:33.596Z'])(
     'extracts transcript-page timestamp %s',
     (timestamp) => {

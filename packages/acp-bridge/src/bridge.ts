@@ -3967,7 +3967,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         action === 'load' && req.historyPageSize !== undefined
           ? await refreshedReplayFieldsFor(existing, req.historyPageSize)
           : replayFieldsFor(existing, action);
-      if (byId.get(req.sessionId) !== existing) {
+      if (byId.get(req.sessionId) !== existing || existing.closing) {
         throw new SessionNotFoundError(req.sessionId);
       }
       existing.attachCount++;

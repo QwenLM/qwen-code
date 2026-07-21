@@ -360,7 +360,7 @@ describe('createDaemonSessionActions', () => {
     controller.abort();
 
     await expect(
-      actions.loadSession('session-a', { signal: controller.signal }),
+      actions.reloadSession(controller.signal),
     ).rejects.toMatchObject({ name: 'AbortError' });
 
     expect(pendingSessionLoadRef.current).toBeUndefined();
@@ -376,9 +376,7 @@ describe('createDaemonSessionActions', () => {
       session: createMockSession('session-a'),
     });
 
-    void actions
-      .loadSession('session-a', { signal: controller.signal })
-      .catch(() => undefined);
+    void actions.reloadSession(controller.signal).catch(() => undefined);
 
     expect(pendingSessionLoadRef.current?.signal).toBe(controller.signal);
     clearTimeout(pendingSessionLoadRef.current?.timeout);

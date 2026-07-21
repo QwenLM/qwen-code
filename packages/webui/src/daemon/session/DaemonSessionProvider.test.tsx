@@ -6331,6 +6331,53 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toEqual([]);
   });
 
+  it('keeps the current transcript when a same-session reload is aborted', async () => {
+    const replacement = createDeferred<MockSession>();
+    const currentSession = createMockSession({
+      sessionId: 'session-a',
+      replaySnapshot: createTextReplaySnapshot('current transcript'),
+    });
+    sdkMocks.sessions.push(currentSession);
+    let actions: DaemonSessionActions | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+
+    function Harness() {
+      actions = useDaemonActions();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
+      async () => replacement.promise,
+    );
+    const controller = new AbortController();
+    const reload = requireActions(actions).reloadSession(controller.signal);
+    await act(async () => {
+      await flushPromises();
+    });
+
+    controller.abort();
+    const refreshedSession = createMockSession({
+      sessionId: 'session-a',
+      replaySnapshot: createTextReplaySnapshot('replacement transcript'),
+    });
+    replacement.resolve(refreshedSession);
+    await act(async () => {
+      await expect(reload).rejects.toMatchObject({ name: 'AbortError' });
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'current transcript' },
+    ]);
+    expect(currentSession.detach).not.toHaveBeenCalled();
+    expect(refreshedSession.detach).toHaveBeenCalledOnce();
+  });
+
   it('clears transcript immediately for default session switches', async () => {
     const nextSession = createDeferred<MockSession>();
     const currentSession = createMockSession({

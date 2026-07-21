@@ -394,6 +394,7 @@ describe('AssistantMessage streaming markdown', () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
     const root = createRoot(container);
+    mounted.push({ root, container });
     const tree = (content: string, isStreaming: boolean) => (
       <I18nProvider language="en">
         <AssistantMessage content={content} isStreaming={isStreaming} />
@@ -410,7 +411,6 @@ describe('AssistantMessage streaming markdown', () => {
 
     act(() => root.render(tree('first second final', false)));
     expect(container.textContent).toContain('first second final');
-    mounted.push({ root, container });
   });
 });
 

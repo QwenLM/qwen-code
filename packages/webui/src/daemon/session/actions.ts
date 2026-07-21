@@ -630,11 +630,21 @@ export function createDaemonSessionActions({
     },
 
     async loadSession(sessionId, options) {
+      return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
+    },
+
+    async reloadSession(signal) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Reload session failed',
+        'load_session',
+      );
       return startSessionSwitch(
-        sessionId,
+        session.sessionId,
         'load',
-        options?.workspaceCwd,
-        options?.signal,
+        session.workspaceCwd,
+        signal,
       );
     },
 

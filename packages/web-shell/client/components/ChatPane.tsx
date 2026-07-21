@@ -159,12 +159,9 @@ export function ChatPane({
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
-      await actions.loadSession(connection.sessionId, {
-        workspaceCwd: connection.workspaceCwd,
-        signal,
-      });
+      await actions.reloadSession(signal);
     },
-    [actions, connection.sessionId, connection.workspaceCwd],
+    [actions, connection.sessionId],
   );
   const transcriptReloadSupported =
     connection.capabilities?.features.includes(

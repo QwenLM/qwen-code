@@ -605,10 +605,10 @@ export function extractServerTimestamp(event: DaemonEvent): number | undefined {
       }
     }
     const timestampCandidates = [
-      event.data['timestamp'],
-      isRecord(dataMeta) ? dataMeta['timestamp'] : undefined,
-      isRecord(update) ? update['timestamp'] : undefined,
       isRecord(updateMeta) ? updateMeta['timestamp'] : undefined,
+      isRecord(update) ? update['timestamp'] : undefined,
+      isRecord(dataMeta) ? dataMeta['timestamp'] : undefined,
+      event.data['timestamp'],
     ];
     for (const candidate of timestampCandidates) {
       const timestamp = parseTimestamp(candidate);

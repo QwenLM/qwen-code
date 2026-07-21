@@ -1305,12 +1305,9 @@ export function App({
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
-      await sessionActions.loadSession(connection.sessionId, {
-        workspaceCwd: connection.workspaceCwd,
-        signal,
-      });
+      await sessionActions.reloadSession(signal);
     },
-    [connection.sessionId, connection.workspaceCwd, sessionActions],
+    [connection.sessionId, sessionActions],
   );
   const transcriptReloadSupported =
     connection.capabilities?.features.includes(

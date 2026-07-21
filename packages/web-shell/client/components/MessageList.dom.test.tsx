@@ -362,6 +362,45 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onReloadTranscript).toHaveBeenCalledTimes(2);
   });
 
+  it('aborts an in-flight transcript reload when the reader leaves the tail', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    let resolveReload = () => undefined;
+    let reloadSignal: AbortSignal | undefined;
+    const onReloadTranscript = vi.fn((signal: AbortSignal) => {
+      reloadSignal = signal;
+      return new Promise<void>((resolve) => {
+        resolveReload = resolve;
+      });
+    });
+    const container = mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+    });
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(reloadSignal?.aborted).toBe(false);
+
+    const list = container.firstElementChild as HTMLElement;
+    list.scrollTop = 400;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    expect(reloadSignal?.aborted).toBe(true);
+
+    await act(async () => resolveReload());
+  });
+
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')]);
     expect(has(c, 'u1')).toBe(true);

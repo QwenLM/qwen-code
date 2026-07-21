@@ -7922,6 +7922,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         limit: 1.5,
       }),
     ).rejects.toThrow('Invalid transcript limit');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        direction: 'forward',
+      }),
+    ).rejects.toThrow('Invalid transcript direction');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        cursor: 'cursor-1',
+        direction: 'backward',
+      }),
+    ).rejects.toThrow('Transcript cursor and direction are mutually exclusive');
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionTranscript, {
+        sessionId: VALID_SESSION_ID,
+        beforeRecordId: 'record-1',
+        direction: 'backward',
+      }),
+    ).rejects.toThrow(
+      'Transcript record boundary and direction are mutually exclusive',
+    );
     expect(readPage).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
