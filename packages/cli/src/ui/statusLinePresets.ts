@@ -6,7 +6,9 @@
 
 import nodePath from 'node:path';
 import type { ReasoningEffort } from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { StreamingState } from './types.js';
+import { t } from '../i18n/index.js';
 
 export const STATUS_LINE_PRESET_ITEM_IDS = [
   'project-name',
@@ -21,6 +23,7 @@ export const STATUS_LINE_PRESET_ITEM_IDS = [
   'branch-changes',
   'context-used',
   'run-state',
+  'approval-mode',
   'qwen-version',
   'context-window-size',
   'used-tokens',
@@ -69,6 +72,7 @@ export interface StatusLinePresetData {
   totalLinesAdded: number;
   totalLinesRemoved: number;
   streamingState: StreamingState;
+  approvalMode: ApprovalMode | undefined;
 }
 
 export function aggregateModelTokens(metrics: {
@@ -147,6 +151,11 @@ export const STATUS_LINE_PRESET_ITEMS: readonly StatusLinePresetItem[] = [
     id: 'run-state',
     label: 'run-state',
     description: 'Compact session run-state text',
+  },
+  {
+    id: 'approval-mode',
+    label: 'approval-mode',
+    description: 'Current approval / interaction mode',
   },
   {
     id: 'qwen-version',
@@ -307,6 +316,7 @@ export function buildStatusLinePresetData(params: {
   totalLinesAdded: number;
   totalLinesRemoved: number;
   streamingState: StreamingState;
+  approvalMode?: ApprovalMode | undefined;
 }): StatusLinePresetData {
   const usedPercentage =
     params.contextWindowSize > 0
@@ -339,7 +349,28 @@ export function buildStatusLinePresetData(params: {
     totalLinesAdded: params.totalLinesAdded,
     totalLinesRemoved: params.totalLinesRemoved,
     streamingState: params.streamingState,
+    approvalMode: params.approvalMode,
   };
+}
+
+function getApprovalModeLabel(
+  mode: ApprovalMode | undefined,
+): string | undefined {
+  if (!mode) return undefined;
+  switch (mode) {
+    case ApprovalMode.PLAN:
+      return t('plan mode');
+    case ApprovalMode.AUTO_EDIT:
+      return t('auto-accept edits');
+    case ApprovalMode.AUTO:
+      return t('Auto mode');
+    case ApprovalMode.YOLO:
+      return t('YOLO mode');
+    case ApprovalMode.DEFAULT:
+      return t('Ask permissions');
+    default:
+      return undefined;
+  }
 }
 
 function formatPresetItem(
@@ -388,6 +419,8 @@ function formatPresetItem(
       return undefined;
     case 'run-state':
       return getRunStateLabel(data.streamingState);
+    case 'approval-mode':
+      return getApprovalModeLabel(data.approvalMode);
     case 'qwen-version':
       return `v${data.version}`;
     case 'context-window-size':

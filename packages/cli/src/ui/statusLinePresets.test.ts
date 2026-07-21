@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { StreamingState } from './types.js';
 import {
   aggregateModelTokens,
@@ -336,5 +337,54 @@ describe('statusLinePresets', () => {
     expect(inferPullRequestNumber('dragon/pull-request_99')).toBe('99');
     expect(inferPullRequestNumber('main')).toBeUndefined();
     expect(inferPullRequestNumber(undefined)).toBeUndefined();
+  });
+
+  it('renders approval-mode preset item', () => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      currentDir: '/repo/project',
+      branch: 'main',
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+      streamingState: StreamingState.Idle,
+      approvalMode: ApprovalMode.YOLO,
+    });
+
+    expect(
+      buildStatusLinePresetLines(
+        { type: 'preset', items: ['approval-mode'] },
+        data,
+      ),
+    ).toEqual(['YOLO mode']);
+  });
+
+  it('omits approval-mode when mode is undefined', () => {
+    const data = buildStatusLinePresetData({
+      sessionId: 'session-123',
+      version: '1.2.3',
+      modelDisplayName: 'qwen3-code-plus',
+      currentDir: '/repo/project',
+      branch: 'main',
+      contextWindowSize: 1000,
+      currentUsage: 250,
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalLinesAdded: 0,
+      totalLinesRemoved: 0,
+      streamingState: StreamingState.Idle,
+    });
+
+    expect(
+      buildStatusLinePresetLines(
+        { type: 'preset', items: ['approval-mode', 'model'] },
+        data,
+      ),
+    ).toEqual(['qwen3-code-plus']);
   });
 });

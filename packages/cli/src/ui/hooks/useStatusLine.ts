@@ -261,7 +261,13 @@ export function useStatusLine(): {
   // Initialized with current values so the state-change effect
   // does not fire redundantly on mount.
   const { lastPromptTokenCount } = uiState.sessionStats;
-  const { currentModel, branchName, activeWorktree, streamingState } = uiState;
+  const {
+    currentModel,
+    branchName,
+    activeWorktree,
+    streamingState,
+    showAutoAcceptIndicator,
+  } = uiState;
   // Track only the slug — equality on the whole object would re-fire on
   // every render because `activeWorktree` is rebuilt by AppContainer's
   // useMemo each time the sidecar reloads.
@@ -288,6 +294,7 @@ export function useStatusLine(): {
     totalLinesRemoved: number;
     streamingState: string;
     reasoningEffortKey: string;
+    approvalMode: string | undefined;
   }>({
     promptTokenCount: lastPromptTokenCount,
     currentModel,
@@ -299,6 +306,7 @@ export function useStatusLine(): {
     totalLinesRemoved,
     streamingState,
     reasoningEffortKey,
+    approvalMode: showAutoAcceptIndicator,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
@@ -432,6 +440,7 @@ export function useStatusLine(): {
         totalLinesAdded: m.files.totalLinesAdded,
         totalLinesRemoved: m.files.totalLinesRemoved,
         streamingState: ui.streamingState,
+        approvalMode: ui.showAutoAcceptIndicator,
       });
       setOutput(buildStatusLinePresetLines(preset, data));
       return;
@@ -596,7 +605,8 @@ export function useStatusLine(): {
       totalLinesAdded !== prev.totalLinesAdded ||
       totalLinesRemoved !== prev.totalLinesRemoved ||
       streamingState !== prev.streamingState ||
-      reasoningEffortKey !== prev.reasoningEffortKey
+      reasoningEffortKey !== prev.reasoningEffortKey ||
+      showAutoAcceptIndicator !== prev.approvalMode
     ) {
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
@@ -608,6 +618,7 @@ export function useStatusLine(): {
       prev.totalLinesRemoved = totalLinesRemoved;
       prev.streamingState = streamingState;
       prev.reasoningEffortKey = reasoningEffortKey;
+      prev.approvalMode = showAutoAcceptIndicator;
       scheduleUpdate();
     }
   }, [
@@ -626,6 +637,7 @@ export function useStatusLine(): {
     totalLinesRemoved,
     streamingState,
     reasoningEffortKey,
+    showAutoAcceptIndicator,
     scheduleUpdate,
     updatePullRequestNumber,
   ]);
