@@ -115,6 +115,57 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     ]);
   });
 
+  it('marks hard-disabled skills with a hard disable reason', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'enabled',
+        description: 'Enabled skill',
+        body: 'Visible',
+        filePath: '/skills/enabled/SKILL.md',
+        level: 'project',
+      },
+      {
+        name: 'disabled',
+        description: 'Disabled skill',
+        body: 'Hidden',
+        filePath: '/skills/disabled/SKILL.md',
+        level: 'project',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-hard-disabled-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        skills: {
+          disabled: ['disabled'],
+        },
+      }),
+    );
+    const provider = createWorkspaceSkillsStatusProvider();
+
+    const status = await provider(workspace);
+
+    expect(status.skills).toMatchObject([
+      {
+        name: 'enabled',
+        status: 'ok',
+        installedPath: '/skills/enabled/SKILL.md',
+      },
+      {
+        name: 'disabled',
+        status: 'disabled',
+        disabledReason: 'hard',
+        installedPath: '/skills/disabled/SKILL.md',
+      },
+    ]);
+    // A workspace-scope hard disable is not locked by a higher scope.
+    const hardDisabled = status.skills.find((s) => s.name === 'disabled');
+    expect(hardDisabled?.lockedScope).toBeUndefined();
+  });
+
   it('reuses one SkillManager per workspace across calls', async () => {
     const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
     const provider = createWorkspaceSkillsStatusProvider();

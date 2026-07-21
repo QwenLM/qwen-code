@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { SettingScope } from './settings.js';
 import {
+  computeWorkspaceSkillListUpdates,
   resolveSkillSettings,
   updateWorkspaceSkillSettingLists,
 } from './skill-settings.js';
@@ -137,5 +138,91 @@ describe('updateWorkspaceSkillSettingLists', () => {
         false,
       ),
     ).toEqual({ disabled: ['review', 'orphan'], enabled: [] });
+  });
+});
+
+describe('computeWorkspaceSkillListUpdates', () => {
+  it('preserves orphaned workspace disables the picker does not manage', () => {
+    // 'orphan' is not a loaded skill (different branch, uninstalled extension,
+    // deleted skills dir), so it must survive untouched even though only
+    // 'review' is toggled.
+    const result = computeWorkspaceSkillListUpdates(
+      ['orphan', 'review'],
+      new Set<string>(),
+      [],
+      [
+        {
+          name: 'review',
+          wasEnabled: false,
+          isEnabled: true,
+          defaultDisabled: false,
+        },
+      ],
+    );
+
+    expect(result.disabled).toEqual(['orphan']);
+    expect(result.disabledChanged).toBe(true);
+    expect(result.enabledChanged).toBe(false);
+  });
+
+  it('drops locked higher-scope entries so they are not re-emitted', () => {
+    // 'locked' is disabled at a higher scope; the picker must not re-emit it at
+    // workspace scope. Toggling 'review' on provides a genuine change so the
+    // write path is exercised while 'orphan' is still preserved.
+    const result = computeWorkspaceSkillListUpdates(
+      ['locked', 'orphan', 'review'],
+      new Set(['locked']),
+      [],
+      [
+        {
+          name: 'review',
+          wasEnabled: false,
+          isEnabled: true,
+          defaultDisabled: false,
+        },
+      ],
+    );
+
+    expect(result.disabled).toEqual(['orphan']);
+    expect(result.disabledChanged).toBe(true);
+  });
+
+  it('reports no change when nothing toggled and lists already match', () => {
+    const result = computeWorkspaceSkillListUpdates(
+      ['orphan'],
+      new Set<string>(),
+      [],
+      [
+        {
+          name: 'review',
+          wasEnabled: true,
+          isEnabled: true,
+          defaultDisabled: false,
+        },
+      ],
+    );
+
+    expect(result.disabled).toEqual(['orphan']);
+    expect(result.disabledChanged).toBe(false);
+    expect(result.enabledChanged).toBe(false);
+  });
+
+  it('records an explicit opt-in when enabling a default-disabled skill', () => {
+    const result = computeWorkspaceSkillListUpdates(
+      [],
+      new Set<string>(),
+      [],
+      [
+        {
+          name: 'Review',
+          wasEnabled: false,
+          isEnabled: true,
+          defaultDisabled: true,
+        },
+      ],
+    );
+
+    expect(result.enabled).toEqual(['Review']);
+    expect(result.enabledChanged).toBe(true);
   });
 });

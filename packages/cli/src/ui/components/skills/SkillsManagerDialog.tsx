@@ -33,9 +33,9 @@ import type {
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
 import {
+  computeWorkspaceSkillListUpdates,
   resolveSkillSettings,
   skillSettingStrings,
-  updateWorkspaceSkillSettingLists,
 } from '../../../config/skill-settings.js';
 import { t } from '../../../i18n/index.js';
 import { levelLabel } from '../../utils/skill-level-label.js';
@@ -310,32 +310,20 @@ export function SkillsManagerDialog({
       SettingScope.Workspace,
     ).filter((name): name is string => typeof name === 'string');
     const lockedNames = new Set(lockedSkills.map((skill) => lower(skill.name)));
-    const previousDisabled = workspaceDisabled.filter(
-      (name) => !lockedNames.has(lower(name)),
-    );
-    const previousEnabled = skillSettingStrings(
-      settings,
-      SettingScope.Workspace,
-      'enabled',
-    );
-    let next = { disabled: previousDisabled, enabled: previousEnabled };
-    for (const skill of unlockedSkills) {
-      const wasEnabled = initialSelectedKeys.has(skill.name);
-      const isEnabled = selected.has(skill.name);
-      if (wasEnabled === isEnabled) continue;
-      next = updateWorkspaceSkillSettingLists(
-        next,
-        skill.name,
-        isEnabled,
-        initialResolved.defaultDisabledNames.has(lower(skill.name)) &&
-          !initialResolved.enabledNames.has(lower(skill.name)),
+    const { disabled, enabled, disabledChanged, enabledChanged } =
+      computeWorkspaceSkillListUpdates(
+        workspaceDisabled,
+        lockedNames,
+        skillSettingStrings(settings, SettingScope.Workspace, 'enabled'),
+        unlockedSkills.map((skill) => ({
+          name: skill.name,
+          wasEnabled: initialSelectedKeys.has(skill.name),
+          isEnabled: selected.has(skill.name),
+          defaultDisabled:
+            initialResolved.defaultDisabledNames.has(lower(skill.name)) &&
+            !initialResolved.enabledNames.has(lower(skill.name)),
+        })),
       );
-    }
-
-    const disabledChanged =
-      JSON.stringify(previousDisabled) !== JSON.stringify(next.disabled);
-    const enabledChanged =
-      JSON.stringify(previousEnabled) !== JSON.stringify(next.enabled);
     if (!disabledChanged && !enabledChanged) return 'ok';
 
     try {
@@ -345,7 +333,7 @@ export function SkillsManagerDialog({
               {
                 scope: SettingScope.Workspace,
                 key: 'skills.disabled',
-                value: next.disabled.length > 0 ? next.disabled : undefined,
+                value: disabled.length > 0 ? disabled : undefined,
               },
             ]
           : []),
@@ -354,7 +342,7 @@ export function SkillsManagerDialog({
               {
                 scope: SettingScope.Workspace,
                 key: 'skills.enabled',
-                value: next.enabled.length > 0 ? next.enabled : undefined,
+                value: enabled.length > 0 ? enabled : undefined,
               },
             ]
           : []),
