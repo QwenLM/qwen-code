@@ -10946,6 +10946,63 @@ describe('QwenAgent extMethod renameSession routing', () => {
     await agentPromise;
   });
 
+  it('quarantines a disposed session when the final strict flush fails', async () => {
+    const recording = makeRecordingService();
+    let ownsWriter = true;
+    recording.hasWriteOwnership.mockImplementation(() => ownsWriter);
+    recording.close.mockImplementation(async () => {
+      ownsWriter = false;
+    });
+    recording.flush
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error('flush failed'))
+      .mockResolvedValue(undefined);
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    const liveSession = vi.mocked(Session).mock.results.at(-1)?.value as
+      | { dispose: ReturnType<typeof vi.fn> }
+      | undefined;
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(recording.flush).toHaveBeenCalledTimes(2);
+    expect(recording.close).not.toHaveBeenCalled();
+    expect(recording.hasWriteOwnership()).toBe(true);
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(liveSession?.dispose).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).not.toContain(liveSessionId);
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(recording.flush).toHaveBeenCalledTimes(3);
+    expect(recording.close).toHaveBeenCalledOnce();
+    expect(recording.hasWriteOwnership()).toBe(false);
+    expect(liveSession?.dispose).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not abort an active generation when the close gate is unavailable', async () => {
     const recording = makeRecordingService();
     const innerConfig = makeLiveSessionInnerConfig(recording);
@@ -11126,6 +11183,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
       }),
     ).rejects.toThrow('dispose failed');
     expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(recording.finalize).not.toHaveBeenCalled();
+    expect(recording.flush).not.toHaveBeenCalled();
+    expect(recording.close).not.toHaveBeenCalled();
     expect(vi.mocked(unregisterGoalHook).mock.calls).toHaveLength(
       unregisterCalls,
     );
@@ -11152,6 +11212,9 @@ describe('QwenAgent extMethod renameSession routing', () => {
 
     expect(liveSession?.dispose).toHaveBeenCalledTimes(2);
     expect(recording.close).toHaveBeenCalledOnce();
+    expect(liveSession!.dispose.mock.invocationCallOrder.at(-1)!).toBeLessThan(
+      recording.close.mock.invocationCallOrder[0]!,
+    );
     expect(innerConfig.shutdown).toHaveBeenCalledOnce();
     expect(unregisterGoalHook).toHaveBeenCalledWith(innerConfig, liveSessionId);
     expect(mcpPool?.releaseSession).toHaveBeenCalledWith(liveSessionId);
@@ -11586,6 +11649,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getSessionRuntimeBaseDir: vi
         .fn()
         .mockReturnValue('/tmp/qwen-runtime-test'),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(undefined),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getSessionService: vi.fn(),
       getToolRegistry: vi.fn().mockReturnValue(undefined),
@@ -11633,11 +11698,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
           loadSession,
         }) as unknown as InstanceType<typeof SessionService>,
     );
-    vi.mocked(Session).mockImplementation(() => {
+    vi.mocked(Session).mockImplementation((_sessionId, config) => {
       const releaseCloseGate = vi.fn();
       const sessionMock = {
         getId: vi.fn().mockReturnValue('persisted-1'),
-        getConfig: vi.fn().mockReturnValue(innerConfig),
+        getConfig: vi.fn().mockReturnValue(config),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi
           .fn()
@@ -12215,6 +12280,11 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       lastSessionMock!.primeTurnFromHistory.mock.invocationCallOrder[0],
     ).toBeLessThan(mockHistoryReplay.mock.invocationCallOrder[0]!);
     expect(mockHistoryReplay.mock.invocationCallOrder[0]!).toBeLessThan(
+      innerConfig.loadPausedBackgroundAgents.mock.invocationCallOrder[0]!,
+    );
+    expect(
+      innerConfig.loadPausedBackgroundAgents.mock.invocationCallOrder[0]!,
+    ).toBeLessThan(
       lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
     );
     expect(
@@ -12473,7 +12543,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     expect(result).toBe(setupError);
     expect(recording.close).toHaveBeenCalledOnce();
-    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
     expect(recording.hasWriteOwnership()).toBe(true);
     expect(lastSessionMock?.dispose).toHaveBeenCalledOnce();
     expect(
@@ -12486,12 +12556,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         .map((session) => session.getId()),
     ).not.toContain('persisted-1');
 
-    innerConfig.shutdown.mockImplementation(async () => {
-      recording.hasWriteOwnership.mockReturnValue(false);
-    });
+    recording.close.mockResolvedValue(undefined);
+    recording.hasWriteOwnership.mockReturnValue(false);
     mockConnectionState.resolve();
     await agentPromise;
-    expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
+    expect(lastSessionMock?.dispose).toHaveBeenCalledTimes(2);
+    expect(recording.close).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
     expect(recording.hasWriteOwnership()).toBe(false);
   });
 
@@ -12522,7 +12593,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('removes a stored session when replay and the first lease release fail', async () => {
+  it('quarantines a stored session when replay and the first lease release fail', async () => {
     const replayError = new Error('replay failed');
     const innerConfig = bindRestoreMocks({
       sessionExists: true,
@@ -12565,11 +12636,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         .getActiveSessions()
         .map((session) => session.getId()),
     ).not.toContain('persisted-1');
-    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
-    expect(recording.close).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).not.toHaveBeenCalled();
+    expect(recording.close).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
+    expect(failedSession.dispose).toHaveBeenCalledTimes(2);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(recording.close).toHaveBeenCalledTimes(3);
   });
 
   it('cleans Config once when replay fails and lease release succeeds', async () => {
@@ -12993,7 +13067,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   });
 
   it('does not replace a quarantined session until disposal succeeds', async () => {
-    bindRestoreMocks({
+    const innerConfig = bindRestoreMocks({
       sessionExists: true,
       resumedConversation: { messages: [] },
     });
@@ -13018,6 +13092,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(lastSessionMock).toBe(firstSession);
     expect(firstSession?.dispose).toHaveBeenCalledOnce();
 
+    const mcpPool = vi.mocked(McpTransportPool).mock.results.at(-1)?.value as
+      | { releaseSession: ReturnType<typeof vi.fn> }
+      | undefined;
+    const replacementConfig = makeRestoreInnerConfig({
+      resumedConversation: { messages: [] },
+    });
+    vi.mocked(loadCliConfig).mockResolvedValueOnce(
+      replacementConfig as unknown as Config,
+    );
+
     await expect(
       agent.loadSession({
         cwd: '/tmp',
@@ -13031,6 +13115,18 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     expect(firstSession?.dispose).toHaveBeenCalledTimes(2);
     expect(lastSessionMock).not.toBe(firstSession);
+    expect(lastSessionMock?.getConfig()).toBe(replacementConfig);
+    expect(innerConfig.shutdown).toHaveBeenCalledOnce();
+    expect(innerConfig.shutdown).toHaveBeenCalledWith({
+      shutdownTelemetry: false,
+    });
+    expect(mcpPool?.releaseSession).toHaveBeenCalledWith('persisted-1');
+    expect(innerConfig.shutdown.mock.invocationCallOrder[0]).toBeLessThan(
+      replacementConfig.initialize.mock.invocationCallOrder[0]!,
+    );
+    expect(mcpPool?.releaseSession.mock.invocationCallOrder[0]).toBeLessThan(
+      replacementConfig.initialize.mock.invocationCallOrder[0]!,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -13103,7 +13199,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
   it('unstable_resumeSession returns the response without replaying history', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
-    bindRestoreMocks({
+    const innerConfig = bindRestoreMocks({
       sessionExists: true,
       resumedConversation: {
         messages,
@@ -13128,6 +13224,16 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);
+    expect(
+      innerConfig.loadPausedBackgroundAgents.mock.invocationCallOrder[0]!,
+    ).toBeLessThan(
+      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+    );
+    expect(
+      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+    ).toBeLessThan(
+      lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
