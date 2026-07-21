@@ -8,6 +8,16 @@
   },
   "type": "module",
   "main": "dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./credentials": {
+      "types": "./dist/src/models/credential-provider.d.ts",
+      "import": "./dist/src/models/credential-provider.js"
+    }
+  },
   "scripts": {
     "build": "node ../../scripts/build_package.js",
     "lint": "eslint . --ext .ts,.tsx",

@@ -177,12 +177,14 @@ function prepareSettingWrite(
   key: string,
   value: unknown,
   mcpServerMutation?: McpServerSettingMutation,
+  credentialStore?: CredentialStore,
 ): { persistedValue: unknown; publicValue: unknown } {
   if (key !== 'mcpServers') {
     return { persistedValue: value, publicValue: value };
   }
   const existing =
-    loadSettings(workspace).forScope(scope).settings.mcpServers ?? {};
+    loadSettings(workspace, { credentialStore }).forScope(scope).settings
+      .mcpServers ?? {};
   let nextValue = value;
   if (mcpServerMutation) {
     const servers = { ...existing };
@@ -394,6 +396,7 @@ export function registerWorkspaceSettingsRoutes(
             key,
             value,
             mcpServerMutation,
+            credentialStore,
           );
           publicValue = prepared.publicValue;
           await persistSetting(
@@ -584,6 +587,7 @@ export function registerWorkspaceQualifiedSettingsRoutes(
             key,
             value,
             mcpServerMutation,
+            deps.credentialStore,
           );
           publicValue = prepared.publicValue;
           await deps.persistSetting(

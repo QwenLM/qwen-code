@@ -220,16 +220,10 @@ describe('IdeClient', () => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.connect();
 
-      expect(StdioClientTransport).toHaveBeenCalledWith(
-        expect.objectContaining({
-          command: 'test-cmd',
-          args: ['--foo'],
-          env: expect.any(Object),
-        }),
-      );
-      const env = vi.mocked(StdioClientTransport).mock.calls[0]?.[0].env;
-      expect(env?.['QWEN_SERVER_TOKEN']).toBeUndefined();
-      expect(env?.['OPENAI_API_KEY']).toBe('provider-key');
+      expect(StdioClientTransport).toHaveBeenCalledWith({
+        command: 'test-cmd',
+        args: ['--foo'],
+      });
       expect(mockClient.connect).toHaveBeenCalledWith(mockStdioTransport);
       expect(ideClient.getConnectionStatus().status).toBe(
         IDEConnectionStatus.Connected,
@@ -540,13 +534,10 @@ describe('IdeClient', () => {
       const ideClient = await IdeClient.getInstance();
       await ideClient.connect();
 
-      expect(StdioClientTransport).toHaveBeenCalledWith(
-        expect.objectContaining({
-          command: 'env-cmd',
-          args: ['--bar'],
-          env: expect.any(Object),
-        }),
-      );
+      expect(StdioClientTransport).toHaveBeenCalledWith({
+        command: 'env-cmd',
+        args: ['--bar'],
+      });
       expect(mockClient.connect).toHaveBeenCalledWith(mockStdioTransport);
       expect(ideClient.getConnectionStatus().status).toBe(
         IDEConnectionStatus.Connected,

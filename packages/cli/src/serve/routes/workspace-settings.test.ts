@@ -9,6 +9,7 @@ import express from 'express';
 import request from 'supertest';
 import { registerWorkspaceSettingsRoutes } from './workspace-settings.js';
 import { loadSettings } from '../../config/settings.js';
+import type { CredentialStore } from '@qwen-code/qwen-code-core';
 
 vi.mock('../../config/settings.js', async (importOriginal) => {
   const actual =
@@ -25,7 +26,7 @@ beforeEach(() => {
   } as never);
 });
 
-function makeApp() {
+function makeApp(credentialStore?: CredentialStore) {
   const app = express();
   app.use(express.json());
 
@@ -40,12 +41,29 @@ function makeApp() {
     persistSetting,
     broadcastSettingsChanged,
     parseAndValidateClientId: () => undefined,
+    credentialStore,
   });
 
   return { app, persistSetting, broadcastSettingsChanged };
 }
 
 describe('POST /workspace/settings', () => {
+  it('uses the credential store when reading MCP server settings', async () => {
+    const credentialStore = {} as CredentialStore;
+    const { app } = makeApp(credentialStore);
+
+    const res = await request(app).post('/workspace/settings').send({
+      scope: 'workspace',
+      key: 'mcpServers',
+      value: {},
+    });
+
+    expect(res.status).toBe(200);
+    expect(loadSettings).toHaveBeenCalledWith('/workspace', {
+      credentialStore,
+    });
+  });
+
   it('rejects negative general.cleanupPeriodDays values', async () => {
     const { app, persistSetting, broadcastSettingsChanged } = makeApp();
 

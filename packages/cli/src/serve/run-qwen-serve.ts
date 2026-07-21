@@ -48,7 +48,7 @@ import type {
 import {
   createCredentialStore,
   createCredentialProvider,
-} from '@qwen-code/qwen-code-core';
+} from '@qwen-code/qwen-code-core/credentials';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // Dynamic-imported below (not at module scope) so the serve fast-path bundle
 // closure check doesn't trace create-sub-session's transitive deps through
