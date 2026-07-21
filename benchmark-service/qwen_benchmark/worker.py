@@ -245,6 +245,9 @@ def main() -> None:
     settings.prepare_directories()
     store = Store(settings.database_path)
     store.initialize()
+    recovered = store.recover_interrupted_runs()
+    if recovered:
+        LOGGER.warning("recovered interrupted benchmark runs: %s", recovered)
     worker = Worker(settings, store, load_suites())
     while True:
         if not worker.run_once():

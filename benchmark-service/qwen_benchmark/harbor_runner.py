@@ -80,7 +80,12 @@ class HarborRunner:
         if on_grading:
             on_grading()
 
-        run_jobs_root = self.settings.harbor_jobs_root / run_id
+        run_jobs_base = self.settings.harbor_jobs_root / run_id
+        run_jobs_base.mkdir(parents=True, exist_ok=True)
+        attempt_number = 1
+        while (run_jobs_base / f"attempt-{attempt_number:02d}").exists():
+            attempt_number += 1
+        run_jobs_root = run_jobs_base / f"attempt-{attempt_number:02d}"
         run_jobs_root.mkdir(parents=True, exist_ok=True)
         work_dir = self.settings.work_root / run_id
         work_dir.mkdir(parents=True, exist_ok=True)
@@ -144,7 +149,9 @@ class HarborRunner:
             # Preserve all evidence even when Harbor, the verifier, or state-store
             # bookkeeping fails after a trial has already produced useful output.
             try:
-                artifacts.copy_tree(run_jobs_root, "harbor/jobs")
+                artifacts.copy_tree(
+                    run_jobs_root, f"harbor/jobs/attempt-{attempt_number:02d}"
+                )
                 for instance_id in suite["instance_ids"]:
                     log_path = work_dir / f"harbor-{instance_id}.log"
                     if log_path.exists():

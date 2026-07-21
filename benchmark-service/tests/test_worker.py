@@ -154,3 +154,29 @@ def test_transient_heartbeat_failure_does_not_abort_runner(tmp_path: Path) -> No
     assert final is not None
     assert final["status"] == "SUCCEEDED"
     assert store.heartbeat_calls >= 1
+
+
+def test_recover_interrupted_run_requeues_with_attempt_remaining(
+    tmp_path: Path,
+) -> None:
+    store = Store(tmp_path / "state/benchmark.db")
+    store.initialize()
+    suites = load_suites()
+    request = RunRequest(
+        qwen_ref="HEAD",
+        suite="swebench_verified_gold_smoke",
+        trigger="manual",
+    )
+    run, _ = store.create_run(request, suites[request.suite], "worker-recovery")
+    claimed = store.claim_run()
+    assert claimed is not None
+    store.transition(run["run_id"], "GRADING")
+    store.update_instance(run["run_id"], "sympy__sympy-20590", "RUNNING")
+
+    assert store.recover_interrupted_runs() == [run["run_id"]]
+    recovered = store.get_run(run["run_id"])
+    assert recovered is not None
+    assert recovered["status"] == "QUEUED"
+    assert recovered["attempt_count"] == 1
+    instance = store.get_instances(run["run_id"])[0]
+    assert instance["status"] == "PENDING"

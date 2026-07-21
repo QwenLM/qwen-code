@@ -14,6 +14,7 @@ from .models import RunRequest
 
 
 TERMINAL_RUN_STATES = {"SUCCEEDED", "FAILED", "CANCELED"}
+ACTIVE_RUN_STATES = {"PREPARING", "RUNNING_AGENT", "GRADING", "UPLOADING"}
 LOGGER = logging.getLogger(__name__)
 SQLITE_RETRY_DELAYS = (0.1, 0.25, 0.5, 1.0)
 
@@ -189,6 +190,55 @@ class Store:
                 "SELECT * FROM runs WHERE run_id = ?", (row["run_id"],)
             ).fetchone()
             return dict(claimed)
+
+    def recover_interrupted_runs(self) -> list[str]:
+        """Requeue runs left active when the single POC worker was restarted."""
+        recovered: list[str] = []
+        recovered_at = now()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                """
+                SELECT run_id, attempt_count, max_attempts
+                FROM runs
+                WHERE status IN ('PREPARING', 'RUNNING_AGENT', 'GRADING', 'UPLOADING')
+                ORDER BY created_at
+                """
+            ).fetchall()
+            for row in rows:
+                retry = row["attempt_count"] < row["max_attempts"]
+                status = "QUEUED" if retry else "FAILED"
+                finished_at = None if retry else recovered_at
+                error = "worker restarted before run reached a terminal state"
+                connection.execute(
+                    """
+                    UPDATE runs
+                    SET status = ?, error = ?, heartbeat_at = ?, finished_at = ?
+                    WHERE run_id = ?
+                    """,
+                    (status, error, recovered_at, finished_at, row["run_id"]),
+                )
+                connection.execute(
+                    """
+                    UPDATE instances
+                    SET status = ?, error = ?, finished_at = ?
+                    WHERE run_id = ? AND status = 'RUNNING'
+                    """,
+                    (
+                        "PENDING" if retry else "INFRA_FAILED",
+                        error,
+                        None if retry else recovered_at,
+                        row["run_id"],
+                    ),
+                )
+                self._event(
+                    connection,
+                    row["run_id"],
+                    "RUN_RECOVERED",
+                    {"status": status, "previous_attempt": row["attempt_count"]},
+                )
+                recovered.append(row["run_id"])
+        return recovered
 
     def transition(
         self,
