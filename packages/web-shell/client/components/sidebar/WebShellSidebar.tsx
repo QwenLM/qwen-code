@@ -666,9 +666,6 @@ export function WebShellSidebar({
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
   );
-  const workspaceDisplayNameEnabled = Boolean(
-    connection.capabilities?.features?.includes('workspace_display_name'),
-  );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
   const canExportArchivedSessions =
@@ -1192,34 +1189,6 @@ export function WebShellSidebar({
       return changed ? next : current;
     });
   }, [currentSessionIdentity, getIdentityForSession, sessions]);
-
-  const handleAddWorkspace = useCallback(
-    async (cwd: string, persist: boolean, displayName?: string) => {
-      const result = await workspaceActions.addWorkspace(cwd, {
-        persist,
-        ...(displayName ? { displayName } : {}),
-      });
-      if (persist && result.persisted !== true) {
-        throw new Error(t('sidebar.addWorkspacePersistenceError'));
-      }
-      // Force a fresh capabilities fetch so the new workspace appears
-      // immediately. Best-effort: registration already succeeded, so a
-      // refresh failure must not surface as an add-workspace error — the
-      // next reload reconciles. (The former `getCapabilities?.()` was a
-      // no-op: it returns a cached promise and never updates state.)
-      try {
-        await workspace.refreshCapabilities?.();
-      } catch {
-        // ignore — the workspace is registered; the list reconciles on reload
-      }
-    },
-    [t, workspaceActions, workspace],
-  );
-
-  const handleSuggestWorkspacePaths = useCallback(
-    (prefix: string) => workspaceActions.suggestWorkspacePaths(prefix),
-    [workspaceActions],
-  );
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
@@ -3824,14 +3793,6 @@ export function WebShellSidebar({
           onPointerDown={handleResizePointerDown}
         />
       </aside>
-      {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
-        <AddWorkspaceDialog
-          onClose={() => setShowAddWorkspaceDialog(false)}
-          onAdd={handleAddWorkspace}
-          displayNameEnabled={workspaceDisplayNameEnabled}
-          onSuggest={handleSuggestWorkspacePaths}
-        />
-      )}
     </>
   );
 }

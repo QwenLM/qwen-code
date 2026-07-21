@@ -52,6 +52,13 @@ type ChatEditorTestProps = {
   existingFolderWorkspaceSupported?: boolean;
 };
 
+type AddWorkspaceDialogTestProps = {
+  onClose: () => void;
+  onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
+  displayNameEnabled?: boolean;
+  persistenceSupported?: boolean;
+};
+
 const {
   mockConnection,
   mockSessionActions,
@@ -167,6 +174,7 @@ const {
       blocks: [] as unknown[],
       messages: [] as unknown[],
       latestChatEditorProps: null as ChatEditorTestProps | null,
+      latestAddWorkspaceDialogProps: null as AddWorkspaceDialogTestProps | null,
       latestToolApprovalKeyboardActive: null as boolean | null,
       latestAskUserQuestionKeyboardActive: null as boolean | null,
       latestScheduledTasksProps: null as {
@@ -507,6 +515,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       onOpenSplitView?: () => void;
       onNewSession?: () => Promise<boolean> | boolean;
       onLoadSession?: (sessionId: string) => Promise<void> | void;
+      onOpenAddWorkspace?: () => void;
     }) => {
       sidebarTokens.push(props.sessionListReloadToken);
       // Expose the Daemon Status / Session Overview openers so tests can
@@ -517,6 +526,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           'data-testid': 'sidebar',
           'data-collapsed': String(Boolean(props.collapsed)),
         },
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-add-workspace',
+            type: 'button',
+            onClick: props.onOpenAddWorkspace,
+          },
+          'add workspace',
+        ),
         React.createElement(
           'button',
           {
@@ -572,6 +590,18 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
           'split view',
         ),
       );
+    },
+  };
+});
+
+vi.mock('./components/dialogs/AddWorkspaceDialog', async () => {
+  const React = await import('react');
+  return {
+    AddWorkspaceDialog: (props: AddWorkspaceDialogTestProps) => {
+      testState.latestAddWorkspaceDialogProps = props;
+      return React.createElement('div', {
+        'data-testid': 'add-workspace-dialog',
+      });
     },
   };
 });
@@ -953,6 +983,7 @@ beforeEach(() => {
   testState.blocks = [];
   testState.messages = [];
   testState.latestChatEditorProps = null;
+  testState.latestAddWorkspaceDialogProps = null;
   testState.latestToolApprovalKeyboardActive = null;
   testState.latestAskUserQuestionKeyboardActive = null;
   testState.latestScheduledTasksProps = null;
@@ -1126,6 +1157,150 @@ describe('App session callbacks', () => {
     expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledOnce();
     expect(mockWorkspace.client.workspaceByCwd).toHaveBeenCalledWith(
       '/managed/scratch-Ab3',
+    );
+  });
+
+  it('opens one App-owned Add workspace dialog from both entry points', async () => {
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+        'workspace_display_name',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    act(() => {
+      testState.latestChatEditorProps?.onOpenExistingWorkspace?.();
+    });
+    expect(
+      container.querySelectorAll('[data-testid="add-workspace-dialog"]'),
+    ).toHaveLength(1);
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      displayNameEnabled: true,
+      persistenceSupported: true,
+    });
+
+    act(() => {
+      testState.latestAddWorkspaceDialogProps?.onClose();
+    });
+    expect(
+      container.querySelector('[data-testid="add-workspace-dialog"]'),
+    ).toBeNull();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-add-workspace"]')
+        ?.click();
+    });
+    expect(
+      container.querySelectorAll('[data-testid="add-workspace-dialog"]'),
+    ).toHaveLength(1);
+  });
+
+  it('forwards a supported workspace display name through the shared mutation lane', async () => {
+    const added = {
+      id: 'payments',
+      cwd: '/tmp/payments',
+      displayName: 'Payments API',
+      primary: false,
+      trusted: true,
+      persisted: true,
+    };
+    mockWorkspace.capabilities = {
+      features: [
+        'dynamic_workspace_registration',
+        'persistent_workspace_registration',
+        'workspace_display_name',
+      ],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.addWorkspace.mockResolvedValue(added);
+    mockWorkspace.refreshCapabilities.mockResolvedValue({
+      ...mockWorkspace.capabilities,
+      workspaces: [...mockWorkspace.capabilities.workspaces, added],
+    });
+    renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onOpenExistingWorkspace?.();
+    });
+
+    await act(async () => {
+      await testState.latestAddWorkspaceDialogProps?.onAdd(
+        '/tmp/payments',
+        true,
+        'Payments API',
+      );
+    });
+
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/payments',
+      { persist: true, displayName: 'Payments API' },
+    );
+    expect(mockWorkspace.refreshCapabilities).toHaveBeenCalledOnce();
+  });
+
+  it('omits unsupported persistence and display-name options', async () => {
+    const added = {
+      id: 'local',
+      cwd: '/tmp/local',
+      primary: false,
+      trusted: true,
+    };
+    mockWorkspace.capabilities = {
+      features: ['dynamic_workspace_registration'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+        },
+      ],
+    } as typeof mockWorkspace.capabilities;
+    mockWorkspaceActions.addWorkspace.mockResolvedValue(added);
+    mockWorkspace.refreshCapabilities.mockResolvedValue({
+      ...mockWorkspace.capabilities,
+      workspaces: [...mockWorkspace.capabilities.workspaces, added],
+    });
+    renderApp();
+    await flush();
+    act(() => {
+      testState.latestChatEditorProps?.onOpenExistingWorkspace?.();
+    });
+    expect(testState.latestAddWorkspaceDialogProps).toMatchObject({
+      displayNameEnabled: false,
+      persistenceSupported: false,
+    });
+
+    await act(async () => {
+      await testState.latestAddWorkspaceDialogProps?.onAdd(
+        '/tmp/local',
+        true,
+        'Ignored name',
+      );
+    });
+
+    expect(mockWorkspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/local',
+      { persist: false },
     );
   });
 

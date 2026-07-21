@@ -170,6 +170,7 @@ describe('POST /workspaces', () => {
     { kind: 'unknown' },
     { kind: 'scratch', cwd: REAL_DIR },
     { kind: 'scratch', persist: false },
+    { kind: 'scratch', displayName: 'Scratch' },
     { kind: 'scratch', extra: true },
   ])('rejects invalid discriminated requests: %j', async (body) => {
     const { app } = createApp();

@@ -1315,6 +1315,9 @@ export function App({
     workspace.capabilities?.features?.includes(
       'scratch_workspace_registration',
     ) === true;
+  const workspaceDisplayNameSupported =
+    workspace.capabilities?.features?.includes('workspace_display_name') ===
+    true;
   const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
@@ -4086,7 +4089,7 @@ export function App({
 
   /** Registers an existing directory through the shared mutation lane. */
   const handleAddWorkspace = useCallback(
-    async (cwd: string, persist: boolean) => {
+    async (cwd: string, persist: boolean, displayName?: string) => {
       if (workspaceMutationTokenRef.current) return;
       const token = Symbol('workspace-mutation');
       workspaceMutationTokenRef.current = token;
@@ -4094,8 +4097,14 @@ export function App({
       try {
         const effectivePersist =
           persistentWorkspaceRegistrationSupported === true && persist;
+        const effectiveDisplayName = workspaceDisplayNameSupported
+          ? displayName
+          : undefined;
         const result = await workspaceActions.addWorkspace(cwd, {
           persist: effectivePersist,
+          ...(effectiveDisplayName
+            ? { displayName: effectiveDisplayName }
+            : {}),
         });
         if (effectivePersist && result.persisted !== true) {
           throw new Error(t('sidebar.addWorkspacePersistenceError'));
@@ -4112,6 +4121,7 @@ export function App({
       persistentWorkspaceRegistrationSupported,
       reconcileAddedWorkspace,
       t,
+      workspaceDisplayNameSupported,
       workspaceActions,
     ],
   );
@@ -6648,6 +6658,7 @@ export function App({
               persistenceSupported={
                 persistentWorkspaceRegistrationSupported
               }
+              displayNameEnabled={workspaceDisplayNameSupported}
             />
           )}
           {scratchOutcomeUnknown !== 'clear' && (

@@ -776,7 +776,9 @@ export function registerWorkspaceManagementRoutes(
       operationStarted();
       let persistenceFailed = false;
       try {
-        const runtime = await createWorkspaceRuntime(canonical);
+        const runtime = await createWorkspaceRuntime(canonical, {
+          provenance: 'existing',
+        });
         if (!persist && displayName !== undefined) {
           runtime.displayName = displayName;
         }
