@@ -333,7 +333,7 @@ export function SkillsManagerDialog({
     }
 
     const disabledChanged =
-      JSON.stringify(workspaceDisabled) !== JSON.stringify(next.disabled);
+      JSON.stringify(previousDisabled) !== JSON.stringify(next.disabled);
     const enabledChanged =
       JSON.stringify(previousEnabled) !== JSON.stringify(next.enabled);
     if (!disabledChanged && !enabledChanged) return 'ok';

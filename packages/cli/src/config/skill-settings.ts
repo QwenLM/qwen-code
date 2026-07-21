@@ -4,11 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { LoadedSettings, SettingScope } from './settings.js';
-
-const SYSTEM_DEFAULTS_SCOPE = 'SystemDefaults' as SettingScope;
-const USER_SCOPE = 'User' as SettingScope;
-const SYSTEM_SCOPE = 'System' as SettingScope;
+import { SettingScope, type LoadedSettings } from './settings.js';
 
 export interface SkillDisablement {
   reason: 'hard' | 'default';
@@ -65,9 +61,9 @@ export function resolveSkillSettings(
   }
 
   const lockedScopes = [
-    [SYSTEM_DEFAULTS_SCOPE, 'systemDefaults'],
-    [USER_SCOPE, 'user'],
-    [SYSTEM_SCOPE, 'system'],
+    [SettingScope.SystemDefaults, 'systemDefaults'],
+    [SettingScope.User, 'user'],
+    [SettingScope.System, 'system'],
   ] as const;
   const lockedByName = new Map<
     string,
