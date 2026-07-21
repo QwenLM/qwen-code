@@ -571,7 +571,7 @@ describe('GithubChannel', () => {
     );
   });
 
-  it('does not advance cursor or mark read when handleInbound fails', async () => {
+  it('retries handleInbound failure without advancing cursor', async () => {
     const bridge = mockBridge();
 
     const notification = {
@@ -612,12 +612,58 @@ describe('GithubChannel', () => {
     await vi.waitFor(() => expect(mockPaginate).toHaveBeenCalled(), {
       timeout: 2000,
     });
-    await new Promise((r) => setTimeout(r, 100));
     channel.disconnect();
 
     expect(mockMarkThreadAsRead).not.toHaveBeenCalled();
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
     expect(cursor.timestamp).toBe('');
+  });
+
+  it('force advances cursor after 3 consecutive handleInbound failures', async () => {
+    const bridge = mockBridge();
+
+    const notification = {
+      id: '1',
+      reason: 'mention',
+      unread: true,
+      subject: {
+        title: 'Fix bug',
+        type: 'Issue',
+        url: 'https://api.github.com/repos/owner/repo/issues/1',
+        latest_comment_url: null,
+      },
+      repository: {
+        full_name: 'owner/repo',
+        html_url: 'https://github.com/owner/repo',
+      },
+      updated_at: '2026-01-01T00:00:00Z',
+    };
+
+    mockPaginate.mockResolvedValue([notification]);
+    mockGetIssue.mockResolvedValue({
+      data: { user: { login: 'author' }, body: 'fix this' },
+    });
+
+    const channel = new GithubChannel(
+      'test',
+      { ...baseConfig, pollInterval: 50 },
+      bridge,
+    );
+    (
+      channel as unknown as {
+        handleInbound: (e: unknown) => Promise<void>;
+      }
+    ).handleInbound = async () => {
+      throw new Error('agent error');
+    };
+    await channel.connect();
+    await vi.waitFor(() => expect(mockMarkThreadAsRead).toHaveBeenCalled(), {
+      timeout: 5000,
+    });
+    channel.disconnect();
+
+    const cursor = loadPollCursor('test', join(tempDir, 'channels'));
+    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
   });
 
   it('does not re-dispatch seen notifications', async () => {

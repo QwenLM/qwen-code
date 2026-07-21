@@ -16244,6 +16244,9 @@ describe('ChannelBase', () => {
           threadId: 'thread-99',
         }),
       ]);
+      expect(ch.proactive).toEqual([
+        { chatId: 'chat1', text: 'threaded response' },
+      ]);
     });
 
     it('disables a stored job when its sender is no longer allowed', async () => {

@@ -26,6 +26,7 @@ export class GiteaChannel extends ChannelBase {
   private pollGeneration = 0;
   private lastProcessedAt: string;
   private processedIdsAtCursor: Set<string> = new Set();
+  private handleInboundFailCount = 0;
   private readonly pollIntervalMs: number;
   private botUsername: string | null = null;
 
@@ -158,11 +159,15 @@ export class GiteaChannel extends ChannelBase {
     const notifications: NotificationThread[] = [];
     let page = 1;
     while (true) {
-      const apiSince = this.lastProcessedAt
-        ? new Date(
-            new Date(this.lastProcessedAt).getTime() - 1000,
-          ).toISOString()
-        : undefined;
+      let apiSince: string | undefined;
+      if (this.lastProcessedAt) {
+        const parsed = new Date(this.lastProcessedAt).getTime();
+        if (Number.isNaN(parsed)) {
+          this.lastProcessedAt = '';
+        } else {
+          apiSince = new Date(parsed - 1000).toISOString();
+        }
+      }
       const params = apiSince
         ? { since: apiSince, limit: 100, page }
         : { limit: 100, page };
@@ -202,11 +207,19 @@ export class GiteaChannel extends ChannelBase {
       }
       try {
         await this.handleInbound(envelope);
+        this.handleInboundFailCount = 0;
       } catch (err) {
+        this.handleInboundFailCount++;
+        if (this.handleInboundFailCount < 3) {
+          process.stderr.write(
+            `[Gitea:${this.name}] error processing notification ${nid} (${this.handleInboundFailCount}/3): ${err instanceof Error ? err.message : err}\n`,
+          );
+          continue;
+        }
+        this.handleInboundFailCount = 0;
         process.stderr.write(
-          `[Gitea:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
+          `[Gitea:${this.name}] notification ${nid} failed 3 times, force advancing cursor: ${err instanceof Error ? err.message : err}\n`,
         );
-        continue;
       }
       this.advanceCursor(updatedAt, nid);
       try {

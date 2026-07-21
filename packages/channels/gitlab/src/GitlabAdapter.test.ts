@@ -352,7 +352,7 @@ describe('GitlabChannel', () => {
     expect(mockIssuesCreate).not.toHaveBeenCalled();
   });
 
-  it('does not advance cursor or dismiss todo when handleInbound fails', async () => {
+  it('retries handleInbound failure without advancing cursor', async () => {
     const bridge = mockBridge();
     (bridge as Record<string, unknown>).prompt = vi
       .fn()
@@ -387,12 +387,52 @@ describe('GitlabChannel', () => {
     await vi.waitFor(() => expect(mockTodosAll).toHaveBeenCalled(), {
       timeout: 2000,
     });
-    await new Promise((r) => setTimeout(r, 100));
     channel.disconnect();
 
     expect(mockTodoDone).not.toHaveBeenCalled();
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
     expect(cursor.timestamp).toBe('');
+  });
+
+  it('force advances cursor after 3 consecutive handleInbound failures', async () => {
+    const bridge = mockBridge();
+    (bridge as Record<string, unknown>).prompt = vi
+      .fn()
+      .mockRejectedValue(new Error('agent error'));
+
+    mockTodosAll.mockResolvedValue([
+      {
+        id: 50,
+        action_name: 'mentioned',
+        target_type: 'Issue',
+        target: { title: 'Bug', iid: 1 },
+        target_url: 'https://gitlab.com/owner/repo/-/issues/1',
+        body: 'fix this',
+        state: 'pending',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        project: {
+          name: 'repo',
+          path_with_namespace: 'owner/repo',
+        },
+        author: { name: 'Alice', username: 'alice' },
+      },
+    ]);
+    mockTodoDone.mockResolvedValue({});
+
+    const channel = new GitlabChannel(
+      'test',
+      { ...baseConfig, pollInterval: 50 },
+      bridge,
+    );
+    await channel.connect();
+    await vi.waitFor(() => expect(mockTodoDone).toHaveBeenCalled(), {
+      timeout: 5000,
+    });
+    channel.disconnect();
+
+    const cursor = loadPollCursor('test', join(tempDir, 'channels'));
+    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
   });
 
   it('fetches all pages of todos', async () => {

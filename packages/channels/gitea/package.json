@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-gitea",
-  "version": "0.19.10",
+  "version": "0.20.0",
   "description": "Gitea channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

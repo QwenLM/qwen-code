@@ -27,6 +27,7 @@ export class GithubChannel extends ChannelBase {
   private pollGeneration = 0;
   private lastProcessedAt: string;
   private processedIdsAtCursor: Set<string> = new Set();
+  private handleInboundFailCount = 0;
   private readonly pollIntervalMs: number;
   private botUsername: string | null = null;
 
@@ -156,9 +157,15 @@ export class GithubChannel extends ChannelBase {
   }
 
   private async pollNotifications(): Promise<void> {
-    const apiSince = this.lastProcessedAt
-      ? new Date(new Date(this.lastProcessedAt).getTime() - 1000).toISOString()
-      : undefined;
+    let apiSince: string | undefined;
+    if (this.lastProcessedAt) {
+      const parsed = new Date(this.lastProcessedAt).getTime();
+      if (Number.isNaN(parsed)) {
+        this.lastProcessedAt = '';
+      } else {
+        apiSince = new Date(parsed - 1000).toISOString();
+      }
+    }
     const notifications = await this.octokit.paginate(
       this.octokit.rest.activity.listNotificationsForAuthenticatedUser,
       {
@@ -198,11 +205,19 @@ export class GithubChannel extends ChannelBase {
       }
       try {
         await this.handleInbound(envelope);
+        this.handleInboundFailCount = 0;
       } catch (err) {
+        this.handleInboundFailCount++;
+        if (this.handleInboundFailCount < 3) {
+          process.stderr.write(
+            `[GitHub:${this.name}] error processing notification ${nid} (${this.handleInboundFailCount}/3): ${err instanceof Error ? err.message : err}\n`,
+          );
+          continue;
+        }
+        this.handleInboundFailCount = 0;
         process.stderr.write(
-          `[GitHub:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
+          `[GitHub:${this.name}] notification ${nid} failed 3 times, force advancing cursor: ${err instanceof Error ? err.message : err}\n`,
         );
-        continue;
       }
       this.advanceCursor(updatedAt, nid);
       try {
