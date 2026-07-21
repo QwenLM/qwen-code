@@ -142,6 +142,7 @@ function readDisabledSkillNames(
     consumeCorruptionEnvVars: false,
     skipLoadEnvironment: !workspaceTrusted,
     skipWorkspaceSettings: !workspaceTrusted,
+    workspaceTrusted,
   }).merged.skills?.disabled;
   if (!Array.isArray(raw)) return new Set();
   return new Set(

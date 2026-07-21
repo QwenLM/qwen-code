@@ -150,9 +150,11 @@ export function registerWorkspaceModelsRoutes(
 
       let writes: WorkspaceSettingsWrite[];
       try {
+        const workspaceTrusted = deps.isWorkspaceTrusted?.();
         const loaded = loadSettings(boundWorkspace, {
           skipLoadEnvironment: true,
-          skipWorkspaceSettings: deps.isWorkspaceTrusted?.() === false,
+          skipWorkspaceSettings: workspaceTrusted === false,
+          workspaceTrusted,
         });
         const scope = getModelProvidersOwnerScope(loaded) ?? SettingScope.User;
         const modelProviders =

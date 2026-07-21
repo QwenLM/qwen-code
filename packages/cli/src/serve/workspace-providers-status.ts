@@ -66,11 +66,13 @@ function buildWorkspaceProvidersStatus(
         ? {
             skipLoadEnvironment: true,
             skipWorkspaceSettings: options.workspaceTrusted === false,
+            workspaceTrusted: options.workspaceTrusted,
           }
         : {
             consumeCorruptionEnvVars: true,
             skipLoadEnvironment: options.workspaceTrusted === false,
             skipWorkspaceSettings: options.workspaceTrusted === false,
+            workspaceTrusted: options.workspaceTrusted,
           },
     );
     const settings = loaded.merged;

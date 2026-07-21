@@ -311,17 +311,20 @@ function requestAbortSignal(req: Request, res: Response): AbortSignal {
 }
 
 function loadVoiceSettings(deps: WorkspaceVoiceRouteDeps): LoadedSettings {
+  const workspaceTrusted = deps.isWorkspaceTrusted?.();
   return loadSettings(
     deps.boundWorkspace,
     deps.env
       ? {
           skipLoadEnvironment: true,
-          skipWorkspaceSettings: deps.isWorkspaceTrusted?.() === false,
+          skipWorkspaceSettings: workspaceTrusted === false,
+          workspaceTrusted,
         }
       : {
           consumeCorruptionEnvVars: true,
-          skipLoadEnvironment: deps.isWorkspaceTrusted?.() === false,
-          skipWorkspaceSettings: deps.isWorkspaceTrusted?.() === false,
+          skipLoadEnvironment: workspaceTrusted === false,
+          skipWorkspaceSettings: workspaceTrusted === false,
+          workspaceTrusted,
         },
   );
 }

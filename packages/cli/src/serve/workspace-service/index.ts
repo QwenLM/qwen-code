@@ -230,11 +230,14 @@ export function createDaemonWorkspaceService(
     publishWorkspaceEvent,
   } = deps;
 
-  const loadBoundSettings = (skipLoadEnvironment = false) =>
-    loadSettings(boundWorkspace, {
-      skipLoadEnvironment: skipLoadEnvironment || !isWorkspaceTrusted(),
-      skipWorkspaceSettings: !isWorkspaceTrusted(),
+  const loadBoundSettings = (skipLoadEnvironment = false) => {
+    const workspaceTrusted = isWorkspaceTrusted();
+    return loadSettings(boundWorkspace, {
+      skipLoadEnvironment: skipLoadEnvironment || !workspaceTrusted,
+      skipWorkspaceSettings: !workspaceTrusted,
+      workspaceTrusted,
     });
+  };
   const assertActiveGeneration = () => assertGenerationOpen?.();
 
   // Last skills status answered by a live ACP child, retained so

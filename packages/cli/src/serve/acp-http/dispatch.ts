@@ -2476,9 +2476,11 @@ export class AcpDispatcher {
 
           let rules: string[];
           try {
+            const workspaceTrusted = this.isWorkspaceTrusted();
             const settings = loadSettings(this.boundWorkspace, {
               skipLoadEnvironment: true,
-              skipWorkspaceSettings: !this.isWorkspaceTrusted(),
+              skipWorkspaceSettings: !workspaceTrusted,
+              workspaceTrusted,
             });
             const scopeSettings =
               scope === 'workspace'

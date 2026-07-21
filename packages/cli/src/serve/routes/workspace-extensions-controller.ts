@@ -58,9 +58,19 @@ const EXTENSION_PREPARATION_CONCURRENCY = 2;
 const EXTENSION_REFRESH_TIMEOUT_MS = 30_000;
 const RECONCILE_SLOW_MS = 30_000;
 
-const resolveExtensionLocale = (workspaceDir: string): string => {
-  const configuredLanguage = loadSettings(workspaceDir).merged.general
-    ?.language as string | undefined;
+const resolveExtensionLocale = (
+  workspaceDir: string,
+  workspaceTrusted?: boolean,
+): string => {
+  const configuredLanguage = loadSettings(
+    workspaceDir,
+    workspaceTrusted === undefined
+      ? true
+      : {
+          skipWorkspaceSettings: !workspaceTrusted,
+          workspaceTrusted,
+        },
+  ).merged.general?.language as string | undefined;
   const requestedLocale = resolveLanguageSetting(configuredLanguage);
   if (requestedLocale === 'auto') {
     return detectSystemLanguage();
@@ -275,13 +285,13 @@ export function createExtensionsController(
     workspaceDir = boundWorkspace,
     trustedOverride?: boolean,
     interactions?: ExtensionInteractionHandlers,
-  ) =>
-    new ExtensionManager({
+  ) => {
+    const workspaceTrusted = trustedOverride ?? deps.isWorkspaceTrusted?.();
+    return new ExtensionManager({
       workspaceDir,
-      locale: resolveExtensionLocale(workspaceDir),
+      locale: resolveExtensionLocale(workspaceDir, workspaceTrusted),
       isWorkspaceTrusted:
-        trustedOverride ??
-        deps.isWorkspaceTrusted?.() ??
+        workspaceTrusted ??
         getWorkspaceTrustStatus(loadSettings(workspaceDir).merged, workspaceDir)
           .effective.state === 'trusted',
       requestConsent: () => Promise.resolve(),
@@ -301,6 +311,7 @@ export function createExtensionsController(
           );
         }),
     });
+  };
 
   const validateExtensionMutationClient = (
     req: Request,

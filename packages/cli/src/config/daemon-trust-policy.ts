@@ -21,6 +21,7 @@ import {
   type WorkspaceTrustState,
 } from './trustedFolders.js';
 import { arePathsEquivalent } from './path-comparison.js';
+import { v1ToV2Migration } from './migration/versions/v1-to-v2.js';
 
 const MAX_TRUSTED_FOLDERS_BYTES = 1024 * 1024;
 const MAX_SETTINGS_BYTES = 4 * 1024 * 1024;
@@ -55,6 +56,7 @@ export interface DaemonWorkspaceTrustDecision {
 interface ReadJsonResult {
   readonly value?: Record<string, unknown>;
   readonly error?: DaemonTrustPolicyError;
+  readonly missing?: boolean;
 }
 
 function policyError(
@@ -73,6 +75,7 @@ async function readJsonObject(
   filePath: string,
   maxBytes: number,
   requireRegularFile: boolean,
+  retryMissing = false,
 ): Promise<ReadJsonResult> {
   const delays = [0, 50, 200];
   let result: ReadJsonResult = {};
@@ -81,7 +84,7 @@ async function readJsonObject(
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
     result = await readJsonObjectOnce(filePath, maxBytes, requireRegularFile);
-    if (!result.error) return result;
+    if (!result.error && (!result.missing || !retryMissing)) return result;
   }
   return result;
 }
@@ -100,7 +103,7 @@ async function readJsonObjectOnce(
       'code' in error &&
       (error as NodeJS.ErrnoException).code === 'ENOENT'
     ) {
-      return { value: {} };
+      return { value: {}, missing: true };
     }
     return {
       error: policyError('trust_policy_unreadable', filePath, error),
@@ -149,6 +152,17 @@ async function readJsonObjectOnce(
   } catch (error) {
     return { error: policyError('trust_policy_invalid', filePath, error) };
   }
+}
+
+function migrateFolderTrustSettings(
+  value: Record<string, unknown> | undefined,
+  scope: string,
+): Record<string, unknown> | undefined {
+  if (!value || !v1ToV2Migration.shouldMigrate(value)) return value;
+  return v1ToV2Migration.migrate(value, scope).settings as Record<
+    string,
+    unknown
+  >;
 }
 
 function folderTrustSetting(
@@ -245,20 +259,22 @@ function semanticRevision(input: {
 }
 
 export async function readDaemonTrustPolicySnapshot(): Promise<DaemonTrustPolicySnapshot> {
-  const [user, system, systemDefaults, trustedFoldersFile] = await Promise.all([
+  const [user, system, systemDefaults] = await Promise.all([
     readJsonObject(getUserSettingsPath(), MAX_SETTINGS_BYTES, false),
     readJsonObject(getSystemSettingsPath(), MAX_SETTINGS_BYTES, false),
     readJsonObject(getSystemDefaultsPath(), MAX_SETTINGS_BYTES, false),
-    readJsonObject(getTrustedFoldersPath(), MAX_TRUSTED_FOLDERS_BYTES, true),
   ]);
 
   const systemFolderTrust = folderTrustSetting(
-    system.value,
+    migrateFolderTrustSettings(system.value, 'System'),
     getSystemSettingsPath(),
   );
-  const userFolderTrust = folderTrustSetting(user.value, getUserSettingsPath());
+  const userFolderTrust = folderTrustSetting(
+    migrateFolderTrustSettings(user.value, 'User'),
+    getUserSettingsPath(),
+  );
   const defaultsFolderTrust = folderTrustSetting(
-    systemDefaults.value,
+    migrateFolderTrustSettings(systemDefaults.value, 'SystemDefaults'),
     getSystemDefaultsPath(),
   );
   const settingsError =
@@ -269,10 +285,13 @@ export async function readDaemonTrustPolicySnapshot(): Promise<DaemonTrustPolicy
     systemDefaults.error ??
     defaultsFolderTrust.error;
   const folderTrustEnabled =
-    systemFolderTrust.value ??
-    userFolderTrust.value ??
-    defaultsFolderTrust.value ??
-    false;
+    userFolderTrust.value ?? systemFolderTrust.value ?? false;
+  const trustedFoldersFile = await readJsonObject(
+    getTrustedFoldersPath(),
+    MAX_TRUSTED_FOLDERS_BYTES,
+    true,
+    folderTrustEnabled,
+  );
   const parsedTrustedFolders = parseTrustedFolders(
     trustedFoldersFile.value,
     getTrustedFoldersPath(),

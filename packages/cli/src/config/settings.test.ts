@@ -3222,6 +3222,30 @@ describe('Settings Loading and Merging', () => {
       expect(settings.merged.context?.fileName).toBe('USER.md'); // User setting
       expect(settings.merged.ui?.theme).toBe('dark'); // User setting
     });
+
+    it('should use an explicit runtime trust decision instead of cached folder trust', () => {
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH) {
+            return JSON.stringify({ context: { fileName: 'WORKSPACE.md' } });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR, {
+        skipLoadEnvironment: true,
+        workspaceTrusted: true,
+      });
+
+      expect(settings.merged.context?.fileName).toBe('WORKSPACE.md');
+      expect(isWorkspaceTrusted).not.toHaveBeenCalled();
+    });
   });
 
   describe('reloadScopeFromDisk', () => {

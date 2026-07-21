@@ -113,6 +113,7 @@ function buildSettingsResponse(
   const loaded = loadSettings(boundWorkspace, {
     skipLoadEnvironment: true,
     skipWorkspaceSettings: !workspaceTrusted,
+    workspaceTrusted,
   });
 
   const settings: SettingDescriptor[] = [];
@@ -189,6 +190,7 @@ function prepareSettingWrite(
     loadSettings(workspace, {
       skipLoadEnvironment: true,
       skipWorkspaceSettings: !workspaceTrusted,
+      workspaceTrusted,
     }).forScope(scope).settings.mcpServers ?? {};
   let nextValue = value;
   if (mcpServerMutation) {
