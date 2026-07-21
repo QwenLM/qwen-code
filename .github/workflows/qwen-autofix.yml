@@ -2017,6 +2017,8 @@ jobs:
             # against has been evaluated. The address job records the head it
             # reported on; a PR whose recorded head still matches is left alone,
             # which bounds this to ONE look per head instead of every scan.
+            # Empty LIVE_HEAD → N_RED_NOW stays 0: fail-closed (no head → cannot judge → do not act),
+            # unlike the recording side where an empty REPORT_HEAD keeps reds visible.
             LIVE_HEAD="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
             N_RED_NOW=0
             if [[ -n "${LIVE_HEAD}" && "${RED_HEAD}" != "${LIVE_HEAD}" ]]; then
