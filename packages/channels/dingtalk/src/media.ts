@@ -102,7 +102,10 @@ export async function downloadMedia(
       if (done) break;
       totalSize += value.byteLength;
       if (totalSize > MAX_DOWNLOAD_BYTES) {
-        reader.cancel();
+        // Await the cancel so a stream error during teardown surfaces here
+        // instead of becoming an unhandled rejection (matches the body.cancel
+        // above).
+        await reader.cancel();
         process.stderr.write(
           `[DingTalk] downloadMedia rejected: actual size exceeds ${MAX_DOWNLOAD_BYTES} byte limit\n`,
         );
