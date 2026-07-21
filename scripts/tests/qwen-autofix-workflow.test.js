@@ -3409,6 +3409,9 @@ describe('qwen-autofix workflow', () => {
       // keyword 'does not exist' must not promote it to a retried auth error.
       "[API Error: 400 Tool 'web_search' does not exist]",
       "[API Error: 400 Field 'temperature' does not exist in schema]",
+      // A hostname that does not resolve is a misconfigured endpoint: it
+      // repeats forever, so it stays terminal like a bad model name.
+      '[API Error: getaddrinfo ENOTFOUND bad.host]',
     ]) {
       withRunnerDir((dir) => {
         writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
@@ -3426,6 +3429,11 @@ describe('qwen-autofix workflow', () => {
     for (const [render, kind] of [
       ['[API Error: 429 Too Many Requests]', 'transient'],
       ['[API Error: 503 upstream unavailable]', 'transient'],
+      // Transport failures never got far enough to have a status code. #7365
+      // stranded at round 2/100 on exactly this render.
+      ['[API Error: terminated (cause: read ECONNRESET)]', 'transient'],
+      ['[API Error: fetch failed]', 'transient'],
+      ['[API Error: socket hang up]', 'transient'],
       ['[API Error: 速率限制，请稍后重试]', 'transient'],
       ['[API Error: 配额不足]', 'transient'],
       ['[API Error: 服务不可用]', 'transient'],

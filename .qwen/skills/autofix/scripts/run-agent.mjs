@@ -86,6 +86,14 @@ function writeFailure(workdir, message) {
 // smuggle a newline into the marker or the PR-comment headline.
 const TRANSIENT_API_ERROR =
   /rate.?limit|quota|RESOURCE_EXHAUSTED|overloaded|temporarily|too many requests|速率限制|配额|服务(?:繁忙|不可用)/i;
+// Transport-level failures carry no HTTP status at all - the request never got
+// far enough to have one. They are unambiguously retryable, and leaving them
+// out stranded #7365 at round 2/100 on a bare
+// `[API Error: terminated (cause: read ECONNRESET)]`. ENOTFOUND is deliberately
+// excluded: a hostname that does not resolve is a misconfigured endpoint, which
+// repeats forever like a bad model name.
+const TRANSPORT_API_ERROR =
+  /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EPIPE|EAI_AGAIN|socket hang up|fetch failed|terminated/i;
 // "does not exist or you do not have access to it" is the OpenAI-compatible
 // render of the same condition a 403 reports - same root cause, same fix.
 const AUTH_API_ERROR =
@@ -108,6 +116,7 @@ function classifyApiError(render) {
   }
   // Code-less render: fall back to the keyword arms.
   if (AUTH_API_ERROR.test(render)) return 'auth';
+  if (TRANSPORT_API_ERROR.test(render)) return 'transient';
   return TRANSIENT_API_ERROR.test(render) ? 'transient' : '';
 }
 
