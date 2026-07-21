@@ -33,7 +33,15 @@ jobs:
           echo "os=$(uname -a)"
           echo "node=$(node -v)"
           echo "npm=$(npm -v)"
-          echo "qwen=$(qwen --version 2>/dev/null || echo missing)"
-          echo "git=$(git --version)"
+          if command -v qwen >/dev/null 2>&1; then
+            echo "qwen=$(qwen --version)"
+          else
+            echo '::warning::qwen is not available on the runner PATH'
+          fi
+          if command -v git >/dev/null 2>&1; then
+            echo "git=$(git --version)"
+          else
+            echo '::warning::git is not available on the runner PATH; checkout may use the REST archive fallback'
+          fi
           df -h "${GITHUB_WORKSPACE}"
           node -e "console.log('node smoke ok')"
