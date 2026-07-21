@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   getSubagentSessionDir,
   Storage,
@@ -15,6 +15,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 import {
+  createVirtualSubagentSessionId,
   parseVirtualSubagentSessionId,
   VirtualSubagentSessions,
 } from './virtual-subagent-sessions.js';
@@ -50,7 +51,33 @@ function record(
   };
 }
 
+function activeTarget(sessions: VirtualSubagentSessions): {
+  refreshLive: () => Promise<void>;
+  subscribers: number;
+} {
+  const targets = (
+    sessions as unknown as {
+      targets: Map<
+        string,
+        { refreshLive: () => Promise<void>; subscribers: number }
+      >;
+    }
+  ).targets;
+  const target = targets.values().next().value;
+  if (!target) throw new Error('Expected an active virtual subagent target');
+  return target;
+}
+
 describe('VirtualSubagentSessions', () => {
+  it('rejects id parts that the parser cannot accept', () => {
+    expect(() =>
+      createVirtualSubagentSessionId('parent session', 'agent-1'),
+    ).toThrow('valid id parts');
+    expect(() =>
+      createVirtualSubagentSessionId('parent-session', 'agent/1'),
+    ).toThrow('valid id parts');
+  });
+
   it('resolves, fully loads, and independently streams an agent transcript', async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
     tempDirs.push(dir);
@@ -156,8 +183,9 @@ describe('VirtualSubagentSessions', () => {
       lastEventId: loaded?.lastEventId,
     });
     const iterator = stream![Symbol.asyncIterator]();
+    expect((await iterator.next()).value?.type).toBe('replay_complete');
     await fs.rm(`${outputFile}.stream`);
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await activeTarget(sessions).refreshLive();
     await fs.writeFile(
       `${outputFile}.stream`,
       `${JSON.stringify({
@@ -169,39 +197,29 @@ describe('VirtualSubagentSessions', () => {
         timestamp: Date.now(),
       })}\n`,
     );
-
-    let streamed: Awaited<ReturnType<typeof iterator.next>> | undefined;
-    for (let i = 0; i < 4; i++) {
-      const next = await iterator.next();
-      if (next.value?.type === 'session_update') {
-        streamed = next;
-        break;
-      }
-    }
+    await activeTarget(sessions).refreshLive();
+    const streamed = await iterator.next();
     const reloaded = await sessions.load(runtime, resolved!.sessionId);
     await fs.writeFile(
       outputFile,
-      `${JSON.stringify(
-        record('replacement', null, 'assistant', 'replacement canonical'),
-      )}\n`,
+      `${JSON.stringify({
+        ...record('replacement', null, 'assistant', 'replacement canonical'),
+        timestamp: new Date(100).toISOString(),
+      })}\n`,
     );
-    let replaced: Awaited<ReturnType<typeof iterator.next>> | undefined;
-    for (let i = 0; i < 4; i++) {
-      const next = await Promise.race([
-        iterator.next(),
-        new Promise<undefined>((resolve) =>
-          setTimeout(() => resolve(undefined), 600),
-        ),
-      ]);
-      if (!next) break;
-      if (
-        next.value?.type === 'session_update' &&
-        JSON.stringify(next.value).includes('replacement canonical')
-      ) {
-        replaced = next;
-        break;
-      }
-    }
+    await activeTarget(sessions).refreshLive();
+    const replaced = await iterator.next();
+    await fs.writeFile(
+      `${outputFile}.stream`,
+      `${JSON.stringify({
+        v: 1,
+        text: 'stream after rewind',
+        thought: false,
+        timestamp: 200,
+      })}\n`,
+    );
+    await activeTarget(sessions).refreshLive();
+    const afterRewind = await iterator.next();
     abort.abort();
     await iterator.return?.();
     expect(streamed?.value).toMatchObject({ type: 'session_update' });
@@ -209,6 +227,51 @@ describe('VirtualSubagentSessions', () => {
       'resumed round live',
     );
     expect(JSON.stringify(replaced?.value)).toContain('replacement canonical');
+    expect(JSON.stringify(afterRewind.value)).toContain('stream after rewind');
+  });
+
+  it('releases the subscriber count when the initial refresh fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-subagent-'));
+    tempDirs.push(dir);
+    const outputFile = path.join(dir, 'not-a-file');
+    await fs.mkdir(outputFile);
+    const runtime = {
+      workspaceId: 'workspace-refresh-error',
+      workspaceCwd: '/workspace',
+      env: { mode: 'parent-process', overlayKeys: [] },
+      bridge: {
+        getSessionTasksStatus: async () => ({
+          v: 1 as const,
+          sessionId: 'parent-session',
+          now: Date.now(),
+          tasks: [
+            {
+              kind: 'agent' as const,
+              id: 'agent-error',
+              label: 'agent',
+              description: 'agent',
+              status: 'running' as const,
+              startTime: Date.now(),
+              runtimeMs: 1,
+              outputFile,
+              isBackgrounded: false,
+              toolUseId: 'call-error',
+            },
+          ],
+        }),
+      },
+    } as unknown as WorkspaceRuntime;
+    const sessions = new VirtualSubagentSessions();
+    const sessionId = createVirtualSubagentSessionId(
+      'parent-session',
+      'agent-error',
+    );
+    const stream = await sessions.subscribe(runtime, sessionId, {
+      signal: new AbortController().signal,
+    });
+
+    await expect(stream![Symbol.asyncIterator]().next()).rejects.toThrow();
+    expect(activeTarget(sessions).subscribers).toBe(0);
   });
 
   it('isolates cached targets by workspace runtime', async () => {
@@ -539,13 +602,8 @@ describe('VirtualSubagentSessions', () => {
     expect(
       await sessions.resolve(runtime, parentSessionId, toolCallId),
     ).toMatchObject({ status: 'completed', totalTokens: 999 });
-
-    const finalUpdate = await Promise.race([
-      iterator.next(),
-      new Promise<undefined>((resolve) =>
-        setTimeout(() => resolve(undefined), 400),
-      ),
-    ]);
+    await activeTarget(sessions).refreshLive();
+    const finalUpdate = await iterator.next();
     expect(JSON.stringify(finalUpdate?.value)).toContain(
       'final canonical output',
     );
@@ -561,16 +619,16 @@ describe('VirtualSubagentSessions', () => {
       })}\n`,
     );
     const next = iterator.next();
-    const outcome = await Promise.race([
-      next.then(() => 'event'),
-      new Promise<'timeout'>((resolve) =>
-        setTimeout(() => resolve('timeout'), 400),
-      ),
-    ]);
+    let settled = false;
+    void next.then(() => {
+      settled = true;
+    });
+    vi.useFakeTimers();
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(settled).toBe(false);
     abort.abort();
     await next;
     await iterator.return?.();
-    expect(outcome).toBe('timeout');
   });
 
   it('matches legacy sidecars through the recorded launch prompt', async () => {

@@ -7389,6 +7389,48 @@ describe('createServeApp', () => {
       }
     });
 
+    it('requires the parent runtime for virtual heartbeat and detach', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+      const sessionId = createVirtualSubagentSessionId(
+        'missing-parent',
+        'agent-1',
+      );
+
+      const heartbeat = await request(app)
+        .post(`/session/${sessionId}/heartbeat`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      const detach = await request(app)
+        .post(`/session/${sessionId}/detach`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(heartbeat.status).toBe(404);
+      expect(heartbeat.body.sessionId).toBe('missing-parent');
+      expect(detach.status).toBe(404);
+      expect(detach.body.sessionId).toBe('missing-parent');
+    });
+
     it('maps task cancellation bridge errors', async () => {
       const bridge = fakeBridge({
         cancelSessionTaskImpl: async (sessionId) => {

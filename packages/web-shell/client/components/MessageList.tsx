@@ -92,6 +92,7 @@ interface MessageListProps {
     outputTokens?: number;
     cachedTokens?: number;
   };
+  includeSubagentToolUsageInMetrics?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   onBranchSession?: () => void;
@@ -474,6 +475,7 @@ export interface ApplyTurnCollapseOptions {
    * compact mode's `isForceExpandGroup`).
    */
   pendingApprovalCallId?: string | null;
+  includeSubagentToolUsageInMetrics?: boolean;
   /** Master switch; when false the items pass through untouched. */
   enabled: boolean;
 }
@@ -1309,6 +1311,7 @@ export function applyTurnCollapse(
     isResponding,
     activeTurnStartedAt,
     pendingApprovalCallId,
+    includeSubagentToolUsageInMetrics = true,
     enabled,
   }: ApplyTurnCollapseOptions,
 ): DisplayItem[] {
@@ -1388,13 +1391,15 @@ export function applyTurnCollapse(
         cachedTokens += usage.cachedTokens ?? 0;
         hasUsage = true;
       }
-      for (const subagent of itemSubagentUsages(item)) {
-        if (countedSubagents.has(subagent.callId)) continue;
-        countedSubagents.add(subagent.callId);
-        inputTokens += subagent.usage.inputTokens;
-        outputTokens += subagent.usage.outputTokens;
-        cachedTokens += subagent.usage.cachedTokens ?? 0;
-        hasUsage = true;
+      if (includeSubagentToolUsageInMetrics) {
+        for (const subagent of itemSubagentUsages(item)) {
+          if (countedSubagents.has(subagent.callId)) continue;
+          countedSubagents.add(subagent.callId);
+          inputTokens += subagent.usage.inputTokens;
+          outputTokens += subagent.usage.outputTokens;
+          cachedTokens += subagent.usage.cachedTokens ?? 0;
+          hasUsage = true;
+        }
       }
     }
 
@@ -2263,6 +2268,7 @@ export const MessageList = memo(
       hideSessionTimeline = false,
       hideFirstUserMessage = false,
       firstTurnMetrics,
+      includeSubagentToolUsageInMetrics = true,
       showRetryHint = false,
       onRetryClick,
       onBranchSession,
@@ -2476,6 +2482,7 @@ export const MessageList = memo(
         isResponding,
         activeTurnStartedAt,
         pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
+        includeSubagentToolUsageInMetrics,
         enabled: collapseEnabled,
       });
       let metricsApplied = false;
@@ -2523,6 +2530,7 @@ export const MessageList = memo(
       collapseEnabled,
       hideFirstUserMessage,
       firstTurnMetrics,
+      includeSubagentToolUsageInMetrics,
       mergedMessages,
     ]);
     const visibleTurnIdByDisplayIndex = useMemo(

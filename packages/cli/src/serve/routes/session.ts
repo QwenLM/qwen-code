@@ -1732,7 +1732,15 @@ export function registerSessionRoutes(
   app.get('/session/:id/subagents/:toolCallId', async (req, res) => {
     const route = 'GET /session/:id/subagents/:toolCallId';
     const sessionId = requireSessionId(req, res);
-    if (!sessionId || !virtualSubagentSessions) return;
+    if (!sessionId) return;
+    if (!virtualSubagentSessions) {
+      res.status(404).json({
+        error: `No session with id "${sessionId}"`,
+        code: 'session_not_found',
+        sessionId,
+      });
+      return;
+    }
     const toolCallId = req.params['toolCallId'];
     if (!toolCallId || toolCallId.length > 500) {
       res.status(400).json({
@@ -1776,7 +1784,15 @@ export function registerSessionRoutes(
     async (req, res) => {
       const route = 'POST /session/:id/subagents/:toolCallId/cancel';
       const sessionId = requireSessionId(req, res);
-      if (!sessionId || !virtualSubagentSessions) return;
+      if (!sessionId) return;
+      if (!virtualSubagentSessions) {
+        res.status(404).json({
+          error: `No session with id "${sessionId}"`,
+          code: 'session_not_found',
+          sessionId,
+        });
+        return;
+      }
       const toolCallId = req.params['toolCallId'];
       if (!toolCallId || toolCallId.length > 500) {
         res.status(400).json({
@@ -2714,10 +2730,21 @@ export function registerSessionRoutes(
     mutate(),
     (req, res, next) => {
       const sessionId = req.params['id'];
-      if (!sessionId || !parseVirtualSubagentSessionId(sessionId)) {
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
         next();
         return;
       }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'POST /session/:id/heartbeat',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       res.status(200).json({
@@ -2745,10 +2772,21 @@ export function registerSessionRoutes(
     mutate(),
     (req, res, next) => {
       const sessionId = req.params['id'];
-      if (!sessionId || !parseVirtualSubagentSessionId(sessionId)) {
+      const key = sessionId
+        ? parseVirtualSubagentSessionId(sessionId)
+        : undefined;
+      if (!sessionId || !key) {
         next();
         return;
       }
+      const runtime = requireSessionRuntime({
+        sessionId: key.parentSessionId,
+        route: 'POST /session/:id/detach',
+        res,
+        workspaceRegistry,
+        daemonLog,
+      });
+      if (!runtime) return;
       const clientId = parseClientIdHeader(req, res);
       if (clientId === null) return;
       res.status(204).end();

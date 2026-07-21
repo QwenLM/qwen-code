@@ -172,10 +172,20 @@ function decodePart(value: string): string | undefined {
   }
 }
 
+function isValidVirtualSessionPart(value: string): boolean {
+  return /^[a-zA-Z0-9_-]{1,500}$/.test(value);
+}
+
 export function createVirtualSubagentSessionId(
   parentSessionId: string,
   agentId: string,
 ): string {
+  if (
+    !isValidVirtualSessionPart(parentSessionId) ||
+    !isValidVirtualSessionPart(agentId)
+  ) {
+    throw new Error('Virtual subagent session ids require valid id parts');
+  }
   return `${PREFIX}${encodePart(parentSessionId)}.${encodePart(agentId)}`;
 }
 
@@ -192,8 +202,8 @@ export function parseVirtualSubagentSessionId(
   if (
     !parentSessionId ||
     !agentId ||
-    !/^[a-zA-Z0-9_-]{1,500}$/.test(parentSessionId) ||
-    !/^[a-zA-Z0-9_-]{1,500}$/.test(agentId)
+    !isValidVirtualSessionPart(parentSessionId) ||
+    !isValidVirtualSessionPart(agentId)
   ) {
     return undefined;
   }
@@ -224,6 +234,7 @@ class VirtualSubagentTarget {
   private readonly events: BridgeEvent[] = [];
   private snapshotDelivered = false;
   private offset = 0;
+  private transcriptIdentity: string | undefined;
   private streamOffset = 0;
   private streamIdentity: string | undefined;
   private streamReady = false;
@@ -264,12 +275,38 @@ class VirtualSubagentTarget {
     if (event && !this.snapshotDelivered) this.events.push(event);
   }
 
+  private resetCanonicalState(): void {
+    this.offset = 0;
+    this.replayState = undefined;
+    this.canonicalThroughTimestamp = 0;
+    this.completedStreamRounds.clear();
+    this.streamRunIds.clear();
+    this.streamedRounds.clear();
+    this.legacyStreamedSinceCanonical = false;
+  }
+
+  private resetStreamState(): void {
+    this.streamOffset = 0;
+    this.completedStreamRounds.clear();
+    this.streamRunIds.clear();
+    this.streamedRounds.clear();
+    this.legacyStreamedSinceCanonical = false;
+  }
+
   private async readNewRecords(endOffset?: number): Promise<ChatRecord[]> {
     let handle: fs.FileHandle | undefined;
     try {
       handle = await fs.open(this.task.outputFile, 'r');
       const stat = await handle.stat();
-      if (stat.size < this.offset) this.offset = 0;
+      const identity = `${stat.dev}:${stat.ino}`;
+      if (
+        (this.transcriptIdentity !== undefined &&
+          this.transcriptIdentity !== identity) ||
+        stat.size < this.offset
+      ) {
+        this.resetCanonicalState();
+      }
+      this.transcriptIdentity = identity;
       const size = Math.min(stat.size, endOffset ?? stat.size);
       if (size <= this.offset) return [];
       const bytes = Buffer.alloc(size - this.offset);
@@ -294,7 +331,13 @@ class VirtualSubagentTarget {
             : [];
         });
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return [];
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        if (this.transcriptIdentity !== undefined) {
+          this.transcriptIdentity = undefined;
+          this.resetCanonicalState();
+        }
+        return [];
+      }
       throw error;
     } finally {
       await handle?.close();
@@ -309,18 +352,15 @@ class VirtualSubagentTarget {
     try {
       handle = await fs.open(filePath, 'r');
       const stat = await handle.stat();
-      const identity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}`;
+      const identity = `${stat.dev}:${stat.ino}`;
       if (
         this.streamIdentity !== undefined &&
         this.streamIdentity !== identity
       ) {
-        this.streamOffset = 0;
-        this.streamRunIds.clear();
-        this.streamedRounds.clear();
-        this.legacyStreamedSinceCanonical = false;
+        this.resetStreamState();
       }
       this.streamIdentity = identity;
-      if (stat.size < this.streamOffset) this.streamOffset = 0;
+      if (stat.size < this.streamOffset) this.resetStreamState();
       const size = Math.min(stat.size, endOffset ?? stat.size);
       if (size <= this.streamOffset) return;
       const bytes = Buffer.alloc(size - this.streamOffset);
@@ -600,18 +640,18 @@ class VirtualSubagentTarget {
       this.retentionTimer = undefined;
     }
     this.subscribers++;
-    await this.refreshLive();
-    if (!this.snapshotDelivered) {
-      this.events.length = 0;
-      this.snapshotDelivered = true;
-    }
-    if (this.task.status === 'running' && !this.pollTimer) {
-      this.pollTimer = setInterval(() => {
-        void this.refreshLive().catch(() => undefined);
-      }, POLL_INTERVAL_MS);
-      this.pollTimer.unref();
-    }
     try {
+      await this.refreshLive();
+      if (!this.snapshotDelivered) {
+        this.events.length = 0;
+        this.snapshotDelivered = true;
+      }
+      if (this.task.status === 'running' && !this.pollTimer) {
+        this.pollTimer = setInterval(() => {
+          void this.refreshLive().catch(() => undefined);
+        }, POLL_INTERVAL_MS);
+        this.pollTimer.unref();
+      }
       yield* this.bus.subscribe(opts);
     } finally {
       this.subscribers--;

@@ -16,7 +16,6 @@ interface SubagentResolution {
   sessionId: string;
   status: string;
   durationMs?: number;
-  totalTokens?: number;
   inputTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
@@ -190,6 +189,7 @@ function SubagentDetailContent({
           hideSessionTimeline
           hideFirstUserMessage
           firstTurnMetrics={metrics}
+          includeSubagentToolUsageInMetrics={false}
         />
       </div>
     </div>

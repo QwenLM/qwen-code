@@ -211,6 +211,7 @@ function mount(
       outputTokens?: number;
       cachedTokens?: number;
     };
+    includeSubagentToolUsageInMetrics?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
   } = {},
@@ -236,6 +237,9 @@ function mount(
             isResponding={opts.isResponding}
             hideFirstUserMessage={opts.hideFirstUserMessage}
             firstTurnMetrics={opts.firstTurnMetrics}
+            includeSubagentToolUsageInMetrics={
+              opts.includeSubagentToolUsageInMetrics
+            }
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
           />
         </WebShellCustomizationProvider>
@@ -382,6 +386,28 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(text).toContain('1 thought');
     expect(text).not.toContain('1 step');
     expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('1 tool call'));
+  });
+
+  it('does not add tool summary usage when full transcript usage includes it', () => {
+    const agent = agentMsg('nested');
+    agent.tools[0]!.rawOutput = {
+      executionSummary: { inputTokens: 100, outputTokens: 20 },
+    };
+    const c = mount(
+      [
+        userMsg('u1'),
+        agent,
+        {
+          ...asstMsg('a1'),
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+      ],
+      undefined,
+      { includeSubagentToolUsageInMetrics: false },
+    );
+
+    expect(c.textContent).toContain('↑100 ↓20');
+    expect(c.textContent).not.toContain('↑200 ↓40');
   });
 
   it('renders step-less metrics without a toggle', () => {

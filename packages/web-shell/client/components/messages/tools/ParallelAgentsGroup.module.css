@@ -240,6 +240,10 @@
   color: var(--muted-foreground);
 }
 
+.detail {
+  margin-top: 4px;
+}
+
 /* Shared-axis mini timeline: one bar per agent laid out against the
    group's combined wall-clock span. */
 .track {

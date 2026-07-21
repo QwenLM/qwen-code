@@ -140,6 +140,28 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('uses the tool name when replay starts with a tool update', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'in_progress',
+        _meta: { toolName: 'agent' },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'tool', title: 'agent', status: 'in_progress' },
+    ]);
+  });
+
   it('normalizes an in_progress frame that carries a kind (the drop is scoped to kind-less heartbeats)', () => {
     // The `kind === undefined` condition is load-bearing: an in_progress
     // frame WITH a kind is not a bare heartbeat and must pass through to a

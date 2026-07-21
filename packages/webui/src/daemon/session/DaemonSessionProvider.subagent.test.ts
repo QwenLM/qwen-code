@@ -77,4 +77,21 @@ describe('on-demand subagent transcript projection', () => {
       (result[0] as Extract<DaemonUiEvent, { type: 'tool.update' }>).rawInput,
     ).toMatchObject({ prompt: `${'p'.repeat(240)}…` });
   });
+
+  it('omits root output when none of its fields are projected', () => {
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        rawOutput: { result: 'unbounded result' },
+      },
+    ]);
+
+    expect(result).toMatchObject({
+      type: 'tool.update',
+      toolCallId: 'agent-1',
+      rawOutput: undefined,
+    });
+  });
 });

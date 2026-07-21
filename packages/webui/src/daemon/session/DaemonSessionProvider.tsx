@@ -267,7 +267,9 @@ function projectSubagentToolUpdate(
     ...(projectedInput && Object.keys(projectedInput).length > 0
       ? { rawInput: projectedInput }
       : { rawInput: undefined }),
-    rawOutput: projectedOutput,
+    ...(projectedOutput && Object.keys(projectedOutput).length > 0
+      ? { rawOutput: projectedOutput }
+      : { rawOutput: undefined }),
     content: undefined,
     details: undefined,
   };

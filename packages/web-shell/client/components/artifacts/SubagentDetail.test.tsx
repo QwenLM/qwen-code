@@ -31,4 +31,14 @@ describe('findSubagentRootTool', () => {
       status: 'in_progress',
     });
   });
+
+  it('returns undefined when the requested tool is absent', () => {
+    expect(findSubagentRootTool([], 'agent-1')).toBeUndefined();
+    expect(
+      findSubagentRootTool(
+        [{ id: 'assistant-1', role: 'assistant', content: 'done' }],
+        'agent-1',
+      ),
+    ).toBeUndefined();
+  });
 });
