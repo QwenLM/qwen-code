@@ -1015,6 +1015,18 @@ Body`);
 
       expect(baseDirs).toHaveLength(2);
     });
+
+    it('should resolve relative custom skill dirs against CWD', () => {
+      const customConfig = makeFakeConfig({
+        customSkillDirs: ['./relative-skills'],
+      });
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const customManager = new SkillManager(customConfig);
+
+      const baseDirs = customManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toContain(path.resolve('./relative-skills'));
+    });
   });
 
   describe('bundled skills', () => {
