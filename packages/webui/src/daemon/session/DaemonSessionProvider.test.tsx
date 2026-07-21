@@ -3715,6 +3715,12 @@ describe('DaemonSessionProvider', () => {
       },
     });
     sdkMocks.sessions.push(session);
+    sdkMocks.getSessionTranscriptPage.mockResolvedValue({
+      v: 1,
+      sessionId: session.sessionId,
+      events: [],
+      hasMore: false,
+    });
     let blocks: readonly DaemonTranscriptBlock[] = [];
     let awaitingResync = false;
     let history: ReturnType<typeof useDaemonTranscriptHistory> | undefined;

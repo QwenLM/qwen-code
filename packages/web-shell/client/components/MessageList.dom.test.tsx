@@ -1650,7 +1650,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
     ]);
 
-    expect(assistantActions(c, 'mid')).toBe('false');
+    expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 
