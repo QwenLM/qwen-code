@@ -102,11 +102,9 @@ describe('workspace trust reconciler', () => {
       '/primary': TrustLevel.TRUST_FOLDER,
     });
     const disposeRuntime = vi.fn(async () => undefined);
-    let reads = 0;
     const reconciler = createWorkspaceTrustReconciler({
       registry,
-      readLatestSnapshot: async () =>
-        reads++ === 0 ? latestPolicy : latestPolicy,
+      readLatestSnapshot: async () => latestPolicy,
       buildRuntime: async ({ entry, trusted, generationGuard }) =>
         makeRuntime(entry.workspaceCwd, {
           workspaceId: entry.workspaceId,
