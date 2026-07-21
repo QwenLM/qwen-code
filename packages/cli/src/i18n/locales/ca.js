@@ -2375,6 +2375,7 @@ export default {
   'toolDisplayName.CronDelete': 'Suprimeix tasca programada',
   'toolDisplayName.LoopWakeup': 'Desperta el bucle',
   'toolDisplayName.CreateSubSession': 'Crea subsessió',
+  'toolDisplayName.ListAgents': 'Llista agents',
   'toolDisplayName.TaskCreate': 'Crea tasca',
   'toolDisplayName.TaskUpdate': 'Actualitza tasca',
   'toolDisplayName.TaskList': 'Llista tasques',
