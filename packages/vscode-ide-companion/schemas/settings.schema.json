@@ -882,6 +882,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "directories": {
+          "description": "Additional directories to scan for skills (SKILL.md files). Paths support ~ expansion. Directories are scanned recursively for SKILL.md files. Skills from these directories are loaded at user level, after the default ~/.qwen/skills/ directory.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
