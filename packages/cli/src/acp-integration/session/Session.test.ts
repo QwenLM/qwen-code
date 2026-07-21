@@ -11462,6 +11462,158 @@ describe('Session', () => {
       );
     });
 
+    it('asks when the AUTO classifier is unavailable and can switch to Default', async () => {
+      const cwd = '/repo';
+      const command = "echo '{}' > .qwen/settings.json";
+      let approvalMode = ApprovalMode.AUTO;
+      let denialState = {
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      };
+      const baseLlmClient = {
+        generateJson: vi.fn().mockRejectedValue(new Error('classifier 503')),
+      };
+      const getHistoryTail = vi.fn().mockReturnValue([]);
+      const permissionManager = new core.PermissionManager({
+        getPermissionsAllow: () => ['Bash(*)'],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => [],
+        getCoreTools: () => undefined,
+        getApprovalMode: () => ApprovalMode.DEFAULT,
+        getProjectRoot: () => cwd,
+        getCwd: () => cwd,
+      });
+      permissionManager.initialize();
+      const executeSpy = vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+      });
+      const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
+      const invocation = {
+        params: { command },
+        getDefaultPermission: vi.fn().mockResolvedValue('ask'),
+        getConfirmationDetails: vi.fn().mockResolvedValue({
+          type: 'exec',
+          title: 'Confirm shell command',
+          command,
+          rootCommand: 'echo',
+          onConfirm: onConfirmSpy,
+        }),
+        getDescription: vi.fn().mockReturnValue('Run shell command'),
+        toolLocations: vi.fn().mockReturnValue([]),
+        execute: executeSpy,
+      };
+      const tool = {
+        name: core.ToolNames.SHELL,
+        kind: core.Kind.Execute,
+        build: vi.fn().mockReturnValue(invocation),
+      };
+
+      mockToolRegistry.getTool.mockReturnValue(tool);
+      mockConfig.getApprovalMode = vi
+        .fn()
+        .mockImplementation(() => approvalMode);
+      mockConfig.setApprovalMode = vi.fn().mockImplementation((mode) => {
+        approvalMode = mode;
+      });
+      mockConfig.getTargetDir = vi.fn().mockReturnValue(cwd);
+      mockConfig.getCwd = vi.fn().mockReturnValue(cwd);
+      mockConfig.getPermissionManager = vi
+        .fn()
+        .mockReturnValue(permissionManager);
+      mockConfig.getAutoModeDenialState = vi
+        .fn()
+        .mockImplementation(() => denialState);
+      mockConfig.setAutoModeDenialState = vi
+        .fn()
+        .mockImplementation((next: typeof denialState) => {
+          denialState = next;
+        });
+      mockConfig.getBaseLlmClient = vi.fn().mockReturnValue(baseLlmClient);
+      mockConfig.getGeminiClient = vi
+        .fn()
+        .mockReturnValue({ ...mockGeminiClient, getHistoryTail });
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
+      mockConfig.getModel = vi.fn().mockReturnValue('test-model');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: {
+          outcome: 'selected',
+          optionId: core.ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+        },
+      });
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              functionCalls: [
+                {
+                  id: 'call-classifier-unavailable',
+                  name: core.ToolNames.SHELL,
+                  args: { command },
+                },
+              ],
+            },
+          },
+        ]),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run shell command' }],
+      });
+
+      expect(mockClient.requestPermission).toHaveBeenCalledWith(
+        expect.objectContaining({
+          options: [
+            expect.objectContaining({
+              optionId: core.ToolConfirmationOutcome.ProceedOnce,
+            }),
+            expect.objectContaining({
+              optionId:
+                core.ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+              name: expect.stringContaining('recommended'),
+            }),
+            expect.objectContaining({
+              optionId: core.ToolConfirmationOutcome.Cancel,
+            }),
+          ],
+          toolCall: expect.objectContaining({
+            content: expect.arrayContaining([
+              expect.objectContaining({
+                content: expect.objectContaining({
+                  text: expect.stringContaining(
+                    "Auto Mode couldn't classify this action",
+                  ),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      );
+      expect(onConfirmSpy).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: undefined },
+      );
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(approvalMode).toBe(ApprovalMode.DEFAULT);
+      expect(executeSpy).toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'current_mode_update',
+            currentModeId: ApprovalMode.DEFAULT,
+          }),
+        }),
+      );
+    });
+
     it('resets AUTO denial counters when the user approves a denialTracking fallback prompt', async () => {
       const executeSpy = vi.fn().mockResolvedValue({
         llmContent: 'ok',
@@ -11717,7 +11869,7 @@ describe('Session', () => {
           );
         });
 
-        it('forwards classifier_unavailable reasons to PermissionDenied hooks', async () => {
+        it('does not fire PermissionDenied hooks for classifier unavailability', async () => {
           const hookSystem = {
             firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
           };
@@ -11735,9 +11887,9 @@ describe('Session', () => {
               durationMs: 3000,
             },
             {
-              kind: 'blocked',
-              errorMessage: 'blocked',
+              kind: 'fallback',
               reason: 'classifier_unavailable',
+              message: 'Classifier unavailable.',
             },
             core.ToolNames.SHELL,
             { command: 'rm -rf /tmp/example' },
@@ -11745,14 +11897,7 @@ describe('Session', () => {
             new AbortController().signal,
           );
 
-          expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
-            core.ToolNames.SHELL,
-            { command: 'rm -rf /tmp/example' },
-            'auto-denied-acp',
-            'classifier_unavailable',
-            expect.any(AbortSignal),
-            'auto-denied-acp',
-          );
+          expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
         });
 
         it('continues AUTO block handling when PermissionDenied hook fails', async () => {
