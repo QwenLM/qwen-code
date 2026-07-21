@@ -2599,6 +2599,27 @@ jobs:
               | select((.completedAt // .updatedAt // "") > $wm)
               | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
+            # If the LAST round ended in a gate rejection, show the agent WHY.
+            # It is otherwise invisible on the retry: the reason lives in the
+            # bot's own handoff comment, which the feedback filter above
+            # (correctly) excludes, so the agent would re-read only the original
+            # review points and re-make the same mistake - #7208 was handed to a
+            # human over a two-character TS4111 fix its own compiler output had
+            # already spelled out.
+            LAST_REJECTION="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- autofix-eval ts=")) ]
+              | sort_by(.created_at) | last | .body // ""' "${WORKDIR}/ic.json" \
+              | sed -n '/<!-- autofix-gate-rejection-start -->/,/<!-- autofix-gate-rejection-end -->/p' \
+              | sed '1d;$d')"
+            if [[ -n "${LAST_REJECTION}" ]]; then
+              echo
+              echo '## Your previous attempt was REJECTED by the verification gate'
+              echo
+              echo 'Fix this first — the same change will be rejected again otherwise.'
+              echo
+              printf '%s\n' "${LAST_REJECTION}"
+            fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
@@ -2765,16 +2786,49 @@ jobs:
           # on a failed job means the gate never reached a verdict (its own bug,
           # an infra blip), and the agent's work must then be retried rather
           # than buried by a watermark advance.
+          # Capture each check's output. A rejection has to tell the agent WHY
+          # its change was refused: without that, the next round re-reads only
+          # the original review feedback and re-makes the same mistake - #7208
+          # was handed to a human over a two-character TS4111 fix its own
+          # compiler output already spelled out.
+          GATE_LOG="${WORKDIR}/gate-output.log"
+          : > "${GATE_LOG}"
           reject_fix() {
             echo "❌ ${1}"
+            # Declare the verdict FIRST. The handoff routes on outcome=, and an
+            # empty outcome on a failed job means "the gate never reached a
+            # verdict" — i.e. a crash, which is RETRIED. So a rejection that
+            # dies while writing its detail file would be re-attempted forever
+            # instead of reported once. A detail we cannot write is a degraded
+            # message; it must never cost the verdict, hence this order and the
+            # non-fatal write below.
             echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            {
+              echo "**${1}**"
+              echo
+              # A four-backtick fence cannot be closed by a ``` line, so
+              # captured output containing its own fences stays inside the
+              # block when this is posted verbatim as a PR comment.
+              echo '````'
+              tail -c 3000 "${GATE_LOG}" 2> /dev/null
+              echo '````'
+            } > "${WORKDIR}/gate-rejection.md" ||
+              echo "::warning::could not write the gate rejection detail; the verdict stands."
             exit 1
+          }
+          run_check() {
+            # pipefail makes the pipeline carry the command's status, not tee's.
+            local label="${1}"
+            shift
+            if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+              reject_fix "${label}"
+            fi
           }
 
           echo '🔬 Re-running deterministic checks (independent of the agent)...'
-          npm run build || reject_fix 'build failed on the agent-committed fix'
-          npm run typecheck || reject_fix 'typecheck failed on the agent-committed fix'
-          npm run lint || reject_fix 'lint failed on the agent-committed fix'
+          run_check 'build failed on the agent-committed fix' npm run build
+          run_check 'typecheck failed on the agent-committed fix' npm run typecheck
+          run_check 'lint failed on the agent-committed fix' npm run lint
 
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -2805,8 +2859,8 @@ jobs:
                 continue
               fi
               echo "🧪 Testing ${p} (changed files only)..."
-              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests \
-                || reject_fix "tests failed in ${p}"
+              run_check "tests failed in ${p}" \
+                npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
             done
           fi
           echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
@@ -2818,7 +2872,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md agent-api-error agent-api-error-kind resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3234,6 +3288,22 @@ jobs:
                 head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
               else
                 echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
+              fi
+              # Carry the gate's own rejection reason. Without it the comment
+              # shows only the agent's optimistic summary, so neither a human
+              # nor the NEXT round can see why the change was refused - the
+              # agent then re-reads the original review feedback and repeats
+              # the same mistake. Delimited so `Prepare branch and feedback`
+              # can lift it back out on the retry.
+              if [[ -s "${WORKDIR}/gate-rejection.md" ]]; then
+                echo
+                echo '<!-- autofix-gate-rejection-start -->'
+                echo "**Why it was not pushed:**"
+                echo
+                # Must stay >= reject_fix's tail -c 3000 + label + two four-backtick
+                # fences (~3.1 KB), or the closing fence is silently truncated.
+                head -c 3500 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
+                echo '<!-- autofix-gate-rejection-end -->'
               fi
               echo
               echo
