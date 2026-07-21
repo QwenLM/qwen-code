@@ -120,6 +120,7 @@ import {
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
   withInteractionSpan,
+  SessionWriterError,
   startToolSpan,
   endToolSpan,
   runInToolSpanContext,
@@ -1082,6 +1083,7 @@ export class Session implements SessionContext {
    * process termination is slow.
    */
   private pendingPromptCompletion: Promise<void> | null = null;
+  private automaticDrainRetry: Promise<void> | null = null;
   /**
    * Per-turn AbortController for the fire-and-forget follow-up suggestion
    * generation. Aborted on the top of the next `prompt()` and on
@@ -1147,6 +1149,9 @@ export class Session implements SessionContext {
   // or session reload), which would otherwise execute orphaned cron prompts
   // on a session whose registries are already unregistered.
   private disposed = false;
+  private closing = false;
+  private closeGateCompletion: Promise<void> | null = null;
+  private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
 
   // Modular components
@@ -1183,7 +1188,7 @@ export class Session implements SessionContext {
     private readonly settings: LoadedSettings,
   ) {
     this.sessionId = id;
-    this.runtimeBaseDir = Storage.getRuntimeBaseDir();
+    this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -1499,7 +1504,7 @@ export class Session implements SessionContext {
    */
   startCronScheduler(): void {
     // Best-effort: a cron startup failure must not break session creation.
-    this.#startCronSchedulerIfNeeded().catch((error) => {
+    this.#startCronSchedulerInRuntime().catch((error) => {
       debugLogger.warn(
         `Cron scheduler startup failed [session ${this.sessionId}]: ${error}`,
       );
@@ -1510,15 +1515,110 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  async assertCanStartTurn(): Promise<void> {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    try {
+      await this.config.assertCanStartTurn();
+    } catch (error) {
+      if (error instanceof SessionWriterError) {
+        throw new RequestError(error.rpcCode, error.message, {
+          errorKind: error.errorKind,
+        });
+      }
+      throw error;
+    }
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+  }
+
   isIdle(): boolean {
-    return (
-      !this.pendingPrompt &&
-      !this.pendingPromptCompletion &&
-      !this.cronProcessing &&
-      !this.cronAbortController &&
-      !this.notificationProcessing &&
-      !this.notificationAbortController
+    return !this.closing && !this.#hasActiveTurn();
+  }
+
+  #hasActiveTurn(): boolean {
+    return Boolean(
+      this.pendingPrompt ||
+        this.pendingPromptCompletion ||
+        this.cronProcessing ||
+        this.cronAbortController ||
+        this.cronCompletion ||
+        this.notificationProcessing ||
+        this.notificationAbortController ||
+        this.notificationCompletion,
     );
+  }
+
+  beginClose(): () => void {
+    if (this.closing) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session close is already in progress',
+      );
+    }
+    this.closing = true;
+    let resolveGate!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    this.closeGateCompletion = completion;
+    this.resolveCloseGate = resolveGate;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (this.closeGateCompletion === completion) {
+        this.closeGateCompletion = null;
+        this.resolveCloseGate = null;
+      }
+      resolveGate();
+      if (this.disposed) return;
+      this.closing = false;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
+  }
+
+  beginCloseIfAvailable(): (() => void) | null {
+    if (this.disposed) {
+      throw RequestError.invalidParams(undefined, 'Session has been disposed');
+    }
+    return this.closing ? null : this.beginClose();
+  }
+
+  waitForCloseGateToRelease(): Promise<void> {
+    return this.closeGateCompletion ?? Promise.resolve();
+  }
+
+  async waitForActiveTurnsToSettle(): Promise<void> {
+    const pending = [
+      this.pendingPromptCompletion,
+      this.cronCompletion,
+      this.notificationCompletion,
+    ].filter((completion): completion is Promise<void> => completion !== null);
+    await Promise.allSettled(pending);
+  }
+
+  #deferAutomaticQueueDrainUntilTurnsSettle(): boolean {
+    const completions = [
+      this.pendingPromptCompletion,
+      this.cronCompletion,
+      this.notificationCompletion,
+    ].filter((completion): completion is Promise<void> => completion !== null);
+    if (completions.length === 0) return false;
+    if (this.automaticDrainRetry) return true;
+
+    const retry = Promise.allSettled(completions).then(() => {
+      if (this.automaticDrainRetry !== retry) return;
+      this.automaticDrainRetry = null;
+      if (this.disposed) return;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    });
+    this.automaticDrainRetry = retry;
+    return true;
   }
 
   getTurnCount(): number {
@@ -1531,6 +1631,10 @@ export class Session implements SessionContext {
 
   dispose(): void {
     this.disposed = true;
+    this.closing = true;
+    this.resolveCloseGate?.();
+    this.resolveCloseGate = null;
+    this.closeGateCompletion = null;
     this.todoStopGuardQueuedPromptPriority = false;
     this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
     this.todoStopGuard.clearTrust();
@@ -1553,7 +1657,7 @@ export class Session implements SessionContext {
     // one-shots from disk without executing them) and the held lock
     // would block another session from taking over.
     if (this.config.isCronEnabled()) {
-      this.config.getCronScheduler().stop();
+      this.#stopCronSchedulerInRuntime();
     }
 
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
@@ -1657,13 +1761,7 @@ export class Session implements SessionContext {
       );
     }
 
-    if (
-      this.pendingPrompt ||
-      this.cronProcessing ||
-      this.cronAbortController ||
-      this.notificationProcessing ||
-      this.notificationAbortController
-    ) {
+    if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',
@@ -1740,13 +1838,7 @@ export class Session implements SessionContext {
   }
 
   restoreHistory(history: Content[]): void {
-    if (
-      this.pendingPrompt ||
-      this.cronProcessing ||
-      this.cronAbortController ||
-      this.notificationProcessing ||
-      this.notificationAbortController
-    ) {
+    if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot restore history while a prompt is running',
@@ -1858,7 +1950,7 @@ export class Session implements SessionContext {
       : null;
     if (scheduler) {
       const summary = scheduler.getExitSummary();
-      scheduler.stop();
+      this.#stopCronSchedulerInRuntime();
       if (summary) {
         await this.messageEmitter.emitAgentMessage(summary);
       }
@@ -1866,10 +1958,15 @@ export class Session implements SessionContext {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    await this.assertCanStartTurn();
     const todoStopGuardPreparation =
       this.#prepareTodoStopGuardForPrompt(params);
-    // Install this prompt's AbortController before awaiting the previous
-    // prompt, so that a session/cancel during the wait targets us.
+    // After writer admission, install this prompt's AbortController before
+    // awaiting the previous prompt so a session/cancel during that wait
+    // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
@@ -1952,6 +2049,13 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
       return result;
+    } catch (error) {
+      if (error instanceof SessionWriterError) {
+        throw new RequestError(error.rpcCode, error.message, {
+          errorKind: error.errorKind,
+        });
+      }
+      throw error;
     } finally {
       this.pendingPrompt = null;
       const shouldDrainAutomaticQueues =
@@ -1970,7 +2074,7 @@ export class Session implements SessionContext {
       // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
       // cron job) is actually pending — otherwise the loop dies silently on
       // any post-arm error.
-      void this.#startCronSchedulerIfNeeded();
+      void this.#startCronSchedulerInRuntime();
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
@@ -2155,6 +2259,10 @@ export class Session implements SessionContext {
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
+        await this.assertCanStartTurn();
+        if (pendingSend.signal.aborted) {
+          return { stopReason: 'cancelled' };
+        }
         // Increment turn counter for each user prompt
         this.turn += 1;
 
@@ -4110,6 +4218,22 @@ export class Session implements SessionContext {
     });
   }
 
+  #startCronSchedulerInRuntime(): Promise<void> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      () => this.#startCronSchedulerIfNeeded(),
+    );
+  }
+
+  #stopCronSchedulerInRuntime(): void {
+    Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      () => this.config.getCronScheduler().stop(),
+    );
+  }
+
   #enqueueCronPrompt(item: CronQueueItem): void {
     if (
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -4151,12 +4275,33 @@ export class Session implements SessionContext {
    */
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
+    if (this.closing) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
     if (this.notificationProcessing) return;
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
+    try {
+      await this.assertCanStartTurn();
+    } catch (error) {
+      debugLogger.warn(
+        `Cron turn rejected [session ${this.sessionId}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (
+      this.disposed ||
+      this.closing ||
+      this.cronProcessing ||
+      this.pendingPrompt ||
+      this.notificationProcessing ||
+      this.#nextCronQueueIndex() < 0
+    ) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     this.cronProcessing = true;
 
     let resolveCompletion!: () => void;
@@ -4186,7 +4331,7 @@ export class Session implements SessionContext {
       if (this.config.isCronEnabled()) {
         const scheduler = this.config.getCronScheduler();
         if (!scheduler.hasPendingWork) {
-          scheduler.stop();
+          this.#stopCronSchedulerInRuntime();
         }
       }
     }
@@ -4263,6 +4408,8 @@ export class Session implements SessionContext {
           async () => {
             let turnCount = 0;
             try {
+              await this.assertCanStartTurn();
+              if (ac.signal.aborted) return;
               // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
               // fire time into the loop.md task block — full on the first or a
               // changed fire, a short reminder when unchanged. Non-sentinel
@@ -4736,12 +4883,35 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
+    if (this.closing) return;
     if (this.notificationProcessing) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.notificationQueue.length === 0) return;
     if (this.#nextNotificationQueueIndex() < 0) return;
+
+    try {
+      await this.assertCanStartTurn();
+    } catch (error) {
+      debugLogger.warn(
+        `Notification turn rejected [session ${this.sessionId}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (
+      this.disposed ||
+      this.closing ||
+      this.notificationProcessing ||
+      this.pendingPrompt ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.#nextNotificationQueueIndex() < 0
+    ) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
 
     this.notificationProcessing = true;
     let resolveCompletion!: () => void;
@@ -4812,6 +4982,8 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
         try {
+          await this.assertCanStartTurn();
+          if (ac.signal.aborted) return;
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];

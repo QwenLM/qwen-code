@@ -98,11 +98,15 @@ describe('Session.pendingWorktreeNotice', () => {
     };
 
     mockConfig = {
+      storage: {
+        getRuntimeBaseDir: vi.fn(() => Storage.getRuntimeBaseDir()),
+      },
       setApprovalMode: vi.fn(),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
       switchModel: vi.fn(),
       getModel: vi.fn().mockReturnValue('qwen3'),
       getSessionId: vi.fn().mockReturnValue(SESSION_ID),
+      assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getWorkingDir: vi.fn().mockReturnValue('/tmp'),
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),

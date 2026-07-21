@@ -197,6 +197,13 @@ import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterError,
+  SessionWriterLease,
+  SessionWriterLostError,
+  SessionWriterUnavailableError,
+} from '../services/session-writer-lease.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
@@ -1569,6 +1576,9 @@ export type SubSessionSpawner = (
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  private readonly sessionRuntimeBaseDir: string;
+  private sessionProjectDirRegistered = false;
+  private pendingSessionWriterLease?: SessionWriterLease;
   /**
    * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
    * CLI was launched with `--worktree`. The active entry point (TUI XOR
@@ -1871,6 +1881,7 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.sessionId = params.sessionId ?? randomUUID();
     // Only set the global env marker once per process lifetime, so
     // throwaway Config instances (e.g. telemetry-only) don't clobber
@@ -2127,7 +2138,7 @@ export class Config {
     this.jsonSchema = params.jsonSchema;
     this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
-    this.storage = new Storage(this.targetDir);
+    this.storage = new Storage(this.targetDir, this.sessionRuntimeBaseDir);
     // Publish the project dir a subprocess needs to find this session's harness
     // records. It is derived from the session's *launch* cwd, so a subprocess
     // that has `cd`-ed elsewhere — which the /review skill explicitly does, into
@@ -2139,7 +2150,6 @@ export class Config {
     // booted first, and every later session would hand its subprocesses another
     // session's directory. The env var is still set for the single-session CLI,
     // where it is the only consumer and there is nothing to collide with.
-    registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
     if (!projectDirEnvClaimed && process.env) {
       process.env['QWEN_CODE_PROJECT_DIR'] = this.storage.getProjectDir();
       projectDirEnvClaimed = true;
@@ -2278,6 +2288,33 @@ export class Config {
       throw Error('Config was already initialized');
     }
     this.initialized = true;
+    try {
+      await this.activateChatRecording();
+      registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
+      this.sessionProjectDirRegistered = true;
+      await this.initializeInternal(options);
+    } catch (error) {
+      if (this.sessionProjectDirRegistered) {
+        unregisterSessionProjectDir(this.sessionId);
+        this.sessionProjectDirRegistered = false;
+      }
+      try {
+        await this.chatRecordingService?.close();
+      } catch (closeError) {
+        throw new SessionWriterUnavailableError({
+          cause: new AggregateError(
+            [error, closeError],
+            'Chat recording close failed during failed initialization',
+          ),
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async initializeInternal(
+    options?: ConfigInitializeOptions,
+  ): Promise<void> {
     this.debugLogger.info('Config initialization started');
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
@@ -2739,6 +2776,78 @@ export class Config {
           );
         }
       })();
+    }
+  }
+
+  private async activateChatRecording(): Promise<void> {
+    if (!this.chatRecordingEnabled || !this.experimentalZedIntegration) return;
+    const recorder = this.chatRecordingService;
+    if (!recorder) throw new SessionWriterUnavailableError();
+    let lease: SessionWriterLease | undefined;
+    try {
+      lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionId: this.sessionId,
+        transcriptPath: this.getTranscriptPath(),
+        processKind: 'acp',
+        qwenVersion: this.cliVersion ?? null,
+        onOwnershipAcquired: (acquiredLease) => {
+          lease = acquiredLease;
+          this.pendingSessionWriterLease = acquiredLease;
+        },
+      });
+      const location = await this.getSessionService().getSessionLocation(
+        this.sessionId,
+      );
+      if (location === 'conflict' || location === 'archived') {
+        throw new SessionTranscriptChangedError();
+      }
+      let authoritative: ResumedSessionData | undefined;
+      if (this.sessionData || lease.transcriptExistedAtAcquire) {
+        authoritative = await this.getSessionService().loadSession(
+          this.sessionId,
+        );
+        if (!authoritative) throw new SessionWriterUnavailableError();
+      } else if (location !== undefined) {
+        throw new SessionTranscriptChangedError();
+      }
+      const persistedTitleInfo = authoritative
+        ? this.getSessionService().getSessionTitleInfo(this.sessionId)
+        : undefined;
+      await lease.assertOwnedAndUnchanged();
+      this.sessionData = authoritative;
+      recorder.activate(lease, authoritative, persistedTitleInfo);
+      this.pendingSessionWriterLease = undefined;
+      lease = undefined;
+    } catch (error) {
+      let failure: unknown = error;
+      if (
+        !(failure instanceof SessionWriterError) &&
+        failure &&
+        typeof failure === 'object' &&
+        typeof (failure as NodeJS.ErrnoException).code === 'string'
+      ) {
+        failure = new SessionWriterUnavailableError({ cause: failure });
+      }
+      try {
+        const ownedLease = lease ?? this.pendingSessionWriterLease;
+        await ownedLease?.release();
+        if (this.pendingSessionWriterLease === ownedLease) {
+          this.pendingSessionWriterLease = undefined;
+        }
+      } catch (releaseError) {
+        if (releaseError instanceof SessionWriterLostError) {
+          this.pendingSessionWriterLease = undefined;
+        } else {
+          failure = new SessionWriterUnavailableError({
+            cause: new AggregateError(
+              [failure, releaseError],
+              'Session writer lease release failed during activation cleanup',
+            ),
+          });
+        }
+      }
+      throw failure;
     }
   }
 
@@ -3260,6 +3369,9 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    if (this.chatRecordingService?.hasWriteOwnership()) {
+      throw new SessionWriterUnavailableError();
+    }
     // Finalize the outgoing session before switching.
     const outgoingChatRecordingService = this.chatRecordingService;
     try {
@@ -4075,6 +4187,12 @@ export class Config {
     expectedCanonicalDir?: string,
     opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
   ): Promise<{ memoryRefreshError?: unknown }> {
+    if (
+      !opts?.skipArtifactMigration &&
+      this.chatRecordingService?.hasWriteOwnership()
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
     const oldDir = opts?.skipProcessChdir
       ? this.cwd
       : fs.realpathSync(process.cwd());
@@ -4111,7 +4229,7 @@ export class Config {
 
     const oldStorage = this.storage;
     if (!opts?.skipArtifactMigration) {
-      const newStorage = new Storage(expected);
+      const newStorage = new Storage(expected, this.sessionRuntimeBaseDir);
       await this.prepareSessionArtifactMigration(
         oldStorage,
         newStorage,
@@ -4183,13 +4301,16 @@ export class Config {
    * This method is idempotent and safe to call multiple times.
    * It handles the case where initialization was not completed.
    */
-  async shutdown(): Promise<void> {
+  async shutdown(options?: { shutdownTelemetry?: boolean }): Promise<void> {
     try {
-      // Drop this session's project-dir registry entry. It is registered in the
-      // constructor, so it is released here regardless of initialization state —
+      // Drop this session's project-dir registry entry. It is registered during
+      // initialization, so it is released here whenever that step completed —
       // in daemon mode, where one process serves many sessions, an unreleased
       // entry per session is a leak that grows for the life of the process.
-      unregisterSessionProjectDir(this.sessionId);
+      if (this.sessionProjectDirRegistered) {
+        unregisterSessionProjectDir(this.sessionId);
+        this.sessionProjectDirRegistered = false;
+      }
 
       // Stop the settings watcher regardless of initialization state —
       // it is started before Config.initialize() and would leak otherwise.
@@ -4225,8 +4346,31 @@ export class Config {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
     } finally {
+      await this.chatRecordingService?.close().catch((error) => {
+        this.debugLogger.error(
+          'Failed to release session writer lease:',
+          error,
+        );
+      });
+      const pendingLease = this.pendingSessionWriterLease;
+      if (pendingLease) {
+        try {
+          await pendingLease.release();
+          if (this.pendingSessionWriterLease === pendingLease) {
+            this.pendingSessionWriterLease = undefined;
+          }
+        } catch (error) {
+          if (error instanceof SessionWriterLostError) {
+            this.pendingSessionWriterLease = undefined;
+          }
+          this.debugLogger.error(
+            'Failed to release pending session writer lease:',
+            error,
+          );
+        }
+      }
       this.chatRecordingFailureListeners.clear();
-      if (isTelemetrySdkInitialized()) {
+      if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
     }
@@ -6203,9 +6347,13 @@ export class Config {
   }
 
   private createChatRecordingService(): ChatRecordingService {
-    return new ChatRecordingService(this, (event) => {
-      this.notifyChatRecordingFailure(event);
-    });
+    return new ChatRecordingService(
+      this,
+      (event) => {
+        this.notifyChatRecordingFailure(event);
+      },
+      this.experimentalZedIntegration,
+    );
   }
 
   private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {
@@ -6241,12 +6389,31 @@ export class Config {
     return path.join(projectDir, 'chats', safeFilename);
   }
 
+  async assertCanStartTurn(): Promise<void> {
+    if (this.chatRecordingService?.hasWriteOwnership()) {
+      await this.chatRecordingService.assertCanStartTurn();
+    }
+  }
+
+  hasSessionWriteOwnership(): boolean {
+    return (
+      this.pendingSessionWriterLease !== undefined ||
+      this.chatRecordingService?.hasWriteOwnership() === true
+    );
+  }
+
+  getSessionRuntimeBaseDir(): string {
+    return this.sessionRuntimeBaseDir;
+  }
+
   /**
    * Gets or creates a SessionService for managing chat sessions.
    */
   getSessionService(): SessionService {
     if (!this.sessionService) {
-      this.sessionService = new SessionService(this.targetDir);
+      this.sessionService = new SessionService(this.storage.getProjectRoot(), {
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+      });
     }
     return this.sessionService;
   }
