@@ -1168,6 +1168,39 @@ describe('KeypressContext - Kitty Protocol', () => {
           }),
         );
       });
+
+      it('reassembles paste content whose end marker straddles a chunk boundary', async () => {
+        const keyHandler = vi.fn();
+
+        const { result } = renderHook(() => useKeypressContext(), {
+          wrapper: ({ children }) =>
+            wrapper({ children, pasteWorkaround: true }),
+        });
+
+        act(() => {
+          result.current.subscribe(keyHandler);
+        });
+
+        // Large pastes arrive in many stdin chunks, and the paste-end marker
+        // (\x1b[201~) can straddle a chunk boundary. The partial-marker tail
+        // must be held back and prepended to the next chunk so content is never
+        // truncated at the boundary — the exact case this optimization targets.
+        act(() => {
+          stdin.emit('data', Buffer.from('\x1b[200~hello world\x1b[20'));
+          stdin.emit('data', Buffer.from('1~'));
+        });
+
+        await waitFor(() => {
+          expect(keyHandler).toHaveBeenCalledTimes(1);
+        });
+
+        expect(keyHandler).toHaveBeenCalledWith(
+          expect.objectContaining({
+            paste: true,
+            sequence: 'hello world',
+          }),
+        );
+      });
     });
 
     it('buffers fragmented paste chunks before emitting newlines', () => {
