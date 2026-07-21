@@ -40,6 +40,7 @@ import type {
   ToolArtifact,
   VisionBridgeResult,
   MemoryWriteCandidate,
+  CronTaskDelivery,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -153,7 +154,10 @@ import {
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
 // so a rename can't desync caller and answerer into a silent -32601 latch.
-import { MID_TURN_QUEUE_DRAIN_METHOD } from '@qwen-code/acp-bridge/bridgeTypes';
+import {
+  DAEMON_CHANNEL_DELIVERY_META_KEY,
+  MID_TURN_QUEUE_DRAIN_METHOD,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import { SERVE_CONTROL_EXT_METHODS } from '@qwen-code/acp-bridge/status';
 import { getCommandSubcommandNames } from '../../services/commandMetadata.js';
 import { getEffectiveSupportedModes } from '../../services/commandUtils.js';
@@ -263,6 +267,9 @@ const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
+const MAX_CHANNEL_DELIVERY_TEXT_CHARS = 100_000;
+const CHANNEL_DELIVERY_TRUNCATED_SUFFIX =
+  '\n\n[Channel delivery truncated because the result exceeded the delivery size limit.]';
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -755,12 +762,70 @@ interface CronFire {
    * calling `onFire` and writes the run record under the same value, so it
    * identifies this fire's entry in `runs[]`. */
   lastFiredAt?: number;
+  delivery?: CronTaskDelivery;
 }
 
 interface CronQueueItem {
   prompt: string;
   source: 'cron' | 'loop';
   taskId?: string;
+  firedAt?: number;
+  delivery?: CronTaskDelivery;
+}
+
+interface PromptChannelDelivery {
+  deliveryId: string;
+  target: CronTaskDelivery['target'];
+}
+
+function parsePromptChannelDelivery(
+  params: PromptRequest,
+): PromptChannelDelivery | undefined {
+  const meta = (params as { _meta?: Record<string, unknown> })._meta;
+  const value = meta?.[DAEMON_CHANNEL_DELIVERY_META_KEY];
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return undefined;
+  }
+  const delivery = value as Record<string, unknown>;
+  const target = delivery['target'];
+  if (
+    typeof delivery['deliveryId'] !== 'string' ||
+    delivery['deliveryId'].length === 0 ||
+    typeof target !== 'object' ||
+    target === null ||
+    Array.isArray(target)
+  ) {
+    return undefined;
+  }
+  const targetRecord = target as Record<string, unknown>;
+  if (
+    typeof targetRecord['channelName'] !== 'string' ||
+    targetRecord['channelName'].length === 0 ||
+    (targetRecord['type'] !== 'user' && targetRecord['type'] !== 'chat') ||
+    typeof targetRecord['id'] !== 'string' ||
+    targetRecord['id'].length === 0
+  ) {
+    return undefined;
+  }
+  return {
+    deliveryId: delivery['deliveryId'],
+    target: {
+      channelName: targetRecord['channelName'],
+      type: targetRecord['type'],
+      id: targetRecord['id'],
+    },
+  };
+}
+
+function boundChannelDeliveryText(text: string): string {
+  if (text.length <= MAX_CHANNEL_DELIVERY_TEXT_CHARS) return text;
+  let prefix = text.slice(
+    0,
+    MAX_CHANNEL_DELIVERY_TEXT_CHARS - CHANNEL_DELIVERY_TRUNCATED_SUFFIX.length,
+  );
+  const boundary = prefix.charCodeAt(prefix.length - 1);
+  if (boundary >= 0xd800 && boundary <= 0xdbff) prefix = prefix.slice(0, -1);
+  return `${prefix}${CHANNEL_DELIVERY_TRUNCATED_SUFFIX}`;
 }
 
 const MAX_NOTIFICATION_QUEUE = 20;
@@ -1101,6 +1166,7 @@ export class Session implements SessionContext {
     apiTimeMs: 0,
   };
   private readonly runtimeBaseDir: string;
+  private channelDeliveryCollector: string[] | null = null;
 
   // Cron scheduling state
   private cronQueue: CronQueueItem[] = [];
@@ -1936,6 +2002,9 @@ export class Session implements SessionContext {
     }
 
     this.duplicateProviderToolCallResponseIds.clear();
+    const channelDelivery = parsePromptChannelDelivery(params);
+    const channelDeliveryCollector = channelDelivery ? [] : null;
+    this.channelDeliveryCollector = channelDeliveryCollector;
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -1950,8 +2019,24 @@ export class Session implements SessionContext {
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
+      if (channelDelivery && result.stopReason === 'end_turn') {
+        const text = boundChannelDeliveryText(
+          channelDeliveryCollector?.join('') ?? '',
+        );
+        this.#scheduleChannelDelivery({
+          sessionId: this.sessionId,
+          deliveryId: channelDelivery.deliveryId,
+          source: 'prompt',
+          target: channelDelivery.target,
+          text,
+          promptId: channelDelivery.deliveryId,
+        });
+      }
       return result;
     } finally {
+      if (this.channelDeliveryCollector === channelDeliveryCollector) {
+        this.channelDeliveryCollector = null;
+      }
       this.pendingPrompt = null;
       const shouldDrainAutomaticQueues =
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
@@ -2510,6 +2595,7 @@ export class Session implements SessionContext {
                             part.thought,
                           );
                           if (!part.thought) {
+                            this.#collectChannelDeliveryText(part.text);
                             messageDisplay?.addChunk(part.text);
                           }
                         }
@@ -3238,7 +3324,10 @@ export class Session implements SessionContext {
                 'assistant',
                 part.thought,
               );
-              if (!part.thought) messageDisplay?.addChunk(part.text);
+              if (!part.thought) {
+                this.#collectChannelDeliveryText(part.text);
+                messageDisplay?.addChunk(part.text);
+              }
             }
           }
 
@@ -3455,6 +3544,25 @@ export class Session implements SessionContext {
     };
 
     await this.client.sessionUpdate(params);
+  }
+
+  #collectChannelDeliveryText(text: string, thought?: boolean): void {
+    if (!thought && this.channelDeliveryCollector) {
+      this.channelDeliveryCollector.push(text);
+    }
+  }
+
+  #scheduleChannelDelivery(params: Record<string, unknown>): void {
+    const timer = setTimeout(() => {
+      void this.client
+        .extMethod(SERVE_CONTROL_EXT_METHODS.channelDelivery, params)
+        .catch((error) => {
+          debugLogger.warn(
+            `Channel delivery submission failed: ${error instanceof Error ? error.message : String(error)}`,
+          );
+        });
+    }, 0);
+    timer.unref();
   }
 
   #getCurrentChat(): GeminiChat {
@@ -4104,6 +4212,8 @@ export class Session implements SessionContext {
         prompt: job.prompt,
         source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
         ...(job.id ? { taskId: job.id } : {}),
+        ...(job.lastFiredAt !== undefined ? { firedAt: job.lastFiredAt } : {}),
+        ...(job.delivery ? { delivery: job.delivery } : {}),
       });
       void this.#drainCronQueue();
     });
@@ -4252,6 +4362,9 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
+        let cronCompleted = false;
+        const channelDeliveryCollector = item.delivery ? [] : null;
+        this.channelDeliveryCollector = channelDeliveryCollector;
         await withInteractionSpan(
           this.config,
           {
@@ -4467,6 +4580,7 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
+                          this.#collectChannelDeliveryText(part.text);
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -4553,6 +4667,7 @@ export class Session implements SessionContext {
                   }
                 }
               }
+              let stopReason: PromptResponse['stopReason'] = 'end_turn';
               if (this.todoStopGuard.needsStopInspection) {
                 const guardStop = await this.#handleStopHookLoop(
                   ac,
@@ -4561,10 +4676,12 @@ export class Session implements SessionContext {
                   undefined,
                   false,
                 );
+                stopReason = guardStop.stopReason;
                 if (guardStop.stopReason === 'max_tokens') {
                   this.#stopCronAfterTokenLimit();
                 }
               }
+              cronCompleted = stopReason === 'end_turn' && !ac.signal.aborted;
             } catch (error) {
               if (ac.signal.aborted) {
                 this.todoStopGuard.suspend();
@@ -4596,7 +4713,29 @@ export class Session implements SessionContext {
           },
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
-        );
+        ).finally(() => {
+          if (this.channelDeliveryCollector === channelDeliveryCollector) {
+            this.channelDeliveryCollector = null;
+          }
+        });
+        if (
+          cronCompleted &&
+          item.delivery &&
+          item.taskId &&
+          item.firedAt !== undefined
+        ) {
+          this.#scheduleChannelDelivery({
+            sessionId: this.sessionId,
+            deliveryId: `${item.taskId}:${item.firedAt}`,
+            source: 'scheduled',
+            target: item.delivery.target,
+            text: boundChannelDeliveryText(
+              channelDeliveryCollector?.join('') ?? '',
+            ),
+            taskId: item.taskId,
+            firedAt: item.firedAt,
+          });
+        }
       },
     );
   }

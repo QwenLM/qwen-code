@@ -7145,6 +7145,159 @@ describe('Session', () => {
         );
       });
 
+      it('submits a successful prompt final once through the reverse delivery control', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'final answer' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-1',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            {
+              sessionId: 'test-session-id',
+              deliveryId: 'prompt-1',
+              source: 'prompt',
+              target: {
+                channelName: 'dingtalk',
+                type: 'user',
+                id: 'user-1',
+              },
+              text: 'final answer',
+              promptId: 'prompt-1',
+            },
+          );
+        });
+      });
+
+      it('does not submit a prompt without trusted delivery metadata', async () => {
+        mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  { content: { parts: [{ text: 'ordinary answer' }] } },
+                ],
+              },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+        await new Promise((resolve) => setTimeout(resolve, 10));
+
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
+      });
+
+      it('submits a successful scheduled final with stable fire correlation', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn(
+            (
+              callback: (job: {
+                id: string;
+                prompt: string;
+                cronExpr: string;
+                lastFiredAt: number;
+                delivery: unknown;
+              }) => void,
+            ) => {
+              callback({
+                id: 'task-1',
+                prompt: 'scheduled prompt',
+                cronExpr: '* * * * *',
+                lastFiredAt: 1_750_000_000_000,
+                delivery: {
+                  kind: 'channel',
+                  target: {
+                    channelName: 'dingtalk',
+                    type: 'chat',
+                    id: 'chat-1',
+                  },
+                },
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'scheduled answer' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start scheduler' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            {
+              sessionId: 'test-session-id',
+              deliveryId: 'task-1:1750000000000',
+              source: 'scheduled',
+              target: {
+                channelName: 'dingtalk',
+                type: 'chat',
+                id: 'chat-1',
+              },
+              text: 'scheduled answer',
+              taskId: 'task-1',
+              firedAt: 1_750_000_000_000,
+            },
+          );
+        });
+      });
+
       it('marks loop wakeup ACP prompts with loop source metadata', async () => {
         const scheduler = {
           size: 1,

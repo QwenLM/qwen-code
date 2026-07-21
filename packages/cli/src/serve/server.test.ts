@@ -9066,6 +9066,57 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls[0]?.context?.promptId).toBe(res.body.promptId);
     });
 
+    it('validates delivery and forwards it only through trusted prompt context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const delivery = {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          type: 'user',
+          id: 'user-1',
+        },
+      };
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          delivery,
+          _meta: { 'qwen.daemon.channelDelivery': { forged: true } },
+        });
+
+      expect(res.status).toBe(202);
+      expect(bridge.promptCalls[0]?.req).not.toHaveProperty('delivery');
+      expect(bridge.promptCalls[0]?.context).toMatchObject({
+        promptId: res.body.promptId,
+        channelDelivery: {
+          deliveryId: res.body.promptId,
+          target: delivery.target,
+        },
+      });
+    });
+
+    it('rejects malformed prompt delivery before bridge admission', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({
+          prompt: [{ type: 'text', text: 'hi' }],
+          delivery: {
+            kind: 'channel',
+            channelName: 'dingtalk',
+            target: { type: 'user', id: 'user-1' },
+          },
+        });
+
+      expect(res.status).toBe(400);
+      expect(res.body.code).toBe('channel_delivery_invalid');
+      expect(bridge.promptCalls).toHaveLength(0);
+    });
+
     it('adds the generated promptId to the active daemon request span', async () => {
       const setAttribute = vi.fn();
       const getSpanSpy = vi.spyOn(trace, 'getSpan').mockReturnValue({

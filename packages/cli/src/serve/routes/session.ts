@@ -34,6 +34,8 @@ import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifact
 import { parseSessionSource } from '@qwen-code/acp-bridge';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { isChannelDeliveryError } from '../channel-delivery-ipc.js';
+import { parseChannelDelivery } from '../channel-delivery.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
@@ -2311,9 +2313,21 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
 
+        let delivery: ReturnType<typeof parseChannelDelivery> | undefined;
+        if (body['delivery'] !== undefined) {
+          try {
+            delivery = parseChannelDelivery(body['delivery']);
+          } catch (err) {
+            if (!isChannelDeliveryError(err)) throw err;
+            res.status(400).json({ error: err.message, code: err.code });
+            return;
+          }
+        }
+
         const promptId = crypto.randomUUID();
         const forwardedBody = { ...body };
         delete forwardedBody['deadlineMs'];
+        delete forwardedBody['delivery'];
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
         addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
@@ -2356,6 +2370,14 @@ export function registerSessionRoutes(
             {
               ...(clientId !== undefined ? { clientId } : {}),
               promptId,
+              ...(delivery !== undefined
+                ? {
+                    channelDelivery: {
+                      deliveryId: promptId,
+                      target: delivery.target,
+                    },
+                  }
+                : {}),
             },
           );
         } catch (err) {
