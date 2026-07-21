@@ -12194,7 +12194,7 @@ describe('createAcpSessionBridge', () => {
       expect(b.attached).toBe(true);
       expect(bridge.sessionCount).toBe(1);
       // B disconnects — but A is alive. detachClient must NOT reap.
-      await bridge.detachClient(b.sessionId);
+      await bridge.detachClient(b.sessionId, b.clientId);
       // Session survives — A would have 404'd on every subsequent
       // request otherwise.
       expect(bridge.sessionCount).toBe(1);
@@ -12223,7 +12223,152 @@ describe('createAcpSessionBridge', () => {
       expect(bridge.sessionCount).toBe(1); // bailed, no reap
       // B disconnects: detachClient decrements attachCount→0 AND
       // sees the tombstone → completes the deferred reap.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('duplicate detach with same clientId decrements attachCount only once (DAEMON-006)', async () => {
+      // A spawns (owner, attachCount stays 0); B and C attach
+      // (attachCount: 2). B's detach arrives TWICE (e.g. route
+      // handler + disconnect reaper both firing). The second detach
+      // finds no attach-ref in the ledger and must NOT decrement —
+      // otherwise it steals C's ref, attachCount hits 0 with C still
+      // connected, and A's requireZeroAttaches kill reaps a session
+      // C is actively using.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      const c = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(c.attached).toBe(true);
+      expect(c.clientId).not.toBe(b.clientId);
+      await bridge.detachClient(b.sessionId, b.clientId);
+      await bridge.detachClient(b.sessionId, b.clientId);
+      // attachCount must still be 1 (C's ref intact): the owner's
+      // zero-attaches kill bails and C's session survives.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('detach with unknown clientId does not decrement attachCount (DAEMON-006)', async () => {
+      // A stray DELETE with a bogus X-Qwen-Client-Id must not steal
+      // B's attach ref: the owner's requireZeroAttaches kill must
+      // still bail on attachCount === 1.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      await bridge.detachClient(b.sessionId, 'client_does-not-exist');
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('anonymous detach (no clientId) does not decrement attachCount (DAEMON-006)', async () => {
+      // A DELETE without X-Qwen-Client-Id returns 204 but releases
+      // nothing — attach/spawn responses always hand out a clientId,
+      // and clients that lost theirs are reaped by the idle backstop.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
       await bridge.detachClient(b.sessionId);
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      await bridge.shutdown();
+    });
+
+    it('spawn owner detaching itself does not steal an attacher ref (DAEMON-006)', async () => {
+      // Owner registrations never contribute to attachCount, so the
+      // owner's own DELETE detach must leave B's ref intact — while
+      // still dropping the owner's registration so close-on-last-
+      // detach stays reachable.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      // Owner says goodbye with its own clientId.
+      await bridge.detachClient(a.sessionId, a.clientId);
+      expect(bridge.sessionCount).toBe(1);
+      // attachCount must still be 1 (B's ref survived the owner
+      // detach): the zero-attaches kill bails.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      // Owner's registration WAS removed: once B leaves too, the
+      // deferred-reap tombstone completes and the session closes.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('deferred reap fires exactly on the real last attacher detach (DAEMON-006 regression)', async () => {
+      // With the tombstone set, noise detaches (unknown/anonymous)
+      // must NOT complete the reap early; the genuine last attacher's
+      // clientId-bearing detach must.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1); // bailed, tombstone set
+      // Noise: neither of these releases B's ledger ref.
+      await bridge.detachClient(b.sessionId, 'client_unknown');
+      await bridge.detachClient(b.sessionId);
+      expect(bridge.sessionCount).toBe(1);
+      // The real last attacher leaves → deferred reap completes.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('repeated attach under one clientId detaches ref-by-ref (DAEMON-006)', async () => {
+      // Echoing the same clientId on a second attach refcounts the
+      // ledger entry; each detach releases exactly one ref, and the
+      // deferred reap fires only when the LAST ref is gone.
+      const factory: ChannelFactory = async () => makeChannel().channel;
+      const bridge = makeBridge({
+        channelFactory: factory,
+        sessionScope: 'single',
+      });
+      const a = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const b = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      expect(b.attached).toBe(true);
+      const c = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        clientId: b.clientId,
+      });
+      expect(c.attached).toBe(true);
+      expect(c.clientId).toBe(b.clientId); // echoed id was honored
+      // attachCount is now 2; tombstone the owner's kill.
+      await bridge.killSession(a.sessionId, { requireZeroAttaches: true });
+      expect(bridge.sessionCount).toBe(1);
+      // First detach releases one ref → attachCount 2→1, no reap.
+      await bridge.detachClient(b.sessionId, b.clientId);
+      expect(bridge.sessionCount).toBe(1);
+      // Second detach releases the last ref → attachCount 0 → reap.
+      await bridge.detachClient(b.sessionId, b.clientId);
       expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
