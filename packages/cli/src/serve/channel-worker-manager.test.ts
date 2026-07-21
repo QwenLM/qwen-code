@@ -60,6 +60,7 @@ function fakeGroup(
     workspaceActivity: vi.fn(() => 0),
     removeWorkspace: vi.fn(async () => {}),
     restoreWorkspace: vi.fn(async () => {}),
+    deliverChannelMessage: vi.fn(async () => ({ delivered: true as const })),
     enqueueWebhookTask: vi.fn(async () => ({ accepted: true as const })),
     ...overrides,
   };
@@ -743,6 +744,26 @@ describe('createChannelWorkerManager', () => {
       }),
     ).rejects.toMatchObject({ code: 'channel_worker_unavailable' });
     expect(group.enqueueWebhookTask).not.toHaveBeenCalled();
+  });
+
+  it('routes delivery through the committed group and exact workspace', async () => {
+    const group = fakeGroup();
+    const test = setup(group);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram'],
+    });
+    const delivery = {
+      deliveryId: 'task-1:1000',
+      channelName: 'telegram',
+      target: { type: 'chat' as const, id: 'group-42' },
+      text: 'daily result',
+    };
+
+    await expect(
+      test.manager.deliverChannelMessage(PRIMARY, delivery),
+    ).resolves.toEqual({ delivered: true });
+    expect(group.deliverChannelMessage).toHaveBeenCalledWith(delivery, PRIMARY);
   });
 
   it('serializes mutations and rejects queued work once shutdown latches', async () => {
