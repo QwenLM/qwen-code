@@ -2252,6 +2252,7 @@ const ZH: Messages = {
   'toolName.task_update': '更新任务',
   'toolName.task_list': '任务列表',
   'toolName.task_stop': '停止任务',
+  'toolName.list_agents': '智能体列表',
   'toolName.team_create': '创建团队',
   'toolName.team_delete': '删除团队',
   'toolName.send_message': '发送消息',
