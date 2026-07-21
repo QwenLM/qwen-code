@@ -16124,7 +16124,7 @@ describe('createHttpAcpBridge — side-channel state layer (#4511)', () => {
 });
 
 describe('channelIdleTimeoutMs', () => {
-  it('keeps the channel by default after workspace runtime control drains', async () => {
+  it('reaps the channel by default after workspace runtime control drains', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method) =>
         method === SERVE_STATUS_EXT_METHODS.workspaceExtensions
@@ -16145,22 +16145,27 @@ describe('channelIdleTimeoutMs', () => {
     });
 
     expect(epoch).toBe(1);
-    expect(
-      bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs,
-    ).toBeNull();
-    expect(handle.killed).toBe(false);
+    expect(bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs).toBe(
+      0,
+    );
+    expect(handle.killed).toBe(true);
     await bridge.shutdown();
   });
 
-  it('rejects an explicit zero timeout', () => {
-    expect(() =>
-      makeBridge({
-        channelFactory: async () => makeChannel().channel,
-        channelIdleTimeoutMs: 0,
-      }),
-    ).toThrow(
-      'Must be a positive integer when provided; omit it to disable automatic reaping.',
+  it('accepts an explicit zero timeout as immediate reaping', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({
+      channelFactory: async () => handle.channel,
+      channelIdleTimeoutMs: 0,
+    });
+
+    await bridge.withWorkspaceRuntimeControl!(async () => undefined);
+
+    expect(bridge.getDaemonStatusSnapshot().limits.channelIdleTimeoutMs).toBe(
+      0,
     );
+    expect(handle.killed).toBe(true);
+    await bridge.shutdown();
   });
 
   it('reuses the channel during a configured idle window', async () => {

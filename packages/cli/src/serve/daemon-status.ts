@@ -164,7 +164,7 @@ interface DaemonStatusLimits {
   compactedReplayMaxBytes: number;
   promptDeadlineMs: number | null;
   writerIdleTimeoutMs: number | null;
-  channelIdleTimeoutMs: number | null;
+  channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
   acpConnectionCap: number | null;
 }

@@ -1321,16 +1321,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   if (
     configuredChannelIdleTimeoutMs !== undefined &&
     (!Number.isInteger(configuredChannelIdleTimeoutMs) ||
-      configuredChannelIdleTimeoutMs <= 0)
+      configuredChannelIdleTimeoutMs < 0)
   ) {
     throw new TypeError(
       `Invalid channelIdleTimeoutMs: ${configuredChannelIdleTimeoutMs}. ` +
-        'Must be a positive integer when provided; omit it to disable automatic reaping.',
+        'Must be a non-negative integer (milliseconds, 0 = immediate kill).',
     );
   }
   const channelIdleTimeoutMs =
     configuredChannelIdleTimeoutMs === undefined
-      ? null
+      ? 0
       : Math.min(configuredChannelIdleTimeoutMs, 2_147_483_647);
   const channelFactory = opts.channelFactory ?? defaultSpawnChannelFactory;
   // Close over a per-handle env-override snapshot. Calls to
@@ -1506,8 +1506,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return;
     }
     const timeoutMs = channelIdleTimeoutMs;
-    if (timeoutMs === null) {
+    if (timeoutMs === 0) {
       cancelIdleTimer();
+      void killChannelWithLog(ci, context);
       return;
     }
     cancelIdleTimer();

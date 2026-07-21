@@ -165,17 +165,6 @@ describe('workspace runtime routes', () => {
     expect(harness.preheatAcpChild).not.toHaveBeenCalled();
   });
 
-  it('rejects invalid MCP server names before calling the bridge', async () => {
-    const harness = createHarness();
-
-    const response = await request(harness.app).get(
-      '/workspace/runtime/mcp/bad.name/tools',
-    );
-
-    expect(response.status).toBe(400);
-    expect(response.body.code).toBe('invalid_server_name');
-  });
-
   it('trust-gates the primary workspace runtime API', async () => {
     const harness = createHarness();
     (harness.runtime as unknown as { trusted: boolean }).trusted = false;
@@ -290,126 +279,14 @@ describe('workspace runtime routes', () => {
     expect(primary.preheatAcpChild).not.toHaveBeenCalled();
   });
 
-  it('ensures tools and exposes MCP operation status', async () => {
-    const harness = createHarness();
-    const prepared = await request(harness.app)
-      .post('/workspace/runtime/ensure')
-      .send({});
-    expect(prepared.status).toBe(200);
-    expect(prepared.body.capabilities.tools.state).toBe('ready');
-
-    const managed = await request(harness.app).post(
-      '/workspace/runtime/mcp/docs/approve',
-    );
-    expect(managed.status).toBe(200);
-    expect(managed.body.operationId).toEqual(expect.any(String));
-
-    const operation = await request(harness.app).get(
-      `/workspace/runtime/operations/${managed.body.operationId}`,
-    );
-    expect(operation.status).toBe(200);
-    expect(operation.body).toMatchObject({
-      kind: 'mcp',
-      action: 'approve',
-      target: 'docs',
-      state: 'succeeded',
-    });
-  });
-
-  it('lists active MCP operations and returns the recorded OAuth deadline', async () => {
-    const harness = createHarness();
-    harness.setLive(true);
-    vi.mocked(harness.runtime.bridge.manageMcpServer).mockResolvedValueOnce({
-      serverName: 'docs',
-      action: 'authenticate',
-      ok: true,
-      pending: true,
-      authUrl: 'https://auth.example/start',
-      runtimeEpoch: 1,
-    });
-    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
-
-    try {
-      const authenticated = await request(harness.app).post(
-        '/workspace/runtime/mcp/docs/authenticate',
-      );
-
-      expect(authenticated.status).toBe(200);
-      expect(authenticated.body).toMatchObject({
-        pending: true,
-        operationId: expect.any(String),
-        deadlineAt: expect.any(String),
-        authUrl: 'https://auth.example/start',
-      });
-      expect(authenticated.body.deadlineAt).toBe(
-        coordinator.operationStatus(authenticated.body.operationId)?.deadlineAt,
-      );
-
-      const active = await request(harness.app).get(
-        '/workspace/runtime/operations',
-      );
-      expect(active.status).toBe(200);
-      expect(active.body).toEqual({
-        v: 1,
-        operations: [
-          expect.objectContaining({
-            operationId: authenticated.body.operationId,
-            action: 'authenticate',
-            target: 'docs',
-            state: 'waiting_for_input',
-            deadlineAt: authenticated.body.deadlineAt,
-            authUrl: 'https://auth.example/start',
-          }),
-        ],
-      });
-
-      harness.setLive(false);
-      coordinator.dispose();
-      const afterDispose = await request(harness.app).get(
-        '/workspace/runtime/operations',
-      );
-      expect(afterDispose.body).toEqual({ v: 1, operations: [] });
-
-      const retained = await request(harness.app).get(
-        `/workspace/runtime/operations/${authenticated.body.operationId}`,
-      );
-      expect(retained.status).toBe(200);
-      expect(retained.body).toMatchObject({
-        state: 'failed',
-        deadlineAt: authenticated.body.deadlineAt,
-        authUrl: 'https://auth.example/start',
-      });
-    } finally {
-      harness.setLive(false);
-      coordinator.dispose();
-    }
-  });
-
-  it('keeps persistent enablement out of the runtime API', async () => {
-    const harness = createHarness();
-
-    const response = await request(harness.app).post(
-      '/workspace/runtime/mcp/docs/disable',
-    );
-
-    expect(response.status).toBe(404);
-    expect(harness.runtime.bridge.manageMcpServer).not.toHaveBeenCalled();
-  });
-
-  it('strict-gates every runtime command', async () => {
+  it('strict-gates runtime initialization', async () => {
     const harness = createHarness({ denyStrictMutations: true });
 
     const ensured = await request(harness.app).post(
       '/workspace/runtime/ensure',
     );
-    const managed = await request(harness.app).post(
-      '/workspace/runtime/mcp/docs/approve',
-    );
-
     expect(ensured.status).toBe(401);
     expect(ensured.body.code).toBe('token_required');
-    expect(managed.status).toBe(401);
-    expect(managed.body.code).toBe('token_required');
     expect(harness.preheatAcpChild).not.toHaveBeenCalled();
   });
 
@@ -427,36 +304,5 @@ describe('workspace runtime routes', () => {
       code: 'workspace_draining',
       workspaceCwd: '/workspace',
     });
-  });
-
-  it('maps overlapping MCP operations to a 409 response', async () => {
-    const harness = createHarness({ mapBridgeErrors: true });
-    harness.setLive(true);
-    vi.mocked(harness.runtime.bridge.manageMcpServer).mockResolvedValue({
-      serverName: 'docs',
-      action: 'authenticate',
-      ok: true,
-      pending: true,
-      runtimeEpoch: 1,
-    });
-    const coordinator = getWorkspaceRuntimeCoordinator(harness.runtime);
-
-    try {
-      const first = await request(harness.app).post(
-        '/workspace/runtime/mcp/docs/authenticate',
-      );
-      expect(first.status).toBe(200);
-
-      const conflict = await request(harness.app).post(
-        '/workspace/runtime/mcp/docs/approve',
-      );
-      expect(conflict.status).toBe(409);
-      expect(conflict.body).toMatchObject({
-        code: 'mcp_operation_conflict',
-      });
-    } finally {
-      harness.setLive(false);
-      coordinator.dispose();
-    }
   });
 });

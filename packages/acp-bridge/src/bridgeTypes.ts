@@ -606,7 +606,7 @@ export interface BridgeDaemonStatusLimits {
   maxPendingPromptsPerSession: number | null;
   eventRingSize: number;
   compactedReplayMaxBytes: number;
-  channelIdleTimeoutMs: number | null;
+  channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
 }
 

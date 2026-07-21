@@ -249,7 +249,7 @@ cold -> starting -> active -> idle
           └-> cold + lastError  启动失败
 
 active/idle -> stopping -> cold  workspace removal / daemon shutdown / explicit restart
-idle -> stopping -> cold         opt-in positive compatibility timeout
+idle -> stopping -> cold         immediate or configured idle timeout
 active/idle -> cold              child crash
 ```
 
@@ -300,21 +300,21 @@ Bridge 的配置持久化和 Extension 后台提交，但不参与顶层 `active
 - Bridge 的 status/Catalog 请求必须在整个 RPC 期间持 workspace-control lease，
   避免被 idle 回收中断。
 
-### 8.3 Sticky idle
+### 8.3 可配置的 idle 生命周期
 
-最后一个物理 work lease 释放后进入 `idle`。WorkspaceRuntime 默认保持 live，直到
-workspace removal、daemon shutdown、child crash 或显式 restart；Session 数量归零和
-管理请求结束都不会自动停止它：
+最后一个物理 work lease 释放后，Bridge 按 `channelIdleTimeoutMs` 决定是否保留 ACP
+child。进程所有权仍属于 WorkspaceRuntime，回收条件由整个 workspace 的物理 work
+lease 决定，而不是只看 Session 数量：
 
 1. 新 lease 直接复用当前 runtime 和 epoch；
 2. 合法的 runtime 请求更新 `lastActivityAt`；
-3. 未配置 `channelIdleTimeoutMs`（默认）时禁用自动回收；
-4. 显式正值启用兼容 idle timer；到期时 Bridge 再次确认 session、spawn/restore、
+3. 未配置或显式设为 `0` 时保持既有默认行为：所有物理 work lease 排空后立即回收；
+4. 显式正值启用 idle timer；到期时 Bridge 再次确认 session、spawn/restore、
    workspace-control、MCP discovery 和 auth work 均为空后停止 runtime；
 5. daemon shutdown 和 workspace removal 可以统一结束对应子进程。
 
-`0` 不代表另一种生命周期策略，而是非法配置。默认常驻通过未配置表达，兼容自动
-回收只接受正数，避免管理命令退化为每次拉起和销毁 ACP Runtime。
+需要管理页面的多次请求复用同一 runtime/epoch 时，部署方应显式配置合理的正数超时。
+这保留了旧版默认资源行为，同时允许选择 Workspace Runtime 的常驻窗口。
 
 Session 数量不是回收条件，只是 lease 集合的一部分。
 
@@ -450,8 +450,8 @@ POST /workspaces/:workspace/runtime/ensure
 7. 请求完成、失败或达到后台收敛 deadline 后释放物理 work lease。
 
 这里第 2 步取得的是一次调用的外层连续 runtime-control lease。它覆盖第 3 至第 7 步，
-默认未配置的 idle timeout 禁用自动回收，不能导致 preheat 成功后、首个 capability
-RPC 前换 epoch。正值兼容回收策略也只能在整个命令完成且 lease 排空后执行。命令返回
+外层 lease 保证默认的立即回收不能发生在 preheat 成功后、首个 capability RPC 之前。
+无论超时为 `0` 还是正值，回收都只能在整个命令完成且 lease 排空后执行。命令返回
 的 `status` 在外层 lease 释放后重新投影，因此 child 在释放期间退出时不会返回已经
 过期的 `runtimeLive: true`，而是准确反映 `stopping` 或 `cold` 状态。
 
@@ -802,10 +802,10 @@ Catalog GET 始终保持只读，不以“页面加载”为理由启动 ACP。
   但 runtime command 和敏感 Workspace scope mutation 明确失败，global config owner
   不受 primary workspace trust 影响；
 - 最后一个 Session 关闭不影响页面正在进行的 operation；
-- 最后一个物理 lease 释放后进入 `idle`；关闭最后一个 Session 或离开管理页面后再次
-  打开会复用同一 runtime/epoch；
-- 外层 runtime-control lease 连续覆盖一次 ensure；未配置 idle timeout 时禁用自动
-  回收，正值 timer 只能在同一 epoch 完成所请求的 RPC 后执行，`0` 配置明确失败；
+- 最后一个物理 lease 释放后，默认或 `0` 立即回收 ACP child；配置正值时，在 timeout
+  窗口内再次打开管理页面会复用同一 runtime/epoch；
+- 外层 runtime-control lease 连续覆盖一次 ensure；回收只能在同一 epoch 完成所请求的
+  RPC 且 lease 排空后执行；
 - 非 `force` workspace removal 会把零 Session 的 ensure、Catalog、reconcile、OAuth
   等 runtime work 计为 busy；进入 draining 后的新管理命令明确失败；
 - Session create/load/close 不再作为任何管理 capability 的初始化或失效信号；

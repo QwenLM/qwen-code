@@ -966,10 +966,8 @@ function clampTimeoutMs(value: number): number {
   return Math.min(value, MAX_TIMEOUT_MS);
 }
 
-function advertisedChannelIdleTimeoutMs(
-  value: number | undefined,
-): number | null {
-  return value === undefined ? null : clampTimeoutMs(value);
+function advertisedChannelIdleTimeoutMs(value: number | undefined): number {
+  return value === undefined ? 0 : clampTimeoutMs(value);
 }
 
 function sessionIdleTimeoutMs(value: number | undefined): number {
@@ -2379,10 +2377,10 @@ async function runQwenServeImpl(
     if (
       !Number.isFinite(opts.channelIdleTimeoutMs) ||
       !Number.isInteger(opts.channelIdleTimeoutMs) ||
-      opts.channelIdleTimeoutMs <= 0
+      opts.channelIdleTimeoutMs < 0
     ) {
       throw new TypeError(
-        `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a positive integer (milliseconds); omit it to disable automatic reaping.`,
+        `Invalid channelIdleTimeoutMs: ${opts.channelIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = immediate kill).`,
       );
     }
   }
@@ -4325,7 +4323,6 @@ async function runQwenServeImpl(
               await runtimeToDrain.bridge.shutdown({ reason });
             }
             bridgeStopped = true;
-            runtimeToDrain.runtimeCoordinator?.completeDisposeAfterBridgeShutdown();
           } finally {
             if (bridgeStopped || reason === 'workspace_removed') {
               subSessionStoppersByWorkspace.delete(runtimeToDrain.workspaceCwd);

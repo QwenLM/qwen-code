@@ -339,7 +339,7 @@ function makeBridge(
           maxPendingPromptsPerSession: 5,
           eventRingSize: 8000,
           compactedReplayMaxBytes: 4 * 1024 * 1024,
-          channelIdleTimeoutMs: null,
+          channelIdleTimeoutMs: 0,
           sessionIdleTimeoutMs: 1_800_000,
         },
         sessionCount: live.size,

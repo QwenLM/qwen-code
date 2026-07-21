@@ -334,7 +334,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'number',
         description:
           'Compatibility auto-reap delay for an idle workspace ACP child. ' +
-          'Positive integer; unset = disabled.',
+          '0 or unset = immediate kill (default).',
       })
       .option('initialize-timeout-ms', {
         type: 'number',
