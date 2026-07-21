@@ -2538,6 +2538,7 @@ export const useGeminiStream = (
               {
                 type: MessageType.USER,
                 text: message,
+                // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
                 sentToModel: false,
               },
               Date.now(),

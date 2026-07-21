@@ -340,7 +340,7 @@ function convertToHistoryItems(
             payload?.displayText ||
             extractTextFromParts(record.message?.parts as Part[]);
           if (text) {
-            items.push({ type: 'notification', text });
+            items.push({ type: MessageType.USER, text, sentToModel: false });
           }
           break;
         }

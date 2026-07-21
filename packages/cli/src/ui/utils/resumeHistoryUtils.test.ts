@@ -226,8 +226,9 @@ describe('resumeHistoryUtils', () => {
 
     expect(items).toContainEqual({
       id: 21,
-      type: 'notification',
+      type: 'user',
       text: 'save logs',
+      sentToModel: false,
     });
   });
 
