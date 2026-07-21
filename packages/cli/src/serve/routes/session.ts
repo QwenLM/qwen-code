@@ -1648,9 +1648,10 @@ export function registerSessionRoutes(
                 // timeout), making the session unopenable in the Web
                 // Shell. Skip the cwd relocation in that case.
                 // Invariant: hasActivePrompt implies a live bridge entry
-                // that was spawned directly in the worktree cwd, so
-                // relocation is unnecessary. A cold-restored session
-                // cannot have an in-flight prompt.
+                // that was relocated into the worktree cwd at creation
+                // (before any prompt could run), so relocation is
+                // unnecessary. A cold-restored session cannot have an
+                // in-flight prompt.
                 if (!session.hasActivePrompt) {
                   await runtime.bridge.changeSessionCwd(sessionId, {
                     path: wt.path,

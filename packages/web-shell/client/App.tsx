@@ -1347,8 +1347,9 @@ export function App({
         }
       })
       .catch(() => {
-        // Non-live sessions 404 here; the sidecar-enriched session list
-        // in the sidebar still shows the worktree badge.
+        if (worktreeSessionIdRef.current === sid) {
+          setSessionWorktree(undefined);
+        }
       });
   }, [connection.sessionId, workspace.client]);
   // Active workspace: the connected session's workspace, else the workspace
