@@ -2885,16 +2885,18 @@ jobs:
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
               if [[ -z "${DETAIL_FILE}" || "${GATE_CRASHED}" == 'true' ]]; then
-                # Prepare ran (NEWEST is set) but the agent produced NO output
-                # at all — it crashed before writing any verdict (e.g. a staged
-                # runner that fails to boot). It evaluated NOTHING, so the
-                # watermark must NOT advance past this feedback: an advance makes
-                # the next scan see "nothing new" and never retry, stranding the
-                # PR on a transient crash (a deploy, an infra blip, a base-image
-                # bug fixed minutes later). Stamp the sentinel ts (excluded from
-                # EVAL_WM) so the feedback stays live and the next scan retries;
-                # the incremented round still bounds retries to MAX_ROUNDS before
-                # a terminal handoff, so a PERSISTENT crash cannot loop forever.
+                # Prepare ran (NEWEST is set) but no verdict was reached — either
+                # the agent produced NO output at all (crashed before writing any
+                # verdict, e.g. a staged runner that fails to boot), or the gate
+                # crashed after the agent wrote its summary. It evaluated NOTHING,
+                # so the watermark must NOT advance past this feedback: an advance
+                # makes the next scan see "nothing new" and never retry,
+                # stranding the PR on a transient crash (a deploy, an infra blip,
+                # a base-image bug fixed minutes later). Stamp the sentinel ts
+                # (excluded from EVAL_WM) so the feedback stays live and the next
+                # scan retries; the incremented round still bounds retries to
+                # MAX_ROUNDS before a terminal handoff, so a PERSISTENT crash
+                # cannot loop forever.
                 MARK_TS='9999-12-31T23:59:59Z'
                 # Only promise a retry when one will actually happen: at
                 # MARK_ROUND == MAX_ROUNDS the next scan's round-cap gate skips
@@ -2903,8 +2905,9 @@ jobs:
                 # a retry that never comes. No Run log here: the report block
                 # below appends it to every handoff (avoid a duplicate URL).
                 # Name the real cause: a gate crash points the maintainer at
-                # the gate logs (the agent's work may be fine and is preserved
-                # for the retry), while a no-output crash points at the run.
+                # the gate logs (the agent's commit is discarded with the runner,
+                # but the feedback watermark is preserved so the retry re-attempts
+                # the same feedback), while a no-output crash points at the run.
                 if [[ -z "${DETAIL_FILE}" ]]; then
                   CAUSE='crashed before it could evaluate the feedback'
                   LAST_FIX='a human should take over this PR'
