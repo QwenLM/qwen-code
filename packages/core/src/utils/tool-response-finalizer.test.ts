@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { getPlanModeSystemReminder } from '../core/prompts.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   enforceFunctionResponseBudget,
@@ -27,9 +28,13 @@ vi.mock('./debugLogger.js', () => ({
   createDebugLogger: () => debugLogger,
 }));
 
-vi.mock('./truncation.js', () => ({
-  persistAndTruncateToolResult: vi.fn(),
-}));
+vi.mock('./truncation.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./truncation.js')>();
+  return {
+    ...actual,
+    persistAndTruncateToolResult: vi.fn(),
+  };
+});
 
 const persist = vi.mocked(persistAndTruncateToolResult);
 
@@ -82,8 +87,36 @@ describe('tool response finalization', () => {
     expect(debugLogger.info).not.toHaveBeenCalled();
   });
 
-  it('preserves the plan-mode lifecycle reminder outside the output budget', async () => {
-    const reminder = '<system-reminder>plan lifecycle policy</system-reminder>';
+  it.each([false, true])(
+    'preserves the plan-mode lifecycle reminder outside the output budget (planOnly=%s)',
+    async (planOnly) => {
+      const reminder = getPlanModeSystemReminder(planOnly);
+      const entries: ToolResponseBudgetEntry[] = [
+        {
+          callId: 'enter-plan',
+          toolName: ToolNames.ENTER_PLAN_MODE,
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'enter-plan',
+                name: ToolNames.ENTER_PLAN_MODE,
+                response: { output: reminder },
+              },
+            },
+          ],
+        },
+      ];
+
+      await expect(finalizeToolResponses(config(1), entries)).resolves.toBe(
+        entries,
+      );
+      expect(persist).not.toHaveBeenCalled();
+    },
+  );
+
+  it('budgets hook context appended after the plan-mode lifecycle reminder', async () => {
+    const reminder = getPlanModeSystemReminder(false);
+    const hookContext = `\n\n${'hook-context'.repeat(1000)}`;
     const entries: ToolResponseBudgetEntry[] = [
       {
         callId: 'enter-plan',
@@ -93,17 +126,78 @@ describe('tool response finalization', () => {
             functionResponse: {
               id: 'enter-plan',
               name: ToolNames.ENTER_PLAN_MODE,
-              response: { output: reminder },
+              response: { output: `${reminder}${hookContext}` },
             },
           },
         ],
       },
     ];
 
-    await expect(finalizeToolResponses(config(1), entries)).resolves.toBe(
-      entries,
+    const result = await finalizeToolResponses(config(100), entries);
+    const output = result[0].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+
+    expect(output.startsWith(reminder)).toBe(true);
+    expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+    expect(output.length).toBeLessThan(reminder.length + hookContext.length);
+    expect(persist).toHaveBeenCalledWith(
+      'enter-plan',
+      ToolNames.ENTER_PLAN_MODE,
+      hookContext.slice(2),
+      expect.anything(),
     );
-    expect(persist).not.toHaveBeenCalled();
+  });
+
+  it('keeps hook context budgeted across both scheduler finalization passes', async () => {
+    const reminder = getPlanModeSystemReminder(false);
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'enter-plan',
+        toolName: ToolNames.ENTER_PLAN_MODE,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'enter-plan',
+              name: ToolNames.ENTER_PLAN_MODE,
+              response: { output: `${reminder}\n\n${'first'.repeat(1000)}` },
+            },
+          },
+        ],
+      },
+    ];
+
+    const firstPass = await finalizeToolResponses(config(100), entries);
+    const firstOutput = firstPass[0].responseParts[0].functionResponse
+      ?.response?.['output'] as string;
+    const secondPassInput: ToolResponseBudgetEntry[] = [
+      {
+        ...firstPass[0],
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'enter-plan',
+              name: ToolNames.ENTER_PLAN_MODE,
+              response: {
+                output: `${firstOutput}\n\n${'second'.repeat(1000)}`,
+              },
+            },
+          },
+        ],
+      },
+    ];
+
+    const secondPass = await finalizeToolResponses(
+      config(100),
+      secondPassInput,
+    );
+    const output = secondPass[0].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+
+    expect(output.startsWith(`${reminder}\n\n`)).toBe(true);
+    expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
+    expect(output).not.toContain('second'.repeat(1000));
   });
 
   it('still bounds enter_plan_mode failures', async () => {
@@ -131,8 +225,34 @@ describe('tool response finalization', () => {
     expect((error as string).length).toBeLessThanOrEqual(100);
   });
 
+  it('does not exempt arbitrary enter_plan_mode output', async () => {
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'enter-plan',
+        toolName: ToolNames.ENTER_PLAN_MODE,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'enter-plan',
+              name: ToolNames.ENTER_PLAN_MODE,
+              response: { output: 'untrusted'.repeat(1000) },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = await finalizeToolResponses(config(100), entries);
+    const output = result[0].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+
+    expect(output.length).toBeLessThanOrEqual(100);
+    expect(persist).toHaveBeenCalledOnce();
+  });
+
   it('counts protected lifecycle output in response metadata', () => {
-    const reminder = '<system-reminder>plan lifecycle policy</system-reminder>';
+    const reminder = getPlanModeSystemReminder(false);
     const parts: Part[] = [
       {
         functionResponse: {
@@ -335,6 +455,54 @@ describe('tool response finalization', () => {
     expect(result[1].persistedOutputFiles).toEqual(['/tmp/duplicate-2.txt']);
   });
 
+  it('avoids collisions between duplicate ids and natural suffix ids', async () => {
+    const responseParts = (callId: string, value: string): Part[] => [
+      {
+        functionResponse: {
+          id: callId,
+          name: 'shell',
+          response: { output: value.repeat(1000) },
+        },
+      },
+    ];
+    const entries = [
+      entry('call', responseParts('call', 'a')),
+      entry('call', responseParts('call', 'b')),
+      entry('call-1', responseParts('call-1', 'c')),
+    ];
+
+    await finalizeToolResponses(config(100), entries);
+
+    expect(persist.mock.calls.map(([callId]) => callId)).toEqual([
+      'call-2',
+      'call-3',
+      'call-1',
+    ]);
+  });
+
+  it('avoids collisions after call ids are normalized to basenames', async () => {
+    const responseParts = (callId: string, value: string): Part[] => [
+      {
+        functionResponse: {
+          id: callId,
+          name: 'shell',
+          response: { output: value.repeat(1000) },
+        },
+      },
+    ];
+    const entries = [
+      entry('dir/call', responseParts('dir/call', 'a')),
+      entry('call', responseParts('call', 'b')),
+    ];
+
+    await finalizeToolResponses(config(100), entries);
+
+    expect(persist.mock.calls.map(([callId]) => callId)).toEqual([
+      'call-1',
+      'call-2',
+    ]);
+  });
+
   it('does not persist or rewrite responses when the budget is disabled', async () => {
     const entries = [
       entry('disabled', [
@@ -412,7 +580,7 @@ describe('tool response finalization', () => {
   });
 
   it('the send guard preserves an enter_plan_mode lifecycle response', () => {
-    const reminder = '<system-reminder>plan lifecycle policy</system-reminder>';
+    const reminder = getPlanModeSystemReminder(false);
     const entries: ToolResponseBudgetEntry[] = [
       {
         callId: 'send-boundary',
@@ -430,5 +598,32 @@ describe('tool response finalization', () => {
     ];
 
     expect(enforceFunctionResponseBudget(entries, 1)).toBe(entries);
+  });
+
+  it('the send guard budgets hook context after an enter_plan_mode lifecycle response', () => {
+    const reminder = getPlanModeSystemReminder(false);
+    const entries: ToolResponseBudgetEntry[] = [
+      {
+        callId: 'send-boundary',
+        toolName: 'tool-response-batch',
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'enter-plan',
+              name: ToolNames.ENTER_PLAN_MODE,
+              response: { output: `${reminder}\n\n${'hook'.repeat(1000)}` },
+            },
+          },
+        ],
+      },
+    ];
+
+    const result = enforceFunctionResponseBudget(entries, 100);
+    const output = result[0].responseParts[0].functionResponse?.response?.[
+      'output'
+    ] as string;
+
+    expect(output.startsWith(reminder)).toBe(true);
+    expect(output.length).toBeLessThanOrEqual(reminder.length + 2 + 100);
   });
 });

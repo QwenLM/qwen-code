@@ -1367,6 +1367,7 @@ export class AgentCore {
         toolName: string;
         responseParts: Part[];
         persistedOutputFiles?: string[];
+        durationMs?: number;
       }
     >();
     const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
@@ -1438,6 +1439,7 @@ export class AgentCore {
         responseByCallId.set(callId, {
           toolName,
           responseParts: [functionResponsePart],
+          durationMs: 0,
         });
         continue;
       }
@@ -1485,6 +1487,7 @@ export class AgentCore {
             toolName,
             responseParts: response.responseParts,
             persistedOutputFiles: response.persistedOutputFiles,
+            durationMs: 0,
           });
           continue;
         }
@@ -1568,6 +1571,7 @@ export class AgentCore {
             toolName,
             responseParts: call.response.responseParts,
             persistedOutputFiles: call.response.persistedOutputFiles,
+            durationMs: duration,
           });
         }
         // Signal that this batch is complete (all tools terminal)
@@ -1737,6 +1741,15 @@ export class AgentCore {
           emittedCallIds.add(req.callId);
 
           const errorMessage = 'Tool call cancelled by user abort.';
+          const responseParts: Part[] = [
+            {
+              functionResponse: {
+                id: req.callId,
+                name: req.name,
+                response: { error: errorMessage },
+              },
+            },
+          ];
           this.recordToolCallStats(req.name, false, 0, errorMessage);
 
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
@@ -1746,19 +1759,16 @@ export class AgentCore {
             name: req.name,
             success: false,
             error: errorMessage,
-            responseParts: [
-              {
-                functionResponse: {
-                  id: req.callId,
-                  name: req.name,
-                  response: { error: errorMessage },
-                },
-              },
-            ],
+            responseParts,
             resultDisplay: errorMessage,
             durationMs: 0,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
+          responseByCallId.set(req.callId, {
+            toolName: req.name,
+            responseParts,
+            durationMs: 0,
+          });
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
@@ -1785,7 +1795,15 @@ export class AgentCore {
       uniqueFunctionCalls.flatMap((fc) => {
         const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
         const response = responseByCallId.get(callId);
-        return response ? [{ callId, ...response }] : [];
+        if (!response) return [];
+        return [
+          {
+            callId,
+            toolName: response.toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+          },
+        ];
       });
     if (functionCalls.length > 0 && orderedResponses.length === 0) {
       orderedResponses.push({
@@ -1806,6 +1824,21 @@ export class AgentCore {
     const toolResponseParts = finalizedResponses.flatMap(
       (response) => response.responseParts,
     );
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+      subagentId: this.subagentId,
+      round: currentRound,
+      responses: finalizedResponses.map((response) => {
+        const collected = responseByCallId.get(response.callId);
+        return {
+          callId: response.callId,
+          responseParts: response.responseParts,
+          ...(collected?.durationMs !== undefined
+            ? { durationMs: collected.durationMs }
+            : {}),
+        };
+      }),
+      timestamp: Date.now(),
+    });
 
     return {
       messages: [{ role: 'user', parts: toolResponseParts }],

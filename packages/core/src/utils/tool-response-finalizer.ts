@@ -6,9 +6,12 @@
 
 import type { Part } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { ToolNames } from '../tools/tool-names.js';
+import { getPlanModeLifecyclePrefix } from '../core/plan-mode-entry-policy.js';
 import { createDebugLogger } from './debugLogger.js';
-import { persistAndTruncateToolResult } from './truncation.js';
+import {
+  normalizeToolResultCallId,
+  persistAndTruncateToolResult,
+} from './truncation.js';
 
 const debugLogger = createDebugLogger('TOOL_RESPONSE_FINALIZER');
 
@@ -24,11 +27,8 @@ type TextSlot = {
   partIndex: number;
   field: 'text' | 'output' | 'error';
   text: string;
+  protectedPrefix?: string;
 };
-
-function isBudgetExemptToolName(toolName: string | undefined): boolean {
-  return toolName === ToolNames.ENTER_PLAN_MODE;
-}
 
 function collectTextSlots(
   entries: ToolResponseBudgetEntry[],
@@ -50,21 +50,27 @@ function collectTextSlots(
         });
       }
       const response = part.functionResponse?.response;
-      const outputIsExempt = isBudgetExemptToolName(
-        part.functionResponse?.name ?? entry.toolName,
-      );
       const output = response?.['output'];
       const error = response?.['error'];
-      if (
-        (!excludeBudgetExemptOutput || !outputIsExempt) &&
-        typeof output === 'string'
-      ) {
-        slots.push({
-          entryIndex,
-          partIndex,
-          field: 'output',
-          text: output,
-        });
+      if (typeof output === 'string') {
+        const protectedPrefix = excludeBudgetExemptOutput
+          ? getPlanModeLifecyclePrefix(
+              part.functionResponse?.name ?? entry.toolName,
+              output,
+            )
+          : undefined;
+        const budgetedOutput = protectedPrefix
+          ? output.slice(protectedPrefix.length)
+          : output;
+        if (budgetedOutput.length > 0) {
+          slots.push({
+            entryIndex,
+            partIndex,
+            field: 'output',
+            text: budgetedOutput,
+            ...(protectedPrefix ? { protectedPrefix } : {}),
+          });
+        }
       }
       if (typeof error === 'string') {
         slots.push({
@@ -208,7 +214,9 @@ function replaceTextSlots(
         ...functionResponse,
         response: {
           ...functionResponse.response,
-          [slot.field]: replacement,
+          [slot.field]: slot.protectedPrefix
+            ? `${slot.protectedPrefix}${replacement}`
+            : replacement,
         },
       },
     };
@@ -268,10 +276,21 @@ export async function finalizeToolResponses(
   }
 
   const withPersistence = [...entries];
-  const callIdCounts = new Map<string, number>();
-  for (const entry of entries) {
-    callIdCounts.set(entry.callId, (callIdCounts.get(entry.callId) ?? 0) + 1);
+  const normalizedCallIds = entries.map((entry) =>
+    normalizeToolResultCallId(entry.callId),
+  );
+  const normalizedCallIdCounts = new Map<string, number>();
+  for (const callId of normalizedCallIds) {
+    if (!callId) continue;
+    normalizedCallIdCounts.set(
+      callId,
+      (normalizedCallIdCounts.get(callId) ?? 0) + 1,
+    );
   }
+  const reservedCallIds = new Set(
+    normalizedCallIds.filter((callId): callId is string => !!callId),
+  );
+  const usedCallIds = new Set<string>();
   for (const entryIndex of entriesToPersist) {
     const entry = withPersistence[entryIndex];
     if (entry.persistedOutputFiles !== undefined) continue;
@@ -280,10 +299,27 @@ export async function finalizeToolResponses(
       .map((slot) => slot.text)
       .join('\n\n');
     try {
+      const normalizedCallId = normalizedCallIds[entryIndex];
+      let persistenceCallId = entry.callId;
+      if (normalizedCallId) {
+        if (
+          normalizedCallIdCounts.get(normalizedCallId) === 1 &&
+          !usedCallIds.has(normalizedCallId)
+        ) {
+          persistenceCallId = normalizedCallId;
+        } else {
+          let suffix = 1;
+          let candidate = `${normalizedCallId}-${suffix}`;
+          while (reservedCallIds.has(candidate) || usedCallIds.has(candidate)) {
+            suffix++;
+            candidate = `${normalizedCallId}-${suffix}`;
+          }
+          persistenceCallId = candidate;
+        }
+        usedCallIds.add(persistenceCallId);
+      }
       const persisted = await persistAndTruncateToolResult(
-        (callIdCounts.get(entry.callId) ?? 0) > 1
-          ? `${entry.callId}-${entryIndex + 1}`
-          : entry.callId,
+        persistenceCallId,
         entry.toolName,
         content,
         config,

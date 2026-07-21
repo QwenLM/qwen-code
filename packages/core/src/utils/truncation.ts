@@ -371,6 +371,14 @@ export interface PersistResult {
   bytesWritten: number;
 }
 
+export function normalizeToolResultCallId(callId: string): string | undefined {
+  // eslint-disable-next-line no-control-regex
+  const safeCallId = path.basename(callId).replace(/\x00/g, '_');
+  return !safeCallId || safeCallId === '.' || safeCallId === '..'
+    ? undefined
+    : safeCallId;
+}
+
 export async function persistAndTruncateToolResult(
   callId: string,
   toolName: string,
@@ -405,9 +413,8 @@ export async function persistAndTruncateToolResult(
   // Reserve budget before async write; rollback on failure below.
   config.trackToolResultBytes(byteSize);
 
-  // eslint-disable-next-line no-control-regex
-  const safeCallId = path.basename(callId).replace(/\x00/g, '_');
-  if (!safeCallId || safeCallId === '.' || safeCallId === '..') {
+  const safeCallId = normalizeToolResultCallId(callId);
+  if (!safeCallId) {
     debugLogger.warn(
       `Invalid callId for disk persistence: ${JSON.stringify(callId)}`,
     );
