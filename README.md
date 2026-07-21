@@ -24,6 +24,17 @@
 > for its scope, safety defaults, and validation. The upstream Qwen project is
 > available at [`QwenLM/qwen-code`](https://github.com/QwenLM/qwen-code).
 
+## Agentix mode
+
+This fork runs Agentix as an external, Qwen-side memory adapter:
+
+- session-scoped snapshots are opt-in and do not cross chat boundaries
+- automatic training is disabled by default and must be enabled explicitly
+- the fork uses documented external commands only; it does not inspect private
+  sidecar internals
+- when no snapshot is available, normal Qwen history and compression remain
+  authoritative
+
 ## 🎉 News
 
 - **2026-04-15**: Qwen OAuth free tier has been discontinued. To continue using Qwen Code, switch to [Alibaba Cloud Coding Plan](https://modelstudio.console.alibabacloud.com/?tab=coding-plan#/efm/coding-plan-index), [OpenRouter](https://openrouter.ai), [Fireworks AI](https://app.fireworks.ai), or bring your own API key. Run `qwen auth` to configure.
