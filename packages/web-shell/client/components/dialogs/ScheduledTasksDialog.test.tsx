@@ -268,6 +268,9 @@ describe('ScheduledTasksDialog editing', () => {
     click(document.querySelector('[aria-label="Edit"]'));
     const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
     expect(removeButtons).toHaveLength(3);
+    expect(removeButtons[0]?.getAttribute('aria-label')).toBe(
+      'Remove clickhouse',
+    );
 
     click(removeButtons[1]);
     await flush();
@@ -278,6 +281,29 @@ describe('ScheduledTasksDialog editing', () => {
       't1',
       expect.objectContaining({
         prompt: '@ext:clickhouse @mcp:repo-tools',
+      }),
+      undefined,
+    );
+  });
+
+  it('removes spacing before a trailing prompt reference tag', async () => {
+    await mount([
+      baseTask({ prompt: '@ext:clickhouse /review @mcp:repo-tools' }),
+    ]);
+
+    click(document.querySelector('[aria-label="Edit"]'));
+    const removeButtons = document.querySelectorAll('[data-prompt-tag-remove]');
+    expect(removeButtons).toHaveLength(3);
+
+    click(removeButtons[2]);
+    await flush();
+    click(findButton('Save'));
+    await flush();
+
+    expect(actions.updateScheduledTask).toHaveBeenCalledWith(
+      't1',
+      expect.objectContaining({
+        prompt: '@ext:clickhouse /review',
       }),
       undefined,
     );
