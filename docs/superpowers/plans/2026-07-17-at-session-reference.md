@@ -322,10 +322,7 @@ export class SessionReferenceService {
     }
     const body =
       (truncated ? '[earlier turns omitted]\n' : '') + kept.join('\n');
-    const title =
-      resumed.conversation.messages.length > 0
-        ? sessionId // caller supplies a friendlier title in Task 3; id fallback here
-        : sessionId;
+    const title = sessionId; // TODO: derive friendlier title from first user message
     const text =
       body.trim().length === 0
         ? `--- Referenced session "${title}" (slimmed, read-only) ---\n(no textual content)`

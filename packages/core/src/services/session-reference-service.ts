@@ -71,7 +71,7 @@ export class SessionReferenceService {
     const lines = this.recordsToLines(records);
     const budget = opts.budgetTokens ?? SESSION_REF_TOKEN_BUDGET;
 
-    const title = opts.title ?? sessionId;
+    const title = opts.title ?? this.deriveTitle(records) ?? sessionId;
     const header = `--- Referenced session "${title}" (slimmed, read-only) ---`;
     // Budget for the header and potential truncation marker so the final
     // injected text stays within the caller's budget.
@@ -147,6 +147,23 @@ export class SessionReferenceService {
       .map((p: Part) => p.text)
       .join('')
       .trim();
+  }
+
+  private static readonly TITLE_MAX_LENGTH = 80;
+
+  private deriveTitle(records: ChatRecord[]): string | undefined {
+    for (const rec of records) {
+      if (rec.type !== 'user') continue;
+      const text = this.visibleText(rec.message);
+      if (!text) continue;
+      const firstLine = text.split('\n')[0].trim();
+      if (firstLine.length === 0) continue;
+      return firstLine.length > SessionReferenceService.TITLE_MAX_LENGTH
+        ? firstLine.slice(0, SessionReferenceService.TITLE_MAX_LENGTH - 3) +
+            '...'
+        : firstLine;
+    }
+    return undefined;
   }
 
   /** Names of every `functionResponse` part in a record (parallel tool calls

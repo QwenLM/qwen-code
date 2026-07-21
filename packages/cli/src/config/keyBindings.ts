@@ -188,8 +188,12 @@ export const defaultKeyBindings: KeyBindingConfig = {
     { key: 'n', ctrl: true },
   ],
   // Completion category tab switching (for the tabbed @ completion UI).
-  [Command.COMPLETION_TAB_LEFT]: [{ key: 'left', shift: false }],
-  [Command.COMPLETION_TAB_RIGHT]: [{ key: 'right', shift: false }],
+  [Command.COMPLETION_TAB_LEFT]: [
+    { key: 'left', shift: false, ctrl: false, command: false },
+  ],
+  [Command.COMPLETION_TAB_RIGHT]: [
+    { key: 'right', shift: false, ctrl: false, command: false },
+  ],
 
   // Text input
   // Must also exclude shift to allow shift+enter for newline

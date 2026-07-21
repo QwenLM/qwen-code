@@ -179,7 +179,7 @@ describe('SessionReferenceService', () => {
         },
       ]),
     );
-    const res = await svc.resolve('s1', { budgetTokens: 50 });
+    const res = await svc.resolve('s1', { budgetTokens: 50, title: 's1' });
     if ('notFound' in res) throw new Error('unexpected');
     expect(res.truncated).toBe(true);
     expect(res.text).toContain('[earlier turns omitted]');
@@ -197,7 +197,7 @@ describe('SessionReferenceService', () => {
       },
     }));
     const svc = makeSvc(fakeResumed(many));
-    const res = await svc.resolve('s1', { budgetTokens: 200 });
+    const res = await svc.resolve('s1', { budgetTokens: 200, title: 's1' });
     if ('notFound' in res) throw new Error('unexpected');
     expect(res.truncated).toBe(true);
     expect(res.text).toContain('[earlier turns omitted]');
@@ -215,5 +215,84 @@ describe('SessionReferenceService', () => {
     if ('notFound' in res) throw new Error('unexpected');
     expect(res.text).toContain('(no textual content)');
     expect(res.truncated).toBe(false);
+  });
+});
+
+describe('title derivation', () => {
+  it('derives title from first user message when no explicit title given', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Fix the auth bug' }] },
+        },
+        {
+          type: 'assistant',
+          message: { role: 'model', parts: [{ text: 'Sure' }] },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('Fix the auth bug');
+    expect(res.text).toContain('Referenced session "Fix the auth bug"');
+  });
+
+  it('truncates a long first user message to 80 chars', async () => {
+    const long = 'A'.repeat(120);
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: long }] },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toHaveLength(80);
+    expect(res.meta.title.endsWith('...')).toBe(true);
+  });
+
+  it('uses only the first line of a multi-line user message', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'Short title\nLonger body text' }],
+          },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('Short title');
+  });
+
+  it('falls back to sessionId when there are no user messages', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        { type: 'system', subtype: 'custom_title', message: undefined },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('s1');
+  });
+
+  it('prefers an explicit title over derivation', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'First message' }] },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1', { title: 'Custom Title' });
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('Custom Title');
   });
 });
