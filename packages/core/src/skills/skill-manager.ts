@@ -36,6 +36,7 @@ import {
 } from './skill-activation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { normalizeContent } from '../utils/textUtils.js';
+import { expandHomeDir } from '../utils/paths.js';
 import {
   QWEN_DIR,
   SKILL_PROVIDER_CONFIG_DIRS,
@@ -906,11 +907,8 @@ export class SkillManager {
             ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
             : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
         );
-        // Append custom skill directories from settings.skills.directories
-        for (const customDir of this.config.getCustomSkillDirs()) {
-          const expanded = customDir.startsWith('~')
-            ? path.join(os.homedir(), customDir.slice(1))
-            : path.resolve(customDir);
+        for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
+          const expanded = path.resolve(expandHomeDir(customDir));
           if (!dirs.includes(expanded)) {
             dirs.push(expanded);
           }

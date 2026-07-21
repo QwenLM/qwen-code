@@ -971,6 +971,50 @@ Body`);
         'Extension skills do not have a base directory',
       );
     });
+
+    it('should append custom skill dirs with ~ expansion to user-level dirs', () => {
+      const defaultDirs = manager.getSkillsBaseDirs('user');
+      const customConfig = makeFakeConfig({
+        customSkillDirs: ['~/custom-skills', '/abs/skills'],
+      });
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const customManager = new SkillManager(customConfig);
+
+      const baseDirs = customManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toHaveLength(defaultDirs.length + 2);
+      expect(baseDirs.slice(0, defaultDirs.length)).toEqual(defaultDirs);
+      expect(baseDirs).toContain(
+        path.resolve(path.join(os.homedir(), 'custom-skills')),
+      );
+      expect(baseDirs).toContain(path.resolve('/abs/skills'));
+    });
+
+    it('should deduplicate custom dirs against default dirs', () => {
+      const defaultDirs = manager.getSkillsBaseDirs('user');
+      const customConfig = makeFakeConfig({
+        customSkillDirs: [defaultDirs[0], '/unique/dir'],
+      });
+      vi.spyOn(customConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const customManager = new SkillManager(customConfig);
+
+      const baseDirs = customManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toHaveLength(defaultDirs.length + 1);
+      expect(baseDirs.filter((d) => d === defaultDirs[0])).toHaveLength(1);
+      expect(baseDirs).toContain(path.resolve('/unique/dir'));
+    });
+
+    it('should not crash when config lacks getCustomSkillDirs', () => {
+      const partialConfig = {
+        getProjectRoot: () => '/test/project',
+      } as Config;
+      const partialManager = new SkillManager(partialConfig);
+
+      const baseDirs = partialManager.getSkillsBaseDirs('user');
+
+      expect(baseDirs).toHaveLength(2);
+    });
   });
 
   describe('bundled skills', () => {

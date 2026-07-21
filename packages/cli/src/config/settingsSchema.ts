@@ -1961,9 +1961,10 @@ const SETTINGS_SCHEMA = {
         default: undefined as string[] | undefined,
         description:
           'Additional directories to scan for skills (SKILL.md files). ' +
-          'Paths support ~ expansion. Directories are scanned recursively ' +
-          'for SKILL.md files. Skills from these directories are loaded at ' +
-          'user level, after the default ~/.qwen/skills/ directory.',
+          'Paths support ~ expansion. Each directory is scanned one level ' +
+          'deep for subdirectories containing a SKILL.md file. Skills from ' +
+          'these directories are loaded at user level, after the default ' +
+          '~/.qwen/skills/ directory.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

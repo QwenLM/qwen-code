@@ -914,8 +914,8 @@ export interface ConfigParameters {
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   /**
    * Additional directories to scan for skills (SKILL.md files).
-   * Sourced from `settings.skills.directories`. Paths are expanded
-   * (~ → home dir) and scanned recursively at user level.
+   * Sourced from `settings.skills.directories`. Paths are raw
+   * (unexpanded); `SkillManager.getSkillsBaseDirs` handles `~` expansion.
    */
   customSkillDirs?: readonly string[];
   /**
@@ -4530,7 +4530,8 @@ export class Config {
 
   /**
    * Returns additional skill directories from `settings.skills.directories`.
-   * Paths are already expanded (~ → home dir) by the CLI layer.
+   * Paths are raw (unexpanded); consumers must handle `~` expansion
+   * (see `SkillManager.getSkillsBaseDirs`).
    */
   getCustomSkillDirs(): readonly string[] {
     return this.customSkillDirs;
