@@ -779,16 +779,23 @@ export type DaemonChannelDeliveryErrorCode =
   | 'channel_delivery_queue_full'
   | 'channel_delivery_failed';
 
-export type DaemonChannelDeliveryResultData = {
-  sessionId: string;
-  deliveryId: string;
-  status: 'delivered' | 'failed' | 'skipped';
-  code?: DaemonChannelDeliveryErrorCode;
-  error?: string;
-} & (
+type DeliveryResultSource =
   | { source: 'prompt'; promptId: string }
-  | { source: 'scheduled'; taskId: string; firedAt: number }
-);
+  | { source: 'scheduled'; taskId: string; firedAt: number };
+
+export type DaemonChannelDeliveryResultData =
+  | ({
+      sessionId: string;
+      deliveryId: string;
+      status: 'delivered' | 'skipped';
+    } & DeliveryResultSource)
+  | ({
+      sessionId: string;
+      deliveryId: string;
+      status: 'failed';
+      code: DaemonChannelDeliveryErrorCode;
+      error: string;
+    } & DeliveryResultSource);
 
 export interface DaemonTurnCompleteData {
   sessionId: string;

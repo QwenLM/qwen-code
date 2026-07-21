@@ -2500,6 +2500,83 @@ describe('createChannelWorkerSupervisor', () => {
     });
   });
 
+  it('rejects channel delivery when IPC send throws synchronously', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    child.send.mockImplementationOnce(() => {
+      throw new Error('send boom');
+    });
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const rejected = supervisor.deliverChannelMessage!(deliveryRequest).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      'Channel worker IPC send failed: send boom',
+    );
+    expect((error as { code?: string }).code).toBe(
+      'channel_worker_unavailable',
+    );
+  });
+
+  it('rejects channel delivery when the IPC send callback reports an error', async () => {
+    vi.useFakeTimers();
+    const child = new FakeChild(false);
+    child.send.mockImplementationOnce((_message, callback) => {
+      callback?.(new Error('callback boom'));
+      return true;
+    });
+    const supervisor = createChannelWorkerSupervisor({
+      cliEntryPath: '/repo/dist/index.js',
+      daemonUrl: 'http://127.0.0.1:4170',
+      workspace: '/workspace',
+      selection: { mode: 'names', names: ['telegram'] },
+      spawnWorker: vi.fn(() => child),
+    });
+
+    const started = supervisor.start();
+    child.emit('message', {
+      type: 'ready',
+      pid: 12345,
+      channels: ['telegram'],
+      requestedChannels: ['telegram'],
+    });
+    await started;
+
+    const rejected = supervisor.deliverChannelMessage!(deliveryRequest).then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+    const error = await rejected;
+    expect(error).toBeInstanceOf(Error);
+    expect((error as Error).message).toBe(
+      'Channel worker IPC send failed: callback boom',
+    );
+    expect((error as { code?: string }).code).toBe(
+      'channel_worker_unavailable',
+    );
+  });
+
   it('times out delivery and rejects pending work when the worker exits', async () => {
     vi.useFakeTimers();
     const child = new FakeChild(false);

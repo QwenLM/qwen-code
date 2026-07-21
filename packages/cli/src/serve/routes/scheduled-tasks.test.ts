@@ -257,6 +257,21 @@ describe('scheduled-tasks routes', () => {
         target: newDelivery.target,
       }),
     ).toBe(true);
+    // The old target's authorization is revoked.
+    expect(
+      h.channelDeliveryAuthorizations.consume(h.workspace, {
+        sessionId: sid,
+        deliveryId: `${id}:${firedAt}`,
+        source: 'scheduled',
+        taskId: id,
+        firedAt,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      }),
+    ).toBe(false);
   });
 
   it('clears delivery via PATCH with null', async () => {
