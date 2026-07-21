@@ -805,11 +805,6 @@ export class BackgroundAgentResumeService {
       }
 
       const bgEventEmitter = new AgentEventEmitter();
-      // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
-      // the resume `finally` invokes this so per-agent hook entries and
-      // the force-rebuilt ToolRegistry don't leak across the resume
-      // boundary. Stays undefined on the fork-resume path (forks share
-      // the parent's registry + hook lifecycle).
       const launchModel = meta.model ?? meta.persistedCliFlags?.model;
       let subagent: AgentHeadless;
       if (target.isFork) {
@@ -844,6 +839,11 @@ export class BackgroundAgentResumeService {
               : {}),
           });
         subagent = result.subagent;
+        // Per-spawn cleanup from `SubagentManager.createAgentHeadless` —
+        // the resume `finally` invokes this so per-agent hook entries and
+        // the force-rebuilt ToolRegistry don't leak across the resume
+        // boundary. Stays undefined on the fork-resume path (forks share
+        // the parent's registry + hook lifecycle).
         subagentDispose = result.dispose;
       }
 
