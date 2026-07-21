@@ -690,6 +690,7 @@ function makeBridge(
 function makeRuntime(input: {
   workspaceId: string;
   workspaceCwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   bridge: AcpSessionBridge;
@@ -713,7 +714,16 @@ function makeDaemonLog(): DaemonLogger {
     raw: vi.fn(),
     getLogPath: () => '',
     getDaemonId: () => 'test-daemon',
+    getStatus: () => ({
+      runId: '00000000000000000000000000000000',
+      mode: 'stderr-only',
+      health: 'ok',
+      issues: [],
+      droppedRecords: 0,
+      droppedBytes: 0,
+    }),
     flush: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
   };
 }
 
@@ -760,6 +770,7 @@ function makeHarness(opts?: {
     makeRuntime({
       workspaceId: 'secondary-id',
       workspaceCwd: SECONDARY_CWD,
+      displayName: 'Secondary workspace',
       primary: false,
       trusted: opts?.secondaryTrusted ?? true,
       bridge: secondaryBridge,
@@ -798,11 +809,13 @@ describe('multi-workspace session dispatch', () => {
     expect(res.body.features).toContain('workspace_persisted_transcript');
     expect(res.body.features).toContain('workspace_session_export');
     expect(res.body.features).toContain('workspace_archived_session_export');
+    expect(res.body.features).toContain('workspace_display_name');
     expect(res.body.workspaces).toEqual([
       { id: 'primary-id', cwd: PRIMARY_CWD, primary: true, trusted: true },
       {
         id: 'secondary-id',
         cwd: SECONDARY_CWD,
+        displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
       },
@@ -836,6 +849,7 @@ describe('multi-workspace session dispatch', () => {
       {
         id: 'secondary-id',
         cwd: SECONDARY_CWD,
+        displayName: 'Secondary workspace',
         primary: false,
         trusted: true,
       },

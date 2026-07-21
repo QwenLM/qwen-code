@@ -1559,6 +1559,7 @@ export class TeamManager {
       // fileDiff}`), which doesn't match what permission policies
       // expect to see (e.g. `{file_path, content}`).
       toolInput: event.args ?? {},
+      confirmationDetails: event.confirmationDetails,
       respond: event.respond,
       timestamp: Date.now(),
     };

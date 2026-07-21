@@ -26,6 +26,9 @@ export interface ToolInvocation<
    */
   params: TParams;
 
+  /** Historical names accepted only when evaluating persisted permissions. */
+  readonly permissionAliases?: readonly string[];
+
   /**
    * Gets a pre-execution description of the tool operation.
    *
@@ -789,6 +792,10 @@ export interface ToolEditConfirmationDetails {
   isModifying?: boolean;
   /** Hide UI affordances that let the user edit the proposed content. */
   hideModify?: boolean;
+  /** Skip opening or resolving an IDE diff for this confirmation. */
+  skipIdeDiff?: boolean;
+  /** Informational warnings to render alongside the proposed diff. */
+  warnings?: string[];
 }
 
 export interface ToolConfirmationPayload {

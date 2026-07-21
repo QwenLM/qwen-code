@@ -642,6 +642,7 @@ describe('serve fast path argument parsing', () => {
       ['prompt-deadline-ms', ['--prompt-deadline-ms', '1000']],
       ['writer-idle-timeout-ms', ['--writer-idle-timeout-ms', '1000']],
       ['channel-idle-timeout-ms', ['--channel-idle-timeout-ms', '1000']],
+      ['initialize-timeout-ms', ['--initialize-timeout-ms', '30000']],
       ['session-reap-interval-ms', ['--session-reap-interval-ms', '1000']],
       ['session-idle-timeout-ms', ['--session-idle-timeout-ms', '1000']],
       [

@@ -33,7 +33,11 @@ import {
   getActiveGoal,
   type ActiveGoal,
 } from '../goals/activeGoalStore.js';
-import { abortGoalForStopHookCap } from '../goals/goalHook.js';
+import {
+  abortGoalForStopHookCap,
+  getStopHookContinuationReason,
+  GOAL_HOOK_ID_OUTPUT_KEY,
+} from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
@@ -49,6 +53,7 @@ import {
   getCoreSystemPrompt,
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
+  resolveInteractionMode,
 } from './prompts.js';
 import {
   CompressionStatus,
@@ -814,6 +819,7 @@ export class GeminiClient {
       userMemory,
       this.config.getModel(),
       appendSystemPrompt,
+      resolveInteractionMode(this.config),
     );
     return gitStatus ? base + '\n\n' + gitStatus : base;
   }
@@ -2723,7 +2729,7 @@ export class GeminiClient {
             return turn;
           }
 
-          const continueReason = stopOutput.getEffectiveReason();
+          const continueReason = getStopHookContinuationReason(stopOutput);
 
           // Track stop hook iterations
           const currentIterationCount =
@@ -2796,9 +2802,45 @@ export class GeminiClient {
           const activeGoal = getActiveGoal(this.config.getSessionId());
           const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
           const pendingSteer = await takeSteerInput(hookTurnBudget);
-          const continueRequest: Part[] = [{ text: continueReason }];
+          const activeGoalAfterSteer = getActiveGoal(
+            this.config.getSessionId(),
+          );
+          const activeGoalChanged =
+            activeGoal !== undefined &&
+            activeGoalAfterSteer?.hookId !== activeGoal.hookId;
+          const goalContinuationChanged =
+            activeGoalChanged &&
+            stopOutput.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] ===
+              activeGoal.hookId;
+          if (activeGoalChanged) {
+            const activeGoalEvent =
+              maybeEmitActiveGoalChange(activeGoalAfterSteer);
+            if (activeGoalEvent) {
+              yield activeGoalEvent;
+            }
+          }
+          const discardGoalContinuation =
+            goalContinuationChanged &&
+            response.hasNonGoalBlockingStopHook === false;
+          const continuationReasonAfterSteer = discardGoalContinuation
+            ? undefined
+            : goalContinuationChanged &&
+                response.hasNonGoalBlockingStopHook === true
+              ? response.nonGoalBlockingStopReason || 'No reason provided'
+              : continueReason;
+          if (!continuationReasonAfterSteer && !pendingSteer) {
+            if (isTopLevelInteraction) endInteractionSpan('ok');
+            normalCompletion = true;
+            return turn;
+          }
+          const continueRequest: Part[] = continuationReasonAfterSteer
+            ? [{ text: continuationReasonAfterSteer }]
+            : [];
           if (pendingSteer) {
-            continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
+            if (continueRequest.length > 0) {
+              continueRequest.push({ text: '\n\n' });
+            }
+            continueRequest.push(...pendingSteer.parts);
           }
           const pushCountBefore = currentPushCount();
           let hookTurn: Turn;
@@ -2811,10 +2853,19 @@ export class GeminiClient {
                 type: SendMessageType.Hook,
                 modelOverride: options?.modelOverride,
                 getSteerInput: options?.getSteerInput,
-                stopHookState: {
-                  iterationCount: currentIterationCount,
-                  reasons: currentReasons,
-                },
+                stopHookState: discardGoalContinuation
+                  ? undefined
+                  : {
+                      iterationCount: currentIterationCount,
+                      reasons:
+                        continuationReasonAfterSteer &&
+                        continuationReasonAfterSteer !== continueReason
+                          ? [
+                              ...currentReasons.slice(0, -1),
+                              continuationReasonAfterSteer,
+                            ]
+                          : currentReasons,
+                    },
               },
               hookTurnBudget,
             );

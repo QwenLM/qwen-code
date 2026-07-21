@@ -29,6 +29,9 @@ export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
 export type {
   ChannelBaseOptions,
+  ChannelMemoryRecallCacheStatus,
+  ChannelMemoryRecallObservation,
+  ChannelMemoryRecallResult,
   ChannelLoopController,
 } from './ChannelBase.js';
 export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
@@ -92,6 +95,13 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
+  ObservedChannelIdentity,
+  ObservedChannelContactObservation,
+  ObservedChannelContact,
+  ObservedChannelRelatedContact,
+  ObservedChannelTopic,
+  ObservedChannelGroup,
+  ObservedChannelContactGraph,
   SanitizedToolCallEvent,
   SenderPolicy,
   SessionScope,

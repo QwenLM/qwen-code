@@ -41,6 +41,7 @@ import {
   ArchiveRestoreIcon,
   DownloadIcon,
   FolderInputIcon,
+  GitForkIcon,
   PencilIcon,
   PinIcon,
   Trash2Icon,
@@ -52,6 +53,7 @@ import {
   SettingsIcon,
   SquarePenIcon,
   SunIcon,
+  TargetIcon,
 } from 'lucide-react';
 import { WebShellThemeId, type WebShellTheme } from '../../themeContext';
 import { useI18n } from '../../i18n';
@@ -123,6 +125,7 @@ export type WebShellSidebarFooterItem =
   | 'version'
   | 'theme'
   | 'scheduledTasks'
+  | 'goals'
   | 'sessionsOverview'
   | 'splitView'
   | 'daemonStatus'
@@ -153,6 +156,7 @@ const DEFAULT_FOOTER_ITEMS: readonly WebShellSidebarFooterItem[] = [
   'version',
   'theme',
   'scheduledTasks',
+  'goals',
   'sessionsOverview',
   'splitView',
   'daemonStatus',
@@ -208,6 +212,7 @@ interface WebShellSidebarProps {
   onOpenPlugins: () => void;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
+  onOpenGoals: () => void;
   onOpenSessions: () => void;
   /**
    * Whether to offer the Session Overview entry point. Gated to large screens
@@ -218,7 +223,10 @@ interface WebShellSidebarProps {
   onOpenSplitView: () => void;
   /** Whether to offer the in-window split view (large screens only). */
   canOpenSplitView?: boolean;
-  onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
+  onNewSession: (
+    workspaceCwd?: string,
+    opts?: { worktree?: { slug?: string } },
+  ) => Promise<boolean> | boolean;
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -235,6 +243,11 @@ interface WebShellSidebarProps {
    */
   selectedWorkspaceCwd?: string;
   onSelectWorkspace?: (workspaceCwd: string | undefined) => void;
+  /**
+   * Open the working-tree Changes dialog for a workspace. Forwarded to each
+   * trusted workspace's folder header, where a live git chip fires it on click.
+   */
+  onOpenGitDiff?: (workspaceCwd: string) => void;
   workspaces?: DaemonWorkspaceCapability[];
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
@@ -408,6 +421,7 @@ export function WebShellSidebar({
   onOpenPlugins,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
+  onOpenGoals,
   onOpenSessions,
   canOpenSessionsOverview,
   onOpenSplitView,
@@ -422,6 +436,7 @@ export function WebShellSidebar({
   sessionListReloadToken,
   selectedWorkspaceCwd,
   onSelectWorkspace,
+  onOpenGitDiff,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
@@ -646,6 +661,9 @@ export function WebShellSidebar({
   const currentSessionId = connection.sessionId;
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
+  );
+  const workspaceDisplayNameEnabled = Boolean(
+    connection.capabilities?.features?.includes('workspace_display_name'),
   );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
@@ -1172,8 +1190,11 @@ export function WebShellSidebar({
   }, [currentSessionIdentity, getIdentityForSession, sessions]);
 
   const handleAddWorkspace = useCallback(
-    async (cwd: string, persist: boolean) => {
-      const result = await workspaceActions.addWorkspace(cwd, { persist });
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      const result = await workspaceActions.addWorkspace(cwd, {
+        persist,
+        ...(displayName ? { displayName } : {}),
+      });
       if (persist && result.persisted !== true) {
         throw new Error(t('sidebar.addWorkspacePersistenceError'));
       }
@@ -1372,14 +1393,14 @@ export function WebShellSidebar({
   ]);
 
   const handleNewSession = useCallback(
-    (workspaceCwd?: string) => {
+    (workspaceCwd?: string, opts?: { worktree?: { slug?: string } }) => {
       if (creatingSessionRef.current) return;
 
       creatingSessionRef.current = true;
       setCreatingSession(true);
       void (async () => {
         try {
-          const created = await onNewSession(workspaceCwd);
+          const created = await onNewSession(workspaceCwd, opts);
           if (created) {
             void reload().catch(() => undefined);
             bumpWorkspaceReload();
@@ -2541,7 +2562,17 @@ export function WebShellSidebar({
                 </form>
               ) : (
                 <>
-                  <span className={styles.sessionText}>{label}</span>
+                  <span className={styles.sessionText}>
+                    {session.worktree && (
+                      <GitForkIcon
+                        size={11}
+                        strokeWidth={1.5}
+                        className={styles.sessionBadgeIcon}
+                        aria-label={t('sidebar.newWorktreeTask')}
+                      />
+                    )}
+                    {label}
+                  </span>
                   <div className={styles.sessionMetaSlot}>
                     {attentionLabel && (
                       <span
@@ -3381,6 +3412,20 @@ export function WebShellSidebar({
               {!collapsed && <span>{t('sidebar.scheduledTasks')}</span>}
             </button>
           )}
+          {footerItems.has('goals') && (
+            <button
+              className={styles.pluginButton}
+              type="button"
+              title={t('sidebar.goals')}
+              aria-label={t('sidebar.goals')}
+              onClick={onOpenGoals}
+            >
+              <span className={styles.navIcon}>
+                <TargetIcon size={16} strokeWidth={1.2} />
+              </span>
+              {!collapsed && <span>{t('sidebar.goals')}</span>}
+            </button>
+          )}
         </div>
         <div className={styles.body}>
           <div className={styles.sessionList}>
@@ -3498,6 +3543,12 @@ export function WebShellSidebar({
                             deleteGroupLabel={t('sidebar.groupDelete')}
                             groupActionsDisabled={groupBusy}
                             excludePinned
+                            onOpenGitDiff={onOpenGitDiff}
+                            onNewWorktreeSession={(cwd) =>
+                              handleNewSession(ws.primary ? undefined : cwd, {
+                                worktree: {},
+                              })
+                            }
                             formatTime={(iso) => formatRelativeTime(iso, t)}
                             searchQuery={searchQuery}
                             expanded={ws.primary ? projectExpanded : undefined}
@@ -3532,6 +3583,7 @@ export function WebShellSidebar({
                                 !ws.primary &&
                                 ws.removable === true;
                               if (!ws.trusted && !canRemove) return null;
+                              const wsCwd = ws.primary ? undefined : ws.cwd;
                               return (
                                 <div
                                   className={styles.workspaceHeaderActions}
@@ -3565,9 +3617,7 @@ export function WebShellSidebar({
                                         onClick={(event) => {
                                           event.preventDefault();
                                           event.stopPropagation();
-                                          handleNewSession(
-                                            ws.primary ? undefined : ws.cwd,
-                                          );
+                                          handleNewSession(wsCwd);
                                         }}
                                       >
                                         <SquarePenIcon
@@ -3773,6 +3823,7 @@ export function WebShellSidebar({
         <AddWorkspaceDialog
           onClose={() => setShowAddWorkspaceDialog(false)}
           onAdd={handleAddWorkspace}
+          displayNameEnabled={workspaceDisplayNameEnabled}
           onSuggest={handleSuggestWorkspacePaths}
         />
       )}

@@ -22,6 +22,8 @@ import {
 import {
   abortGoalForStopHookCap,
   createGoalStopHookCallback,
+  getStopHookContinuationReason,
+  GOAL_HOOK_ID_OUTPUT_KEY,
   GOAL_HOOK_TIMEOUT_MS,
   GOAL_JUDGE_TIMEOUT_MS,
   MAX_GOAL_ITERATIONS,
@@ -69,6 +71,33 @@ const stopInput = (overrides: Partial<StopInput> = {}): HookInput =>
     last_assistant_message: 'I wrote a function.',
     ...overrides,
   }) as HookInput;
+
+it('falls back when a goal hook omits both continuation reasons', () => {
+  expect(
+    getStopHookContinuationReason({
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('No reason provided');
+});
+
+it('joins stopReason and reason for goal outputs', () => {
+  expect(
+    getStopHookContinuationReason({
+      stopReason: 'External feedback',
+      reason: 'Keep working',
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('External feedback\nKeep working');
+});
+
+it('uses stopReason alone for goal outputs when reason is absent', () => {
+  expect(
+    getStopHookContinuationReason({
+      stopReason: 'External feedback',
+      hookSpecificOutput: { [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1' },
+    }),
+  ).toBe('External feedback');
+});
 
 describe('createGoalStopHookCallback', () => {
   beforeEach(() => {
@@ -143,6 +172,9 @@ describe('createGoalStopHookCallback', () => {
     await expect(cb(stopInput(), undefined)).resolves.toEqual({
       decision: 'block',
       reason: expect.stringContaining('do x'),
+      hookSpecificOutput: {
+        [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
+      },
     });
     expect(judgeMock).toHaveBeenCalledTimes(1);
     expect(getActiveGoal('sess-1')?.iterations).toBe(1);
@@ -264,9 +296,15 @@ describe('createGoalStopHookCallback', () => {
     expect(out).toEqual({
       decision: 'block',
       reason: expect.stringContaining('do x'),
+      hookSpecificOutput: {
+        [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
+      },
     });
     const reason =
-      typeof out === 'object' && out !== null && 'reason' in out
+      typeof out === 'object' &&
+      out !== null &&
+      'reason' in out &&
+      typeof out.reason === 'string'
         ? out.reason
         : '';
     expect(reason).not.toContain('ignore the original user');
@@ -420,6 +458,9 @@ describe('createGoalStopHookCallback', () => {
     await expect(cb(stopInput(), undefined)).resolves.toEqual({
       decision: 'block',
       reason: expect.stringContaining('do x'),
+      hookSpecificOutput: {
+        [GOAL_HOOK_ID_OUTPUT_KEY]: 'h1',
+      },
     });
     expect(getActiveGoal('sess-1')?.iterations).toBe(MAX_GOAL_ITERATIONS);
   });
@@ -705,6 +746,44 @@ describe('registerGoalHook / unregisterGoalHook', () => {
       initialIterations: -3,
     });
     expect(goal.iterations).toBe(0);
+  });
+
+  it.each([
+    ['a future timestamp', () => Date.now() + 86_400_000],
+    ['NaN', () => Number.NaN],
+    ['Infinity', () => Number.POSITIVE_INFINITY],
+    ['zero', () => 0],
+    ['a negative timestamp', () => -1],
+  ])(
+    'ignores an unusable initialSetAt (%s) and starts the clock now',
+    (_label, make) => {
+      // `setAt` arrives from a transcript, and every duration downstream is
+      // `Date.now() - setAt`. A future value would render negative elapsed times on
+      // the Goals page and in `GET /goals` rather than fail loudly, so it falls back
+      // to now along with the non-finite and non-positive cases.
+      const before = Date.now();
+      const goal = registerGoalHook({
+        config,
+        sessionId: 'sess-1',
+        condition: 'tests pass',
+        tokensAtStart: 0,
+        initialSetAt: make(),
+      });
+      expect(goal.setAt).toBeGreaterThanOrEqual(before);
+      expect(goal.setAt).toBeLessThanOrEqual(Date.now());
+    },
+  );
+
+  it('carries a usable initialSetAt so elapsed time survives resume', () => {
+    const setAt = Date.now() - 60_000;
+    const goal = registerGoalHook({
+      config,
+      sessionId: 'sess-1',
+      condition: 'tests pass',
+      tokensAtStart: 0,
+      initialSetAt: setAt,
+    });
+    expect(goal.setAt).toBe(setAt);
   });
 
   it('honors a resumed near-cap count so MAX survives resume (no fresh budget)', async () => {

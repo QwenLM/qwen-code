@@ -5,6 +5,8 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
+export { WebShellTranscript } from './components/WebShellTranscript';
+export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -124,6 +126,8 @@ export type {
   WebShellApi,
   WebShellComposerPlaceholders,
   WebShellComposerPlaceholderState,
+  WebShellSlashCommand,
+  WebShellSlashCommandHandler,
   WebShellProps,
   WebShellSidebarOptions,
   BugReportInfo,

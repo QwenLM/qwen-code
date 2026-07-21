@@ -68,6 +68,11 @@ import {
   isStartupProfilerEnabled,
 } from './utils/startupProfiler.js';
 import {
+  isAcpStartupProfilerEnabled,
+  markAcpStartup,
+  recordAcpConfigStartupEvent,
+} from './utils/acp-startup-profiler.js';
+import {
   relaunchAppInChildProcess,
   relaunchOnExitCode,
 } from './utils/relaunch.js';
@@ -262,6 +267,7 @@ function installInteractiveSignalHandlers(wasRaw: boolean): () => void {
 
 export async function main() {
   profileCheckpoint('main_entry');
+  const acpStartupProfilerEnabled = isAcpStartupProfilerEnabled();
   // Bridge core-package startup events (Config.initialize, MCP discovery,
   // GeminiClient.setTools) into the cli's startup profiler. Gated on
   // `isStartupProfilerEnabled()` so that when QWEN_CODE_PROFILE_STARTUP is
@@ -269,8 +275,12 @@ export async function main() {
   // sees a null sink and short-circuits at the first comparison, instead
   // of going through this arrow wrapper and the profiler's own enabled
   // check.
-  if (isStartupProfilerEnabled()) {
-    setStartupEventSink((name, attrs) => recordStartupEvent(name, attrs));
+  const startupProfilerEnabled = isStartupProfilerEnabled();
+  if (startupProfilerEnabled || acpStartupProfilerEnabled) {
+    setStartupEventSink((name, attrs) => {
+      if (startupProfilerEnabled) recordStartupEvent(name, attrs);
+      if (acpStartupProfilerEnabled) recordAcpConfigStartupEvent(name);
+    });
   }
   setupUnhandledRejectionHandler();
   initializeWarningHandler();
@@ -283,7 +293,9 @@ export async function main() {
   // call `process.exit` before `loadSettings()` would otherwise bootstrap.
   preResolveHomeEnvOverrides();
 
+  markAcpStartup('argsParseStart');
   let argv = await parseArguments();
+  markAcpStartup('argsParseEnd');
   profileCheckpoint('after_parse_arguments');
 
   if (
@@ -301,9 +313,11 @@ export async function main() {
   }
 
   // Load user settings — bare mode uses minimal config, normal mode loads full.
+  markAcpStartup('settingsLoadStart');
   const settings = isBareMode(argv.bare)
     ? createMinimalSettings()
     : loadSettings();
+  markAcpStartup('settingsLoadEnd');
 
   // Propagate corruption state to child process via env vars so
   // relaunchAppInChildProcess() doesn't lose the marker.
@@ -386,7 +400,7 @@ export async function main() {
       ? getNodeMemoryArgs(isDebugMode)
       : [];
     const updateProjectRoot = process.cwd();
-    const onUpdateRelaunch = async () => {
+    const onUpdateRelaunch = async (relaunchOnFailure: boolean) => {
       await initializeI18n(
         resolveLanguageSetting(settings.merged.general?.language as string),
       );
@@ -396,6 +410,7 @@ export async function main() {
       const shouldRelaunch = await updateBeforeRelaunch(
         settings,
         updateProjectRoot,
+        relaunchOnFailure,
       );
       return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
     };
@@ -698,6 +713,7 @@ export async function main() {
       : new SettingsWatcher(settings);
     settingsWatcher?.startWatching();
 
+    markAcpStartup('configConstructionStart');
     const config = await loadCliConfig(
       settings.merged,
       argv,
@@ -712,6 +728,7 @@ export async function main() {
       undefined,
       settingsWatcher,
     );
+    markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');
 
     // Subscribe the running Config to settings changes so MCP servers
@@ -894,13 +911,17 @@ export async function main() {
       !config.getExperimentalZedIntegration() &&
       !input &&
       !hasRemoteInput;
+    markAcpStartup('appInitializationStart');
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
     });
+    markAcpStartup('appInitializationEnd');
     profileCheckpoint('after_initialize_app');
 
     if (config.getExperimentalZedIntegration()) {
+      markAcpStartup('acpImportStart');
       const { runAcpAgent } = await import('./acp-integration/acpAgent.js');
+      markAcpStartup('acpImportEnd');
       await runAcpAgent(config, settings, argv);
       // Clean up child processes and force exit, matching other non-interactive modes
       await runExitCleanup();

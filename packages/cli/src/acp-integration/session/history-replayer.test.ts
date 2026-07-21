@@ -5,6 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+
+// Deliberately NOT mocked: `writeStderrLineSafe` is the thing under test in
+// "survives a broken stderr" below, and a mocked stand-in would re-implement the
+// very try/catch it is supposed to prove exists. Tests that trigger a stderr
+// line spy on `process.stderr.write` instead.
+
 import {
   HistoryReplayer,
   MISSING_TOOL_RESULT_MESSAGE,
@@ -58,6 +64,14 @@ describe('HistoryReplayer', () => {
   });
 
   const toEpochMs = (ts: string) => new Date(ts).getTime();
+  const replayMeta = (
+    record: ChatRecord,
+    extra: Record<string, unknown> = {},
+  ) => ({
+    ...extra,
+    timestamp: toEpochMs(record.timestamp),
+    qwenTranscript: { sourceRecordIds: [record.uuid] },
+  });
   const sentUpdates = () =>
     sendUpdateSpy.mock.calls.map(
       (call: unknown[]) => call[0] as Record<string, unknown>,
@@ -161,7 +175,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'Hello, world!' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -190,7 +204,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'user_message_chunk',
         content: { type: 'text', text: 'save logs' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
   });
@@ -205,7 +219,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'I can help with that.' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -218,7 +232,7 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Thinking about this...' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
 
@@ -241,17 +255,17 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy.mock.calls[0][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'First part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[1][0]).toEqual({
         sessionUpdate: 'agent_thought_chunk',
         content: { type: 'text', text: 'Second part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy.mock.calls[2][0]).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Third part' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
     });
   });
@@ -275,24 +289,31 @@ describe('HistoryReplayer', () => {
 
       await replayer.replay([record]);
 
-      expect(sendUpdateSpy).toHaveBeenCalledWith(
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        1,
         expect.objectContaining({
           sessionUpdate: 'tool_call',
           status: 'in_progress',
           title: 'read_file',
           rawInput: { path: '/test.ts' },
-          _meta: {
+          _meta: replayMeta(record, {
             toolName: 'read_file',
             // #4175 F4 prereq — ToolCallEmitter now stamps provenance
             // on every tool_call / tool_call_update event so the UI can
             // dispatch on builtin / mcp / subagent without string-
             // matching toolName.
             provenance: 'builtin',
-            timestamp: toEpochMs(record.timestamp),
-          },
+          }),
         }),
       );
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
+      expect(sendUpdateSpy).toHaveBeenCalledTimes(2);
+      expect(sendUpdateSpy).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({
+          toolCallId: 'qwen-replay-tool:assistant-uuid:0',
+          status: 'failed',
+        }),
+      );
     });
 
     it('should use function call id as callId when available', async () => {
@@ -520,7 +541,7 @@ describe('HistoryReplayer', () => {
       ]);
     });
 
-    it('should not synthesize missing-result failures for calls without source ids', async () => {
+    it('should not guess correlation between synthesized and explicit call ids', async () => {
       const records: ChatRecord[] = [
         {
           ...createAssistantRecord(''),
@@ -545,10 +566,15 @@ describe('HistoryReplayer', () => {
       expect(updates.map((update) => update['sessionUpdate'])).toEqual([
         'tool_call',
         'tool_call_update',
+        'tool_call_update',
       ]);
       expect(updates[1]).toMatchObject({
         toolCallId: 'call-123',
         status: 'completed',
+      });
+      expect(updates[2]).toMatchObject({
+        toolCallId: 'qwen-replay-tool:assistant-uuid:0',
+        status: 'failed',
       });
     });
 
@@ -816,12 +842,38 @@ describe('HistoryReplayer', () => {
         ],
         // resultDisplay is included as rawOutput
         rawOutput: 'File contents here',
-        _meta: {
+        _meta: replayMeta(record, {
           toolName: 'read_file',
           // #4175 F4 prereq — provenance stamped on update events too.
           provenance: 'builtin',
-          timestamp: toEpochMs(record.timestamp),
-        },
+        }),
+      });
+    });
+
+    it('preserves vision bridge disclosures on replay', async () => {
+      const resultDisplay = {
+        type: 'vision_bridge_notice' as const,
+        summary: 'Transcribed PDF pages 1-2',
+        notice: 'Converted 2 images via qwen3-vl-plus.',
+      };
+      const record = createToolResultRecord('read_file', resultDisplay);
+
+      await replayer.replay([record]);
+
+      expect(sentUpdates()[0]).toMatchObject({
+        content: [
+          {
+            type: 'content',
+            content: {
+              type: 'text',
+              text: `${resultDisplay.summary}\n${resultDisplay.notice}`,
+            },
+          },
+          {
+            type: 'content',
+            content: { type: 'text', text: '{"result":"ok"}' },
+          },
+        ],
       });
     });
 
@@ -901,10 +953,24 @@ describe('HistoryReplayer', () => {
           { content: 'Task 1', priority: 'medium', status: 'pending' },
           { content: 'Task 2', priority: 'medium', status: 'completed' },
         ],
+        _meta: {
+          ...replayMeta(record, {
+            stats: {
+              promptTokens: 0,
+              cachedTokens: 0,
+              candidateTokens: 0,
+              apiTimeMs: 0,
+            },
+          }),
+          qwenTranscript: {
+            sourceRecordIds: [record.uuid],
+            planToolCallId: 'call-123',
+          },
+        },
       });
     });
 
-    it('should use record uuid as callId when toolCallResult.callId is missing', async () => {
+    it('should synthesize a stable callId when a tool result has no callId', async () => {
       const record: ChatRecord = {
         ...createToolResultRecord('test_tool'),
         uuid: 'fallback-uuid',
@@ -921,7 +987,7 @@ describe('HistoryReplayer', () => {
 
       expect(sendUpdateSpy).toHaveBeenCalledWith(
         expect.objectContaining({
-          toolCallId: 'fallback-uuid',
+          toolCallId: 'qwen-replay-tool:fallback-uuid:result',
         }),
       );
     });
@@ -1003,11 +1069,357 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenCalledWith({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Context compressed.' },
-        _meta: {
+        _meta: replayMeta(systemRecord, {
           source: 'slash_command',
-          timestamp: toEpochMs(systemRecord.timestamp),
-        },
+        }),
       });
+    });
+  });
+
+  describe('goal card replay', () => {
+    const goalRecord = (
+      ...outputHistoryItems: Array<Record<string, unknown>>
+    ): ChatRecord =>
+      ({
+        uuid: 'goal-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/goal',
+          outputHistoryItems,
+        },
+      }) as unknown as ChatRecord;
+
+    const goalStatuses = () =>
+      sentUpdates()
+        .map((u) => u['_meta'] as Record<string, unknown> | undefined)
+        .map((meta) => meta?.['goalStatus'])
+        .filter(Boolean);
+
+    it('re-emits a persisted goal card as _meta.goalStatus, without the type field', async () => {
+      await replayer.replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'ship it',
+          setAt: 1234,
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([
+        { kind: 'set', condition: 'ship it', setAt: 1234 },
+      ]);
+    });
+
+    it('re-emits terminal goal cards', async () => {
+      await replayer.replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 3,
+          durationMs: 900,
+          lastReason: 'tests pass',
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([
+        {
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 3,
+          durationMs: 900,
+          lastReason: 'tests pass',
+        },
+      ]);
+    });
+
+    it('skips per-iteration checking cards so a long TUI goal loop does not flood replay', async () => {
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+        goalRecord({
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'ship it',
+          iterations: 1,
+        }),
+        goalRecord({
+          type: 'goal_status',
+          kind: 'checking',
+          condition: 'ship it',
+          iterations: 2,
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+
+    it('refuses to replay a goal card whose condition is empty', async () => {
+      // A transcript is a file: a corrupted or hand-edited condition would
+      // otherwise ride out to every client inside `_meta.goalStatus`.
+      // `restoreGoalFromHistory` refuses the same card, so neither the card nor
+      // the hook survives — they stay consistent.
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
+      ]);
+
+      expect(goalStatuses()).toEqual([]);
+      expect(sendUpdateSpy).not.toHaveBeenCalled();
+    });
+
+    it('replays a goal card far longer than the old 4,000-char cap', async () => {
+      // `/goal` accepts any length (#6665); dropping the card here would hide a
+      // running goal from every client.
+      const condition = 'x'.repeat(10_000);
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition }),
+      ]);
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition }]);
+    });
+
+    it('does not fall through to the plain-text path for goal cards', async () => {
+      await replayer.replay([
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+      ]);
+
+      expect(sentUpdates()).toHaveLength(1);
+      expect(sentUpdates()[0]['content']).toEqual({ type: 'text', text: '' });
+    });
+
+    it('still replays non-goal output items as agent text', async () => {
+      await replayer.replay([
+        goalRecord(
+          { type: 'goal_status', kind: 'set', condition: 'ship it' },
+          { type: 'assistant', text: 'hello' },
+        ),
+      ]);
+
+      const texts = sentUpdates()
+        .map((u) => (u['content'] as Record<string, unknown>)?.['text'])
+        .filter(Boolean);
+      expect(texts).toEqual(['hello']);
+      expect(goalStatuses()).toHaveLength(1);
+    });
+
+    it('survives a broken stderr instead of abandoning the transcript', async () => {
+      // The empty-condition card writes a diagnostic. `process.stderr.write`
+      // throws on EPIPE (`qwen … | head`, or a daemon whose stderr reader went
+      // away), and a raw `writeStderrLine` would take that throw out through the
+      // item loop and the record loop, aborting the whole replay: the user loses
+      // their transcript because we failed to *complain* about one bad card.
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => {
+          throw Object.assign(new Error('write EPIPE'), { code: 'EPIPE' });
+        });
+
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = [
+        // Trips the diagnostic...
+        { type: 'goal_status', kind: 'set', condition: '' },
+        // ...and this must still be replayed afterwards.
+        { type: 'goal_status', kind: 'set', condition: 'ship it' },
+        { type: 'assistant', text: 'hello' },
+      ];
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+
+      expect(stderr).toHaveBeenCalled();
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+      const texts = sentUpdates()
+        .map((u) => (u['content'] as Record<string, unknown>)?.['text'])
+        .filter(Boolean);
+      expect(texts).toEqual(['hello']);
+
+      stderr.mockRestore();
+    });
+
+    it('survives a slash_command record whose outputHistoryItems is not an array', async () => {
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = {
+        type: 'goal_status',
+        kind: 'set',
+        condition: 'ship it',
+      };
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+      expect(goalStatuses()).toEqual([]);
+    });
+
+    it('survives null entries and still replays the valid cards after them', async () => {
+      const record = goalRecord();
+      (
+        record as unknown as { systemPayload: Record<string, unknown> }
+      ).systemPayload['outputHistoryItems'] = [
+        null,
+        'not an object',
+        { type: 'goal_status', kind: 'set', condition: 'ship it' },
+      ];
+
+      await expect(replayer.replay([record])).resolves.toBeUndefined();
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+  });
+
+  describe('an active goal that cannot be restored is superseded', () => {
+    // The client reads "a goal is running" off the newest goal card it saw. If
+    // restore is going to refuse the goal, replaying the `set` card alone
+    // leaves the UI claiming a live loop that nothing drives.
+    const goalRecord = (
+      ...outputHistoryItems: Array<Record<string, unknown>>
+    ): ChatRecord =>
+      ({
+        uuid: 'goal-uuid',
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date().toISOString(),
+        type: 'system',
+        subtype: 'slash_command',
+        cwd: '/test',
+        version: '1.0.0',
+        systemPayload: {
+          phase: 'result',
+          rawCommand: '/goal',
+          outputHistoryItems,
+        },
+      }) as unknown as ChatRecord;
+
+    const goalStatuses = () =>
+      sentUpdates()
+        .map((u) => u['_meta'] as Record<string, unknown> | undefined)
+        .map((meta) => meta?.['goalStatus'] as Record<string, unknown>)
+        .filter(Boolean);
+
+    const replayWithConfig = async (
+      config: Partial<Record<string, unknown>>,
+      records: ChatRecord[],
+    ) => {
+      const ctx = {
+        ...mockContext,
+        config: {
+          getToolRegistry: () => ({ getTool: () => null }),
+          isTrustedFolder: () => true,
+          getDisableAllHooks: () => false,
+          getHookSystem: () => ({}),
+          ...config,
+        } as unknown as Config,
+      } as unknown as SessionContext;
+      await new HistoryReplayer(ctx, {
+        supersedeUnrestorableGoal: true,
+      }).replay(records);
+    };
+
+    it.each([
+      [
+        'the folder is no longer trusted',
+        { isTrustedFolder: () => false },
+        'not trusted',
+      ],
+      [
+        'hooks are disabled by policy',
+        { getDisableAllHooks: () => true },
+        'hooks are disabled',
+      ],
+      [
+        'the hook system is unavailable',
+        { getHookSystem: () => undefined },
+        'hook system is unavailable',
+      ],
+    ])('emits a trailing cleared card when %s', async (_l, cfg, reason) => {
+      await replayWithConfig(cfg, [
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'ship it',
+          setAt: 1234,
+        }),
+      ]);
+
+      const statuses = goalStatuses();
+      expect(statuses).toHaveLength(2);
+      expect(statuses[0]).toMatchObject({ kind: 'set' });
+      // Ordering is the whole point: `loadSession` batches replay updates into
+      // its response, so a card emitted after replay would reach the client
+      // first and lose to the `set` card.
+      expect(statuses[1]).toMatchObject({
+        kind: 'cleared',
+        condition: 'ship it',
+        setAt: 1234,
+      });
+      expect(statuses[1]['lastReason']).toContain(reason);
+    });
+
+    it('leaves a restorable goal alone', async () => {
+      await replayWithConfig({}, [
+        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+      ]);
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+
+    it('says nothing when the transcript has no active goal', async () => {
+      await replayWithConfig({ isTrustedFolder: () => false }, [
+        goalRecord({
+          type: 'goal_status',
+          kind: 'achieved',
+          condition: 'ship it',
+          iterations: 1,
+          durationMs: 5,
+        }),
+      ]);
+      expect(goalStatuses()).toHaveLength(1);
+      expect(goalStatuses()[0]).toMatchObject({ kind: 'achieved' });
+    });
+
+    it('says nothing when the active card was already dropped as invalid', async () => {
+      // The empty-condition card never reached the client, so there is no
+      // phantom "running" state to correct — a `cleared` card would name a goal
+      // the user never saw.
+      await replayWithConfig({ isTrustedFolder: () => false }, [
+        goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
+      ]);
+      expect(goalStatuses()).toEqual([]);
+    });
+
+    it('stays off by default, and never touches config when it is off', async () => {
+      // Export replays a transcript through this class with a config stub that
+      // throws on any method it does not implement. A replay that only renders
+      // history must not ask about trust or hook policy — or editorialize.
+      const ctx = {
+        ...mockContext,
+        config: new Proxy(
+          { getToolRegistry: () => ({ getTool: () => null }) },
+          {
+            get(target: Record<string, unknown>, prop: string | symbol) {
+              if (prop in target) return target[prop as string];
+              if (typeof prop === 'symbol') return undefined;
+              throw new Error(`config does not implement ${String(prop)}`);
+            },
+          },
+        ) as unknown as Config,
+      } as unknown as SessionContext;
+
+      await expect(
+        new HistoryReplayer(ctx).replay([
+          goalRecord({
+            type: 'goal_status',
+            kind: 'set',
+            condition: 'ship it',
+          }),
+        ]),
+      ).resolves.toBeUndefined();
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
     });
   });
 
@@ -1079,18 +1491,18 @@ describe('HistoryReplayer', () => {
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(1, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: 'Hello!' },
-        _meta: { timestamp: toEpochMs(record.timestamp) },
+        _meta: replayMeta(record),
       });
       expect(sendUpdateSpy).toHaveBeenNthCalledWith(2, {
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '' },
         _meta: {
+          timestamp: toEpochMs(record.timestamp),
+          qwenTranscript: { sourceRecordIds: [record.uuid] },
           usage: {
             inputTokens: 100,
             outputTokens: 50,
             totalTokens: 150,
-            thoughtTokens: undefined,
-            cachedReadTokens: undefined,
           },
         },
       });

@@ -12,10 +12,8 @@ import { randomUUID } from 'node:crypto';
 import readline from 'node:readline';
 import type { Content, Part } from '@google/genai';
 import * as jsonl from '../utils/jsonl-utils.js';
-import {
-  buildOrderedUuidChain,
-  type HistoryGap,
-} from '../utils/conversation-chain.js';
+import type { HistoryGap } from '../utils/conversation-chain.js';
+import { prepareTranscriptRecords } from '../utils/transcript-records.js';
 import type {
   ChatCompressionRecordPayload,
   ChatRecord,
@@ -383,6 +381,24 @@ export class SessionService {
       return true;
     }
 
+    // Worktree sessions record cwd as the worktree path
+    // (<repoRoot>/.qwen/worktrees/<slug>), which has a different project
+    // hash. Infer the repo root from the path and check its hash. This
+    // is durable — it doesn't depend on the sidecar file, which is
+    // transient and cleared when the worktree is removed. Pure string
+    // ops, so check before the file-read runtime status below.
+    // Use lastIndexOf to handle nested worktrees: for
+    // /repo/.qwen/worktrees/parent/.qwen/worktrees/child, the innermost
+    // marker gives repoRoot = /repo/.qwen/worktrees/parent (the workspace).
+    const worktreesMarker = `${path.sep}.qwen${path.sep}worktrees${path.sep}`;
+    const markerIdx = recordCwd.lastIndexOf(worktreesMarker);
+    if (markerIdx > 0) {
+      const repoRoot = recordCwd.substring(0, markerIdx);
+      if (getProjectHash(repoRoot) === this.projectHash) {
+        return true;
+      }
+    }
+
     const status = await readRuntimeStatus(
       this.storage.getRuntimeStatusPath(sessionId),
     );
@@ -399,6 +415,13 @@ export class SessionService {
    */
   getWorktreeSessionPath(sessionId: string): string {
     return this.getWorktreeSessionPathForState(sessionId, 'active');
+  }
+
+  getWorktreeSessionPathForArchiveState(
+    sessionId: string,
+    state: SessionArchiveState,
+  ): string {
+    return this.getWorktreeSessionPathForState(sessionId, state);
   }
 
   private async readProjectSessionHead(
@@ -1112,62 +1135,10 @@ export class SessionService {
   }
 
   /**
-   * Aggregates multiple records with the same uuid into a single ChatRecord.
-   * Merges content fields (message, tokens, model, toolCallResult).
-   */
-  private aggregateRecords(records: ChatRecord[]): ChatRecord {
-    if (records.length === 0) {
-      throw new Error('Cannot aggregate empty records array');
-    }
-
-    const base = { ...records[0] };
-
-    for (let i = 1; i < records.length; i++) {
-      const record = records[i];
-
-      // Merge message (Content objects)
-      if (record.message !== undefined) {
-        if (base.message === undefined) {
-          base.message = record.message;
-        } else {
-          base.message = {
-            role: base.message.role,
-            parts: [
-              ...(base.message.parts || []),
-              ...(record.message.parts || []),
-            ],
-          };
-        }
-      }
-
-      // Merge tokens (take the latest)
-      if (record.usageMetadata) {
-        base.usageMetadata = record.usageMetadata;
-      }
-
-      // Merge toolCallResult
-      if (record.toolCallResult && !base.toolCallResult) {
-        base.toolCallResult = record.toolCallResult;
-      }
-
-      // Merge model (take the first non-empty one)
-      if (record.model && !base.model) {
-        base.model = record.model;
-      }
-
-      // Update timestamp to the latest
-      if (record.timestamp > base.timestamp) {
-        base.timestamp = record.timestamp;
-      }
-    }
-
-    return base;
-  }
-
-  /**
    * Reconstructs a linear conversation from tree-structured records.
    *
-   * Delegates the parentUuid walk to {@link buildOrderedUuidChain}. With
+   * Delegates validation, parentUuid walking, and fragment aggregation to the
+   * shared transcript record preparation module. With
    * `detectGaps`, a walk that stops on a physically-missing parent records the
    * break in the returned `gaps` (see {@link HistoryGap}) so the surface can
    * mark it — the earlier records are NOT reconstructed (reconnecting them
@@ -1179,35 +1150,13 @@ export class SessionService {
     opts?: { leafUuid?: string; detectGaps?: boolean },
   ): { messages: ChatRecord[]; gaps: HistoryGap[] } {
     if (records.length === 0) return { messages: [], gaps: [] };
-
-    const recordsByUuid = new Map<string, ChatRecord[]>();
-    for (const record of records) {
-      const existing = recordsByUuid.get(record.uuid) || [];
-      existing.push(record);
-      recordsByUuid.set(record.uuid, existing);
-    }
-
-    const { uuids, gaps } = buildOrderedUuidChain(records, opts);
-
-    const messages: ChatRecord[] = [];
-    for (const uuid of uuids) {
-      const recordsForUuid = recordsByUuid.get(uuid);
-      if (recordsForUuid && recordsForUuid.length > 0) {
-        messages.push(this.aggregateRecords(recordsForUuid));
-      }
-    }
-
-    return { messages, gaps };
-  }
-
-  private lastConversationRecordUuid(records: ChatRecord[]): string | null {
-    for (let index = records.length - 1; index >= 0; index--) {
-      const record = records[index];
-      if (record && !isSessionArtifactRecord(record)) {
-        return record.uuid;
-      }
-    }
-    return null;
+    const prepared = prepareTranscriptRecords(records, {
+      ...(opts?.leafUuid !== undefined ? { leafUuid: opts.leafUuid } : {}),
+    });
+    return {
+      messages: prepared.records.map((record) => record as ChatRecord),
+      gaps: opts?.detectGaps ? [...prepared.gaps] : [],
+    };
   }
 
   /**
@@ -1282,13 +1231,7 @@ export class SessionService {
     }
 
     // Reconstruct linear history
-    const leafUuid = this.lastConversationRecordUuid(records);
-    if (!leafUuid) {
-      return;
-    }
-
     const { messages, gaps } = this.reconstructHistory(records, {
-      leafUuid,
       detectGaps: true,
     });
     if (messages.length === 0) {
@@ -1725,13 +1668,7 @@ export class SessionService {
 
     // Copy only the active branch. Rewind leaves old records in the JSONL as
     // abandoned parentUuid branches; copying raw records would resurrect them.
-    const leafUuid = this.lastConversationRecordUuid(records);
-    if (!leafUuid) {
-      throw new Error(`Source session not found or empty: ${sourceSessionId}`);
-    }
-    const { messages: activeMessages } = this.reconstructHistory(records, {
-      leafUuid,
-    });
+    const { messages: activeMessages } = this.reconstructHistory(records);
     const sourceRecords = includeActiveSideArtifactRecords(
       records,
       activeMessages,

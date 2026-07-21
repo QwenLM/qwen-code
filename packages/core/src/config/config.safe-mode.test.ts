@@ -9,6 +9,7 @@ import type { Mock } from 'vitest';
 import type { ConfigParameters } from './config.js';
 import { Config } from './config.js';
 import * as fs from 'node:fs';
+import { recordStartupEvent } from '../utils/startupEventSink.js';
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -308,6 +309,35 @@ describe('Config safe mode', () => {
       await config.initialize();
       expect(config.getUserMemory()).toBe('');
       expect(config.getGeminiMdFileCount()).toBe(0);
+    });
+
+    it('records every fixed Config startup phase in order when skipped', async () => {
+      const config = new Config({ ...baseParams, safeMode: true });
+
+      await config.initialize();
+
+      const events = vi
+        .mocked(recordStartupEvent)
+        .mock.calls.map(([name]) => name)
+        .filter((name) => name.startsWith('config_initialize_'));
+      expect(events).toEqual([
+        'config_initialize_extensions_initial_start',
+        'config_initialize_extensions_initial_end',
+        'config_initialize_hooks_start',
+        'config_initialize_hooks_end',
+        'config_initialize_skills_start',
+        'config_initialize_skills_end',
+        'config_initialize_extensions_final_start',
+        'config_initialize_extensions_final_end',
+        'config_initialize_hierarchical_memory_start',
+        'config_initialize_hierarchical_memory_end',
+        'config_initialize_tool_registry_start',
+        'config_initialize_ripgrep_probe_start',
+        'config_initialize_ripgrep_probe_end',
+        'config_initialize_tool_registry_end',
+        'config_initialize_tool_warmup_start',
+        'config_initialize_tool_warmup_end',
+      ]);
     });
   });
 });

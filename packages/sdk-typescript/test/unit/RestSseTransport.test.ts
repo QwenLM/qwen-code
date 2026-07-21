@@ -75,6 +75,22 @@ function sseResponse(frames: string): Response {
   });
 }
 
+function heldOpenSseResponse(frames: string, onCancel?: () => void): Response {
+  const encoder = new TextEncoder();
+  const body = new ReadableStream<Uint8Array>({
+    start(controller) {
+      controller.enqueue(encoder.encode(frames));
+    },
+    cancel() {
+      onCancel?.();
+    },
+  });
+  return new Response(body, {
+    status: 200,
+    headers: { 'content-type': 'text/event-stream' },
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -263,7 +279,7 @@ describe('RestSseTransport', () => {
     });
 
     it('rejects non-SSE content-type', async () => {
-      const { fetch } = recordingFetch(
+      const { fetch, calls } = recordingFetch(
         () =>
           new Response('not sse', {
             status: 200,
@@ -273,15 +289,17 @@ describe('RestSseTransport', () => {
       const transport = new RestSseTransport('http://d', undefined, fetch);
       const gen = transport.subscribeEvents('s1');
       await expect(gen.next()).rejects.toThrow(DaemonHttpError);
+      expect(calls[0].signal?.aborted).toBe(true);
     });
 
     it('throws DaemonHttpError on non-ok response', async () => {
-      const { fetch } = recordingFetch(() =>
+      const { fetch, calls } = recordingFetch(() =>
         jsonResponse(404, { error: 'session not found' }),
       );
       const transport = new RestSseTransport('http://d', undefined, fetch);
       const gen = transport.subscribeEvents('s1');
       await expect(gen.next()).rejects.toThrow(DaemonHttpError);
+      expect(calls[0].signal?.aborted).toBe(true);
     });
 
     it('throws DaemonHttpError with correct status on non-ok response', async () => {
@@ -300,7 +318,7 @@ describe('RestSseTransport', () => {
     });
 
     it('throws when response has no body', async () => {
-      const { fetch } = recordingFetch(
+      const { fetch, calls } = recordingFetch(
         () =>
           new Response(null, {
             status: 200,
@@ -310,6 +328,7 @@ describe('RestSseTransport', () => {
       const transport = new RestSseTransport('http://d', undefined, fetch);
       const gen = transport.subscribeEvents('s1');
       await expect(gen.next()).rejects.toThrow('No SSE body');
+      expect(calls[0].signal?.aborted).toBe(true);
     });
 
     it('parses SSE frames into DaemonEvents', async () => {
@@ -317,7 +336,7 @@ describe('RestSseTransport', () => {
         'data: {"type":"update","data":{"msg":"hello"},"id":1,"v":1}\n\n',
         'data: {"type":"done","data":{},"id":2,"v":1}\n\n',
       ].join('');
-      const { fetch } = recordingFetch(() => sseResponse(frames));
+      const { fetch, calls } = recordingFetch(() => sseResponse(frames));
       const transport = new RestSseTransport('http://d', undefined, fetch);
 
       const events: unknown[] = [];
@@ -327,6 +346,90 @@ describe('RestSseTransport', () => {
       expect(events).toHaveLength(2);
       expect((events[0] as { type: string }).type).toBe('update');
       expect((events[1] as { type: string }).type).toBe('done');
+      expect(calls[0].signal?.aborted).toBe(true);
+    });
+
+    it('aborts the request when the generator is returned early', async () => {
+      const onCancel = vi.fn();
+      const { fetch, calls } = recordingFetch(() =>
+        heldOpenSseResponse(
+          'data: {"type":"a","data":{},"id":1,"v":1}\n\n',
+          onCancel,
+        ),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1');
+
+      expect((await gen.next()).done).toBe(false);
+      expect(calls[0].signal?.aborted).toBe(false);
+      await gen.return(undefined);
+
+      expect(calls[0].signal?.aborted).toBe(true);
+      expect(onCancel).toHaveBeenCalledOnce();
+    });
+
+    it('aborts the request when for-await exits early', async () => {
+      const onCancel = vi.fn();
+      const { fetch, calls } = recordingFetch(() =>
+        heldOpenSseResponse(
+          'data: {"type":"a","data":{},"id":1,"v":1}\n\n',
+          onCancel,
+        ),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+
+      for await (const _event of transport.subscribeEvents('s1')) {
+        break;
+      }
+
+      expect(calls[0].signal?.aborted).toBe(true);
+      expect(onCancel).toHaveBeenCalledOnce();
+    });
+
+    it('aborts the request when the generator is thrown into', async () => {
+      const upstream = new Error('consumer stopped');
+      const { fetch, calls } = recordingFetch(() =>
+        heldOpenSseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1');
+
+      expect((await gen.next()).done).toBe(false);
+      await expect(gen.throw(upstream)).rejects.toBe(upstream);
+
+      expect(calls[0].signal?.aborted).toBe(true);
+    });
+
+    it('aborts the request without replacing a stream error', async () => {
+      const upstream = new Error('upstream network drop');
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(upstream);
+        },
+      });
+      const { fetch, calls } = recordingFetch(
+        () =>
+          new Response(body, {
+            headers: { 'content-type': 'text/event-stream' },
+          }),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1');
+
+      await expect(gen.next()).rejects.toBe(upstream);
+      expect(calls[0].signal?.aborted).toBe(true);
+    });
+
+    it('aborts the request without replacing a connection error', async () => {
+      const upstream = new Error('connection refused');
+      const { fetch, calls } = recordingFetch(() => {
+        throw upstream;
+      });
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1');
+
+      await expect(gen.next()).rejects.toBe(upstream);
+      expect(calls[0].signal?.aborted).toBe(true);
     });
 
     it('URL-encodes sessionId in path', async () => {
@@ -359,8 +462,10 @@ describe('RestSseTransport', () => {
 
     it('connect-phase timeout triggers abort', async () => {
       // Create a fetch that hangs until aborted
+      let capturedSignal: AbortSignal | null | undefined;
       const fetchFn = vi.fn(
         async (_input: RequestInfo | URL, init?: RequestInit) => {
+          capturedSignal = init?.signal;
           return new Promise<Response>((_, reject) => {
             if (init?.signal) {
               init.signal.addEventListener('abort', () => {
@@ -376,6 +481,22 @@ describe('RestSseTransport', () => {
       const transport = new RestSseTransport('http://d', undefined, fetchFn);
       const gen = transport.subscribeEvents('s1', { connectTimeoutMs: 50 });
       await expect(gen.next()).rejects.toThrow();
+      expect(capturedSignal?.aborted).toBe(true);
+    });
+
+    it('does not apply the connect timeout to the SSE body', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        heldOpenSseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1', { connectTimeoutMs: 10 });
+
+      expect((await gen.next()).done).toBe(false);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(calls[0].signal?.aborted).toBe(false);
+
+      await gen.return(undefined);
+      expect(calls[0].signal?.aborted).toBe(true);
     });
 
     it('signal abort prevents iteration', async () => {
@@ -385,7 +506,7 @@ describe('RestSseTransport', () => {
       // When the signal is pre-aborted, the fetch call will receive
       // the aborted signal. The mock fetch proceeds anyway, but
       // parseSseStream sees the aborted signal and returns immediately.
-      const { fetch } = recordingFetch(() =>
+      const { fetch, calls } = recordingFetch(() =>
         sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
       );
       const transport = new RestSseTransport('http://d', undefined, fetch);
@@ -402,6 +523,71 @@ describe('RestSseTransport', () => {
       }
       // Either way, no events should be yielded
       expect(events).toHaveLength(0);
+      expect(calls[0].signal?.aborted).toBe(true);
+    });
+
+    it('signal abort ends an active iteration', async () => {
+      const ctrl = new AbortController();
+      const onCancel = vi.fn();
+      const { fetch, calls } = recordingFetch(() =>
+        heldOpenSseResponse(
+          'data: {"type":"a","data":{},"id":1,"v":1}\n\n',
+          onCancel,
+        ),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1', { signal: ctrl.signal });
+
+      expect((await gen.next()).done).toBe(false);
+      ctrl.abort();
+      expect((await gen.next()).done).toBe(true);
+
+      expect(calls[0].signal?.aborted).toBe(true);
+      expect(onCancel).toHaveBeenCalledOnce();
+    });
+
+    it('aborts the underlying fetch when the consumer breaks early without a caller signal', async () => {
+      // Regression for #7238: a consumer that opens a subscription,
+      // receives an event, and `break`s out — without supplying
+      // opts.signal — must still tear down the fetch/TCP connection so
+      // the daemon EventBus subscriber is released. Previously the
+      // request-lifetime controller was never aborted on normal iterator
+      // exit, so the fetch signal stayed unaborted and the connection
+      // leaked.
+      const frames = [
+        'data: {"type":"a","data":{},"id":1,"v":1}\n\n',
+        'data: {"type":"b","data":{},"id":2,"v":1}\n\n',
+      ].join('');
+      const { fetch, calls } = recordingFetch(() => sseResponse(frames));
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+
+      const events: unknown[] = [];
+      for await (const event of transport.subscribeEvents('s1')) {
+        events.push(event);
+        break; // exit after the first event, no caller signal
+      }
+
+      expect(events).toHaveLength(1);
+      expect(calls[0].signal).not.toBeNull();
+      expect(calls[0].signal?.aborted).toBe(true);
+    });
+
+    it('aborts the underlying fetch after the stream completes normally', async () => {
+      // The request-lifetime controller must be aborted on every exit
+      // path, including normal end-of-stream, so no fetch/TCP connection
+      // is left dangling.
+      const { fetch, calls } = recordingFetch(() =>
+        sseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+
+      const events: unknown[] = [];
+      for await (const event of transport.subscribeEvents('s1')) {
+        events.push(event);
+      }
+
+      expect(events).toHaveLength(1);
+      expect(calls[0].signal?.aborted).toBe(true);
     });
   });
 
@@ -419,6 +605,65 @@ describe('RestSseTransport', () => {
       const transport = new RestSseTransport('http://d', undefined, fetch);
       transport.dispose();
       expect(() => transport.dispose()).not.toThrow();
+    });
+
+    it('aborts every active SSE request', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        heldOpenSseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const first = transport.subscribeEvents('s1');
+      const second = transport.subscribeEvents('s2');
+
+      await Promise.all([first.next(), second.next()]);
+      expect(calls).toHaveLength(2);
+      expect(calls.every((call) => call.signal?.aborted === false)).toBe(true);
+
+      transport.dispose();
+
+      expect(calls.every((call) => call.signal?.aborted === true)).toBe(true);
+      await Promise.all([first.return(undefined), second.return(undefined)]);
+    });
+
+    it('unblocks a pending iterator read', async () => {
+      const { fetch } = recordingFetch(() =>
+        heldOpenSseResponse('data: {"type":"a","data":{},"id":1,"v":1}\n\n'),
+      );
+      const transport = new RestSseTransport('http://d', undefined, fetch);
+      const gen = transport.subscribeEvents('s1');
+
+      expect((await gen.next()).done).toBe(false);
+      const pending = gen.next();
+      transport.dispose();
+
+      await expect(pending).resolves.toEqual({ done: true, value: undefined });
+    });
+
+    it('aborts a request that is still connecting', async () => {
+      const aborted = new DOMException(
+        'The operation was aborted',
+        'AbortError',
+      );
+      let capturedSignal: AbortSignal | null | undefined;
+      const fetchFn = vi.fn(
+        async (_input: RequestInfo | URL, init?: RequestInit) => {
+          capturedSignal = init?.signal;
+          return new Promise<Response>((_, reject) => {
+            init?.signal?.addEventListener('abort', () => reject(aborted), {
+              once: true,
+            });
+          });
+        },
+      ) as unknown as typeof globalThis.fetch;
+      const transport = new RestSseTransport('http://d', undefined, fetchFn);
+      const gen = transport.subscribeEvents('s1');
+
+      const pending = gen.next();
+      await vi.waitFor(() => expect(capturedSignal).toBeDefined());
+      transport.dispose();
+
+      expect(capturedSignal?.aborted).toBe(true);
+      await expect(pending).rejects.toBe(aborted);
     });
   });
 });

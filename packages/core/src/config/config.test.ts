@@ -74,6 +74,7 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
 import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -4383,6 +4384,28 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('MEMORY.md is currently empty');
   });
 
+  it('refreshHierarchicalMemory should omit managed auto-memory prompt when disabled', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+    });
+
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      fileCount: 1,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+    vi.mocked(readAutoMemoryIndex).mockResolvedValue(null);
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getUserMemory()).toContain('Project rules');
+    expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(readAutoMemoryIndex).not.toHaveBeenCalled();
+  });
+
   it('refreshHierarchicalMemory should only use explicit inputs in bare mode', async () => {
     const config = new Config({
       ...baseParams,
@@ -4418,13 +4441,13 @@ describe('Server Config (config.ts)', () => {
       expect(config.isManagedMemoryAvailable()).toBe(false);
     });
 
-    it('returns true even when enableManagedAutoMemory is false', () => {
+    it('returns false when enableManagedAutoMemory is false', () => {
       const config = new Config({
         ...baseParams,
         enableManagedAutoMemory: false,
         bareMode: false,
       });
-      expect(config.isManagedMemoryAvailable()).toBe(true);
+      expect(config.isManagedMemoryAvailable()).toBe(false);
     });
   });
 
@@ -7241,6 +7264,78 @@ describe('Model Switching and Config Updates', () => {
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
     });
+  });
+
+  describe('Stop dispatch through the hook execution bridge', () => {
+    it.each([
+      {
+        name: 'ignores non-blocking outputs',
+        otherOutput: { continue: true },
+        expected: false,
+        expectedReason: undefined,
+      },
+      {
+        name: 'detects another blocking output',
+        otherOutput: {
+          decision: 'block',
+          reason: 'Policy review is still required',
+        },
+        expected: true,
+        expectedReason: 'Policy review is still required',
+      },
+      {
+        name: 'preserves a stop reason',
+        otherOutput: {
+          continue: false,
+          stopReason: 'External stop hook feedback',
+        },
+        expected: true,
+        expectedReason: 'External stop hook feedback',
+      },
+    ])(
+      '$name when a goal hook blocks',
+      async ({ otherOutput, expected, expectedReason }) => {
+        const config = new Config({ ...baseParams });
+        await config.initialize();
+        const goalOutput = {
+          decision: 'block' as const,
+          reason: 'Keep working',
+          hookSpecificOutput: {
+            [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
+          },
+        };
+        const fireStopEvent = vi.fn().mockResolvedValue({
+          finalOutput: {
+            ...goalOutput,
+            ...otherOutput,
+          },
+          allOutputs: [goalOutput, otherOutput],
+        });
+        // @ts-expect-error - accessing private for testing
+        config['hookSystem'] = { fireStopEvent };
+
+        const response = await config
+          .getMessageBus()!
+          .request<HookExecutionRequest, HookExecutionResponse>(
+            {
+              type: MessageBusType.HOOK_EXECUTION_REQUEST,
+              eventName: 'Stop',
+              input: {
+                stop_hook_active: true,
+                last_assistant_message: 'last response',
+              },
+            },
+            MessageBusType.HOOK_EXECUTION_RESPONSE,
+          );
+
+        expect(response.error).toBeUndefined();
+        expect(response).toMatchObject({
+          success: true,
+          hasNonGoalBlockingStopHook: expected,
+        });
+        expect(response.nonGoalBlockingStopReason).toBe(expectedReason);
+      },
+    );
   });
 
   describe('MessageDisplay dispatch through the hook execution bridge', () => {

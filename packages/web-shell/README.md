@@ -136,6 +136,33 @@ export function App() {
 > **注意**：不要在已有 `DaemonSessionProvider` 下使用
 > `WebShellWithProviders`，否则会创建嵌套的重复 Provider。
 
+### 3. 只读 ChatRecord JSONL
+
+`WebShellTranscript` 只接收已经投影完成的 blocks，不连接 daemon，也不提供 composer、
+审批或 session mutation。浏览器宿主可以逐行解析 JSONL，再通过 SDK 的 opt-in facade
+投影：
+
+```tsx
+import { projectChatRecordsToDaemonTranscript } from '@qwen-code/sdk/daemon/transcript';
+import { WebShellTranscript } from '@qwen-code/web-shell';
+
+const records = jsonl
+  .split(/\r?\n/)
+  .filter((line) => line.trim())
+  .map((line) => JSON.parse(line) as unknown);
+const projection = projectChatRecordsToDaemonTranscript(records);
+
+<WebShellTranscript
+  blocks={projection.blocks}
+  theme="dark"
+  language="zh-CN"
+  style={{ height: 640 }}
+/>;
+```
+
+宿主应显示 `projection.diagnostics`，并在 `complete=false` 或 `truncated=true` 时提示
+历史可能不完整。组件需要一个可用高度；自定义 renderer 的副作用仍由宿主负责。
+
 ## Props
 
 ### WebShellWithProviders
@@ -162,6 +189,23 @@ export function App() {
 | `onThemeChange`     | `(theme: WebShellTheme) => void`                                                        | `/theme` 命令切换主题后触发                                                      |
 | `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`                                                    | UI 语言                                                                          |
 | `onLanguageChange`  | `(language: WebShellLanguage) => void`                                                  | `/language ui` 切换 UI 语言后触发                                                |
+| `onSlashCommand`    | `(command: WebShellSlashCommand) => boolean \| void`                                    | 斜杠命令进入默认处理前触发；返回 `true` 时由宿主接管并跳过默认行为               |
+
+宿主可以监听命令，也可以返回 `true` 接管对应操作：
+
+```tsx
+<WebShell
+  onSlashCommand={({ command, args, input }) => {
+    if (command !== 'deploy') return;
+    openDeployDialog({ environment: args, source: input });
+    return true;
+  }}
+/>
+```
+
+回调在主聊天和分屏聊天中都会触发，也可以在 daemon 断连时处理纯宿主操作。
+命令名后必须是空白或输入结束，因此 `/usr/local/bin/tool` 等绝对路径不会触发
+回调。如果回调抛出异常，Web Shell 会报告错误并继续执行默认命令流程。
 
 锁定工作区时，可以自定义 Sidebar 文件夹行的内容：
 

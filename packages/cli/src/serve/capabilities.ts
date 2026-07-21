@@ -72,6 +72,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_mcp: { since: 'v1' },
   workspace_skills: { since: 'v1' },
   workspace_providers: { since: 'v1' },
+  workspace_acp_preheat: { since: 'v1' },
+  workspace_acp_status: { since: 'v1' },
   auth_provider_install: { since: 'v1' },
   // Workspace memory CRUD (`GET/POST /workspace/memory`). Daemon exposes
   // hierarchical QWEN.md state and accepts append/replace writes scoped
@@ -284,6 +286,8 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Runtime GET/PUT/DELETE control for daemon-managed channel selection.
   // The route exists even when no selection was supplied at daemon boot.
   channel_control: { since: 'v1' },
+  // Read-only workspace graph of recently observed channel contacts.
+  workspace_channel_observed_contacts: { since: 'v1' },
   // Multi-workspace session routing. Advertised only when one daemon hosts
   // more than one registered workspace runtime.
   multi_workspace_sessions: { since: 'v1' },
@@ -292,6 +296,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // Singular session shell routes resolve the owning live workspace runtime.
   multi_workspace_session_shell: { since: 'v1' },
   persistent_workspace_registration: { since: 'v1' },
+  // Optional presentation-only names and updates to those names for workspace
+  // runtimes. Workspace ids and canonical paths remain the routing identities.
+  workspace_display_name: { since: 'v1' },
   workspace_runtime_removal: { since: 'v1' },
   // Workspace-qualified core REST routes under `/workspaces/:workspace/...`.
   // Covers core file/status/permissions/trust/lifecycle/MCP/tool, memory,

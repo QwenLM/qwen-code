@@ -68,6 +68,7 @@ owns the model-driven decisions, code changes, and pre-commit verification.
   Keep `failure.md` and `handoff.md` English-only WITHOUT a details block:
   handoff comments embed a byte-truncated excerpt of them, and a severed
   `<details>` tag would swallow the rest of the comment when rendered.
+
 - Never ask the user a question in this headless workflow. If blocked, write
   `<workdir>/failure.md` with what you learned and stop.
 

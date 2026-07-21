@@ -17,11 +17,11 @@ import { ToolCallStatus } from '../../types.js';
 import type { IndividualToolCallDisplay } from '../../types.js';
 
 // ToolStatusIndicator pulls in GeminiRespondingSpinner which requires
-// StreamingContext; stub it out so we can test the elapsed/timeout
-// plumbing in isolation.
-vi.mock('../shared/ToolStatusIndicator.js', () => ({
+// StreamingContext; stub the component but keep the real constant so
+// height-estimation tests stay in sync with production.
+vi.mock('../shared/ToolStatusIndicator.js', async (importOriginal) => ({
+  ...(await importOriginal()),
   ToolStatusIndicator: () => <Text>•</Text>,
-  STATUS_INDICATOR_WIDTH: 2,
 }));
 
 const NOW = 1_700_000_000_000;
@@ -162,6 +162,141 @@ describe('<CompactToolGroupDisplay /> — summary label', () => {
     expect(frame).not.toContain('…');
     expect(frame.replace(/\s/g, '')).toContain(`Read${description}`);
   });
+
+  it('shows the latest executing description while a batch is active', () => {
+    const tools = [
+      toolCall({
+        callId: 'c1',
+        name: 'ReadFile',
+        description: 'completed.ts',
+      }),
+      toolCall({
+        callId: 'c2',
+        name: 'ReadFile',
+        description: 'current.ts',
+        status: ToolCallStatus.Executing,
+      }),
+      toolCall({
+        callId: 'c3',
+        name: 'ReadFile',
+        description: 'queued.ts',
+        status: ToolCallStatus.Pending,
+      }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    const frame = lastFrame()!;
+
+    expect(frame).toContain('Reading 3 files…');
+    expect(frame).toContain('⎿ current.ts');
+    expect(frame).not.toContain('queued.ts');
+  });
+
+  it('hides the description hint when a batch completes', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    const frame = lastFrame()!;
+
+    expect(frame).toContain('Read 2 files');
+    expect(frame).not.toContain('⎿');
+  });
+
+  it('does not expose JSON fallback arguments as an active hint', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({
+        callId: 'c2',
+        name: 'ReadFile',
+        description: '{"file_path":"b.ts"}',
+        status: ToolCallStatus.Executing,
+      }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    const frame = lastFrame()!;
+
+    expect(frame).toContain('Reading 2 files…');
+    expect(frame).not.toContain('⎿');
+    expect(frame).not.toContain('file_path');
+  });
+
+  it('does not repeat a description already shown for a single-tool category', () => {
+    const tools = [
+      toolCall({
+        callId: 'c1',
+        name: 'Grep',
+        description: 'needle',
+        status: ToolCallStatus.Executing,
+      }),
+      toolCall({
+        callId: 'c2',
+        name: 'ReadFile',
+        description: 'a.ts',
+      }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    const frame = lastFrame()!;
+
+    expect(frame).toContain('Searching needle, reading a.ts…');
+    expect(frame).not.toContain('⎿');
+    expect(estimateCompactToolGroupHeight(tools, 80)).toBe(1);
+  });
+
+  it('keeps a 30-file active batch to two rows at 80 columns', () => {
+    const tools = Array.from({ length: 30 }, (_, index) =>
+      toolCall({
+        callId: `c${index + 1}`,
+        name: 'ReadFile',
+        description: `packages/cli/src/ui/components/example-${String(
+          index + 1,
+        ).padStart(2, '0')}.tsx`,
+        status:
+          index === 29 ? ToolCallStatus.Executing : ToolCallStatus.Success,
+      }),
+    );
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={80} />,
+    );
+    const frame = lastFrame()!;
+
+    expect(frame.split('\n')).toHaveLength(2);
+    expect(frame).toContain('Reading 30 files…');
+    expect(frame).toContain('⎿ packages/cli/src/ui/components/example-30.tsx');
+    expect(frame).not.toContain('example-01.tsx');
+  });
+
+  it('truncates a long active hint to one row', () => {
+    const currentPath =
+      'packages/cli/src/ui/components/messages/CompactToolGroupDisplay.tsx';
+    const tools = [
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({
+        callId: 'c2',
+        name: 'ReadFile',
+        description: currentPath,
+        status: ToolCallStatus.Executing,
+      }),
+    ];
+    const { lastFrame } = render(
+      <CompactToolGroupDisplay toolCalls={tools} contentWidth={30} />,
+    );
+    const frame = lastFrame()!;
+    const lines = frame.split('\n');
+
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toContain('⎿ packages/cli');
+    expect(lines[1]).toMatch(/…$/);
+    expect(frame).not.toContain(currentPath);
+  });
 });
 
 describe('buildToolSummary', () => {
@@ -189,13 +324,21 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary([make({})], true)).toBe('Reading a.ts');
   });
 
-  it('multiple same-type tools use count', () => {
+  it('multiple same-type tools use count format', () => {
     const tools = [
       make({ callId: 'c1', description: 'a.ts' }),
       make({ callId: 'c2', description: 'b.ts' }),
       make({ callId: 'c3', description: 'c.ts' }),
     ];
     expect(buildToolSummary(tools, false)).toBe('Read 3 files');
+  });
+
+  it('multiple same-type tools use progressive verb when active', () => {
+    const tools = [
+      make({ callId: 'c1', description: 'a.ts' }),
+      make({ callId: 'c2', description: 'b.ts' }),
+    ];
+    expect(buildToolSummary(tools, true)).toBe('Reading 2 files');
   });
 
   it('mixed types joined with comma and lowercase verbs', () => {
@@ -260,6 +403,15 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary(tools, false)).toBe('Ran 1 command');
   });
 
+  it('keeps file names that resemble JSON delimiters', () => {
+    expect(buildToolSummary([make({ description: '[id].tsx' })], false)).toBe(
+      'Read [id].tsx',
+    );
+    expect(buildToolSummary([make({ description: '{draft}.md' })], false)).toBe(
+      'Read {draft}.md',
+    );
+  });
+
   it('strips ANSI CSI escape sequences from description', () => {
     const tools = [
       make({
@@ -289,7 +441,7 @@ describe('buildToolSummary', () => {
     expect(buildToolSummary(tools, false)).toBe('Ran echo hello world');
   });
 
-  it('mixed group with count per category', () => {
+  it('mixed group uses count format per category', () => {
     const tools = [
       make({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
       make({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
@@ -324,6 +476,43 @@ describe('estimateCompactToolGroupHeight', () => {
     const tool = toolCall({ name: 'ReadFile', description });
 
     expect(estimateCompactToolGroupHeight([tool], 30)).toBeGreaterThan(1);
+  });
+
+  it('adds one row for an active batch description hint', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({
+        callId: 'c2',
+        name: 'ReadFile',
+        description: 'b.ts',
+        status: ToolCallStatus.Executing,
+      }),
+    ];
+
+    expect(estimateCompactToolGroupHeight(tools, 80)).toBe(2);
+  });
+
+  it('uses one row for a completed batch', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({ callId: 'c2', name: 'ReadFile', description: 'b.ts' }),
+    ];
+
+    expect(estimateCompactToolGroupHeight(tools, 80)).toBe(1);
+  });
+
+  it('does not reserve a hint row for unsafe fallback arguments', () => {
+    const tools = [
+      toolCall({ callId: 'c1', name: 'ReadFile', description: 'a.ts' }),
+      toolCall({
+        callId: 'c2',
+        name: 'ReadFile',
+        description: '["b.ts"]',
+        status: ToolCallStatus.Executing,
+      }),
+    ];
+
+    expect(estimateCompactToolGroupHeight(tools, 80)).toBe(1);
   });
 
   it('reserves additional width for active summary status', () => {
@@ -366,7 +555,7 @@ describe('estimateCompactToolGroupHeight', () => {
       description: '中文中文中文中文',
     });
 
-    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(3);
+    expect(estimateCompactToolGroupHeight([tool], 12)).toBe(4);
   });
 });
 

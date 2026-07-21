@@ -227,8 +227,8 @@ export interface AgentParams {
    * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
    * reach outside, same as `isolation:'worktree'`.) Must resolve to a
    * worktree registered against this repository, and must live inside it —
-   * pinning rebinds the child's workspace boundary. Mutually exclusive with
-   * `isolation`.
+   * pinning rebinds the child's workspace boundary. If `isolation` is also
+   * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
 }
@@ -756,8 +756,9 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         },
         run_in_background: {
           type: 'boolean',
+          default: true,
           description:
-            'Set to true to run this agent in the background. You will be notified when it completes. Top-level session only: from within a sub-agent the task runs in the foreground and returns its result inline.',
+            'Defaults to true for top-level one-shot agents. Set to false to run in the foreground and return the result inline. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -774,7 +775,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. Mutually exclusive with 'isolation'.",
+            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. If both working_dir and isolation are provided, isolation is ignored and the caller-owned worktree is reused.",
         },
       },
       required: ['description', 'prompt'],
@@ -855,8 +856,8 @@ ${subagentDescriptions}
 
 ${
   isForkSubagentEnabled(this.config)
-    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used and returns its result to you inline. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
-    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used.`
+    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
+    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
 }
 
 When NOT to use the Agent tool:
@@ -869,21 +870,25 @@ ${teamGuidance}
 
 Usage notes:
 - Always include a short description (3-5 words) summarizing what the agent will do
-- Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
-- When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
+- Delegate only concrete, bounded tasks that can run independently.
+- Keep immediate critical-path work local when your next action depends on it.
+- Do not duplicate work between the parent and subagents.
+- Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
+- A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
+- While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
-- The agent's outputs should generally be trusted
+- Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
-- If the user specifies that they want you to run agents "in parallel", you MUST send a single message with multiple Agent tool use content blocks. For example, if you need to launch both a build-validator agent and a test-runner agent in parallel, send a single message with both tool calls.
-- You can optionally set \`run_in_background: true\` to run the agent in the background. You will be notified when it completes. Use this when you have genuinely independent work to do in parallel and don't need the agent's results before you can proceed.
+- If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
+- Top-level one-shot agents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agents run in the foreground. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ${
   isForkSubagentEnabled(this.config)
     ? `
 ## When to fork
 
-A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context, but its findings do NOT come back to you in a form you can act on. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular awaitable subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type); each returns its result to you inline, and several in one message still run concurrently. Omitting \`subagent_type\` does NOT fork.
+A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context, but its findings do NOT come back to you in a form you can act on. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
 
 Fork only when you genuinely won't need the result back — a detached background chore the user asked you to kick off and move on from. The criterion is qualitative: "will I need to read this output?" If yes, don't fork.
 
@@ -1055,12 +1060,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (params.run_in_background === true) {
         return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
-      // A worktree pin and a fresh-worktree isolation are contradictory —
-      // one reuses a caller-owned directory, the other provisions and
-      // reaps its own. Reject the ambiguous combination up front.
-      if (params.isolation !== undefined) {
-        return 'Parameters "working_dir" and "isolation" are mutually exclusive.';
-      }
+      // `working_dir` is the more specific workspace instruction. Some
+      // providers require every advertised schema property and therefore send
+      // the optional `isolation: "worktree"` alongside it. Accept that
+      // redundant combination; createInvocation drops isolation so the
+      // caller-owned worktree is reused rather than provisioning another one.
       // Same rationale as isolation: a fork shares the parent's
       // conversation context and working tree, so it cannot be rebound to
       // a different directory; and the pin is only meaningful for an
@@ -1095,7 +1099,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   protected createInvocation(params: AgentParams) {
-    return new AgentToolInvocation(this.config, this.subagentManager, params);
+    const invocationParams = params.working_dir
+      ? { ...params, isolation: undefined }
+      : params;
+    return new AgentToolInvocation(
+      this.config,
+      this.subagentManager,
+      invocationParams,
+    );
   }
 
   override toAutoClassifierInput(params: AgentParams): Record<string, unknown> {
@@ -2254,10 +2265,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     try {
       // Forking is explicit: `subagent_type: "fork"` selects a fork, and only
       // when forking is available (interactive session). Any other value — or
-      // an omitted subagent_type — resolves to a real, awaitable subagent
-      // (general-purpose by default) whose result is returned inline. This
-      // keeps the long-standing "omit ⇒ awaitable general-purpose" contract
-      // that skills and callers depend on; a fork is opt-in, never the default.
+      // an omitted subagent_type — resolves to a regular subagent
+      // (general-purpose by default). Its execution mode is decided separately
+      // below; a fork is opt-in, never the default.
       const requestedType = this.params.subagent_type;
       const isForkRequested =
         requestedType?.toLowerCase() === FORK_SUBAGENT_TYPE;
@@ -2266,15 +2276,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         isForkSubagentEnabled(this.config) &&
         // v1: fork is a top-level-only capability. A sub-agent — which may now
         // carry the AgentTool via nesting — that requests a fork falls back to
-        // the awaitable general-purpose sub-agent (via effectiveSubagentType
-        // below) instead of opening a nested fork. Fork nesting is deferred
-        // past v1.
+        // a general-purpose sub-agent (via effectiveSubagentType below) instead
+        // of opening a nested fork. Fork nesting is deferred past v1.
         isTopLevelSession();
       const effectiveSubagentType = isFork
         ? undefined
         : isForkRequested
           ? // Explicit fork requested but unavailable (non-interactive) →
-            // fall back to the awaitable general-purpose subagent.
+            // fall back to the general-purpose subagent.
             DEFAULT_BUILTIN_SUBAGENT_TYPE
           : (requestedType ?? DEFAULT_BUILTIN_SUBAGENT_TYPE);
       if (isForkRequested && !isFork) {
@@ -2338,7 +2347,20 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
-      // OR the tool parameter with the agent definition's background flag.
+      // An explicit tool parameter wins. Otherwise, an agent-level background
+      // flag retains its existing meaning, and safe ordinary one-shot launches
+      // default to background. Caller-owned working_dir launches stay
+      // foreground unless explicitly configured for background, which the
+      // incompatibility guard below rejects. Unavailable fork requests retain
+      // their existing foreground general-purpose fallback.
+      //
+      // This is the source of truth for the background-classification rule. Two
+      // UI classifiers replicate it from tool-call args (they cannot see
+      // subagentConfig.background) and must be kept in sync when it changes:
+      //   - packages/web-shell/client/adapters/toolClassification.ts
+      //     (isBackgroundSubAgentToolCall)
+      //   - packages/desktop/packages/shared/src/agent/tool-matching.ts
+      //     (detectBackgroundEvents)
       //
       // Background delegation is top-level-only in v1, mirroring the fork
       // downgrade above: a nested launcher would be handed a completion
@@ -2350,8 +2372,14 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // Downgrade to an awaited foreground run instead of orphaning the
       // child's results.
       const backgroundRequested =
-        this.params.run_in_background === true ||
-        subagentConfig.background === true;
+        this.params.run_in_background ??
+        (subagentConfig.background === true ||
+          (!isForkRequested &&
+            this.params.working_dir === undefined &&
+            // A `name` passed without an active team falls through to a regular
+            // one-shot agent above; keep it foreground so both UI classifiers
+            // (which exclude `name`) stay consistent with core dispatch.
+            this.params.name === undefined));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded

@@ -130,6 +130,12 @@ export const Footer: React.FC = () => {
   ) : uiState.streamingState === StreamingState.Responding ? (
     <Text color={theme.text.secondary}>
       {t('Enter to steer · Ctrl+Q to queue')}
+      {showAutoAcceptIndicator !== undefined && (
+        <>
+          {' · '}
+          <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />
+        </>
+      )}
     </Text>
   ) : showAutoAcceptIndicator !== undefined ? (
     <AutoAcceptIndicator approvalMode={showAutoAcceptIndicator} />

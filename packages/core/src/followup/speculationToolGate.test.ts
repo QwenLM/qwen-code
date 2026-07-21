@@ -130,6 +130,16 @@ describe('speculationToolGate', () => {
       expect(result.action).toBe('boundary');
     });
 
+    it('hits boundary when shell safety is unknown', async () => {
+      const result = await evaluateToolCall(
+        ToolNames.SHELL,
+        { command: "python -c 'print(1)'" },
+        overlayFs,
+        ApprovalMode.DEFAULT,
+      );
+      expect(result.action).toBe('boundary');
+    });
+
     it('hits boundary for empty command', async () => {
       const result = await evaluateToolCall(
         ToolNames.SHELL,

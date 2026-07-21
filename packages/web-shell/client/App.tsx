@@ -36,7 +36,9 @@ import type {
   DaemonSessionTaskStatus,
   DaemonSessionArtifact,
   DaemonWorkspaceCapability,
+  DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
+import { GitForkIcon } from 'lucide-react';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
@@ -73,6 +75,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
@@ -94,8 +97,20 @@ import {
   getScheduledTasksByTurn,
 } from './components/artifacts/turnOutputSelectors';
 import { useIsLargeScreen } from './hooks/useIsLargeScreen';
-import { MAX_SPLIT_PANES, parseSplitSessionIds } from './utils/splitUrl';
+import {
+  clearSplitSessions,
+  loadSplitSessions,
+  MAX_SPLIT_PANES,
+  parseSplitSessionIds,
+  saveSplitSessions,
+} from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
+import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import {
+  goalArgOf,
+  isGoalClearCommand,
+  isGoalClearKeyword,
+} from './utils/goalCondition';
 import { ExtensionsManagerPage } from './components/extensions/ExtensionsManagerPage';
 import { PluginManagerPage } from './components/plugins/PluginManagerPage';
 import { SettingsMessage } from './components/messages/SettingsMessage';
@@ -114,6 +129,7 @@ import {
   type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
+import { workspaceLabel } from './utils/workspace';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -138,6 +154,10 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
+import {
+  invokeSlashCommandHandler,
+  SLASH_COMMAND_PATTERN,
+} from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
@@ -337,24 +357,6 @@ function normalizeHiddenCommand(command: string): string {
   return command.trim().replace(/^\/+/, '').toLowerCase();
 }
 
-// Keep in sync with CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts
-const GOAL_CLEAR_KEYWORDS = new Set([
-  'clear',
-  'stop',
-  'off',
-  'reset',
-  'none',
-  'cancel',
-]);
-
-function isGoalClearCommand(text: string): boolean {
-  const goalArg = text
-    .replace(/^\/goal\b/i, '')
-    .trim()
-    .toLowerCase();
-  return GOAL_CLEAR_KEYWORDS.has(goalArg);
-}
-
 interface ActiveGoalStatus {
   condition: string;
   setAt: number;
@@ -458,6 +460,19 @@ export type WebShellComposerPlaceholders = Readonly<
   Partial<Record<WebShellComposerPlaceholderState, string>>
 >;
 
+export interface WebShellSlashCommand {
+  /** Slash command name without the leading slash, normalized to lower case. */
+  command: string;
+  /** Trimmed text following the command name. */
+  args: string;
+  /** Original text submitted from the composer. */
+  input: string;
+}
+
+export type WebShellSlashCommandHandler = (
+  command: WebShellSlashCommand,
+) => boolean | void;
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
@@ -523,6 +538,11 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /**
+   * Called before Web Shell handles a slash command. Return true to skip the
+   * built-in or daemon behavior after handling the command in the host.
+   */
+  onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -616,7 +636,11 @@ type SessionActionsWithCreate = {
     workspaceCwd?: string;
     approvalMode?: string;
     sourceType?: string;
-  }) => Promise<{ sessionId: string }>;
+    worktree?: { slug?: string };
+  }) => Promise<{
+    sessionId: string;
+    worktree?: { slug: string; path: string; branch: string };
+  }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
@@ -1004,6 +1028,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  onSlashCommand,
   builtinAtProviders,
   atProviders,
   composerTagIcons,
@@ -1157,23 +1182,50 @@ export function App({
     if (!sidebarOptions.enabled) return undefined;
     const onKey = (e: KeyboardEvent) => {
       if (!isSidebarToggleShortcut(e)) return;
-      e.preventDefault();
-      if (window.matchMedia('(max-width: 760px)').matches) {
-        setMobileDrawerOpen((open) => {
-          if (open) setForceMobileDrawer(false);
-          return !open;
-        });
+      // The composer keeps the editor-convention behavior (VS Code toggles
+      // the sidebar while the editor is focused), but other editable targets
+      // — sidebar search, session rename, settings inputs — must not have
+      // the sidebar yanked around while the user is typing, matching the
+      // codebase's isEditableTarget convention.
+      const target = e.target as HTMLElement | null;
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-web-shell-composer-editor]')
+      ) {
         return;
       }
-      setSidebarCollapsed((collapsed) => {
-        const next = !collapsed;
-        writeSidebarCollapsed(next);
-        return next;
-      });
+      e.preventDefault();
+      // All state updates are dispatched sequentially outside the updater
+      // functions (React purity contract — mirrors the hamburger handler),
+      // which is why this effect re-binds on state changes: the listener
+      // closure must stay fresh.
+      if (
+        forceMobileDrawer ||
+        window.matchMedia('(max-width: 760px)').matches
+      ) {
+        // A forced drawer on a wide viewport still belongs to the drawer
+        // path: collapsing the rail underneath the overlay would look like
+        // a no-op to the user.
+        if (mobileDrawerOpen) {
+          setMobileDrawerOpen(false);
+          setForceMobileDrawer(false);
+        } else {
+          setMobileDrawerOpen(true);
+        }
+        return;
+      }
+      const next = !sidebarCollapsed;
+      setSidebarCollapsed(next);
+      writeSidebarCollapsed(next);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [sidebarOptions.enabled]);
+  }, [
+    sidebarOptions.enabled,
+    mobileDrawerOpen,
+    forceMobileDrawer,
+    sidebarCollapsed,
+  ]);
   const customization = useMemo(
     () => ({
       composerTagIcons,
@@ -1257,43 +1309,100 @@ export function App({
   >(undefined);
   const selectedWorkspaceCwdRef = useRef(selectedWorkspaceCwd);
   selectedWorkspaceCwdRef.current = selectedWorkspaceCwd;
-  const [selectedWorkspaceGitBranch, setSelectedWorkspaceGitBranch] = useState<
-    string | undefined
+  const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
+    DaemonWorkspaceGitStatus | undefined
   >(undefined);
+  // The workspace the chip's status was last fetched for. On a workspace switch
+  // we clear the status immediately so the chip never shows the previous repo's
+  // branch/dirty counts while the new fetch is in flight; same-workspace
+  // re-runs (branch change, focus, poll) keep the live value to avoid flicker.
+  const gitStatusWorkspaceCwdRef = useRef<string | undefined>(undefined);
+  /** Worktree metadata for the current session (set after creation). */
+  const [sessionWorktree, setSessionWorktree] = useState<
+    { slug: string; path: string; branch: string } | undefined
+  >(undefined);
+  // Restore worktree info from the server when switching to an existing session.
   useEffect(() => {
-    if (connection.sessionId) {
-      setSelectedWorkspaceGitBranch(undefined);
-      return;
-    }
-    const primaryWorkspaceCwd = workspaces.find((entry) => entry.primary)?.cwd;
-    const workspaceCwd =
-      lockedWorkspaceCwd ?? selectedWorkspaceCwd ?? primaryWorkspaceCwd;
-    if (!workspaceCwd) {
-      setSelectedWorkspaceGitBranch(undefined);
+    const sid = connection.sessionId;
+    if (!sid) {
+      setSessionWorktree(undefined);
       return;
     }
     let cancelled = false;
-    setSelectedWorkspaceGitBranch(undefined);
-    void workspace.client
-      .workspaceByCwd(workspaceCwd)
-      .workspaceGit()
-      .then((git) => {
-        if (!cancelled) {
-          setSelectedWorkspaceGitBranch(git.branch ?? undefined);
-        }
+    workspace.client
+      .sessionStatus(sid)
+      .then((summary) => {
+        if (!cancelled) setSessionWorktree(summary.worktree);
       })
       .catch(() => {
-        if (!cancelled) setSelectedWorkspaceGitBranch(undefined);
+        if (!cancelled) setSessionWorktree(undefined);
       });
     return () => {
       cancelled = true;
     };
+  }, [connection.sessionId, workspace.client]);
+  // Active workspace: the connected session's workspace, else the workspace
+  // picked for the next session (locked / selected / primary). Computed once
+  // and shared by the git-status effect and the Changes-dialog entry point so
+  // the chip and the dialog always target the same repo.
+  const activeWorkspaceCwd = useMemo(
+    () =>
+      connection.sessionId
+        ? connection.workspaceCwd
+        : (lockedWorkspaceCwd ??
+          selectedWorkspaceCwd ??
+          workspaces.find((entry) => entry.primary)?.cwd),
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      lockedWorkspaceCwd,
+      selectedWorkspaceCwd,
+      workspaces,
+    ],
+  );
+  // Worktree sessions override the git chip branch via sessionWorktree.branch
+  // and query git status with the worktree path (?cwd= parameter).
+  useEffect(() => {
+    if (!activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = undefined;
+      setSelectedWorkspaceGitStatus(undefined);
+      return;
+    }
+    if (gitStatusWorkspaceCwdRef.current !== activeWorkspaceCwd) {
+      gitStatusWorkspaceCwdRef.current = activeWorkspaceCwd;
+      setSelectedWorkspaceGitStatus(undefined);
+    }
+    let cancelled = false;
+    const fetchStatus = () => {
+      void workspace.client
+        .workspaceByCwd(activeWorkspaceCwd)
+        .workspaceGit(sessionWorktree?.path)
+        .then((git) => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(git);
+        })
+        .catch(() => {
+          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
+        });
+    };
+    fetchStatus();
+    // The enriched working-tree summary isn't pushed over SSE, so refresh it on
+    // focus and on a slow poll for the active workspace only. A live branch
+    // change re-runs this effect via the connection.gitBranch dependency.
+    const onFocus = () => fetchStatus();
+    window.addEventListener('focus', onFocus);
+    const poll = window.setInterval(() => {
+      if (document.visibilityState === 'visible') fetchStatus();
+    }, 30_000);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(poll);
+    };
   }, [
-    connection.sessionId,
-    lockedWorkspaceCwd,
-    selectedWorkspaceCwd,
-    workspaces,
+    activeWorkspaceCwd,
+    connection.gitBranch,
     workspace.client,
+    sessionWorktree,
   ]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
@@ -2153,13 +2262,19 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  // The workspace the Git dialog reads. Set by whichever entry point opened
+  // it — the composer git chip / `/diff` (current workspace) or a sidebar
+  // folder's git chip (that workspace) — so each can target its own repo.
+  const [gitDialog, setGitDialog] = useState<
+    { workspaceCwd: string; view: GitDialogView } | undefined
+  >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
   // is one of the activePanel values below.)
-  const [mainView, setMainView] = useState<'chat' | 'scheduledTasks' | 'split'>(
-    'chat',
-  );
+  const [mainView, setMainView] = useState<
+    'chat' | 'scheduledTasks' | 'goals' | 'split'
+  >('chat');
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   // Latest pane list, readable from the shrink-close effect without making it a
@@ -2228,6 +2343,10 @@ export function App({
   const openScheduledTasks = useCallback(() => {
     setActivePanel(null);
     setMainView('scheduledTasks');
+  }, []);
+  const openGoals = useCallback(() => {
+    setActivePanel(null);
+    setMainView('goals');
   }, []);
   const openSessionDrawer = useCallback(() => {
     if (!sidebarOptions.enabled) return;
@@ -2320,6 +2439,9 @@ export function App({
   // to the Session Overview — the hub the split is launched from.
   const handleSplitExit = useCallback(() => {
     notifyControlledSplitClose();
+    // The user left the split of their own accord, so a refresh must not bring
+    // it back. (A shrink-fold is transient and deliberately doesn't clear it.)
+    clearSplitSessions();
     openPanel('sessions');
   }, [notifyControlledSplitClose, openPanel]);
   // A `?split=a,b` URL (opened in a new tab from the overview) enters the split
@@ -2327,14 +2449,33 @@ export function App({
   // or exit doesn't force the split back on.
   useEffect(() => {
     const ids = parseSplitSessionIds(window.location.search);
-    if (ids.length === 0) return;
-    const url = new URL(window.location.href);
-    url.searchParams.delete('split');
-    window.history.replaceState(null, '', url);
-    if (!externalSplitControlled) {
-      openSplitView(ids);
+    if (ids.length > 0) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('split');
+      window.history.replaceState(null, '', url);
+      if (!externalSplitControlled) {
+        openSplitView(ids);
+      }
+      return;
     }
+    // No `?split=` deep link: restore the in-window split the user had before a
+    // refresh, when one was persisted for this tab. sessionStorage is per-tab,
+    // so a fresh tab (or a controlled host, which owns its own lifecycle)
+    // restores nothing.
+    if (externalSplitControlled) return;
+    const saved = loadSplitSessions();
+    if (saved.length > 0) openSplitView(saved);
   }, [externalSplitControlled, openSplitView]);
+  // Mirror the live split session set to per-tab storage while the split is the
+  // active view, so a refresh restores exactly these panes. Not written when the
+  // split is merely folded by a shrink (mainView flips to 'chat' transiently) —
+  // the saved set is kept so growing back, or refreshing mid-fold, still restores.
+  useEffect(() => {
+    if (externalSplitControlled) return;
+    if (mainView === 'split' && splitSessionIds.length > 0) {
+      saveSplitSessions(splitSessionIds);
+    }
+  }, [mainView, splitSessionIds, externalSplitControlled]);
   // If the viewport shrinks below the large-screen breakpoint, fold away the
   // Session Overview panel and the split view — both are large-screen-only
   // surfaces whose entry points are hidden on small screens. The split is only
@@ -2467,12 +2608,14 @@ export function App({
     if (activePanel) setActivePanel(null);
     if (modelDialogMode) setModelDialogMode(null);
     if (showApprovalModeDialog) setShowApprovalModeDialog(false);
-    // The Scheduled Tasks page is a full-pane overlay (position:absolute) that
-    // covers the chat footer too, so dismiss it for the same reason. The split
-    // view is deliberately NOT dismissed: each pane owns and renders its own
-    // session's approval, so an approval on the (outer) main session must not
-    // yank the user out of the panes they are working in.
-    if (mainView === 'scheduledTasks') setMainView('chat');
+    // The Scheduled Tasks and Goals pages are full-pane overlays
+    // (position:absolute) that cover the chat footer too, so dismiss them for
+    // the same reason. The split view is deliberately NOT dismissed: each pane
+    // owns and renders its own session's approval, so an approval on the (outer)
+    // main session must not yank the user out of the panes they are working in.
+    if (mainView === 'scheduledTasks' || mainView === 'goals') {
+      setMainView('chat');
+    }
   }, [
     approvalOverlayActive,
     activePanel,
@@ -2480,30 +2623,24 @@ export function App({
     showApprovalModeDialog,
     mainView,
   ]);
-  // Once the effect above uncovers the approval, the overlay is the topmost
-  // surface but the just-unmounted panel Back button dropped focus to <body>.
-  // Move focus onto the overlay when it becomes visible so keyboard/AT users
-  // land on it. Only for ToolApproval: it drives keyboard entirely through a
-  // window listener, so focusing its (tabindex=-1) wrapper is safe and gives AT
-  // a landing spot without confirming (Enter arms first, confirms second — a
-  // focused button would confirm on the first press). AskUserQuestion instead
-  // manages its own focus across its options/input, so stealing focus to the
-  // wrapper would break its arrow-key navigation.
-  const approvalOverlayRef = useRef<HTMLDivElement | null>(null);
+  // Whether each approval overlay is the topmost (visible, uncovered) one. The
+  // overlay components consume this as `keyboardActive`: when it flips true — on
+  // appearance, or once a panel/dialog that was covering it closes — they pull
+  // keyboard focus to their own safe-default option. Focus handling now lives in
+  // ToolApproval/AskUserQuestion (their keyboard handling is focus-scoped), so
+  // the app no longer focuses the wrapper element directly.
   const toolApprovalOverlayVisible =
     pendingToolApproval !== null &&
     !activePanel &&
     modelDialogMode === null &&
     !showApprovalModeDialog &&
     mainView === 'chat';
-  const prevToolApprovalOverlayVisibleRef = useRef(toolApprovalOverlayVisible);
-  useEffect(() => {
-    const wasVisible = prevToolApprovalOverlayVisibleRef.current;
-    prevToolApprovalOverlayVisibleRef.current = toolApprovalOverlayVisible;
-    if (toolApprovalOverlayVisible && !wasVisible) {
-      approvalOverlayRef.current?.focus();
-    }
-  }, [toolApprovalOverlayVisible]);
+  const askUserOverlayVisible =
+    pendingAskUserApproval !== null &&
+    !activePanel &&
+    modelDialogMode === null &&
+    !showApprovalModeDialog &&
+    mainView === 'chat';
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const showAuthDialogRef = useRef(showAuthDialog);
@@ -2627,6 +2764,10 @@ export function App({
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
+  /** Worktree request for the next lazily-created session. */
+  const pendingWorktreeRef = useRef<{ slug?: string } | undefined>(undefined);
+  /** Render-visible mirror of pendingWorktreeRef for the empty-state badge. */
+  const [worktreePending, setWorktreePending] = useState(false);
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -2636,6 +2777,30 @@ export function App({
   } | null>(null);
   const onSessionCreatedRef = useRef(onSessionCreated);
   onSessionCreatedRef.current = onSessionCreated;
+  /**
+   * The session a failed `/goal` submit left behind.
+   *
+   * Setting a goal starts a fresh session and then sends `/goal <condition>`
+   * into it, but the daemon session is not created by the "new session" step —
+   * `ensureSessionForPrompt` creates it lazily *inside* `sendPrompt`. So a
+   * prompt that fails leaves a session that exists but never got its goal.
+   *
+   * The Goals form keeps the condition and lets the user retry. Without this
+   * ref every retry would abandon that session and create another, piling up
+   * blank chats in the sidebar. Remembering it lets the retry reuse it — no
+   * session is ever deleted.
+   *
+   * Only valid while the Goals page stays mounted. The moment the user leaves,
+   * that session is reachable from the composer and may stop being a scratch
+   * session, so the effect below forgets it: a later goal then starts a fresh
+   * session rather than landing on top of a conversation.
+   */
+  const strandedGoalSessionRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (mainView !== 'goals') {
+      strandedGoalSessionRef.current = undefined;
+    }
+  }, [mainView]);
   const ensureSessionForPrompt = useCallback(() => {
     const currentSessionId = connectionRef.current.sessionId;
     if (createSessionPromiseRef.current) {
@@ -2665,11 +2830,21 @@ export function App({
           lockedWorkspaceCwd ??
           selectedWorkspaceCwdRef.current ??
           primaryWorkspaceCwd,
+        worktree: pendingWorktreeRef.current,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
         },
         getCurrentSessionId: () => connectionRef.current.sessionId,
+      }).then((result) => {
+        if (result.worktree) {
+          setSessionWorktree(result.worktree);
+        }
+        // Clear the pending intent only on success. On failure the
+        // welcome badge stays visible so the user knows the isolation
+        // intent was not fulfilled and can retry.
+        pendingWorktreeRef.current = undefined;
+        setWorktreePending(false);
       });
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
@@ -2688,6 +2863,8 @@ export function App({
   }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
+  const onSlashCommandRef = useRef(onSlashCommand);
+  onSlashCommandRef.current = onSlashCommand;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
   const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -2824,6 +3001,10 @@ export function App({
       })),
     [connection.models],
   );
+  // The workspace the Changes dialog reads — the same active workspace the
+  // git-status effect targets (computed once above), so the chip and the
+  // dialog always target the same repo.
+  const gitDiffWorkspaceCwd = activeWorkspaceCwd;
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -2832,6 +3013,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
+    gitDialog !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -3739,17 +3921,28 @@ export function App({
     return request;
   }, []);
   const createNewSession = useCallback(
-    async (workspaceCwd?: string) => {
+    async (
+      workspaceCwd?: string,
+      /**
+       * Leave `mainView` alone. The default is to switch to the chat, because a
+       * user who asks for a new chat wants to see it — but the Goals form has to
+       * stay mounted until its prompt is admitted, or a rejection has nowhere to
+       * render. Only that caller passes this.
+       */
+      opts?: { keepView?: boolean; worktree?: { slug?: string } },
+    ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
+      pendingWorktreeRef.current = opts?.worktree;
+      setWorktreePending(Boolean(opts?.worktree));
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
       // Starting a new chat means the user wants to see it — leave any open
       // Settings/Status panel so the fresh chat is visible (no-op when closed).
       closePanel();
-      setMainView('chat');
+      if (!opts?.keepView) setMainView('chat');
       let focusRequest: number | undefined;
       try {
         const clearPromise = (
@@ -3760,6 +3953,9 @@ export function App({
           clearPromise,
           reloadLoadedSkills(targetWorkspaceCwd),
         ]);
+        // Clear after successful clearSession — if it rejects, the old
+        // session's worktree state is preserved.
+        setSessionWorktree(undefined);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -3967,6 +4163,9 @@ export function App({
     async (sessionId: string, workspaceCwd?: string) => {
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
+      pendingWorktreeRef.current = undefined;
+      setWorktreePending(false);
+      setSessionWorktree(undefined);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
@@ -4262,8 +4461,7 @@ export function App({
         commitComposerAccepted?: ComposerSubmitCommit;
       },
     ) => {
-      const goalArg = text.replace(/^\/goal\b/i, '').trim();
-      const lowerGoalArg = goalArg.toLowerCase();
+      const goalArg = goalArgOf(text);
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
         const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
@@ -4280,7 +4478,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
 
-      if (goalArg && GOAL_CLEAR_KEYWORDS.has(lowerGoalArg)) {
+      if (goalArg && isGoalClearKeyword(goalArg)) {
         if (!sendToDaemon) {
           store.appendLocalUserMessage(text);
           dispatchGoalCleared(activeGoalRef.current);
@@ -4296,16 +4494,17 @@ export function App({
         return sendGoalPrompt();
       }
 
-      if (sendToDaemon) {
-        return sendGoalPrompt();
-      }
-      store.appendLocalUserMessage(text);
+      // Bare `/goal` opens the Goals page instead of asking the daemon to print
+      // its status as text — the same move `/schedule` makes. Nothing is sent,
+      // so the composer is cleared by returning true.
+      openGoals();
       return true;
     },
     [
       dispatchGoalCleared,
       dispatchGoalSet,
       handleBusyGoalClear,
+      openGoals,
       reportError,
       sendPrompt,
       store,
@@ -4329,6 +4528,11 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
+      if (
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -4367,7 +4571,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
       if (text.startsWith('/')) {
-        const match = text.match(/^\/([\w-]+)/);
+        const match = text.match(SLASH_COMMAND_PATTERN);
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
@@ -4391,11 +4595,33 @@ export function App({
             setShowHelpDialog(true);
             return true;
           }
+          if (cmd === 'diff') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.diffNoWorkspace'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            return true;
+          }
+          if (cmd === 'log') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.logNoWorkspace'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
+            return true;
+          }
           if (cmd === 'tasks') {
             openTasksPanel();
             return true;
           }
           if (cmd === 'goal') {
+            // A bare `/goal` just opens the Goals page; it neither sends a
+            // prompt nor touches the session, so it works mid-turn too.
+            if (!goalArgOf(text)) {
+              openGoals();
+              return true;
+            }
             if (promptBlocked) {
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
@@ -5183,7 +5409,9 @@ export function App({
       closePanel,
       openPanel,
       openScheduledTasks,
+      openGoals,
       createNewSession,
+      gitDiffWorkspaceCwd,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
@@ -5758,13 +5986,27 @@ export function App({
   );
 
   const welcomeHeader = useMemo(
-    () =>
-      renderWelcomeHeader ? (
-        renderWelcomeHeader(welcomeHeaderProps)
-      ) : (
-        <WelcomeHeader {...welcomeHeaderProps} />
-      ),
-    [renderWelcomeHeader, welcomeHeaderProps],
+    () => (
+      <>
+        {renderWelcomeHeader ? (
+          renderWelcomeHeader(welcomeHeaderProps)
+        ) : (
+          <WelcomeHeader {...welcomeHeaderProps} />
+        )}
+        {worktreePending && (
+          <div className={styles.worktreeWelcomeBadge}>
+            <GitForkIcon size={20} strokeWidth={1.5} />
+            <span className={styles.worktreeWelcomeTitle}>
+              {t('worktree.welcomeTitle')}
+            </span>
+            <span className={styles.worktreeWelcomeDesc}>
+              {t('worktree.welcomeDesc')}
+            </span>
+          </div>
+        )}
+      </>
+    ),
+    [renderWelcomeHeader, welcomeHeaderProps, worktreePending, t],
   );
   const welcomeFooter = useMemo(
     () => renderWelcomeFooter?.(welcomeHeaderProps),
@@ -5993,6 +6235,14 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
+          {gitDialog && (
+            <GitDialog
+              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              workspaceCwd={gitDialog.workspaceCwd}
+              initialView={gitDialog.view}
+              onClose={() => setGitDialog(undefined)}
+            />
+          )}
           {tasksDialogMessage && (
             <DialogShell
               title={t('tasks.title')}
@@ -6216,6 +6466,10 @@ export function App({
                     closeMobileDrawer();
                     openScheduledTasks();
                   }}
+                  onOpenGoals={() => {
+                    closeMobileDrawer();
+                    openGoals();
+                  }}
                   onOpenSessions={() => {
                     closeMobileDrawer();
                     openPanel('sessions');
@@ -6235,8 +6489,8 @@ export function App({
                       webShellThemeToSettingValue(theme),
                     );
                   }}
-                  onNewSession={(workspaceCwd) => {
-                    return createNewSession(workspaceCwd);
+                  onNewSession={(workspaceCwd, opts) => {
+                    return createNewSession(workspaceCwd, opts);
                   }}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
@@ -6252,6 +6506,9 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
+                  onOpenGitDiff={(workspaceCwd) =>
+                    setGitDialog({ workspaceCwd, view: 'diff' })
+                  }
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
@@ -6558,6 +6815,109 @@ export function App({
                   </div>
                 </div>
               )}
+              {mainView === 'goals' && (
+                <div className={styles.fullPage} data-testid="goals-page">
+                  <div className={styles.fullPageHeader}>
+                    <button
+                      type="button"
+                      className={styles.fullPageBack}
+                      onClick={() => setMainView('chat')}
+                      aria-label={t('common.back')}
+                      title={t('common.back')}
+                    >
+                      <svg
+                        viewBox="0 0 24 24"
+                        width="18"
+                        height="18"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M15 18l-6-6 6-6" />
+                      </svg>
+                    </button>
+                    <div className={styles.fullPageTitle}>
+                      {t('goals.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <GoalsDialog
+                      onCreateGoal={async (condition) => {
+                        // Setting a goal registers the Stop hook AND kicks off
+                        // the first turn, so it has to travel the prompt path.
+                        // Start a FRESH session so the goal loop doesn't take
+                        // over the conversation the user was already having.
+                        //
+                        // Unless a previous attempt in this same visit to the
+                        // page already made one and then failed to send: that
+                        // session never got its goal and is still current, so
+                        // reuse it. Creating another would strand it, and a user
+                        // retrying a few times would end up with a column of
+                        // blank chats in the sidebar.
+                        //
+                        // Leaving the page forgets it (see the effect on
+                        // `strandedGoalSessionRef`), so this can never reuse a
+                        // session the user has since talked to.
+                        const stranded = strandedGoalSessionRef.current;
+                        const canReuseStranded =
+                          stranded !== undefined &&
+                          connectionRef.current.sessionId === stranded;
+                        if (!canReuseStranded) {
+                          // `keepView`: createNewSession switches to the chat by
+                          // default, which would unmount this form before the
+                          // prompt is even sent and leave a later rejection with
+                          // nowhere to render — the exact failure the deferred
+                          // switch below exists to prevent.
+                          const created = await createNewSession(undefined, {
+                            keepView: true,
+                          });
+                          // createNewSession already surfaced the failure; don't
+                          // drop the goal into the wrong (still-current) session.
+                          // `false` keeps the form open with the typed condition
+                          // still in it — returning normally would read as
+                          // "created" and reset it.
+                          if (!created) return false;
+                          onSessionIdChange?.(undefined);
+                        }
+                        // Switch to the chat only once the prompt is admitted.
+                        // Switching first unmounts the Goals page, and a later
+                        // rejection would then have nowhere to render: the user
+                        // would land in an empty session with no explanation.
+                        // Letting this reject keeps the error in the form the
+                        // user is looking at.
+                        try {
+                          await sendPrompt(`/goal ${condition}`, undefined, {
+                            clearComposerOnPromptStart: true,
+                          });
+                        } catch (error) {
+                          // `sendPrompt` creates the session lazily, so by now
+                          // one may exist even though the prompt never landed.
+                          // Remember it so the retry reuses it rather than
+                          // stranding it.
+                          strandedGoalSessionRef.current =
+                            connectionRef.current.sessionId;
+                          throw error;
+                        }
+                        strandedGoalSessionRef.current = undefined;
+                        setMainView('chat');
+                      }}
+                      onOpenSession={(sessionId) => {
+                        // The goal's session transcript IS its history.
+                        setMainView('chat');
+                        loadSidebarSession(sessionId).catch(
+                          (error: unknown) => {
+                            reportError(error, 'Failed to open session');
+                          },
+                        );
+                      }}
+                      onError={reportError}
+                    />
+                  </div>
+                </div>
+              )}
               {mainView === 'split' && (
                 <div className={styles.fullPage} data-testid="split-view-page">
                   {/* The outer session's approval overlay is suppressed under the
@@ -6598,6 +6958,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onSlashCommand={onSlashCommand}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
@@ -6835,13 +7196,11 @@ export function App({
                       )}
                       {/* Only render the outer session's approval on the chat
                           view. Under a full-page view (split / scheduled tasks)
-                          it would sit hidden yet still own global keyboard
-                          shortcuts — a keypress could confirm an unseen
-                          approval. Each split pane surfaces its own approval. */}
+                          it would sit hidden and unreachable. Each split pane
+                          surfaces its own approval. `keyboardActive` tells the
+                          overlay to grab focus only when it's the topmost one. */}
                       {pendingToolApproval && mainView === 'chat' && (
                         <div
-                          ref={approvalOverlayRef}
-                          tabIndex={-1}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -6849,13 +7208,12 @@ export function App({
                             request={pendingToolApproval}
                             onConfirm={handleConfirm}
                             variant="floating"
+                            keyboardActive={toolApprovalOverlayVisible}
                           />
                         </div>
                       )}
                       {pendingAskUserApproval && mainView === 'chat' && (
                         <div
-                          ref={approvalOverlayRef}
-                          tabIndex={-1}
                           data-testid="approval-overlay"
                           className={styles.approvalOverlay}
                         >
@@ -6863,6 +7221,7 @@ export function App({
                             request={pendingAskUserApproval}
                             onConfirm={handleConfirm}
                             variant="floating"
+                            keyboardActive={askUserOverlayVisible}
                           />
                         </div>
                       )}
@@ -6947,9 +7306,22 @@ export function App({
                           currentMode={currentMode}
                           currentModel={currentModel}
                           gitBranch={
-                            connection.sessionId
+                            sessionWorktree?.branch ??
+                            (connection.sessionId
                               ? connection.gitBranch
-                              : selectedWorkspaceGitBranch
+                              : (selectedWorkspaceGitStatus?.branch ??
+                                undefined))
+                          }
+                          gitWorktree={Boolean(sessionWorktree)}
+                          gitStatus={selectedWorkspaceGitStatus}
+                          onOpenGitDiff={
+                            gitDiffWorkspaceCwd && !sessionWorktree
+                              ? () =>
+                                  setGitDialog({
+                                    workspaceCwd: gitDiffWorkspaceCwd,
+                                    view: 'diff',
+                                  })
+                              : undefined
                           }
                           chatWidthMode={chatWidthMode}
                           showChatWidthToggle={!isChatEmptyState}
@@ -6963,11 +7335,7 @@ export function App({
                               ? workspaces.map((entry) => ({
                                     id: entry.id,
                                     cwd: entry.cwd,
-                                    label:
-                                      entry.cwd
-                                        .split(/[\\/]+/)
-                                        .filter(Boolean)
-                                        .at(-1) ?? entry.cwd,
+                                    label: workspaceLabel(entry),
                                     primary: entry.primary,
                                   }))
                               : undefined
@@ -7082,6 +7450,7 @@ export function App({
                           onReturnToInput={handleReturnToEditor}
                           tasks={backgroundTasks}
                           activeGoal={activeGoal}
+                          onOpenGoals={openGoals}
                           hideSettings={hideSettings}
                           onToggleShortcuts={handleToggleShortcuts}
                           compact={true}
