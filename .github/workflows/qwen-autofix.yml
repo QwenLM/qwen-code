@@ -205,6 +205,7 @@ jobs:
       pr_number: '${{ steps.decide.outputs.pr_number }}'
       takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'
       ack_pr: '${{ steps.decide.outputs.ack_pr }}'
+      ack_base: '${{ steps.decide.outputs.ack_base }}'
       takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
       retry_pr: '${{ steps.decide.outputs.retry_pr }}'
       cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
@@ -242,6 +243,7 @@ jobs:
           DO_ISSUE=false
           DO_REVIEW=false
           TAKEOVER_ACK=''
+          ACK_BASE=''
           TAKEOVER_CMD=''
           CMD_PR=''
           RETRY_PR=''
@@ -454,6 +456,14 @@ jobs:
                   elif [[ "${PR_STATE}" != 'open' ]]; then
                     echo "🧭 takeover ignored: PR state '${PR_STATE:-unknown}' is not open"
                   elif [[ "${PR_BASE_REF}" != 'main' ]]; then
+                    # Refuse OUT LOUD. Staying silent here made a labelled
+                    # stacked PR indistinguishable from a managed one: the
+                    # label stuck, the route run went green, and the only
+                    # trace was this log line — so the PR sat unmanaged for
+                    # hours with nobody able to tell without reading the job
+                    # log. The ack job posts the explanation instead.
+                    TAKEOVER_ACK='base-refused'
+                    ACK_BASE="${PR_BASE_REF}"
                     echo "🧭 takeover ignored: PR targets '${PR_BASE_REF}' not 'main'"
                   else
                     DO_REVIEW=true
@@ -531,6 +541,7 @@ jobs:
           echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
           echo "takeover_ack=${TAKEOVER_ACK}" >> "${GITHUB_OUTPUT}"
           echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
+          echo "ack_base=${ACK_BASE}" >> "${GITHUB_OUTPUT}"
           echo "takeover_cmd=${TAKEOVER_CMD}" >> "${GITHUB_OUTPUT}"
           echo "retry_pr=${RETRY_PR}" >> "${GITHUB_OUTPUT}"
           echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
@@ -1440,6 +1451,10 @@ jobs:
       REPO: '${{ github.repository }}'
       ACK: '${{ needs.route.outputs.takeover_ack }}'
       PR: '${{ needs.route.outputs.ack_pr }}'
+      # The base the ROUTE saw when it refused — naming a live re-read here
+      # could report 'main' for a refusal that was decided against something
+      # else, so the message stays tied to the decision it explains.
+      ACK_BASE: '${{ needs.route.outputs.ack_base }}'
       GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
     steps:
       - name: 'Acknowledge takeover state change'
@@ -1469,13 +1484,23 @@ jobs:
           # ack on a skip-labeled PR during a transient API failure. A red
           # ack job posts nothing — engagement itself is scan-driven and
           # unaffected.
-          if ! PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
-            echo "::error::could not read PR #${PR} state for takeover ack"
-            exit 1
+          # A base refusal needs no live state — it is decided entirely by the
+          # route — so it does NOT ride on this read. Making the one ack whose
+          # whole purpose is "say why nothing happened" depend on an unrelated
+          # API call would reintroduce the silence it exists to remove.
+          HAS_SKIP=''
+          PR_AUTHOR_LIVE=''
+          if [[ "${ACK}" != 'base-refused' ]]; then
+            if ! PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
+              echo "::error::could not read PR #${PR} state for takeover ack"
+              exit 1
+            fi
+            HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
+            PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
           fi
-          HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
-          PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
-          if [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then
+          if [[ "${ACK}" == 'base-refused' ]]; then
+            BODY="$(printf '🚫 Takeover not engaged: the loop only manages PRs that target `main`, and this one targets `%s`. A stacked PR moves whenever its base branch does, so "new feedback since the last round" and base-conflict resolution are not well defined until the base lands. Two ways forward: retarget this PR to `main` once the base PR merges — the `%s` label is left in place and the scan lists by label, so the next scan engages it with no re-labelling — or take over the base PR instead.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：循环只管理以 `main` 为 base 的 PR，而本 PR 的 base 是 `%s`。堆叠 PR 会随 base 分支移动，因此“自上一轮以来的新反馈”与 base 冲突处理都无法良定义。两条路：待 base 的 PR 合入后把本 PR 改为面向 `main` —— `%s` 标签予以保留，扫描按标签枚举，下一次扫描即会自动接管，无需重新打标签；或改为接管 base 那个 PR。\n\n</details>\n\n<!-- takeover-ack base-refused -->' "${ACK_BASE}" "${TAKEOVER_LABEL}" "${ACK_BASE}" "${TAKEOVER_LABEL}")"
+          elif [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then
             BODY="$(printf '🚫 Takeover label applied but NOT engaged: this PR carries `%s`, which wins over takeover — the loop will not manage it. Remove `%s` to engage.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 已打接管标签但未生效：本 PR 带有 `%s`，其优先级高于接管，循环不会介入。移除 `%s` 后才会接管。\n\n</details>\n\n<!-- takeover-ack skip-blocked -->' "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}")"
           elif [[ "${ACK}" == 'engaged' ]]; then
             BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"

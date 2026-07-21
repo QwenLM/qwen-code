@@ -942,12 +942,13 @@ describe('qwen-autofix workflow', () => {
     // one lost Chinese section against a duplicate elsewhere): engage,
     // honest bot-PR release, skip-labeled bot-PR release, human-PR
     // release, re-arm, fork allow-edits refusal, two skip-blocked refusals,
-    // the cap pause, and the scan-side first-pickup engage ack (fork label
-    // events carry no secrets, so the scan anchors the window itself).
+    // the non-main base refusal, the cap pause, and the scan-side
+    // first-pickup engage ack (fork label events carry no secrets, so the
+    // scan anchors the window itself).
     const ackBodies = workflow.match(
       /printf '[^']*takeover-(?:ack|cap)[^']*'/g,
     );
-    expect(ackBodies).toHaveLength(11);
+    expect(ackBodies).toHaveLength(12);
     for (const body of ackBodies) {
       expect(body).toContain('<summary>中文说明</summary>');
     }
@@ -2020,6 +2021,169 @@ describe('qwen-autofix workflow', () => {
     expect(
       run({ headRepo: FORK, author: 'qwen-code-dev-bot', metaOk: false }),
     ).toContain('DO_REVIEW=false');
+  });
+
+  it('refuses a takeover on a non-main base out loud instead of only in the job log', () => {
+    // Observed: #7368 was labelled autofix/takeover, the pull_request:labeled
+    // route ran GREEN, and the loop never engaged it — because the PR targeted
+    // another PR's branch. The only trace was one line in a job log, so the PR
+    // sat unmanaged for hours looking exactly like a managed one.
+    const block = routeStep.match(
+      /if \[\[ "\$\{EVENT_NAME\}" == 'pull_request' \]\]; then[\s\S]*?\n {14}fi/,
+    )?.[0];
+    expect(block).toBeTruthy();
+
+    const run = ({
+      base = 'main',
+      state = 'open',
+      action = 'labeled',
+      headRepo = 'QwenLM/qwen-code',
+      label = 'autofix/takeover',
+    }) =>
+      // The block also logs its reasoning; only the trailing summary is asserted.
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            'sanitize_number() { printf "%s" "${1//[^0-9]/}"; }',
+            'DO_ISSUE=true; DO_REVIEW=false; ROUTE_PR=""',
+            "TAKEOVER_ACK=''; ACK_BASE=''",
+            block,
+            'printf "ack=%s base=%s review=%s" "${TAKEOVER_ACK}" "${ACK_BASE}" "${DO_REVIEW}"',
+          ].join('\n'),
+        ],
+        {
+          env: {
+            ...process.env,
+            EVENT_NAME: 'pull_request',
+            EVENT_ACTION: action,
+            REPO: 'QwenLM/qwen-code',
+            TAKEOVER_LABEL: 'autofix/takeover',
+            ISSUE_LABEL: label,
+            PR_HEAD_REPO: headRepo,
+            PR_STATE: state,
+            PR_BASE_REF: base,
+            PR_NUMBER_EVENT: '7368',
+            SENDER_LOGIN: 'wenshao',
+          },
+          encoding: 'utf8',
+        },
+      )
+        .trim()
+        .split('\n')
+        .pop();
+
+    // The regression: a stacked PR now REFUSES audibly and carries the base
+    // it was refused against, rather than falling through silently.
+    expect(run({ base: 'ci/autofix-gate-crash-retry' })).toBe(
+      'ack=base-refused base=ci/autofix-gate-crash-retry review=false',
+    );
+    // Unchanged: a main-targeting in-repo PR still engages, and engagement
+    // carries no base (the field exists only to name a refusal).
+    expect(run({})).toBe('ack=engaged base= review=true');
+    // Still deliberately silent — these were never engaged and a comment on
+    // them would be noise, not information: a closed PR, a fork (whose label
+    // event carries no secrets to comment with), a non-takeover label, and
+    // releasing a PR that never engaged.
+    expect(run({ state: 'closed' })).toBe('ack= base= review=false');
+    expect(run({ headRepo: 'wenshao/qwen-code' })).toBe(
+      'ack= base= review=false',
+    );
+    expect(run({ label: 'kind/bug' })).toBe('ack= base= review=false');
+    expect(
+      run({ action: 'unlabeled', base: 'ci/autofix-gate-crash-retry' }),
+    ).toBe('ack= base= review=false');
+  });
+
+  it('posts the non-main base refusal without depending on any other API call', () => {
+    const ackBlock = workflow
+      .match(
+        /- name: 'Acknowledge takeover state change'\n {8}run: \|-\n([\s\S]*?)(?=\n {2}# ={10})/,
+      )?.[1]
+      ?.split('\n')
+      .map((line) => line.slice(10))
+      .join('\n');
+    expect(ackBlock).toBeTruthy();
+
+    const runAck = ({ ack, base = '', prViewOk = true }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ack-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `if [[ "$1" == 'api' ]]; then printf 'qwen-code-dev-bot'; exit 0; fi`,
+          `if [[ "$1" == 'pr' && "$2" == 'view' ]]; then : > ${JSON.stringify(join(dir, 'pr-view-called'))}; ${
+            prViewOk
+              ? `printf '%s' '{"labels":[],"author":{"login":"wenshao"}}'; exit 0`
+              : 'exit 1'
+          }; fi`,
+          `if [[ "$1" == 'pr' && "$2" == 'comment' ]]; then printf '%s' "$7" > ${JSON.stringify(join(dir, 'comment.md'))}; exit 0; fi`,
+          'exit 1',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const proc = spawnSync('bash', ['-e', '-c', ackBlock], {
+        env: {
+          ...process.env,
+          PATH: `${bin}:${process.env.PATH}`,
+          GITHUB_TOKEN: 'pat',
+          AUTOFIX_BOT: 'qwen-code-dev-bot',
+          REPO: 'QwenLM/qwen-code',
+          SKIP_LABEL: 'autofix/skip',
+          TAKEOVER_LABEL: 'autofix/takeover',
+          TAKEOVER_COMMAND: '@qwen-code /takeover',
+          ACK: ack,
+          PR: '7368',
+          ACK_BASE: base,
+        },
+        encoding: 'utf8',
+      });
+      const commentPath = join(dir, 'comment.md');
+      const result = {
+        status: proc.status,
+        body: existsSync(commentPath) ? readFileSync(commentPath, 'utf8') : '',
+        readPr: existsSync(join(dir, 'pr-view-called')),
+      };
+      rmSync(dir, { recursive: true, force: true });
+      return result;
+    };
+
+    const refused = runAck({
+      ack: 'base-refused',
+      base: 'ci/autofix-gate-crash-retry',
+    });
+    expect(refused.status).toBe(0);
+    expect(refused.body).toContain('<!-- takeover-ack base-refused -->');
+    // Names the actual base and stays actionable + bilingual.
+    expect(refused.body).toContain('`ci/autofix-gate-crash-retry`');
+    expect(refused.body).toContain('<summary>中文说明</summary>');
+    // The advice it gives ("retarget, no re-labelling needed") is only true
+    // while the scan enumerates takeover PRs BY LABEL — retargeting emits no
+    // `labeled` event, so a scan that instead required a fresh engage marker
+    // would silently make this message wrong. Pin the fact it depends on.
+    expect(refused.body).toContain('no re-labelling');
+    expect(reviewScanJob).toContain('--label "${TAKEOVER_LABEL}"');
+    expect(reviewScanJob).toContain('--base main');
+    // The one ack whose entire job is to explain silence must not itself be
+    // silenced by an unrelated API call — it reads no live PR state at all,
+    // so it still posts when that read would have failed.
+    expect(refused.readPr).toBe(false);
+    expect(
+      runAck({ ack: 'base-refused', base: 'release', prViewOk: false }).body,
+    ).toContain('<!-- takeover-ack base-refused -->');
+
+    // Unchanged for every other ack: the live read happens and still fails
+    // CLOSED, so a transient API error cannot turn into a wrong ack.
+    const engaged = runAck({ ack: 'engaged' });
+    expect(engaged.readPr).toBe(true);
+    expect(engaged.body).toContain('<!-- takeover-ack engaged -->');
+    const broken = runAck({ ack: 'engaged', prViewOk: false });
+    expect(broken.status).not.toBe(0);
+    expect(broken.body).toBe('');
   });
 
   it('treats Suggestion-level review findings as actionable feedback', () => {
