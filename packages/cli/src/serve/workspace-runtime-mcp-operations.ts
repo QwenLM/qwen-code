@@ -7,7 +7,7 @@
 import * as crypto from 'node:crypto';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
 import type { WorkspaceRuntime } from './workspace-registry.js';
-import { getErrorMessage as message } from '../utils/errors.js';
+import { errorMessage as message } from './error-message.js';
 import type { WorkspaceRequestContext } from './workspace-service/types.js';
 
 const MCP_POLL_INTERVAL_MS = 250;

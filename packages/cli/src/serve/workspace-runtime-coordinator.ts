@@ -18,7 +18,7 @@ import {
 } from './workspace-runtime-mcp-operations.js';
 import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
-import { getErrorMessage as message } from '../utils/errors.js';
+import { errorMessage as message } from './error-message.js';
 import type { WorkspaceRequestContext } from './workspace-service/types.js';
 
 const DEFAULT_PREPARE_TIMEOUT_MS = 60_000;
