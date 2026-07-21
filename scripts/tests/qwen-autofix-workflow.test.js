@@ -445,6 +445,10 @@ describe('qwen-autofix workflow', () => {
     // Green stays green.
     expect(run([], '', 'abc123')).toBe('0');
     expect(run(['a', 'b', 'c'], '', 'abc123')).toBe('3');
+    // Empty LIVE_HEAD → fail-closed regardless of RED_HEAD. Without this,
+    // a simplified guard (removing -n) would select a PR with no evaluable head.
+    expect(run(['Test'], '', '')).toBe('0');
+    expect(run(['Test'], 'abc123', '')).toBe('0');
 
     // The count must actually GATE selection — computing it and then not
     // consulting it is the whole bug, and every other assertion here still
