@@ -903,6 +903,12 @@ export interface ConfigParameters {
    */
   disabledSkillNamesProvider?: () => ReadonlySet<string>;
   /**
+   * Additional directories to scan for skills (SKILL.md files).
+   * Sourced from `settings.skills.directories`. Paths are expanded
+   * (~ → home dir) and scanned recursively at user level.
+   */
+  customSkillDirs?: readonly string[];
+  /**
    * Tool names hidden from the registry at construction time. Unlike
    * `permissions.deny` (which keeps the tool registered and rejects
    * invocation), tools listed here are not registered at all and never
@@ -1652,6 +1658,7 @@ export class Config {
   private readonly disabledSkillNamesProvider:
     | (() => ReadonlySet<string>)
     | null;
+  private readonly customSkillDirs: readonly string[];
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1914,6 +1921,7 @@ export class Config {
       ...(params.disabledSlashCommands ?? []),
     ]);
     this.disabledSkillNamesProvider = params.disabledSkillNamesProvider ?? null;
+    this.customSkillDirs = Object.freeze([...(params.customSkillDirs ?? [])]);
     this.disabledTools = new Set(params.disabledTools ?? []);
     this.visibleTools = new Set(
       (params.visibleTools ?? []).filter(
@@ -4329,6 +4337,14 @@ export class Config {
    */
   getDisabledSkillNames(): ReadonlySet<string> {
     return this.disabledSkillNamesProvider?.() ?? EMPTY_DISABLED_SKILL_NAMES;
+  }
+
+  /**
+   * Returns additional skill directories from `settings.skills.directories`.
+   * Paths are already expanded (~ → home dir) by the CLI layer.
+   */
+  getCustomSkillDirs(): readonly string[] {
+    return this.customSkillDirs;
   }
 
   /**

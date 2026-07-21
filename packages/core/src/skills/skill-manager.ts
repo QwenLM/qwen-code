@@ -900,12 +900,23 @@ export class SkillManager {
         return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           path.join(this.config.getProjectRoot(), v, SKILLS_CONFIG_DIR),
         );
-      case 'user':
-        return SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
+      case 'user': {
+        const dirs = SKILL_PROVIDER_CONFIG_DIRS.map((v) =>
           v === QWEN_DIR
             ? path.join(Storage.getGlobalQwenDir(), SKILLS_CONFIG_DIR)
             : path.join(os.homedir(), v, SKILLS_CONFIG_DIR),
         );
+        // Append custom skill directories from settings.skills.directories
+        for (const customDir of this.config.getCustomSkillDirs()) {
+          const expanded = customDir.startsWith('~')
+            ? path.join(os.homedir(), customDir.slice(1))
+            : path.resolve(customDir);
+          if (!dirs.includes(expanded)) {
+            dirs.push(expanded);
+          }
+        }
+        return dirs;
+      }
       case 'bundled':
         return [this.bundledSkillsDir];
       case 'extension':
