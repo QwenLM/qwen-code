@@ -527,6 +527,32 @@ describe('qwen resolve workflow', () => {
     }
   });
 
+  it('pauses automatic deep review for PRs placed on hold by triage', () => {
+    const stateStep = step(delayAutomaticReviewJob, 'Re-check PR state');
+
+    for (const action of [
+      'opened',
+      'synchronize',
+      'reopened',
+      'ready_for_review',
+    ]) {
+      expect(delayAutomaticReviewJob).toContain(
+        `github.event.action == '${action}'`,
+      );
+    }
+    expect(stateStep).toContain('--json state,isDraft,labels');
+    expect(stateStep).toContain('any(.labels[]; .name == "status/on-hold")');
+    expect(stateStep).toContain('if [ "$on_hold" = "true" ]; then');
+    expect(stateStep).toContain('echo "should_review=false"');
+    expect(reviewJob).toContain("github.event.action == 'review_requested'");
+    expect(reviewJob).toContain(
+      "github.event.comment.body == '@qwen-code /review'",
+    );
+    expect(reviewJob).toContain(
+      "needs.delay-automatic-review.outputs.should_review == 'true'",
+    );
+  });
+
   it('does not require fork PR authors to have write permission for automatic review', () => {
     const authorizeStep = step(
       authorizeJob,

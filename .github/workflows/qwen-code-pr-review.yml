@@ -161,7 +161,9 @@ jobs:
       !cancelled() &&
       github.event_name == 'pull_request_target' &&
       (github.event.action == 'opened' ||
-       github.event.action == 'synchronize') &&
+       github.event.action == 'synchronize' ||
+       github.event.action == 'reopened' ||
+       github.event.action == 'ready_for_review') &&
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
       needs.authorize.outputs.should_review == 'true'
@@ -184,8 +186,8 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
-          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft --jq '[.state, .isDraft] | @tsv')"
-          IFS=$'\t' read -r state is_draft <<< "$pr_data"
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,isDraft,labels --jq '[.state, .isDraft, any(.labels[]; .name == "status/on-hold")] | @tsv')"
+          IFS=$'\t' read -r state is_draft on_hold <<< "$pr_data"
 
           if [ "$state" != "OPEN" ]; then
             echo "Skipping delayed review: PR #${PR_NUMBER} is ${state}." >> "$GITHUB_STEP_SUMMARY"
@@ -194,6 +196,11 @@ jobs:
           fi
           if [ "$is_draft" = "true" ]; then
             echo "Skipping delayed review: PR #${PR_NUMBER} is draft." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_review=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$on_hold" = "true" ]; then
+            echo "Skipping automatic review: PR #${PR_NUMBER} is on hold. A maintainer can still request @qwen-code /review." >> "$GITHUB_STEP_SUMMARY"
             echo "should_review=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -311,8 +318,8 @@ jobs:
     # pull_request_target routing (all paths additionally pass through
     # `authorize`; automatic PR events are precheck-gated, while explicit
     # review_requested events check the requester and skip delay):
-    # - opened/synchronize uses delay-automatic-review
-    # - reopened/ready_for_review runs immediately
+    # - automatic lifecycle events use delay-automatic-review
+    # - review_requested runs immediately
     # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
     if: |-
       !cancelled() &&
@@ -325,9 +332,7 @@ jobs:
        ((github.event.action == 'review_requested' &&
          github.event.requested_reviewer.login == needs.review-config.outputs.bot_login) ||
         (github.event.action != 'review_requested' &&
-         ((github.event.action != 'opened' &&
-           github.event.action != 'synchronize') ||
-          needs.delay-automatic-review.outputs.should_review == 'true')))) ||
+         needs.delay-automatic-review.outputs.should_review == 'true'))) ||
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.issue.state == 'open' &&
