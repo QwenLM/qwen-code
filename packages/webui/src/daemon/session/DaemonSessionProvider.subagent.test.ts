@@ -57,7 +57,6 @@ describe('on-demand subagent transcript projection', () => {
       rawOutput: {
         type: 'task_execution',
         status: 'completed',
-        detailsOmitted: true,
         executionSummary: {
           totalToolCalls: 1,
           inputTokens: 100,

@@ -157,6 +157,7 @@ describe('VirtualSubagentSessions', () => {
     });
     const iterator = stream![Symbol.asyncIterator]();
     await fs.rm(`${outputFile}.stream`);
+    await new Promise((resolve) => setTimeout(resolve, 300));
     await fs.writeFile(
       `${outputFile}.stream`,
       `${JSON.stringify({
@@ -178,12 +179,36 @@ describe('VirtualSubagentSessions', () => {
       }
     }
     const reloaded = await sessions.load(runtime, resolved!.sessionId);
+    await fs.writeFile(
+      outputFile,
+      `${JSON.stringify(
+        record('replacement', null, 'assistant', 'replacement canonical'),
+      )}\n`,
+    );
+    let replaced: Awaited<ReturnType<typeof iterator.next>> | undefined;
+    for (let i = 0; i < 4; i++) {
+      const next = await Promise.race([
+        iterator.next(),
+        new Promise<undefined>((resolve) =>
+          setTimeout(() => resolve(undefined), 600),
+        ),
+      ]);
+      if (!next) break;
+      if (
+        next.value?.type === 'session_update' &&
+        JSON.stringify(next.value).includes('replacement canonical')
+      ) {
+        replaced = next;
+        break;
+      }
+    }
     abort.abort();
     await iterator.return?.();
     expect(streamed?.value).toMatchObject({ type: 'session_update' });
     expect(JSON.stringify(reloaded?.compactedReplay)).toContain(
       'resumed round live',
     );
+    expect(JSON.stringify(replaced?.value)).toContain('replacement canonical');
   });
 
   it('isolates cached targets by workspace runtime', async () => {

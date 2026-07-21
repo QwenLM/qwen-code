@@ -269,6 +269,7 @@ class VirtualSubagentTarget {
     try {
       handle = await fs.open(this.task.outputFile, 'r');
       const stat = await handle.stat();
+      if (stat.size < this.offset) this.offset = 0;
       const size = Math.min(stat.size, endOffset ?? stat.size);
       if (size <= this.offset) return [];
       const bytes = Buffer.alloc(size - this.offset);
@@ -388,6 +389,7 @@ class VirtualSubagentTarget {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
       this.streamIdentity = undefined;
+      this.streamOffset = 0;
       this.streamRunIds.clear();
       this.streamedRounds.clear();
       this.legacyStreamedSinceCanonical = false;
@@ -443,7 +445,10 @@ class VirtualSubagentTarget {
         this.legacyStreamedSinceCanonical = false;
         return false;
       });
-      if (records.length === 0) return;
+      if (records.length === 0) {
+        this.initialized = true;
+        return;
+      }
     }
     const startTime = records[0]?.timestamp ?? new Date().toISOString();
     const lastUpdated =

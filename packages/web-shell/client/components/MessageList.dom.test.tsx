@@ -204,6 +204,13 @@ function mount(
     historyCapacityReached?: boolean;
     onLoadOlderHistory?: () => Promise<void>;
     isResponding?: boolean;
+    hideFirstUserMessage?: boolean;
+    firstTurnMetrics?: {
+      durationMs?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      cachedTokens?: number;
+    };
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
   } = {},
@@ -227,6 +234,8 @@ function mount(
             historyCapacityReached={opts.historyCapacityReached}
             onLoadOlderHistory={opts.onLoadOlderHistory}
             isResponding={opts.isResponding}
+            hideFirstUserMessage={opts.hideFirstUserMessage}
+            firstTurnMetrics={opts.firstTurnMetrics}
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
           />
         </WebShellCustomizationProvider>
@@ -313,6 +322,34 @@ const simpleTurns = (count: number): Message[] =>
   }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('hides only the first user message and overrides first-turn metrics', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), content: 'first prompt' },
+        toolMsg('g1'),
+        asstMsg('a1'),
+        { ...userMsg('u2'), content: 'second prompt' },
+        toolMsg('g2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      {
+        hideFirstUserMessage: true,
+        firstTurnMetrics: {
+          durationMs: 9_000,
+          inputTokens: 1_200,
+          outputTokens: 45,
+          cachedTokens: 800,
+        },
+      },
+    );
+
+    expect(has(c, 'u1')).toBe(false);
+    expect(has(c, 'u2')).toBe(true);
+    expect(c.textContent).toContain('9s');
+    expect(c.textContent).toContain('↑1.2k (800 cached, 67%) ↓45');
+  });
+
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')]);
     expect(has(c, 'u1')).toBe(true);

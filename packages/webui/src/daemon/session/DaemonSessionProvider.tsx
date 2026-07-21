@@ -208,17 +208,17 @@ function projectSubagentToolUpdate(
   const executionSummary = isRecord(rawOutput?.['executionSummary'])
     ? rawOutput['executionSummary']
     : undefined;
+  const subagentType = boundedString(rawInput?.['subagent_type'], 120);
+  const prompt = boundedString(rawInput?.['prompt'], 240);
+  const description = boundedString(rawInput?.['description'], 240);
+  const subagentName = boundedString(rawOutput?.['subagentName'], 120);
+  const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
+  const status = boundedString(rawOutput?.['status'], 80);
   const projectedInput = rawInput
     ? {
-        ...(boundedString(rawInput['subagent_type'], 120)
-          ? { subagent_type: boundedString(rawInput['subagent_type'], 120) }
-          : {}),
-        ...(boundedString(rawInput['prompt'], 240)
-          ? { prompt: boundedString(rawInput['prompt'], 240) }
-          : {}),
-        ...(boundedString(rawInput['description'], 240)
-          ? { description: boundedString(rawInput['description'], 240) }
-          : {}),
+        ...(subagentType ? { subagent_type: subagentType } : {}),
+        ...(prompt ? { prompt } : {}),
+        ...(description ? { description } : {}),
         ...(rawInput['run_in_background'] === true
           ? { run_in_background: true }
           : {}),
@@ -229,17 +229,9 @@ function projectSubagentToolUpdate(
         ...(rawOutput['type'] === 'task_execution'
           ? { type: 'task_execution' }
           : {}),
-        ...(boundedString(rawOutput['subagentName'], 120)
-          ? { subagentName: boundedString(rawOutput['subagentName'], 120) }
-          : {}),
-        ...(boundedString(rawOutput['taskDescription'], 240)
-          ? {
-              taskDescription: boundedString(rawOutput['taskDescription'], 240),
-            }
-          : {}),
-        ...(boundedString(rawOutput['status'], 80)
-          ? { status: boundedString(rawOutput['status'], 80) }
-          : {}),
+        ...(subagentName ? { subagentName } : {}),
+        ...(taskDescription ? { taskDescription } : {}),
+        ...(status ? { status } : {}),
         ...(typeof rawOutput['tokenCount'] === 'number'
           ? { tokenCount: rawOutput['tokenCount'] }
           : {}),
@@ -267,9 +259,8 @@ function projectSubagentToolUpdate(
               },
             }
           : {}),
-        detailsOmitted: true,
       }
-    : { detailsOmitted: true };
+    : undefined;
 
   return {
     ...event,
