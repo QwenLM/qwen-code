@@ -3495,7 +3495,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
 
-  const createSessionEventBus = (): EventBus =>
+  const createSessionEventBus = (sessionId: string): EventBus =>
     new EventBus(
       eventRingSize,
       undefined,
@@ -3507,6 +3507,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         },
       }),
+      {
+        // Fired once, on the FIRST ingest/seed failure (the bus keeps the
+        // degraded flag set silently afterwards). The bus doesn't know its
+        // session, so the sessionId context is injected here.
+        onCompactionError: (err) => {
+          writeStderrLine(
+            `qwen serve: compaction degraded for session=${sessionId}; replay snapshot may lag behind live events: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        },
+      },
     );
 
   // §2.3 publish helpers — centralise cache + generation + bus publish so
@@ -3661,7 +3673,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     ci: ChannelInfo,
     sessionId: string,
     workspaceCwd: string,
-    events = createSessionEventBus(),
+    events = createSessionEventBus(sessionId),
     options: {
       drainEarlyEvents?: boolean;
       lifecycleReason?: string;
@@ -3916,6 +3928,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | 'compactedReplay'
     | 'liveJournal'
     | 'lastEventId'
+    | 'eventEpoch'
+    | 'replayDegraded'
     | 'partial'
     | 'replayError'
     | 'historyHasMore'
@@ -3929,22 +3943,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : {}),
           }
         : {};
+    // Clients seed their reconnect cursor from `lastEventId`; the epoch
+    // token must travel with it so a daemon restart between this response
+    // and the first subscribe is detected (stale cursor + dead epoch).
+    const eventEpoch = entry.events.epoch;
     const snapshot = entry.events.snapshotReplay();
     if (!snapshot) {
-      return { lastEventId: entry.events.lastEventId, ...replayStatus };
+      return {
+        lastEventId: entry.events.lastEventId,
+        eventEpoch,
+        ...replayStatus,
+      };
     }
     if (action === 'load') {
       return {
         compactedReplay: snapshot.compactedTurns,
         liveJournal: snapshot.liveJournal,
         lastEventId: snapshot.lastEventId,
+        eventEpoch,
         ...replayStatus,
+        ...(snapshot.degraded ? { replayDegraded: true } : {}),
         ...(entry.restoreHistoryHasMore === true
           ? { historyHasMore: true }
           : {}),
       };
     }
-    return { lastEventId: snapshot.lastEventId, ...replayStatus };
+    return { lastEventId: snapshot.lastEventId, eventEpoch, ...replayStatus };
   };
 
   const restoredArtifactSnapshotFromState = (
@@ -4118,7 +4142,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new SessionLimitExceededError(maxSessions);
     }
 
-    const restoreEvents = createSessionEventBus();
+    const restoreEvents = createSessionEventBus(req.sessionId);
     let registeredEntry: SessionEntry | undefined;
     let ci: ChannelInfo | undefined;
     // Live counter shared with coalesced waiters (see InFlightRestore
@@ -5594,6 +5618,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
+    },
+
+    getSessionEventEpoch(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.events.epoch;
     },
 
     getSessionReplaySnapshot(sessionId) {

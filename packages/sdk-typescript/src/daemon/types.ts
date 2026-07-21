@@ -684,6 +684,21 @@ export interface DaemonRestoredSession extends DaemonSession {
   historyHasMore?: boolean;
   /** Event bus watermark — used as initial SSE cursor. */
   lastEventId?: number;
+  /**
+   * Epoch token of the event bus that produced `lastEventId`. Pass it back
+   * as `SubscribeOptions.epoch` alongside the cursor so a daemon restart
+   * between this response and the subscription is detected (forces a
+   * `state_resync_required` with reason `epoch_reset`). Absent on older
+   * daemons — the bus falls back to its numeric stale-cursor heuristic.
+   */
+  eventEpoch?: string;
+  /**
+   * True when the compaction engine failed at least once for this session
+   * (load only): `compactedReplay`/`liveJournal` may lag behind live
+   * events. Clients should prefer the full transcript (see
+   * `fullTranscriptAvailable`) over the degraded snapshot.
+   */
+  replayDegraded?: boolean;
 }
 
 export interface BranchSessionRequest {

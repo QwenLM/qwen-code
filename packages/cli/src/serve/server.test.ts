@@ -550,6 +550,7 @@ interface FakeBridgeOpts {
     context?: BridgeClientRequestContext,
   ) => Promise<void>;
   getSessionLastEventIdImpl?: (sessionId: string) => number;
+  getSessionEventEpochImpl?: (sessionId: string) => string;
   subscribeImpl?: (
     sessionId: string,
     opts?: SubscribeOptions,
@@ -1675,6 +1676,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         return opts.getSessionLastEventIdImpl(sessionId);
       }
       return 0;
+    },
+    getSessionEventEpoch(sessionId) {
+      if (opts.getSessionEventEpochImpl) {
+        return opts.getSessionEventEpochImpl(sessionId);
+      }
+      return 'fake-epoch';
     },
     respondToPermission(requestId, response, context) {
       const accepted = respondImpl(requestId, response, context);
@@ -9039,6 +9046,24 @@ describe('createServeApp', () => {
       expect(bridge.promptCalls).toHaveLength(1);
       expect(bridge.promptCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.promptCalls[0]?.req.sessionId).toBe('session-A');
+    });
+
+    it('202 envelope carries eventEpoch alongside lastEventId (DAEMON-001)', async () => {
+      // A client seeding its SSE resume cursor from this 202 must also
+      // learn the bus epoch, or a daemon restart between the 202 and the
+      // subscription would go undetected.
+      const bridge = fakeBridge({
+        getSessionLastEventIdImpl: () => 7,
+        getSessionEventEpochImpl: () => 'epoch-abc',
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/session-A/prompt')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ prompt: [{ type: 'text', text: 'hi' }] });
+      expect(res.status).toBe(202);
+      expect(res.body.lastEventId).toBe(7);
+      expect(res.body.eventEpoch).toBe('epoch-abc');
     });
 
     it('passes client identity and promptId context into bridge.sendPrompt', async () => {
@@ -19859,6 +19884,77 @@ describe('GET /session/:id/events (SSE)', () => {
 
     expect(seen).toEqual([17]);
     expect(frames[0]?.id).toBe('42');
+  });
+
+  it('forwards a valid X-Qwen-Event-Epoch header to the bridge as the epoch option', async () => {
+    const seen: Array<string | undefined> = [];
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, opts) {
+        seen.push(opts?.epoch);
+        yield { id: 1, v: 1, type: 'session_update', data: 'x' };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`, {
+      headers: {
+        'Last-Event-ID': '17',
+        'X-Qwen-Event-Epoch': 'epoch-abc',
+      },
+    });
+    await readSseFrames(res.body!, 1);
+    expect(seen).toEqual(['epoch-abc']);
+  });
+
+  it('degrades an invalid X-Qwen-Event-Epoch header to "not provided"', async () => {
+    // Invalid tokens must NOT abort the subscription — the bus just falls
+    // back to the numeric stale-cursor heuristic.
+    const seen: Array<string | undefined> = [];
+    const bridge = fakeBridge({
+      async *subscribeImpl(_sessionId, opts) {
+        seen.push(opts?.epoch);
+        yield { id: 1, v: 1, type: 'session_update', data: 'x' };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`, {
+      headers: {
+        'Last-Event-ID': '17',
+        'X-Qwen-Event-Epoch': 'not a valid token!',
+      },
+    });
+    await readSseFrames(res.body!, 1);
+    expect(seen).toEqual([undefined]);
+  });
+
+  it('advertises the bus epoch on the SSE response headers (even without a cursor)', async () => {
+    const bridge = fakeBridge({
+      getSessionEventEpochImpl: () => 'epoch-xyz',
+      async *subscribeImpl(_sessionId, _opts) {
+        yield { id: 1, v: 1, type: 'session_update', data: 'x' };
+        await new Promise(() => {});
+      },
+    });
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+
+    const res = await fetch(`http://127.0.0.1:${port}/session/sess-A/events`);
+    expect(res.headers.get('x-qwen-event-epoch')).toBe('epoch-xyz');
+    await readSseFrames(res.body!, 1);
   });
 
   it('forwards ?maxQueued=N to the bridge when in [16, 2048]', async () => {

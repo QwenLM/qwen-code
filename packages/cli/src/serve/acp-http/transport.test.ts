@@ -230,17 +230,25 @@ class FakeBridge {
 
   subscribeThrows = false;
   /** Records every subscribeEvents call so tests can assert the resume cursor. */
-  subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
+  subscribeCalls: Array<{
+    sessionId: string;
+    lastEventId?: number;
+    epoch?: string;
+  }> = [];
   /** Parallel to `subscribeCalls`: each subscription's abort signal, so a test
    * can detect when a closed stream's pump has actually stopped server-side. */
   subscribeSignals: Array<AbortSignal | undefined> = [];
 
   subscribeEvents(
     sessionId: string,
-    opts?: { signal?: AbortSignal; lastEventId?: number },
+    opts?: { signal?: AbortSignal; lastEventId?: number; epoch?: string },
   ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
-    this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
+    this.subscribeCalls.push({
+      sessionId,
+      lastEventId: opts?.lastEventId,
+      epoch: opts?.epoch,
+    });
     this.subscribeSignals.push(opts?.signal);
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
@@ -265,6 +273,15 @@ class FakeBridge {
   sessionLastEventId: number | undefined = undefined;
   getSessionLastEventId(_sessionId: string): number | undefined {
     return this.sessionLastEventId;
+  }
+
+  /**
+   * Bus epoch token advertised on the SSE response header and paired with
+   * resume cursors (DAEMON-001). Configurable per test.
+   */
+  sessionEventEpoch = 'fake-epoch';
+  getSessionEventEpoch(_sessionId: string): string {
+    return this.sessionEventEpoch;
   }
 
   respondToSessionPermission() {
@@ -1414,6 +1431,50 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       lastEventId: undefined,
     });
     await fresh.body?.cancel().catch(() => {});
+  });
+
+  it('GET X-Qwen-Event-Epoch flows to subscribeEvents; invalid values degrade to "not provided"', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    // Reconnect carrying cursor + epoch → subscribeEvents gets both.
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'epoch-abc',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: 'epoch-abc',
+    });
+    // The stream advertises the CURRENT bus epoch back to the client so it
+    // can pair future cursors with it (DAEMON-001).
+    expect(resumed.headers.get('x-qwen-event-epoch')).toBe('fake-epoch');
+    await resumed.body?.cancel().catch(() => {});
+
+    // An out-of-charset token is rejected (logged) → treated as absent.
+    const bad = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+        'x-qwen-event-epoch': 'not a valid token!',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+      epoch: undefined,
+    });
+    await bad.body?.cancel().catch(() => {});
   });
 
   it('real close-then-reconnect order keeps ownership (no 403) + prompt alive, resumes via Last-Event-ID', async () => {

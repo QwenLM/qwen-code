@@ -517,11 +517,34 @@ export interface PromptRequest {
 export interface NonBlockingPromptAccepted {
   promptId: string;
   lastEventId: number;
+  /**
+   * Epoch token of the bus that produced `lastEventId`. Clients that seed
+   * an SSE resume cursor from this envelope should pass it back via
+   * {@link SubscribeOptions.epoch} so a daemon restart in between is
+   * detected (`state_resync_required` reason `epoch_reset`). Absent on
+   * older daemons.
+   */
+  eventEpoch?: string;
 }
 
 export interface SubscribeOptions {
   /** Resume from after this event id (`Last-Event-ID` header). */
   lastEventId?: number;
+  /**
+   * Epoch token of the bus that produced {@link lastEventId}, learned from
+   * a load/resume response (`eventEpoch`), a 202 prompt envelope, or a
+   * previous subscription's `X-Qwen-Event-Epoch` response header. Sent
+   * alongside `Last-Event-ID`; a daemon whose bus epoch differs forces a
+   * resync instead of guessing from event-id arithmetic. Ignored without
+   * {@link lastEventId}; old daemons ignore the header entirely.
+   */
+  epoch?: string;
+  /**
+   * Receives the daemon's current bus epoch when the subscription learns
+   * it from the `X-Qwen-Event-Epoch` response header. Persist it and pass
+   * it back via {@link epoch} on reconnect.
+   */
+  onEpoch?: (epoch: string) => void;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
   /**
@@ -3528,6 +3551,7 @@ export class DaemonClient {
             accept.lastEventId,
             signal,
             clientId,
+            accept.eventEpoch,
           );
         } finally {
           releasePromptSlot();
@@ -3597,6 +3621,7 @@ export class DaemonClient {
     lastEventId: number,
     signal?: AbortSignal,
     clientId?: string,
+    eventEpoch?: string,
   ): Promise<PromptResult> {
     const sseAbort = new AbortController();
     const composedSignal = signal
@@ -3606,6 +3631,10 @@ export class DaemonClient {
     try {
       const events = this.subscribeEvents(sessionId, {
         lastEventId,
+        // Cursor and epoch both come from the 202 envelope: a daemon
+        // restart between the 202 and this subscribe is detected as an
+        // epoch mismatch instead of silently mis-resuming (DAEMON-001).
+        ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
         signal: composedSignal,
       });
       for await (const event of events) {
@@ -3686,11 +3715,13 @@ export class DaemonClient {
     opts: SubscribeOptions = {},
   ): AsyncGenerator<DaemonEvent> {
     // Delegate entirely to the transport. The transport handles
-    // connect-phase timeout, Last-Event-ID, maxQueued, content-type
-    // validation, and SSE parsing (for REST) or JSON-RPC notification
-    // filtering (for ACP transports).
+    // connect-phase timeout, Last-Event-ID, epoch pairing, maxQueued,
+    // content-type validation, and SSE parsing (for REST) or JSON-RPC
+    // notification filtering (for ACP transports).
     yield* this.transport.subscribeEvents(sessionId, {
       lastEventId: opts.lastEventId,
+      epoch: opts.epoch,
+      onEpoch: opts.onEpoch,
       maxQueued: opts.maxQueued,
       signal: opts.signal,
       connectTimeoutMs: this.fetchTimeoutMs || undefined,

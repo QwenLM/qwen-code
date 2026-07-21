@@ -21,6 +21,7 @@ import {
   parseLastEventId,
   parseMaxQueuedQuery,
 } from '../server/request-helpers.js';
+import { parseEventEpochHeader } from '../sse-last-event-id.js';
 import type { WorkspaceRegistry } from '../workspace-registry.js';
 import { requireSessionRuntime } from './session-runtime.js';
 
@@ -85,6 +86,10 @@ export function registerSseEventsRoutes(
   app.get('/session/:id/events', (req, res) => {
     const sessionId = req.params['id'];
     const lastEventId = parseLastEventId(req.headers['last-event-id']);
+    // Epoch token accompanying the resume cursor (DAEMON-001). Invalid
+    // values degrade to "not provided" so the bus falls back to the
+    // numeric stale-cursor heuristic.
+    const eventEpoch = parseEventEpochHeader(req.headers['x-qwen-event-epoch']);
     const maxQueued = parseMaxQueuedQuery(req.query['maxQueued'], res);
     // `parseMaxQueuedQuery` sends its own 400 + JSON body on rejection
     // (returns `null`) so the SSE handshake doesn't get half-written.
@@ -93,6 +98,7 @@ export function registerSseEventsRoutes(
     if (maxQueued === null) return;
 
     let iter: AsyncIterator<BridgeEvent> | undefined;
+    let busEpoch: string | undefined;
     const abort = new AbortController();
     try {
       const runtime = requireSessionRuntime({
@@ -107,10 +113,15 @@ export function registerSseEventsRoutes(
       const iterable = runtime.bridge.subscribeEvents(sessionId, {
         signal: abort.signal,
         lastEventId,
+        ...(eventEpoch !== undefined ? { epoch: eventEpoch } : {}),
         ...(maxQueued !== undefined ? { maxQueued } : {}),
         ...(snapshot ? { snapshot: true } : {}),
       });
       iter = iterable[Symbol.asyncIterator]();
+      // Captured while the session entry is known to exist so the header
+      // block below can advertise the current epoch without a throwing
+      // lookup after the stream is already committed.
+      busEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
     } catch (err) {
       // `EventBus` throws `SubscriberLimitExceededError` when the
       // per-session subscriber cap (default 64) is reached.
@@ -171,6 +182,12 @@ export function registerSseEventsRoutes(
     // Disable proxy buffering (nginx); event-stream content type alone
     // doesn't always reach the client through every proxy.
     res.setHeader('X-Accel-Buffering', 'no');
+    // Advertise the bus epoch on EVERY subscription (including the first,
+    // cursor-less one) so clients can pair it with their resume cursor and
+    // detect a daemon restart on reconnect (DAEMON-001).
+    if (busEpoch !== undefined) {
+      res.setHeader('X-Qwen-Event-Epoch', busEpoch);
+    }
     // Always present on the supported Node versions (engines.node >=22).
     res.flushHeaders();
 
@@ -419,6 +436,7 @@ export function registerSseEventsRoutes(
               lastDeliveredId?: number;
               earliestAvailableId?: number;
               reason?: string;
+              detail?: string;
             };
             const gap =
               typeof data.earliestAvailableId === 'number' &&
@@ -430,8 +448,11 @@ export function registerSseEventsRoutes(
                 `lastEventId=${data.lastDeliveredId ?? '?'}, ` +
                 `earliestInRing=${data.earliestAvailableId ?? '?'}, ` +
                 `gap=${gap ?? '?'} events, ` +
-                `reason=${data.reason ?? '?'}. ` +
-                `Consumer must call loadSession to recover.`,
+                `reason=${data.reason ?? '?'}` +
+                (typeof data.detail === 'string'
+                  ? `, detail=${data.detail}`
+                  : '') +
+                `. Consumer must call loadSession to recover.`,
             );
           }
           await writeWithBackpressure(formatSseFrame(next.value));

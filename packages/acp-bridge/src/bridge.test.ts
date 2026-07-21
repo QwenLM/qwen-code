@@ -2303,6 +2303,7 @@ describe('createAcpSessionBridge', () => {
       compactedReplay: [],
       liveJournal: [],
       lastEventId: 0,
+      eventEpoch: expect.any(String),
     });
     expect(handles[0]?.agent.loadSessionCalls).toEqual([
       {
@@ -3357,6 +3358,7 @@ describe('createAcpSessionBridge', () => {
       hasActivePrompt: false,
       state: { modes: null },
       lastEventId: 0,
+      eventEpoch: expect.any(String),
     });
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toEqual([
@@ -3402,6 +3404,7 @@ describe('createAcpSessionBridge', () => {
       hasActivePrompt: false,
       state: { _meta: { tag: 'restored-foo' } },
       lastEventId: expect.any(Number),
+      eventEpoch: expect.any(String),
     });
     expect(attached.clientId).not.toBe(loaded.clientId);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(1);

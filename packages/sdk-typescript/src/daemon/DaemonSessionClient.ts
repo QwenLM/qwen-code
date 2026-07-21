@@ -68,6 +68,15 @@ export interface DaemonSessionClientOptions {
    * `Last-Event-ID` resume cursors.
    */
   lastEventId?: number;
+  /**
+   * Epoch token of the event bus that produced `lastEventId` (the
+   * `eventEpoch` field of load/resume responses). Paired with the cursor
+   * on every subscription so a daemon restart is detected as an epoch
+   * mismatch instead of a numeric guess. Absent on older daemons — the
+   * first subscription then learns the epoch from the
+   * `X-Qwen-Event-Epoch` response header.
+   */
+  eventEpoch?: string;
   /** Compacted replay snapshot from daemon load response. */
   replaySnapshot?: DaemonReplaySnapshot;
   /** True when older persisted records precede the replay snapshot. */
@@ -109,6 +118,12 @@ export class DaemonSessionClient {
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
   private lastSeenEventId: number | undefined;
+  /**
+   * Epoch token paired with {@link lastSeenEventId}. Seeded from the
+   * load/resume/create response when available, refreshed from every
+   * subscription's `X-Qwen-Event-Epoch` response header.
+   */
+  private lastSeenEpoch: string | undefined;
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
   private reattaching?: Promise<void>;
@@ -132,6 +147,7 @@ export class DaemonSessionClient {
       liveJournal: [],
     };
     this.lastSeenEventId = validateLastEventId(opts.lastEventId);
+    this.lastSeenEpoch = opts.eventEpoch;
     this.promptLimit =
       opts.maxPendingPromptsPerSession === undefined
         ? opts.client.maxPendingPromptsPerSession
@@ -183,6 +199,10 @@ export class DaemonSessionClient {
       session,
       hasActivePrompt: session.hasActivePrompt,
       lastEventId,
+      // Newer daemons may stamp the bus epoch on the create/attach
+      // response; older ones don't — the first subscription then learns it
+      // from the `X-Qwen-Event-Epoch` response header.
+      eventEpoch: (session as { eventEpoch?: string }).eventEpoch,
     });
   }
 
@@ -204,6 +224,7 @@ export class DaemonSessionClient {
       liveJournal,
       historyHasMore,
       lastEventId: serverLastEventId,
+      eventEpoch,
       ...session
     } = await client.loadSession(sessionId, req, clientId);
     return new DaemonSessionClient({
@@ -212,6 +233,7 @@ export class DaemonSessionClient {
       hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
       replaySnapshot: {
         compactedReplay: compactedReplay ?? [],
         liveJournal: liveJournal ?? [],
@@ -236,6 +258,7 @@ export class DaemonSessionClient {
       state,
       hasActivePrompt,
       lastEventId: serverLastEventId,
+      eventEpoch,
       ...session
     } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
@@ -244,6 +267,7 @@ export class DaemonSessionClient {
       hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
+      eventEpoch,
     });
   }
 
@@ -738,10 +762,20 @@ export class DaemonSessionClient {
       const lastEventId =
         subscribeOpts.lastEventId ??
         (resume ? this.lastSeenEventId : undefined);
+      // Same seeding rhythm as the cursor: an explicit caller epoch wins,
+      // otherwise pair the resumed cursor with the epoch it was minted in.
+      const epoch =
+        subscribeOpts.epoch ?? (resume ? this.lastSeenEpoch : undefined);
+      const callerOnEpoch = subscribeOpts.onEpoch;
 
       for await (const event of this.client.subscribeEvents(this.sessionId, {
         ...subscribeOpts,
         lastEventId,
+        ...(epoch !== undefined ? { epoch } : {}),
+        onEpoch: (learned) => {
+          this.lastSeenEpoch = learned;
+          callerOnEpoch?.(learned);
+        },
       })) {
         this._dispatchTurnEvent(event);
         yield event;
