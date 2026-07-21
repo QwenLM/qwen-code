@@ -3367,6 +3367,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
                   finishingInputs = pending;
                   continue;
                 }
+                // Mirror the worktree path: close the input queue before
+                // publishing completion so a send_message racing the terminal
+                // transition is rejected (queueExternalInput checks
+                // finishingAgents) rather than accepted and silently orphaned.
+                registry.beginFinishing(hookOpts.agentId);
               }
 
               if (!hadWorktreeIsolation) {
@@ -3424,6 +3429,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
               break;
             }
           } catch (error) {
+            // A resident runtime is only safe to keep for a cleanly completed
+            // agent. If completion bookkeeping (patchAgentMeta /
+            // registry.complete) threw after keepResident was set, the entry is
+            // finalized as failed/cancelled below and can never be continued —
+            // so release keepResident here to let the finally block dispose the
+            // runtime instead of leaking a zombie resident.
+            keepResident = false;
             // Publish first — same reason as the success path.
             recordSpanOutcome(
               deriveSubagentExceptionMetadata(
