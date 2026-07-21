@@ -3929,13 +3929,15 @@ export function App({
        * stay mounted until its prompt is admitted, or a rejection has nowhere to
        * render. Only that caller passes this.
        */
-      opts?: { keepView?: boolean; worktree?: { slug?: string } },
+      opts?: { keepView?: boolean },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
-      pendingWorktreeRef.current = opts?.worktree;
-      setWorktreePending(Boolean(opts?.worktree));
+      // Starting a fresh chat drops any pending worktree intent set from the
+      // empty-state toggle, so it never leaks into the next created session.
+      pendingWorktreeRef.current = undefined;
+      setWorktreePending(false);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -6546,9 +6548,7 @@ export function App({
                       webShellThemeToSettingValue(theme),
                     );
                   }}
-                  onNewSession={(workspaceCwd, opts) => {
-                    return createNewSession(workspaceCwd, opts);
-                  }}
+                  onNewSession={(workspaceCwd) => createNewSession(workspaceCwd)}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);

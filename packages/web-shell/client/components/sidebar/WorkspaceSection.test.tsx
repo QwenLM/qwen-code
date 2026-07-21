@@ -156,6 +156,16 @@ describe('WorkspaceSection git chip', () => {
     expect(chip?.getAttribute('data-dirty')).toBe('true');
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
+
+    // The chip itself is a read-only OUTPUT; the wrapping button is what opens
+    // the Changes view. Click it to prove the onClick handler is actually wired
+    // — a miswire (e.g. a deleted onClick) would otherwise go undetected.
+    const button = chip?.closest('button');
+    expect(button).not.toBeNull();
+    act(() => {
+      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {
