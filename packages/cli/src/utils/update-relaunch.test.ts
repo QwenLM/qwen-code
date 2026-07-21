@@ -6,7 +6,6 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LoadedSettings } from '../config/settings.js';
-import { EventEmitter } from 'node:events';
 
 const checkForUpdatesDetailed = vi.hoisted(() => vi.fn());
 const handleAutoUpdate = vi.hoisted(() => vi.fn());
@@ -43,8 +42,12 @@ describe('updateBeforeRelaunch', () => {
   });
 
   it('waits for the package-manager update before reporting success', async () => {
-    const updateProcess = new EventEmitter();
-    handleAutoUpdate.mockReturnValue(updateProcess);
+    let finishUpdate!: (success: boolean) => void;
+    handleAutoUpdate.mockReturnValue(
+      new Promise((resolve) => {
+        finishUpdate = resolve;
+      }),
+    );
 
     const update = updateBeforeRelaunch(settings, '/repo', false);
     await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
@@ -53,7 +56,7 @@ describe('updateBeforeRelaunch', () => {
       'Update successful! The new version will be used on your next run.',
     );
 
-    updateProcess.emit('close', 0);
+    finishUpdate(true);
     await expect(update).resolves.toBe(true);
 
     expect(writeStderrLine).toHaveBeenCalledWith(
@@ -67,12 +70,9 @@ describe('updateBeforeRelaunch', () => {
   ] as const)(
     'reports %s failure and returns %s',
     async (_source, relaunchOnFailure, expected) => {
-      const updateProcess = new EventEmitter();
-      handleAutoUpdate.mockReturnValue(updateProcess);
+      handleAutoUpdate.mockResolvedValue(false);
 
       const update = updateBeforeRelaunch(settings, '/repo', relaunchOnFailure);
-      await vi.waitFor(() => expect(handleAutoUpdate).toHaveBeenCalledTimes(1));
-      updateProcess.emit('close', 1);
       await expect(update).resolves.toBe(expected);
 
       expect(writeStderrLine).toHaveBeenCalledWith(

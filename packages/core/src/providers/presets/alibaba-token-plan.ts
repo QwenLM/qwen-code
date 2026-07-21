@@ -12,8 +12,11 @@ import type { ProviderConfig, ModelSpec } from '../types.js';
 // ---------------------------------------------------------------------------
 
 export const TOKEN_PLAN_ENV_KEY = 'BAILIAN_TOKEN_PLAN_API_KEY';
-export const TOKEN_PLAN_BASE_URL =
+export const TOKEN_PLAN_CHINA_BASE_URL =
   'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+export const TOKEN_PLAN_GLOBAL_BASE_URL =
+  'https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1';
+export const TOKEN_PLAN_BASE_URL = TOKEN_PLAN_CHINA_BASE_URL;
 
 const TOKEN_PLAN_MODELS: ModelSpec[] = [
   {
@@ -33,6 +36,7 @@ const TOKEN_PLAN_MODELS: ModelSpec[] = [
     id: 'qwen3.8-max-preview',
     contextWindowSize: 1000000,
     enableThinking: true,
+    thinkingMandatory: true,
     modalities: { image: true, video: true },
   },
   {
@@ -76,11 +80,36 @@ export const tokenPlanProvider: ProviderConfig = {
   description:
     'For teams and companies · Usage-based billing with dedicated endpoint',
   protocol: AuthType.USE_OPENAI,
-  baseUrl: TOKEN_PLAN_BASE_URL,
+  baseUrl: [
+    {
+      id: 'cn-beijing',
+      label: 'China (Beijing)',
+      url: TOKEN_PLAN_CHINA_BASE_URL,
+      documentationUrl:
+        'https://bailian.console.aliyun.com/cn-beijing?tab=doc#/doc/?type=model&url=3028856',
+    },
+    {
+      id: 'ap-southeast-1',
+      label: 'Singapore (International)',
+      url: TOKEN_PLAN_GLOBAL_BASE_URL,
+      documentationUrl:
+        'https://modelstudio.console.alibabacloud.com/ap-southeast-1?tab=doc#/doc/?type=model',
+    },
+  ],
   envKey: TOKEN_PLAN_ENV_KEY,
   models: TOKEN_PLAN_MODELS,
   modelsEditable: true,
-  modelNamePrefix: 'ModelStudio Token Plan',
+  modelNamePrefix: (baseUrl) =>
+    baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL
+      ? 'ModelStudio Token Plan for Global/Intl'
+      : 'ModelStudio Token Plan',
+  ownsModel: (model) =>
+    model.envKey === TOKEN_PLAN_ENV_KEY &&
+    ((typeof model.baseUrl === 'string' &&
+      (model.baseUrl === TOKEN_PLAN_CHINA_BASE_URL ||
+        model.baseUrl === TOKEN_PLAN_GLOBAL_BASE_URL)) ||
+      (typeof model.name === 'string' &&
+        model.name.startsWith('[ModelStudio Token Plan]'))),
   uiGroup: 'alibaba',
-  uiLabels: { flowTitle: 'Alibaba ModelStudio' },
+  uiLabels: { flowTitle: 'Alibaba ModelStudio', baseUrlStepTitle: 'Region' },
 };

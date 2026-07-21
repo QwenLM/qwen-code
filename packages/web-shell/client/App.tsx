@@ -38,7 +38,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { GitForkIcon } from 'lucide-react';
+import { GitForkIcon, XIcon } from 'lucide-react';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
@@ -75,7 +75,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
-import { GitDiffDialog } from './components/dialogs/GitDiffDialog';
+import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
@@ -130,6 +130,7 @@ import {
   type WebShellSidebarLockedWorkspace,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
+import { workspaceLabel } from './utils/workspace';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -154,6 +155,10 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
+import {
+  invokeSlashCommandHandler,
+  SLASH_COMMAND_PATTERN,
+} from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
@@ -456,6 +461,19 @@ export type WebShellComposerPlaceholders = Readonly<
   Partial<Record<WebShellComposerPlaceholderState, string>>
 >;
 
+export interface WebShellSlashCommand {
+  /** Slash command name without the leading slash, normalized to lower case. */
+  command: string;
+  /** Trimmed text following the command name. */
+  args: string;
+  /** Original text submitted from the composer. */
+  input: string;
+}
+
+export type WebShellSlashCommandHandler = (
+  command: WebShellSlashCommand,
+) => boolean | void;
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session or workspace changes. */
   onSessionIdChange?: (
@@ -521,6 +539,11 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /**
+   * Called before Web Shell handles a slash command. Return true to skip the
+   * built-in or daemon behavior after handling the command in the host.
+   */
+  onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -1006,6 +1029,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  onSlashCommand,
   builtinAtProviders,
   atProviders,
   composerTagIcons,
@@ -1336,8 +1360,9 @@ export function App({
       workspaces,
     ],
   );
-  // Worktree sessions override the git chip branch via sessionWorktree.branch
-  // and query git status with the worktree path (?cwd= parameter).
+  // Worktree sessions query git status with the worktree path (?cwd=
+  // parameter); the chip prefers the live branch from that status, falling
+  // back to the creation-time sessionWorktree.branch.
   const workspaceActions = useWorkspaceActions(activeWorkspaceCwd);
   useEffect(() => {
     if (!activeWorkspaceCwd) {
@@ -1345,8 +1370,9 @@ export function App({
       setSelectedWorkspaceGitStatus(undefined);
       return;
     }
-    if (gitStatusWorkspaceCwdRef.current !== activeWorkspaceCwd) {
-      gitStatusWorkspaceCwdRef.current = activeWorkspaceCwd;
+    const statusTarget = sessionWorktree?.path ?? activeWorkspaceCwd;
+    if (gitStatusWorkspaceCwdRef.current !== statusTarget) {
+      gitStatusWorkspaceCwdRef.current = statusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
     let cancelled = false;
@@ -2239,12 +2265,12 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  // The workspace the Changes dialog reads. Set by whichever entry point opened
+  // The workspace the Git dialog reads. Set by whichever entry point opened
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
-  const [diffWorkspaceCwd, setDiffWorkspaceCwd] = useState<string | undefined>(
-    undefined,
-  );
+  const [gitDialog, setGitDialog] = useState<
+    { workspaceCwd: string; view: GitDialogView } | undefined
+  >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
@@ -2938,6 +2964,8 @@ export function App({
   }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
+  const onSlashCommandRef = useRef(onSlashCommand);
+  onSlashCommandRef.current = onSlashCommand;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
   const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -3086,7 +3114,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
-    diffWorkspaceCwd !== undefined ||
+    gitDialog !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -4002,13 +4030,15 @@ export function App({
        * stay mounted until its prompt is admitted, or a rejection has nowhere to
        * render. Only that caller passes this.
        */
-      opts?: { keepView?: boolean; worktree?: { slug?: string } },
+      opts?: { keepView?: boolean },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
-      pendingWorktreeRef.current = opts?.worktree;
-      setWorktreePending(Boolean(opts?.worktree));
+      // Starting a fresh chat drops any pending worktree intent set from the
+      // empty-state toggle, so it never leaks into the next created session.
+      pendingWorktreeRef.current = undefined;
+      setWorktreePending(false);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -4601,6 +4631,11 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
+      if (
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -4639,7 +4674,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
       if (text.startsWith('/')) {
-        const match = text.match(/^\/([\w-]+)/);
+        const match = text.match(SLASH_COMMAND_PATTERN);
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
@@ -4664,13 +4699,19 @@ export function App({
             return true;
           }
           if (cmd === 'diff') {
-            // Local intercept: open the working-tree Changes dialog instead of
-            // forwarding `/diff` to the agent. Targets the current workspace.
             if (!gitDiffWorkspaceCwd) {
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
-            setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            return true;
+          }
+          if (cmd === 'log') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.logNoWorkspace'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
             return true;
           }
           if (cmd === 'tasks') {
@@ -6039,6 +6080,36 @@ export function App({
     ],
   );
 
+  // The empty-state toggle is offered only when the workspace the next
+  // session would land in is trusted and is a git repository — the daemon
+  // rejects worktree creation otherwise. Mirrors the sidebar entry's gating.
+  const worktreeToggleEligible = Boolean(
+    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      selectedWorkspaceGitStatus?.branch,
+  );
+  const worktreeToggleRef = useRef<HTMLButtonElement>(null);
+  const worktreeCancelRef = useRef<HTMLButtonElement>(null);
+  const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
+  const handleEnableWorktree = useCallback(() => {
+    pendingWorktreeRef.current = {};
+    setWorktreePending(true);
+    worktreeFocusTarget.current = 'cancel';
+  }, []);
+  const handleCancelWorktree = useCallback(() => {
+    pendingWorktreeRef.current = undefined;
+    setWorktreePending(false);
+    worktreeFocusTarget.current = 'toggle';
+  }, []);
+  useEffect(() => {
+    if (!worktreeFocusTarget.current) return;
+    const target = worktreeFocusTarget.current;
+    worktreeFocusTarget.current = null;
+    if (target === 'cancel') {
+      worktreeCancelRef.current?.focus();
+    } else {
+      worktreeToggleRef.current?.focus();
+    }
+  }, [worktreePending]);
   const welcomeHeader = useMemo(
     () => (
       <>
@@ -6047,20 +6118,64 @@ export function App({
         ) : (
           <WelcomeHeader {...welcomeHeaderProps} />
         )}
-        {worktreePending && (
+        {worktreePending ? (
           <div className={styles.worktreeWelcomeBadge}>
-            <GitForkIcon size={20} strokeWidth={1.5} />
-            <span className={styles.worktreeWelcomeTitle}>
-              {t('worktree.welcomeTitle')}
+            <span className={styles.worktreeBadgeIcon}>
+              <GitForkIcon size={18} strokeWidth={1.8} />
             </span>
-            <span className={styles.worktreeWelcomeDesc}>
-              {t('worktree.welcomeDesc')}
+            <span className={styles.worktreeBadgeText}>
+              <span className={styles.worktreeWelcomeTitle}>
+                {t('worktree.welcomeTitle')}
+              </span>
+              <span className={styles.worktreeWelcomeDesc}>
+                {t('worktree.welcomeDesc')}
+              </span>
             </span>
+            <button
+              ref={worktreeCancelRef}
+              type="button"
+              className={styles.worktreeWelcomeCancel}
+              aria-label={t('worktree.cancel')}
+              data-testid="worktree-welcome-cancel"
+              onClick={handleCancelWorktree}
+            >
+              <XIcon size={14} strokeWidth={2} />
+            </button>
           </div>
+        ) : (
+          worktreeToggleEligible && (
+            <button
+              ref={worktreeToggleRef}
+              type="button"
+              className={styles.worktreeWelcomeToggle}
+              data-testid="worktree-welcome-toggle"
+              onClick={handleEnableWorktree}
+            >
+              <span className={styles.worktreeToggleIcon}>
+                <GitForkIcon size={16} strokeWidth={1.8} />
+              </span>
+              <span className={styles.worktreeToggleText}>
+                <span className={styles.worktreeToggleLabel}>
+                  {t('worktree.welcomeTitle')}
+                </span>
+                <span className={styles.worktreeToggleHint}>
+                  {t('worktree.toggleHint')}
+                </span>
+              </span>
+            </button>
+          )
         )}
       </>
     ),
-    [renderWelcomeHeader, welcomeHeaderProps, worktreePending, t],
+    [
+      renderWelcomeHeader,
+      welcomeHeaderProps,
+      worktreePending,
+      worktreeToggleEligible,
+      handleEnableWorktree,
+      handleCancelWorktree,
+      t,
+    ],
   );
   const welcomeFooter = useMemo(
     () => renderWelcomeFooter?.(welcomeHeaderProps),
@@ -6289,10 +6404,12 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {diffWorkspaceCwd && (
-            <GitDiffDialog
-              workspaceCwd={diffWorkspaceCwd}
-              onClose={() => setDiffWorkspaceCwd(undefined)}
+          {gitDialog && (
+            <GitDialog
+              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              workspaceCwd={gitDialog.workspaceCwd}
+              initialView={gitDialog.view}
+              onClose={() => setGitDialog(undefined)}
             />
           )}
           {tasksDialogMessage && (
@@ -6541,9 +6658,7 @@ export function App({
                       webShellThemeToSettingValue(theme),
                     );
                   }}
-                  onNewSession={(workspaceCwd, opts) => {
-                    return createNewSession(workspaceCwd, opts);
-                  }}
+                  onNewSession={(workspaceCwd) => createNewSession(workspaceCwd)}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
@@ -6558,7 +6673,9 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
-                  onOpenGitDiff={setDiffWorkspaceCwd}
+                  onOpenGitDiff={(workspaceCwd) =>
+                    setGitDialog({ workspaceCwd, view: 'diff' })
+                  }
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
@@ -7045,6 +7162,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onSlashCommand={onSlashCommand}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
@@ -7392,17 +7510,23 @@ export function App({
                           currentMode={currentMode}
                           currentModel={currentModel}
                           gitBranch={
-                            sessionWorktree?.branch ??
-                            (connection.sessionId
-                              ? connection.gitBranch
-                              : (selectedWorkspaceGitStatus?.branch ??
-                                undefined))
+                            sessionWorktree
+                              ? (selectedWorkspaceGitStatus?.branch ??
+                                sessionWorktree.branch)
+                              : (connection.sessionId
+                                ? connection.gitBranch
+                                : (selectedWorkspaceGitStatus?.branch ??
+                                  undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd && !sessionWorktree
-                              ? () => setDiffWorkspaceCwd(gitDiffWorkspaceCwd)
+                              ? () =>
+                                  setGitDialog({
+                                    workspaceCwd: gitDiffWorkspaceCwd,
+                                    view: 'diff',
+                                  })
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}
@@ -7417,11 +7541,7 @@ export function App({
                               ? workspaces.map((entry) => ({
                                     id: entry.id,
                                     cwd: entry.cwd,
-                                    label:
-                                      entry.cwd
-                                        .split(/[\\/]+/)
-                                        .filter(Boolean)
-                                        .at(-1) ?? entry.cwd,
+                                    label: workspaceLabel(entry),
                                     primary: entry.primary,
                                   }))
                               : undefined

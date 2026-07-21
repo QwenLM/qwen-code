@@ -164,7 +164,7 @@ interface DaemonStatusLimits {
   compactedReplayMaxBytes: number;
   promptDeadlineMs: number | null;
   writerIdleTimeoutMs: number | null;
-  channelIdleTimeoutMs: number | null;
+  channelIdleTimeoutMs: number;
   sessionIdleTimeoutMs: number;
   acpConnectionCap: number | null;
 }
@@ -267,6 +267,7 @@ export interface DaemonStatusResponse {
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
   }>;
@@ -485,6 +486,9 @@ export async function buildDaemonStatusResponse(
           workspaces: workspaceRuntimes.map((runtime) => ({
             id: runtime.workspaceId,
             cwd: runtime.workspaceCwd,
+            ...(runtime.displayName !== undefined
+              ? { displayName: runtime.displayName }
+              : {}),
             primary: runtime.primary,
             trusted: runtime.trusted,
           })),

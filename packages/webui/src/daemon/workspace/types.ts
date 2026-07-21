@@ -52,7 +52,9 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   DaemonWorkspacePreflightStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
@@ -254,6 +256,7 @@ export interface DaemonUpdateScheduledTaskRequest {
 export interface DaemonAddWorkspaceResult {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   persisted?: boolean;
@@ -562,11 +565,15 @@ export interface DaemonWorkspaceActions {
   // Workspace management
   addWorkspace(
     cwd: string,
-    options?: { persist?: boolean },
+    options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;
+  updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability>;
   removeWorkspace(
     workspaceId: string,
     options?: { force?: boolean; timeoutMs?: number },

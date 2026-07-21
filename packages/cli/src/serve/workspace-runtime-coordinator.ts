@@ -12,12 +12,9 @@ import {
   type ServeWorkspaceRuntimeStatus,
   type ServeWorkspaceSkillsRefreshResult,
 } from '@qwen-code/acp-bridge/status';
-import {
-  WorkspaceRuntimeMcpOperations,
-  type WorkspaceRuntimeOperationStatus,
-} from './workspace-runtime-mcp-operations.js';
 import { WorkspaceDrainingError } from './acp-session-bridge.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
+import { errorMessage as message } from './error-message.js';
 import type { WorkspaceRequestContext } from './workspace-service/types.js';
 
 const DEFAULT_PREPARE_TIMEOUT_MS = 60_000;
@@ -64,10 +61,6 @@ function requestContext(
   return { route, workspaceCwd: runtime.workspaceCwd };
 }
 
-function message(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);
@@ -75,7 +68,11 @@ function wait(ms: number): Promise<void> {
   });
 }
 
-class WorkspaceRuntimeStillStartingError extends Error {}
+export class WorkspaceRuntimeStillStartingError extends Error {
+  constructor() {
+    super('Workspace runtime is still starting');
+  }
+}
 class WorkspaceRuntimeEpochChangedError extends WorkspaceRuntimeStillStartingError {}
 
 export function isWorkspaceRuntimeDrainingError(error: unknown): boolean {
@@ -156,20 +153,7 @@ export class WorkspaceRuntimeCoordinator {
 
   private activeManagementOperations = 0;
 
-  private readonly mcpOperations: WorkspaceRuntimeMcpOperations;
-
-  constructor(private readonly runtime: WorkspaceRuntime) {
-    this.mcpOperations = new WorkspaceRuntimeMcpOperations(runtime, {
-      assertAcceptingWork: () => this.assertAcceptingWork(),
-      runtimeEpoch: () => this.runtimeEpoch(),
-      runInPhysicalLane: (run, bypassAuthenticationBarrier) =>
-        this.runInCapabilityPhysicalLane(
-          'mcp',
-          run,
-          bypassAuthenticationBarrier,
-        ),
-    });
-  }
+  constructor(private readonly runtime: WorkspaceRuntime) {}
 
   beginDrain(): void {
     this.draining = true;
@@ -195,7 +179,6 @@ export class WorkspaceRuntimeCoordinator {
       this.inFlight.size > 0 ||
       this.backgroundResume.size > 0 ||
       this.capabilityPhysicalTail.size > 0 ||
-      this.mcpOperations.hasActiveWork() ||
       (this.runtime.bridge.hasActiveWorkspaceWork?.() ?? false)
     );
   }
@@ -231,8 +214,10 @@ export class WorkspaceRuntimeCoordinator {
     if (this.disposed) return;
     this.disposed = true;
     this.draining = true;
-    this.mcpOperations.dispose();
     this.deferredConfigurationReconciliation.clear();
+    this.inFlight.clear();
+    this.backgroundResume.clear();
+    this.capabilityPhysicalTail.clear();
   }
 
   private runtimeEpoch(): number {
@@ -272,18 +257,12 @@ export class WorkspaceRuntimeCoordinator {
   private runInCapabilityPhysicalLane<T>(
     capability: ServeWorkspaceRuntimeCapability,
     run: () => Promise<T>,
-    bypassMcpAuthenticationBarrier = false,
   ): Promise<T> {
     const previous =
       this.capabilityPhysicalTail.get(capability) ?? Promise.resolve();
-    const authenticationBarrier =
-      capability === 'mcp' && !bypassMcpAuthenticationBarrier
-        ? this.mcpOperations.getAuthenticationBarrier()
-        : undefined;
     const execution = previous
       .catch(() => undefined)
       .then(async () => {
-        await authenticationBarrier;
         await this.runtime.bridge.waitForWorkspacePhysicalRequests?.(
           capability,
         );
@@ -532,86 +511,6 @@ export class WorkspaceRuntimeCoordinator {
     );
   }
 
-  async runMcpRuntimeMutation<T>(run: () => Promise<T>): Promise<T> {
-    this.assertAcceptingWork();
-    const revision = this.advanceCapabilityRevision('mcp');
-    const previous = this.inFlight.get('mcp') ?? Promise.resolve();
-    const execution = previous
-      .catch(() => undefined)
-      .then(async () => await this.executeMcpRuntimeMutation(run, revision));
-    const tracked = execution.then(
-      () => undefined,
-      () => undefined,
-    );
-    this.inFlight.set('mcp', tracked);
-    try {
-      return await execution;
-    } finally {
-      if (this.inFlight.get('mcp') === tracked) {
-        this.inFlight.delete('mcp');
-      }
-    }
-  }
-
-  private executeMcpRuntimeMutation<T>(
-    run: () => Promise<T>,
-    revision: number,
-  ): Promise<T> {
-    return this.runInCapabilityPhysicalLane('mcp', () =>
-      this.executeMcpRuntimeMutationInPhysicalLane(run, revision),
-    );
-  }
-
-  private async executeMcpRuntimeMutationInPhysicalLane<T>(
-    run: () => Promise<T>,
-    revision: number,
-  ): Promise<T> {
-    this.assertAcceptingWork();
-    this.setCapabilityStatus('mcp', {
-      state: this.runtime.bridge.isChannelLive() ? 'starting' : 'not_started',
-      runtimeLive: this.runtime.bridge.isChannelLive(),
-    });
-    let operationEpoch: number | undefined;
-    const deadline = Date.now() + MAX_PREPARE_TIMEOUT_MS;
-    try {
-      return await this.withRuntimeControl(deadline, async () => {
-        await this.ensureAcpRuntime(deadline);
-        operationEpoch = this.runtimeEpoch();
-        const result = await run();
-        this.assertCurrentRuntimeEpoch(operationEpoch, operationEpoch);
-        if (revision !== this.currentCapabilityRevision('mcp')) return result;
-        const completed = await this.prepareCapabilityInPhysicalLane(
-          'mcp',
-          deadline,
-          revision,
-        );
-        if (!completed) {
-          await this.resumeCapabilityInBackground('mcp', revision, deadline);
-        }
-        return result;
-      });
-    } catch (error) {
-      if (revision === this.currentCapabilityRevision('mcp')) {
-        if (
-          error instanceof WorkspaceRuntimeEpochChangedError ||
-          (operationEpoch !== undefined &&
-            operationEpoch !== this.runtimeEpoch())
-        ) {
-          throw error;
-        }
-        this.setCapabilityStatus('mcp', {
-          state: 'error',
-          runtimeLive: this.runtime.bridge.isChannelLive(),
-          error: {
-            code: 'mcp_runtime_mutation_failed',
-            message: message(error),
-          },
-        });
-      }
-      throw error;
-    }
-  }
-
   reconcileSkillsConfiguration(): 'deferred' | 'reconciling' {
     return this.reconcileCapability('skills', () =>
       this.refreshSkillsConfiguration(),
@@ -703,11 +602,11 @@ export class WorkspaceRuntimeCoordinator {
             revision,
           );
           if (!completed) {
-            await this.resumeCapabilityInBackground(
+            void this.resumeCapabilityInBackground(
               capability,
               revision,
               deadline,
-            );
+            ).catch(() => undefined);
           }
         }),
       )
@@ -738,24 +637,6 @@ export class WorkspaceRuntimeCoordinator {
     return 'reconciling';
   }
 
-  operationStatus(
-    operationId: string,
-  ): WorkspaceRuntimeOperationStatus | undefined {
-    return this.mcpOperations.operationStatus(operationId);
-  }
-
-  activeOperations(): readonly WorkspaceRuntimeOperationStatus[] {
-    return this.mcpOperations.activeOperations();
-  }
-
-  async runMcpOperation<T extends { pending?: boolean; authUrl?: string }>(
-    serverName: string,
-    action: string,
-    run: (operationId: string, deadlineAt?: number) => Promise<T>,
-  ): Promise<T & { operationId: string; deadlineAt?: string }> {
-    return await this.mcpOperations.runMcpOperation(serverName, action, run);
-  }
-
   status(): ServeWorkspaceRuntimeStatus {
     const runtimeLive = this.runtime.bridge.isChannelLive();
     const capabilities = Object.fromEntries(
@@ -779,8 +660,7 @@ export class WorkspaceRuntimeCoordinator {
             ? 'starting'
             : 'cold'
           : (this.runtime.bridge.hasActiveWorkspaceWork?.() ??
-                this.runtime.bridge.sessionCount > 0) ||
-              this.mcpOperations.hasActiveWork()
+              this.runtime.bridge.sessionCount > 0)
             ? 'active'
             : hasError
               ? 'error'

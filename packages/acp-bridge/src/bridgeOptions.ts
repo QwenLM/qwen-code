@@ -400,10 +400,9 @@ export interface BridgeOptions {
    */
   onDiagnosticLine?: DiagnosticLineSink;
   /**
-   * Optional compatibility timeout that reaps the ACP child after the last
-   * session and workspace operation drain. Omit it to keep the workspace
-   * runtime alive, or pass a positive delay. Timers are `.unref()`'d so they do
-   * not prevent daemon exit.
+   * Keeps the ACP child alive after the last session and workspace operation
+   * drain. `0` or unset kills it immediately. Timers are `.unref()`'d so they
+   * do not prevent daemon exit.
    */
   channelIdleTimeoutMs?: number;
   /**

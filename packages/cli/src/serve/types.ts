@@ -214,12 +214,18 @@ export interface ServeOptions {
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Positive ACP child auto-reap delay in ms. Unset = disabled. */
+  /** ACP child auto-reap delay in ms. 0 or unset = immediate kill. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
+  /**
+   * ACP child request timeout, including the `initialize` handshake,
+   * in ms. Must be a positive
+   * integer. Default: 10000 (10 s).
+   */
+  initializeTimeoutMs?: number;
   /**
    * Wall-clock timeout in ms for a single human permission /
    * ask_user_question response in daemon (ACP) mode. 0 = disabled
@@ -315,6 +321,7 @@ export interface CapabilitiesEnvelope {
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     removable?: boolean;

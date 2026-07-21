@@ -1,0 +1,13 @@
+# ============================================================
+# Qwen Code CODEOWNERS
+# ============================================================
+
+# --- CODEOWNERS file itself ---
+/.github/CODEOWNERS    @pomelo-nwu
+
+# --- Core package ---
+/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan
+
+# --- CUA Driver & Mobile MCP ---
+/packages/cua-driver/  @LaZzyMan
+/packages/mobile-mcp/  @LaZzyMan
