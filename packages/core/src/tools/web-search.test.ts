@@ -280,6 +280,13 @@ describe('evaluateWebSearchGate', () => {
     if (!gate.ok) expect(gate.notice).toContain(TEST_ENV_KEY);
   });
 
+  it('rejects a whitespace-only key env var as unset', () => {
+    process.env[TEST_ENV_KEY] = '   ';
+    const gate = evaluateWebSearchGate(makeConfig());
+    expect(gate.ok).toBe(false);
+    if (!gate.ok) expect(gate.notice).toContain(TEST_ENV_KEY);
+  });
+
   it('prefers a usable entry when several modelProviders entries share the model id', () => {
     const gate = evaluateWebSearchGate(
       makeConfig({
@@ -869,6 +876,38 @@ describe('WebSearchTool execute', () => {
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
   });
 
+  it('handles a response.cancelled terminal event with no prior search', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream([
+        { type: 'response.created' },
+        {
+          type: 'response.cancelled',
+          response: { status: 'cancelled', output: [] },
+        },
+      ]),
+    );
+    const result = await runSearch(makeConfig());
+    expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
+  });
+
+  it('salvages streamed results when the backend cancels after an executed search', async () => {
+    mockCreate.mockResolvedValueOnce(
+      makeStream([
+        { type: 'response.created' },
+        { type: 'response.output_item.done', item: SEARCH_ITEM },
+        {
+          type: 'response.cancelled',
+          response: { status: 'cancelled', output: [] },
+        },
+      ]),
+    );
+    const result = await runSearch(makeConfig());
+    expect(result.error).toBeUndefined();
+    const content = result.llmContent as string;
+    expect(content).toContain('Partial result');
+    expect(content).toContain('https://example.com/a');
+  });
+
   it('labels an incomplete response as partial', async () => {
     mockCreate.mockResolvedValueOnce(
       makeStream(
@@ -976,5 +1015,14 @@ describe('WebSearchTool execute', () => {
     const result = await runSearch(makeConfig());
     expect(result.error?.type).toBe(ToolErrorType.WEB_SEARCH_BACKEND_FAILED);
     expect(mockCreate).not.toHaveBeenCalled();
+  });
+
+  it('embeds the current month and year in the schema description', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(2026, 6, 21));
+    const tool = new WebSearchTool(makeConfig());
+    const schema = tool.schema;
+    expect(schema.description).toContain('July 2026');
+    vi.useRealTimers();
   });
 });

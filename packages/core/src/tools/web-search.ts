@@ -201,7 +201,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
       };
     }
     const keyEnv = settings.apiKeyEnv ?? 'DASHSCOPE_API_KEY';
-    if (!process.env[keyEnv]) {
+    if (!process.env[keyEnv]?.trim()) {
       return {
         ok: false,
         notice: `WebSearch is enabled with WEB_SEARCH_BASE_URL but the API key variable ${keyEnv} is not set. Set WEB_SEARCH_API_KEY (or DASHSCOPE_API_KEY).`,
@@ -244,7 +244,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     !!m.baseUrl &&
     isDashScopeCompatibleBaseUrl(m.baseUrl) &&
     !!m.envKey &&
-    !!process.env[m.envKey];
+    !!process.env[m.envKey]?.trim();
   const entry = matches.find(isUsableEntry) ?? matches[0];
   if (entry.authType === AuthType.QWEN_OAUTH) {
     return {
@@ -277,7 +277,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
       notice: `WebSearch search model "${selector}" has no envKey on its modelProviders entry. Declare the API key environment variable name there.`,
     };
   }
-  if (!process.env[entry.envKey]) {
+  if (!process.env[entry.envKey]?.trim()) {
     return {
       ok: false,
       notice: `WebSearch search model "${selector}" reads its API key from ${entry.envKey}, which is not set in the environment.`,
@@ -726,7 +726,8 @@ class WebSearchToolInvocation extends BaseToolInvocation<
             }
             case 'response.completed':
             case 'response.failed':
-            case 'response.incomplete': {
+            case 'response.incomplete':
+            case 'response.cancelled': {
               finalResponse = event.response;
               break;
             }
