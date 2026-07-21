@@ -3413,8 +3413,9 @@ describe('qwen-autofix workflow', () => {
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL FOUR agent-derived publish sites
-    // (the three model-output bodies + the API_ERROR_DETAIL headline, whose
+    // Token-breaking neutralization at ALL FIVE agent-derived publish sites
+    // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, and the
+    // gate-rejection body, whose
     // content is agent stdout that can echo external comment text), and it
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
