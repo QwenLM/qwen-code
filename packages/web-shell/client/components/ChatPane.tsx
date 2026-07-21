@@ -37,7 +37,10 @@ import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
 import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
-import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
+import {
+  hasMultipleWorkspaces,
+  workspaceLabelForCwd,
+} from '../utils/workspace';
 import { workspaceAccentColor } from '../utils/workspaceColor';
 import {
   getLocalCommands,
@@ -442,7 +445,10 @@ export function ChatPane({
   // and keeps them distinguishable even when the header name ellipsizes.
   const workspaceLabel =
     showWorkspaceChip && paneWorkspaceCwd
-      ? workspaceBasename(paneWorkspaceCwd)
+      ? workspaceLabelForCwd(
+          paneWorkspaceCwd,
+          workspace.capabilities?.workspaces,
+        )
       : undefined;
   const workspaceAccent = showWorkspaceChip
     ? workspaceAccentColor(paneWorkspaceCwd, workspace.capabilities)
@@ -606,11 +612,7 @@ export function ChatPane({
           onPopQueuedMessages={editLastQueuedPrompt}
           onClearQueuedMessages={clearQueuedPrompts}
           visibleToolbarActions={paneToolbarActions}
-          workspaceName={
-            showWorkspaceChip && paneWorkspaceCwd
-              ? workspaceBasename(paneWorkspaceCwd)
-              : undefined
-          }
+          workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
           workspaceTitle={paneWorkspaceCwd}
           workspaceColor={workspaceAccent}
           currentMode={connection.currentMode ?? 'default'}

@@ -2109,6 +2109,26 @@ export class CoreToolScheduler {
       }
 
       const newToolCalls: ToolCall[] = [];
+      const retryErrorsRecordedInBatch = new Map<string, number>();
+      const recordBatchRetryableToolError = (
+        toolName: string,
+        errorMessage: string,
+      ): number => {
+        const key = `${toolName}:${errorMessage}`;
+        const existingCount = retryErrorsRecordedInBatch.get(key);
+        if (existingCount !== undefined) {
+          for (const trackedKey of this.validationRetryCounts.keys()) {
+            if (trackedKey.startsWith(`${toolName}:`)) {
+              this.validationRetryCounts.delete(trackedKey);
+            }
+          }
+          this.validationRetryCounts.set(key, existingCount);
+          return existingCount;
+        }
+        const count = this.recordRetryableToolError(toolName, errorMessage);
+        retryErrorsRecordedInBatch.set(key, count);
+        return count;
+      };
       for (const [requestIndex, reqInfo] of requestsToProcess.entries()) {
         if (
           planModeEntryBoundaryIndex !== undefined &&
@@ -2199,7 +2219,7 @@ export class CoreToolScheduler {
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
         if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const count = this.recordRetryableToolError(
+          const count = recordBatchRetryableToolError(
             reqInfo.name,
             TRUNCATION_EDIT_REJECTION,
           );
@@ -2238,7 +2258,7 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const count = this.recordRetryableToolError(
+          const count = recordBatchRetryableToolError(
             reqInfo.name,
             invocationOrError.message,
           );

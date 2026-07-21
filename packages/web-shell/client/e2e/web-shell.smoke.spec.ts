@@ -217,6 +217,32 @@ test('opens slash menu, resume dialog, model dialog, and theme dialog @smoke', a
   await expect(page.locator('[data-web-shell-theme-dialog]')).toHaveCount(0);
 });
 
+test('gates voice dictation on the workspace voice setting @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    voice: {
+      enabled: false,
+    },
+  });
+  scenario.capabilities.features = [
+    ...scenario.capabilities.features,
+    'voice_transcribe',
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  const voiceButton = page.getByRole('button', {
+    name: 'Start voice dictation',
+  });
+
+  await gotoSession(page, scenario, daemon);
+  await expect(voiceButton).toHaveCount(0);
+
+  scenario.voice.enabled = true;
+  await page.reload();
+  await completeReplay(page, daemon);
+  await expect(voiceButton).toBeVisible();
+});
+
 for (const viewportHeight of COMPOSER_VIEWPORT_HEIGHTS) {
   test(`grows long text to the responsive composer cap at ${viewportHeight}px @smoke`, async ({
     page,

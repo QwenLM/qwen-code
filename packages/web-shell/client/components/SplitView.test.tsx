@@ -743,7 +743,13 @@ describe('SplitView', () => {
     workspaceCwd: '/w',
     workspaces: [
       { id: 'w0', cwd: '/w', primary: true, trusted: true },
-      { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      {
+        id: 'w1',
+        cwd: '/wsB',
+        displayName: 'Payments API',
+        primary: false,
+        trusted: true,
+      },
     ],
   };
 
@@ -759,10 +765,10 @@ describe('SplitView', () => {
     const options = pickerOptions();
     // Primary sessions are still listed…
     expect(options.some((o) => o.includes('Two'))).toBe(true);
-    // …plus the non-primary session, tagged with its workspace basename.
-    expect(options.some((o) => o.includes('Beta') && o.includes('wsB'))).toBe(
-      true,
-    );
+    // …plus the non-primary session, tagged with its workspace display name.
+    expect(
+      options.some((o) => o.includes('Beta') && o.includes('Payments API')),
+    ).toBe(true);
     // Primary-workspace sessions show their own basename too, not a "Primary"
     // tag — the redundant label was removed from the picker.
     expect(options.some((o) => o.includes('Primary'))).toBe(false);

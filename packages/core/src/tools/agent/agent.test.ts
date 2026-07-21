@@ -438,6 +438,23 @@ describe('AgentTool', () => {
       expect(properties.properties.fork_turns.oneOf).toHaveLength(2);
     });
 
+    it('documents that working_dir takes precedence over isolation', () => {
+      const properties = agentTool.schema.parametersJsonSchema as {
+        properties: {
+          working_dir: {
+            description?: string;
+          };
+        };
+      };
+
+      expect(properties.properties.working_dir.description).toContain(
+        'isolation is ignored',
+      );
+      expect(properties.properties.working_dir.description).not.toContain(
+        'Mutually exclusive',
+      );
+    });
+
     it('does not advertise "fork" in the enum, even when interactive', async () => {
       // `fork` is intentionally omitted from the enum so the model is not
       // steered to fork result-bearing work; it stays valid via validation.
@@ -725,14 +742,31 @@ describe('AgentTool', () => {
       ).toMatch(/working_dir/i);
     });
 
-    it('rejects working_dir combined with isolation', () => {
+    it('accepts redundant worktree isolation when working_dir is set', () => {
       expect(
         agentTool.validateToolParams({
           ...validParams,
           working_dir: '.qwen/tmp/review-pr-1',
           isolation: 'worktree',
         }),
-      ).toMatch(/mutually exclusive/i);
+      ).toBeNull();
+    });
+
+    it('drops redundant isolation before creating a working_dir invocation', () => {
+      const invocation = (
+        agentTool as AgentTool & {
+          createInvocation(params: AgentParams): {
+            params: AgentParams;
+          };
+        }
+      ).createInvocation({
+        ...validParams,
+        working_dir: '.qwen/tmp/review-pr-1',
+        isolation: 'worktree',
+      });
+
+      expect(invocation.params.working_dir).toBe('.qwen/tmp/review-pr-1');
+      expect(invocation.params.isolation).toBeUndefined();
     });
 
     it('rejects working_dir without an explicit subagent_type', () => {
@@ -1641,6 +1675,68 @@ describe('AgentTool', () => {
           'task_prompt',
           expect.stringContaining('translate it to the corresponding path'),
         );
+      } finally {
+        fs.rmSync(repo, { recursive: true, force: true });
+        vi.useFakeTimers();
+      }
+    }, 20000);
+
+    it('executes a review agent when strict providers send working_dir and isolation together', async () => {
+      vi.useRealTimers();
+      const repo = fs.realpathSync(
+        fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-agent-wd-strict-')),
+      );
+      try {
+        execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: repo });
+        execFileSync('git', ['config', 'user.email', 't@e.com'], { cwd: repo });
+        execFileSync('git', ['config', 'user.name', 't'], { cwd: repo });
+        execFileSync('git', ['config', 'commit.gpgsign', 'false'], {
+          cwd: repo,
+        });
+        fs.writeFileSync(path.join(repo, 'README.md'), 'hi\n');
+        execFileSync('git', ['add', '.'], { cwd: repo });
+        execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
+          cwd: repo,
+        });
+
+        const wt = path.join(repo, '.qwen', 'tmp', 'review-pr-1');
+        fs.mkdirSync(path.dirname(wt), { recursive: true });
+        execFileSync(
+          'git',
+          ['worktree', 'add', '-b', 'review-pr-1', wt, 'HEAD'],
+          { cwd: repo },
+        );
+
+        vi.mocked(config.getProjectRoot).mockReturnValue(repo);
+        vi.mocked(config.getTargetDir).mockReturnValue(repo);
+        vi.mocked(config.getCwd).mockReturnValue(repo);
+        vi.mocked(config.getWorkingDir).mockReturnValue(repo);
+
+        const params: AgentParams = {
+          description: 'Review',
+          prompt: 'Review the diff',
+          subagent_type: 'file-search',
+          working_dir: wt,
+          isolation: 'worktree',
+        };
+        expect(agentTool.validateToolParams(params)).toBeNull();
+
+        const invocation = (
+          agentTool as AgentToolWithProtectedMethods
+        ).createInvocation(params);
+        await invocation.execute();
+
+        const createCall = vi.mocked(mockSubagentManager.createAgentHeadless)
+          .mock.calls[0];
+        const agentConfig = createCall[1] as Config;
+        expect(agentConfig.getProjectRoot()).toBe(wt);
+        expect(fs.existsSync(wt)).toBe(true);
+        expect(
+          execFileSync('git', ['worktree', 'list', '--porcelain'], {
+            cwd: repo,
+            encoding: 'utf8',
+          }).match(/^worktree /gm),
+        ).toHaveLength(2);
       } finally {
         fs.rmSync(repo, { recursive: true, force: true });
         vi.useFakeTimers();

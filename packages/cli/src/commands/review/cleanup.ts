@@ -16,6 +16,7 @@ import { execFileSync } from 'node:child_process';
 import { existsSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { writeStdoutLine, writeStderrLine } from '../../utils/stdioHelpers.js';
+import { clearReviewWorktreeLease } from '../../services/review-worktree-lease.js';
 import { refExists, releaseWorktree } from './lib/git.js';
 import {
   worktreePath,
@@ -29,7 +30,7 @@ interface CleanupArgs {
   target: string;
 }
 
-function runCleanup(target: string): void {
+export function runCleanup(target: string): void {
   let removedAny = false;
   // Tracked separately from `removedAny`, because a failure is neither. Without
   // it, a run that could not delete something goes on to announce "Nothing to
@@ -79,6 +80,7 @@ function runCleanup(target: string): void {
         writeStderrLine(
           `Failed to delete branch ${branch}: ${(err as Error).message}`,
         );
+        failedAny = true;
       }
     }
   }
@@ -109,6 +111,10 @@ function runCleanup(target: string): void {
       writeStderrLine(`Failed to remove ${full}: ${(err as Error).message}`);
       failedAny = true;
     }
+  }
+
+  if (!failedAny) {
+    clearReviewWorktreeLease(process.cwd(), target);
   }
 
   // "Nothing to clean" is a claim about the tree, not about this run's luck. It

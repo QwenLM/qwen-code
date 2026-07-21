@@ -236,8 +236,8 @@ export interface AgentParams {
    * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
    * reach outside, same as `isolation:'worktree'`.) Must resolve to a
    * worktree registered against this repository, and must live inside it —
-   * pinning rebinds the child's workspace boundary. Mutually exclusive with
-   * `isolation`.
+   * pinning rebinds the child's workspace boundary. If `isolation` is also
+   * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
 }
@@ -798,7 +798,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. Mutually exclusive with 'isolation'.",
+            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. If both working_dir and isolation are provided, isolation is ignored and the caller-owned worktree is reused.",
         },
       },
       required: ['description', 'prompt'],
@@ -1101,12 +1101,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (params.run_in_background === true) {
         return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
-      // A worktree pin and a fresh-worktree isolation are contradictory —
-      // one reuses a caller-owned directory, the other provisions and
-      // reaps its own. Reject the ambiguous combination up front.
-      if (params.isolation !== undefined) {
-        return 'Parameters "working_dir" and "isolation" are mutually exclusive.';
-      }
+      // `working_dir` is the more specific workspace instruction. Some
+      // providers require every advertised schema property and therefore send
+      // the optional `isolation: "worktree"` alongside it. Accept that
+      // redundant combination; createInvocation drops isolation so the
+      // caller-owned worktree is reused rather than provisioning another one.
       // Same rationale as isolation: a fork shares the parent's
       // conversation context and working tree, so it cannot be rebound to
       // a different directory; and the pin is only meaningful for an
@@ -1141,7 +1140,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   protected createInvocation(params: AgentParams) {
-    return new AgentToolInvocation(this.config, this.subagentManager, params);
+    const invocationParams = params.working_dir
+      ? { ...params, isolation: undefined }
+      : params;
+    return new AgentToolInvocation(
+      this.config,
+      this.subagentManager,
+      invocationParams,
+    );
   }
 
   override toAutoClassifierInput(params: AgentParams): Record<string, unknown> {
