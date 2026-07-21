@@ -387,6 +387,51 @@ describe('useComposerCore tags', () => {
     expect(editor.textContent).not.toContain('orders');
   });
 
+  it('restores shell history as raw command text without parsing tags', async () => {
+    const serialized = '<context id="orders">orders</context>';
+    const command = `echo ${serialized}`;
+    const parseUserMessageContent = vi.fn<UserMessageContentParser>(
+      (content) =>
+        content === command
+          ? [
+              { type: 'text', text: 'echo ' },
+              {
+                type: 'tag',
+                tag: { id: 'orders', value: 'orders', serialized },
+              },
+            ]
+          : undefined,
+    );
+    await mount({ parseUserMessageContent });
+
+    act(() => {
+      latest!.setShellMode(true);
+    });
+    act(() => {
+      latest!.setText(command);
+      latest!.submitText();
+      latest!.setText('draft');
+    });
+
+    const editor = container!.querySelector('.cm-content')!;
+    act(() => {
+      editor.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowUp',
+          code: 'ArrowUp',
+          bubbles: true,
+        }),
+      );
+    });
+
+    expect(latest!.getText()).toBe(command);
+    expect(editor.textContent).toBe(command);
+    expect(
+      editor.querySelectorAll('button[aria-label^="Remove "]'),
+    ).toHaveLength(0);
+    expect(parseUserMessageContent).not.toHaveBeenCalled();
+  });
+
   it('restores draft top tags after ArrowDown exits prompt history', async () => {
     const historyText = 'previous prompt';
     const draftText = 'draft prompt';
