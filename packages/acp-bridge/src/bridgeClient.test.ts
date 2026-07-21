@@ -1105,6 +1105,134 @@ describe('BridgeClient — create-sub-session extMethod dispatch', () => {
   });
 });
 
+describe('BridgeClient — channel-delivery extMethod dispatch', () => {
+  const METHOD = 'qwen/control/channel-delivery';
+
+  function makeClient(
+    onChannelDelivery: (info: Record<string, unknown>) => Promise<unknown>,
+  ) {
+    const publish = vi.fn().mockReturnValue(true);
+    const entry = { sessionId: 'session-1', events: { publish } };
+    const noFlow = () => {
+      throw new Error('test: should not run');
+    };
+    const client = new BridgeClient(
+      ((id: string) => (id === 'session-1' ? entry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (id) => id === 'session-1',
+      undefined,
+      undefined,
+      undefined,
+      onChannelDelivery as never,
+    );
+    return { client, publish };
+  }
+
+  const validParams = {
+    sessionId: 'session-1',
+    deliveryId: 'prompt-1',
+    source: 'prompt',
+    target: { channelName: 'dingtalk', type: 'user', id: 'user-1' },
+    text: 'final answer',
+    promptId: 'prompt-1',
+  };
+
+  it('dispatches a validated request and publishes a sanitized delivered result', async () => {
+    const deliver = vi.fn(async () => ({ status: 'delivered' }));
+    const { client, publish } = makeClient(deliver);
+
+    await expect(client.extMethod(METHOD, validParams)).resolves.toEqual({
+      status: 'delivered',
+    });
+    expect(deliver).toHaveBeenCalledWith(validParams);
+    expect(publish).toHaveBeenCalledWith({
+      type: 'channel_delivery_result',
+      promptId: 'prompt-1',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'prompt-1',
+        source: 'prompt',
+        status: 'delivered',
+        promptId: 'prompt-1',
+      },
+    });
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('final answer');
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('user-1');
+  });
+
+  it('publishes only a sanitized code and error for a failed delivery', async () => {
+    const { client, publish } = makeClient(async () => ({
+      status: 'failed',
+      code: 'channel_worker_unavailable',
+      error: 'Channel worker is not running.',
+    }));
+
+    await client.extMethod(METHOD, validParams);
+
+    expect(publish.mock.calls[0]?.[0]).toMatchObject({
+      type: 'channel_delivery_result',
+      data: {
+        status: 'failed',
+        code: 'channel_worker_unavailable',
+        error: 'Channel worker is not running.',
+      },
+    });
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('dingtalk');
+  });
+
+  it('publishes skipped without invoking the host when final text is empty', async () => {
+    const deliver = vi.fn();
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, { ...validParams, text: '' }),
+    ).resolves.toEqual({ status: 'skipped' });
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(publish.mock.calls[0]?.[0]).toMatchObject({
+      type: 'channel_delivery_result',
+      data: { status: 'skipped' },
+    });
+  });
+
+  it('rejects a session that this connection does not own', async () => {
+    const deliver = vi.fn();
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, { ...validParams, sessionId: 'victim' }),
+    ).rejects.toThrow(/sessionId/i);
+    expect(deliver).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
+
+  it('rejects malformed or child-expanded payloads before dispatch', async () => {
+    const deliver = vi.fn();
+    const { client } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, {
+        ...validParams,
+        workspaceCwd: '/other',
+      }),
+    ).rejects.toThrow();
+    await expect(
+      client.extMethod(METHOD, {
+        ...validParams,
+        target: { ...validParams.target, type: 'topic' },
+      }),
+    ).rejects.toThrow();
+    expect(deliver).not.toHaveBeenCalled();
+  });
+});
+
 describe('BridgeClient — artifact ingress', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');

@@ -1972,6 +1972,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             })
             .catch(() => undefined);
         },
+        opts.onChannelDelivery,
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 

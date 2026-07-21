@@ -451,6 +451,9 @@ export interface BridgeOptions {
    * reports itself unavailable (daemon-only).
    */
   onCreateSubSession?: CreateSubSessionHandler;
+  /** Handles one child-initiated Channel delivery attempt. The bridge
+   * authenticates the session and publishes the sanitized result event. */
+  onChannelDelivery?: ChannelDeliveryHandler;
 }
 
 /**
@@ -515,3 +518,37 @@ export interface CreateSubSessionResult {
 export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
+
+export type ChannelDeliveryErrorCode =
+  | 'channel_worker_unavailable'
+  | 'channel_delivery_timeout'
+  | 'channel_delivery_invalid'
+  | 'channel_delivery_queue_full'
+  | 'channel_delivery_failed';
+
+export interface ChannelDeliveryInfo {
+  sessionId: string;
+  deliveryId: string;
+  source: 'prompt' | 'scheduled';
+  target: {
+    channelName: string;
+    type: 'user' | 'chat';
+    id: string;
+  };
+  text: string;
+  promptId?: string;
+  taskId?: string;
+  firedAt?: number;
+}
+
+export type ChannelDeliveryHostResult =
+  | { status: 'delivered' }
+  | {
+      status: 'failed';
+      code: ChannelDeliveryErrorCode;
+      error: string;
+    };
+
+export type ChannelDeliveryHandler = (
+  info: ChannelDeliveryInfo,
+) => Promise<ChannelDeliveryHostResult>;

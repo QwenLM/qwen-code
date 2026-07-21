@@ -94,6 +94,10 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type {
+  ChannelDeliveryHandler,
+  ChannelDeliveryHostResult,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
@@ -117,6 +121,7 @@ import type {
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import { isChannelDeliveryError } from './channel-delivery-ipc.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -159,6 +164,40 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+
+export function createBoundChannelDeliveryHandler(
+  boundWorkspace: string,
+  getManager: () => ChannelWorkerManager | undefined,
+): ChannelDeliveryHandler {
+  return async (info): Promise<ChannelDeliveryHostResult> => {
+    const manager = getManager();
+    if (!manager) {
+      return {
+        status: 'failed',
+        code: 'channel_worker_unavailable',
+        error: 'Channel worker is not running.',
+      };
+    }
+    try {
+      await manager.deliverChannelMessage(boundWorkspace, {
+        deliveryId: info.deliveryId,
+        channelName: info.target.channelName,
+        target: { type: info.target.type, id: info.target.id },
+        text: info.text,
+      });
+      return { status: 'delivered' };
+    } catch (err) {
+      if (isChannelDeliveryError(err)) {
+        return { status: 'failed', code: err.code, error: err.message };
+      }
+      return {
+        status: 'failed',
+        code: 'channel_delivery_failed',
+        error: 'Channel delivery failed.',
+      };
+    }
+  };
+}
 
 async function flushDaemonLogBounded(
   daemonLog: DaemonLogger,
@@ -3336,6 +3375,10 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          boundWorkspace,
+          () => channelWorkerManager,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -3651,6 +3694,10 @@ async function runQwenServeImpl(
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          workspaceInput.cwd,
+          () => channelWorkerManager,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,
@@ -4025,6 +4072,10 @@ async function runQwenServeImpl(
         wsBridge = runtime.createAcpSessionBridge({
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onChannelDelivery: createBoundChannelDeliveryHandler(
+            cwd,
+            () => channelWorkerManager,
+          ),
           maxSessions: opts.maxSessions,
           freshSessionAdmission: totalSessionAdmission.admit,
           sessionLifecycle: sessionOwnerIndex.handleBridgeSessionLifecycle,

@@ -18,6 +18,7 @@ import {
   formatChannelWorkerDaemonUrl,
   InvalidPolicyConfigError,
   createDisabledChannelWorkerSupervisor,
+  createBoundChannelDeliveryHandler,
   resolveRuntimeStartupTimeoutMs,
   runQwenServe,
   type RunHandle,
@@ -89,6 +90,49 @@ const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   permissionPolicy: 'first-responder',
   sessions: [],
 };
+
+describe('createBoundChannelDeliveryHandler', () => {
+  const info = {
+    sessionId: 'session-1',
+    deliveryId: 'prompt-1',
+    source: 'prompt' as const,
+    target: { channelName: 'dingtalk', type: 'user' as const, id: 'user-1' },
+    text: 'answer',
+    promptId: 'prompt-1',
+  };
+
+  it('routes only to the workspace captured by the bridge', async () => {
+    const deliverChannelMessage = vi.fn(async () => ({
+      delivered: true as const,
+    }));
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+    );
+
+    await expect(
+      handler({ ...info, workspaceCwd: '/forged' } as never),
+    ).resolves.toEqual({ status: 'delivered' });
+    expect(deliverChannelMessage).toHaveBeenCalledWith('/canonical', {
+      deliveryId: 'prompt-1',
+      channelName: 'dingtalk',
+      target: { type: 'user', id: 'user-1' },
+      text: 'answer',
+    });
+  });
+
+  it('does not lazily start a missing manager and returns a clear failure', async () => {
+    const getManager = vi.fn(() => undefined);
+    const handler = createBoundChannelDeliveryHandler('/canonical', getManager);
+
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_worker_unavailable',
+      error: 'Channel worker is not running.',
+    });
+    expect(getManager).toHaveBeenCalledTimes(1);
+  });
+});
 
 function makeRuntimeBridge(): HttpAcpBridge {
   return {
@@ -775,6 +819,12 @@ describe('runQwenServe telemetry validation', () => {
         body: JSON.stringify({ cwd: secondary, persist: true }),
       });
       expect(added.status).toBe(201);
+      expect(createBridge.mock.calls[0]?.[0].onChannelDelivery).toBeTypeOf(
+        'function',
+      );
+      expect(createBridge.mock.calls[1]?.[0].onChannelDelivery).toBeTypeOf(
+        'function',
+      );
 
       const before = (await (
         await fetch(`${handle.url}/capabilities`, { headers })
@@ -1014,11 +1064,13 @@ describe('runQwenServe telemetry validation', () => {
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         permissionPolicy: 'local-only',
+        onChannelDelivery: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         permissionPolicy: 'local-only',
+        onChannelDelivery: expect.any(Function),
       });
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
