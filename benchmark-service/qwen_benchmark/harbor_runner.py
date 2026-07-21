@@ -96,13 +96,14 @@ class HarborRunner:
         )
 
         for instance_id in suite["instance_ids"]:
+            harbor_task_name = f"{suite.get('harbor_task_prefix', '')}{instance_id}"
             command = [
                 str(self.settings.harbor_binary),
                 "run",
                 "--dataset",
                 dataset_spec,
                 "--include-task-name",
-                instance_id,
+                harbor_task_name,
                 "--agent",
                 "qwen-coder",
                 "--model",
@@ -219,6 +220,9 @@ class HarborRunner:
         for result_path in sorted(run_jobs_root.glob("*/*/result.json")):
             result = json.loads(result_path.read_text(encoding="utf-8"))
             instance_id = result.get("task_name") or result.get("task_id")
+            task_prefix = suite.get("harbor_task_prefix", "")
+            if task_prefix and isinstance(instance_id, str):
+                instance_id = instance_id.removeprefix(task_prefix)
             if instance_id not in expected or instance_id in seen:
                 continue
             seen.add(instance_id)

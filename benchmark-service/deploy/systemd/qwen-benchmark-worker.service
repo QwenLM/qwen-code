@@ -19,7 +19,9 @@ TimeoutStopSec=90
 NoNewPrivileges=true
 PrivateTmp=false
 ProtectSystem=strict
-ProtectHome=true
+ProtectHome=tmpfs
+CacheDirectory=qwen-benchmark/harbor
+BindPaths=/var/cache/qwen-benchmark/harbor:/home/ecs-user/.cache/harbor
 ReadWritePaths=/srv/qwen-benchmark /var/lib/docker /var/run/docker.sock
 
 [Install]

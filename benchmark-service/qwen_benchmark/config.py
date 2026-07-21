@@ -17,6 +17,7 @@ class Suite(TypedDict):
     publish: bool
     harbor_dataset: NotRequired[str]
     harbor_dataset_version: NotRequired[str]
+    harbor_task_prefix: NotRequired[str]
     harbor_max_turns: NotRequired[int]
 
 

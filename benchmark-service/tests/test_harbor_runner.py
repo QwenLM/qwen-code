@@ -48,7 +48,7 @@ def test_parse_harbor_result_and_validate_version(tmp_path: Path) -> None:
     (trial / "result.json").write_text(
         json.dumps(
             {
-                "task_name": "sympy__sympy-20590",
+                "task_name": "swe-bench/sympy__sympy-20590",
                 "agent_info": {"name": "qwen-coder", "version": "0.19.7"},
                 "exception_info": None,
                 "verifier_result": {"rewards": {"reward": 1}},

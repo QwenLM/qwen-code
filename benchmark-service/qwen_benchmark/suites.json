@@ -22,6 +22,7 @@
     "dataset_revision": "2",
     "harbor_dataset": "swe-bench/swe-bench-verified",
     "harbor_dataset_version": "2",
+    "harbor_task_prefix": "swe-bench/",
     "instance_ids": ["sympy__sympy-20590"],
     "runner_mode": "harbor",
     "grader_concurrency": 1,
