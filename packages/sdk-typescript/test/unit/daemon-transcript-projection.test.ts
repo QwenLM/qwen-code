@@ -277,7 +277,7 @@ describe('projectChatRecordsToDaemonTranscript', () => {
     expect(projection.complete).toBe(true);
   });
 
-  it('finalizes dangling tools as failed', () => {
+  it('finalizes dangling tools as failed and marks the projection incomplete', () => {
     const projection = projectChatRecordsToDaemonTranscript([
       record('tool-start', null, {
         type: 'assistant',
@@ -293,6 +293,14 @@ describe('projectChatRecordsToDaemonTranscript', () => {
       status: 'failed',
       toolCallId: 'qwen-replay-tool:tool-start:0',
     });
+    expect(projection.complete).toBe(false);
+    expect(projection.diagnostics).toContainEqual(
+      expect.objectContaining({
+        code: 'missing_tool_result',
+        affectsCompleteness: true,
+        recordId: 'tool-start',
+      }),
+    );
   });
 
   it('preserves assistant usage when the record ends with a tool call', () => {
