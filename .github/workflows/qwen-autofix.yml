@@ -274,21 +274,53 @@ jobs:
               if [[ "${EVENT_NAME}" == 'schedule' ]]; then
                 DO_ISSUE=true
               fi
-              # Real-time review triggers: only process in-repo bot PRs with
-              # reviews from trusted senders (collaborators or the review bot).
-              # This prevents arbitrary commenters from forcing expensive
+              # Real-time review triggers: process the SAME managed set the
+              # scheduled scan does, so feedback is picked up seconds after the
+              # review instead of waiting for a schedule GitHub throttles hard
+              # (the */10 cron actually lands every 40-70min on this repo).
+              # Reviews must come from trusted senders (collaborators or the
+              # review bot) so arbitrary commenters cannot force expensive
               # review-scan runs. Only pull_request_review:submitted triggers
-              # (not per-comment events) to avoid redundant runs on multi-comment
-              # reviews.
+              # (not per-comment events) to avoid redundant runs on
+              # multi-comment reviews.
               if [[ "${EVENT_NAME}" == 'pull_request_review' ]]; then
                 DO_ISSUE=false
-                if [[ "${PR_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then
-                  echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
-                elif [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
-                  echo "🧭 review event ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
-                elif [[ "${PR_BASE_REF}" != "main" ]]; then
+                pr_is_managed=false
+                if [[ "${PR_BASE_REF}" != "main" ]]; then
                   echo "🧭 review event ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                elif [[ "${PR_HEAD_REPO}" == "${REPO}" ]]; then
+                  if [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
+                    pr_is_managed=true
+                  else
+                    echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
+                  fi
                 else
+                  # Fork PR. The scheduled scan already admits these for
+                  # takeover, so real-time pickup applies the SAME admission
+                  # (allow-edits on, and either the bot's own fork or an
+                  # explicit TAKEOVER_LABEL) rather than making the takeover
+                  # PRs — the ones a maintainer is actively waiting on — sit
+                  # through a throttled schedule. This event runs in BASE-repo
+                  # context, and review-address independently re-verifies
+                  # allow-edits, a live write+ author and a matching live head
+                  # repo before it touches the branch, so this only decides
+                  # WHEN that same gated work happens, never whether it may.
+                  fork_meta=''
+                  if fork_meta="$(gh pr view "${PR_NUMBER_EVENT}" --repo "${REPO}" --json labels,maintainerCanModify 2> /dev/null)"; then
+                    fork_allows_edits="$(jq -r '.maintainerCanModify == true' <<< "${fork_meta}")"
+                    fork_has_takeover="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${fork_meta}")"
+                    if [[ "${fork_allows_edits}" != 'true' ]]; then
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits"
+                    elif [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" || "${fork_has_takeover}" == 'true' ]]; then
+                      pr_is_managed=true
+                    else
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} is neither ${AUTOFIX_BOT}'s own fork nor ${TAKEOVER_LABEL}-labeled"
+                    fi
+                  else
+                    echo "🧭 review event ignored: could not read fork PR #${PR_NUMBER_EVENT} metadata"
+                  fi
+                fi
+                if [[ "${pr_is_managed}" == 'true' ]]; then
                   # Verify the reviewer/commenter is trusted (prompt-injection gate).
                   sender_permission=''
                   sender_is_trusted=false
@@ -1492,15 +1524,44 @@ jobs:
           # input and silently green-no-op'd all forced dispatches.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels 2> /dev/null || echo '{}')"
+              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null || echo '{}')"
+            # Same admission as the scheduled scan below. In-repo PRs fail
+            # CLOSED on a missing isCrossRepository field (`.isCrossRepository
+            # == false`, never a `// true | not` default — jq's // treats false
+            # as empty, so that form is false for EVERY input and silently
+            # green-no-op'd all forced dispatches). Fork PRs are admitted under
+            # the scan's OWN fork rules (allow-edits on; the live write+ author
+            # gate runs in the shell case just below, mirroring the scan's
+            # per-candidate permission call) so the real-time route's fork
+            # pickup is not silently discarded here.
             OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" \
               '(((.state // "") == "OPEN")
                  and (((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null))
                  and ([.labels[]?.name] | index($skip) | not)
-                 and (.isCrossRepository == false)
-                 and ((.baseRefName // "") == "main"))' <<< "${META}")"
+                 and ((.baseRefName // "") == "main")
+                 and (if (.isCrossRepository == true)
+                        then (.maintainerCanModify == true)
+                        else (.isCrossRepository == false)
+                      end))' <<< "${META}")"
+            # Fork only: the author must hold write+ RIGHT NOW (the same
+            # live-privilege rule the scan applies per candidate and
+            # review-address re-checks before pushing). In-repo PRs are gated
+            # by author/label alone.
+            if [[ "${OK}" == 'true' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
+              FORK_AUTHOR="$(jq -r '.author.login // ""' <<< "${META}")"
+              FPERM="$(gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              case "${FPERM}" in
+                admin|maintain|write)
+                  echo "🌿 forced fork PR #${FORCED_PR} admitted (author ${FORK_AUTHOR}=${FPERM})"
+                  ;;
+                *)
+                  echo "🧭 forced fork PR #${FORCED_PR} rejected: author ${FORK_AUTHOR} permission='${FPERM:-none}' below write"
+                  OK='false'
+                  ;;
+              esac
+            fi
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open in-repo main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); fork takeover PRs are engaged by the scheduled scan, not manual dispatch"
+              echo "❌ #${FORCED_PR} is not an open main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); a fork PR additionally needs maintainer edits allowed and a live write+ author"
               echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
@@ -2402,7 +2463,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [rc:\(.id)] \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
             echo
             echo "## Issue-level comments"
@@ -2585,10 +2646,22 @@ jobs:
             exit 1
           fi
 
+          # Every check below can legitimately REJECT the agent's attempt, so
+          # each declares that verdict explicitly. That is what lets the handoff
+          # tell a rejection apart from the gate's OWN death: an empty outcome
+          # on a failed job means the gate never reached a verdict (its own bug,
+          # an infra blip), and the agent's work must then be retried rather
+          # than buried by a watermark advance.
+          reject_fix() {
+            echo "❌ ${1}"
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            exit 1
+          }
+
           echo '🔬 Re-running deterministic checks (independent of the agent)...'
-          npm run build
-          npm run typecheck
-          npm run lint
+          npm run build || reject_fix 'build failed on the agent-committed fix'
+          npm run typecheck || reject_fix 'typecheck failed on the agent-committed fix'
+          npm run lint || reject_fix 'lint failed on the agent-committed fix'
 
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
@@ -2619,7 +2692,8 @@ jobs:
                 continue
               fi
               echo "🧪 Testing ${p} (changed files only)..."
-              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests \
+                || reject_fix "tests failed in ${p}"
             done
           fi
           echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
@@ -2631,7 +2705,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -2703,6 +2777,52 @@ jobs:
               git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"
             else
               git push --no-verify origin "${BRANCH}"
+            fi
+            # Resolve the review threads whose findings the agent actually
+            # IMPLEMENTED, so a human re-reviewing sees only what is still open
+            # instead of re-reading every thread to work out what was handled.
+            # The agent cannot do this itself - its sandbox carries no token -
+            # so it records the inline-comment ids it implemented and this step,
+            # which already holds the PAT, maps each to its thread. Findings it
+            # DECLINED or deferred are deliberately left open. Best-effort
+            # throughout: a resolve failure must never fail a good push.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+              # first-100 page cap: threads beyond this page are not resolved
+              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
+                query($owner:String!,$name:String!,$pr:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$pr){
+                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
+                    }
+                  }
+                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
+              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
+              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved"
+              fi
+              RESOLVED_N=0
+              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
+                rc_id="${rc_id%$'\r'}"
+                rc_id="${rc_id#rc:}"
+                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
+                thread_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(.isResolved | not)
+                     | select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].id // ""' <<< "${THREADS_JSON}")"
+                if [[ -z "${thread_id}" ]]; then
+                  echo "::warning::comment ${rc_id} matched no open review thread"
+                  continue
+                fi
+                if gh api graphql -f threadId="${thread_id}" -f query='
+                  mutation($threadId:ID!){
+                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
+                  }' > /dev/null 2>&1; then
+                  RESOLVED_N=$(( RESOLVED_N + 1 ))
+                else
+                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
+                fi
+              done < "${WORKDIR}/resolved-comments.txt"
+              echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
             fi
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
@@ -2856,20 +2976,34 @@ jobs:
             # ISO-8601 date is used (not a bare word) so it is both non-empty AND
             # sorts above any real timestamp in EVAL_WM's max, belt-and-suspenders
             # with the terminal round.
+            # The gate declares its verdict explicitly (failed / noop / fixed).
+            # An EMPTY outcome on a non-success job means it died BEFORE reaching
+            # one - its own crash (a gate bug, an infra blip, a resolver error),
+            # not a judgement on the agent's work. That must retry like any other
+            # pre-verdict crash instead of advancing the watermark: the
+            # nested-package ENOENT that stranded #7329/#7336 looked exactly like
+            # a rejection, so a fix the agent had already written was discarded
+            # and the PR sat idle until a human deleted the marker by hand.
+            GATE_CRASHED=false
+            if [[ -z "${OUTCOME}" && "${JOB_STATUS:-}" != 'success' ]]; then
+              GATE_CRASHED=true
+            fi
             MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
-              if [[ -z "${DETAIL_FILE}" ]]; then
-                # Prepare ran (NEWEST is set) but the agent produced NO output
-                # at all — it crashed before writing any verdict (e.g. a staged
-                # runner that fails to boot). It evaluated NOTHING, so the
-                # watermark must NOT advance past this feedback: an advance makes
-                # the next scan see "nothing new" and never retry, stranding the
-                # PR on a transient crash (a deploy, an infra blip, a base-image
-                # bug fixed minutes later). Stamp the sentinel ts (excluded from
-                # EVAL_WM) so the feedback stays live and the next scan retries;
-                # the incremented round still bounds retries to MAX_ROUNDS before
-                # a terminal handoff, so a PERSISTENT crash cannot loop forever.
+              if [[ -z "${DETAIL_FILE}" || "${GATE_CRASHED}" == 'true' ]]; then
+                # Prepare ran (NEWEST is set) but no verdict was reached — either
+                # the agent produced NO output at all (crashed before writing any
+                # verdict, e.g. a staged runner that fails to boot), or the gate
+                # crashed after the agent wrote its summary. It evaluated NOTHING,
+                # so the watermark must NOT advance past this feedback: an advance
+                # makes the next scan see "nothing new" and never retry,
+                # stranding the PR on a transient crash (a deploy, an infra blip,
+                # a base-image bug fixed minutes later). Stamp the sentinel ts
+                # (excluded from EVAL_WM) so the feedback stays live and the next
+                # scan retries; the incremented round still bounds retries to
+                # MAX_ROUNDS before a terminal handoff, so a PERSISTENT crash
+                # cannot loop forever.
                 MARK_TS='9999-12-31T23:59:59Z'
                 # Only promise a retry when one will actually happen: at
                 # MARK_ROUND == MAX_ROUNDS the next scan's round-cap gate skips
@@ -2877,10 +3011,21 @@ jobs:
                 # final attempt must say so itself, or the maintainer waits for
                 # a retry that never comes. No Run log here: the report block
                 # below appends it to every handoff (avoid a duplicate URL).
-                if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
-                  HEADLINE="🤖 AutoFix crashed before it could evaluate the feedback (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — it will retry on the next scan."
+                # Name the real cause: a gate crash points the maintainer at
+                # the gate logs (the agent's commit is discarded with the runner,
+                # but the feedback watermark is preserved so the retry re-attempts
+                # the same feedback), while a no-output crash points at the run.
+                if [[ -z "${DETAIL_FILE}" ]]; then
+                  CAUSE='crashed before it could evaluate the feedback'
+                  LAST_FIX='a human should take over this PR'
                 else
-                  HEADLINE="🤖 AutoFix crashed before it could evaluate the feedback (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — this was the last automatic attempt; a human should take over this PR."
+                  CAUSE='hit a verification-gate error before reaching a verdict'
+                  LAST_FIX='a maintainer should check the gate logs, then re-arm'
+                fi
+                if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — it will retry on the next scan."
+                else
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${MARK_ROUND}/${MAX_ROUNDS}) — this was the last automatic attempt; ${LAST_FIX}."
                 fi
               else
                 HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."

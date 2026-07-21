@@ -28,6 +28,7 @@ import {
 import type { PermissionDeniedReason } from '../hooks/types.js';
 export type { PermissionDeniedReason } from '../hooks/types.js';
 import { ToolNames } from '../tools/tool-names.js';
+import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { classifyAction, type ClassifierResult } from './classifier.js';
@@ -514,6 +515,7 @@ export type FallbackToAskReason =
   | 'ask_rule'
   | 'plan_mode_floor'
   | 'org_ask_ceiling'
+  | 'classifier_unavailable'
   | DenialFallbackReason;
 
 /** Outcome of {@link applyAutoModeDecision}. */
@@ -524,7 +526,11 @@ export type AutoModeOutcome =
       errorMessage: string;
       reason: PermissionDeniedReason;
     }
-  | { kind: 'fallback'; reason: FallbackToAskReason };
+  | {
+      kind: 'fallback';
+      reason: FallbackToAskReason;
+      message?: string;
+    };
 
 /**
  * Apply an AUTO decision and denial-tracking update. Shared by the scheduler
@@ -549,17 +555,19 @@ export function applyAutoModeDecision(
       };
     case 'classifier':
       if (decision.shouldBlock) {
-        config.setAutoModeDenialState(
-          decision.unavailable
-            ? recordUnavailable(denialState)
-            : recordBlock(denialState),
-        );
+        if (decision.unavailable) {
+          config.setAutoModeDenialState(recordUnavailable(denialState));
+          return {
+            kind: 'fallback',
+            reason: 'classifier_unavailable',
+            message: formatClassifierUnavailableFallbackMessage(decision),
+          };
+        }
+        config.setAutoModeDenialState(recordBlock(denialState));
         return {
           kind: 'blocked',
           errorMessage: formatClassifierBlockMessage(decision),
-          reason: decision.unavailable
-            ? 'classifier_unavailable'
-            : 'classifier_blocked',
+          reason: 'classifier_blocked',
         };
       }
       config.setAutoModeDenialState(recordAllow(denialState));
@@ -598,21 +606,41 @@ export function getAutoModePermissionDeniedReason(
 }
 
 /**
- * Trailing guidance appended to every classifier-denial tool-result message.
+ * Trailing guidance appended to classifier policy-denial tool results.
  * Centralised so the policy boundary (no silent retries, no equivalent-path
- * workarounds, stop and ask the user) is identical for "blocked" and
- * "unavailable" verdicts and stays in sync with the main system prompt's
- * Denied Tool Calls rule.
+ * workarounds, stop and ask the user) stays in sync with the main system
+ * prompt's Denied Tool Calls rule.
  */
 export const AUTO_MODE_DENIAL_GUIDANCE =
   'Do not try to complete the denied action through another tool, shell indirection, generated script, alias, symlink, config change, hook, command file, MCP configuration, encoded payload, or equivalent path. If that action is required, stop and ask the user for explicit approval. You may continue with unrelated safe work or a genuinely safer alternative that does not accomplish the denied action.';
 
+export function formatClassifierUnavailableFallbackMessage(
+  decision: Extract<AutoModeDecision, { via: 'classifier' }>,
+): string {
+  const detail = decision.reason ? ` (${decision.reason})` : '';
+  return `Auto Mode couldn't classify this action${detail}. Review it manually. Switching to Default Mode is recommended if you want to continue without the classifier.`;
+}
+
+export function decorateClassifierUnavailableConfirmation(
+  confirmation: ToolCallConfirmationDetails,
+  message: string,
+): ToolCallConfirmationDetails {
+  return {
+    ...confirmation,
+    ...(confirmation.type === 'ask_user_question'
+      ? {}
+      : { hideAlwaysAllow: true }),
+    autoModeFallback: {
+      reason: 'classifier_unavailable',
+      message,
+    },
+  } as ToolCallConfirmationDetails;
+}
+
 /**
- * Build the tool-error message the scheduler / ACP session returns when
- * the classifier blocks or is unavailable. Shared between
- * `coreToolScheduler.ts` and `acp-integration/session/Session.ts` so the
- * CLI and ACP paths surface identical diagnostic signal to operators
- * (context overflow vs API timeout vs construction failure).
+ * Build the tool-error message the scheduler / ACP session returns when the
+ * classifier supplies a policy block. Keeping it here gives both paths the
+ * same denial guidance.
  *
  * Callers are responsible for only invoking this on classifier verdicts —
  * `decision.via === 'classifier'` with `decision.shouldBlock === true`.
@@ -620,12 +648,6 @@ export const AUTO_MODE_DENIAL_GUIDANCE =
 export function formatClassifierBlockMessage(
   decision: Extract<AutoModeDecision, { via: 'classifier' }>,
 ): string {
-  if (decision.unavailable) {
-    const message = decision.reason
-      ? `Auto mode classifier unavailable (${decision.reason}); action blocked for safety`
-      : `Auto mode classifier unavailable; action blocked for safety`;
-    return `${message}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
-  }
   return `Blocked by auto mode policy: ${decision.reason}\n${AUTO_MODE_DENIAL_GUIDANCE}`;
 }
 
