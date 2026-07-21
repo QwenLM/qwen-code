@@ -105,7 +105,9 @@ describe('scripts/cli-entry.js production entry', () => {
 
   it('falls back to tmpdir for tilde QWEN_HOME when homedir is unavailable', async () => {
     const inheritedHome = process.env.QWEN_HOME;
-    homedirMock.mockReturnValue(undefined);
+    homedirMock.mockImplementation(() => {
+      throw new Error('homedir unavailable');
+    });
     process.env.QWEN_HOME = '~';
     try {
       await import('../cli-entry.js?tilde-home-fallback');

@@ -74,13 +74,21 @@ const { delimiter, dirname, join, parse, resolve, sep } = await import(
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const currentEntryPath = realpathSync(fileURLToPath(import.meta.url));
 
+function getHomeDir() {
+  try {
+    return homedir() || tmpdir();
+  } catch {
+    return tmpdir();
+  }
+}
+
 function resolveQwenHome() {
   const configured = process.env['QWEN_HOME'];
-  if (!configured) return join(homedir() || tmpdir(), '.qwen');
-  if (configured === '~') return homedir() || tmpdir();
+  if (!configured) return join(getHomeDir(), '.qwen');
+  if (configured === '~') return getHomeDir();
   if (configured.startsWith('~/') || configured.startsWith('~\\')) {
     return join(
-      homedir() || tmpdir(),
+      getHomeDir(),
       ...configured
         .slice(2)
         .split(/[/\\]+/)
@@ -92,7 +100,7 @@ function resolveQwenHome() {
 
 function preResolveQwenHome() {
   if (Object.hasOwn(process.env, 'QWEN_HOME')) return;
-  const home = homedir() || tmpdir();
+  const home = getHomeDir();
   for (const candidate of [join(home, '.qwen', '.env'), join(home, '.env')]) {
     try {
       const source = readFileSync(candidate, 'utf8')
