@@ -591,7 +591,19 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     const targetKind = target.isGroup === true ? 'group' : 'dm';
     for (let attempt = 0; ; attempt++) {
-      const token = await this.getProactiveToken();
+      let token: string;
+      try {
+        token = await this.getProactiveToken();
+      } catch (err) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive send failed (${targetKind}, ${chunkLabel}): token fetch error\n`,
+        );
+        throw new ChannelProactiveDeliveryError(
+          'transient',
+          'DingTalk proactive send failed: token fetch error',
+          { cause: err },
+        );
+      }
       let resp: Response;
       try {
         const targetBody =

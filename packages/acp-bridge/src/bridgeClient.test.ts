@@ -1231,6 +1231,68 @@ describe('BridgeClient — channel-delivery extMethod dispatch', () => {
     ).rejects.toThrow();
     expect(deliver).not.toHaveBeenCalled();
   });
+
+  const scheduledParams = {
+    sessionId: 'session-1',
+    deliveryId: 'task-1:1750000000000',
+    source: 'scheduled',
+    target: { channelName: 'dingtalk', type: 'chat', id: 'chat-1' },
+    text: 'scheduled answer',
+    taskId: 'task-1',
+    firedAt: 1_750_000_000_000,
+  };
+
+  it('dispatches a validated scheduled request and publishes its fire correlation', async () => {
+    const deliver = vi.fn(async () => ({ status: 'delivered' }));
+    const { client, publish } = makeClient(deliver);
+
+    await expect(client.extMethod(METHOD, scheduledParams)).resolves.toEqual({
+      status: 'delivered',
+    });
+    expect(deliver).toHaveBeenCalledWith(scheduledParams);
+    expect(publish).toHaveBeenCalledWith({
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:1750000000000',
+        source: 'scheduled',
+        status: 'delivered',
+        taskId: 'task-1',
+        firedAt: 1_750_000_000_000,
+      },
+    });
+    expect(JSON.stringify(publish.mock.calls)).not.toContain(
+      'scheduled answer',
+    );
+    expect(JSON.stringify(publish.mock.calls)).not.toContain('chat-1');
+  });
+
+  it('rejects a scheduled request with an inconsistent fire correlation', async () => {
+    const deliver = vi.fn();
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, {
+        ...scheduledParams,
+        deliveryId: 'task-1:999',
+      }),
+    ).rejects.toThrow(/correlation/i);
+    await expect(
+      client.extMethod(METHOD, {
+        ...scheduledParams,
+        firedAt: 0,
+      }),
+    ).rejects.toThrow(/correlation/i);
+    await expect(
+      client.extMethod(METHOD, {
+        ...scheduledParams,
+        promptId: 'task-1:1750000000000',
+      }),
+    ).rejects.toThrow(/correlation/i);
+
+    expect(deliver).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalled();
+  });
 });
 
 describe('BridgeClient — artifact ingress', () => {

@@ -2491,6 +2491,31 @@ describe('DingtalkChannel proactive send', () => {
     );
   });
 
+  it('wraps a proactive token fetch failure in a typed delivery error', async () => {
+    const channel = proactive(createChannel());
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubProactiveFetch(
+      () => new Response('{}', { status: 200 }),
+      () => {
+        throw new Error('token api down');
+      },
+    );
+
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
+      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+        disposition: 'transient',
+        message: 'DingTalk proactive send failed: token fetch error',
+      }),
+    );
+
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'proactive send failed (dm, chunk 1/1): token fetch error',
+    );
+  });
+
   it('refreshes the token and retries a direct message once on 401', async () => {
     const channel = proactive(createChannel());
     const { directSendCalls, tokenCalls } = stubProactiveFetch((sendCall) =>
@@ -2519,7 +2544,7 @@ describe('DingtalkChannel proactive send', () => {
     expect(tokenCalls()).toHaveLength(2);
   });
 
-  it('throws when the token endpoint rejects', async () => {
+  it('wraps a token endpoint rejection in a typed delivery error', async () => {
     const channel = proactive(createChannel());
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     stubProactiveFetch(
@@ -2531,7 +2556,17 @@ describe('DingtalkChannel proactive send', () => {
         ),
     );
 
-    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
+    const error = await channel
+      .pushProactive(groupTarget, 'hello')
+      .catch((err: unknown) => err);
+
+    expect(error).toEqual(
+      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+        disposition: 'transient',
+        message: 'DingTalk proactive send failed: token fetch error',
+      }),
+    );
+    expect(String((error as { cause?: unknown }).cause)).toContain(
       'gettoken errcode=40089',
     );
   });
