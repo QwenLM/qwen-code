@@ -1293,6 +1293,19 @@ describe('BridgeClient — channel-delivery extMethod dispatch', () => {
     expect(deliver).not.toHaveBeenCalled();
     expect(publish).not.toHaveBeenCalled();
   });
+
+  it('still resolves when the result-event publish throws', async () => {
+    const deliver = vi.fn(async () => ({ status: 'delivered' }));
+    const { client, publish } = makeClient(deliver);
+    publish.mockImplementation(() => {
+      throw new Error('bus closed');
+    });
+
+    await expect(client.extMethod(METHOD, validParams)).resolves.toEqual({
+      status: 'delivered',
+    });
+    expect(deliver).toHaveBeenCalledOnce();
+  });
 });
 
 describe('BridgeClient — artifact ingress', () => {

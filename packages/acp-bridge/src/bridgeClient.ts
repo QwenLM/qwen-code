@@ -1235,23 +1235,27 @@ export class BridgeClient implements Client {
         };
       }
     }
-    entry.events.publish({
-      type: 'channel_delivery_result',
-      ...(source === 'prompt' ? { promptId: promptId as string } : {}),
-      data: {
-        sessionId,
-        deliveryId,
-        source,
-        status: result.status,
+    try {
+      entry.events.publish({
+        type: 'channel_delivery_result',
         ...(source === 'prompt' ? { promptId: promptId as string } : {}),
-        ...(source === 'scheduled'
-          ? { taskId: taskId as string, firedAt: firedAt as number }
-          : {}),
-        ...(result.status === 'failed'
-          ? { code: result.code, error: result.error }
-          : {}),
-      },
-    });
+        data: {
+          sessionId,
+          deliveryId,
+          source,
+          status: result.status,
+          ...(source === 'prompt' ? { promptId: promptId as string } : {}),
+          ...(source === 'scheduled'
+            ? { taskId: taskId as string, firedAt: firedAt as number }
+            : {}),
+          ...(result.status === 'failed'
+            ? { code: result.code, error: result.error }
+            : {}),
+        },
+      });
+    } catch {
+      // Best-effort: delivery already completed.
+    }
     return result;
   }
 
