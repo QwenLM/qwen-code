@@ -218,6 +218,15 @@ function click(element: HTMLElement): void {
   element.dispatchEvent(new MouseEvent('click', { bubbles: true }));
 }
 
+function typeInto(input: HTMLInputElement, value: string): void {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLInputElement.prototype,
+    'value',
+  )!.set!;
+  setter.call(input, value);
+  input.dispatchEvent(new Event('input', { bubbles: true }));
+}
+
 async function expandWorkspace(name: string): Promise<void> {
   const button = Array.from(
     container.querySelectorAll<HTMLButtonElement>('button'),
@@ -361,6 +370,8 @@ beforeEach(() => {
   }));
   workspaceActions.removeWorkspace.mockReset();
   workspaceActions.removeWorkspace.mockResolvedValue({ removed: true });
+  workspaceActions.addWorkspace.mockReset();
+  workspaceActions.addWorkspace.mockResolvedValue({ persisted: true });
   active.reload.mockReset();
   active.reload.mockResolvedValue(undefined);
   archived.reload.mockReset();
@@ -378,6 +389,45 @@ afterEach(() => {
 });
 
 describe('WebShellSidebar workspace removal', () => {
+  it('forwards a supported display name when adding a workspace', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      features: [...capabilities.features, 'workspace_display_name'],
+    };
+    workspace.capabilities = connection.capabilities;
+    renderSidebar();
+
+    const addButton = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Add workspace"]',
+    );
+    expect(addButton).not.toBeNull();
+    act(() => click(addButton!));
+
+    const pathInput = document.querySelector<HTMLInputElement>(
+      '#add-workspace-path',
+    );
+    const displayNameInput = document.querySelector<HTMLInputElement>(
+      '#add-workspace-display-name',
+    );
+    expect(pathInput).not.toBeNull();
+    expect(displayNameInput).not.toBeNull();
+    act(() => {
+      typeInto(pathInput!, '/tmp/payments');
+      typeInto(displayNameInput!, 'Payments API');
+    });
+
+    await act(async () => {
+      click(dialogButton('Register'));
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(workspaceActions.addWorkspace).toHaveBeenCalledWith(
+      '/tmp/payments',
+      { persist: true, displayName: 'Payments API' },
+    );
+  });
+
   it('scopes pinned and archived sessions to a locked secondary workspace', async () => {
     connection.capabilities = {
       ...capabilities,

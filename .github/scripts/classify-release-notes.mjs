@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { execFileSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,28 +56,8 @@ export function shouldAutoSkipChangelog({ title, labels = [], files = [] }) {
   );
 }
 
-function main() {
-  const repo = process.env.GITHUB_REPOSITORY || '';
-  const number = process.env.PR_NUMBER || '';
-  if (
-    !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) ||
-    !/^[1-9]\d*$/.test(number)
-  ) {
-    throw new Error(
-      'GITHUB_REPOSITORY and PR_NUMBER must identify a pull request.',
-    );
-  }
-
-  const metadata = JSON.parse(
-    execFileSync(
-      'gh',
-      ['pr', 'view', number, '--repo', repo, '--json', 'title,labels'],
-      {
-        encoding: 'utf8',
-      },
-    ),
-  );
-  const files = execFileSync(
+function fetchFiles(repo, number) {
+  return execFileSync(
     'gh',
     [
       'api',
@@ -89,9 +70,67 @@ function main() {
   )
     .split(/\r?\n/)
     .filter(Boolean);
-  process.stdout.write(
-    `${shouldAutoSkipChangelog({ ...metadata, files }) ? 'skip' : 'include'}\n`,
-  );
+}
+
+function main() {
+  const repo = process.env.GITHUB_REPOSITORY || '';
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo)) {
+    throw new Error('GITHUB_REPOSITORY must be set to owner/repo.');
+  }
+
+  const input = JSON.parse(readFileSync(0, 'utf8'));
+  const prs = Array.isArray(input) ? input : [];
+  const labeled = [];
+  const unlabeled = [];
+
+  for (const pr of prs) {
+    const number = String(pr.number);
+    if (!/^[1-9]\d*$/.test(number)) continue;
+    try {
+      const files = fetchFiles(repo, number);
+      const shouldSkip = shouldAutoSkipChangelog({ ...pr, files });
+      const hasAutoLabel = pr.labels.some(
+        (label) =>
+          (typeof label === 'string' ? label : label.name).toLowerCase() ===
+          AUTO_LABEL,
+      );
+      if (shouldSkip && !hasAutoLabel) {
+        execFileSync('gh', [
+          'pr',
+          'edit',
+          number,
+          '--repo',
+          repo,
+          '--add-label',
+          AUTO_LABEL,
+        ]);
+        labeled.push(number);
+      } else if (!shouldSkip && hasAutoLabel) {
+        execFileSync('gh', [
+          'pr',
+          'edit',
+          number,
+          '--repo',
+          repo,
+          '--remove-label',
+          AUTO_LABEL,
+        ]);
+        unlabeled.push(number);
+      }
+    } catch (error) {
+      process.exitCode = 1;
+      process.stderr.write(
+        `::warning::Failed to process PR #${number}: ${error.message}; skipping.\n`,
+      );
+    }
+  }
+
+  if (labeled.length > 0) {
+    process.stdout.write(`Labeled: ${labeled.join(', ')}\n`);
+  }
+  if (unlabeled.length > 0) {
+    process.stdout.write(`Unlabeled: ${unlabeled.join(', ')}\n`);
+  }
 }
 
 if (
