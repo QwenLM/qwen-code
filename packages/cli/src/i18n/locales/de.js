@@ -2146,6 +2146,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Eine neue Version von Qwen Code ist verfügbar! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} ist aktuell!',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Suche nach Updates fehlgeschlagen ({{reason}}). Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update-Prüfung übersprungen ({{reason}}) — mit /update erneut versuchen.',
+  'registry did not respond within {{seconds}}s':
+    'Registry hat nicht innerhalb von {{seconds}}s geantwortet',
+  'registry unreachable': 'Registry nicht erreichbar',
+  'registry error': 'Registry-Fehler',
   'Unable to check for updates: {{reason}}':
     'Updates können nicht geprüft werden: {{reason}}',
   'Update successful! The new version will be used on your next run.':
