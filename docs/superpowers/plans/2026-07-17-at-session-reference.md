@@ -24,10 +24,12 @@
 ### Task 1: `sessionMentionRef` — parse/build/validate `@session:` refs
 
 **Files:**
+
 - Create: `packages/cli/src/ui/hooks/sessionMentionRef.ts`
 - Test: `packages/cli/src/ui/hooks/sessionMentionRef.test.ts`
 
 **Interfaces:**
+
 - Consumes: nothing (pure string module).
 - Produces:
   - `const SESSION_MENTION_PREFIX = 'session:'`
@@ -137,11 +139,13 @@ git commit -m "feat(cli): add @session: mention ref parser"
 ### Task 2: `SessionReferenceService` — load + slim + budget-trim
 
 **Files:**
+
 - Create: `packages/core/src/services/sessionReferenceService.ts`
 - Test: `packages/core/src/services/sessionReferenceService.test.ts`
 - Modify (export barrel): `packages/core/src/index.ts` (add `export * from './services/sessionReferenceService.js';` alongside existing service exports)
 
 **Interfaces:**
+
 - Consumes: `SessionService.loadSession(id): Promise<ResumedSessionData | undefined>` (existing); `ResumedSessionData.conversation.messages: ChatRecord[]`; `ChatRecord` fields `type`, `message?: Content`, `toolCallResult?`; `estimateContentTokens(contents: Content[]): number` from `./tokenEstimation.js`.
 - Produces:
   - `const SESSION_REF_TOKEN_BUDGET = 8000`
@@ -149,12 +153,14 @@ git commit -m "feat(cli): add @session: mention ref parser"
   - `class SessionReferenceService { constructor(cwd: string); resolve(ref: { id?: string; title?: string }, opts?: { budgetTokens?: number }): Promise<SlimmedSessionReference | { notFound: true } | { ambiguous: true; count: number }> }`
 
 Design notes for the implementer:
+
 - Do NOT reuse `filterToDialog` (it is private in `sessionTitle.ts` AND drops tool calls, which we need to summarize). Walk `messages` directly.
 - Per record: `type === 'user'` → collect text parts prefixed `User: `; `type === 'assistant'` → collect text parts prefixed `Assistant: ` (skip `thought` parts); records that are tool calls (record has `toolCallResult`, or `message.parts` contains a `functionCall`/`functionResponse`) → emit one line `[tool: <displayName || name> — <status || 'ok'>]`. Ignore `system` records.
 - Title resolution for the `{ title }` case is done by the CALLER (atCommandProcessor) via `SessionService.findSessionsByTitle` before calling `resolve`; `resolve` itself takes an `{ id }`. Keep `resolve` id-only to stay pure/testable. (Update the Produces signature accordingly: `resolve(id: string, opts?)`.) The ambiguous/not-found title handling lives in Task 3.
 - Budget trim: build an array of per-turn strings, estimate tokens of the joined text via `estimateContentTokens([{ role: 'user', parts: [{ text }] }])`; while over budget, drop the OLDEST line and re-check; if any dropped, prepend `[earlier turns omitted]\n` and set `truncated: true`.
 
 Revised Produces (authoritative):
+
 ```ts
 resolve(sessionId: string, opts?: { budgetTokens?: number }):
   Promise<SlimmedSessionReference | { notFound: true }>
@@ -185,8 +191,9 @@ function fakeResumed(messages: unknown[]): ResumedSessionData {
 function makeSvc(resumed: ResumedSessionData | undefined) {
   const svc = new SessionReferenceService('/proj');
   // Inject a stub SessionService.loadSession
-  (svc as unknown as { loadSession: () => Promise<unknown> }).loadSession =
-    vi.fn().mockResolvedValue(resumed);
+  (svc as unknown as { loadSession: () => Promise<unknown> }).loadSession = vi
+    .fn()
+    .mockResolvedValue(resumed);
   return svc;
 }
 
@@ -224,7 +231,11 @@ describe('SessionReferenceService', () => {
           toolCallResult: { displayName: 'Read File', status: 'success' },
           message: {
             role: 'user',
-            parts: [{ functionResponse: { name: 'read', response: { huge: 'BODY' } } }],
+            parts: [
+              {
+                functionResponse: { name: 'read', response: { huge: 'BODY' } },
+              },
+            ],
           },
         },
       ]),
@@ -238,7 +249,10 @@ describe('SessionReferenceService', () => {
   it('tail-trims to budget and marks truncated', async () => {
     const many = Array.from({ length: 50 }, (_, i) => ({
       type: 'user',
-      message: { role: 'user', parts: [{ text: `turn ${i} ` + 'x'.repeat(400) }] },
+      message: {
+        role: 'user',
+        parts: [{ text: `turn ${i} ` + 'x'.repeat(400) }],
+      },
     }));
     const svc = makeSvc(fakeResumed(many));
     const res = await svc.resolve('s1', { budgetTokens: 200 });
@@ -306,7 +320,8 @@ export class SessionReferenceService {
       kept.shift(); // drop oldest first (tail-retention)
       truncated = true;
     }
-    const body = (truncated ? '[earlier turns omitted]\n' : '') + kept.join('\n');
+    const body =
+      (truncated ? '[earlier turns omitted]\n' : '') + kept.join('\n');
     const title =
       resumed.conversation.messages.length > 0
         ? sessionId // caller supplies a friendlier title in Task 3; id fallback here
@@ -358,6 +373,11 @@ export class SessionReferenceService {
     }
     return out;
   }
+  // NOTE: The shipped implementation (session-reference-service.ts) uses a
+  // two-pass approach instead — emit visible text first (user/assistant),
+  // then tool summaries from functionResponse parts in a separate pass.
+  // The `continue` above would silently drop assistant reasoning on turns
+  // that also call a tool; do NOT copy this version verbatim.
 
   private visibleText(message?: Content): string {
     if (!message?.parts) return '';
@@ -400,9 +420,11 @@ Expected: PASS (4 tests).
 - [ ] **Step 5: Add barrel export + typecheck**
 
 Add to `packages/core/src/index.ts` (near other `./services/*` exports):
+
 ```ts
 export * from './services/sessionReferenceService.js';
 ```
+
 Run: `npx tsc --noEmit -p packages/core/tsconfig.json`
 Expected: no errors in the new file.
 
@@ -418,14 +440,17 @@ git commit -m "feat(core): add SessionReferenceService for slimmed session injec
 ### Task 3: Route `@session:` through `atCommandProcessor` and inject
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/hooks/atCommandProcessor.ts` (add routing branch after the MCP-server branch near line 281, before the filesystem containment check near line 320; inject into `scopedMentionParts` assembled near line 611)
 - Test: `packages/cli/src/ui/hooks/atCommandProcessor.session.test.ts`
 
 **Interfaces:**
+
 - Consumes: `parseSessionRef`, `SESSION_MENTION_PREFIX` (Task 1); `SessionReferenceService` (Task 2); existing `SessionService.findSessionsByTitle(title): Promise<SessionListItem[]>`.
 - Produces: injected `{ text }` part appended to the scoped-mention bucket; a "Referenced session" display card; literal-text fallback for unresolved refs.
 
 Behavior:
+
 1. When a parsed token yields `parseSessionRef(pathName)` non-null: resolve the id.
    - `{ id }` → use directly.
    - `{ title }` → `findSessionsByTitle(title)`; 0 matches → not-found; >1 → ambiguous; 1 → use its `sessionId`.
@@ -450,7 +475,12 @@ vi.mock('@qwen-code/qwen-code-core', async (orig) => {
     SessionReferenceService: class {
       resolve = vi.fn().mockResolvedValue({
         text: '--- Referenced session "s1" (slimmed, read-only) ---\nUser: hi',
-        meta: { sessionId: 's1', title: 's1', messageCount: 1, approxTokens: 5 },
+        meta: {
+          sessionId: 's1',
+          title: 's1',
+          messageCount: 1,
+          approxTokens: 5,
+        },
         truncated: false,
       });
     },
@@ -479,11 +509,14 @@ Expected: FAIL — assertion fails (session text not injected) because the branc
 - [ ] **Step 3: Implement the routing branch**
 
 In `atCommandProcessor.ts`, add imports at the top:
+
 ```ts
 import { parseSessionRef } from './sessionMentionRef.js';
 import { SessionReferenceService } from '@qwen-code/qwen-code-core';
 ```
+
 Add this branch immediately after the `parseMcpServerRef` handling (~line 281) and before the filesystem `isPathWithinWorkspace` check (~line 320):
+
 ```ts
 const sessionRef = parseSessionRef(pathName);
 if (sessionRef) {
@@ -509,9 +542,9 @@ if (sessionRef) {
       continue; // token already retained as literal text
     }
   }
-  const ref = await new SessionReferenceService(
-    config.getWorkingDir(),
-  ).resolve(sessionId!);
+  const ref = await new SessionReferenceService(config.getWorkingDir()).resolve(
+    sessionId!,
+  );
   if ('notFound' in ref) {
     addItem(
       { type: MessageType.INFO, text: `Session "${sessionId}" not found.` },
@@ -527,6 +560,7 @@ if (sessionRef) {
   continue;
 }
 ```
+
 (Implementer: match the exact `scopedMentionEntries` element shape and `addItem`/`MessageType` imports already used in this file; the block above shows intent and names.)
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -553,12 +587,14 @@ git commit -m "feat(cli): inject slimmed prior-session context on @session: ment
 ### Task 4: `category` field + session-suggestion producer
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/SuggestionsDisplay.tsx:19-45` (add `category` to `Suggestion`, add `SuggestionCategory` type)
 - Create: `packages/cli/src/ui/hooks/sessionCompletion.ts` (producer, mirrors `extension-mention-ref.ts`)
 - Modify: `packages/cli/src/ui/hooks/useAtCompletion.ts` (call producer; tag file results; merge near lines 439/486/493)
 - Test: `packages/cli/src/ui/hooks/sessionCompletion.test.ts`
 
 **Interfaces:**
+
 - Consumes: `SessionService.listSessions({ size }): Promise<{ items: SessionListItem[]; hasMore }>`; `SessionListItem` fields `sessionId`, `customTitle?`, `prompt`, `mtime`; `buildSessionRef` (Task 1).
 - Produces:
   - `type SuggestionCategory = 'file' | 'session' | 'mcp' | 'extension'`
@@ -568,16 +604,20 @@ git commit -m "feat(cli): inject slimmed prior-session context on @session: ment
 - [ ] **Step 1: Add the type field (no test — type-only), then write the producer test**
 
 Edit `SuggestionsDisplay.tsx` — add above `export interface Suggestion`:
+
 ```ts
 export type SuggestionCategory = 'file' | 'session' | 'mcp' | 'extension';
 ```
+
 and inside `Suggestion`:
+
 ```ts
   /** Grouping category for the tabbed completion UI. Defaults to 'file'. */
   category?: SuggestionCategory;
 ```
 
 Producer test:
+
 ```ts
 // packages/cli/src/ui/hooks/sessionCompletion.test.ts
 import { describe, it, expect, vi } from 'vitest';
@@ -589,8 +629,18 @@ vi.mock('@qwen-code/qwen-code-core', async (orig) => {
     SessionService: class {
       listSessions = vi.fn().mockResolvedValue({
         items: [
-          { sessionId: 'id-1', customTitle: 'Fix auth bug', prompt: 'fix auth', mtime: 2 },
-          { sessionId: 'id-2', customTitle: undefined, prompt: 'add tests', mtime: 1 },
+          {
+            sessionId: 'id-1',
+            customTitle: 'Fix auth bug',
+            prompt: 'fix auth',
+            mtime: 2,
+          },
+          {
+            sessionId: 'id-2',
+            customTitle: undefined,
+            prompt: 'add tests',
+            mtime: 1,
+          },
         ],
         hasMore: false,
       });
@@ -664,7 +714,9 @@ export async function getSessionSuggestions(
     .filter((sug) =>
       needle.length === 0
         ? true
-        : `${sug.label} ${sug.description ?? ''}`.toLowerCase().includes(needle),
+        : `${sug.label} ${sug.description ?? ''}`
+            .toLowerCase()
+            .includes(needle),
     );
 }
 ```
@@ -678,6 +730,7 @@ Expected: PASS (2 tests).
 
 - Add import: `import { getSessionSuggestions } from './sessionCompletion.js';`
 - Tag file results with `category: 'file'` at the `fileSuggestions` map (~line 486):
+
 ```ts
 const fileSuggestions = results.map((p) => ({
   label: p,
@@ -686,8 +739,10 @@ const fileSuggestions = results.map((p) => ({
   category: 'file' as const,
 }));
 ```
+
 - Tag extension suggestions `category: 'extension'` and MCP suggestions `category: 'mcp'` at their producers (in `useAtCompletion.ts` for MCP; add `category: 'extension'` inside `getExtensionSuggestions` in `extension-mention-ref.ts`).
 - Fetch session suggestions and prepend them to the merged list. Where `mcpSuggestions` is assembled (~line 439) and merged with files (~line 493), add sessions so bare `@` shows them:
+
 ```ts
 const sessionSuggestions = await getSessionSuggestions(
   config?.getWorkingDir() ?? process.cwd(),
@@ -699,6 +754,7 @@ dispatch({
   payload: [...mcpSuggestions, ...sessionSuggestions, ...fileSuggestions],
 });
 ```
+
 (Implementer: place the `await getSessionSuggestions` alongside the existing async file search; keep it inside the same abortable path so a new keystroke cancels it. Sessions are shown on empty pattern like extensions.)
 
 - [ ] **Step 6: Typecheck + existing completion tests**
@@ -719,10 +775,12 @@ git commit -m "feat(cli): surface prior sessions as @ completion suggestions"
 ### Task 5: Tab bar + category filtering in `SuggestionsDisplay`
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/components/SuggestionsDisplay.tsx` (add `activeCategory` prop, tab bar, row filtering)
 - Test: `packages/cli/src/ui/components/SuggestionsDisplay.test.tsx`
 
 **Interfaces:**
+
 - Consumes: `Suggestion.category` (Task 4); `activeIndex`, `scrollOffset` (existing props).
 - Produces: new props `activeCategory?: SuggestionCategory | 'all'`, `availableCategories?: Array<SuggestionCategory | 'all'>`. When `activeCategory` is set and not `'all'`, only rows whose `category === activeCategory` render. A tab bar renders when `availableCategories.length > 2` (i.e., more than just `all` + one category); otherwise hidden (no regression for plain file completion).
 
@@ -803,11 +861,14 @@ Expected: FAIL — tab labels absent / props unknown.
 - [ ] **Step 3: Implement tab bar + filter**
 
 - Extend `SuggestionsDisplayProps` with:
+
 ```ts
   activeCategory?: SuggestionCategory | 'all';
   availableCategories?: Array<SuggestionCategory | 'all'>;
 ```
+
 - Add a label map:
+
 ```ts
 const CATEGORY_LABEL: Record<SuggestionCategory | 'all', string> = {
   all: 'All',
@@ -817,36 +878,43 @@ const CATEGORY_LABEL: Record<SuggestionCategory | 'all', string> = {
   extension: 'Extensions',
 };
 ```
+
 - Before slicing/rendering rows, filter:
+
 ```ts
 const visible =
   !activeCategory || activeCategory === 'all'
     ? suggestions
     : suggestions.filter((s) => (s.category ?? 'file') === activeCategory);
 ```
+
 Use `visible` in place of `suggestions` for the existing `scrollOffset`/`MAX_SUGGESTIONS_TO_SHOW` slice.
+
 - Render a tab bar (mirror `StatsTabs` in `StatsDialog.tsx`) above the list, only when `(availableCategories?.length ?? 0) > 2`:
+
 ```tsx
-{(availableCategories?.length ?? 0) > 2 && (
-  <Box flexDirection="row" marginBottom={1}>
-    {availableCategories!.map((cat, i) => {
-      const active = cat === activeCategory;
-      return (
-        <Box key={cat} marginLeft={i === 0 ? 0 : 1}>
-          <Text
-            color={active ? theme.background.primary : theme.text.secondary}
-            backgroundColor={active ? theme.text.accent : undefined}
-          >
-            {` ${CATEGORY_LABEL[cat]} `}
-          </Text>
-        </Box>
-      );
-    })}
-    <Box marginLeft={2}>
-      <Text color={theme.text.secondary}>(←/→ to switch)</Text>
+{
+  (availableCategories?.length ?? 0) > 2 && (
+    <Box flexDirection="row" marginBottom={1}>
+      {availableCategories!.map((cat, i) => {
+        const active = cat === activeCategory;
+        return (
+          <Box key={cat} marginLeft={i === 0 ? 0 : 1}>
+            <Text
+              color={active ? theme.background.primary : theme.text.secondary}
+              backgroundColor={active ? theme.text.accent : undefined}
+            >
+              {` ${CATEGORY_LABEL[cat]} `}
+            </Text>
+          </Box>
+        );
+      })}
+      <Box marginLeft={2}>
+        <Text color={theme.text.secondary}>(←/→ to switch)</Text>
+      </Box>
     </Box>
-  </Box>
-)}
+  );
+}
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -866,12 +934,14 @@ git commit -m "feat(cli): tabbed category layout for @ completion dropdown"
 ### Task 6: `activeCategory` state + `←/→` tab-switch keybinding
 
 **Files:**
+
 - Modify: `packages/cli/src/ui/hooks/useCompletion.ts` (add `activeCategory`, `availableCategories`, `switchCategory(direction)`, reset index on switch)
 - Modify: `packages/cli/src/ui/keyMatchers.ts` (or the keybindings command file) — add `Command.COMPLETION_TAB_LEFT` / `COMPLETION_TAB_RIGHT` bound to `←`/`→` while suggestions are shown
 - Modify: `packages/cli/src/ui/components/InputPrompt.tsx` (~lines 1386–1448) — handle the new commands; pass `activeCategory`/`availableCategories` into `suggestionDisplayProps` (~line 1948)
 - Test: `packages/cli/src/ui/hooks/useCompletion.test.ts` (extend existing)
 
 **Interfaces:**
+
 - Consumes: `Suggestion.category` (Task 4); `SuggestionCategory` (Task 4).
 - Produces: `useCompletion` returns `activeCategory: SuggestionCategory | 'all'`, `availableCategories: Array<SuggestionCategory | 'all'>`, `switchCategory(direction: 1 | -1): void`.
 
@@ -892,13 +962,18 @@ it('derives availableCategories and cycles with switchCategory', () => {
       { label: 'S', value: 'session:1', category: 'session' },
     ]);
   });
-  expect(result.current.availableCategories).toEqual(['all', 'file', 'session']);
+  expect(result.current.availableCategories).toEqual([
+    'all',
+    'file',
+    'session',
+  ]);
   expect(result.current.activeCategory).toBe('all');
   act(() => result.current.switchCategory(1));
   expect(result.current.activeCategory).toBe('file');
   expect(result.current.activeSuggestionIndex).toBe(0);
 });
 ```
+
 (Implementer: match the actual `useCompletion` setter API — if it exposes `setSuggestions`/a reducer, adapt the arrange step accordingly.)
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -909,38 +984,52 @@ Expected: FAIL — `availableCategories`/`switchCategory` undefined.
 - [ ] **Step 3: Implement state in `useCompletion.ts`**
 
 Add:
+
 ```ts
-const CATEGORY_ORDER: SuggestionCategory[] = ['file', 'session', 'mcp', 'extension'];
+const CATEGORY_ORDER: SuggestionCategory[] = [
+  'file',
+  'session',
+  'mcp',
+  'extension',
+];
 
 const availableCategories = useMemo<Array<SuggestionCategory | 'all'>>(() => {
   const present = new Set(suggestions.map((s) => s.category ?? 'file'));
   const ordered = CATEGORY_ORDER.filter((c) => present.has(c));
-  return ordered.length > 1 ? ['all', ...ordered] : ordered.length === 1 ? ['all', ...ordered] : ['all'];
+  return ordered.length > 1 ? ['all', ...ordered] : ['all'];
 }, [suggestions]);
 
-const [activeCategory, setActiveCategory] = useState<SuggestionCategory | 'all'>('all');
+const [activeCategory, setActiveCategory] = useState<
+  SuggestionCategory | 'all'
+>('all');
 
 useEffect(() => {
   if (!availableCategories.includes(activeCategory)) setActiveCategory('all');
 }, [availableCategories, activeCategory]);
 
-const switchCategory = useCallback((direction: 1 | -1) => {
-  setActiveCategory((cur) => {
-    const idx = availableCategories.indexOf(cur);
-    const next =
-      (idx + direction + availableCategories.length) % availableCategories.length;
-    return availableCategories[next];
-  });
-  setActiveSuggestionIndex(0);
-  setVisibleStartIndex(0);
-}, [availableCategories]);
+const switchCategory = useCallback(
+  (direction: 1 | -1) => {
+    setActiveCategory((cur) => {
+      const idx = availableCategories.indexOf(cur);
+      const next =
+        (idx + direction + availableCategories.length) %
+        availableCategories.length;
+      return availableCategories[next];
+    });
+    setActiveSuggestionIndex(0);
+    setVisibleStartIndex(0);
+  },
+  [availableCategories],
+);
 ```
+
 Return `activeCategory`, `availableCategories`, `switchCategory` from the hook.
 
 - [ ] **Step 4: Add keybindings + InputPrompt wiring**
 
 - In the keybindings command enum/file add `COMPLETION_TAB_LEFT` (`left`/`←`) and `COMPLETION_TAB_RIGHT` (`right`/`→`).
 - In `InputPrompt.tsx` inside the `showCompletionSuggestions` block (~line 1386), BEFORE the `ACCEPT_SUGGESTION` handling:
+
 ```ts
 if (keyMatchers[Command.COMPLETION_TAB_RIGHT](key)) {
   completion.switchCategory(1);
@@ -951,11 +1040,14 @@ if (keyMatchers[Command.COMPLETION_TAB_LEFT](key)) {
   return true;
 }
 ```
+
 - In `suggestionDisplayProps` (~line 1948) add:
+
 ```ts
 activeCategory: completion.activeCategory,
 availableCategories: completion.availableCategories,
 ```
+
 Guard: only consume `←/→` when `availableCategories.length > 2`, so left/right cursor movement in the buffer is unaffected during plain file completion. (Fold this guard into the two `if` blocks above.)
 
 - [ ] **Step 5: Run tests + typecheck**

@@ -71,18 +71,21 @@ export class SessionReferenceService {
     const lines = this.recordsToLines(records);
     const budget = opts.budgetTokens ?? SESSION_REF_TOKEN_BUDGET;
 
+    const title = opts.title ?? sessionId;
+    const header = `--- Referenced session "${title}" (slimmed, read-only) ---`;
+    // Budget for the header and potential truncation marker so the final
+    // injected text stays within the caller's budget.
+    const overhead = this.estimate([header, '[earlier turns omitted]']);
+
     const kept = [...lines];
     let truncated = false;
     // Tail-retention: drop the oldest lines first until under budget, but
     // always keep at least the newest line so an over-budget final turn still
     // yields content (rather than collapsing to just the omission marker).
-    while (kept.length > 1 && this.estimate(kept) > budget) {
+    while (kept.length > 1 && this.estimate(kept) + overhead > budget) {
       kept.shift();
       truncated = true;
     }
-
-    const title = opts.title ?? sessionId;
-    const header = `--- Referenced session "${title}" (slimmed, read-only) ---`;
     const body =
       (truncated ? '[earlier turns omitted]\n' : '') + kept.join('\n');
     const text =

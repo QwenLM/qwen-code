@@ -219,6 +219,30 @@ describe('handleAtCommand @session:', () => {
     expect(card!.resultDisplay).toContain('I/O error');
   });
 
+  it('deduplicates cross-form refs (UUID + title) resolving to the same session', async () => {
+    mockFindSessionsByTitle.mockResolvedValue([{ sessionId: UUID }]);
+    mockResolve.mockResolvedValue({
+      text: '--- Referenced session "s1" (slimmed, read-only) ---\nUser: hi',
+      meta: { sessionId: UUID, title: 's1', messageCount: 1, approxTokens: 5 },
+      truncated: false,
+    });
+    const result = await handleAtCommand({
+      query: `compare @session:${UUID} with @session:My\\ Chat`,
+      config: mockConfig,
+      addItem: mockAddItem,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 8,
+      signal: abortController.signal,
+    });
+    expect(result.shouldProceed).toBe(true);
+    // Both refs resolve to the same session id — resolve called only once
+    expect(mockResolve).toHaveBeenCalledTimes(1);
+    const cards = result.toolDisplays?.filter(
+      (d) => d.name === 'Referenced Session',
+    );
+    expect(cards).toHaveLength(1);
+  });
+
   it('deduplicates identical session mentions', async () => {
     mockResolve.mockResolvedValue({
       text: '--- Referenced session "s1" (slimmed, read-only) ---\nUser: hi',

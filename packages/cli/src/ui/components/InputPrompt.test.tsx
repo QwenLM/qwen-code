@@ -317,6 +317,9 @@ describe('InputPrompt', () => {
       setActiveSuggestionIndex: vi.fn(),
       setShowSuggestions: vi.fn(),
       handleAutocomplete: vi.fn(),
+      activeCategory: 'all' as const,
+      availableCategories: ['all'] as Array<'all'>,
+      switchCategory: vi.fn(),
     };
     mockedUseCommandCompletion.mockReturnValue(mockCommandCompletion);
 
@@ -2546,6 +2549,62 @@ describe('InputPrompt', () => {
     expect(mockCommandCompletion.resetCompletionState).not.toHaveBeenCalled();
     expect(mockCommandCompletion.dismissCompletion).not.toHaveBeenCalled();
     expect(props.onSubmit).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should NOT switch category on left/right when availableCategories <= 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts' },
+        { label: 'other.ts', value: 'other.ts' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file'],
+      switchCategory,
+    });
+    props.buffer.setText('@file');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // right arrow
+    await wait();
+    stdin.write('\x1b[D'); // left arrow
+    await wait();
+
+    expect(switchCategory).not.toHaveBeenCalled();
+    unmount();
+  });
+
+  it('should switch category on left/right when availableCategories > 2', async () => {
+    const switchCategory = vi.fn();
+    mockedUseCommandCompletion.mockReturnValue({
+      ...mockCommandCompletion,
+      completionMode: CompletionMode.AT,
+      showSuggestions: true,
+      suggestions: [
+        { label: 'file.ts', value: 'file.ts', category: 'file' },
+        { label: 'sess', value: 'sess', category: 'session' },
+      ],
+      activeSuggestionIndex: 0,
+      isPerfectMatch: false,
+      availableCategories: ['all', 'file', 'session'],
+      switchCategory,
+    });
+    props.buffer.setText('@');
+
+    const { stdin, unmount } = renderWithProviders(<InputPrompt {...props} />);
+    await wait();
+
+    stdin.write('\x1b[C'); // right arrow
+    await wait();
+
+    expect(switchCategory).toHaveBeenCalledWith(1);
     unmount();
   });
 

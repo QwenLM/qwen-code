@@ -642,6 +642,7 @@ export async function resolveAtCommandQuery({
   // and inject it as a read-only reference block. A miss (not-found / ambiguous
   // title) surfaces an error card and leaves the `@session:` token as literal
   // text (already retained above), never aborting the turn.
+  const resolvedSessionIds = new Set<string>();
   for (let i = 0; i < sessionMentions.length; i++) {
     const { originalAtPath, ref } = sessionMentions[i];
     const callId = `client-session-${userMessageTimestamp}-${i}`;
@@ -714,6 +715,13 @@ export async function resolveAtCommandQuery({
       });
       continue;
     }
+
+    // Cross-form dedup: a UUID ref and a title ref may resolve to the
+    // same session — skip if already injected.
+    if (resolvedSessionIds.has(sessionId)) {
+      continue;
+    }
+    resolvedSessionIds.add(sessionId);
 
     let resolved;
     try {
