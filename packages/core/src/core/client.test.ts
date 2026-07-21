@@ -5303,6 +5303,123 @@ hello
       expect(discardCalls).toHaveLength(0);
     });
 
+    it('should discard prefetch when ModelFallback resets hasToolCalls', async () => {
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      // ToolCallRequest sets hasToolCalls, then ModelFallback resets it →
+      // end-of-turn sees no tool calls and discards the prefetch.
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-1',
+              name: 'foo',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
+          yield {
+            type: 'model_fallback',
+            fromModel: 'test-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'model fallback resets tool calls' }],
+        new AbortController().signal,
+        'prompt-id-model-fallback-reset',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      expect(logMemoryRecallDelivery).toHaveBeenCalledWith(
+        mockConfig,
+        expect.objectContaining({
+          phase: 'refined',
+          delivery_point: 'discarded',
+          discard_reason: 'no_safe_delivery_point',
+          strategy: 'none',
+          docs_selected: 0,
+          latency_ms: expect.any(Number),
+        }),
+      );
+      expect(client['pendingMemoryPrefetch']).toBeUndefined();
+    });
+
+    it('should preserve prefetch when ToolCallRequest follows ModelFallback', async () => {
+      mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
+
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      // ToolCallRequest → ModelFallback (resets) → ToolCallRequest (re-sets) →
+      // end-of-turn sees hasToolCalls=true and preserves the prefetch.
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: 'content', value: 'Hello' };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-1',
+              name: 'foo',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
+          yield {
+            type: 'model_fallback',
+            fromModel: 'test-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          };
+          yield {
+            type: 'tool_call_request',
+            value: {
+              callId: 'call-2',
+              name: 'bar',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'test',
+            },
+          };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'model fallback then tool call' }],
+        new AbortController().signal,
+        'prompt-id-model-fallback-then-tool',
+        { type: SendMessageType.UserQuery },
+      );
+      for await (const _ of stream) {
+        // consume
+      }
+
+      expect(client['pendingMemoryPrefetch']).toBeDefined();
+      const discardCalls = vi
+        .mocked(logMemoryRecallDelivery)
+        .mock.calls.filter(
+          ([, event]) => event.discard_reason === 'no_safe_delivery_point',
+        );
+      expect(discardCalls).toHaveLength(0);
+    });
+
     it('should log abort discard telemetry when arena cancels with a pending prefetch', async () => {
       mockMemoryManager.recall.mockReturnValue(new Promise(() => {}));
 
