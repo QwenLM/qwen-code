@@ -1935,7 +1935,16 @@ export function registerSessionRoutes(
           directive,
           clientId !== undefined ? { clientId } : undefined,
         );
-        runtime.generationGuard?.assertOpen();
+        try {
+          runtime.generationGuard?.assertOpen();
+        } catch (error) {
+          if (result.launched) {
+            await runtime.bridge
+              .killSession(result.sessionId, { requireZeroAttaches: true })
+              .catch(() => {});
+          }
+          throw error;
+        }
         res.status(202).json(result);
       },
     ),

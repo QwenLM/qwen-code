@@ -574,7 +574,10 @@ export function atomicWriteFileSync(
   try {
     writeFileImpl(tmpPath, data, writeOptions);
     tryChmodSync(tmpPath);
-    renameWithRetrySync(tmpPath, targetPath, retries, delayMs, renameImpl);
+    renameWithRetrySync(tmpPath, targetPath, retries, delayMs, (src, dest) => {
+      options?.assertCanCommit?.();
+      renameImpl(src, dest);
+    });
   } catch (error) {
     // See atomicWriteFile for the unlinkImpl-seam routing rationale.
     try {
@@ -585,6 +588,7 @@ export function atomicWriteFileSync(
 
     if (isNodeError(error) && error.code === 'EXDEV') {
       try {
+        options?.assertCanCommit?.();
         if (options?.noFollow) {
           // See atomicWriteFile for the rationale — noFollow must not
           // be silently dropped on the cross-device fallback path.

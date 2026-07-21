@@ -653,11 +653,7 @@ export function createDaemonWorkspaceService(
 
       if (persistSettings) {
         try {
-          if (assertGenerationOpen) {
-            await persistSettings(boundWorkspace, writes, assertGenerationOpen);
-          } else {
-            await persistSettings(boundWorkspace, writes);
-          }
+          await persistSettings(boundWorkspace, writes, assertGenerationOpen);
         } catch (err) {
           if (err instanceof WorkspaceSettingsPartialPersistError) {
             assertActiveGeneration();
@@ -675,22 +671,13 @@ export function createDaemonWorkspaceService(
         const committed: WorkspaceVoiceSettingsWrite[] = [];
         for (const write of writes) {
           try {
-            if (assertGenerationOpen) {
-              await persistSetting!(
-                boundWorkspace,
-                write.scope,
-                write.key,
-                write.value,
-                assertGenerationOpen,
-              );
-            } else {
-              await persistSetting!(
-                boundWorkspace,
-                write.scope,
-                write.key,
-                write.value,
-              );
-            }
+            await persistSetting!(
+              boundWorkspace,
+              write.scope,
+              write.key,
+              write.value,
+              assertGenerationOpen,
+            );
           } catch (err) {
             assertActiveGeneration();
             writeStderrLine(
@@ -728,16 +715,12 @@ export function createDaemonWorkspaceService(
       enabled: boolean,
     ) {
       assertActiveGeneration();
-      if (assertGenerationOpen) {
-        await persistDisabledTools(
-          boundWorkspace,
-          toolName,
-          enabled,
-          assertGenerationOpen,
-        );
-      } else {
-        await persistDisabledTools(boundWorkspace, toolName, enabled);
-      }
+      await persistDisabledTools(
+        boundWorkspace,
+        toolName,
+        enabled,
+        assertGenerationOpen,
+      );
       assertActiveGeneration();
       publishWorkspaceEvent({
         type: 'tool_toggled',
@@ -784,14 +767,12 @@ export function createDaemonWorkspaceService(
         );
       }
 
-      const persisted = assertGenerationOpen
-        ? await persistDisabledSkills(
-            boundWorkspace,
-            skill.name,
-            enabled,
-            assertGenerationOpen,
-          )
-        : await persistDisabledSkills(boundWorkspace, skill.name, enabled);
+      const persisted = await persistDisabledSkills(
+        boundWorkspace,
+        skill.name,
+        enabled,
+        assertGenerationOpen,
+      );
       assertActiveGeneration();
       const channelLive = isChannelLive?.() ?? false;
       let activation: WorkspaceSkillToggleResult['activation'] = channelLive

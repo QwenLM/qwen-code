@@ -256,23 +256,27 @@ describe('createDaemonWorkspaceService', () => {
           { enabled: false, mode: 'tap', language: 'english' },
         );
 
-        expect(persistSettings).toHaveBeenCalledWith('/workspace', [
-          {
-            scope: SettingScope.User,
-            key: 'general.voice.mode',
-            value: 'tap',
-          },
-          {
-            scope: SettingScope.User,
-            key: 'general.voice.language',
-            value: 'english',
-          },
-          {
-            scope: SettingScope.User,
-            key: 'general.voice.enabled',
-            value: false,
-          },
-        ]);
+        expect(persistSettings).toHaveBeenCalledWith(
+          '/workspace',
+          [
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.language',
+              value: 'english',
+            },
+            {
+              scope: SettingScope.User,
+              key: 'general.voice.enabled',
+              value: false,
+            },
+          ],
+          undefined,
+        );
         expect(publishWorkspaceEvent).toHaveBeenCalledTimes(3);
         expect(publishWorkspaceEvent).toHaveBeenCalledWith({
           type: 'settings_changed',
@@ -304,23 +308,27 @@ describe('createDaemonWorkspaceService', () => {
           language: 'english',
         });
 
-        expect(persistSettings).toHaveBeenCalledWith('/workspace', [
-          {
-            scope: SettingScope.Workspace,
-            key: 'general.voice.mode',
-            value: 'tap',
-          },
-          {
-            scope: SettingScope.Workspace,
-            key: 'general.voice.language',
-            value: 'english',
-          },
-          {
-            scope: SettingScope.Workspace,
-            key: 'general.voice.enabled',
-            value: false,
-          },
-        ]);
+        expect(persistSettings).toHaveBeenCalledWith(
+          '/workspace',
+          [
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.mode',
+              value: 'tap',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.language',
+              value: 'english',
+            },
+            {
+              scope: SettingScope.Workspace,
+              key: 'general.voice.enabled',
+              value: false,
+            },
+          ],
+          undefined,
+        );
       });
     });
 
@@ -1263,6 +1271,7 @@ describe('createDaemonWorkspaceService', () => {
         '/my/workspace',
         'Bash',
         false,
+        undefined,
       );
     });
 
@@ -1391,6 +1400,7 @@ describe('createDaemonWorkspaceService', () => {
         '/workspace',
         'review',
         false,
+        undefined,
       );
       expect(invalidate).toHaveBeenCalledWith('/workspace');
       expect(invokeWorkspaceCommand).toHaveBeenCalledWith(
