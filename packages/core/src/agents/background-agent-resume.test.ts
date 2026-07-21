@@ -1398,6 +1398,115 @@ describe('BackgroundAgentResumeService', () => {
     expect(readAgentMeta(metaPath)?.model).toBe('model-a');
   });
 
+  it("revives on a new model when only the completed agent's old model is full", async () => {
+    registry = new BackgroundTaskRegistry({
+      maxConcurrentBackgroundAgents: 3,
+      maxConcurrentBackgroundAgentsByModel: {
+        'model-a': 1,
+        'model-b': 1,
+      },
+    });
+    const sessionId = 'session-revive-model-change';
+    const agentId = 'agent-revive-model-change';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Revive after model change',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+      model: 'model-a',
+      persistedCliFlags: { model: 'model-a' },
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Revive after model change' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+    registry.register({
+      agentId,
+      description: 'Revive after model change',
+      subagentType: 'researcher',
+      model: 'model-a',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'first result');
+    registry.register({
+      agentId: 'model-a-running',
+      description: 'Already using model A',
+      subagentType: 'researcher',
+      model: 'model-a',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile: '/tmp/model-a-running.jsonl',
+    });
+
+    const eventEmitter = new AgentEventEmitter();
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      setExternalMessageWaiter: vi.fn(),
+      setExternalMessageWaitPredicate: vi.fn(),
+      getCore: () => ({
+        modelConfig: { model: 'model-b' },
+        getEventEmitter: () => eventEmitter,
+      }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'continued on model B',
+    };
+    const { service, subagentManager } = createService();
+    subagentManager.loadSubagent.mockResolvedValue({
+      name: 'researcher',
+      color: 'cyan',
+      model: 'model-b',
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'continue'),
+    ).resolves.toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)).toMatchObject({
+        status: 'completed',
+        model: 'model-b',
+      });
+    });
+    expect(subagent.execute).toHaveBeenCalledOnce();
+    expect(readAgentMeta(metaPath)?.model).toBe('model-b');
+    expect(readAgentMeta(metaPath)?.persistedCliFlags?.model).toBe('model-b');
+  });
+
   it('passes the sidechain transcript path to SubagentStop hooks on resume', async () => {
     const sessionId = 'session-stop-hook';
     const agentId = 'agent-stop-hook';
@@ -3337,6 +3446,8 @@ describe('BackgroundAgentResumeService', () => {
       status: 'completed',
       subagentName: 'researcher',
       resolvedApprovalMode: 'default',
+      model: 'model-a',
+      persistedCliFlags: { model: 'model-a' },
     });
     fs.writeFileSync(
       outputFile,
@@ -3361,6 +3472,7 @@ describe('BackgroundAgentResumeService', () => {
       abortController: new AbortController(),
       outputFile,
       metaPath,
+      model: 'model-a',
     });
     registry.complete(agentId, 'All done');
     const original = registry.get(agentId);
@@ -3388,13 +3500,26 @@ describe('BackgroundAgentResumeService', () => {
     registry.setRegisterCallback((entry) => starts.push(entry.status));
 
     const { service, subagentManager } = createService();
-    let rejectSetup: ((error: Error) => void) | undefined;
-    subagentManager.createAgentHeadless.mockImplementation(
-      () =>
-        new Promise((_resolve, reject) => {
-          rejectSetup = reject;
-        }),
-    );
+    let releaseSetup!: () => void;
+    const setupGate = new Promise<void>((resolve) => {
+      releaseSetup = resolve;
+    });
+    const dispose = vi.fn().mockResolvedValue(undefined);
+    subagentManager.createAgentHeadless.mockImplementation(async () => {
+      await setupGate;
+      return {
+        subagent: {
+          getCore: () => ({
+            modelConfig: { model: 'model-b' },
+            getEventEmitter: () => new AgentEventEmitter(),
+          }),
+          setExternalMessageProvider: () => {
+            throw new Error('setup failed');
+          },
+        },
+        dispose,
+      };
+    });
 
     const revive = service.reviveCompletedBackgroundAgent(
       agentId,
@@ -3405,13 +3530,14 @@ describe('BackgroundAgentResumeService', () => {
       expect(subagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
     });
     expect(registry.queueMessage(agentId, 'queued during setup')).toBe(true);
-    rejectSetup?.(new Error('setup failed'));
+    releaseSetup();
     await expect(revive).resolves.toBeUndefined();
 
     const restored = registry.get(agentId);
     expect(restored?.status).toBe('completed');
     expect(restored?.result).toBe('All done');
     expect(restored?.notified).toBe(true);
+    expect(restored?.model).toBe('model-a');
     expect(restored?.pendingMessages).toEqual(['queued during setup']);
     expect(starts).toEqual([]);
     expect(notifications).toEqual([]);
@@ -3423,6 +3549,9 @@ describe('BackgroundAgentResumeService', () => {
     const restoredMeta = readAgentMeta(metaPath);
     expect(restoredMeta?.lastError).toBeUndefined();
     expect(restoredMeta?.status).toBe('completed');
+    expect(restoredMeta?.model).toBe('model-a');
+    expect(restoredMeta?.persistedCliFlags?.model).toBe('model-a');
+    expect(dispose).toHaveBeenCalledOnce();
   });
 
   it('emits one start event and one terminal notification when a completed agent is revived', async () => {

@@ -614,11 +614,12 @@ export class BackgroundAgentResumeService {
       );
       return undefined;
     }
-    // Honor the background-agent concurrency cap before flipping the finished
-    // entry back to paused, so an at-capacity revive fails cleanly instead of
-    // stranding the entry as paused.
+    // Honor the global background-agent concurrency cap before flipping the
+    // finished entry back to paused. The rebuilt runtime can resolve to a
+    // different model, so its per-model cap is checked later when that model
+    // is known.
     try {
-      registry.assertCanStartBackgroundAgent(entry.model);
+      registry.assertCanStartBackgroundAgent();
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
@@ -697,7 +698,7 @@ export class BackgroundAgentResumeService {
       return undefined;
     }
     try {
-      registry.assertCanStartBackgroundAgent(latestEntry.model);
+      registry.assertCanStartBackgroundAgent();
     } catch (error) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": ` +
@@ -1395,9 +1396,15 @@ export class BackgroundAgentResumeService {
       },
     );
     if (entry.metaPath) {
+      const meta = readAgentMeta(entry.metaPath);
       patchAgentMeta(entry.metaPath, {
         lastError: undefined,
         status: 'completed',
+        model: entry.model,
+        persistedCliFlags: {
+          ...meta?.persistedCliFlags,
+          model: entry.model,
+        },
       });
     }
     return restored;
