@@ -183,6 +183,14 @@ describe('loadPollCursor / savePollCursor', () => {
     expect(cursor.processedIds).toEqual(new Set(['100', '200', '300']));
   });
 
+  it('round-trips empty timestamp with processed IDs', () => {
+    const ids = new Set(['100', '200']);
+    savePollCursor('github', '', ids, tmpDir);
+    const cursor = loadPollCursor('github', tmpDir);
+    expect(cursor.timestamp).toBe('');
+    expect(cursor.processedIds).toEqual(new Set(['100', '200']));
+  });
+
   it('overwrites previous cursor value', () => {
     savePollCursor('github', '2026-01-01T00:00:00Z', undefined, tmpDir);
     savePollCursor('github', '2026-01-02T00:00:00Z', undefined, tmpDir);
@@ -296,6 +304,13 @@ describe('stripMentions', () => {
       '() can you review?',
     );
     expect(stripMentions('[@bob] thoughts?')).toBe('[] thoughts?');
+  });
+
+  it('preserves blank lines and multi-line structure', () => {
+    expect(stripMentions('multi-line\n\nno mention')).toBe(
+      'multi-line\n\nno mention',
+    );
+    expect(stripMentions('line1\n\n@bot line2')).toBe('line1\n\nline2');
   });
 });
 
