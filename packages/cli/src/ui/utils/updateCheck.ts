@@ -5,7 +5,6 @@
  */
 
 import type { UpdateInfo } from 'update-notifier';
-import updateNotifier from 'update-notifier';
 import semver from 'semver';
 import { execFile } from 'node:child_process';
 import { realpath } from 'node:fs/promises';
@@ -25,22 +24,22 @@ export const FETCH_TIMEOUT_MS = 5000;
 
 /**
  * Sentinel error thrown when `fetchInfo()` does not resolve within
- * `FETCH_TIMEOUT_MS`. `update-notifier`'s `fetchInfo()` does not accept a
- * timeout option, so slow / unreachable registries (corporate proxies, offline
- * networks, DNS failures) would otherwise hang the check indefinitely or fall
- * through to a stale configstore cache. Race the call against a bounded timer
- * and surface a real error so `/update` can report "check failed" instead of
- * silently returning "up to date". The `distTag` is carried on the message so
- * an oncall reading logs can tell which registry endpoint stalled — the
- * nightly path fires two concurrent fetches, and only one of them may be
- * blocked (e.g. a corporate proxy that lets `nightly` through but not
- * `latest`). Related: #6857.
+ * `FETCH_TIMEOUT_MS`. `npm view` is bounded by the `timeout` option passed to
+ * `execFile` (see `runGlobalNpm`), but we still race it here as a second,
+ * independent bound so a slow / unreachable registry (corporate proxy,
+ * offline network, DNS failure) can never hang the check indefinitely. Race
+ * the call against a bounded timer and surface a real error so `/update` can
+ * report "check failed" instead of silently returning "up to date". The
+ * `distTag` is carried on the message so an oncall reading logs can tell
+ * which registry endpoint stalled — the nightly path fires two concurrent
+ * fetches, and only one of them may be blocked (e.g. a corporate proxy that
+ * lets `nightly` through but not `latest`). Related: #6857.
  */
 export class UpdateCheckTimeoutError extends Error {
   readonly distTag?: string;
   constructor(timeoutMs: number, distTag?: string) {
     const suffix = distTag ? ` for ${distTag}` : '';
-    super(`update-notifier fetchInfo timed out after ${timeoutMs}ms${suffix}`);
+    super(`update check timed out after ${timeoutMs}ms${suffix}`);
     this.name = 'UpdateCheckTimeoutError';
     this.distTag = distTag;
   }
@@ -267,7 +266,6 @@ function getBestAvailableUpdate(
 }
 
 export async function checkForUpdatesDetailed(
-  detectGlobalNpm = isGlobalNpmInstallation,
   fetchGlobalNpm = fetchGlobalNpmUpdateInfo,
 ): Promise<UpdateCheckResult> {
   let currentVersion: string | undefined;
@@ -282,23 +280,17 @@ export async function checkForUpdatesDetailed(
     }
 
     const { name, version } = packageJson;
-    const isGlobalNpm = await detectGlobalNpm();
     currentVersion = version;
     const isNightly = version.includes('nightly');
-    const createNotifier = (distTag: 'latest' | 'nightly') =>
-      isGlobalNpm
-        ? {
-            fetchInfo: () => fetchGlobalNpm(name, version, distTag),
-          }
-        : updateNotifier({
-            pkg: {
-              name,
-              version,
-            },
-            updateCheckInterval: 0,
-            shouldNotifyInNpmScript: true,
-            distTag,
-          });
+    // Always resolve via `npm view` (see fetchGlobalNpmUpdateInfo), regardless
+    // of installation type. update-notifier's fetchInfo() requests the
+    // abbreviated metadata format (Accept: application/vnd.npm.install-v1+json),
+    // which registry.npmjs.org now answers with an empty HTTP 406 response,
+    // breaking the check for every non-global install. `npm view` doesn't send
+    // that header and is unaffected. Related: #7515.
+    const createNotifier = (distTag: 'latest' | 'nightly') => ({
+      fetchInfo: () => fetchGlobalNpm(name, version, distTag),
+    });
 
     if (isNightly) {
       const [nightlyUpdateInfo, latestUpdateInfo] = await Promise.all([
@@ -368,7 +360,9 @@ export async function checkForUpdatesDetailed(
   }
 }
 
-export async function checkForUpdates(): Promise<UpdateObject | null> {
-  const result = await checkForUpdatesDetailed();
+export async function checkForUpdates(
+  fetchGlobalNpm = fetchGlobalNpmUpdateInfo,
+): Promise<UpdateObject | null> {
+  const result = await checkForUpdatesDetailed(fetchGlobalNpm);
   return result.status === 'update' ? result.info : null;
 }
