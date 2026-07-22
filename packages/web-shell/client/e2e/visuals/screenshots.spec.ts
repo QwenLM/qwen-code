@@ -16,6 +16,7 @@ import {
   captureScreenshot,
   completeReplay,
   fillComposer,
+  gotoNewSession,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -391,6 +392,47 @@ for (const theme of THEMES) {
       // screenshot and the capture differs between runs.
       await expect(sidebar.getByText(primarySessionName)).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
+    });
+
+    test(`git mode selector`, async ({ page }, testInfo) => {
+      // The new-session composer offers a git-mode selector (current branch /
+      // new branch / worktree) only when the workspace the next session would
+      // use is trusted AND a git repo, and App.tsx wires the intent props only
+      // while no session is loaded. So this empty state is the suite's only
+      // view of the popover — without a scenario the whole selector (and the
+      // empty-state composer around it) is invisible to the before/after
+      // preview.
+      const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        capabilities: {
+          workspaces: [
+            { id: 'primary', cwd: workspaceCwd, primary: true, trusted: true },
+          ],
+        },
+        gitStatus: { v: 2, workspaceCwd, branch: 'main' },
+      });
+      await installScenario(page, scenario, resolveBaseURL(testInfo));
+      await gotoNewSession(page, theme);
+
+      // Closed: the composer chip advertising the current git mode.
+      const chip = page.locator('[data-testid="git-mode-chip"]');
+      await expect(chip).toBeVisible();
+      await captureScreenshot(page, `git-mode-chip-${theme}`);
+
+      // Open: the three-mode popover (current / new branch / worktree). Assert
+      // an option is visible (not just the chip's aria-label) so a regression
+      // that fails to open the popover fails here, not only in the visually
+      // reviewed screenshot. The branch-name sub-state is intentionally not
+      // captured: its input autoFocuses, and the popover then dismisses on the
+      // idle frame captureScreenshot waits for — so it can't be shot stably
+      // through this pipeline (the functional web-shell.git-mode.spec.ts drives
+      // that path). The chip + open popover already show the new UI head-only.
+      await chip.click();
+      await expect(
+        page.getByText('Current branch', { exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `git-mode-popover-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {
