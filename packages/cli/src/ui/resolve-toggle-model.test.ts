@@ -142,6 +142,26 @@ describe('computeToggleAction', () => {
       previous: { modelId: 'shared', authType: AuthType.USE_OPENAI },
     });
   });
+
+  it('returns forward (not stale backward) after external model change invalidates previousModel', () => {
+    // Scenario: user toggles to model-b (sets previous=model-a), then
+    // switches to model-c via /model. onModelChange fires with
+    // isTogglingRef=false → previousModelRef is nulled. Next Ctrl+F
+    // must do a fresh forward toggle, not jump back to stale model-a.
+    const afterInvalidation = null; // previousModelRef cleared by onModelChange
+    expect(
+      computeToggleAction(
+        'model-c',
+        AuthType.USE_OPENAI,
+        target,
+        afterInvalidation,
+      ),
+    ).toEqual({
+      type: 'forward',
+      target,
+      previous: { modelId: 'model-c', authType: AuthType.USE_OPENAI },
+    });
+  });
 });
 
 describe('needsCachedCredentials', () => {

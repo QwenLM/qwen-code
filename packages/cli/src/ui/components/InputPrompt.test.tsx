@@ -3142,6 +3142,48 @@ describe('InputPrompt', () => {
     });
   });
 
+  describe('Ctrl+F model toggle suppression (non-vim)', () => {
+    it('suppresses cursor-right when handleToggleKeypress returns true', async () => {
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        handleToggleKeypress: vi.fn(() => true),
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x06'); // Ctrl+F
+      await wait();
+
+      expect(mockBuffer.handleInput).not.toHaveBeenCalled();
+      unmount();
+    });
+
+    it('falls through to buffer when handleToggleKeypress returns false', async () => {
+      mockedUseUIActions.mockReturnValue({
+        handleRetryLastPrompt: vi.fn(),
+        temporaryCloseFeedbackDialog: vi.fn(),
+        popAllQueuedMessages: vi.fn(() => null),
+        handleToggleKeypress: vi.fn(() => false),
+      } as unknown as ReturnType<typeof useUIActions>);
+
+      const { stdin, unmount } = renderWithProviders(
+        <InputPrompt {...props} />,
+      );
+      await wait();
+
+      stdin.write('\x06'); // Ctrl+F
+      await wait();
+
+      expect(mockBuffer.handleInput).toHaveBeenCalled();
+      unmount();
+    });
+  });
+
   describe('unfocused paste', () => {
     it('should handle bracketed paste when not focused', async () => {
       props.focus = false;
