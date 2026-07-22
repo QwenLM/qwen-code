@@ -210,6 +210,7 @@ export async function listAgentViewSessionSnapshots(
     states.map(async (state) => ({
       sessionId: state.sessionId,
       state,
+      launch: await readAgentViewLaunch(state.sessionId, options),
       activity: await readAgentViewActivity(state.sessionId, options),
       worker: await readAgentViewWorker(state.sessionId, options),
       rosterEntry: rosterEntries.get(state.sessionId),
@@ -486,8 +487,20 @@ function normalizeActivity(
     ...(stringValue(raw['waitingFor'])
       ? { waitingFor: stringValue(raw['waitingFor']) }
       : {}),
+    ...(inputKindValue(raw['inputKind'])
+      ? { inputKind: inputKindValue(raw['inputKind']) }
+      : {}),
     ...(stringValue(raw['lastResult'])
       ? { lastResult: stringValue(raw['lastResult']) }
+      : {}),
+    ...(numberValue(raw['queuedPromptCount'])
+      ? { queuedPromptCount: numberValue(raw['queuedPromptCount']) }
+      : {}),
+    ...(stringValue(raw['queuedPromptPreview'])
+      ? { queuedPromptPreview: stringValue(raw['queuedPromptPreview']) }
+      : {}),
+    ...(stringValue(raw['lastQueuedPromptAt'])
+      ? { lastQueuedPromptAt: stringValue(raw['lastQueuedPromptAt']) }
       : {}),
     lastActivityAt,
     capabilities: stringArrayValue(raw['capabilities']),
@@ -598,6 +611,10 @@ function worktreeModeValue(
   value: unknown,
 ): AgentViewSessionStateFile['worktree']['mode'] {
   return value === 'worktree' || value === 'shared-unisolated' ? value : 'none';
+}
+
+function inputKindValue(value: unknown): AgentViewActivityFile['inputKind'] {
+  return value === 'blocking' || value === 'soft' ? value : undefined;
 }
 
 function terminalValue(value: unknown): AgentViewLaunchFile['terminal'] {

@@ -6,6 +6,7 @@
 
 import { callAgentViewSupervisor } from './supervisor-client.js';
 import type {
+  AgentViewInputKind,
   AgentViewWorkerControlEvent,
   AgentViewSessionState,
   AgentViewWorkerEvent,
@@ -45,6 +46,7 @@ export interface AgentViewWorkerStateReport {
   cwd?: string;
   summary?: string;
   waitingFor?: string;
+  inputKind?: AgentViewInputKind;
   lastResult?: string;
 }
 
@@ -184,6 +186,9 @@ function isAgentViewWorkerControlEvent(
     return false;
   }
   if (value['type'] === 'redraw') {
+    return true;
+  }
+  if (value['type'] === 'stop') {
     return true;
   }
   if (value['type'] === 'prompt') {
