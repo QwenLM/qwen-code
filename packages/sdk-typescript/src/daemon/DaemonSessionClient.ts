@@ -82,6 +82,12 @@ export interface DaemonSessionClientOptions {
   /** True when older persisted records precede the replay snapshot. */
   historyHasMore?: boolean;
   /**
+   * True when the daemon reported the replay snapshot as degraded (the
+   * compaction engine failed at least once for this session). Consumers
+   * should prefer the full transcript over the snapshot when set.
+   */
+  replayDegraded?: boolean;
+  /**
    * Local per-session prompt cap. The counter is shared with the parent
    * `DaemonClient`; other session clients using the same parent instance
    * contend on the same count. Set to `null`, `0`, or `Infinity` to disable
@@ -117,6 +123,13 @@ export class DaemonSessionClient {
   readonly replaySnapshot: DaemonReplaySnapshot;
   readonly hasActivePrompt: boolean;
   readonly historyHasMore: boolean;
+  /**
+   * True when the load response flagged the replay snapshot as degraded
+   * (`replayDegraded` — compaction failed at least once, so
+   * `replaySnapshot` may lag behind live events). Prefer the full
+   * transcript (see `fullTranscriptAvailable`) when set.
+   */
+  readonly replayDegraded: boolean;
   private lastSeenEventId: number | undefined;
   /**
    * Epoch token paired with {@link lastSeenEventId}. Seeded from the
@@ -142,6 +155,7 @@ export class DaemonSessionClient {
     this.state = { ...(opts.state ?? {}) };
     this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.historyHasMore = opts.historyHasMore ?? false;
+    this.replayDegraded = opts.replayDegraded ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
@@ -223,6 +237,7 @@ export class DaemonSessionClient {
       compactedReplay,
       liveJournal,
       historyHasMore,
+      replayDegraded,
       lastEventId: serverLastEventId,
       eventEpoch,
       ...session
@@ -239,6 +254,7 @@ export class DaemonSessionClient {
         liveJournal: liveJournal ?? [],
       },
       historyHasMore,
+      replayDegraded,
     });
   }
 

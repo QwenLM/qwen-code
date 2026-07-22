@@ -1130,6 +1130,13 @@ export interface AcpSessionBridge {
      */
     promptId?: string;
     lastEventId?: number;
+    /**
+     * Epoch token of the event bus that produced `lastEventId`, mirroring
+     * the `POST /session/:id/prompt` 202 envelope: a client seeding its SSE
+     * resume position from an accepted continuation must also learn the bus
+     * epoch so a daemon restart in between is detected (DAEMON-001).
+     */
+    eventEpoch?: string;
   }>;
 
   /** Read structured session usage stats (tokens, tools, files). */

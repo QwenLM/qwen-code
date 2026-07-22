@@ -3416,6 +3416,70 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('emits the stderr breadcrumb only when the initial replay snapshot is degraded', async () => {
+    const makeSnapshot = (
+      sessionId: string,
+      degraded: boolean,
+    ): SessionReplaySnapshot => ({
+      lastEventId: 1,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId,
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+      liveJournal: [],
+      ...(degraded ? { degraded: true } : {}),
+    });
+    const degradedLine = (calls: unknown[][]) =>
+      calls.some(
+        ([line]) =>
+          typeof line === 'string' && line.includes('DEGRADED snapshot'),
+      );
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReplies = takeFrames(connStream, 2);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Healthy snapshot: no operator breadcrumb.
+    bridge.replaySnapshot = makeSnapshot('deg-0', false);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 30,
+      method: 'session/load',
+      params: { sessionId: 'deg-0' },
+    });
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-0');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(false);
+
+    // Degraded snapshot (DAEMON-008): breadcrumb names the session.
+    bridge.replaySnapshot = makeSnapshot('deg-1', true);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 31,
+      method: 'session/load',
+      params: { sessionId: 'deg-1' },
+    });
+    await loadReplies;
+    stdioMocks.writeStderrLine.mockClear();
+    await openStream(connId, 'deg-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(degradedLine(stdioMocks.writeStderrLine.mock.calls)).toBe(true);
+    expect(
+      stdioMocks.writeStderrLine.mock.calls.some(
+        ([line]) => typeof line === 'string' && line.includes('deg-1'),
+      ),
+    ).toBe(true);
+  });
+
   it('defers prompt replies until initial load replay completes', async () => {
     bridge.replaySnapshot = {
       lastEventId: 1,

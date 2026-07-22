@@ -5272,6 +5272,8 @@ describe('createAcpSessionBridge', () => {
         promptId: 'cont-1',
       });
       expect(typeof decision.lastEventId).toBe('number');
+      // Epoch token pairs with the cursor (DAEMON-001), same as the 202 envelope.
+      expect(decision.eventEpoch).toEqual(expect.any(String));
 
       // The continuation runs through the tracked prompt path (fire-and-forget),
       // so the agent receives a prompt() carrying the re-armed continue meta.

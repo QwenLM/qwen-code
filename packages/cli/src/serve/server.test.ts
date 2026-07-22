@@ -618,6 +618,9 @@ interface FakeBridgeOpts {
   continueSessionImpl?: (sessionId: string) => Promise<{
     accepted: boolean;
     interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+    promptId?: string;
+    lastEventId?: number;
+    eventEpoch?: string;
   }>;
   sessionHooksImpl?: (sessionId: string) => Promise<ServeSessionHooksStatus>;
   setModelImpl?: (
@@ -7653,6 +7656,8 @@ describe('createServeApp', () => {
         continueSessionImpl: async () => ({
           accepted: true,
           interruption: 'interrupted_prompt',
+          lastEventId: 7,
+          eventEpoch: 'epoch-1',
         }),
       });
       const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
@@ -7671,6 +7676,10 @@ describe('createServeApp', () => {
       expect(res.body).toEqual({
         accepted: true,
         interruption: 'interrupted_prompt',
+        // Replay cursor + epoch token pass through untouched (DAEMON-001):
+        // an accepted continuation is a cursor surface like the prompt 202.
+        lastEventId: 7,
+        eventEpoch: 'epoch-1',
       });
       expect(bridge.continueSessionCalls).toEqual(['s-1']);
     });

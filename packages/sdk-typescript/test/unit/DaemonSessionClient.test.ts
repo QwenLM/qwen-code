@@ -338,6 +338,33 @@ describe('DaemonSessionClient', () => {
     });
 
     expect(session.hasActivePrompt).toBe(true);
+    // Absent on the response → defaults to a trustworthy snapshot.
+    expect(session.replayDegraded).toBe(false);
+  });
+
+  it('surfaces replayDegraded from the load response', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          compactedReplay: [],
+          liveJournal: [],
+          replayDegraded: true,
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1', {
+      workspaceCwd: '/work/a',
+    });
+
+    expect(session.replayDegraded).toBe(true);
   });
 
   it('resumes an existing daemon session using server watermark', async () => {

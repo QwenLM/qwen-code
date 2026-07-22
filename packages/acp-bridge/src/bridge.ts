@@ -6646,6 +6646,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const liveEntry = byId.get(sessionId);
       if (!liveEntry) throw new SessionNotFoundError(sessionId);
       const lastEventId = liveEntry.events.lastEventId;
+      // Epoch token paired with the cursor above, mirroring the prompt 202
+      // envelope (DAEMON-001): without it a client that seeds its SSE resume
+      // position from this response cannot detect a daemon restart.
+      const eventEpoch = liveEntry.events.epoch;
       const promptId = context?.promptId;
 
       // Admit synchronously: `sendPrompt` throws synchronously for queue-full /
@@ -6681,6 +6685,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         ...decision,
         ...(promptId !== undefined ? { promptId } : {}),
         lastEventId,
+        eventEpoch,
       };
     },
 
