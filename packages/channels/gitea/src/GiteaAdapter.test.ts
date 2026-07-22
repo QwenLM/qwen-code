@@ -81,6 +81,7 @@ describe('GiteaChannel', () => {
     originalQwenHome = process.env['QWEN_HOME'];
     process.env['QWEN_HOME'] = tempDir;
     mockNotifyGetList.mockClear();
+    mockNotifyGetList.mockResolvedValue({ data: [] });
     mockNotifyReadThread.mockClear();
     mockCreateComment.mockClear();
     mockCreateIssue.mockClear();
@@ -538,7 +539,7 @@ describe('GiteaChannel', () => {
       updated_at: '2026-01-01T00:00:00Z',
     };
 
-    mockNotifyGetList.mockResolvedValue({ data: [notification] });
+    mockNotifyGetList.mockResolvedValueOnce({ data: [notification] });
 
     const channel = new GiteaChannel(
       'test',
@@ -621,7 +622,7 @@ describe('GiteaChannel', () => {
     // Let the in-flight pollNotifications finish before the next test starts
     await new Promise((r) => setTimeout(r, 300));
 
-    expect(mockNotifyGetList).toHaveBeenCalledTimes(2);
+    expect(mockNotifyGetList).toHaveBeenCalledTimes(3);
     expect(mockNotifyReadThread).toHaveBeenCalledTimes(101);
   });
 
@@ -647,9 +648,9 @@ describe('GiteaChannel', () => {
       updated_at: '2026-01-01T00:00:00Z',
     };
 
-    mockNotifyGetList.mockResolvedValue({ data: [notification] });
+    mockNotifyGetList.mockResolvedValueOnce({ data: [notification] });
     mockGetComment.mockResolvedValue({
-      data: { user: { login: 'commenter' }, body: 'fix this' },
+      data: { user: { login: 'commenter' }, body: '@bot fix this' },
     });
     mockNotifyReadThread.mockResolvedValue({});
 
@@ -708,7 +709,7 @@ describe('GiteaChannel', () => {
     const cursorDir = join(tempDir, 'channels');
     savePollCursor('test', '2024-01-01T00:00:00Z', new Set(['1']), cursorDir);
 
-    mockNotifyGetList.mockResolvedValue({
+    mockNotifyGetList.mockResolvedValueOnce({
       data: [
         {
           id: 1,

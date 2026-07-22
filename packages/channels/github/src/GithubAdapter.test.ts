@@ -193,7 +193,7 @@ describe('GithubChannel', () => {
       },
     ]);
     mockGetIssue.mockResolvedValueOnce({
-      data: { user: { login: 'creator' }, body: 'Bug description here' },
+      data: { user: { login: 'creator' }, body: '@bot Bug description here' },
     });
     mockMarkThreadAsRead.mockResolvedValueOnce({});
 
@@ -239,7 +239,7 @@ describe('GithubChannel', () => {
     ]);
     mockGetComment.mockRejectedValueOnce(new Error('not found'));
     mockGetIssue.mockResolvedValueOnce({
-      data: { user: { login: 'creator' }, body: 'Fallback issue body' },
+      data: { user: { login: 'creator' }, body: '@bot Fallback issue body' },
     });
     mockMarkThreadAsRead.mockResolvedValueOnce({});
 
@@ -472,7 +472,7 @@ describe('GithubChannel', () => {
     expect((envelopes[0] as { senderId: string }).senderId).toBe('reviewer');
   });
 
-  it('sets isMentioned true for mention reason', async () => {
+  it('sets isMentioned true when body contains @bot', async () => {
     mockGetComment.mockResolvedValueOnce({
       data: { user: { login: 'alice' }, body: '@bot help' },
     });
@@ -516,7 +516,7 @@ describe('GithubChannel', () => {
     expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(true);
   });
 
-  it('sets isMentioned true for team_mention reason', async () => {
+  it('sets isMentioned true when issue body contains @bot', async () => {
     mockPaginate.mockResolvedValue([
       {
         id: '2',
@@ -535,7 +535,7 @@ describe('GithubChannel', () => {
       },
     ]);
     mockGetIssue.mockResolvedValueOnce({
-      data: { user: { login: 'author' }, body: '' },
+      data: { user: { login: 'author' }, body: '@bot please review' },
     });
 
     const envelopes: unknown[] = [];
@@ -559,7 +559,7 @@ describe('GithubChannel', () => {
     expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(true);
   });
 
-  it('sets isMentioned false for non-mention reason', async () => {
+  it('sets isMentioned false when body has no @bot', async () => {
     mockPaginate.mockResolvedValue([
       {
         id: '3',
@@ -600,6 +600,92 @@ describe('GithubChannel', () => {
     channel.disconnect();
 
     expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(false);
+  });
+
+  it('sets isMentioned false when reason is mention but body has no @bot', async () => {
+    mockGetComment.mockResolvedValueOnce({
+      data: { user: { login: 'alice' }, body: 'gitlab is checked' },
+    });
+    mockPaginate.mockResolvedValue([
+      {
+        id: '5',
+        reason: 'mention',
+        subject: {
+          type: 'PullRequest',
+          title: 'Some PR',
+          url: 'https://api.github.com/repos/owner/repo/pulls/1',
+          latest_comment_url:
+            'https://api.github.com/repos/owner/repo/issues/comments/200',
+        },
+        repository: {
+          full_name: 'owner/repo',
+          html_url: 'https://github.com/owner/repo',
+        },
+        updated_at: '2026-01-01T00:00:00Z',
+      },
+    ]);
+
+    const envelopes: unknown[] = [];
+    const channel = new GithubChannel('test', baseConfig, mockBridge());
+    const origHandleInbound = (
+      channel as unknown as { handleInbound: (e: unknown) => Promise<void> }
+    ).handleInbound.bind(channel);
+    (
+      channel as unknown as { handleInbound: (e: unknown) => Promise<void> }
+    ).handleInbound = async (e: unknown) => {
+      envelopes.push(e);
+      await origHandleInbound(e);
+    };
+
+    await channel.connect();
+    await vi.waitFor(() => expect(envelopes.length).toBe(1), {
+      timeout: 2000,
+    });
+    channel.disconnect();
+
+    expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(false);
+  });
+
+  it('processes message without @bot when requireMention is false', async () => {
+    const bridge = mockBridge();
+    const promptFn = vi.fn().mockResolvedValue('done');
+    (bridge as Record<string, unknown>).prompt = promptFn;
+
+    mockGetComment.mockResolvedValueOnce({
+      data: { user: { login: 'alice' }, body: 'no mention here' },
+    });
+    mockPaginate.mockResolvedValue([
+      {
+        id: '6',
+        reason: 'comment',
+        subject: {
+          type: 'Issue',
+          title: 'Some issue',
+          url: 'https://api.github.com/repos/owner/repo/issues/1',
+          latest_comment_url:
+            'https://api.github.com/repos/owner/repo/issues/comments/300',
+        },
+        repository: {
+          full_name: 'owner/repo',
+          html_url: 'https://github.com/owner/repo',
+        },
+        updated_at: '2026-01-01T00:00:00Z',
+      },
+    ]);
+
+    const channel = new GithubChannel(
+      'test',
+      {
+        ...baseConfig,
+        groups: { '*': { requireMention: false } },
+      } as ChannelConfig,
+      bridge,
+    );
+    await channel.connect();
+    await vi.waitFor(() => expect(promptFn).toHaveBeenCalled(), {
+      timeout: 2000,
+    });
+    channel.disconnect();
   });
 
   it('sets isReplyToBot false and isMentioned false for author reason', async () => {
@@ -747,7 +833,7 @@ describe('GithubChannel', () => {
 
     mockPaginate.mockResolvedValue([notification]);
     mockGetIssue.mockResolvedValue({
-      data: { user: { login: 'author' }, body: 'fix this' },
+      data: { user: { login: 'author' }, body: '@bot fix this' },
     });
     mockMarkThreadAsRead.mockResolvedValue({});
 

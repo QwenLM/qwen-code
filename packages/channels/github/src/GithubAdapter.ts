@@ -17,8 +17,6 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 
-const MENTION_REASONS = new Set(['mention', 'team_mention']);
-
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
 export class GithubChannel extends ChannelBase {
@@ -355,7 +353,7 @@ export class GithubChannel extends ChannelBase {
       text: content,
       metadata,
       isGroup: true,
-      isMentioned: MENTION_REASONS.has(notification.reason),
+      isMentioned: content !== body,
       isReplyToBot: false,
     };
   }

@@ -9,7 +9,6 @@ import {
   loadPollCursor,
   savePollCursor,
   stripBotMention,
-  escapeRegex,
   abortableSleep,
 } from '@qwen-code/channel-base';
 import type {
@@ -315,11 +314,6 @@ export class GiteaChannel extends ChannelBase {
       body && this.botUsername
         ? stripBotMention(body, this.botUsername)
         : (body ?? '');
-    const isMentioned = this.botUsername
-      ? new RegExp(
-          `(?<=\\s|^|[([{"<])@${escapeRegex(this.botUsername)}(?=[^a-zA-Z0-9_/-]|$)`,
-        ).test(body)
-      : false;
 
     return {
       channelName: this.name,
@@ -331,7 +325,7 @@ export class GiteaChannel extends ChannelBase {
       text: content,
       metadata,
       isGroup: true,
-      isMentioned,
+      isMentioned: content !== body,
       isReplyToBot: false,
     };
   }
