@@ -54,7 +54,11 @@ export interface WorkspaceSkillsStatusProvider {
  */
 type SkillManagerConfigShim = Pick<
   Config,
-  'isSafeMode' | 'getBareMode' | 'getProjectRoot' | 'getActiveExtensions'
+  | 'isSafeMode'
+  | 'getBareMode'
+  | 'getProjectRoot'
+  | 'getActiveExtensions'
+  | 'getCustomSkillDirs'
 >;
 
 export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProvider {
@@ -93,6 +97,15 @@ async function buildWorkspaceSkillsStatus(
         // Extension skills need active-extension context that only the child
         // has; omit them here and let the session snapshot surface them.
         getActiveExtensions: () => [],
+        getCustomSkillDirs: () => {
+          const raw = loadSettings(workspaceCwd, false).merged.skills
+            ?.directories;
+          return (Array.isArray(raw) ? raw : [])
+            .filter(
+              (d): d is string => typeof d === 'string' && d.trim().length > 0,
+            )
+            .map((d) => d.trim());
+        },
       };
       skillManager = new SkillManager(shim as Config);
       managers.set(workspaceCwd, skillManager);

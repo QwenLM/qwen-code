@@ -10,6 +10,16 @@ import {
   deleteWorkspaceSkill,
   installWorkspaceSkill,
 } from './workspace-skill-management.js';
+import { loadSettings } from '../config/settings.js';
+
+vi.mock('../config/settings.js', async (importOriginal) => {
+  const original =
+    await importOriginal<typeof import('../config/settings.js')>();
+  return {
+    ...original,
+    loadSettings: vi.fn().mockReturnValue({ merged: {} }),
+  };
+});
 
 const temporaryDirectories: string[] = [];
 
@@ -622,5 +632,30 @@ describe('workspace Skill management', () => {
     await expect(
       fs.readFile(installed.installedPath!, 'utf8'),
     ).resolves.not.toContain('Replacement instructions.');
+  });
+
+  it('deletes a skill from a custom skill directory at global scope', async () => {
+    const workspace = await temporaryDirectory('qwen-skill-workspace-');
+    const customDir = await temporaryDirectory('qwen-skill-custom-');
+    await fs.mkdir(path.join(customDir, 'custom-skill'));
+    await fs.writeFile(
+      path.join(customDir, 'custom-skill', 'SKILL.md'),
+      skillMarkdown('custom-skill'),
+    );
+
+    vi.mocked(loadSettings).mockReturnValue({
+      merged: { skills: { directories: [customDir] } },
+    } as ReturnType<typeof loadSettings>);
+
+    const installedPath = path.join(customDir, 'custom-skill', 'SKILL.md');
+    const result = await deleteWorkspaceSkill(
+      workspace,
+      'global',
+      'custom-skill',
+      installedPath,
+    );
+
+    expect(result.deleted).toBe(true);
+    await expect(fs.access(path.dirname(installedPath))).rejects.toThrow();
   });
 });

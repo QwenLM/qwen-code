@@ -6,6 +6,7 @@ import { promisify } from 'node:util';
 
 import { SkillManager, Storage, type Config } from '@qwen-code/qwen-code-core';
 import { fromBuffer, type Entry, type ZipFile } from 'yauzl';
+import { loadSettings } from '../config/settings.js';
 
 export type WorkspaceSkillScope = 'workspace' | 'global';
 
@@ -832,9 +833,14 @@ export async function deleteWorkspaceSkill(
   const skillName = validateWorkspaceSkillName(skillNameInput);
   const skillDir = path.resolve(path.dirname(installedPath));
   const skillFile = path.resolve(installedPath);
+  const rawDirs = loadSettings(workspace, false).merged.skills?.directories;
+  const customSkillDirs = (Array.isArray(rawDirs) ? rawDirs : [])
+    .filter((d): d is string => typeof d === 'string' && d.trim().length > 0)
+    .map((d) => d.trim());
   const allowedBaseDirs = new SkillManager({
     getProjectRoot: () => workspace,
-  } as Config)
+    getCustomSkillDirs: () => customSkillDirs,
+  } as unknown as Config)
     .getSkillsBaseDirs(scope === 'workspace' ? 'project' : 'user')
     .map((directory) => path.resolve(directory));
   const baseDir = path.dirname(skillDir);
