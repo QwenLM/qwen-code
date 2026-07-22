@@ -111,6 +111,7 @@ def test_worker_completes_and_writes_artifacts(tmp_path: Path) -> None:
     artifact_root = settings.artifact_root / run["run_id"]
     summary = json.loads((artifact_root / "summary.json").read_text())
     assert summary["dataset"] == "princeton-nlp/SWE-bench_Verified"
+    assert summary["runner_mode"] == "gold"
     checksum_file = artifact_root / "checksums.sha256"
     for line in checksum_file.read_text().splitlines():
         expected, relative_path = line.split("  ", 1)

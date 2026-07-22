@@ -69,34 +69,79 @@ def _update_release_body(
 def _check_title(summary: dict[str, Any], succeeded: bool) -> str:
     if not succeeded:
         return "Benchmark failed (not scored)"
-    return f"{summary['resolved_instances']} / {summary['expected_instances']} resolved"
+    return (
+        f"{_score(summary):.2f}% — "
+        f"{summary['resolved_instances']} / {summary['expected_instances']} resolved"
+    )
 
 
 def _check_summary(summary: dict[str, Any], succeeded: bool) -> str:
     if not succeeded:
-        return f"Run `{summary['run_id']}` failed before a valid score was available."
+        return (
+            f"Dataset: `{summary['dataset']}` at `{summary['dataset_revision']}`.\n\n"
+            f"Execution: {summary['completed_instances']} / "
+            f"{summary['expected_instances']} cases completed.\n\n"
+            f"Run `{summary['run_id']}` failed before a valid score was available."
+        )
     return (
-        f"Run `{summary['run_id']}` completed with "
-        f"{summary['resolved_instances']} resolved instances and "
-        f"{summary['error_instances']} infrastructure errors."
+        f"Dataset: `{summary['dataset']}` at `{summary['dataset_revision']}`.\n\n"
+        f"Execution: {summary['completed_instances']} / "
+        f"{summary['expected_instances']} cases completed; "
+        f"{summary['resolved_instances']} resolved, "
+        f"{summary['unresolved_instances']} unresolved, and "
+        f"{summary['error_instances']} infrastructure errors.\n\n"
+        f"Score: **{_score(summary):.2f}%**. Run `{summary['run_id']}`."
     )
 
 
 def _release_section(marker: str, summary: dict[str, Any], succeeded: bool) -> str:
     version = summary["qwen_version"] or summary["qwen_ref"]
+    commit = summary["qwen_commit"]
+    commit_url = f"https://github.com/{summary['repository']}/commit/{commit}"
     lines = [
         marker,
         "## Qwen Code benchmark",
         "",
-        f"- Suite: `{summary['suite']}`",
-        f"- Qwen Code version: `{version}`",
-        f"- Commit: `{summary['qwen_commit']}`",
+        "| Field | Result |",
+        "| --- | --- |",
+        f"| Status | **{'Completed' if succeeded else 'Failed — not scored'}** |",
+        f"| Dataset | `{summary['dataset']}` at `{summary['dataset_revision']}` |",
+        f"| Suite | `{summary['suite']}` |",
+        f"| Evaluation | {_evaluation_method(summary['runner_mode'])} |",
+        f"| Cases | {summary['completed_instances']} / {summary['expected_instances']} completed |",
     ]
     if succeeded:
-        lines.append(
-            f"- Result: **{summary['resolved_instances']} / {summary['expected_instances']} resolved**"
+        lines.extend(
+            [
+                "| Results | "
+                f"{summary['resolved_instances']} resolved · "
+                f"{summary['unresolved_instances']} unresolved · "
+                f"{summary['error_instances']} infrastructure errors |",
+                f"| Score | **{_score(summary):.2f}%** |",
+            ]
         )
     else:
-        lines.append("- Status: **failed — not scored**")
-    lines.extend([f"- Run ID: `{summary['run_id']}`", ""])
+        lines.append("| Score | Not published |")
+    lines.extend(
+        [
+            f"| Qwen Code | `{version}` · [`{commit[:7]}`]({commit_url}) |",
+            f"| Run | `{summary['run_id']}` |",
+            "",
+        ]
+    )
     return "\n".join(lines)
+
+
+def _score(summary: dict[str, Any]) -> float:
+    expected = int(summary["expected_instances"])
+    if expected <= 0:
+        return 0.0
+    return int(summary["resolved_instances"]) * 100.0 / expected
+
+
+def _evaluation_method(runner_mode: str) -> str:
+    return {
+        "harbor": "Qwen Code agent (Harbor)",
+        "qwen": "Qwen Code agent (SWE-bench harness)",
+        "gold": "Gold patch harness validation",
+    }.get(runner_mode, runner_mode)
