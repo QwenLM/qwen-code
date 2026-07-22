@@ -151,6 +151,17 @@ describe('defaultModalities', () => {
       expect(defaultModalities('qwen3.7-max')).toEqual({});
     });
 
+    it('returns image for qwen3.8-max', () => {
+      const m = defaultModalities('qwen3.8-max');
+      expect(m.image).toBe(true);
+      expect(m.video).toBeUndefined();
+    });
+
+    it('returns image for qwen3.8-max-preview (provider-prefixed)', () => {
+      const m = defaultModalities('bailian-token-plan/qwen3.8-max-preview');
+      expect(m.image).toBe(true);
+    });
+
     it('returns image + video for qwen3.6-35b variants', () => {
       const m = defaultModalities('qwen3.6-35b-a3b-nvfp4');
       expect(m.image).toBe(true);
