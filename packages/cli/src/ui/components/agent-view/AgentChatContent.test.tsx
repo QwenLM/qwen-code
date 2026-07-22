@@ -49,6 +49,7 @@ function makeInteractiveAgent() {
 
 describe('AgentChatContent Ctrl+F delegation', () => {
   const handleToggleKeypress = vi.fn(() => true);
+  const setAgentShellFocused = vi.fn();
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -61,7 +62,7 @@ describe('AgentChatContent Ctrl+F delegation', () => {
       handleToggleKeypress,
     } as never);
     vi.mocked(useAgentViewActions).mockReturnValue({
-      setAgentShellFocused: vi.fn(),
+      setAgentShellFocused,
       setAgentViewHasActiveShellPty: vi.fn(),
     } as never);
     vi.mocked(useTerminalSize).mockReturnValue({ columns: 80, rows: 24 });
