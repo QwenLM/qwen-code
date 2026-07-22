@@ -161,7 +161,8 @@ Implement the selected issue in the checked-out repository:
 9. Write all required outputs:
    - `<workdir>/e2e-report.md` (bilingual per Shared Rules — it is posted
      verbatim as a PR comment), ending with a `## Verification` section that
-     lists each command you ran and its result (see Shared Rules)
+     lists each command you ran and its result (see Shared Rules), before the
+     collapsed Chinese translation
    - `<workdir>/pr-title.txt`
    - `<workdir>/pr-body.md` using `.qwen/skills/prepare-pr/SKILL.md`
 
@@ -214,7 +215,8 @@ Finish with exactly one outcome:
   pass, commit once, then write `<workdir>/address-summary.md` with each
   feedback point, decision, changes, and conflict notes, ending with a
   `## Verification` section (bilingual per Shared Rules) that lists **each
-  command you ran and its result** — e.g. `- npm run typecheck — passed`,
+  command you ran and its result**, before the collapsed Chinese translation
+  — e.g. `- npm run typecheck — passed`,
   `- vitest packages/cli (touched) — 42 passed`. Record the commands you truly
   ran; a bare "verified" is not acceptable, because a claim the gate then
   contradicts wastes a round and misleads the reviewer. Also write

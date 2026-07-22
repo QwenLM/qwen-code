@@ -2571,6 +2571,9 @@ describe('qwen-autofix workflow', () => {
     expect(flat).toContain(
       'section that lists each command you ran and its result (see Shared Rules)',
     );
+    // The Verification section ends the English body, before the collapsed
+    // Chinese translation — not after it.
+    expect(flat).toContain('before the collapsed Chinese translation');
   });
 
   it('requires bilingual bodies for files posted verbatim as PR comments', () => {
