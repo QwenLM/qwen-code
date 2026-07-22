@@ -279,7 +279,7 @@
           "default": false
         },
         "leftArrowOpensFleetView": {
-          "description": "When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions. Requires a running daemon (qwen-code serve).",
+          "description": "When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions.",
           "type": "boolean",
           "default": true
         },
@@ -289,8 +289,11 @@
           "default": false
         },
         "fleetViewGroupMode": {
-          "description": "How to group sessions in Fleet View. \"state\" groups by running/idle/persisted status. \"directory\" groups by workspace path.",
-          "type": "string",
+          "description": "How to group sessions in Fleet View. \"state\" groups by running/idle/persisted status. \"directory\" groups by workspace path. Options: state, directory",
+          "enum": [
+            "state",
+            "directory"
+          ],
           "default": "state"
         },
         "history": {

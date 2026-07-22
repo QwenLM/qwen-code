@@ -31,11 +31,12 @@ export function useFleetViewSessions(opts: {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const pollTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const hasFetchedRef = useRef(false);
 
   const fetchSessions = useCallback(async () => {
     try {
       const sessionService = config.getSessionService();
-      setLoading(true);
+      if (!hasFetchedRef.current) setLoading(true);
       const result = await sessionService.listSessions({
         size: SESSION_LIST_SIZE,
       });
@@ -44,6 +45,7 @@ export function useFleetViewSessions(opts: {
       );
       setSessions(entries);
       setError(null);
+      hasFetchedRef.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {

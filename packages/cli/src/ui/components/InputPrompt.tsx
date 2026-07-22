@@ -254,7 +254,11 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
   const settings = useSettings();
   const fleetViewEnabled =
     settings.merged.ui?.leftArrowOpensFleetView !== false;
-  const { handleTap: fleetHandleTap } = useDoubleTap({
+  const {
+    handleTap: fleetHandleTap,
+    isPending: fleetTapPending,
+    reset: fleetTapReset,
+  } = useDoubleTap({
     timeoutMs: 800,
     onDoubleTap: () => {
       onOpenFleetView?.();
@@ -919,6 +923,7 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         fleetViewEnabled &&
         !commandSearchActive &&
         !reverseSearchActive &&
+        !isAttachmentMode &&
         key.name === 'left' &&
         !key.ctrl &&
         !key.meta &&
@@ -927,6 +932,12 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       ) {
         fleetHandleTap();
         return true;
+      }
+
+      // Clear fleet double-tap hint when any other key is pressed
+      if (fleetTapPending && key.name !== 'left') {
+        fleetTapReset();
+        onFleetDoubleTapPendingChange?.(false);
       }
 
       // When the Arena tab bar or background pill has focus, block
@@ -1878,6 +1889,9 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
       voiceInput,
       fleetViewEnabled,
       fleetHandleTap,
+      fleetTapPending,
+      fleetTapReset,
+      onFleetDoubleTapPendingChange,
       targetDir,
     ],
   );

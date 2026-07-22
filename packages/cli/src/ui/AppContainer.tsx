@@ -3625,8 +3625,14 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
-      // Fleet View owns all input while open.
-      if (isFleetViewOpen) return;
+      // Fleet View owns all input while open, but always allow force-quit.
+      if (isFleetViewOpen) {
+        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
+          setIsFleetViewOpen(false);
+          setFleetDoubleTapPending(false);
+        }
+        return;
+      }
 
       // Debug log keystrokes if enabled
       if (settings.merged.general?.debugKeystrokeLogging) {

@@ -6,7 +6,7 @@
 
 import type { SessionListItem } from '@qwen-code/qwen-code-core';
 
-export type FleetSessionStatus = 'active' | 'idle' | 'backgrounded';
+export type FleetSessionStatus = 'active' | 'idle';
 
 export interface FleetSessionEntry extends SessionListItem {
   status: FleetSessionStatus;
@@ -17,10 +17,8 @@ export function toFleetEntry(
   item: SessionListItem,
   currentSessionId: string | null,
 ): FleetSessionEntry {
-  let status: FleetSessionStatus = 'idle';
-  if (item.sessionId === currentSessionId) {
-    status = 'active';
-  }
+  const status: FleetSessionStatus =
+    item.sessionId === currentSessionId ? 'active' : 'idle';
 
   const displayName =
     item.customTitle ||

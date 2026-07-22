@@ -13,6 +13,7 @@ import { AlternateScreen } from '../AlternateScreen.js';
 import { theme } from '../../semantic-colors.js';
 import type { FleetSessionEntry } from '../../contexts/FleetViewContext.js';
 import type { SessionService } from '@qwen-code/qwen-code-core';
+import { sanitizeDisplayText } from '../../../utils/extension-mention.js';
 
 type FleetSessionState = 'working' | 'idle';
 
@@ -37,7 +38,7 @@ function shortenPath(fullPath: string, maxLen: number): string {
   if (fullPath.length <= maxLen) return fullPath;
   const home = process.env['HOME'] || '';
   let p = fullPath;
-  if (home && p.startsWith(home)) {
+  if (home && (p === home || p.startsWith(home + '/'))) {
     p = '~' + p.slice(home.length);
   }
   if (p.length <= maxLen) return p;
@@ -50,14 +51,12 @@ function getSessionState(entry: FleetSessionEntry): FleetSessionState {
 }
 
 function getIconColor(state: FleetSessionState): string {
-  switch (state) {
-    case 'working':
-      return theme.text.accent;
-    case 'idle':
-      return theme.text.secondary;
-    default:
-      return theme.text.secondary;
-  }
+  if (state === 'working') return theme.text.accent;
+  return theme.text.secondary;
+}
+
+function safeText(raw: string, fallback: string): string {
+  return sanitizeDisplayText(raw) || fallback;
 }
 
 interface SessionRowProps {
@@ -75,20 +74,24 @@ const SessionRow: React.FC<SessionRowProps> = ({ entry, selected, width }) => {
   const nameMaxLen = Math.max(15, Math.floor(width * 0.25));
   const summaryMaxLen = Math.max(20, width - nameMaxLen - 15);
 
+  const rawName = safeText(entry.displayName, entry.sessionId.slice(0, 8));
   const name =
-    entry.displayName.length > nameMaxLen
-      ? entry.displayName.slice(0, nameMaxLen - 1) + '…'
-      : entry.displayName;
+    rawName.length > nameMaxLen
+      ? rawName.slice(0, nameMaxLen - 1) + '…'
+      : rawName;
 
-  const summary = entry.prompt
-    ? entry.prompt.length > summaryMaxLen
-      ? entry.prompt.slice(0, summaryMaxLen - 1) + '…'
-      : entry.prompt
+  const rawPrompt = entry.prompt ? safeText(entry.prompt, '') : '';
+  const summary = rawPrompt
+    ? rawPrompt.length > summaryMaxLen
+      ? rawPrompt.slice(0, summaryMaxLen - 1) + '…'
+      : rawPrompt
     : '';
 
   return (
     <Box>
-      <Text color={iconColor}>{icon} </Text>
+      <Text color={selected ? theme.text.accent : iconColor}>
+        {selected ? '❯ ' : `${icon} `}
+      </Text>
       <Text
         color={selected ? theme.text.primary : theme.text.secondary}
         bold={selected}
@@ -120,15 +123,14 @@ function groupByState(
   sessions: FleetSessionEntry[],
 ): Array<{ label: string; entries: FleetSessionEntry[] }> {
   const working: FleetSessionEntry[] = [];
-  const completed: FleetSessionEntry[] = [];
+  const idle: FleetSessionEntry[] = [];
   for (const s of sessions) {
     if (s.status === 'active') working.push(s);
-    else completed.push(s);
+    else idle.push(s);
   }
   const groups: Array<{ label: string; entries: FleetSessionEntry[] }> = [];
   if (working.length > 0) groups.push({ label: 'Working', entries: working });
-  if (completed.length > 0)
-    groups.push({ label: 'Completed', entries: completed });
+  if (idle.length > 0) groups.push({ label: 'Idle', entries: idle });
   return groups;
 }
 
@@ -250,7 +252,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
 
   // Count stats
   const workingCount = sessions.filter((s) => s.status === 'active').length;
-  const completedCount = sessions.length - workingCount;
+  const idleCount = sessions.length - workingCount;
 
   const handleKeypress = useCallback(
     (key: Key) => {
@@ -288,7 +290,8 @@ export const FleetView: React.FC<FleetViewProps> = ({
           key.sequence &&
           key.sequence.length === 1 &&
           !key.ctrl &&
-          !key.meta
+          !key.meta &&
+          key.name !== 'tab'
         ) {
           setRenameValue((prev) => prev + key.sequence);
           return;
@@ -307,8 +310,9 @@ export const FleetView: React.FC<FleetViewProps> = ({
         return;
       }
 
-      // Printable chars go to dispatch input (space only when input is non-empty)
+      // Printable chars go to dispatch input (only when dispatch is available)
       if (
+        onDispatch &&
         key.sequence &&
         key.sequence.length === 1 &&
         !key.ctrl &&
@@ -352,10 +356,10 @@ export const FleetView: React.FC<FleetViewProps> = ({
           return;
         }
         if (key.ctrl && key.name === 'x' && selectedEntry) {
-          setViewMode('list');
           if (deletePendingId === selectedEntry.sessionId) {
             if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
             setDeletePendingId(null);
+            setViewMode('list');
             onDelete(selectedEntry.sessionId);
             showStatus('Session deleted');
           } else {
@@ -447,27 +451,28 @@ export const FleetView: React.FC<FleetViewProps> = ({
 
   useKeypress(handleKeypress, { isActive });
 
-  // Scroll offset
-  const entryRowIndex = useMemo(() => {
-    let row = 0;
+  // Scroll offset — computed in array-index space to match rowNodes slicing
+  const selectedArrayIndex = useMemo(() => {
+    let idx = 0;
     for (const group of groups) {
-      row += 2; // group header (1 content + 1 marginTop)
+      idx++; // group header node
       for (const entry of group.entries) {
-        if (entry === selectedEntry) return row;
-        row++;
+        if (entry === selectedEntry) return idx;
+        idx++;
       }
     }
     return 0;
   }, [groups, selectedEntry]);
 
+  const showInputArea = renaming || !!onDispatch;
   const maxVisibleRows = Math.max(
     3,
-    rows - 8 - (viewMode === 'peek' ? 6 : 0) - (statusMessage ? 1 : 0),
+    rows - 5 - (showInputArea ? 3 : 0) - (viewMode === 'peek' ? 6 : 0),
   );
   const scrollOffset = useMemo(() => {
-    if (entryRowIndex < maxVisibleRows) return 0;
-    return Math.max(0, entryRowIndex - maxVisibleRows + 1);
-  }, [entryRowIndex, maxVisibleRows]);
+    if (selectedArrayIndex < maxVisibleRows) return 0;
+    return Math.max(0, selectedArrayIndex - maxVisibleRows + 1);
+  }, [selectedArrayIndex, maxVisibleRows]);
 
   // Context-aware footer hints
   const footerHint = useMemo(() => {
@@ -491,7 +496,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
             {workspaceCwd ? shortenPath(workspaceCwd, 60) : ''}
           </Text>
           <Text color={theme.text.secondary}>
-            {workingCount} working · {completedCount} completed
+            {workingCount} working · {idleCount} idle
             {loading ? ' · ↻' : ''}
           </Text>
         </Box>
@@ -559,16 +564,22 @@ export const FleetView: React.FC<FleetViewProps> = ({
             height={6}
           >
             <Text color={theme.text.primary} bold>
-              {selectedEntry.displayName}
+              {safeText(
+                selectedEntry.displayName,
+                selectedEntry.sessionId.slice(0, 8),
+              )}
             </Text>
             <Text color={theme.text.secondary}>
-              {(selectedEntry.prompt || 'No recent output').slice(0, 200)}
+              {(selectedEntry.prompt
+                ? safeText(selectedEntry.prompt, 'No recent output')
+                : 'No recent output'
+              ).slice(0, 200)}
             </Text>
           </Box>
         )}
 
         {/* Bottom input — shown when renaming or dispatch is available */}
-        {(renaming || onDispatch) && (
+        {showInputArea && (
           <Box flexDirection="column" flexShrink={0}>
             <Box paddingX={0}>
               <Text color={theme.text.secondary}>{'─'.repeat(columns)}</Text>

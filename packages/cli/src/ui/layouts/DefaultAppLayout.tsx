@@ -5,7 +5,7 @@
  */
 
 import type React from 'react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Box } from 'ink';
 import { MainContent } from '../components/MainContent.js';
 import { DialogManager } from '../components/DialogManager.js';
@@ -47,8 +47,6 @@ const FleetViewContainer: React.FC = () => {
     initialGroupMode,
   );
 
-  const sessionService = useMemo(() => config.getSessionService(), [config]);
-
   const handleAttach = useCallback(
     (sessionId: string) => {
       uiActions.setFleetDoubleTapPending(false);
@@ -67,12 +65,13 @@ const FleetViewContainer: React.FC = () => {
   const handleDelete = useCallback(
     (sessionId: string) => {
       if (sessionId === config.getSessionId()) return;
-      void sessionService
+      void config
+        .getSessionService()
         .removeSession(sessionId)
         .then(() => refresh())
         .catch(() => refresh());
     },
-    [sessionService, refresh, config],
+    [refresh, config],
   );
 
   const handleCreateNew = useCallback(() => {
@@ -109,7 +108,7 @@ const FleetViewContainer: React.FC = () => {
       onCycleGroupMode={handleCycleGroupMode}
       onDispatch={handleDispatch}
       workspaceCwd={config.getWorkingDir()}
-      sessionService={sessionService}
+      sessionService={config.getSessionService()}
       onRefresh={refresh}
       disableAlternateScreen={uiState.useTerminalBuffer}
     />

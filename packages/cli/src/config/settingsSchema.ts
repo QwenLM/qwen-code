@@ -850,7 +850,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: true,
         description:
-          'When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions. Requires a running daemon (qwen-code serve).',
+          'When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions.',
         showInDialog: true,
       },
       defaultToFleetView: {
@@ -864,11 +864,11 @@ const SETTINGS_SCHEMA = {
         showInDialog: false,
       },
       fleetViewGroupMode: {
-        type: 'string',
+        type: 'enum',
         label: 'Fleet View Group Mode',
         category: 'UI',
         requiresRestart: false,
-        default: 'state' as string,
+        default: 'state',
         description:
           'How to group sessions in Fleet View. "state" groups by running/idle/persisted status. "directory" groups by workspace path.',
         showInDialog: true,
