@@ -56,6 +56,7 @@ export function DaemonWorkspaceProvider({
   const capabilitiesPromiseRef = useRef<
     Promise<DaemonCapabilities> | undefined
   >(undefined);
+  const capabilitiesGenerationRef = useRef(0);
   const resolvedCwdRef = useRef<string | undefined>(workspaceCwd);
 
   const [capabilities, setCapabilities] = useState<
@@ -72,6 +73,7 @@ export function DaemonWorkspaceProvider({
     if (capabilitiesClientRef.current !== client) {
       capabilitiesClientRef.current = client;
       capabilitiesPromiseRef.current = undefined;
+      capabilitiesGenerationRef.current++;
     }
     if (!capabilitiesPromiseRef.current) {
       const promise = client.capabilities().catch((error: unknown) => {
@@ -96,29 +98,53 @@ export function DaemonWorkspaceProvider({
     if (!client) {
       return Promise.reject(new Error('Daemon workspace client unavailable'));
     }
-    capabilitiesClientRef.current = client;
-    const promise = client.capabilities().catch((error: unknown) => {
-      if (capabilitiesPromiseRef.current === promise) {
-        capabilitiesPromiseRef.current = undefined;
-        setError(error instanceof Error ? error : new Error(String(error)));
-        setStatus('error');
-      }
-      throw error;
-    });
-    capabilitiesPromiseRef.current = promise;
-    return promise.then((caps) => {
-      // Ignore a stale resolve if the client was swapped or a newer refresh
-      // superseded this one.
+    if (capabilitiesClientRef.current !== client) {
+      capabilitiesClientRef.current = client;
+      capabilitiesGenerationRef.current++;
+    }
+    const generation = ++capabilitiesGenerationRef.current;
+    // Superseded callers must observe the accepted successor, not the stale
+    // payload they happened to receive from their own HTTP request.
+    const followAcceptedSuccessor = (): Promise<DaemonCapabilities> => {
+      const successor = capabilitiesPromiseRef.current;
       if (
         capabilitiesClientRef.current === client &&
-        capabilitiesPromiseRef.current === promise
+        successor &&
+        capabilitiesGenerationRef.current !== generation
       ) {
+        return successor;
+      }
+      return Promise.reject(
+        new Error('Capabilities refresh was superseded by a client change'),
+      );
+    };
+    const acceptedPromise = client.capabilities().then(
+      (caps) => {
+        if (
+          capabilitiesClientRef.current !== client ||
+          capabilitiesGenerationRef.current !== generation
+        ) {
+          return followAcceptedSuccessor();
+        }
         setCapabilities(caps);
         setStatus('connected');
         setError(undefined);
-      }
-      return caps;
-    });
+        return caps;
+      },
+      (error: unknown) => {
+        if (
+          capabilitiesClientRef.current !== client ||
+          capabilitiesGenerationRef.current !== generation
+        ) {
+          return followAcceptedSuccessor();
+        }
+        setError(error instanceof Error ? error : new Error(String(error)));
+        setStatus('error');
+        throw error;
+      },
+    );
+    capabilitiesPromiseRef.current = acceptedPromise;
+    return acceptedPromise;
   }, [client]);
 
   useEffect(() => {
@@ -135,15 +161,26 @@ export function DaemonWorkspaceProvider({
     }
 
     let disposed = false;
-    void getCapabilities()
+    const initialPromise = getCapabilities();
+    void initialPromise
       .then((caps) => {
-        if (!disposed) {
+        // A user-triggered refresh may supersede the mount request before it
+        // resolves; only the still-current promise may initialize state.
+        if (
+          !disposed &&
+          capabilitiesClientRef.current === client &&
+          capabilitiesPromiseRef.current === initialPromise
+        ) {
           setCapabilities(caps);
           setStatus('connected');
         }
       })
       .catch((err: unknown) => {
-        if (!disposed) {
+        if (
+          !disposed &&
+          capabilitiesClientRef.current === client &&
+          capabilitiesPromiseRef.current === initialPromise
+        ) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setStatus('error');
         }

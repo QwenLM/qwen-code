@@ -79,11 +79,17 @@ import { ToolNames } from '../tools/tool-names.js';
 import {
   NextSpeakerCheckEvent,
   logNextSpeakerCheck,
+  logMemoryRecallDelivery,
   startInteractionSpan,
   endInteractionSpan,
   getActiveInteractionSpan,
   addUserPromptAttributes,
+  MemoryRecallDeliveryEvent,
 } from '../telemetry/index.js';
+import type {
+  MemoryRecallDeliveryPoint,
+  MemoryRecallDiscardReason,
+} from '../telemetry/types.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 
 // Forked agent cache
@@ -218,8 +224,13 @@ type MemoryPrefetchHandle = {
   promise: Promise<RelevantAutoMemoryPromptResult>;
   /** Set by promise.finally(). null until the promise settles. */
   settledAt: number | null;
+  /** Set when the promise resolves, even if the consume point never runs. */
+  result: RelevantAutoMemoryPromptResult | null;
   /** True after memory has been injected — prevents double-inject. */
   consumed: boolean;
+  /** True after delivery/discard telemetry has recorded the terminal outcome. */
+  terminalLogged: boolean;
+  firedAt: number;
   controller: AbortController;
 };
 
@@ -658,6 +669,7 @@ export class GeminiClient {
    */
   requestShutdown(): void {
     this.shutdownRequested = true;
+    this.cancelPendingMemoryPrefetch('shutdown');
   }
 
   /**
@@ -670,12 +682,48 @@ export class GeminiClient {
    * hadn't run yet), the settled result is discarded — logged at debug so
    * operators can diagnose missing-memory scenarios.
    */
-  private cancelPendingMemoryPrefetch(): void {
+  private logMemoryPrefetchDelivery(
+    handle: MemoryPrefetchHandle,
+    deliveryPoint: MemoryRecallDeliveryPoint,
+    result: RelevantAutoMemoryPromptResult,
+    discardReason?: MemoryRecallDiscardReason,
+  ): void {
+    if (handle.terminalLogged) return;
+    handle.terminalLogged = true;
+    logMemoryRecallDelivery(
+      this.config,
+      new MemoryRecallDeliveryEvent({
+        phase: 'refined',
+        delivery_point: deliveryPoint,
+        discard_reason: discardReason,
+        strategy: result.strategy,
+        docs_selected: result.selectedDocs.length,
+        latency_ms: Date.now() - handle.firedAt,
+      }),
+    );
+  }
+
+  private logMemoryPrefetchDiscard(
+    handle: MemoryPrefetchHandle,
+    discardReason: MemoryRecallDiscardReason,
+  ): void {
+    this.logMemoryPrefetchDelivery(
+      handle,
+      'discarded',
+      handle.result ?? EMPTY_RELEVANT_AUTO_MEMORY_RESULT,
+      discardReason,
+    );
+  }
+
+  private cancelPendingMemoryPrefetch(
+    discardReason: MemoryRecallDiscardReason,
+  ): void {
     const handle = this.pendingMemoryPrefetch;
     if (!handle) return;
     if (handle.settledAt !== null && !handle.consumed) {
       debugLogger.debug('Discarding settled but unconsumed memory prefetch.');
     }
+    this.logMemoryPrefetchDiscard(handle, discardReason);
     handle.controller.abort();
     this.pendingMemoryPrefetch = undefined;
   }
@@ -688,7 +736,9 @@ export class GeminiClient {
    * Centralises the consume-and-mark dance so the UserQuery and ToolResult
    * inject sites can't drift on the guard logic.
    */
-  private async tryConsumeMemoryPrefetch(): Promise<RelevantAutoMemoryPromptResult | null> {
+  private async tryConsumeMemoryPrefetch(
+    deliveryPoint: Exclude<MemoryRecallDeliveryPoint, 'discarded'>,
+  ): Promise<RelevantAutoMemoryPromptResult | null> {
     const handle = this.pendingMemoryPrefetch;
     if (!handle || handle.settledAt === null || handle.consumed) {
       return null;
@@ -700,6 +750,14 @@ export class GeminiClient {
       for (const doc of result.selectedDocs) {
         this.surfacedRelevantAutoMemoryPaths.add(doc.filePath);
       }
+      this.logMemoryPrefetchDelivery(handle, deliveryPoint, result);
+    } else {
+      this.logMemoryPrefetchDelivery(
+        handle,
+        'discarded',
+        result,
+        'no_relevant_results',
+      );
     }
     return result;
   }
@@ -733,7 +791,7 @@ export class GeminiClient {
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
     // Abort any in-flight auto-memory recall so the stale controller
     // does not leak into the next session.
-    this.cancelPendingMemoryPrefetch();
+    this.cancelPendingMemoryPrefetch('reset');
     // Drop any deferred tools revealed this session so /clear really gives
     // a clean slate. We don't clear inside startChat itself because that path
     // is also taken by compression (which preserves the session), and
@@ -2054,7 +2112,7 @@ export class GeminiClient {
           // A previous recall may still be pending (slow side-query, new user
           // turn arrived before it settled). Abort it before installing the
           // new handle so the orphan doesn't keep running indefinitely.
-          this.cancelPendingMemoryPrefetch();
+          this.cancelPendingMemoryPrefetch('new_query');
           const controller = new AbortController();
           // Bridge the caller's signal into the prefetch controller so a user
           // abort (Ctrl-C / Esc) on the parent turn also terminates the
@@ -2062,8 +2120,14 @@ export class GeminiClient {
           // up after firing; we still call removeEventListener on the promise's
           // finally to cover the normal-completion case so a long-lived parent
           // signal doesn't accumulate listeners across many turns.
-          const onParentAbort = () => controller.abort();
+          let prefetchAbortReason: MemoryRecallDiscardReason | null = null;
+          const onParentAbort = () => {
+            prefetchAbortReason = 'abort';
+            controller.abort();
+            this.cancelPendingMemoryPrefetch('abort');
+          };
           if (signal.aborted) {
+            prefetchAbortReason = 'abort';
             controller.abort();
           } else {
             signal.addEventListener('abort', onParentAbort, { once: true });
@@ -2099,14 +2163,23 @@ export class GeminiClient {
           const handle: MemoryPrefetchHandle = {
             promise,
             settledAt: null,
+            result: null,
             consumed: false,
+            terminalLogged: false,
+            firedAt: Date.now(),
             controller,
           };
+          void promise.then((result) => {
+            handle.result = result;
+          });
           void promise.finally(() => {
             handle.settledAt = Date.now();
             signal.removeEventListener('abort', onParentAbort);
           });
           this.pendingMemoryPrefetch = handle;
+          if (prefetchAbortReason) {
+            this.cancelPendingMemoryPrefetch(prefetchAbortReason);
+          }
         }
 
         // Track prompt count for commit attribution. Only the user typing a
@@ -2191,7 +2264,7 @@ export class GeminiClient {
           this.config.getMaxSessionTurns() > 0 &&
           this.sessionTurnCount > this.config.getMaxSessionTurns()
         ) {
-          this.cancelPendingMemoryPrefetch();
+          this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield { type: GeminiEventType.MaxSessionTurns };
           if (isTopLevelInteraction)
             endInteractionSpan('error', {
@@ -2204,7 +2277,7 @@ export class GeminiClient {
       // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
       const boundedTurns = Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
-        this.cancelPendingMemoryPrefetch();
+        this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
         if (isTopLevelInteraction)
           endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
         return new Turn(this.getChat(), prompt_id);
@@ -2245,7 +2318,7 @@ export class GeminiClient {
         const lastPromptTokenCount =
           uiTelemetryService.getLastPromptTokenCount();
         if (lastPromptTokenCount > sessionTokenLimit) {
-          this.cancelPendingMemoryPrefetch();
+          this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
           yield {
             type: GeminiEventType.SessionTokenLimitExceeded,
             value: {
@@ -2304,7 +2377,7 @@ export class GeminiClient {
             `Arena control signal received: ${controlSignal.type} - ${controlSignal.reason}`,
           );
           await arenaAgentClient.reportCancelled();
-          this.cancelPendingMemoryPrefetch();
+          this.cancelPendingMemoryPrefetch('abort');
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return new Turn(this.getChat(), prompt_id);
         }
@@ -2400,7 +2473,7 @@ export class GeminiClient {
         // after any await prior to this point — flatMapTextParts above is
         // the natural drain.) If still not settled, skip — the ToolResult
         // inject point will retry on the next turn.
-        const userQueryMemory = await this.tryConsumeMemoryPrefetch();
+        const userQueryMemory = await this.tryConsumeMemoryPrefetch('initial');
         if (userQueryMemory?.prompt) {
           // Unshift to the front of systemReminders: on a UserQuery turn
           // requestToSend leads with user text, so positioning memory at
@@ -2414,7 +2487,8 @@ export class GeminiClient {
       }
 
       if (messageType === SendMessageType.ToolResult) {
-        const toolResultMemory = await this.tryConsumeMemoryPrefetch();
+        const toolResultMemory =
+          await this.tryConsumeMemoryPrefetch('tool_result');
         if (toolResultMemory?.prompt) {
           // Append (not prepend): on a ToolResult turn, requestToSend leads
           // with functionResponse parts that must immediately follow the
@@ -2482,6 +2556,7 @@ export class GeminiClient {
       const resultStream = turn.run(model, requestToSend, signal);
       let didUpdateIdeContextState = false;
       let steerInputSettled = false;
+      let hasToolCalls = false;
       try {
         for await (const event of resultStream) {
           if (!steerInputSettled) {
@@ -2493,6 +2568,14 @@ export class GeminiClient {
             // as a no-op thanks to the settledSteerInputs guard.
             settleSteerInput(attachedSteerInput, attachedSteerPushCount);
             steerInputSettled = true;
+          }
+          if (event.type === GeminiEventType.ToolCallRequest) {
+            hasToolCalls = true;
+          } else if (
+            event.type === GeminiEventType.Retry ||
+            event.type === GeminiEventType.ModelFallback
+          ) {
+            hasToolCalls = false;
           }
           if (messageDisplay && event.type === GeminiEventType.Content) {
             messageDisplay.addChunk(event.value);
@@ -2527,7 +2610,7 @@ export class GeminiClient {
             this.lastApiCompletionTimestamp = Date.now();
             if (isTopLevelInteraction)
               endInteractionSpan('error', { errorMessage: 'loop detected' });
-            this.cancelPendingMemoryPrefetch();
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             return turn;
           }
 
@@ -2558,7 +2641,7 @@ export class GeminiClient {
               endInteractionSpan('error', { errorMessage: 'loop detected' });
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
-            this.cancelPendingMemoryPrefetch();
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             return turn;
           }
           // Update arena status on Finished events — stats are derived
@@ -2622,7 +2705,7 @@ export class GeminiClient {
             }
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
-            this.cancelPendingMemoryPrefetch();
+            this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
             return turn;
           }
         }
@@ -3013,9 +3096,14 @@ export class GeminiClient {
       if (isTopLevelInteraction) {
         endInteractionSpan(signal?.aborted ? 'cancelled' : 'ok');
       }
-      // Reached the bottom of the try — this turn ended cleanly. Preserve
-      // any still-pending memory prefetch so the next ToolResult turn can
-      // consume it (the whole point of the fire-and-forget design).
+      // Reached the bottom of the try — this turn ended cleanly. If the
+      // model did not request tool calls, no future ToolResult will arrive
+      // to consume the prefetch, so close it out now. When tool calls ARE
+      // pending, preserve the handle so the next ToolResult turn can
+      // consume it (the fire-and-forget design).
+      if (!hasToolCalls) {
+        this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+      }
       normalCompletion = true;
       return turn;
     } finally {
@@ -3031,7 +3119,9 @@ export class GeminiClient {
       // `return turn`. Catches uncaught exceptions and guards against
       // future early-return sites that forget to call cancel.
       if (!normalCompletion) {
-        this.cancelPendingMemoryPrefetch();
+        this.cancelPendingMemoryPrefetch(
+          signal?.aborted ? 'abort' : 'no_safe_delivery_point',
+        );
       }
       if (isTopLevelInteraction) {
         endInteractionSpan(signal?.aborted ? 'cancelled' : 'error', {
