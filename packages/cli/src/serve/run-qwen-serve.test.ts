@@ -7935,6 +7935,9 @@ describe('runQwenServe channel worker supervisor', () => {
       expect(handle.server.listening).toBe(true);
       expect(handle.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
       expect(handle.url).not.toContain(':4170');
+      expect(new URL(handle.url).port).toBe(
+        String((handle.server.address() as AddressInfo).port),
+      );
       expect(
         stderrWrites.some((w) =>
           w.includes('port 4170 is in use, trying 4171'),
