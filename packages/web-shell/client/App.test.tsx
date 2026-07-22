@@ -1852,7 +1852,7 @@ describe('App session callbacks', () => {
     }
 
     it('shows the toggle in the empty state for a trusted git workspace', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
     });
 
@@ -1862,7 +1862,7 @@ describe('App session callbacks', () => {
           { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
         ],
       };
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await flush();
       await flush();
       expect(container.querySelector(toggleSelector)).toBeNull();
@@ -1873,14 +1873,14 @@ describe('App session callbacks', () => {
         workspaceGit: vi.fn().mockRejectedValue(new Error('not a git repo')),
         workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
       }));
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await flush();
       await flush();
       expect(container.querySelector(toggleSelector)).toBeNull();
     });
 
     it('toggles the pending badge on and off', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
 
       await clickButton(container, toggleSelector);
@@ -1893,7 +1893,7 @@ describe('App session callbacks', () => {
     });
 
     it('creates the session with worktree when the toggle is enabled', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
       await clickButton(container, toggleSelector);
 
@@ -1910,7 +1910,7 @@ describe('App session callbacks', () => {
     });
 
     it('creates the session without worktree when the toggle is off', async () => {
-      renderApp();
+      renderApp({ showWorktreeToggle: true });
       await flush();
 
       await act(async () => {
@@ -1926,7 +1926,7 @@ describe('App session callbacks', () => {
     });
 
     it('clears the pending worktree intent when starting a new session from the sidebar', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
       await clickButton(container, toggleSelector);
       expect(container.textContent).toContain(badgeDesc);

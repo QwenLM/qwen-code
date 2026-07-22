@@ -1,3 +1,4 @@
+import { useRef, useState } from 'react';
 import { FolderClosedIcon, FolderPlusIcon, LockIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import {
@@ -12,6 +13,12 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu';
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from './ui/tooltip';
 
 export interface WorkspaceSelectorOption {
   id: string;
@@ -51,6 +58,10 @@ export function WorkspaceSelector({
   onOpenExistingFolder,
 }: WorkspaceSelectorProps) {
   const { t } = useI18n();
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [tooltipOpen, setTooltipOpen] = useState(false);
+  const menuOpenRef = useRef(false);
+  const suppressTooltipRef = useRef(false);
   const selected = workspaces.find((workspace) =>
     selectedWorkspaceCwd
       ? workspace.cwd === selectedWorkspaceCwd
@@ -60,68 +71,109 @@ export function WorkspaceSelector({
   if (workspaces.length <= 1 && !canCreate) return null;
 
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild disabled={disabled || busy}>
-        <button
-          type="button"
-          className={className}
-          aria-label={t('sidebar.workspaceSelectLabel')}
-          title={selected?.cwd}
-        >
-          <FolderClosedIcon size={16} strokeWidth={1.2} />
-          <span data-slot="select-value">{selected?.label ?? ''}</span>
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="min-w-56">
-        <DropdownMenuRadioGroup
-          value={selected?.id}
-          onValueChange={(id) => {
-            const next = workspaces.find((workspace) => workspace.id === id);
-            if (!next?.trusted) return;
-            onSelectWorkspace(next.primary ? undefined : next.cwd);
+    <TooltipProvider delayDuration={300}>
+      <DropdownMenu
+        open={menuOpen}
+        onOpenChange={(open) => {
+          menuOpenRef.current = open;
+          setMenuOpen(open);
+          if (open) {
+            suppressTooltipRef.current = true;
+            setTooltipOpen(false);
+          }
+        }}
+      >
+        <Tooltip
+          open={tooltipOpen}
+          onOpenChange={(open) => {
+            if (open && (menuOpen || suppressTooltipRef.current)) {
+              return;
+            }
+            setTooltipOpen(open);
           }}
         >
-          {workspaces.map((workspace) => (
-            <DropdownMenuRadioItem
-              key={workspace.id}
-              value={workspace.id}
-              disabled={!workspace.trusted}
-              title={workspace.cwd}
-            >
-              <span className="min-w-0 flex-1 truncate">{workspace.label}</span>
-              {!workspace.trusted && (
-                <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                  <LockIcon />
-                  {t('sidebar.workspaceUntrusted')}
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild disabled={disabled || busy}>
+              <button
+                type="button"
+                className={className}
+                aria-label={t('sidebar.workspaceSelectLabel')}
+                onPointerEnter={() => {
+                  if (!menuOpenRef.current) {
+                    suppressTooltipRef.current = false;
+                  }
+                }}
+                onPointerLeave={() => {
+                  suppressTooltipRef.current = false;
+                  setTooltipOpen(false);
+                }}
+                onBlur={() => {
+                  if (!menuOpenRef.current) {
+                    suppressTooltipRef.current = false;
+                    setTooltipOpen(false);
+                  }
+                }}
+              >
+                <FolderClosedIcon size={16} strokeWidth={1.2} />
+                <span data-slot="select-value">{selected?.label ?? ''}</span>
+              </button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="top">{selected?.label}</TooltipContent>
+        </Tooltip>
+        <DropdownMenuContent align="start" className="min-w-56">
+          <DropdownMenuRadioGroup
+            value={selected?.id}
+            onValueChange={(id) => {
+              const next = workspaces.find((workspace) => workspace.id === id);
+              if (!next?.trusted) return;
+              onSelectWorkspace(next.primary ? undefined : next.cwd);
+            }}
+          >
+            {workspaces.map((workspace) => (
+              <DropdownMenuRadioItem
+                key={workspace.id}
+                value={workspace.id}
+                disabled={!workspace.trusted}
+                title={workspace.cwd}
+              >
+                <span className="min-w-0 flex-1 truncate">
+                  {workspace.label}
                 </span>
-              )}
-            </DropdownMenuRadioItem>
-          ))}
-        </DropdownMenuRadioGroup>
-        {canCreate && (
-          <>
-            <DropdownMenuSeparator />
-            <DropdownMenuSub>
-              <DropdownMenuSubTrigger disabled={busy}>
-                <FolderPlusIcon />
-                {t('sidebar.newWorkspace')}
-              </DropdownMenuSubTrigger>
-              <DropdownMenuSubContent>
-                {scratchSupported && (
-                  <DropdownMenuItem onSelect={onCreateScratch}>
-                    {t('sidebar.startFromScratch')}
-                  </DropdownMenuItem>
+                {!workspace.trusted && (
+                  <span className="flex items-center gap-1 text-xs text-muted-foreground">
+                    <LockIcon />
+                    {t('sidebar.workspaceUntrusted')}
+                  </span>
                 )}
-                {existingFolderSupported && (
-                  <DropdownMenuItem onSelect={onOpenExistingFolder}>
-                    {t('sidebar.useExistingFolder')}
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuSubContent>
-            </DropdownMenuSub>
-          </>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
+              </DropdownMenuRadioItem>
+            ))}
+          </DropdownMenuRadioGroup>
+          {canCreate && (
+            <>
+              <DropdownMenuSeparator />
+              <DropdownMenuSub>
+                <DropdownMenuSubTrigger disabled={busy}>
+                  <FolderPlusIcon />
+                  {t('sidebar.newWorkspace')}
+                </DropdownMenuSubTrigger>
+                <DropdownMenuSubContent>
+                  {scratchSupported && (
+                    <DropdownMenuItem onSelect={onCreateScratch}>
+                      {t('sidebar.startFromScratch')}
+                    </DropdownMenuItem>
+                  )}
+                  {existingFolderSupported && (
+                    <DropdownMenuItem onSelect={onOpenExistingFolder}>
+                      {t('sidebar.useExistingFolder')}
+                    </DropdownMenuItem>
+                  )}
+                </DropdownMenuSubContent>
+              </DropdownMenuSub>
+            </>
+          )}
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </TooltipProvider>
   );
 }
