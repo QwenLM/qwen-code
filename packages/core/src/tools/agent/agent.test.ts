@@ -317,6 +317,15 @@ describe('AgentTool', () => {
       expect(interactiveTool.description).toContain("Don't race");
       expect(interactiveTool.description).toContain('Writing a fork prompt');
       expect(interactiveTool.description).toContain(
+        'result arrives through a completion notification',
+      );
+      expect(interactiveTool.description).not.toContain(
+        'does NOT come back to you',
+      );
+      expect(interactiveTool.description).not.toContain(
+        "won't need the result back",
+      );
+      expect(interactiveTool.description).toContain(
         'forks inherit all or the selected recent window',
       );
     });
@@ -364,6 +373,9 @@ describe('AgentTool', () => {
 
       expect(tool.description).toContain('background by default');
       expect(tool.description).toContain('run_in_background: false');
+      expect(tool.description).toContain(
+        'foreground regular agent returns its result inline',
+      );
     });
 
     it('explains how to continue reusable background agents', async () => {
@@ -374,8 +386,9 @@ describe('AgentTool', () => {
         'Reuse an existing background agent for related follow-up work',
       );
       expect(tool.description).toContain(
-        'send_message with the `agentId` from its launch result as its `task_id`',
+        'list_agents to inspect the current roster',
       );
+      expect(tool.description).toContain('send_message with its `task_id`');
       expect(tool.description).toContain('next tool-round boundary');
       expect(tool.description).toContain(
         'paused agents resume with it as their first continuation instruction',
@@ -413,19 +426,22 @@ describe('AgentTool', () => {
   });
 
   describe('schema generation', () => {
-    it('should generate schema with subagent names as enum', () => {
+    it('keeps subagent_type open when named subagents are available', () => {
       const schema = agentTool.schema;
       const properties = schema.parametersJsonSchema as {
         properties: {
           subagent_type: {
+            type?: string;
+            description?: string;
             enum?: string[];
           };
         };
       };
-      expect(properties.properties.subagent_type.enum).toEqual([
-        'file-search',
-        'code-review',
-      ]);
+      expect(properties.properties.subagent_type.type).toBe('string');
+      expect(properties.properties.subagent_type.description).toContain(
+        '"fork" to inherit',
+      );
+      expect(properties.properties.subagent_type.enum).toBeUndefined();
     });
 
     it('declares the background default and foreground opt-out', () => {
@@ -441,6 +457,9 @@ describe('AgentTool', () => {
       expect(properties.properties.run_in_background.default).toBe(true);
       expect(properties.properties.run_in_background.description).toContain(
         'Set to false',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'interactive fork',
       );
     });
 
@@ -480,30 +499,6 @@ describe('AgentTool', () => {
       expect(properties.properties.working_dir.description).not.toContain(
         'Mutually exclusive',
       );
-    });
-
-    it('does not advertise "fork" in the enum, even when interactive', async () => {
-      // `fork` is intentionally omitted from the enum so the model is not
-      // steered to fork result-bearing work; it stays valid via validation.
-      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
-        .fn()
-        .mockReturnValue(true);
-      const interactiveTool = new AgentTool(config);
-      await vi.runAllTimersAsync();
-
-      const schema = interactiveTool.schema;
-      const properties = schema.parametersJsonSchema as {
-        properties: {
-          subagent_type: {
-            enum?: string[];
-          };
-        };
-      };
-      expect(properties.properties.subagent_type.enum).toEqual([
-        'file-search',
-        'code-review',
-      ]);
-      expect(properties.properties.subagent_type.enum).not.toContain('fork');
     });
 
     it('does not expose teammate name when teams are disabled', () => {
@@ -3088,6 +3083,7 @@ describe('AgentTool', () => {
       vi.mocked(
         config.isInteractive as ReturnType<typeof vi.fn>,
       ).mockReturnValue(false);
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('headless fork result');
       (mockAgent as unknown as Record<string, unknown>)['getCore'] = vi
         .fn()
         .mockReturnValue({
@@ -3119,6 +3115,7 @@ describe('AgentTool', () => {
         config as unknown as {
           getBackgroundTaskRegistry: () => {
             register: ReturnType<typeof vi.fn>;
+            complete: ReturnType<typeof vi.fn>;
           };
         }
       ).getBackgroundTaskRegistry();
@@ -3157,6 +3154,11 @@ describe('AgentTool', () => {
       );
 
       await vi.runAllTimersAsync();
+      expect(stubRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        'headless fork result',
+        expect.anything(),
+      );
       expect(mockStartSubagentSpan).toHaveBeenCalledWith(
         expect.objectContaining({
           invocationKind: 'fork',
@@ -4490,7 +4492,7 @@ describe('AgentTool', () => {
       expect(llmText).toContain(
         `Use ${ToolNames.SEND_MESSAGE} to continue this agent`,
       );
-      expect(llmText).toContain('agentId: monitor-');
+      expect(llmText).toContain('task_id: monitor-');
       expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
       expect(llmText).not.toContain('with to:');
       expect(llmText).not.toContain('Use send_message with task_id:');

@@ -526,23 +526,34 @@ jobs:
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
                 [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true
+                sender_permission=''
+                sender_is_trusted=false
+                if [[ -n "${SENDER_LOGIN}" ]]; then
+                  if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                    api_error="${sender_permission}"
+                    sender_permission=''
+                    api_error="${api_error//$'\r'/ }"
+                    api_error="${api_error//$'\n'/ }"
+                    echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
+                  fi
+                  [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
+                fi
                 if [[ "${label_is_trigger}" != 'true' ]]; then
-                  echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  # A non-trigger label (e.g. scope/*, priority/*) may arrive
+                  # after the trigger labels and cancel their runs via per-issue
+                  # concurrency. If the issue already carries both required
+                  # labels and the current sender is trusted, proceed anyway.
+                  _late_ready="$(jq -r --arg l "${READY_FOR_AGENT_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  _late_approved="$(jq -r --arg l "${AUTOFIX_APPROVED_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  if [[ "${ISSUE_STATE}" == 'open' && "${_late_ready}" == 'true' && "${_late_approved}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
+                    echo "🧭 non-trigger label '${ISSUE_LABEL:-n/a}' but issue #${ISSUE_NUMBER} already approved+ready → issue phase"
+                    DO_ISSUE=true
+                  else
+                    echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  fi
                 else
                   issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                   issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
-                  sender_permission=''
-                  sender_is_trusted=false
-                  if [[ -n "${SENDER_LOGIN}" ]]; then
-                    if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
-                      api_error="${sender_permission}"
-                      sender_permission=''
-                      api_error="${api_error//$'\r'/ }"
-                      api_error="${api_error//$'\n'/ }"
-                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
-                    fi
-                    [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
-                  fi
                   issue_is_approved="$(jq -r --arg label "${AUTOFIX_APPROVED_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                   if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_ready}" == 'true' && "${issue_is_approved}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
                     DO_ISSUE=true
