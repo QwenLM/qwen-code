@@ -4056,29 +4056,33 @@ describe('qwen-autofix workflow', () => {
     const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
     const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
 
-    const run = (priorHeadlines) => {
+    const run = (priorHeadlines, { window, markRound = 7 } = {}) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(
-        join(dir, 'comments.json'),
+        join(dir, 'ic.json'),
         JSON.stringify(
-          priorHeadlines.map((h) => ({
-            user: { login: 'qwen-code-dev-bot' },
-            body: `${h}\n<!-- autofix-eval ts=x acted=y round=z -->`,
-          })),
+          priorHeadlines.map((h) => {
+            const headline = typeof h === 'string' ? h : h.headline;
+            const win = typeof h === 'string' ? undefined : h.win;
+            return {
+              user: { login: 'qwen-code-dev-bot' },
+              body: `${headline}\n<!-- autofix-eval ts=x acted=y round=z${win ? ` win=${win}` : ''} -->`,
+            };
+          }),
         ),
       );
       writeFileSync(
         join(bin, 'gh'),
-        `#!/usr/bin/env bash\ncat ${JSON.stringify(join(dir, 'comments.json'))}\n`,
+        `#!/usr/bin/env bash\ncat ${JSON.stringify(join(dir, 'ic.json'))}\n`,
       );
       chmodSync(join(bin, 'gh'), 0o755);
       const out = execFileSync(
         'bash',
         [
           '-c',
-          `set -uo pipefail\nMARK_ROUND=7\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nHEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -4120,6 +4124,21 @@ describe('qwen-autofix workflow', () => {
       consec: cap,
       terminal: true,
     });
+    // Already-terminal rounds skip the circuit breaker entirely.
+    expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
+      terminal: true,
+      headline: 'orig',
+    });
+    // Window filtering: pre-re-arm failures don't count after a re-arm.
+    expect(
+      run(
+        [
+          ...Array(cap - 1).fill({ headline: FAIL, win: 'old-window' }),
+          { headline: FAIL, win: 'current-window' },
+        ],
+        { window: 'current-window' },
+      ),
+    ).toMatchObject({ consec: 2, terminal: false });
   });
 
   it('makes every known gate rejection declare its verdict', () => {
