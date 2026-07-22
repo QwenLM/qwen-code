@@ -122,6 +122,7 @@ function withNonBotMentionContext(
     if (!user) continue;
     const dingtalkId =
       typeof user.dingtalkId === 'string' ? user.dingtalkId : undefined;
+    // DingTalk Stream always sets dingtalkId for the bot entry; staffId-only bot entries are not expected.
     if (dingtalkId === data.chatbotUserId) continue;
     const staffId = typeof user.staffId === 'string' ? user.staffId : undefined;
     const stableId = dingtalkId || staffId;

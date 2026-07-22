@@ -1729,6 +1729,134 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
+  it('uses plural label when multiple distinct non-bot members are mentioned', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'plural-mentions',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [
+          { dingtalkId: 'bot-user' },
+          { dingtalkId: 'user-a' },
+          { dingtalkId: 'user-b' },
+        ],
+        text: { content: 'please review this' },
+      }),
+      headers: { messageId: 'plural-mentions' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Mentioned 2 other group members]\nplease review this',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('falls back to staffId when dingtalkId is absent', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'staffid-fallback',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { staffId: 'only-staff' }],
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'staffid-fallback' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Mentioned 1 other group member]\nhello',
+        isMentioned: true,
+      }),
+    );
+  });
+
+  it('returns text unchanged when chatbotUserId is absent', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'no-chatbot-id',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'user-a' }],
+        text: { content: 'hello' },
+      }),
+      headers: { messageId: 'no-chatbot-id' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ text: 'hello', isMentioned: true }),
+    );
+  });
+
+  it('returns context only when text is empty after mention stripping', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'empty-text-mention',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'user-a' }],
+        text: { content: '' },
+      }),
+      headers: { messageId: 'empty-text-mention' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: '[Mentioned 1 other group member]',
+        isMentioned: true,
+      }),
+    );
+  });
+
   it('ignores non-string message metadata when logging parsed JSON', () => {
     const channel = createChannel();
     const downstream = {
