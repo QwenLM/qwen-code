@@ -2205,6 +2205,7 @@ describe('startInteractiveUI', () => {
   vi.mock('./ui/utils/kittyProtocolDetector.js', () => ({
     detectAndEnableKittyProtocol: vi.fn(() => Promise.resolve(true)),
     disableKittyProtocol: vi.fn(),
+    pushKittyProtocolFlags: vi.fn(),
   }));
 
   vi.mock('./utils/cleanup.js', () => ({
