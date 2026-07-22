@@ -394,9 +394,56 @@
   align-items: center;
   padding: 8px 10px;
   text-align: left;
+  position: relative;
 }
 
 .reviewRow:hover {
+  background: var(--accent);
+}
+
+.reviewRowToggle {
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.reviewRowToggle:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.reviewRow > :not(.reviewRowToggle) {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.reviewFileName {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reviewOpenButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 7px;
+  pointer-events: auto;
+}
+
+.reviewOpenButton:hover {
   background: var(--accent);
 }
 
@@ -736,6 +783,12 @@ button.treeRow:hover {
   min-height: 100%;
   display: flex;
   flex-direction: column;
+}
+
+.markdownPreviewWrap {
+  min-height: 100%;
+  padding: 4px 8px 24px;
+  overflow-wrap: anywhere;
 }
 
 .htmlPreview {

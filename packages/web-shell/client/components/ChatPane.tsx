@@ -376,11 +376,7 @@ export function ChatPane({
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
-      if (request.kind === 'artifact' || request.kind === 'scheduled_task') {
-        onRightPanelOpen({ ...request, workspaceActions });
-        return;
-      }
-      onRightPanelOpen(request);
+      onRightPanelOpen({ ...request, workspaceActions });
     },
     [onRightPanelOpen, workspaceActions],
   );
