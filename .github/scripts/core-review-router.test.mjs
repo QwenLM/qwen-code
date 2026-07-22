@@ -192,4 +192,19 @@ describe('classify', () => {
     assert.match(result.reason, /1 prod file\b/);
     assert.doesNotMatch(result.reason, /1 prod files/);
   });
+
+  it('ignores package.json version bumps (release PRs)', () => {
+    const result = classify(
+      [
+        'CHANGELOG.md',
+        'package.json',
+        'packages/core/package.json',
+        'packages/cli/package.json',
+      ],
+      'qwen-code-ci-bot',
+      7461,
+    );
+    assert.equal(result.reviewers.length, 0);
+    assert.match(result.reason, /no core files/);
+  });
 });

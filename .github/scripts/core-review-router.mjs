@@ -20,6 +20,8 @@ const CORE_PREFIX = 'packages/core/';
 
 const TEST_PATTERN = /\.test\.|\.spec\.|__tests__|\.test-utils\./;
 
+const NON_SOURCE_PATTERN = /(?:^|\/)(?:package\.json|package-lock\.json|tsconfig.*\.json|\.eslintrc|\.prettierrc|CHANGELOG\.md)$/;
+
 /**
  * Domain expertise: map core sub-paths to the maintainer who knows
  * that area best.  Order matters — first match wins.
@@ -55,6 +57,7 @@ export function classify(files, author, prNumber = 0) {
 
   for (const f of files) {
     if (!f.startsWith(CORE_PREFIX)) continue;
+    if (NON_SOURCE_PATTERN.test(f)) continue;
     if (TEST_PATTERN.test(f)) {
       coreTest.push(f);
     } else {
