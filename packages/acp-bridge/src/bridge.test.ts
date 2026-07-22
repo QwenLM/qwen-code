@@ -6993,6 +6993,98 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('does not publish a duplicate completed event when a promoted-then-removed running prompt settles', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const firstDone = new Promise<void>((r) => {
+        releaseFirst = r;
+      });
+      let releaseSecond: (() => void) | undefined;
+      const secondDone = new Promise<void>((r) => {
+        releaseSecond = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          const text = (req.prompt[0] as { text?: string }).text;
+          if (text === 'blocker') await firstDone;
+          if (text === 'queued then running') await secondDone;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      // Prompt 1 starts running immediately; prompt 2 queues behind it.
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocker' }],
+        },
+        undefined,
+        { promptId: 'prompt-blocker' },
+      );
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued then running' }],
+        },
+        undefined,
+        { promptId: 'prompt-promoted' },
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Prompt 2 is queued behind prompt 1.
+      expect(
+        bridge
+          .getPendingPrompts(session.sessionId)
+          .find((p) => p.promptId === 'prompt-promoted')?.state,
+      ).toBe('queued');
+
+      // Release prompt 1 so prompt 2 promotes to running.
+      releaseFirst!();
+      await p1;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(
+        bridge
+          .getPendingPrompts(session.sessionId)
+          .find((p) => p.promptId === 'prompt-promoted')?.state,
+      ).toBe('running');
+
+      // Remove the now-running prompt 2.
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-promoted'),
+      ).toEqual({ removed: true });
+
+      // Let prompt 2 settle cooperatively.
+      releaseSecond!();
+      await p2;
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Exactly one pending_prompt_completed for prompt-promoted: the
+      // 'removed' one from removePendingPrompt. The result.finally path
+      // must NOT publish a second 'completed' event because the
+      // isQueued && !pendingEntry.removed guard suppresses it.
+      const completedForPromoted = events.filter(
+        (e) =>
+          e.type === 'pending_prompt_completed' &&
+          (e as BridgeEvent & { data: { promptId: string } }).data.promptId ===
+            'prompt-promoted',
+      );
+      expect(completedForPromoted).toHaveLength(1);
+      expect(
+        (completedForPromoted[0] as BridgeEvent & { data: { state: string } })
+          .data.state,
+      ).toBe('removed');
+
+      // The formal terminal is still published exactly once.
+      expect(terminalsFor(events, 'prompt-promoted')).toHaveLength(1);
+
+      await bridge.shutdown();
+    });
+
     it('flushes error terminals for active and queued prompts before session_died on killSession (DAEMON-005)', async () => {
       const handle = wedgeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
