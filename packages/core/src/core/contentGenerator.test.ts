@@ -12,36 +12,46 @@ import {
 } from './contentGenerator.js';
 import { GoogleGenAI } from '@google/genai';
 import type { Config } from '../config/config.js';
-import { LoggingContentGenerator } from './loggingContentGenerator/index.js';
 
 vi.mock('@google/genai');
 
 const openaiMockState = vi.hoisted(() => ({
   importError: null as Error | null,
   generatorError: null as Error | null,
+  createCount: 0,
 }));
 
 const qwenMockState = vi.hoisted(() => ({
   oauthError: null as Error | null,
+  oauthCount: 0,
+  constructorCount: 0,
 }));
 
-vi.mock('./openaiContentGenerator/index.js', () => {
-  if (openaiMockState.importError) {
-    throw openaiMockState.importError;
-  }
-
-  return {
-    createOpenAIContentGenerator: () => {
-      if (openaiMockState.generatorError) {
-        throw openaiMockState.generatorError;
-      }
-      return {};
-    },
-  };
-});
+vi.mock('./openaiContentGenerator/index.js', () => ({
+  createOpenAIContentGenerator: () => {
+    if (openaiMockState.importError) {
+      throw openaiMockState.importError;
+    }
+    if (openaiMockState.generatorError) {
+      throw openaiMockState.generatorError;
+    }
+    openaiMockState.createCount += 1;
+    return {
+      generateContent: async () => ({}),
+      generateContentStream: async () =>
+        (async function* () {
+          yield {};
+        })(),
+      countTokens: async () => ({ totalTokens: 1 }),
+      embedContent: async () => ({ embeddings: [] }),
+      useSummarizedThinking: () => false,
+    };
+  },
+}));
 
 vi.mock('../qwen/qwenOAuth2.js', () => ({
   getQwenOAuthClient: async () => {
+    qwenMockState.oauthCount += 1;
     if (qwenMockState.oauthError) {
       throw qwenMockState.oauthError;
     }
@@ -50,11 +60,33 @@ vi.mock('../qwen/qwenOAuth2.js', () => ({
 }));
 
 vi.mock('../qwen/qwenContentGenerator.js', () => ({
-  QwenContentGenerator: class {},
+  QwenContentGenerator: class {
+    constructor() {
+      qwenMockState.constructorCount += 1;
+    }
+
+    async countTokens() {
+      return { totalTokens: 1 };
+    }
+
+    useSummarizedThinking() {
+      return false;
+    }
+  },
 }));
 
 describe('createContentGenerator', () => {
-  it('should create a Gemini content generator', async () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    openaiMockState.importError = null;
+    openaiMockState.generatorError = null;
+    openaiMockState.createCount = 0;
+    qwenMockState.oauthError = null;
+    qwenMockState.oauthCount = 0;
+    qwenMockState.constructorCount = 0;
+  });
+
+  it('should defer Gemini content generator creation until first use', async () => {
     const mockConfig = {
       getUsageStatisticsEnabled: () => true,
       getContentGeneratorConfig: () => ({}),
@@ -64,7 +96,9 @@ describe('createContentGenerator', () => {
     } as unknown as Config;
 
     const mockGenerator = {
-      models: {},
+      models: {
+        countTokens: vi.fn().mockResolvedValue({ totalTokens: 1 }),
+      },
     } as unknown as GoogleGenAI;
     vi.mocked(GoogleGenAI).mockImplementation(() => mockGenerator as never);
     const generator = await createContentGenerator(
@@ -75,6 +109,14 @@ describe('createContentGenerator', () => {
       },
       mockConfig,
     );
+    expect(GoogleGenAI).not.toHaveBeenCalled();
+    expect(generator.useSummarizedThinking()).toBe(true);
+
+    await generator.countTokens({
+      model: 'test-model',
+      contents: 'hello',
+    });
+
     expect(GoogleGenAI).toHaveBeenCalledWith({
       apiKey: 'test-api-key',
       vertexai: undefined,
@@ -85,10 +127,6 @@ describe('createContentGenerator', () => {
         },
       },
     });
-    // We expect it to be a LoggingContentGenerator wrapping a GeminiContentGenerator
-    expect(generator).toBeInstanceOf(LoggingContentGenerator);
-    const wrapped = (generator as LoggingContentGenerator).getWrapped();
-    expect(wrapped).toBeDefined();
   });
 
   it('should create a Gemini content generator with client install id logging disabled', async () => {
@@ -100,7 +138,9 @@ describe('createContentGenerator', () => {
       getSessionId: () => 'test-session',
     } as unknown as Config;
     const mockGenerator = {
-      models: {},
+      models: {
+        countTokens: vi.fn().mockResolvedValue({ totalTokens: 1 }),
+      },
     } as unknown as GoogleGenAI;
     vi.mocked(GoogleGenAI).mockImplementation(() => mockGenerator as never);
     const generator = await createContentGenerator(
@@ -111,6 +151,11 @@ describe('createContentGenerator', () => {
       },
       mockConfig,
     );
+    expect(GoogleGenAI).not.toHaveBeenCalled();
+    await generator.countTokens({
+      model: 'test-model',
+      contents: 'hello',
+    });
     expect(GoogleGenAI).toHaveBeenCalledWith({
       apiKey: 'test-api-key',
       vertexai: undefined,
@@ -120,7 +165,80 @@ describe('createContentGenerator', () => {
         },
       },
     });
-    expect(generator).toBeInstanceOf(LoggingContentGenerator);
+  });
+
+  it('loads a provider once across concurrent first calls', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
+
+    expect(openaiMockState.createCount).toBe(0);
+    expect(generator.useSummarizedThinking()).toBe(false);
+    await Promise.all([
+      generator.countTokens({ model: 'test-model', contents: 'one' }),
+      generator.countTokens({ model: 'test-model', contents: 'two' }),
+    ]);
+    expect(openaiMockState.createCount).toBe(1);
+  });
+
+  it('checks Qwen credentials before deferring provider creation', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        authType: AuthType.QWEN_OAUTH,
+      },
+      mockConfig,
+      true,
+    );
+
+    expect(qwenMockState.oauthCount).toBe(1);
+    expect(qwenMockState.constructorCount).toBe(0);
+    expect(generator.useSummarizedThinking()).toBe(false);
+    await generator.countTokens({ model: 'test-model', contents: 'hello' });
+    expect(qwenMockState.constructorCount).toBe(1);
+  });
+
+  it('rejects Qwen credential failures before returning a lazy generator', async () => {
+    const mockConfig = {
+      getUsageStatisticsEnabled: () => false,
+      getContentGeneratorConfig: () => ({}),
+      getCliVersion: () => '1.0.0',
+      getTelemetryEnabled: () => false,
+      getSessionId: () => 'test-session',
+    } as unknown as Config;
+    qwenMockState.oauthError = new Error('cached credentials are missing');
+
+    await expect(
+      createContentGenerator(
+        {
+          model: 'test-model',
+          authType: AuthType.QWEN_OAUTH,
+        },
+        mockConfig,
+        true,
+      ),
+    ).rejects.toThrow('cached credentials are missing');
+    expect(qwenMockState.oauthCount).toBe(1);
+    expect(qwenMockState.constructorCount).toBe(0);
   });
 
   it('should throw when the config has no authType', async () => {
@@ -176,7 +294,10 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
   beforeEach(() => {
     openaiMockState.importError = null;
     openaiMockState.generatorError = null;
+    openaiMockState.createCount = 0;
     qwenMockState.oauthError = null;
+    qwenMockState.oauthCount = 0;
+    qwenMockState.constructorCount = 0;
     vi.resetModules();
   });
 
@@ -188,7 +309,7 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
     openaiMockState.importError = moduleError;
 
     try {
-      await createContentGenerator(
+      const generator = await createContentGenerator(
         {
           model: 'test-model',
           apiKey: 'test-key',
@@ -196,6 +317,7 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
         },
         mockConfig,
       );
+      await generator.countTokens({ model: 'test-model', contents: 'hello' });
       expect.unreachable('should have thrown');
     } catch (error) {
       expect(error).toBeInstanceOf(Error);
@@ -211,15 +333,16 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
   it('should re-throw non-module errors unchanged', async () => {
     openaiMockState.generatorError = new Error('network timeout');
 
+    const generator = await createContentGenerator(
+      {
+        model: 'test-model',
+        apiKey: 'test-key',
+        authType: AuthType.USE_OPENAI,
+      },
+      mockConfig,
+    );
     await expect(
-      createContentGenerator(
-        {
-          model: 'test-model',
-          apiKey: 'test-key',
-          authType: AuthType.USE_OPENAI,
-        },
-        mockConfig,
-      ),
+      generator.countTokens({ model: 'test-model', contents: 'hello' }),
     ).rejects.toThrow('network timeout');
   });
 
