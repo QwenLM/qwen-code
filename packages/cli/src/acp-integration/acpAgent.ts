@@ -10401,7 +10401,7 @@ class QwenAgent implements Agent {
       ''
     ).trim();
     const currentAuthType = config.getAuthType();
-    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
+    const modelOptions = this.buildSelectableModelOptions(config);
 
     const activeRuntimeSnapshot = config.getActiveRuntimeModelSnapshot?.();
     const currentModelId = getCurrentAcpModelId(
@@ -10445,7 +10445,7 @@ class QwenAgent implements Agent {
 
   private buildConfigOptions(config: Config): SessionConfigOption[] {
     const currentApprovalMode = config.getApprovalMode();
-    const modelOptions = buildAcpModelOptions(config.getAllConfiguredModels());
+    const modelOptions = this.buildSelectableModelOptions(config);
     const rawCurrentModelId = (config.getModel() || '').trim();
     const currentAuthType = config.getAuthType?.();
 
@@ -10492,6 +10492,19 @@ class QwenAgent implements Agent {
     };
 
     return [modeConfigOption, modelConfigOption];
+  }
+
+  private buildSelectableModelOptions(config: Config) {
+    const currentAuthType = config.getAuthType();
+    return buildAcpModelOptions(
+      config
+        .getAllConfiguredModels()
+        .filter(
+          (model) =>
+            model.authType !== AuthType.QWEN_OAUTH ||
+            currentAuthType === AuthType.QWEN_OAUTH,
+        ),
+    );
   }
 }
 
