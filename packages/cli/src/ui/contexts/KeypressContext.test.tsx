@@ -528,6 +528,125 @@ describe('KeypressContext - Kitty Protocol', () => {
       expect(pasteEvent?.[0]?.sequence).toBe('hi\x1b[20');
     });
 
+    it('does not intercept a paste-start split immediately after its ESC byte (documented tradeoff)', async () => {
+      // partialMarkerTailLength uses minLen=2 on the prefix path, so a lone
+      // trailing ESC (0x1b) is never held back: holding it would delay every
+      // real Esc keypress that lands at a read boundary (common) to catch the
+      // rare case of the OS splitting the paste-start as "\x1b" | "[200~...".
+      // This test pins that tradeoff — when the split happens, the paste-start
+      // is missed and the content leaks to readline instead of being intercepted
+      // as one clean paste event. Changing minLen to 1 would detect this split
+      // (and start delaying boundary Esc keypresses), making this test fail.
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // Deliver the paste-start split right after its ESC byte across two read
+      // boundaries (the realistic OS delivery this tradeoff concerns). The gap
+      // lets readline's 0ms escape timeout emit the lone ESC before the rest
+      // arrives, so neither the raw interceptor nor readline sees a leading ESC
+      // on "[200~...".
+      act(() => {
+        stdin.emit('data', Buffer.from('\x1b'));
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      act(() => {
+        stdin.emit('data', Buffer.from('[200~body\x1b[201~'));
+      });
+      await new Promise((r) => setTimeout(r, 50));
+
+      // The paste-start was missed: the content was NOT intercepted as one clean
+      // paste event...
+      const cleanPaste = keyHandler.mock.calls.find(
+        (c) => c[0]?.paste === true && c[0]?.sequence === 'body',
+      );
+      expect(cleanPaste).toBeUndefined();
+
+      // ...it leaked to readline as literal characters (the "[" of "[200~"
+      // arrives as a plain keypress). Changing minLen to 1 would hold the lone
+      // ESC, intercept this paste at the raw level, and flip both assertions —
+      // surfacing the boundary-Esc-keypress delay cost of that choice.
+      const leakedMarker = keyHandler.mock.calls.find(
+        (c) => c[0]?.paste !== true && c[0]?.sequence === '[',
+      );
+      expect(leakedMarker).toBeDefined();
+    });
+
+    it('does not prematurely flush a slow keypress-level paste (idle timer reschedules)', () => {
+      // Regression for the passthrough/keypress-level path: the idle timeout
+      // must stay armed ~1s past the LATEST character. A slow paste (< 1000
+      // chars with characters spaced > 1s apart, e.g. high-latency SSH or tmux
+      // rate-limiting) must NOT be flushed mid-paste — otherwise a partial
+      // paste is broadcast and a later '\r' could become a real Enter. This
+      // drives the keypress-level paste state machine directly via keypress
+      // events (paste-start + content), which is how passthrough mode feeds it.
+      vi.useFakeTimers();
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      try {
+        act(() => {
+          stdin.pressKey({
+            name: 'paste-start',
+            ctrl: false,
+            meta: false,
+            shift: false,
+            paste: false,
+            sequence: '\x1b[200~',
+          });
+        });
+
+        // Deliver characters spaced just under the idle timeout apart. Each
+        // must push the flush deadline forward so nothing flushes mid-paste.
+        for (let i = 0; i < 3; i++) {
+          act(() => {
+            vi.advanceTimersByTime(PASTE_IDLE_TIMEOUT_MS - 100);
+          });
+          act(() => {
+            stdin.pressKey({
+              name: 'a',
+              ctrl: false,
+              meta: false,
+              shift: false,
+              paste: false,
+              sequence: 'a',
+            });
+          });
+        }
+
+        // No paste flushed yet — every character arrived within the idle window.
+        const flushedEarly = keyHandler.mock.calls.some(
+          (c) => c[0]?.paste === true,
+        );
+        expect(flushedEarly).toBe(false);
+
+        // Now go idle for the full timeout: the whole paste flushes as one event.
+        act(() => {
+          vi.advanceTimersByTime(PASTE_IDLE_TIMEOUT_MS + 200);
+        });
+
+        const pasteEvent = keyHandler.mock.calls.find(
+          (c) => c[0]?.paste === true,
+        );
+        expect(pasteEvent?.[0]?.sequence).toBe('aaa');
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('should not process kitty sequences when kitty protocol is disabled', async () => {
       const keyHandler = vi.fn();
 
@@ -1245,9 +1364,13 @@ describe('KeypressContext - Kitty Protocol', () => {
       it('reassembles paste content whose end marker straddles a chunk boundary', async () => {
         const keyHandler = vi.fn();
 
+        // kittyProtocolEnabled (non-passthrough) routes stdin through
+        // handleStdinData — the raw-level paste interceptor this optimization
+        // adds. The straddled paste-end marker must be reassembled there, so
+        // this test exercises that path rather than the legacy passthrough one.
         const { result } = renderHook(() => useKeypressContext(), {
           wrapper: ({ children }) =>
-            wrapper({ children, pasteWorkaround: true }),
+            wrapper({ children, kittyProtocolEnabled: true }),
         });
 
         act(() => {

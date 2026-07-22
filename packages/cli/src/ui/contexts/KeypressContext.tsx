@@ -223,6 +223,12 @@ export function KeypressProvider({
       usePassthrough = true;
     }
 
+    // Keypress-level bracketed-paste state machine. In the production
+    // non-passthrough path, paste markers are intercepted at the raw stdin
+    // level (handleStdinData) and never reach readline, so this machinery
+    // only runs in passthrough mode (pasteWorkaround / Windows / Node < 20).
+    // It is kept separate from the raw path; the two should eventually be
+    // collapsed.
     let isPaste = false;
     let pasteChunks: string[] = [];
     // Set to true when paste mode is ended by something other than a
@@ -231,6 +237,7 @@ export function KeypressProvider({
     // and must be swallowed instead of producing a spurious empty paste.
     let pasteAlreadyFlushed = false;
     let pasteIdleTimeout: NodeJS.Timeout | null = null;
+    let lastPasteChunkAt = 0;
     const kittySequenceBufferRef = { current: '' };
     let kittySequenceTimeout: NodeJS.Timeout | null = null;
     let backslashTimeout: NodeJS.Timeout | null = null;
@@ -340,12 +347,30 @@ export function KeypressProvider({
       }
     };
 
+    // Idle-timeout callback: flush only if the paste has actually been idle
+    // for PASTE_IDLE_TIMEOUT_MS, otherwise reschedule for the remaining time.
+    // With startPasteIdleTimeout (records the last chunk time, arms a single
+    // timer) this detects a stuck paste ~1s after the last received character
+    // WITHOUT a per-character clearTimeout/setTimeout pair — so a slow paste
+    // (< 1000 chars delivered > 1s apart, e.g. high-latency SSH or tmux
+    // rate-limiting) keeps pushing lastPasteChunkAt forward and the timer
+    // reschedules instead of flushing partial content prematurely.
+    const onPasteIdleTimeout = () => {
+      const idleFor = Date.now() - lastPasteChunkAt;
+      if (idleFor >= PASTE_IDLE_TIMEOUT_MS) {
+        forceFlushStuckPaste();
+      } else {
+        pasteIdleTimeout = setTimeout(
+          onPasteIdleTimeout,
+          PASTE_IDLE_TIMEOUT_MS - idleFor,
+        );
+      }
+    };
+
     const startPasteIdleTimeout = () => {
-      clearPasteIdleTimeout();
-      pasteIdleTimeout = setTimeout(
-        forceFlushStuckPaste,
-        PASTE_IDLE_TIMEOUT_MS,
-      );
+      lastPasteChunkAt = Date.now();
+      if (pasteIdleTimeout) return;
+      pasteIdleTimeout = setTimeout(onPasteIdleTimeout, PASTE_IDLE_TIMEOUT_MS);
     };
 
     const createPrintableKey = (char: string): Key => {
@@ -901,13 +926,12 @@ export function KeypressProvider({
 
       if (isPaste) {
         pasteChunks.push(key.sequence);
-        // Reset the idle timeout periodically rather than on every single
-        // character — avoids hundreds of thousands of clearTimeout/setTimeout
-        // syscall pairs for large pastes while still detecting stuck paste
-        // mode within ~1s of the last received character.
-        if (pasteChunks.length % 1000 === 1) {
-          startPasteIdleTimeout();
-        }
+        // Record the chunk time on every character so the idle timer stays
+        // armed ~1s past the latest character. startPasteIdleTimeout arms a
+        // single timer (rescheduled by onPasteIdleTimeout based on actual idle
+        // time), so this is a cheap timestamp write — no per-character
+        // clearTimeout/setTimeout — yet a slow paste is never flushed early.
+        startPasteIdleTimeout();
         return;
       }
 
@@ -1437,6 +1461,13 @@ export function KeypressProvider({
             // partial prefix marker that might complete in the next chunk.
             const remaining = buf.subarray(cursor);
             if (remaining.length > 0) {
+              // minLen defaults to 2, so a lone trailing ESC (0x1b) is NOT
+              // held back: holding it would delay every real Esc keypress that
+              // lands at a read boundary (common) just to catch the rare case of
+              // the OS splitting the paste-start as "\x1b" | "[200~...". In
+              // that rare case the paste-start is missed and leaks to readline
+              // (see the split-after-ESC regression test). The suffix path passes
+              // minLen=1 because a trailing ESC there is most likely paste-end.
               const tailLen = partialMarkerTailLength(
                 remaining,
                 pasteModePrefixBuf,
@@ -1507,10 +1538,10 @@ export function KeypressProvider({
         `Replaying ${capturedInput.length} bytes of captured input`,
       );
       // Process in next event loop tick to ensure subscribers are ready.
-      // Always emit on stdin so that handleRawKeypress processes paste markers
-      // correctly in passthrough mode.
-      // In non-passthrough mode, readline.emitKeypressEvents installs an internal
-      // 'data' listener on stdin that converts data events to keypress events.
+      // Emit on stdin so the registered 'data' listener handles the replay:
+      // handleRawKeypress in passthrough mode, handleStdinData otherwise
+      // (which strips bracketed-paste regions before forwarding the remaining
+      // bytes to readline via keypressStream).
       replayPending = true;
       setImmediate(() => {
         if (!replayPending) return;
