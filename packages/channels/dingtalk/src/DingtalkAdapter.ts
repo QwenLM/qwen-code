@@ -130,6 +130,9 @@ function withNonBotMentionContext(
   }
 
   if (mentions.size === 0) return text;
+  // Prepending the marker would break slash-command routing in ChannelBase
+  // (isSlashCommand requires text to start with '/').
+  if (text.trim().startsWith('/')) return text;
   const memberLabel = mentions.size === 1 ? 'member' : 'members';
   const context = `[Mentioned ${mentions.size} other group ${memberLabel}]`;
   return text ? `${context}\n${text}` : context;

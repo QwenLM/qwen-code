@@ -1857,6 +1857,35 @@ describe('DingtalkChannel sender attribution', () => {
     );
   });
 
+  it('skips mention context for slash-command text to preserve routing', () => {
+    const channel = createChannel();
+    const downstream = {
+      data: JSON.stringify({
+        msgId: 'slash-command-mention',
+        conversationType: '2',
+        conversationId: 'cid123',
+        sessionWebhook:
+          'https://oapi.dingtalk.com/robot/send?access_token=token',
+        senderNick: 'Alice',
+        senderStaffId: 'staff-1',
+        senderId: 'sender-1',
+        chatbotUserId: 'bot-user',
+        isInAtList: true,
+        atUsers: [{ dingtalkId: 'bot-user' }, { dingtalkId: 'user-a' }],
+        text: { content: '/clear' },
+      }),
+      headers: { messageId: 'slash-command-mention' },
+    } as unknown as DWClientDownStream;
+
+    (
+      channel as unknown as { onMessage(d: DWClientDownStream): void }
+    ).onMessage(downstream);
+
+    expect(channel.handleInbound).toHaveBeenCalledWith(
+      expect.objectContaining({ text: '/clear', isMentioned: true }),
+    );
+  });
+
   it('ignores non-string message metadata when logging parsed JSON', () => {
     const channel = createChannel();
     const downstream = {
