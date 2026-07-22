@@ -4045,7 +4045,7 @@ describe('qwen-autofix workflow', () => {
     expect(cap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\]; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -4056,18 +4056,22 @@ describe('qwen-autofix workflow', () => {
     const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
     const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
 
-    const run = (priorHeadlines, { window, markRound = 7 } = {}) => {
+    const run = (
+      priorHeadlines,
+      { window, markRound = 7, apiErrorDetail = '', apiErrorKind = '' } = {},
+    ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
       writeFileSync(
         join(dir, 'ic.json'),
         JSON.stringify(
-          priorHeadlines.map((h) => {
+          priorHeadlines.map((h, i) => {
             const headline = typeof h === 'string' ? h : h.headline;
             const win = typeof h === 'string' ? undefined : h.win;
             return {
               user: { login: 'qwen-code-dev-bot' },
+              created_at: `2026-01-01T00:${String(i).padStart(2, '0')}:00Z`,
               body: `${headline}\n<!-- autofix-eval ts=x acted=y round=z${win ? ` win=${win}` : ''} -->`,
             };
           }),
@@ -4082,7 +4086,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -4119,16 +4123,46 @@ describe('qwen-autofix workflow', () => {
       consec: 2,
       terminal: false,
     });
-    // Timeouts and gate rejections both count — the streak is cause-agnostic.
+    // Prior-round headlines are cause-agnostic: timeouts and gate rejections
+    // both count toward the streak.
     expect(run([FAIL, FAIL_TIMEOUT, FAIL, FAIL_TIMEOUT])).toMatchObject({
       consec: cap,
       terminal: true,
     });
+    // A transient (non-auth) model error on the CURRENT round skips the
+    // breaker entirely — the CAUSE_MAX logic above gives it the full budget
+    // because it self-heals, and the breaker must not override that.
+    expect(
+      run(Array(cap - 1).fill(FAIL), {
+        apiErrorDetail: 'terminated',
+        apiErrorKind: 'transient',
+      }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    // An auth error on the current round is NOT exempt — it never self-heals.
+    expect(
+      run(Array(cap - 1).fill(FAIL), {
+        apiErrorDetail: 'access denied',
+        apiErrorKind: 'auth',
+      }),
+    ).toMatchObject({ consec: cap, terminal: true });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
       headline: 'orig',
     });
+    // The reset detector keys on literal substrings; pin them to the actual
+    // "Push and report" emit lines so a reword breaks this test, not silently
+    // the streak reset in production.
+    const pushEmit = pushAndReportStep.match(
+      /echo "(🤖 Addressed the latest review feedback[^"]*)"/,
+    );
+    expect(pushEmit).toBeTruthy();
+    expect(pushEmit[1]).toContain('Addressed the latest review feedback');
+    const noopEmit = pushAndReportStep.match(
+      /echo "(🤖 Reviewed the latest feedback — no changes needed[^"]*)"/,
+    );
+    expect(noopEmit).toBeTruthy();
+    expect(noopEmit[1]).toContain('no changes needed');
     // Window filtering: pre-re-arm failures don't count after a re-arm.
     expect(
       run(
