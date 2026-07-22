@@ -157,6 +157,8 @@ describe('AgentTool', () => {
       queueExternalInput: vi.fn(),
       wakeExternalInputWaiters: vi.fn(),
       appendActivity: vi.fn(),
+      registerResidentAgent: vi.fn(),
+      unregisterResidentAgent: vi.fn(),
     };
     const stubMonitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
