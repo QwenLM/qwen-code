@@ -637,6 +637,12 @@ export interface DaemonSession {
   createdAt?: string;
   /** True while the live session has an in-flight prompt. */
   hasActivePrompt?: boolean;
+  /**
+   * Epoch token of the session's event bus. Newer daemons stamp it on the
+   * create/attach response; older daemons omit it and the first subscription
+   * learns it from the `X-Qwen-Event-Epoch` response header.
+   */
+  eventEpoch?: string;
   /** Immutable creator attribution, absent on legacy/unattributed sessions. */
   sourceType?: string;
   /** Optional source-specific identifier paired with `sourceType`. */

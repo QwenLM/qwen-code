@@ -140,8 +140,20 @@ export function registerSseEventsRoutes(
       iter = iterable[Symbol.asyncIterator]();
       // Captured while the session entry is known to exist so the header
       // block below can advertise the current epoch without a throwing
-      // lookup after the stream is already committed.
-      busEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+      // lookup after the stream is already committed. Virtual subagent
+      // sessions ride their own bus with no epoch/resume mechanism (same
+      // rationale the WS transport documents for ignoring the epoch), and
+      // their compound ids are not in the bridge's byId map — a direct
+      // lookup would throw and abort the subscription. A real session torn
+      // down between subscribeEvents and this lookup degrades to a
+      // headerless stream rather than an error (mirrors the /acp route).
+      if (!virtualKey) {
+        try {
+          busEpoch = runtime.bridge.getSessionEventEpoch(sessionId);
+        } catch {
+          busEpoch = undefined;
+        }
+      }
     } catch (err) {
       // `EventBus` throws `SubscriberLimitExceededError` when the
       // per-session subscriber cap (default 64) is reached.

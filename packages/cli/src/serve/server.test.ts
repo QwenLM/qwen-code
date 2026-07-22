@@ -20058,6 +20058,57 @@ describe('GET /session/:id/events (SSE)', () => {
     }
   });
 
+  it('does not look up the bus epoch for virtual subagent SSE streams', async () => {
+    // Virtual subagent sessions ride their own bus and their compound ids
+    // (parent::agent) are not in the bridge's byId map, so a direct
+    // getSessionEventEpoch lookup throws SessionNotFoundError. The route
+    // must skip the epoch lookup for the virtual path entirely; letting it
+    // throw aborts the subscription and breaks the subagent event stream.
+    const epochLookups: string[] = [];
+    const bridge = fakeBridge({
+      getSessionEventEpochImpl: (sessionId) => {
+        epochLookups.push(sessionId);
+        throw new Error(`Session not found: ${sessionId}`);
+      },
+    });
+    const subscribeSpy = vi
+      .spyOn(VirtualSubagentSessions.prototype, 'subscribe')
+      .mockResolvedValue(
+        (async function* () {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: { source: 'subagent' },
+          } satisfies BridgeEvent;
+          await new Promise(() => {});
+        })(),
+      );
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const sessionId = createVirtualSubagentSessionId('parent-1', 'agent-1');
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/${sessionId}/events`,
+      );
+      expect(res.status).toBe(200);
+      const frames = await readSseFrames(res.body!, 1);
+      expect(JSON.parse(frames[0]!.data!)).toMatchObject({
+        id: 1,
+        data: { source: 'subagent' },
+      });
+      // The epoch lookup must be skipped for the virtual path — before the
+      // fix this throw aborted the subscription into an error response.
+      expect(epochLookups).not.toContain(sessionId);
+    } finally {
+      subscribeSpy.mockRestore();
+    }
+  });
+
   it('stamps _meta.serverTimestamp on every SSE frame (#4175 F4 prereq, chiga0 #19 P0)', async () => {
     // The daemon stamps `_meta.serverTimestamp` so multi-client UIs
     // use the server clock for transcript ordering / "X minutes ago"

@@ -202,7 +202,7 @@ export class DaemonSessionClient {
       // Newer daemons may stamp the bus epoch on the create/attach
       // response; older ones don't — the first subscription then learns it
       // from the `X-Qwen-Event-Epoch` response header.
-      eventEpoch: (session as { eventEpoch?: string }).eventEpoch,
+      eventEpoch: session.eventEpoch,
     });
   }
 
