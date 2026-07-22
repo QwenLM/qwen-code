@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolve, relative, isAbsolute, sep } from 'node:path';
+
 /**
  * Security-critical, escalate-by-default classifier for remote reviews.
  *
@@ -13,12 +15,18 @@
  * vote. A false "approve" on the wrong call is a workstation-compromise path
  * (a prompt-injected diff can steer the reviewing agent), so the ONLY rule
  * that matters is: **when in any doubt, escalate.** It is always safe to
- * escalate a call; it is never safe to approve one we are unsure about.
+ * escalate a call; it is never safe to approve one we cannot prove safe.
  *
  * The permission frame carries the ACP `ToolCall` shape
  * `{ kind, title, rawInput }` and NO tool-name — so we key on `kind` plus
  * `rawInput`. See docs/superpowers/specs/2026-07-20-remote-review-design.md
  * "The permission bridge".
+ *
+ * Shell handling uses a PER-COMMAND FLAG ALLOWLIST, not a denylist: a denylist
+ * cannot prove a flag safe, so any unrecognized flag ESCALATES. This closes
+ * attacker-pointed OUT-OF-tree code loads (`--config`, `--manifest-path`,
+ * `-f <makefile>`, `--init-script`, `-exec`, `--prefix`, …) which a denylist
+ * would miss. `node:path` is used only for pure path math (no fs I/O).
  */
 
 export interface ReviewToolCall {
@@ -32,6 +40,13 @@ export interface ReviewPolicy {
   autoApprove: boolean;
   autofix: boolean;
   comment: boolean;
+  /**
+   * Absolute path of the review worktree. An `edit`/`write` under `autofix`
+   * auto-approves ONLY if its target path resolves inside this root. `null`
+   * (or a non-string) forces every edit to escalate. Wired by the bridge (C.2)
+   * / saga (D.2).
+   */
+  worktreeRoot: string | null;
 }
 
 export type ReviewDecision = 'approve' | 'escalate';
@@ -46,119 +61,228 @@ export type ReviewDecision = 'approve' | 'escalate';
  */
 const SAFE_SHELL_CHARS = /^[A-Za-z0-9 _\-./=:@,]+$/;
 
-/**
- * Flags that turn an otherwise-read-only allowlisted command into an
- * arbitrary-code-execution or arbitrary-file-write primitive. Escalated no
- * matter which allowlisted command carries them. Categories:
- *  - git config / external-diff / textconv / pager machinery runs arbitrary
- *    programs: `-c`, `--config-env`, `--ext-diff`, `--textconv`, `--pager`,
- *    `--open-files-in-pager`, `--exec-path`, `--exec`.
- *  - git remote-exec transports: `--upload-pack`, `--receive-pack`.
- *  - arbitrary file write: `--output`/`-o`/`-O`, `--output-file`, and tsc's
- *    emit-path flags (`--outFile`, `--outDir`, `--out`, `--declarationDir`,
- *    `--tsBuildInfoFile`, `--generateTrace`).
- */
-const DANGEROUS_FLAGS: ReadonlySet<string> = new Set([
-  '-c',
-  '-o',
-  '-O',
-  '--config-env',
-  '--ext-diff',
-  '--textconv',
-  '--pager',
-  '--open-files-in-pager',
-  '--exec-path',
-  '--exec',
-  '--upload-pack',
-  '--receive-pack',
-  '--output',
-  '--output-file',
-  '--outFile',
-  '--outDir',
-  '--out',
-  '--declarationDir',
-  '--tsBuildInfoFile',
-  '--generateTrace',
+// ---------------------------------------------------------------------------
+// Per-command flag allowlists. A command approves ONLY when every argument is
+// either an allowed flag, an in-tree path value for a known path-flag, or an
+// in-tree positional. Any unrecognized flag → escalate (fail-safe).
+// ---------------------------------------------------------------------------
+
+const GIT_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'status',
+  'diff',
+  'log',
+  'show',
+  'rev-parse',
+  'ls-files',
+  'cat-file',
+]);
+// Small curated set of read-only git presentation flags. Anything unusual
+// (e.g. --ext-diff/--output/-c/--pager/--exec-path/--upload-pack) escalates.
+const GIT_FLAGS: ReadonlySet<string> = new Set([
+  '--stat',
+  '--numstat',
+  '--shortstat',
+  '--name-only',
+  '--name-status',
+  '--oneline',
+  '--summary',
+  '--patch',
+  '-p',
+  '--no-patch',
+  '-s',
+  '--short',
+  '--no-color',
+  '--cached',
+  '--staged',
+  '-w',
+  '--unified',
+  '-U',
 ]);
 
-/**
- * argv[0] → allowed argv[1] verbs. `true` = any subcommand allowed (project
- * build wrappers whose recipes are, by design, the reviewed tree's own code —
- * see the threat model's accepted "build/test runs the PR author's code"
- * residual). Only genuinely read-only git subcommands are listed; `branch`
- * (create/delete/rename) is deliberately absent, and `npm ci`/`npm exec`/
- * `pnpm exec` (network install / arbitrary-binary run) are deliberately absent.
- */
-const SHELL_ALLOWLIST: Record<string, ReadonlySet<string> | true> = {
-  git: new Set([
-    'status',
-    'diff',
-    'log',
-    'show',
-    'rev-parse',
-    'ls-files',
-    'cat-file',
-  ]),
-  npm: new Set(['run', 'test']),
-  pnpm: new Set(['run', 'test']),
-  yarn: new Set(['run', 'test']),
-  npx: new Set(['tsc', 'vitest', 'jest', 'eslint']),
-  cargo: new Set(['build', 'test', 'check', 'clippy']),
-  go: new Set(['build', 'test', 'vet']),
-  mvn: true,
-  './mvnw': true,
-  mvnw: true,
-  gradle: true,
-  './gradlew': true,
-  gradlew: true,
-  make: new Set(['build', 'test', 'check']),
-  tsc: true,
-  qwen: new Set(['review']),
-  mkdir: true, // gated below to paths under a real `.qwen` segment, no `..`.
-};
+const NPM_SUBCOMMANDS: ReadonlySet<string> = new Set(['run', 'test']);
+const NPM_FLAGS: ReadonlySet<string> = new Set();
+
+const CARGO_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'build',
+  'test',
+  'check',
+  'clippy',
+]);
+const CARGO_FLAGS: ReadonlySet<string> = new Set([
+  '--release',
+  '--all',
+  '--workspace',
+  '--all-features',
+  '--no-default-features',
+  '--locked',
+  '--offline',
+  '--frozen',
+  '-q',
+  '--quiet',
+  '-v',
+  '--verbose',
+]);
+
+const GO_SUBCOMMANDS: ReadonlySet<string> = new Set(['build', 'test', 'vet']);
+// NOTE: `-exec` deliberately absent (`go test -exec /evil` is arbitrary exec).
+const GO_FLAGS: ReadonlySet<string> = new Set([
+  '-v',
+  '-race',
+  '-short',
+  '-cover',
+  '-count',
+  '-run',
+  '-tags',
+]);
+
+const MAKE_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'build',
+  'test',
+  'check',
+]);
+// NOTE: `-f`/`--file`/`--makefile` deliberately absent (points make at an
+// arbitrary out-of-tree Makefile).
+const MAKE_FLAGS: ReadonlySet<string> = new Set([
+  '-j',
+  '--jobs',
+  '-s',
+  '--silent',
+  '-k',
+]);
+
+// mvn/gradle have no fixed subcommand set (they take goals/tasks). Reject
+// out-of-tree-load flags (--init-script/-I/-b/-s/--settings/-c/-D/-P) by
+// omission, and reject `group:artifact:goal` plugin coordinates via the
+// colon-positional guard.
+const MVN_GRADLE_FLAGS: ReadonlySet<string> = new Set([
+  '--offline',
+  '-o',
+  '--quiet',
+  '-q',
+  '--no-daemon',
+  '--batch-mode',
+  '-B',
+  '--stacktrace',
+  '--info',
+  '--console',
+]);
+
+// tsc is pinned: typecheck/emit-control flags plus `-p/--project <in-tree>`.
+// Emit-path flags (--outFile/--outDir/--out/--declarationDir/…) are absent.
+const TSC_FLAGS: ReadonlySet<string> = new Set([
+  '--noEmit',
+  '--noEmitOnError',
+  '--pretty',
+  '--strict',
+  '--incremental',
+  '--skipLibCheck',
+  '--build',
+  '-b',
+]);
+const TSC_PATH_FLAGS: ReadonlySet<string> = new Set(['-p', '--project']);
+
+// The fork's review CLI subcommands the skill actually invokes.
+const QWEN_REVIEW_SUBCOMMANDS: ReadonlySet<string> = new Set([
+  'fetch-pr',
+  'cleanup',
+]);
+const QWEN_FLAGS: ReadonlySet<string> = new Set(['--remote']);
 
 /**
  * `gh api` paths that post a PR review comment (the sole sanctioned `gh`
- * mutation). Anything else — `gh repo delete`, `gh secret set`,
- * `gh api user`, a non-reviews endpoint — escalates.
+ * mutation).
  */
 const GH_REVIEW_PATH = /^repos\/[^/]+\/[^/]+\/pulls\/\d+\/(reviews|comments)$/;
+// Allowed `gh api` flags (each with a value constraint below). Anything else
+// (`--input`, `--jq`, `-i`, …) escalates.
+const GH_FIELD_FLAGS: ReadonlySet<string> = new Set([
+  '-f',
+  '-F',
+  '--field',
+  '--raw-field',
+]);
+const GH_HEADER_FLAGS: ReadonlySet<string> = new Set(['-H', '--header']);
+const GH_METHOD_FLAGS: ReadonlySet<string> = new Set(['-X', '--method']);
 
-/** True if a token is a command-injection / file-write flag (bare, `=`-valued,
- * or short-attached like `-o/tmp/x`). */
-function isDangerousFlag(tok: string): boolean {
-  const bare = tok.split('=', 1)[0];
-  if (DANGEROUS_FLAGS.has(bare)) return true;
-  // attached short-flag values: -oFILE, -OFILE, -cKEY=VAL
-  if (/^-[coO]./.test(tok)) return true;
-  return false;
+/** Split `--flag=value` into `[name, value]`; `[token, undefined]` if no `=`. */
+function splitEq(t: string): [string, string | undefined] {
+  const i = t.indexOf('=');
+  return i === -1 ? [t, undefined] : [t.slice(0, i), t.slice(i + 1)];
+}
+
+/**
+ * A path token that stays inside the (worktree-relative) tree: relative, with
+ * no `..` path segment. Absolute paths and `..` traversal escalate.
+ */
+function isInTreePathToken(t: string): boolean {
+  if (t.length === 0) return false;
+  if (t.startsWith('/')) return false; // absolute
+  if (t.split('/').includes('..')) return false; // traversal
+  return true;
+}
+
+interface ArgSpec {
+  flags: ReadonlySet<string>;
+  pathFlags?: ReadonlySet<string>;
+  rejectColonPositional?: boolean;
+}
+
+/**
+ * Validate the argument tail of an allowlisted command: allowed flags only,
+ * in-tree path-flag values, in-tree positionals. Escalate on anything else.
+ */
+function validateShellArgs(tokens: string[], spec: ArgSpec): ReviewDecision {
+  for (let i = 0; i < tokens.length; i++) {
+    const t = tokens[i];
+    if (t.startsWith('-')) {
+      const [name, attached] = splitEq(t);
+      if (spec.pathFlags?.has(name)) {
+        const val = attached ?? tokens[++i];
+        if (val === undefined || !isInTreePathToken(val)) return 'escalate';
+        continue;
+      }
+      if (spec.flags.has(name)) continue;
+      return 'escalate';
+    }
+    // positional
+    if (spec.rejectColonPositional && t.includes(':')) return 'escalate';
+    if (!isInTreePathToken(t)) return 'escalate';
+  }
+  return 'approve';
 }
 
 function classifyGh(argv: string[], policy: ReviewPolicy): ReviewDecision {
   if (!policy.comment) return 'escalate';
   if (argv[1] !== 'api') return 'escalate';
   const rest = argv.slice(2);
-  // `gh api` executes exactly ONE endpoint: the FIRST bare positional. We must
-  // pin that positional to a review/comment path — a mere "some token looks
-  // like a review path" check is decoy-bypassable
-  // (`gh api <bad-endpoint> repos/o/r/pulls/1/reviews`).
+  // `gh api` executes exactly ONE endpoint: the FIRST bare positional. Pin it
+  // to a review/comment path (a "some token matches" check is decoy-bypassable
+  // via `gh api <bad-endpoint> repos/o/r/pulls/1/reviews`).
   let endpoint: string | undefined;
   for (let i = 0; i < rest.length; i++) {
     const t = rest[i];
-    // Reject any non-POST HTTP method override (`-X DELETE`, `--method PUT`,
-    // `-XDELETE`, `--method=GET`, …); consume the separate-token value.
-    if (t === '-X' || t === '--method') {
-      if (rest[i + 1] !== 'POST') return 'escalate';
-      i++;
-      continue;
+    if (t.startsWith('-')) {
+      const [name, attached] = splitEq(t);
+      if (GH_METHOD_FLAGS.has(name)) {
+        const val = attached ?? rest[++i];
+        if (val !== 'POST') return 'escalate'; // only POST a review
+        continue;
+      }
+      if (GH_FIELD_FLAGS.has(name)) {
+        const val = attached ?? rest[++i];
+        // `@` = read-file-from-disk (e.g. `-F body=@/home/user/.ssh/id_rsa`),
+        // an exfiltration primitive.
+        if (val === undefined || val.includes('@')) return 'escalate';
+        continue;
+      }
+      if (GH_HEADER_FLAGS.has(name)) {
+        const val = attached ?? rest[++i];
+        if (val === undefined) return 'escalate';
+        continue;
+      }
+      return 'escalate'; // unknown gh flag (--input, --jq, …)
     }
-    const m = t.match(/^(?:-X|--method=)(.+)$/);
-    if (m) {
-      if (m[1] !== 'POST') return 'escalate';
-      continue;
-    }
-    if (t.startsWith('-')) continue; // some other flag
-    if (endpoint === undefined) endpoint = t; // first bare positional = endpoint
+    if (endpoint === undefined) endpoint = t; // first bare positional
   }
   if (endpoint === undefined || !GH_REVIEW_PATH.test(endpoint)) {
     return 'escalate';
@@ -188,22 +312,73 @@ function classifyShell(command: unknown, policy: ReviewPolicy): ReviewDecision {
   const cmd = argv[0];
   if (cmd === undefined || cmd.length === 0) return 'escalate';
 
-  // Global dangerous-flag scan: any command-injection / file-write flag on
-  // ANY allowlisted command forces escalation (defeats e.g.
-  // `git diff --ext-diff`, `git diff --output=/etc/x`, `tsc --outFile ...`).
-  for (const tok of argv.slice(1)) {
-    if (isDangerousFlag(tok)) return 'escalate';
+  switch (cmd) {
+    case 'gh':
+      return classifyGh(argv, policy);
+    case 'mkdir':
+      return classifyMkdir(argv);
+    case 'git':
+      if (!GIT_SUBCOMMANDS.has(argv[1])) return 'escalate';
+      return validateShellArgs(argv.slice(2), { flags: GIT_FLAGS });
+    case 'npm':
+    case 'pnpm':
+    case 'yarn':
+      if (!NPM_SUBCOMMANDS.has(argv[1])) return 'escalate';
+      return validateShellArgs(argv.slice(2), { flags: NPM_FLAGS });
+    case 'cargo':
+      if (!CARGO_SUBCOMMANDS.has(argv[1])) return 'escalate';
+      return validateShellArgs(argv.slice(2), { flags: CARGO_FLAGS });
+    case 'go':
+      if (!GO_SUBCOMMANDS.has(argv[1])) return 'escalate';
+      return validateShellArgs(argv.slice(2), { flags: GO_FLAGS });
+    case 'make':
+      if (!MAKE_SUBCOMMANDS.has(argv[1])) return 'escalate';
+      return validateShellArgs(argv.slice(2), { flags: MAKE_FLAGS });
+    case 'mvn':
+    case 'mvnw':
+    case './mvnw':
+    case 'gradle':
+    case 'gradlew':
+    case './gradlew':
+      return validateShellArgs(argv.slice(1), {
+        flags: MVN_GRADLE_FLAGS,
+        rejectColonPositional: true,
+      });
+    case 'tsc':
+      return validateShellArgs(argv.slice(1), {
+        flags: TSC_FLAGS,
+        pathFlags: TSC_PATH_FLAGS,
+      });
+    case 'qwen':
+      if (argv[1] !== 'review') return 'escalate';
+      if (!QWEN_REVIEW_SUBCOMMANDS.has(argv[2])) return 'escalate';
+      return validateShellArgs(argv.slice(3), { flags: QWEN_FLAGS });
+    default:
+      return 'escalate';
   }
+}
 
-  // The PR-comment post is a narrowly-scoped `gh api` invocation.
-  if (cmd === 'gh') return classifyGh(argv, policy);
-  // mkdir is allowed only for creating dirs under a real `.qwen` segment.
-  if (cmd === 'mkdir') return classifyMkdir(argv);
-
-  const allowed = SHELL_ALLOWLIST[cmd];
-  if (allowed === undefined) return 'escalate';
-  if (allowed === true) return 'approve';
-  return argv[1] !== undefined && allowed.has(argv[1]) ? 'approve' : 'escalate';
+/**
+ * An `edit`/`write` under `autofix` may auto-approve ONLY when its target path
+ * resolves strictly inside the review worktree. Reads both `file_path` and
+ * `path` (the two ACP path field names). Pure path math — no fs.
+ */
+function classifyEdit(
+  rawInput: Record<string, unknown> | undefined,
+  worktreeRoot: string | null,
+): ReviewDecision {
+  if (typeof worktreeRoot !== 'string' || worktreeRoot.length === 0) {
+    return 'escalate';
+  }
+  const raw = rawInput?.['file_path'] ?? rawInput?.['path'];
+  if (typeof raw !== 'string' || raw.length === 0) return 'escalate';
+  const rootAbs = resolve(worktreeRoot);
+  const targetAbs = resolve(rootAbs, raw);
+  const rel = relative(rootAbs, targetAbs);
+  if (rel.length === 0) return 'approve'; // path === root (degenerate, inside)
+  if (isAbsolute(rel)) return 'escalate'; // different filesystem root
+  if (rel === '..' || rel.startsWith('..' + sep)) return 'escalate'; // escapes
+  return 'approve';
 }
 
 export function classifyReviewToolCall(
@@ -217,7 +392,9 @@ export function classifyReviewToolCall(
     case 'search':
       return 'approve';
     case 'edit':
-      return policy.autofix ? 'approve' : 'escalate';
+      return policy.autofix
+        ? classifyEdit(toolCall.rawInput, policy.worktreeRoot)
+        : 'escalate';
     case 'execute':
       return classifyShell(toolCall.rawInput?.['command'], policy);
     case 'fetch': // exfiltration vector
