@@ -17,9 +17,201 @@
   gap: 12px;
 }
 
+.managerLayout {
+  display: grid;
+  min-width: 0;
+  gap: 16px;
+}
+
+.managerLayout[data-details-open='true'] {
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px);
+}
+
+.sectionHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.platformRail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 10px;
+}
+
+.platformRailButton,
+.platformCard {
+  appearance: none;
+  display: flex;
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--card);
+  color: var(--card-foreground);
+  cursor: pointer;
+}
+
+.platformRailButton {
+  align-items: center;
+  gap: 9px;
+  padding: 10px 12px;
+  text-align: start;
+}
+
+.platformRailButton:hover,
+.platformCard:hover {
+  border-color: color-mix(in oklab, var(--primary) 45%, var(--border));
+  background: var(--accent);
+}
+
+.platformRailButton:focus-visible,
+.platformCard:focus-visible,
+.channelSummary:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.platformMark {
+  display: inline-flex;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  background: var(--muted);
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.platformSearch {
+  position: relative;
+  display: block;
+}
+
+.platformSearch > svg {
+  position: absolute;
+  z-index: 1;
+  top: 50%;
+  left: 11px;
+  width: 16px;
+  height: 16px;
+  transform: translateY(-50%);
+  color: var(--muted-foreground);
+}
+
+.platformSearch input {
+  padding-left: 34px;
+}
+
+.platformGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.platformCard {
+  flex-direction: column;
+  align-items: center;
+  gap: 7px;
+  padding: 18px 12px;
+  text-align: center;
+}
+
+.platformName {
+  overflow: hidden;
+  max-width: 100%;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.platformAuth {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
 .channelCard {
   position: relative;
   border-inline-start: 3px solid var(--muted-foreground);
+}
+
+.channelCard[data-selected='true'] {
+  box-shadow: 0 0 0 1px var(--ring);
+}
+
+.channelSummary {
+  appearance: none;
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.detailsPanel {
+  position: sticky;
+  top: 0;
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--card);
+}
+
+.detailsHeader,
+.detailsRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.detailsActions {
+  display: grid;
+  gap: 8px;
+}
+
+.detailsActions > button {
+  justify-content: flex-start;
+}
+
+.pairingSection {
+  display: grid;
+  gap: 10px;
+  padding-block-start: 14px;
+  border-block-start: 1px solid var(--border);
+}
+
+.pairingRequest {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--muted);
+}
+
+.pairingCode {
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
 }
 
 .channelCard[data-runtime-state='connected'] {
@@ -56,6 +248,20 @@
 
   .addButton {
     width: 100%;
+  }
+
+  .platformGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@container panel-body (max-width: 900px) {
+  .managerLayout[data-details-open='true'] {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .detailsPanel {
+    position: static;
   }
 }
 

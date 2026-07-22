@@ -187,6 +187,7 @@ const {
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useActions: () => mockSessionActions,
+  useChannels: () => ({ snapshot: undefined }),
   useConnection: () => mockConnection,
   useDaemonFollowupSuggestion: () => ({
     followupState: null,
@@ -518,6 +519,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
       sessionListReloadToken?: number;
       collapsed?: boolean;
       onOpenPlugins?: () => void;
+      onOpenChannels?: () => void;
       onOpenDaemonStatus?: () => void;
       onOpenSessions?: () => void;
       onOpenSplitView?: () => void;
@@ -541,6 +543,15 @@ vi.mock('./components/sidebar/WebShellSidebar', async () => {
             onClick: props.onNewSession,
           },
           'new session',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-channels-sidebar',
+            type: 'button',
+            onClick: props.onOpenChannels,
+          },
+          'open channels',
         ),
         React.createElement(
           'button',
@@ -4210,6 +4221,32 @@ describe('App session callbacks', () => {
       expect(document.activeElement).toBe(restoredTrigger);
     },
   );
+
+  it('opens Channels from the top-level sidebar and returns to chat', async () => {
+    const { container } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="open-channels-sidebar"]',
+        )
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(
+      container.querySelector('[data-testid="channels-manager"]'),
+    ).not.toBeNull();
+
+    const back = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'Back');
+    await act(async () => {
+      back?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
 
   it('opens Channels in the selected secondary workspace before a session exists', async () => {
     mockConnection.sessionId = undefined;

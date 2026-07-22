@@ -5,7 +5,13 @@
  */
 
 import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
-import { sanitizeLogText } from '@qwen-code/channel-base';
+import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  PairingStore,
+  sanitizeLogText,
+  type PairingRequest,
+} from '@qwen-code/channel-base';
+import { resolveChannelCwd } from '../commands/channel/channel-cwd.js';
 import { getPlugin } from '../commands/channel/channel-registry.js';
 import type {
   ChannelSecretUpdate,
@@ -66,6 +72,15 @@ export interface ChannelMutationResult {
   instance: ChannelInstanceSnapshot;
 }
 
+export interface ChannelPairingRequestsSnapshot {
+  requests: PairingRequest[];
+}
+
+export interface ChannelPairingApprovalResult
+  extends ChannelPairingRequestsSnapshot {
+  approved: PairingRequest;
+}
+
 export interface ChannelManagementService {
   list(): Promise<DaemonChannelsSnapshot>;
   upsert(
@@ -83,6 +98,11 @@ export interface ChannelManagementService {
   start(name: string): Promise<ChannelMutationResult>;
   stop(name: string): Promise<ChannelMutationResult>;
   restart(name: string): Promise<ChannelMutationResult>;
+  pairingRequests(name: string): Promise<ChannelPairingRequestsSnapshot>;
+  approvePairing(
+    name: string,
+    code: string,
+  ): Promise<ChannelPairingApprovalResult>;
 }
 
 interface ChannelManagementSettingsStore {
@@ -369,6 +389,39 @@ export function createChannelManagementService(
     }
   };
 
+  const pairingStoreFor = (name: string): PairingStore => {
+    assertManageableInstanceName(name);
+    const config = opts.store.snapshot().channels[name];
+    if (!config) {
+      throw new ChannelManagementError(
+        'channel_instance_not_found',
+        `Channel "${name}" is not configured in this workspace.`,
+      );
+    }
+    if (config['senderPolicy'] !== 'pairing') {
+      throw new ChannelManagementError(
+        'channel_pairing_not_enabled',
+        `Channel "${name}" does not use pairing mode.`,
+      );
+    }
+    return new PairingStore(name, opts.workspaceCwd);
+  };
+
+  const assertWorkspaceConfig = (config: Record<string, unknown>): void => {
+    const rawCwd = config['cwd'];
+    if (typeof rawCwd !== 'string') return;
+    const workspaceCwd = canonicalizeWorkspace(opts.workspaceCwd);
+    const channelCwd = canonicalizeWorkspace(
+      resolveChannelCwd(rawCwd, workspaceCwd),
+    );
+    if (channelCwd !== workspaceCwd) {
+      throw new ChannelManagementError(
+        'channel_workspace_mismatch',
+        'Channel workspace must match the selected workspace.',
+      );
+    }
+  };
+
   const service: ChannelManagementService = {
     async list() {
       return listFrom(opts.store.snapshot());
@@ -376,6 +429,7 @@ export function createChannelManagementService(
     async upsert(name, request) {
       return inMutationLane(async () => {
         assertManageableInstanceName(name);
+        assertWorkspaceConfig(request.config);
         const committedNames = opts.manager.committedChannelNames();
         const active = committedNames.includes(name);
         if (active) assertOwnedRuntime(name);
@@ -511,6 +565,20 @@ export function createChannelManagementService(
         }
         return resultFor(name, persisted);
       });
+    },
+    async pairingRequests(name) {
+      return { requests: pairingStoreFor(name).listPending() };
+    },
+    async approvePairing(name, code) {
+      const store = pairingStoreFor(name);
+      const approved = store.approve(code);
+      if (!approved) {
+        throw new ChannelManagementError(
+          'channel_pairing_request_not_found',
+          'Pairing request was not found or has expired.',
+        );
+      }
+      return { approved, requests: store.listPending() };
     },
   };
   return service;

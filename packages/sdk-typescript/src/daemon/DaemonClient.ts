@@ -113,6 +113,9 @@ import type {
   DaemonChannelAuthCommitRequest,
   DaemonChannelAuthSession,
   DaemonChannelMutationResult,
+  DaemonChannelPairingApprovalRequest,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingRequestsSnapshot,
   DaemonChannelsSnapshot,
   DaemonChannelTypeCatalog,
   DaemonChannelUpsertRequest,
@@ -3331,6 +3334,35 @@ export class DaemonClient {
     );
   }
 
+  workspaceChannelPairingRequests(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRequestsSnapshot> {
+    return this.jsonRequest<DaemonChannelPairingRequestsSnapshot>(
+      `/workspace/channels/${urlEncode(name)}/pairing-requests`,
+      'GET /workspace/channels/:name/pairing-requests',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  approveWorkspaceChannelPairing(
+    name: string,
+    request: DaemonChannelPairingApprovalRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalResult> {
+    return this.jsonRequest<DaemonChannelPairingApprovalResult>(
+      `/workspace/channels/${urlEncode(name)}/pairing-requests/approve`,
+      'POST /workspace/channels/:name/pairing-requests/approve',
+      {
+        method: 'POST',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
+    );
+  }
+
   beginWorkspaceChannelAuth(
     name: string,
     request: DaemonChannelAuthBeginRequest,
@@ -4411,6 +4443,37 @@ export class WorkspaceDaemonClient {
       '/channels',
       'GET /workspaces/:workspace/channels',
       { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  workspaceChannelPairingRequests(
+    name: string,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingRequestsSnapshot> {
+    return this.client.workspaceJsonRequest<DaemonChannelPairingRequestsSnapshot>(
+      this.workspaceSelector,
+      `/channels/${urlEncode(name)}/pairing-requests`,
+      'GET /workspaces/:workspace/channels/:name/pairing-requests',
+      { clientId: opts?.clientId, timeoutMs: opts?.timeoutMs, mode: 'rest' },
+    );
+  }
+
+  approveWorkspaceChannelPairing(
+    name: string,
+    request: DaemonChannelPairingApprovalRequest,
+    opts?: DaemonChannelManagementOptions,
+  ): Promise<DaemonChannelPairingApprovalResult> {
+    return this.client.workspaceJsonRequest<DaemonChannelPairingApprovalResult>(
+      this.workspaceSelector,
+      `/channels/${urlEncode(name)}/pairing-requests/approve`,
+      'POST /workspaces/:workspace/channels/:name/pairing-requests/approve',
+      {
+        method: 'POST',
+        body: request,
+        clientId: opts?.clientId,
+        timeoutMs: opts?.timeoutMs ?? CHANNEL_CONTROL_DEFAULT_TIMEOUT_MS,
+        mode: 'rest',
+      },
     );
   }
 

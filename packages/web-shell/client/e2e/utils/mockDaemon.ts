@@ -4,6 +4,7 @@ import {
   type DaemonChannelAuthSession,
   type DaemonChannelInstanceSnapshot,
   type DaemonChannelMutationResult,
+  type DaemonChannelPairingRequest,
   type DaemonChannelsSnapshot,
   type DaemonChannelTypeCatalog,
   type DaemonChannelUpsertRequest,
@@ -74,6 +75,7 @@ export interface MockChannelWorkspaceState {
     string,
     { session: DaemonChannelAuthSession; pollCount: number }
   >;
+  pairingRequests: Record<string, DaemonChannelPairingRequest[]>;
 }
 
 export interface MockDaemonController {
@@ -408,6 +410,7 @@ function createDefaultChannelWorkspace(
     catalog,
     snapshot: { revision: 'revision-1', instances },
     authSessions: {},
+    pairingRequests: {},
   };
 }
 
@@ -721,6 +724,12 @@ function isChannelMethod(method: string, path: string): boolean {
   if (/^channels\/[^/]+\/(start|stop|restart)$/.test(parsed.rest)) {
     return method === 'POST';
   }
+  if (/^channels\/[^/]+\/pairing-requests$/.test(parsed.rest)) {
+    return method === 'GET';
+  }
+  if (/^channels\/[^/]+\/pairing-requests\/approve$/.test(parsed.rest)) {
+    return method === 'POST';
+  }
   if (/^channels\/[^/]+\/auth-sessions$/.test(parsed.rest)) {
     return method === 'POST';
   }
@@ -846,6 +855,30 @@ async function handleChannelRoute(
     };
     await json(route, channelMutationResult(workspace, instance));
     return;
+  }
+
+  if (segments[2] === 'pairing-requests') {
+    const requests = workspace.pairingRequests[name] ?? [];
+    if (segments.length === 3 && method === 'GET') {
+      await json(route, { requests });
+      return;
+    }
+    if (segments[3] === 'approve' && method === 'POST') {
+      const code = getRecordValue(body, 'code');
+      const approved = requests.find((request) => request.code === code);
+      if (!approved) {
+        await json(route, { code: 'channel_pairing_request_not_found' }, 404);
+        return;
+      }
+      workspace.pairingRequests[name] = requests.filter(
+        (request) => request.code !== code,
+      );
+      await json(route, {
+        approved,
+        requests: workspace.pairingRequests[name],
+      });
+      return;
+    }
   }
 
   if (segments[2] === 'auth-sessions') {

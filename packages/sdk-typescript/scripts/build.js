@@ -61,7 +61,8 @@ const rootDir = join(__dirname, '..');
 // ChatRecord transcript projection in the default UI API.
 // Bumped from 165KB to 168KB for Channel QR authentication helpers on both
 // client classes (171964-byte bundle, 3004 bytes over the previous limit).
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 168 * 1024;
+// Bumped to 170KB for workspace-scoped Channel pairing list/approve helpers.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 170 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

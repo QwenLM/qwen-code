@@ -451,6 +451,13 @@ export async function parseChannelConfig(
     'clientSecret',
     envResolution,
   );
+  const senderPolicy =
+    (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) || 'allowlist';
+  const defaultGroupPolicy =
+    channelType === 'dingtalk' &&
+    (senderPolicy === 'pairing' || senderPolicy === 'open')
+      ? 'open'
+      : 'disabled';
 
   return {
     ...resolvedRawConfig,
@@ -458,9 +465,7 @@ export async function parseChannelConfig(
     token,
     clientId,
     clientSecret,
-    senderPolicy:
-      (rawConfig['senderPolicy'] as ChannelConfig['senderPolicy']) ||
-      'allowlist',
+    senderPolicy,
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
@@ -475,7 +480,8 @@ export async function parseChannelConfig(
     memoryScope: parseMemoryScopeConfig(name, rawConfig),
     model: rawConfig['model'] as string | undefined,
     groupPolicy:
-      (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',
+      (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) ||
+      defaultGroupPolicy,
     dmPolicy: (rawConfig['dmPolicy'] as ChannelConfig['dmPolicy']) || 'open',
     groups: (rawConfig['groups'] as ChannelConfig['groups']) || {},
     webhooks: parseWebhookConfig(name, rawConfig),

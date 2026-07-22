@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { PairingStore } from '@qwen-code/channel-base';
 import { describe, expect, it, vi } from 'vitest';
 import {
   isAllChannelSelectionName,
@@ -38,6 +42,7 @@ function setup(options: {
   snapshot?: ChannelSettingsSnapshot;
   committedNames?: string[];
   workspaceCwd?: string;
+  serviceWorkspaceCwd?: string;
 }) {
   let persisted = options.snapshot ?? settingsSnapshot();
   const store = {
@@ -151,7 +156,7 @@ function setup(options: {
     })),
   };
   const service = createChannelManagementService({
-    workspaceCwd: WORKSPACE,
+    workspaceCwd: options.serviceWorkspaceCwd ?? WORKSPACE,
     store,
     manager,
   });
@@ -297,6 +302,20 @@ describe('createChannelManagementService', () => {
     expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
   });
 
+  it('rejects a channel cwd outside the selected workspace before persisting', async () => {
+    const { service, store, manager } = setup({});
+
+    await expect(
+      service.upsert('bot', {
+        expectedRevision: 'rev-1',
+        config: { type: 'telegram', cwd: '/ws/secondary' },
+      }),
+    ).rejects.toMatchObject({ code: 'channel_workspace_mismatch' });
+
+    expect(store.upsert).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
   it('does not delete config when worker stop is unconfirmed', async () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['bot'],
@@ -393,6 +412,63 @@ describe('createChannelManagementService', () => {
     });
     expect(store.upsert).not.toHaveBeenCalled();
     expect(store.remove).not.toHaveBeenCalled();
+  });
+
+  it('lists and approves pairing requests only in the selected workspace', async () => {
+    const qwenHome = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'qwen-pairing-api-'),
+    );
+    const workspaceA = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ws-a-'));
+    const workspaceB = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-ws-b-'));
+    const originalQwenHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = qwenHome;
+
+    try {
+      const snapshot = settingsSnapshot({
+        channels: {
+          bot: { type: 'dingtalk', senderPolicy: 'pairing' },
+        },
+      });
+      const serviceA = setup({
+        snapshot,
+        serviceWorkspaceCwd: workspaceA,
+      }).service;
+      const serviceB = setup({
+        snapshot,
+        serviceWorkspaceCwd: workspaceB,
+      }).service;
+      const codeA = new PairingStore('bot', workspaceA).createRequest(
+        'sender-a',
+        'Alice',
+      )!;
+      new PairingStore('bot', workspaceB).createRequest('sender-b', 'Bob');
+
+      expect(await serviceA.pairingRequests('bot')).toMatchObject({
+        requests: [{ senderId: 'sender-a', senderName: 'Alice', code: codeA }],
+      });
+      expect(await serviceB.pairingRequests('bot')).toMatchObject({
+        requests: [{ senderId: 'sender-b', senderName: 'Bob' }],
+      });
+
+      const approved = await serviceA.approvePairing('bot', codeA);
+      expect(approved.approved).toMatchObject({
+        senderId: 'sender-a',
+        senderName: 'Alice',
+      });
+      expect(approved.requests).toEqual([]);
+      expect(new PairingStore('bot', workspaceA).isApproved('sender-a')).toBe(
+        true,
+      );
+      expect(new PairingStore('bot', workspaceB).isApproved('sender-a')).toBe(
+        false,
+      );
+    } finally {
+      if (originalQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = originalQwenHome;
+      for (const dir of [qwenHome, workspaceA, workspaceB]) {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    }
   });
 
   it('enables persisted startup once while preserving order and runtime state', async () => {

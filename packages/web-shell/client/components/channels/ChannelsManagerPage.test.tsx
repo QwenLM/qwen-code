@@ -25,53 +25,65 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-const { channelState, workspace, actions, authActions, channelOptions } =
-  vi.hoisted(() => {
-    const authActions = {
-      begin: vi.fn(),
-      status: vi.fn(),
-      qr: vi.fn(),
-      cancel: vi.fn(),
-      commit: vi.fn(),
-    };
-    return {
-      channelState: {
-        loading: false,
-        error: undefined as Error | undefined,
-        catalog: [
-          {
-            type: 'dingtalk',
-            displayName: 'DingTalk',
-            manageable: true,
-            fields: [],
-            auth: ['credentials'] as const,
-          },
-        ],
-        snapshot: {
-          revision: 'revision-1',
-          instances: {} as Record<string, DaemonChannelInstanceSnapshot>,
+const {
+  channelState,
+  workspace,
+  actions,
+  authActions,
+  pairingActions,
+  channelOptions,
+} = vi.hoisted(() => {
+  const authActions = {
+    begin: vi.fn(),
+    status: vi.fn(),
+    qr: vi.fn(),
+    cancel: vi.fn(),
+    commit: vi.fn(),
+  };
+  const pairingActions = {
+    list: vi.fn(),
+    approve: vi.fn(),
+  };
+  return {
+    channelState: {
+      loading: false,
+      error: undefined as Error | undefined,
+      catalog: [
+        {
+          type: 'dingtalk',
+          displayName: 'DingTalk',
+          manageable: true,
+          fields: [],
+          auth: ['credentials'] as const,
         },
+      ],
+      snapshot: {
+        revision: 'revision-1',
+        instances: {} as Record<string, DaemonChannelInstanceSnapshot>,
       },
-      workspace: {
-        client: {},
-        workspaceCwd: '/workspace/demo',
-        token: 'test-token' as string | undefined,
-        capabilities: { features: ['channel_management'] },
-      },
-      actions: {
-        reload: vi.fn(),
-        createOrUpdate: vi.fn(),
-        remove: vi.fn(),
-        setStartup: vi.fn(),
-        start: vi.fn(),
-        stop: vi.fn(),
-        restart: vi.fn(),
-        auth: authActions,
-      },
-      authActions,
-      channelOptions: { workspaceCwd: undefined as string | undefined },
-    };
-  });
+    },
+    workspace: {
+      client: {},
+      workspaceCwd: '/workspace/demo',
+      token: 'test-token' as string | undefined,
+      capabilities: { features: ['channel_management'] },
+    },
+    actions: {
+      reload: vi.fn(),
+      createOrUpdate: vi.fn(),
+      remove: vi.fn(),
+      setStartup: vi.fn(),
+      start: vi.fn(),
+      stop: vi.fn(),
+      restart: vi.fn(),
+      auth: authActions,
+      pairing: pairingActions,
+    },
+    authActions,
+    pairingActions,
+    channelOptions: { workspaceCwd: undefined as string | undefined },
+  };
+});
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useChannels: (options: { workspaceCwd?: string }) => {
@@ -124,30 +136,10 @@ function button(name: string): HTMLButtonElement {
   return match;
 }
 
-function elementWithText(selector: string, text: string): Element {
-  const match = Array.from(document.querySelectorAll(selector)).find(
-    (element) => element.textContent?.trim() === text,
-  );
-  if (!match) throw new Error(`Element not found: ${text}`);
-  return match;
-}
-
 function click(element: Element) {
   act(() => {
     element.dispatchEvent(
       new MouseEvent('click', { bubbles: true, cancelable: true }),
-    );
-  });
-}
-
-function pointerDown(element: Element) {
-  act(() => {
-    element.dispatchEvent(
-      new MouseEvent('pointerdown', {
-        bubbles: true,
-        cancelable: true,
-        button: 0,
-      }),
     );
   });
 }
@@ -190,6 +182,10 @@ beforeEach(() => {
     mock.mockReset();
     mock.mockResolvedValue(undefined);
   }
+  for (const mock of Object.values(pairingActions)) {
+    mock.mockReset();
+  }
+  pairingActions.list.mockResolvedValue({ requests: [] });
   authActions.begin.mockResolvedValue({
     id: 'auth-1',
     state: 'requesting',
@@ -223,6 +219,53 @@ describe('ChannelsManagerPage', () => {
     await flush();
 
     expect(actions.restart).toHaveBeenCalledWith('bot');
+  });
+
+  it('lists and approves pending senders for a pairing channel', async () => {
+    channelState.catalog[0] = {
+      ...channelState.catalog[0]!,
+      fields: [
+        { key: 'clientId', label: 'Client ID', kind: 'string' },
+        { key: 'clientSecret', label: 'Client Secret', kind: 'secret' },
+      ],
+    };
+    channelState.snapshot.instances.bot = instance('connected', {
+      config: { type: 'dingtalk', senderPolicy: 'pairing' },
+    });
+    pairingActions.list.mockResolvedValue({
+      requests: [
+        {
+          senderId: 'sender-1',
+          senderName: 'Alice',
+          code: 'ABCDEFGH',
+          createdAt: Date.now(),
+        },
+      ],
+    });
+    pairingActions.approve.mockResolvedValue({
+      approved: {
+        senderId: 'sender-1',
+        senderName: 'Alice',
+        code: 'ABCDEFGH',
+        createdAt: Date.now(),
+      },
+      requests: [],
+    });
+
+    await renderPage();
+    click(button('Edit bot'));
+    await flush();
+
+    expect(document.body.textContent).toContain('Pairing requests');
+    expect(document.body.textContent).toContain('ABCDEFGH');
+    click(button('Allow Alice'));
+    await flush();
+
+    expect(pairingActions.approve).toHaveBeenCalledWith('bot', 'ABCDEFGH');
+    expect(document.body.textContent).toContain(
+      'Ask them to send the message again.',
+    );
+    expect(document.body.textContent).not.toContain('ABCDEFGH');
   });
 
   it('explains when channel management is unsupported', async () => {
@@ -311,10 +354,8 @@ describe('ChannelsManagerPage', () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
-    const trigger = button('More actions for bot');
-    pointerDown(trigger);
-    await flush();
-    click(elementWithText('[role="menuitem"]', 'Edit bot'));
+    const trigger = button('Edit bot');
+    click(trigger);
     await flush();
 
     expect(
@@ -347,9 +388,7 @@ describe('ChannelsManagerPage', () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
-    pointerDown(button('More actions for bot'));
-    await flush();
-    click(elementWithText('[role="menuitem"]', 'Edit bot'));
+    click(button('Edit bot'));
     await flush();
     click(button('Save changes'));
     await flush();
@@ -372,15 +411,11 @@ describe('ChannelsManagerPage', () => {
     });
     await renderPage();
 
-    pointerDown(button('More actions for bot'));
-    await flush();
-
-    const item = elementWithText(
-      '[role="menuitem"]',
-      'Configuration is read-only',
-    );
-    expect(item.getAttribute('data-disabled')).not.toBeNull();
-    click(item);
+    expect(
+      Array.from(document.querySelectorAll('button')).some(
+        (element) => element.textContent?.trim() === 'Edit configuration',
+      ),
+    ).toBe(false);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
   });
 
@@ -388,9 +423,7 @@ describe('ChannelsManagerPage', () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
-    pointerDown(button('More actions for bot'));
-    await flush();
-    click(elementWithText('[role="menuitem"]', 'Delete bot'));
+    click(button('Delete bot'));
     await flush();
     expect(actions.remove).not.toHaveBeenCalled();
 
@@ -457,9 +490,7 @@ describe('ChannelsManagerPage', () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
-    pointerDown(button('More actions for bot'));
-    await flush();
-    click(elementWithText('[role="menuitem"]', 'Delete bot'));
+    click(button('Delete bot'));
     await flush();
     click(button('Delete channel'));
     await flush();
@@ -487,9 +518,7 @@ describe('ChannelsManagerPage', () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
-    pointerDown(button('More actions for bot'));
-    await flush();
-    click(elementWithText('[role="menuitem"]', 'Delete bot'));
+    click(button('Delete bot'));
     await flush();
     click(button('Delete channel'));
     await flush();
@@ -565,12 +594,9 @@ describe('ChannelsManagerPage', () => {
       'Channel settings are out of date',
     );
     expect(button('Add channel').disabled).toBe(true);
-    expect(button('More actions for other').disabled).toBe(true);
-    expect(
-      document.querySelector<HTMLInputElement>(
-        '[aria-label="Start other with serve"]',
-      )?.disabled,
-    ).toBe(true);
+    click(button('View details for other'));
+    expect(button('Delete other').disabled).toBe(true);
+    expect(button('Edit other').disabled).toBe(true);
     expect(button('Start other').disabled).toBe(false);
   });
 
@@ -652,11 +678,9 @@ describe('ChannelsManagerPage', () => {
     channelState.snapshot.instances.bot = instance('stopped');
     await renderPage();
 
-    const removedTrigger = button('More actions for bot');
+    const removedTrigger = button('Delete bot');
     removedTrigger.focus();
-    pointerDown(removedTrigger);
-    await flush();
-    click(elementWithText('[role="menuitem"]', 'Delete bot'));
+    click(removedTrigger);
     await flush();
     button('Delete channel').focus();
     click(button('Delete channel'));
@@ -694,7 +718,7 @@ describe('ChannelsManagerPage', () => {
     expect(headingRef.current?.textContent).toBe('Channels');
   });
 
-  it('opens QR authentication after a successful save-and-continue handoff', async () => {
+  it('only offers DingTalk, Feishu, and WeCom for new channels', async () => {
     channelState.catalog = [
       {
         type: 'qq',
@@ -703,32 +727,42 @@ describe('ChannelsManagerPage', () => {
         fields: [],
         auth: ['credentials', 'qr'] as const,
       },
+      {
+        type: 'weixin',
+        displayName: 'WeChat',
+        manageable: true,
+        fields: [],
+        auth: ['qr'] as const,
+      },
+      {
+        type: 'dingtalk',
+        displayName: 'DingTalk',
+        manageable: true,
+        fields: [],
+        auth: ['credentials'] as const,
+      },
+      {
+        type: 'feishu',
+        displayName: 'Feishu',
+        manageable: true,
+        fields: [],
+        auth: ['credentials'] as const,
+      },
+      {
+        type: 'wecom',
+        displayName: 'WeCom',
+        manageable: true,
+        fields: [],
+        auth: ['credentials'] as const,
+      },
     ];
     await renderPage();
 
-    click(button('Add channel'));
-    await flush();
-    const nameInput = document.querySelector<HTMLInputElement>(
-      '#channel-editor-name',
-    );
-    if (!nameInput) throw new Error('Channel name input not found');
-    act(() => {
-      const setter = Object.getOwnPropertyDescriptor(
-        HTMLInputElement.prototype,
-        'value',
-      )?.set;
-      setter?.call(nameInput, 'qq-main');
-      nameInput.dispatchEvent(new Event('input', { bubbles: true }));
-    });
-    click(button('Continue with QR code'));
-    click(button('Save and continue'));
-    await flush();
-
-    expect(actions.createOrUpdate).toHaveBeenCalledOnce();
-    expect(authActions.begin).toHaveBeenCalledWith('qq-main', {
-      channelType: 'qq',
-    });
-    expect(document.body.textContent).toContain('Authenticate qq-main');
+    expect(document.body.textContent).toContain('DingTalk');
+    expect(document.body.textContent).toContain('Feishu');
+    expect(document.body.textContent).toContain('WeCom');
+    expect(document.body.textContent).not.toContain('QQ');
+    expect(document.body.textContent).not.toContain('WeChat');
   });
 
   it('offers Authenticate only for configured QR types with auth capability and token', async () => {

@@ -127,6 +127,7 @@
 }
 
 .navIcon {
+  position: relative;
   width: 24px;
   height: 24px;
   flex: 0 0 24px;
@@ -134,6 +135,18 @@
   align-items: center;
   justify-content: center;
   color: currentColor;
+}
+
+.navIcon[data-attention='true']::after {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 6px;
+  height: 6px;
+  border: 1px solid var(--sidebar-background);
+  border-radius: 999px;
+  background: var(--destructive);
+  content: '';
 }
 
 .navIcon svg,

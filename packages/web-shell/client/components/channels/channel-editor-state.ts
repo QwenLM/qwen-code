@@ -47,6 +47,31 @@ export interface CreateChannelEditorStateOptions {
   expectedRevision?: string;
   instance?: DaemonChannelInstanceSnapshot;
   name?: string;
+  type?: string;
+}
+
+export interface ChannelCredentialPolicyFields {
+  id: string;
+  secret: string;
+}
+
+const CREDENTIAL_POLICY_FIELDS: Readonly<
+  Record<string, ChannelCredentialPolicyFields>
+> = {
+  dingtalk: { id: 'clientId', secret: 'clientSecret' },
+  feishu: { id: 'clientId', secret: 'clientSecret' },
+  wecom: { id: 'botId', secret: 'secret' },
+};
+
+export function channelCredentialPolicyFields(
+  descriptor: DaemonChannelTypeDescriptor | undefined,
+): ChannelCredentialPolicyFields | undefined {
+  const fields = descriptor
+    ? CREDENTIAL_POLICY_FIELDS[descriptor.type]
+    : undefined;
+  if (!fields) return undefined;
+  const keys = new Set(descriptor?.fields.map((field) => field.key));
+  return keys.has(fields.id) && keys.has(fields.secret) ? fields : undefined;
 }
 
 export const SHARED_CHANNEL_FIELDS: readonly DaemonChannelConfigFieldDescriptor[] =
@@ -55,7 +80,6 @@ export const SHARED_CHANNEL_FIELDS: readonly DaemonChannelConfigFieldDescriptor[
     { key: 'identity.displayName', label: 'Display name', kind: 'string' },
     { key: 'identity.description', label: 'Description', kind: 'string' },
     { key: 'model', label: 'Model', kind: 'string' },
-    { key: 'cwd', label: 'Workspace', kind: 'string' },
     {
       key: 'senderPolicy',
       label: 'Sender policy',
@@ -328,12 +352,15 @@ export function createChannelEditorState({
   expectedRevision = '',
   instance,
   name = '',
+  type: requestedType,
 }: CreateChannelEditorStateOptions): ChannelEditorState {
   const manageable = catalog.filter((descriptor) => descriptor.manageable);
   const configuredType =
     typeof instance?.config.type === 'string' ? instance.config.type : '';
   const descriptor =
-    manageable.find((item) => item.type === configuredType) ?? manageable[0];
+    manageable.find(
+      (item) => item.type === (configuredType || requestedType),
+    ) ?? manageable[0];
   const type = descriptor?.type ?? manageable[0]?.type ?? '';
   const secretKeys = new Set(
     descriptor?.fields
@@ -342,6 +369,7 @@ export function createChannelEditorState({
   );
   const preservedConfig = structuredClone(instance?.config ?? {});
   for (const key of secretKeys) delete preservedConfig[key];
+  delete preservedConfig['cwd'];
   if (Object.hasOwn(preservedConfig, 'webhooks')) {
     preservedConfig.webhooks = sanitizeWebhookConfig(preservedConfig.webhooks);
   }
@@ -359,6 +387,24 @@ export function createChannelEditorState({
     values.groupPolicy = 'disabled';
     values.dmPolicy = 'open';
     values.dispatchMode = 'steer';
+  }
+  const usesCredentialPolicyEditor = Boolean(
+    channelCredentialPolicyFields(descriptor),
+  );
+  const defaultedPolicyFields: string[] = [];
+  if (usesCredentialPolicyEditor) {
+    if (values.senderPolicy !== 'pairing' && values.senderPolicy !== 'open') {
+      values.senderPolicy = 'pairing';
+      defaultedPolicyFields.push('senderPolicy');
+    }
+    if (!instance || values.dmPolicy !== 'open') {
+      values.dmPolicy = 'open';
+      defaultedPolicyFields.push('dmPolicy');
+    }
+    if (!instance || values.groupPolicy !== 'open') {
+      values.groupPolicy = 'open';
+      defaultedPolicyFields.push('groupPolicy');
+    }
   }
   const secrets: Record<string, SecretEditorState> = {};
   for (const field of descriptor?.fields ?? []) {
@@ -401,7 +447,7 @@ export function createChannelEditorState({
     webhookSecrets,
     preservedConfig,
     authMethod,
-    dirtyFields: [],
+    dirtyFields: defaultedPolicyFields,
   };
 }
 

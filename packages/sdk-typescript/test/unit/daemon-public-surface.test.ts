@@ -32,6 +32,10 @@ import type {
   DaemonChannelInstanceSnapshot,
   DaemonChannelManagementOptions,
   DaemonChannelMutationResult,
+  DaemonChannelPairingApprovalRequest,
+  DaemonChannelPairingApprovalResult,
+  DaemonChannelPairingRequest,
+  DaemonChannelPairingRequestsSnapshot,
   DaemonChannelRuntimeState,
   DaemonChannelSecretState,
   DaemonChannelStartupRequest,
@@ -366,6 +370,12 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       expectedRevision: string;
     }>();
     expectTypeOf<DaemonChannelMutationResult>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRequest>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingRequestsSnapshot>().not.toBeNever();
+    expectTypeOf<DaemonChannelPairingApprovalRequest>().toEqualTypeOf<{
+      code: string;
+    }>();
+    expectTypeOf<DaemonChannelPairingApprovalResult>().not.toBeNever();
     expectTypeOf<DaemonChannelManagementOptions>().toEqualTypeOf<{
       clientId?: string;
       timeoutMs?: number;

@@ -15,10 +15,13 @@ import {
 import {
   AlertCircleIcon,
   ArrowLeftIcon,
-  EllipsisVerticalIcon,
+  PencilIcon,
   PlusIcon,
   QrCodeIcon,
   RadioTowerIcon,
+  RotateCwIcon,
+  Trash2Icon,
+  XIcon,
 } from 'lucide-react';
 import {
   DaemonHttpError,
@@ -51,14 +54,6 @@ import {
   CardTitle,
 } from '../ui/card';
 import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
-import {
   Empty,
   EmptyDescription,
   EmptyHeader,
@@ -72,6 +67,14 @@ import {
   type ChannelEditorQrHandoff,
 } from './ChannelEditorDialog';
 import { ChannelQrAuthDialog } from './ChannelQrAuthDialog';
+import {
+  ChannelPlatformPickerDialog,
+  platformMark,
+} from './ChannelPlatformPickerDialog';
+import {
+  isChannelPlatformAvailable,
+  suggestChannelName,
+} from './channel-platform';
 
 interface ChannelsManagerPageProps {
   onClose: () => void;
@@ -79,7 +82,9 @@ interface ChannelsManagerPageProps {
   workspaceCwd?: string;
 }
 
-type EditorIntent = { mode: 'add' } | { mode: 'edit'; name: string };
+type EditorIntent =
+  | { mode: 'add'; name: string; type: string }
+  | { mode: 'edit'; name: string };
 type FocusTarget = 'primary' | 'restart' | 'startup';
 interface QrDialogTarget {
   name: string;
@@ -130,6 +135,7 @@ export function ChannelsManagerPage({
     stop,
     restart,
     auth,
+    pairing,
   } = useChannels({ autoLoad: true, workspaceCwd: resolvedWorkspaceCwd });
   const supportsManagement =
     workspace.capabilities?.features.includes('channel_management') === true;
@@ -142,7 +148,11 @@ export function ChannelsManagerPage({
     () => ({ client: workspace.client, workspaceCwd: resolvedWorkspaceCwd }),
     [resolvedWorkspaceCwd, workspace.client],
   );
-  const hasManageableTypes = catalog.some((entry) => entry.manageable);
+  const availablePlatforms = useMemo(
+    () => catalog.filter(isChannelPlatformAvailable),
+    [catalog],
+  );
+  const hasManageableTypes = availablePlatforms.length > 0;
   const instances = useMemo(
     () =>
       Object.values(snapshot?.instances ?? {}).sort((left, right) =>
@@ -156,6 +166,10 @@ export function ChannelsManagerPage({
   const [revisionBlocked, setRevisionBlocked] = useState(false);
   const [deleteName, setDeleteName] = useState<string | null>(null);
   const [editorIntent, setEditorIntent] = useState<EditorIntent | null>(null);
+  const [platformPickerOpen, setPlatformPickerOpen] = useState(false);
+  const [selectedName, setSelectedName] = useState<string | null>(
+    () => instances[0]?.name ?? null,
+  );
   const [qrHandoff, setQrHandoff] = useState<QrDialogTarget | null>(null);
   const returnFocusRef = useRef<{ name: string; target: FocusTarget } | null>(
     null,
@@ -164,9 +178,10 @@ export function ChannelsManagerPage({
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const editorReturnFocusRef = useRef<HTMLElement | null>(null);
-  const moreActionRefs = useRef(new Map<string, HTMLButtonElement>());
   const restorePageFocusAfterDeleteRef = useRef(false);
   const blockedSnapshotRef = useRef(snapshot);
+  const previousWorkspaceIdentityRef = useRef(workspaceIdentity);
+  const autoSelectedWorkspaceRef = useRef<object | null>(null);
 
   const setActionRef = useCallback(
     (name: string, target: FocusTarget, element: HTMLButtonElement | null) => {
@@ -199,6 +214,33 @@ export function ChannelsManagerPage({
       setQrHandoff(null);
     }
   }, [qrHandoff, workspaceIdentity]);
+
+  useEffect(() => {
+    if (previousWorkspaceIdentityRef.current === workspaceIdentity) return;
+    previousWorkspaceIdentityRef.current = workspaceIdentity;
+    setPlatformPickerOpen(false);
+    setEditorIntent(null);
+    setQrHandoff(null);
+    setSelectedName(null);
+  }, [workspaceIdentity]);
+
+  useEffect(() => {
+    if (selectedName && !snapshot?.instances[selectedName]) {
+      setSelectedName(null);
+    }
+  }, [selectedName, snapshot?.instances]);
+
+  useEffect(() => {
+    if (
+      selectedName ||
+      instances.length === 0 ||
+      autoSelectedWorkspaceRef.current === workspaceIdentity
+    ) {
+      return;
+    }
+    autoSelectedWorkspaceRef.current = workspaceIdentity;
+    setSelectedName(instances[0]!.name);
+  }, [instances, selectedName, workspaceIdentity]);
 
   const runAction = useCallback(
     async (
@@ -272,7 +314,7 @@ export function ChannelsManagerPage({
     [catalog, t],
   );
 
-  const renderPrimaryActions = (channel: DaemonChannelInstanceSnapshot) => {
+  const renderPrimaryAction = (channel: DaemonChannelInstanceSnapshot) => {
     const disabled = !canManage || busyName !== null;
     const state = channel.runtime.state;
     if (state === 'stopped') {
@@ -311,46 +353,71 @@ export function ChannelsManagerPage({
         </Button>
       );
     }
-    return (
-      <>
-        {state === 'starting' ||
-        state === 'connected' ||
-        state === 'partial' ? (
-          <Button
-            ref={(element) => setActionRef(channel.name, 'primary', element)}
-            size="sm"
-            variant="outline"
-            disabled={disabled}
-            aria-label={t('channels.action.stopNamed', { name: channel.name })}
-            onClick={() =>
-              void runAction(channel.name, 'primary', () => stop(channel.name))
-            }
-          >
-            {busyName === channel.name && busyTarget === 'primary' ? (
-              <Spinner />
-            ) : null}
-            {t('channels.action.stop')}
-          </Button>
+    return state === 'starting' ||
+      state === 'connected' ||
+      state === 'partial' ? (
+      <Button
+        ref={(element) => setActionRef(channel.name, 'primary', element)}
+        size="sm"
+        variant="outline"
+        disabled={disabled}
+        aria-label={t('channels.action.stopNamed', { name: channel.name })}
+        onClick={() =>
+          void runAction(channel.name, 'primary', () => stop(channel.name))
+        }
+      >
+        {busyName === channel.name && busyTarget === 'primary' ? (
+          <Spinner />
         ) : null}
-        <Button
-          ref={(element) => setActionRef(channel.name, 'restart', element)}
-          size="sm"
-          disabled={disabled}
-          aria-label={t('channels.action.restartNamed', {
-            name: channel.name,
-          })}
-          onClick={() =>
-            void runAction(channel.name, 'restart', () => restart(channel.name))
-          }
-        >
-          {busyName === channel.name && busyTarget === 'restart' ? (
-            <Spinner />
-          ) : null}
-          {t('channels.action.restart')}
-        </Button>
-      </>
-    );
+        {t('channels.action.stop')}
+      </Button>
+    ) : null;
   };
+
+  const openPlatformPicker = (returnTarget: HTMLElement) => {
+    editorReturnFocusRef.current = returnTarget;
+    setQrHandoff(null);
+    setPlatformPickerOpen(true);
+  };
+
+  const selectPlatform = async (descriptor: (typeof catalog)[number]) => {
+    if (!isChannelPlatformAvailable(descriptor)) return;
+    const name = suggestChannelName(
+      descriptor.displayName,
+      descriptor.type,
+      instances.map((instance) => instance.name),
+    );
+    setPlatformPickerOpen(false);
+    if (
+      descriptor.auth.includes('qr') &&
+      !descriptor.auth.includes('credentials')
+    ) {
+      const created = await runAction(
+        '__create__',
+        null,
+        () =>
+          createOrUpdate(name, {
+            expectedRevision: snapshot?.revision ?? '',
+            config: { type: descriptor.type },
+          }),
+        true,
+      );
+      if (created) {
+        setSelectedName(name);
+        setQrHandoff({
+          name,
+          type: descriptor.type,
+          identity: workspaceIdentity,
+        });
+      }
+      return;
+    }
+    setEditorIntent({ mode: 'add', name, type: descriptor.type });
+  };
+
+  const selectedChannel = selectedName
+    ? snapshot?.instances[selectedName]
+    : undefined;
 
   return (
     <div className="flex w-full flex-col gap-6 pb-8">
@@ -391,14 +458,13 @@ export function ChannelsManagerPage({
           className={styles.addButton}
           disabled={
             !canManage ||
+            !snapshot ||
             !hasManageableTypes ||
             busyName !== null ||
             revisionBlocked
           }
           onClick={(event) => {
-            editorReturnFocusRef.current = event.currentTarget;
-            setQrHandoff(null);
-            setEditorIntent({ mode: 'add' });
+            openPlatformPicker(event.currentTarget);
           }}
         >
           <PlusIcon data-icon="inline-start" />
@@ -480,196 +546,321 @@ export function ChannelsManagerPage({
         </Alert>
       ) : null}
 
-      {!loading && !error && instances.length === 0 ? (
-        <Empty className="border">
-          <EmptyHeader>
-            <EmptyMedia variant="icon">
-              <RadioTowerIcon />
-            </EmptyMedia>
-            <EmptyTitle>{t('channels.empty.title')}</EmptyTitle>
-            <EmptyDescription>
-              {t('channels.empty.description')}
-            </EmptyDescription>
-          </EmptyHeader>
-        </Empty>
+      {actionErrors.__create__ && !editorIntent ? (
+        <Alert variant="destructive">
+          <AlertCircleIcon />
+          <AlertTitle>{t('channels.actionError')}</AlertTitle>
+          <AlertDescription>{actionErrors.__create__}</AlertDescription>
+        </Alert>
       ) : null}
 
-      {instances.length > 0 ? (
-        <div className={styles.channelGrid}>
-          {instances.map((channel) => {
-            const state = channel.runtime.state;
-            const disabled = !canManage || busyName !== null;
-            const configuredType =
-              typeof channel.config.type === 'string'
-                ? channel.config.type
-                : '';
-            const configManageable = catalog.some(
-              (entry) =>
-                entry.type === configuredType && entry.manageable === true,
-            );
-            const authDescriptor = catalog.find(
-              (entry) => entry.type === configuredType,
-            );
-            const supportsQr = authDescriptor?.auth.includes('qr') === true;
-            return (
-              <Card
-                key={channel.name}
-                size="sm"
-                className={styles.channelCard}
-                data-runtime-state={state}
-              >
-                <CardHeader>
-                  <CardTitle className="flex min-w-0 flex-wrap items-center gap-2">
-                    <span className="truncate">{channel.name}</span>
-                    <Badge variant={badgeVariant(state)}>
-                      {t(STATUS_KEYS[state])}
-                    </Badge>
-                    {channel.startsWithServe ? (
-                      <Badge variant="outline">
-                        {t('channels.startsWithServe')}
-                      </Badge>
-                    ) : null}
-                  </CardTitle>
-                  <CardDescription>{channelTypeLabel(channel)}</CardDescription>
-                  <CardAction>
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button
-                          ref={(element) => {
-                            if (element)
-                              moreActionRefs.current.set(channel.name, element);
-                            else moreActionRefs.current.delete(channel.name);
-                          }}
-                          variant="ghost"
-                          size="icon-sm"
-                          disabled={disabled || revisionBlocked}
-                          aria-label={t('channels.action.moreNamed', {
+      <div
+        className={styles.managerLayout}
+        data-details-open={Boolean(selectedChannel)}
+      >
+        <div className="flex min-w-0 flex-col gap-6">
+          <section
+            className="flex flex-col gap-3"
+            aria-labelledby="channels-yours"
+          >
+            <div className={styles.sectionHeader}>
+              <h2 id="channels-yours" className="text-sm font-semibold">
+                {t('channels.yours')}
+              </h2>
+              <Badge variant="outline">{instances.length}</Badge>
+            </div>
+            {!loading && !error && instances.length === 0 ? (
+              <Empty className="border">
+                <EmptyHeader>
+                  <EmptyMedia variant="icon">
+                    <RadioTowerIcon />
+                  </EmptyMedia>
+                  <EmptyTitle>{t('channels.empty.title')}</EmptyTitle>
+                  <EmptyDescription>
+                    {t('channels.empty.description')}
+                  </EmptyDescription>
+                </EmptyHeader>
+              </Empty>
+            ) : null}
+            {instances.length > 0 ? (
+              <div className={styles.channelGrid}>
+                {instances.map((channel) => {
+                  const state = channel.runtime.state;
+                  return (
+                    <Card
+                      key={channel.name}
+                      size="sm"
+                      className={styles.channelCard}
+                      data-runtime-state={state}
+                      data-selected={selectedName === channel.name}
+                    >
+                      <CardHeader>
+                        <button
+                          type="button"
+                          className={styles.channelSummary}
+                          aria-label={t('channels.details.openNamed', {
                             name: channel.name,
                           })}
+                          onClick={() => setSelectedName(channel.name)}
                         >
-                          <EllipsisVerticalIcon />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuGroup>
-                          <DropdownMenuItem
-                            disabled={!configManageable}
-                            onSelect={() => {
-                              if (!configManageable) return;
-                              editorReturnFocusRef.current =
-                                moreActionRefs.current.get(channel.name) ??
-                                addButtonRef.current;
-                              setQrHandoff(null);
-                              setEditorIntent({
-                                mode: 'edit',
-                                name: channel.name,
-                              });
-                            }}
+                          <CardTitle className="flex min-w-0 flex-wrap items-center gap-2">
+                            <span className="truncate">{channel.name}</span>
+                            <Badge variant={badgeVariant(state)}>
+                              {t(STATUS_KEYS[state])}
+                            </Badge>
+                          </CardTitle>
+                          <CardDescription>
+                            {channelTypeLabel(channel)}
+                          </CardDescription>
+                        </button>
+                        <CardAction>{renderPrimaryAction(channel)}</CardAction>
+                      </CardHeader>
+                      {channel.runtime.lastError ||
+                      actionErrors[channel.name] ? (
+                        <CardContent>
+                          <Alert
+                            variant="destructive"
+                            className={styles.errorAlert}
                           >
-                            {configManageable
-                              ? t('channels.action.editNamed', {
-                                  name: channel.name,
-                                })
-                              : t('channels.configurationReadOnly')}
-                          </DropdownMenuItem>
-                        </DropdownMenuGroup>
-                        <DropdownMenuSeparator />
-                        <DropdownMenuItem
-                          variant="destructive"
-                          onSelect={() => setDeleteName(channel.name)}
-                        >
-                          {t('channels.action.deleteNamed', {
-                            name: channel.name,
-                          })}
-                        </DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
-                  </CardAction>
-                </CardHeader>
-                <CardContent className="flex flex-col gap-3">
-                  {channel.runtime.lastError ? (
-                    <Alert variant="destructive" className={styles.errorAlert}>
-                      <AlertCircleIcon />
-                      <AlertTitle>{t('channels.runtimeError')}</AlertTitle>
-                      <AlertDescription>
-                        {channel.runtime.lastError}
-                      </AlertDescription>
-                    </Alert>
-                  ) : null}
-                  {actionErrors[channel.name] ? (
-                    <Alert variant="destructive" className={styles.errorAlert}>
-                      <AlertCircleIcon />
-                      <AlertTitle>{t('channels.actionError')}</AlertTitle>
-                      <AlertDescription>
-                        {actionErrors[channel.name]}
-                      </AlertDescription>
-                    </Alert>
-                  ) : null}
-                  <div className="flex flex-wrap items-center justify-between gap-3 border-t pt-3">
-                    <label className="flex items-center gap-2 text-sm">
-                      <span
-                        className="contents"
-                        ref={(element) =>
-                          setActionRef(
-                            channel.name,
-                            'startup',
-                            element?.querySelector('button') ?? null,
-                          )
-                        }
-                      >
-                        <Switch
-                          size="sm"
-                          checked={channel.startsWithServe}
-                          disabled={disabled || revisionBlocked}
-                          aria-label={t('channels.action.startWithServeNamed', {
-                            name: channel.name,
-                          })}
-                          onCheckedChange={(enabled) =>
-                            void runAction(
-                              channel.name,
-                              'startup',
-                              () =>
-                                setStartup(channel.name, {
-                                  expectedRevision: snapshot?.revision ?? '',
-                                  enabled,
-                                }),
-                              true,
-                            )
-                          }
-                        />
-                      </span>
-                      {t('channels.action.startWithServe')}
-                    </label>
-                    <div className="flex flex-wrap items-center gap-2">
-                      {canAuthenticate && supportsQr ? (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          disabled={busyName !== null}
-                          aria-label={t('channels.action.authenticateNamed', {
-                            name: channel.name,
-                          })}
-                          onClick={() =>
-                            setQrHandoff({
-                              name: channel.name,
-                              type: configuredType,
-                              identity: workspaceIdentity,
-                            })
-                          }
-                        >
-                          <QrCodeIcon />
-                          {t('channels.action.authenticate')}
-                        </Button>
+                            <AlertCircleIcon />
+                            <AlertTitle>
+                              {t('channels.runtimeError')}
+                            </AlertTitle>
+                            <AlertDescription>
+                              {actionErrors[channel.name] ??
+                                channel.runtime.lastError}
+                            </AlertDescription>
+                          </Alert>
+                        </CardContent>
                       ) : null}
-                      {renderPrimaryActions(channel)}
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
-            );
-          })}
+                    </Card>
+                  );
+                })}
+              </div>
+            ) : null}
+          </section>
+
+          {hasManageableTypes ? (
+            <section
+              className="flex flex-col gap-3"
+              aria-labelledby="channels-connect"
+            >
+              <div className={styles.sectionHeader}>
+                <h2 id="channels-connect" className="text-sm font-semibold">
+                  {t('channels.connectAnother')}
+                </h2>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  disabled={
+                    !canManage ||
+                    !snapshot ||
+                    busyName !== null ||
+                    revisionBlocked
+                  }
+                  onClick={(event) => openPlatformPicker(event.currentTarget)}
+                >
+                  {t('channels.viewAllPlatforms')}
+                </Button>
+              </div>
+              <div className={styles.platformRail}>
+                {availablePlatforms.slice(0, 4).map((descriptor) => (
+                  <button
+                    key={descriptor.type}
+                    type="button"
+                    className={styles.platformRailButton}
+                    disabled={
+                      !canManage ||
+                      !snapshot ||
+                      busyName !== null ||
+                      revisionBlocked
+                    }
+                    onClick={(event) => {
+                      editorReturnFocusRef.current = event.currentTarget;
+                      void selectPlatform(descriptor);
+                    }}
+                  >
+                    <span className={styles.platformMark} aria-hidden="true">
+                      {platformMark(descriptor)}
+                    </span>
+                    <span className="truncate text-sm font-medium">
+                      {descriptor.displayName}
+                    </span>
+                  </button>
+                ))}
+              </div>
+            </section>
+          ) : null}
         </div>
-      ) : null}
+
+        {selectedChannel ? (
+          <aside
+            className={styles.detailsPanel}
+            aria-label={t('channels.details.title')}
+          >
+            <div className={styles.detailsHeader}>
+              <div className="min-w-0">
+                <p className="text-xs text-muted-foreground">
+                  {t('channels.details.title')}
+                </p>
+                <h2 className="truncate text-lg font-semibold">
+                  {selectedChannel.name}
+                </h2>
+              </div>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                onClick={() => setSelectedName(null)}
+                aria-label={t('channels.details.closeNamed', {
+                  name: selectedChannel.name,
+                })}
+              >
+                <XIcon />
+              </Button>
+            </div>
+            <div className={styles.detailsRow}>
+              <span className="text-sm text-muted-foreground">
+                {t('channels.details.status')}
+              </span>
+              <Badge variant={badgeVariant(selectedChannel.runtime.state)}>
+                {t(STATUS_KEYS[selectedChannel.runtime.state])}
+              </Badge>
+            </div>
+            <div className={styles.detailsRow}>
+              <span className="text-sm text-muted-foreground">
+                {t('channels.editor.type')}
+              </span>
+              <span className="text-sm font-medium">
+                {channelTypeLabel(selectedChannel)}
+              </span>
+            </div>
+            <label className={styles.detailsRow}>
+              <span className="text-sm">
+                {t('channels.action.startWithServe')}
+              </span>
+              <span
+                className="contents"
+                ref={(element) =>
+                  setActionRef(
+                    selectedChannel.name,
+                    'startup',
+                    element?.querySelector('button') ?? null,
+                  )
+                }
+              >
+                <Switch
+                  size="sm"
+                  checked={selectedChannel.startsWithServe}
+                  disabled={!canManage || busyName !== null || revisionBlocked}
+                  aria-label={t('channels.action.startWithServeNamed', {
+                    name: selectedChannel.name,
+                  })}
+                  onCheckedChange={(enabled) =>
+                    void runAction(
+                      selectedChannel.name,
+                      'startup',
+                      () =>
+                        setStartup(selectedChannel.name, {
+                          expectedRevision: snapshot?.revision ?? '',
+                          enabled,
+                        }),
+                      true,
+                    )
+                  }
+                />
+              </span>
+            </label>
+            <div className={styles.detailsActions}>
+              {renderPrimaryAction(selectedChannel)}
+              {catalog.some(
+                (entry) =>
+                  entry.type === selectedChannel.config.type &&
+                  entry.manageable,
+              ) ? (
+                <Button
+                  variant="outline"
+                  disabled={!canManage || busyName !== null || revisionBlocked}
+                  aria-label={t('channels.action.editNamed', {
+                    name: selectedChannel.name,
+                  })}
+                  onClick={(event) => {
+                    editorReturnFocusRef.current = event.currentTarget;
+                    setQrHandoff(null);
+                    setEditorIntent({
+                      mode: 'edit',
+                      name: selectedChannel.name,
+                    });
+                  }}
+                >
+                  <PencilIcon />
+                  {t('channels.action.editConfiguration')}
+                </Button>
+              ) : null}
+              {canAuthenticate &&
+              catalog
+                .find((entry) => entry.type === selectedChannel.config.type)
+                ?.auth.includes('qr') ? (
+                <Button
+                  variant="outline"
+                  aria-label={t('channels.action.authenticateNamed', {
+                    name: selectedChannel.name,
+                  })}
+                  onClick={() =>
+                    setQrHandoff({
+                      name: selectedChannel.name,
+                      type: String(selectedChannel.config.type),
+                      identity: workspaceIdentity,
+                    })
+                  }
+                >
+                  <QrCodeIcon />
+                  {t('channels.action.authenticateAgain')}
+                </Button>
+              ) : null}
+              {selectedChannel.runtime.state !== 'stopped' ? (
+                <Button
+                  ref={(element) =>
+                    setActionRef(selectedChannel.name, 'restart', element)
+                  }
+                  variant="outline"
+                  disabled={!canManage || busyName !== null}
+                  aria-label={t('channels.action.restartNamed', {
+                    name: selectedChannel.name,
+                  })}
+                  onClick={() =>
+                    void runAction(selectedChannel.name, 'restart', () =>
+                      restart(selectedChannel.name),
+                    )
+                  }
+                >
+                  <RotateCwIcon />
+                  {t('channels.action.restart')}
+                </Button>
+              ) : null}
+              <Button
+                variant="ghost"
+                className="text-destructive"
+                disabled={!canManage || busyName !== null || revisionBlocked}
+                aria-label={t('channels.action.deleteNamed', {
+                  name: selectedChannel.name,
+                })}
+                onClick={() => setDeleteName(selectedChannel.name)}
+              >
+                <Trash2Icon />
+                {t('channels.action.deleteMenu')}
+              </Button>
+            </div>
+          </aside>
+        ) : null}
+      </div>
+
+      <ChannelPlatformPickerDialog
+        open={platformPickerOpen}
+        catalog={catalog}
+        returnFocusRef={editorReturnFocusRef}
+        onOpenChange={setPlatformPickerOpen}
+        onSelect={(descriptor) => void selectPlatform(descriptor)}
+      />
 
       {editorIntent && snapshot ? (
         <ChannelEditorDialog
@@ -679,6 +870,22 @@ export function ChannelsManagerPage({
           instance={
             editorIntent.mode === 'edit'
               ? snapshot.instances[editorIntent.name]
+              : undefined
+          }
+          initialName={
+            editorIntent.mode === 'add' ? editorIntent.name : undefined
+          }
+          initialType={
+            editorIntent.mode === 'add' ? editorIntent.type : undefined
+          }
+          workspaceCwd={resolvedWorkspaceCwd}
+          pairing={
+            editorIntent.mode === 'edit'
+              ? {
+                  canManage,
+                  list: pairing.list,
+                  approve: pairing.approve,
+                }
               : undefined
           }
           error={

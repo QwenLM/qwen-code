@@ -176,6 +176,33 @@ describe('parseChannelConfig', () => {
     expect(result.memoryScope).toBeUndefined();
   });
 
+  it.each(['pairing', 'open'] as const)(
+    'allows DingTalk conversations when sender policy is %s and channel policies are omitted',
+    async (senderPolicy) => {
+      const result = await parseChannelConfig('dingtalk', {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: 'client-secret',
+        senderPolicy,
+      });
+
+      expect(result.dmPolicy).toBe('open');
+      expect(result.groupPolicy).toBe('open');
+    },
+  );
+
+  it('preserves an explicit disabled DingTalk group policy', async () => {
+    const result = await parseChannelConfig('dingtalk', {
+      type: 'dingtalk',
+      clientId: 'client-id',
+      clientSecret: 'client-secret',
+      senderPolicy: 'open',
+      groupPolicy: 'disabled',
+    });
+
+    expect(result.groupPolicy).toBe('disabled');
+  });
+
   it('resolves env vars in token, clientId, clientSecret', async () => {
     process.env['TEST_TOKEN'] = 'tok123';
     process.env['TEST_CID'] = 'cid456';

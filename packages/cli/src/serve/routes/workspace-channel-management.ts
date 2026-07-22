@@ -175,6 +175,21 @@ function parseStartupRequest(
   };
 }
 
+function parsePairingCode(
+  body: Record<string, unknown>,
+  res: Response,
+): string | undefined {
+  const code = body['code'];
+  if (typeof code !== 'string' || !/^[A-HJ-NP-Z2-9]{8}$/iu.test(code.trim())) {
+    res.status(400).json({
+      error: '`code` must be an 8-character pairing code.',
+      code: 'invalid_channel_pairing_code',
+    });
+    return undefined;
+  }
+  return code.trim().toUpperCase();
+}
+
 function errorCode(error: unknown): string | undefined {
   if (!error || typeof error !== 'object') return undefined;
   try {
@@ -202,6 +217,8 @@ const ERROR_STATUS = new Map<string, number>([
   ['channel_worker_stop_failed', 500],
   ['daemon_draining', 503],
   ['channel_worker_unavailable', 503],
+  ['channel_pairing_not_enabled', 409],
+  ['channel_pairing_request_not_found', 404],
   ['channel_auth_instance_mismatch', 400],
   ['channel_auth_unsupported', 400],
   ['channel_auth_qr_payload_too_large', 400],
@@ -345,6 +362,8 @@ export function registerWorkspaceChannelManagementRoutes(
   const startMutation = deps.mutate({ strict: true });
   const stopMutation = deps.mutate({ strict: true });
   const restartMutation = deps.mutate({ strict: true });
+  const readPairingRequests = deps.mutate({ strict: true });
+  const approvePairingRequest = deps.mutate({ strict: true });
   const beginAuth = deps.authManager
     ? deps.mutate({ strict: true })
     : undefined;
@@ -551,6 +570,54 @@ export function registerWorkspaceChannelManagementRoutes(
         sendManagementError(res, error);
       }
     });
+
+    app.get(
+      `${prefix}/channels/:name/pairing-requests`,
+      readPairingRequests,
+      async (req, res) => {
+        const target = await resolveTarget(
+          req,
+          res,
+          resolveRuntime,
+          deps.resolveService,
+        );
+        if (!target) return;
+        if (deps.parseAndValidateClientId(req, res, target.runtime) === null)
+          return;
+        const name = parseInstanceName(req, res);
+        if (!name) return;
+        try {
+          res.status(200).json(await target.service.pairingRequests(name));
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
+
+    app.post(
+      `${prefix}/channels/:name/pairing-requests/approve`,
+      approvePairingRequest,
+      async (req, res) => {
+        const target = await resolveTarget(
+          req,
+          res,
+          resolveRuntime,
+          deps.resolveService,
+        );
+        if (!target) return;
+        if (deps.parseAndValidateClientId(req, res, target.runtime) === null)
+          return;
+        const name = parseInstanceName(req, res);
+        if (!name) return;
+        const code = parsePairingCode(deps.safeBody(req), res);
+        if (!code) return;
+        try {
+          res.status(200).json(await target.service.approvePairing(name, code));
+        } catch (error) {
+          sendManagementError(res, error);
+        }
+      },
+    );
 
     app.put(`${prefix}/channels/:name`, putMutation, async (req, res) => {
       const target = await resolveTarget(

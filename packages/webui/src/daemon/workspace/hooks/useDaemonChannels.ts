@@ -154,7 +154,8 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
       ),
     [mutate, requireWorkspace],
   );
-  const auth = useMemo(() => ({
+  const auth = useMemo(
+    () => ({
       begin: async (name: string, request: DaemonChannelAuthBeginRequest) =>
         withActionTimeout(
           requireWorkspace().beginWorkspaceChannelAuth(name, request),
@@ -193,7 +194,24 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
         }
         return result;
       },
-    }), [identity, requireWorkspace]);
+    }),
+    [identity, requireWorkspace],
+  );
+  const pairing = useMemo(
+    () => ({
+      list: (name: string) =>
+        withActionTimeout(
+          requireWorkspace().workspaceChannelPairingRequests(name),
+          'Load channel pairing requests timed out',
+        ),
+      approve: (name: string, code: string) =>
+        withActionTimeout(
+          requireWorkspace().approveWorkspaceChannelPairing(name, { code }),
+          'Approve channel pairing timed out',
+        ),
+    }),
+    [requireWorkspace],
+  );
 
   const current = resource.data;
   return {
@@ -213,5 +231,6 @@ export function useDaemonChannels(options: DaemonChannelsOptions = {}) {
     stop,
     restart,
     auth,
+    pairing,
   };
 }

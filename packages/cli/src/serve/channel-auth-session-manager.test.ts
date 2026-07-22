@@ -59,6 +59,8 @@ function managementService(
     start: vi.fn(),
     stop: vi.fn(),
     restart: vi.fn(),
+    pairingRequests: vi.fn(),
+    approvePairing: vi.fn(),
   };
 }
 

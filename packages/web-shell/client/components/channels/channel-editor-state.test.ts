@@ -46,6 +46,50 @@ const descriptor: DaemonChannelTypeDescriptor = {
   ],
 };
 
+const dingtalkDescriptor: DaemonChannelTypeDescriptor = {
+  type: 'dingtalk',
+  displayName: 'DingTalk',
+  manageable: true,
+  auth: ['credentials'],
+  fields: [
+    { key: 'clientId', label: 'Client ID', kind: 'string', required: true },
+    {
+      key: 'clientSecret',
+      label: 'Client Secret',
+      kind: 'secret',
+      required: true,
+    },
+  ],
+};
+
+const feishuDescriptor: DaemonChannelTypeDescriptor = {
+  type: 'feishu',
+  displayName: 'Feishu',
+  manageable: true,
+  auth: ['credentials'],
+  fields: [
+    { key: 'clientId', label: 'App ID', kind: 'string', required: true },
+    {
+      key: 'clientSecret',
+      label: 'App Secret',
+      kind: 'secret',
+      required: true,
+    },
+  ],
+};
+
+const wecomDescriptor: DaemonChannelTypeDescriptor = {
+  type: 'wecom',
+  displayName: 'WeCom',
+  manageable: true,
+  auth: ['credentials'],
+  fields: [
+    { key: 'botId', label: 'Bot ID', kind: 'string', required: true },
+    { key: 'secret', label: 'Bot Secret', kind: 'secret', required: true },
+    { key: 'wsUrl', label: 'WebSocket URL', kind: 'string' },
+  ],
+};
+
 function existing(): DaemonChannelInstanceSnapshot {
   return {
     name: 'ops-bot',
@@ -55,6 +99,7 @@ function existing(): DaemonChannelInstanceSnapshot {
       enabled: true,
       region: 'cn',
       endpoint: '${BOT_ENDPOINT}',
+      cwd: '/ws/current',
       pluginFutureField: { keep: true },
       token: 'must-not-enter-the-editor',
     },
@@ -66,6 +111,113 @@ function existing(): DaemonChannelInstanceSnapshot {
 }
 
 describe('channel editor state', () => {
+  it('persists pairing with enabled DingTalk conversation policies by default', () => {
+    let state = createChannelEditorState({
+      catalog: [dingtalkDescriptor],
+      name: 'dingtalk',
+      type: 'dingtalk',
+    });
+    state = updateChannelEditorField(state, 'clientId', 'client-id');
+    state = updateSecretEditor(state, 'clientSecret', {
+      operation: 'replace',
+      value: 'client-secret',
+    });
+
+    expect(state.values.senderPolicy).toBe('pairing');
+    expect(buildChannelUpsertRequest(state)).toMatchObject({
+      config: {
+        type: 'dingtalk',
+        senderPolicy: 'pairing',
+        dmPolicy: 'open',
+        groupPolicy: 'open',
+      },
+    });
+  });
+
+  it.each([
+    ['feishu', feishuDescriptor, 'clientId', 'clientSecret'],
+    ['wecom', wecomDescriptor, 'botId', 'secret'],
+  ] as const)(
+    'persists pairing with enabled %s conversation policies by default',
+    (type, platformDescriptor, idField, secretField) => {
+      let state = createChannelEditorState({
+        catalog: [platformDescriptor],
+        name: type,
+        type,
+      });
+      state = updateChannelEditorField(state, idField, 'app-id');
+      state = updateSecretEditor(state, secretField, {
+        operation: 'replace',
+        value: 'app-secret',
+      });
+
+      expect(buildChannelUpsertRequest(state)).toMatchObject({
+        config: {
+          type,
+          senderPolicy: 'pairing',
+          dmPolicy: 'open',
+          groupPolicy: 'open',
+        },
+      });
+    },
+  );
+
+  it('preserves an existing hidden WeCom WebSocket URL', () => {
+    const state = createChannelEditorState({
+      catalog: [wecomDescriptor],
+      instance: {
+        name: 'wecom',
+        config: {
+          type: 'wecom',
+          botId: 'bot-id',
+          wsUrl: 'wss://wecom.example.test/connect',
+          senderPolicy: 'pairing',
+          dmPolicy: 'open',
+          groupPolicy: 'open',
+        },
+        secrets: { secret: { present: true, source: 'literal' } },
+        webhookSecrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      },
+    });
+
+    expect(buildChannelUpsertRequest(state).config).toMatchObject({
+      wsUrl: 'wss://wecom.example.test/connect',
+    });
+  });
+
+  it('repairs hidden DingTalk conversation policies when editing', () => {
+    const state = createChannelEditorState({
+      catalog: [dingtalkDescriptor],
+      instance: {
+        name: 'dingtalk',
+        config: {
+          type: 'dingtalk',
+          clientId: 'client-id',
+          senderPolicy: 'pairing',
+          dmPolicy: 'disabled',
+          groupPolicy: 'disabled',
+        },
+        secrets: {
+          clientSecret: { present: true, source: 'settings' },
+        },
+        webhookSecrets: {},
+        startsWithServe: false,
+        runtime: { state: 'stopped' },
+      },
+    });
+
+    expect(buildChannelUpsertRequest(state)).toMatchObject({
+      config: {
+        type: 'dingtalk',
+        senderPolicy: 'pairing',
+        dmPolicy: 'open',
+        groupPolicy: 'open',
+      },
+    });
+  });
+
   it('preserves configured secrets without copying values into state', () => {
     const state = createChannelEditorState({
       catalog: [descriptor],
@@ -124,6 +276,7 @@ describe('channel editor state', () => {
       secrets: { token: { operation: 'preserve' } },
     });
     expect(buildChannelUpsertRequest(state).config).not.toHaveProperty('token');
+    expect(buildChannelUpsertRequest(state).config).not.toHaveProperty('cwd');
   });
 
   it('validates create names with portable server rules including all', () => {

@@ -25,22 +25,145 @@ const TEST_TOKEN = 'web-shell-channel-e2e-token';
 test('loads the deterministic channel catalog and workspace snapshot', async ({
   page,
 }, testInfo) => {
-  const scenario = createWebShellDaemonScenario({
-    capabilities: {
-      features: [
-        'session_events',
-        'workspace_settings',
-        'channel_management',
-        'channel_auth',
-      ],
-    },
-  });
+  const scenario = managedScenario();
   const daemon = await installScenario(page, scenario, testInfo);
 
   await gotoChannels(page, scenario, daemon);
 
-  await expect(page.getByText('Credential Adapter')).toBeVisible();
-  await expect(page.getByText('QR Adapter')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'DingTalk' })).toBeVisible();
+  await expect(
+    page.getByRole('button', { name: 'Credential Adapter' }),
+  ).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'QR Adapter' })).toHaveCount(0);
+});
+
+test('configures DingTalk with only credentials and access policy', async ({
+  page,
+}, testInfo) => {
+  const scenario = managedScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoChannels(page, scenario, daemon);
+
+  await page.getByRole('button', { name: 'Add channel' }).click();
+  await page.getByRole('button', { name: 'DingTalk' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Configure DingTalk' });
+  await expect(dialog.getByLabel('Client ID (AppKey)')).toBeVisible();
+  await expect(dialog.getByLabel('Client Secret (AppSecret)')).toBeVisible();
+  await expect(dialog.getByText('Access policy')).toBeVisible();
+  await expect(dialog.getByText('Current workspace')).toBeVisible();
+  await expect(dialog.getByText(scenario.workspaceCwd)).toBeVisible();
+  await expect(dialog.getByLabel('Name', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByText('Model and workspace')).toHaveCount(0);
+  await expect(dialog.getByText('Webhooks')).toHaveCount(0);
+
+  await dialog.getByLabel('Client ID (AppKey)').fill('ding-client-id');
+  await dialog
+    .getByLabel('Client Secret (AppSecret)')
+    .fill('ding-client-secret');
+  await dialog.getByRole('button', { name: /Open/ }).click();
+  await dialog.getByRole('button', { name: 'Save' }).click();
+
+  const upsert = lastChannelUpsertFor(daemon, 'dingtalk');
+  expect(upsert.body).toMatchObject({
+    config: {
+      type: 'dingtalk',
+      clientId: 'ding-client-id',
+      senderPolicy: 'open',
+      dmPolicy: 'open',
+      groupPolicy: 'open',
+    },
+    secrets: {
+      clientSecret: {
+        operation: 'replace',
+        value: 'ding-client-secret',
+      },
+    },
+  });
+  expect(upsert.body.config).not.toHaveProperty('cwd');
+});
+
+test('configures WeCom and Feishu with focused credentials and access policy', async ({
+  page,
+}, testInfo) => {
+  const scenario = managedScenario();
+  const workspace = scenario.channelWorkspaces[scenario.workspaceCwd];
+  workspace.catalog.push(
+    {
+      type: 'wecom',
+      displayName: 'WeCom',
+      manageable: true,
+      auth: ['credentials'],
+      fields: [
+        { key: 'botId', label: 'Bot ID', kind: 'string', required: true },
+        {
+          key: 'secret',
+          label: 'Bot Secret',
+          kind: 'secret',
+          required: true,
+        },
+        { key: 'wsUrl', label: 'WebSocket URL', kind: 'string' },
+      ],
+    },
+    {
+      type: 'feishu',
+      displayName: 'Feishu',
+      manageable: true,
+      auth: ['credentials'],
+      fields: [
+        { key: 'clientId', label: 'App ID', kind: 'string', required: true },
+        {
+          key: 'clientSecret',
+          label: 'App Secret',
+          kind: 'secret',
+          required: true,
+        },
+      ],
+    },
+  );
+  const daemon = await installScenario(page, scenario, testInfo);
+  await gotoChannels(page, scenario, daemon);
+
+  await page.getByRole('button', { name: 'Add channel' }).click();
+  await page.getByRole('button', { name: 'WeCom' }).click();
+  const wecom = page.getByRole('dialog', { name: 'Configure WeCom' });
+  await expect(wecom.getByText('WebSocket URL')).toHaveCount(0);
+  await wecom.getByLabel('Bot ID').fill('wecom-bot-id');
+  await wecom.getByLabel('Bot Secret').fill('wecom-bot-secret');
+  await wecom.getByRole('button', { name: 'Save' }).click();
+  expect(lastChannelUpsertFor(daemon, 'wecom').body).toMatchObject({
+    config: {
+      type: 'wecom',
+      botId: 'wecom-bot-id',
+      senderPolicy: 'pairing',
+      dmPolicy: 'open',
+      groupPolicy: 'open',
+    },
+    secrets: {
+      secret: { operation: 'replace', value: 'wecom-bot-secret' },
+    },
+  });
+
+  await page.getByRole('button', { name: 'Add channel' }).click();
+  await page.getByRole('button', { name: 'Feishu' }).click();
+  const feishu = page.getByRole('dialog', { name: 'Configure Feishu' });
+  await feishu.getByLabel('App ID').fill('feishu-app-id');
+  await feishu.getByLabel('App Secret').fill('feishu-app-secret');
+  await feishu.getByRole('button', { name: 'Save' }).click();
+  expect(lastChannelUpsertFor(daemon, 'feishu').body).toMatchObject({
+    config: {
+      type: 'feishu',
+      clientId: 'feishu-app-id',
+      senderPolicy: 'pairing',
+      dmPolicy: 'open',
+      groupPolicy: 'open',
+    },
+    secrets: {
+      clientSecret: {
+        operation: 'replace',
+        value: 'feishu-app-secret',
+      },
+    },
+  });
 });
 
 test('preserves, replaces, and explicitly clears stored credentials without rendering them', async ({
@@ -49,28 +172,6 @@ test('preserves, replaces, and explicitly clears stored credentials without rend
   const scenario = managedScenario();
   const daemon = await installScenario(page, scenario, testInfo);
   await gotoChannels(page, scenario, daemon);
-
-  await page.getByRole('button', { name: 'Add channel' }).click();
-  const createDialog = page.getByRole('dialog', { name: 'Add channel' });
-  await createDialog.getByLabel('Name *').fill('created-credential');
-  await createDialog
-    .getByLabel('Endpoint')
-    .fill('https://created.invalid/messages');
-  await createDialog.getByRole('button', { name: 'Enter credential' }).click();
-  await createDialog.getByLabel('Access token').fill('created-value');
-  await createDialog.getByRole('button', { name: 'Add channel' }).click();
-  expect(lastChannelUpsertFor(daemon, 'created-credential').body).toMatchObject(
-    {
-      config: {
-        type: 'credential-adapter',
-        endpoint: 'https://created.invalid/messages',
-      },
-      secrets: {
-        token: { operation: 'replace', value: 'created-value' },
-      },
-    },
-  );
-  await expect(page.locator('body')).not.toContainText('created-value');
 
   await openCredentialEditor(page);
   await expect(page.getByRole('button', { name: 'Keep stored' })).toBeVisible();
@@ -117,7 +218,10 @@ test('retries runtime errors, toggles startup, reloads conflicts, and preserves 
   await gotoChannels(page, scenario, daemon);
 
   await expect(page.getByText('Adapter unavailable')).toBeVisible();
-  await page.getByRole('button', { name: 'Retry primary-credential' }).click();
+  await page
+    .getByRole('region', { name: 'Your channels' })
+    .getByRole('button', { name: 'Retry primary-credential' })
+    .click();
   await expect(page.getByText('Adapter unavailable')).toHaveCount(0);
   expect(
     daemon.requests.some(
@@ -168,12 +272,7 @@ test('retries runtime errors, toggles startup, reloads conflicts, and preserves 
       error: 'The channel could not be stopped before deletion.',
     },
   });
-  await page
-    .getByRole('button', { name: 'More actions for primary-credential' })
-    .click();
-  await page
-    .getByRole('menuitem', { name: 'Delete primary-credential' })
-    .click();
+  await page.getByRole('button', { name: 'Delete primary-credential' }).click();
   await page.getByRole('button', { name: 'Delete channel' }).click();
   await expect(
     page.getByRole('heading', { name: 'Delete channel?' }),
@@ -196,16 +295,12 @@ test('rotates a local QR image before explicit authentication commit', async ({
   const daemon = await installScenario(page, scenario, testInfo);
   await gotoChannels(page, scenario, daemon);
 
-  await page.getByRole('button', { name: 'Add channel' }).click();
-  await page.getByLabel('Name *').fill('handoff-qr');
-  await page.getByLabel('Type *').click();
-  await page.getByRole('option', { name: 'QR Adapter' }).click();
-  await page.getByRole('button', { name: 'Save and continue' }).click();
-  expect(lastChannelUpsertFor(daemon, 'handoff-qr').body).toMatchObject({
-    config: { type: 'qr-adapter' },
-  });
+  await page
+    .getByRole('button', { name: 'View details for primary-qr' })
+    .click();
+  await page.getByRole('button', { name: 'Authenticate primary-qr' }).click();
   const qr = page.getByRole('img', {
-    name: 'QR code for QR Adapter channel handoff-qr',
+    name: 'QR code for QR Adapter channel primary-qr',
   });
   await expect(qr).toBeVisible();
   const firstUrl = await qr.getAttribute('src');
@@ -258,6 +353,52 @@ test('keeps management read-only when the feature exists without a token', async
   ).toBeDisabled();
 });
 
+test('approves a pending sender from pairing management', async ({
+  page,
+}, testInfo) => {
+  const scenario = managedScenario();
+  const workspace = scenario.channelWorkspaces[scenario.workspaceCwd];
+  workspace.snapshot.instances['primary-credential']!.config = {
+    type: 'dingtalk',
+    clientId: 'ding-client-id',
+    senderPolicy: 'pairing',
+  };
+  workspace.pairingRequests['primary-credential'] = [
+    {
+      senderId: 'sender-1',
+      senderName: 'Alice',
+      code: 'ABCDEFGH',
+      createdAt: Date.now(),
+    },
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoChannels(page, scenario, daemon);
+  await page
+    .getByRole('button', { name: 'View details for primary-credential' })
+    .click();
+  await page.getByRole('button', { name: 'Edit primary-credential' }).click();
+  await expect(page.getByText('ABCDEFGH')).toBeVisible();
+  await page.getByRole('button', { name: 'Allow Alice' }).click();
+
+  await expect(
+    page.getByText('Alice is allowed. Ask them to send the message again.', {
+      exact: true,
+    }),
+  ).toBeVisible();
+  await expect(page.getByText('ABCDEFGH')).toHaveCount(0);
+  expect(
+    daemon.requests.some(
+      (request) =>
+        request.method === 'POST' &&
+        request.path.endsWith(
+          '/channels/primary-credential/pairing-requests/approve',
+        ) &&
+        (request.body as { code?: string }).code === 'ABCDEFGH',
+    ),
+  ).toBe(true);
+});
+
 test('reports unsupported management when a token exists without the feature', async ({
   page,
 }, testInfo) => {
@@ -294,7 +435,9 @@ test('supports keyboard-only channel navigation and a 440px layout', async ({
   const manage = page.getByRole('button', { name: 'Manage channels' });
   await tabTo(page, manage);
   await page.keyboard.press('Enter');
-  await expect(page.getByRole('heading', { name: 'Channels' })).toBeFocused();
+  await expect(
+    page.getByRole('heading', { name: 'Channels', exact: true }),
+  ).toBeFocused();
 
   const add = page.getByRole('button', { name: 'Add channel' });
   await tabTo(page, add);
@@ -302,11 +445,11 @@ test('supports keyboard-only channel navigation and a 440px layout', async ({
   await expect(
     page.getByRole('heading', { name: 'Add channel' }),
   ).toBeVisible();
-  await expect(page.getByLabel('Name *')).toBeFocused();
+  await expect(page.getByLabel('Search platforms')).toBeFocused();
   await page.keyboard.press('Escape');
   await expect(add).toBeFocused();
 
-  const back = page.getByRole('button', { name: 'Back to settings' });
+  const back = page.getByRole('button', { name: 'Back' });
   await tabTo(page, back);
   await page.keyboard.press('Enter');
   await expect(page.getByRole('region', { name: 'Settings' })).toBeVisible();
@@ -319,11 +462,13 @@ test('supports keyboard-only channel navigation and a 440px layout', async ({
     )
     .toBe(true);
   for (const label of [
-    'More actions for primary-credential',
+    'Edit primary-credential',
     'Start primary-credential',
-    'Authenticate primary-qr',
+    'View details for primary-qr',
   ]) {
-    await expect(page.getByRole('button', { name: label })).toBeVisible();
+    await expect(
+      page.getByRole('button', { name: label }).first(),
+    ).toBeVisible();
   }
 });
 
@@ -389,6 +534,9 @@ test('cancels primary auth and routes channel reads to a switched secondary work
   if (!secondarySessionHandle) {
     throw new Error('Secondary workspace session control was not mounted.');
   }
+  await page
+    .getByRole('button', { name: 'View details for primary-qr' })
+    .click();
   await page.getByRole('button', { name: 'Authenticate primary-qr' }).click();
   await expect(
     page.getByRole('img', {
@@ -429,7 +577,11 @@ test('cancels primary auth and routes channel reads to a switched secondary work
   await expect(page.getByText('secondary-credential')).toBeVisible();
   await expect(page.getByText('primary-credential')).toHaveCount(0);
   await page
+    .getByRole('region', { name: 'Your channels' })
     .getByRole('button', { name: 'Start secondary-credential' })
+    .click();
+  await page
+    .getByRole('button', { name: 'View details for secondary-qr' })
     .click();
   await page.getByRole('button', { name: 'Authenticate secondary-qr' }).click();
   await expect(
@@ -477,7 +629,7 @@ function channelWorkspacePath(workspaceCwd: string): string {
 }
 
 function managedScenario(): WebShellDaemonScenario {
-  return createWebShellDaemonScenario({
+  const scenario = createWebShellDaemonScenario({
     capabilities: {
       features: [
         'session_events',
@@ -487,13 +639,26 @@ function managedScenario(): WebShellDaemonScenario {
       ],
     },
   });
+  scenario.channelWorkspaces[scenario.workspaceCwd].catalog.unshift({
+    type: 'dingtalk',
+    displayName: 'DingTalk',
+    manageable: true,
+    auth: ['credentials'],
+    fields: [
+      { key: 'clientId', label: 'Client ID', kind: 'string', required: true },
+      {
+        key: 'clientSecret',
+        label: 'Client Secret',
+        kind: 'secret',
+        required: true,
+      },
+    ],
+  });
+  return scenario;
 }
 
 async function openCredentialEditor(page: Page): Promise<void> {
-  await page
-    .getByRole('button', { name: 'More actions for primary-credential' })
-    .click();
-  await page.getByRole('menuitem', { name: 'Edit primary-credential' }).click();
+  await page.getByRole('button', { name: 'Edit primary-credential' }).click();
   await expect(
     page.getByRole('heading', { name: 'Edit primary-credential' }),
   ).toBeVisible();
@@ -538,7 +703,9 @@ async function gotoChannels(
     .getByRole('button', { name: /^Channels/ })
     .click();
   await page.getByRole('button', { name: 'Manage channels' }).click();
-  await expect(page.getByRole('heading', { name: 'Channels' })).toBeVisible();
+  await expect(
+    page.getByRole('heading', { name: 'Channels', exact: true }),
+  ).toBeVisible();
 }
 
 async function gotoSession(

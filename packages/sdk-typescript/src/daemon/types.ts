@@ -2667,6 +2667,26 @@ export interface DaemonChannelMutationResult {
   instance: DaemonChannelInstanceSnapshot;
 }
 
+export interface DaemonChannelPairingRequest {
+  senderId: string;
+  senderName: string;
+  code: string;
+  createdAt: number;
+}
+
+export interface DaemonChannelPairingRequestsSnapshot {
+  requests: DaemonChannelPairingRequest[];
+}
+
+export interface DaemonChannelPairingApprovalRequest {
+  code: string;
+}
+
+export interface DaemonChannelPairingApprovalResult
+  extends DaemonChannelPairingRequestsSnapshot {
+  approved: DaemonChannelPairingRequest;
+}
+
 export interface DaemonChannelManagementOptions {
   clientId?: string;
   timeoutMs?: number;

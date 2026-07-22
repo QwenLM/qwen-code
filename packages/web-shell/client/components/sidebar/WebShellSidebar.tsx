@@ -48,6 +48,7 @@ import {
   PanelLeftCloseIcon,
   PanelLeftOpenIcon,
   PlusIcon,
+  RadioTowerIcon,
   SearchIcon,
   SettingsIcon,
   SquarePenIcon,
@@ -209,6 +210,8 @@ interface WebShellSidebarProps {
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
   onOpenPlugins: () => void;
+  onOpenChannels?: () => void;
+  channelAttention?: boolean;
   onOpenDaemonStatus: () => void;
   onOpenScheduledTasks: () => void;
   onOpenGoals: () => void;
@@ -415,6 +418,8 @@ export function WebShellSidebar({
   onCollapsedChange,
   onOpenSettings,
   onOpenPlugins,
+  onOpenChannels = () => undefined,
+  channelAttention = false,
   onOpenDaemonStatus,
   onOpenScheduledTasks,
   onOpenGoals,
@@ -3377,6 +3382,26 @@ export function WebShellSidebar({
               <BlocksIcon size={16} strokeWidth={1.2} />
             </span>
             {!collapsed && <span>{t('sidebar.plugins')}</span>}
+          </button>
+          <button
+            className={styles.pluginButton}
+            type="button"
+            title={
+              channelAttention
+                ? t('sidebar.channelsAttention')
+                : t('sidebar.channels')
+            }
+            aria-label={
+              channelAttention
+                ? t('sidebar.channelsAttention')
+                : t('sidebar.channels')
+            }
+            onClick={onOpenChannels}
+          >
+            <span className={styles.navIcon} data-attention={channelAttention}>
+              <RadioTowerIcon size={16} strokeWidth={1.2} />
+            </span>
+            {!collapsed && <span>{t('sidebar.channels')}</span>}
           </button>
           {footerItems.has('scheduledTasks') && (
             <button

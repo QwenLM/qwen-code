@@ -13,6 +13,7 @@ import {
 import {
   DAEMON_APPROVAL_MODES,
   useActions,
+  useChannels,
   useConnection,
   useDaemonFollowupSuggestion,
   useSettings,
@@ -1308,6 +1309,14 @@ export function App({
       workspaces,
     ],
   );
+  const channelOverview = useChannels({
+    autoLoad:
+      workspace.capabilities?.features?.includes('channel_management') === true,
+    workspaceCwd: activeWorkspaceCwd,
+  });
+  const channelAttention = Object.values(
+    channelOverview.snapshot?.instances ?? {},
+  ).some((instance) => instance.runtime.state === 'error');
   useEffect(() => {
     if (!activeWorkspaceCwd) {
       gitStatusWorkspaceCwdRef.current = undefined;
@@ -2495,6 +2504,7 @@ export function App({
   const panelHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const pluginTabRef = useRef<HTMLButtonElement | null>(null);
   const channelsSettingsTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const channelsEntrySourceRef = useRef<'sidebar' | 'settings'>('sidebar');
   const prevActivePanelRef = useRef(activePanel);
   const prevApprovalOverlayRef = useRef(approvalOverlayActive);
   useEffect(() => {
@@ -6359,6 +6369,12 @@ export function App({
                     closeMobileDrawer();
                     openPanel('plugins');
                   }}
+                  onOpenChannels={() => {
+                    channelsEntrySourceRef.current = 'sidebar';
+                    closeMobileDrawer();
+                    openPanel('channels');
+                  }}
+                  channelAttention={channelAttention}
                   onOpenDaemonStatus={() => {
                     closeMobileDrawer();
                     openPanel('status');
@@ -6531,7 +6547,10 @@ export function App({
                         onThemeChange={handleThemeChange}
                         chatWidthMode={chatWidthMode}
                         onChatWidthModeChange={handleChatWidthModeChange}
-                        onOpenChannels={() => openPanel('channels')}
+                        onOpenChannels={() => {
+                          channelsEntrySourceRef.current = 'settings';
+                          openPanel('channels');
+                        }}
                         channelsTriggerRef={channelsSettingsTriggerRef}
                         initialCategory={
                           prevActivePanelRef.current === 'channels'
@@ -6634,7 +6653,13 @@ export function App({
                       />
                     ) : activePanel === 'channels' ? (
                       <ChannelsManagerPage
-                        onClose={() => setActivePanel('settings')}
+                        onClose={() => {
+                          if (channelsEntrySourceRef.current === 'settings') {
+                            setActivePanel('settings');
+                          } else {
+                            closePanel();
+                          }
+                        }}
                         initialFocusRef={panelHeadingRef}
                         workspaceCwd={activeWorkspaceCwd}
                       />

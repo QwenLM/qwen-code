@@ -187,16 +187,19 @@ for (const theme of THEMES) {
         manage: 'Manage channels',
         heading: 'Channels',
       });
-      await expect(page.getByText('primary-credential')).toBeVisible();
-      await expect(page.getByText('primary-qr')).toBeVisible();
+      await expect(
+        page.getByRole('button', {
+          name: 'View details for primary-credential',
+        }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole('button', { name: 'View details for primary-qr' }),
+      ).toBeVisible();
       await captureScreenshot(page, `channels-manager-${theme}`);
 
       if (theme === 'dark') {
         await page
-          .getByRole('button', { name: 'More actions for primary-credential' })
-          .click();
-        await page
-          .getByRole('menuitem', { name: 'Edit primary-credential' })
+          .getByRole('button', { name: 'Edit primary-credential' })
           .click();
         await expect(
           page.getByRole('heading', { name: 'Edit primary-credential' }),
@@ -204,6 +207,9 @@ for (const theme of THEMES) {
         await captureScreenshot(page, 'channels-editor-dark');
         await page.keyboard.press('Escape');
 
+        await page
+          .getByRole('button', { name: 'View details for primary-qr' })
+          .click();
         await page
           .getByRole('button', { name: 'Authenticate primary-qr' })
           .click();

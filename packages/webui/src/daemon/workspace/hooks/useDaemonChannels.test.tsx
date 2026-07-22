@@ -30,6 +30,8 @@ const { context, actions, client, workspaceA, workspaceB } = vi.hoisted(() => {
     startWorkspaceChannel: vi.fn(),
     stopWorkspaceChannel: vi.fn(),
     restartWorkspaceChannel: vi.fn(),
+    workspaceChannelPairingRequests: vi.fn(),
+    approveWorkspaceChannelPairing: vi.fn(),
     beginWorkspaceChannelAuth: vi.fn(),
     workspaceChannelAuth: vi.fn(),
     workspaceChannelAuthQr: vi.fn(),
@@ -218,6 +220,8 @@ describe('useDaemonChannels', () => {
       workspaceB.stopWorkspaceChannel,
       workspaceB.restartWorkspaceChannel,
       workspaceB.commitWorkspaceChannelAuth,
+      workspaceB.workspaceChannelPairingRequests,
+      workspaceB.approveWorkspaceChannelPairing,
     ]) {
       mutation.mockResolvedValue({});
     }
@@ -234,6 +238,18 @@ describe('useDaemonChannels', () => {
     );
     workspaceB.cancelWorkspaceChannelAuth.mockResolvedValue({
       cancelled: true,
+    });
+    workspaceB.workspaceChannelPairingRequests.mockResolvedValue({
+      requests: [],
+    });
+    workspaceB.approveWorkspaceChannelPairing.mockResolvedValue({
+      approved: {
+        senderId: 'sender-b',
+        senderName: 'Bob',
+        code: 'ABCDEFGH',
+        createdAt: 1,
+      },
+      requests: [],
     });
     let result: ReturnType<typeof useDaemonChannels> | undefined;
 
@@ -270,6 +286,8 @@ describe('useDaemonChannels', () => {
       await result?.auth.qr('bot', 'auth-b');
       await result?.auth.cancel('bot', 'auth-b');
       await result?.auth.commit('bot', 'auth-b', { channelType: 'qq' });
+      await result?.pairing.list('bot');
+      await result?.pairing.approve('bot', 'ABCDEFGH');
     });
 
     for (const operation of [
@@ -284,6 +302,8 @@ describe('useDaemonChannels', () => {
       workspaceB.workspaceChannelAuthQr,
       workspaceB.cancelWorkspaceChannelAuth,
       workspaceB.commitWorkspaceChannelAuth,
+      workspaceB.workspaceChannelPairingRequests,
+      workspaceB.approveWorkspaceChannelPairing,
     ]) {
       expect(operation).toHaveBeenCalledOnce();
     }

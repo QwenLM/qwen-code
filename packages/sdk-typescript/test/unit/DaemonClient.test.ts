@@ -1925,7 +1925,7 @@ describe('DaemonClient', () => {
           {
             prompt: [{ type: 'text', text: 'hi' }],
           },
-          undefined,
+          null,
           'client-stale',
         )
         .catch((err: unknown) => err);
@@ -4384,6 +4384,59 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('lists and approves primary workspace pairing requests', async () => {
+      const pairing = {
+        requests: [
+          {
+            senderId: 'sender-1',
+            senderName: 'Alice',
+            code: 'ABCDEFGH',
+            createdAt: 1,
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch((request) =>
+        jsonResponse(
+          200,
+          request.method === 'GET'
+            ? pairing
+            : { approved: pairing.requests[0], requests: [] },
+        ),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'daemon-token',
+        fetch,
+      });
+
+      await expect(
+        client.workspaceChannelPairingRequests('bot/name', {
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual(pairing);
+      await client.approveWorkspaceChannelPairing(
+        'bot/name',
+        { code: 'ABCDEFGH' },
+        { clientId: 'client-1' },
+      );
+
+      expect(calls.map(({ method, url, body }) => [method, url, body])).toEqual(
+        [
+          [
+            'GET',
+            'http://daemon/workspace/channels/bot%2Fname/pairing-requests',
+            null,
+          ],
+          [
+            'POST',
+            'http://daemon/workspace/channels/bot%2Fname/pairing-requests/approve',
+            JSON.stringify({ code: 'ABCDEFGH' }),
+          ],
+        ],
+      );
+      expect(calls.every((call) => call.headers.authorization)).toBe(true);
+    });
+
     it('targets workspace-qualified channel routes with the same transport contract', async () => {
       const catalog = [
         {
@@ -4409,6 +4462,10 @@ describe('DaemonClient', () => {
 
       await workspace.workspaceChannelTypes({ clientId: 'client-read' });
       await workspace.workspaceChannels();
+      await workspace.workspaceChannelPairingRequests('bot');
+      await workspace.approveWorkspaceChannelPairing('bot', {
+        code: 'ABCDEFGH',
+      });
       await workspace.upsertWorkspaceChannel(
         'bot/name',
         {
@@ -4431,6 +4488,14 @@ describe('DaemonClient', () => {
       expect(calls.map((call) => [call.method, call.url])).toEqual([
         ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channel-types'],
         ['GET', 'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels'],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-requests',
+        ],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot/pairing-requests/approve',
+        ],
         [
           'PUT',
           'http://daemon/workspaces/%2Ftmp%2Fwork%20space/channels/bot%2Fname',
@@ -4457,7 +4522,7 @@ describe('DaemonClient', () => {
         ],
       ]);
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-read');
-      expect(calls[2]?.headers['x-qwen-client-id']).toBe('client-write');
+      expect(calls[4]?.headers['x-qwen-client-id']).toBe('client-write');
     });
 
     it('maps channel management failures through DaemonHttpError', async () => {

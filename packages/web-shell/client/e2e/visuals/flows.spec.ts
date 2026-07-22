@@ -120,11 +120,18 @@ test('flow: open channel management and its editor', async ({
       .getByRole('button', { name: /^Channels/ })
       .click();
     await page.getByRole('button', { name: 'Manage channels' }).click();
-    await expect(page.getByRole('heading', { name: 'Channels' })).toBeVisible();
+    await expect(
+      page.getByRole('heading', { name: 'Channels', exact: true }),
+    ).toBeVisible();
     await beat(page);
     await page.getByRole('button', { name: 'Add channel' }).click();
     await expect(
       page.getByRole('heading', { name: 'Add channel' }),
+    ).toBeVisible();
+    await beat(page);
+    await page.getByRole('button', { name: 'Credential Adapter' }).click();
+    await expect(
+      page.getByRole('heading', { name: 'Connect Credential Adapter' }),
     ).toBeVisible();
     await beat(page);
   });

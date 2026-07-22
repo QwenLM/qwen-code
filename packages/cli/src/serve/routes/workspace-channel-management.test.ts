@@ -66,6 +66,16 @@ function service(): ChannelManagementService {
     start: vi.fn(async (name) => result(name, 'connected')),
     stop: vi.fn(async (name) => result(name, 'stopped')),
     restart: vi.fn(async (name) => result(name, 'connected')),
+    pairingRequests: vi.fn(async () => ({ requests: [] })),
+    approvePairing: vi.fn(async (_name, code) => ({
+      approved: {
+        senderId: 'sender-1',
+        senderName: 'Alice',
+        code,
+        createdAt: 1,
+      },
+      requests: [],
+    })),
   };
 }
 
@@ -471,9 +481,9 @@ describe('workspace Channel management routes', () => {
     expect(primaryService.start).toHaveBeenCalledWith('bot');
     expect(primaryService.stop).toHaveBeenCalledWith('bot');
     expect(primaryService.restart).toHaveBeenCalledWith('bot');
-    expect(strictOptions).toHaveLength(6);
+    expect(strictOptions).toHaveLength(8);
     expect(strictOptions).toEqual(
-      Array.from({ length: 6 }, () => ({ strict: true })),
+      Array.from({ length: 8 }, () => ({ strict: true })),
     );
     expect(parseAndValidateClientId).toHaveBeenCalledTimes(6);
   });
@@ -492,6 +502,60 @@ describe('workspace Channel management routes', () => {
       enabled: false,
     });
     expect(primaryService.setStartup).not.toHaveBeenCalled();
+  });
+
+  it('lists and approves pairing requests with strict auth in the selected workspace', async () => {
+    const { app, primaryService, secondaryService } = mount({});
+    vi.mocked(secondaryService.pairingRequests).mockResolvedValueOnce({
+      requests: [
+        {
+          senderId: 'sender-2',
+          senderName: 'Bob',
+          code: 'ABCDEFGH',
+          createdAt: 2,
+        },
+      ],
+    });
+
+    await request(app)
+      .get('/workspaces/secondary/channels/bot/pairing-requests')
+      .expect(401);
+    const listed = await auth(
+      request(app).get('/workspaces/secondary/channels/bot/pairing-requests'),
+    );
+    const approved = await auth(
+      request(app)
+        .post('/workspaces/secondary/channels/bot/pairing-requests/approve')
+        .send({ code: 'abcdefgh' }),
+    );
+
+    expect(listed.status).toBe(200);
+    expect(listed.body.requests[0]).toMatchObject({
+      senderId: 'sender-2',
+      code: 'ABCDEFGH',
+    });
+    expect(approved.status).toBe(200);
+    expect(secondaryService.pairingRequests).toHaveBeenCalledWith('bot');
+    expect(secondaryService.approvePairing).toHaveBeenCalledWith(
+      'bot',
+      'ABCDEFGH',
+    );
+    expect(primaryService.pairingRequests).not.toHaveBeenCalled();
+    expect(primaryService.approvePairing).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid pairing code before calling the service', async () => {
+    const { app, primaryService } = mount({});
+
+    const response = await auth(
+      request(app)
+        .post('/workspace/channels/bot/pairing-requests/approve')
+        .send({ code: 'short' }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('invalid_channel_pairing_code');
+    expect(primaryService.approvePairing).not.toHaveBeenCalled();
   });
 
   it('rejects invalid startup bodies before calling the service', async () => {
