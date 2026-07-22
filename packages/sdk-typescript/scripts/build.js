@@ -59,9 +59,9 @@ const rootDir = join(__dirname, '..');
 // Bumped from 161KB to 167KB for the Web Shell git-diff and subagent REST helpers
 // (workspaceGitDiff / workspaceGitDiffFile on both client classes) and the
 // ChatRecord transcript projection in the default UI API.
-// Bumped from 167KB to 168KB for workspace-level streaming generation.
-// Bumped from 167KB to 168KB for the daemon event-bus epoch token fields
-// (eventEpoch / onEpoch) and their docs across the daemon SDK transports.
+// Bumped from 167KB to 168KB for workspace-level streaming generation and
+// workspace trust status v2 SDK types, plus the daemon event-bus epoch token
+// fields (eventEpoch / onEpoch) and their docs across SDK transports.
 const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 168 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
