@@ -3338,20 +3338,24 @@ jobs:
               else
                 HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
               fi
-            elif [[ "${PREPARE_OUTCOME}" == 'skipped' ]]; then
-              # NEWEST is empty because Prepare never RAN — an earlier step
-              # failed before the agent started: installing/building the trusted
-              # base, checkout, node setup. That is infra or a broken base, NOT
-              # the agent, and it is usually transient (a base build fixed
-              # minutes later, an ENOSPC runner). A job CANCELLED before Prepare
-              # (concurrency cancel, manual cancel) also lands here with outcome
-              # 'skipped' and retries the same way — intentionally, since a cancel
-              # is not the agent's fault either. Terminal here is wrong: a
-              # web-shell TS break on main failed the base build across a whole
-              # scan batch and stranded SIX healthy PRs terminally, including
-              # ones at round 11. Retry instead — sentinel ts keeps the feedback
-              # live — but still increment the round so a PERSISTENTLY broken
-              # base is bounded and cannot loop forever.
+            elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
+              # NEWEST is empty because Prepare never RAN TO A VERDICT — an
+              # earlier step failed or the job stopped before the agent started:
+              # installing/building the trusted base, checkout, node setup. That
+              # is infra or a broken base, NOT the agent, and it is usually
+              # transient (a base build fixed minutes later, an ENOSPC runner).
+              # Match on "not a real Prepare run" rather than 'skipped' alone, so
+              # this also covers a CANCELLED job (outcome 'cancelled') and a job
+              # that stopped before Prepare even entered the step context
+              # (outcome ''): a concurrency/manual cancel is not the agent's
+              # fault either, and 'cancelled' is a DISTINCT value from 'skipped'
+              # — matching only 'skipped' would send a cancel to the terminal
+              # branch below. Terminal here is wrong: a web-shell TS break on
+              # main failed the base build across a whole scan batch and stranded
+              # SIX healthy PRs terminally, including ones at round 11. Retry
+              # instead — sentinel ts keeps the feedback live — but still
+              # increment the round so a PERSISTENTLY broken base is bounded and
+              # cannot loop forever.
               MARK_ROUND="$(( ROUND + 1 ))"
               if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
                 MARK_TS='9999-12-31T23:59:59Z'

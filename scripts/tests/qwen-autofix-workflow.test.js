@@ -4083,12 +4083,31 @@ describe('qwen-autofix workflow', () => {
     const persistent = run({ PREPARE_OUTCOME: 'skipped', ROUND: '99' });
     expect(persistent).toMatchObject({ ts: SENTINEL, terminal: true });
     expect(persistent.headline).toContain('/retry');
-    // Prepare RAN and produced no feedback → a genuine pre-read agent crash:
-    // unchanged terminal behaviour.
-    const crashed = run({ PREPARE_OUTCOME: 'success', ROUND: '3' });
-    expect(crashed).toMatchObject({ terminal: true });
-    expect(crashed.headline).toContain('crashed or timed out before reading');
-    expect(crashed.headline).not.toContain('setup step');
+    // A CANCELLED job (concurrency/manual cancel) is a DISTINCT outcome value
+    // from 'skipped', and a job stopped before Prepare enters the step context
+    // reports outcome ''. Both are pre-agent and transient, so both must also
+    // retry — matching only 'skipped' sent them to the terminal branch.
+    const cancelled = run({ PREPARE_OUTCOME: 'cancelled', ROUND: '3' });
+    expect(cancelled).toMatchObject({
+      ts: SENTINEL,
+      round: '4',
+      terminal: false,
+    });
+    const emptyOutcome = run({ PREPARE_OUTCOME: '', ROUND: '3' });
+    expect(emptyOutcome).toMatchObject({
+      ts: SENTINEL,
+      round: '4',
+      terminal: false,
+    });
+    // Prepare RAN to a verdict (success/failure) and produced no feedback → a
+    // genuine pre-read agent crash: unchanged terminal behaviour. Both real-run
+    // outcomes stay terminal; only they do.
+    for (const outcome of ['success', 'failure']) {
+      const crashed = run({ PREPARE_OUTCOME: outcome, ROUND: '3' });
+      expect(crashed).toMatchObject({ terminal: true });
+      expect(crashed.headline).toContain('crashed or timed out before reading');
+      expect(crashed.headline).not.toContain('setup step');
+    }
   });
 
   it('makes every known gate rejection declare its verdict', () => {
