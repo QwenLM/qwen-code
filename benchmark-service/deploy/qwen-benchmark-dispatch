@@ -9,12 +9,14 @@ repository=''
 qwen_ref=''
 qwen_commit=''
 suite=''
+release_id=''
+trigger='workflow_dispatch'
 github_run_id=''
 github_run_attempt=''
 
 while (($#)); do
   case "$1" in
-    --repository|--qwen-ref|--qwen-commit|--suite|--github-run-id|--github-run-attempt)
+    --repository|--qwen-ref|--qwen-commit|--suite|--release-id|--trigger|--github-run-id|--github-run-attempt)
       key="${1#--}"
       shift
       (($#)) || { echo "missing value for --${key}" >&2; exit 2; }
@@ -23,6 +25,8 @@ while (($#)); do
         qwen-ref) qwen_ref="$1" ;;
         qwen-commit) qwen_commit="$1" ;;
         suite) suite="$1" ;;
+        release-id) release_id="$1" ;;
+        trigger) trigger="$1" ;;
         github-run-id) github_run_id="$1" ;;
         github-run-attempt) github_run_attempt="$1" ;;
       esac
@@ -36,6 +40,8 @@ done
 [[ "$qwen_ref" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo 'qwen-ref must be a release version' >&2; exit 2; }
 [[ "$qwen_commit" =~ ^[0-9a-f]{40}$ ]] || { echo 'qwen-commit must be a 40-character SHA' >&2; exit 2; }
 [[ "$suite" =~ ^swebench_verified_(gold_smoke|qwen_smoke|harbor_smoke)$ ]] || { echo 'suite is not allowed' >&2; exit 2; }
+[[ -z "$release_id" || "$release_id" =~ ^[0-9]+$ ]] || { echo 'release-id must be numeric' >&2; exit 2; }
+[[ "$trigger" == 'release' || "$trigger" == 'workflow_dispatch' ]] || { echo 'trigger is not allowed' >&2; exit 2; }
 [[ "$github_run_id" =~ ^[0-9]+$ && "$github_run_attempt" =~ ^[0-9]+$ ]] || { echo 'invalid GitHub run metadata' >&2; exit 2; }
 
 set -a
@@ -48,9 +54,11 @@ payload="$(jq -n \
   --arg qwen_ref "$qwen_ref" \
   --arg qwen_commit "$qwen_commit" \
   --arg suite "$suite" \
+  --arg release_id "$release_id" \
+  --arg trigger "$trigger" \
   --arg github_run_id "$github_run_id" \
   --arg github_run_attempt "$github_run_attempt" \
-  '{repository: $repository, qwen_ref: $qwen_ref, qwen_commit: $qwen_commit, suite: $suite, trigger: "workflow_dispatch", github_run_id: ($github_run_id | tonumber), github_run_attempt: ($github_run_attempt | tonumber)}')"
+  '{repository: $repository, qwen_ref: $qwen_ref, qwen_commit: $qwen_commit, suite: $suite, trigger: $trigger, release_id: (if $release_id == "" then null else ($release_id | tonumber) end), github_run_id: ($github_run_id | tonumber), github_run_attempt: ($github_run_attempt | tonumber)}')"
 
 curl --fail-with-body --silent --show-error \
   -X POST "$API_URL" \

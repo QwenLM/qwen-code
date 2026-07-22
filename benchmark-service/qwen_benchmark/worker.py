@@ -120,13 +120,7 @@ class Worker:
             )
             self._write_status(artifacts, run_id)
             artifacts.write_checksums()
-            current = self.store.get_run(run_id)
-            if current:
-                try:
-                    publish_check(self.settings, current, summary)
-                except Exception as error:
-                    LOGGER.exception("result publishing failed for %s", run_id)
-                    artifacts.write_json("publisher-error.json", {"error": str(error)})
+            self._publish(artifacts, run_id, summary)
         except AgentError as error:
             LOGGER.exception("agent failed for %s", run_id)
             for instance in self.store.get_instances(run_id):
@@ -137,6 +131,7 @@ class Worker:
             self.store.transition(run_id, "FAILED", error=str(error))
             artifacts.write_json("error.json", {"class": "agent", "error": str(error)})
             self._write_status(artifacts, run_id)
+            self._publish(artifacts, run_id, self._failed_summary(run_id))
         except InfrastructureError as error:
             LOGGER.exception("infrastructure failed for %s", run_id)
             status = self.store.requeue_or_fail(run_id, str(error))
@@ -153,6 +148,8 @@ class Worker:
                 "error.json", {"class": "infrastructure", "error": str(error)}
             )
             self._write_status(artifacts, run_id)
+            if status == "FAILED":
+                self._publish(artifacts, run_id, self._failed_summary(run_id))
         except Exception as error:
             LOGGER.exception("unexpected worker failure for %s", run_id)
             artifacts.write_json(
@@ -161,6 +158,7 @@ class Worker:
             try:
                 self.store.transition(run_id, "FAILED", error=str(error))
                 self._write_status(artifacts, run_id)
+                self._publish(artifacts, run_id, self._failed_summary(run_id))
             except Exception:
                 LOGGER.exception(
                     "could not persist failure state for %s; worker remains alive",
@@ -218,6 +216,45 @@ class Worker:
             "unresolved_ids": result.unresolved_ids,
             "error_ids": result.error_ids,
         }
+
+    def _failed_summary(self, run_id: str) -> dict[str, Any]:
+        run = self.store.get_run(run_id)
+        if not run:
+            raise RuntimeError(f"run disappeared: {run_id}")
+        return {
+            "run_id": run_id,
+            "repository": run["repository"],
+            "qwen_ref": run["qwen_ref"],
+            "qwen_commit": run["qwen_commit"],
+            "qwen_version": (
+                qwen_version_from_ref(run["qwen_ref"])
+                if run["runner_mode"] == "harbor"
+                else None
+            ),
+            "suite": run["suite"],
+            "dataset": run["dataset"],
+            "dataset_revision": run["dataset_revision"],
+            "expected_instances": run["expected_instances"],
+            "completed_instances": run["completed_instances"],
+            "resolved_instances": run["resolved_instances"],
+            "unresolved_instances": 0,
+            "error_instances": 0,
+            "resolved_ids": [],
+            "unresolved_ids": [],
+            "error_ids": [],
+        }
+
+    def _publish(
+        self, artifacts: Artifacts, run_id: str, summary: dict[str, Any]
+    ) -> None:
+        current = self.store.get_run(run_id)
+        if not current:
+            return
+        try:
+            publish_check(self.settings, current, summary)
+        except Exception as error:
+            LOGGER.exception("result publishing failed for %s", run_id)
+            artifacts.write_json("publisher-error.json", {"error": str(error)})
 
     def _write_status(self, artifacts: Artifacts, run_id: str) -> None:
         run = self.store.get_run(run_id)

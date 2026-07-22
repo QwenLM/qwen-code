@@ -20,7 +20,8 @@ def publish_check(
         "Authorization": f"Bearer {settings.github_token}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    conclusion = "success" if run["status"] == "SUCCEEDED" else "failure"
+    succeeded = run["status"] == "SUCCEEDED"
+    conclusion = "success" if succeeded else "failure"
     release_id = json.loads(run["request_json"]).get("release_id")
     if release_id:
         _update_release_body(settings, run, summary, headers, int(release_id))
@@ -33,12 +34,8 @@ def publish_check(
             "status": "completed",
             "conclusion": conclusion,
             "output": {
-                "title": f"{summary['resolved_instances']} / {summary['expected_instances']} resolved",
-                "summary": (
-                    f"Run `{run['run_id']}` completed with "
-                    f"{summary['resolved_instances']} resolved instances and "
-                    f"{summary['error_instances']} infrastructure errors."
-                ),
+                "title": _check_title(summary, succeeded),
+                "summary": _check_summary(summary, succeeded),
             },
         },
         timeout=30,
@@ -60,22 +57,46 @@ def _update_release_body(
     response.raise_for_status()
     existing_body = response.json().get("body") or ""
     marker = "<!-- qwen-code-benchmark -->"
-    section = "\n".join(
-        [
-            marker,
-            "## Qwen Code benchmark",
-            "",
-            f"- Suite: `{summary['suite']}`",
-            f"- Qwen Code version: `{summary['qwen_version']}`",
-            f"- Commit: `{summary['qwen_commit']}`",
-            f"- Result: **{summary['resolved_instances']} / {summary['expected_instances']} resolved**",
-            f"- Run ID: `{summary['run_id']}`",
-            "",
-        ]
-    )
+    section = _release_section(marker, summary, run["status"] == "SUCCEEDED")
     if marker in existing_body:
         body = existing_body.split(marker, 1)[0].rstrip() + "\n\n" + section
     else:
         body = existing_body.rstrip() + "\n\n" + section
     patch = httpx.patch(url, headers=headers, json={"body": body}, timeout=30)
     patch.raise_for_status()
+
+
+def _check_title(summary: dict[str, Any], succeeded: bool) -> str:
+    if not succeeded:
+        return "Benchmark failed (not scored)"
+    return f"{summary['resolved_instances']} / {summary['expected_instances']} resolved"
+
+
+def _check_summary(summary: dict[str, Any], succeeded: bool) -> str:
+    if not succeeded:
+        return f"Run `{summary['run_id']}` failed before a valid score was available."
+    return (
+        f"Run `{summary['run_id']}` completed with "
+        f"{summary['resolved_instances']} resolved instances and "
+        f"{summary['error_instances']} infrastructure errors."
+    )
+
+
+def _release_section(marker: str, summary: dict[str, Any], succeeded: bool) -> str:
+    version = summary["qwen_version"] or summary["qwen_ref"]
+    lines = [
+        marker,
+        "## Qwen Code benchmark",
+        "",
+        f"- Suite: `{summary['suite']}`",
+        f"- Qwen Code version: `{version}`",
+        f"- Commit: `{summary['qwen_commit']}`",
+    ]
+    if succeeded:
+        lines.append(
+            f"- Result: **{summary['resolved_instances']} / {summary['expected_instances']} resolved**"
+        )
+    else:
+        lines.append("- Status: **failed — not scored**")
+    lines.extend([f"- Run ID: `{summary['run_id']}`", ""])
+    return "\n".join(lines)

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from qwen_benchmark.config import Settings, load_suites
 from qwen_benchmark.models import RunRequest
-from qwen_benchmark.runner import RunResult
+from qwen_benchmark.runner import AgentError, RunResult
 from qwen_benchmark.store import Store
 from qwen_benchmark.worker import Worker
 
@@ -56,6 +56,11 @@ class FlakyHeartbeatStore(Store):
         if self.heartbeat_calls == 1:
             raise sqlite3.OperationalError("unable to open database file")
         super().heartbeat(run_id)
+
+
+class FailingRunner(FakeRunner):
+    def run(self, *args, **kwargs) -> RunResult:
+        raise AgentError("agent setup failed")
 
 
 def test_worker_completes_and_writes_artifacts(tmp_path: Path) -> None:
@@ -154,6 +159,54 @@ def test_transient_heartbeat_failure_does_not_abort_runner(tmp_path: Path) -> No
     assert final is not None
     assert final["status"] == "SUCCEEDED"
     assert store.heartbeat_calls >= 1
+
+
+def test_worker_publishes_terminal_failure_without_score(tmp_path: Path, monkeypatch) -> None:
+    settings = Settings(
+        database_path=tmp_path / "state/benchmark.db",
+        work_root=tmp_path / "work",
+        artifact_root=tmp_path / "artifacts",
+        qwen_repo=tmp_path,
+        swebench_python=Path("/usr/bin/python3"),
+        auth_mode="token",
+        shared_token="test-token",
+        oidc_audience="qwen-benchmark",
+        allowed_repository="QwenLM/qwen-code",
+        allowed_repository_id=None,
+        allowed_workflow=None,
+        poll_seconds=0.01,
+        github_token="token",
+        harbor_jobs_root=tmp_path / "harbor-jobs",
+    )
+    settings.prepare_directories()
+    store = Store(settings.database_path)
+    store.initialize()
+    suites = load_suites()
+    request = RunRequest(
+        qwen_ref="HEAD",
+        suite="swebench_verified_gold_smoke",
+        trigger="manual",
+    )
+    run, _ = store.create_run(request, suites[request.suite], "worker-failure")
+    published: list[tuple[dict, dict]] = []
+    monkeypatch.setattr(
+        "qwen_benchmark.worker.publish_check",
+        lambda settings, current, summary: published.append((current, summary)),
+    )
+
+    worker = Worker(
+        settings,
+        store,
+        suites,
+        runner_factory=lambda heartbeat: FailingRunner(heartbeat),
+    )
+    assert worker.run_once() is True
+
+    final = store.get_run(run["run_id"])
+    assert final is not None and final["status"] == "FAILED"
+    assert len(published) == 1
+    assert published[0][0]["status"] == "FAILED"
+    assert published[0][1]["resolved_instances"] == 0
 
 
 def test_recover_interrupted_run_requeues_with_attempt_remaining(

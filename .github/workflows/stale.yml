@@ -26,6 +26,10 @@ on:
         options:
           - 'swebench_verified_gold_smoke'
           - 'swebench_verified_harbor_smoke'
+      release_id:
+        description: 'Optional GitHub Release ID to update after the benchmark.'
+        required: false
+        type: string
 
 jobs:
   stale:
@@ -91,6 +95,8 @@ jobs:
           QWEN_REF: '${{ inputs.qwen_ref }}'
           QWEN_COMMIT: '${{ steps.revision.outputs.commit }}'
           SUITE: '${{ inputs.suite }}'
+          RELEASE_ID: '${{ inputs.release_id }}'
+          TRIGGER: workflow_dispatch
         run: |-
           set -euo pipefail
           response="$(sudo -n /usr/local/sbin/qwen-benchmark-dispatch \
@@ -98,6 +104,8 @@ jobs:
             --qwen-ref "${QWEN_REF}" \
             --qwen-commit "${QWEN_COMMIT}" \
             --suite "${SUITE}" \
+            --release-id "${RELEASE_ID}" \
+            --trigger "${TRIGGER}" \
             --github-run-id "${GITHUB_RUN_ID}" \
             --github-run-attempt "${GITHUB_RUN_ATTEMPT}")"
           echo "${response}" | jq .

@@ -1,6 +1,8 @@
 name: 'Dispatch SWE-bench Verified Benchmark'
 
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       qwen_ref:
@@ -20,6 +22,7 @@ on:
 jobs:
   dispatch:
     name: 'Submit benchmark run'
+    if: '${{ github.event_name != ''release'' || github.event.release.prerelease == false }}'
     runs-on: [self-hosted, Linux, X64, qwen-benchmark]
     timeout-minutes: 10
     permissions:
@@ -41,7 +44,9 @@ jobs:
         env:
           QWEN_REF: '${{ github.event.release.tag_name || inputs.qwen_ref }}'
           QWEN_COMMIT: '${{ steps.revision.outputs.commit }}'
-          SUITE: '${{ inputs.suite }}'
+          SUITE: "${{ inputs.suite || 'swebench_verified_harbor_smoke' }}"
+          RELEASE_ID: '${{ github.event.release.id }}'
+          TRIGGER: '${{ github.event_name }}'
         run: |-
           set -euo pipefail
           response="$(sudo -n /usr/local/sbin/qwen-benchmark-dispatch \
@@ -49,6 +54,8 @@ jobs:
             --qwen-ref "${QWEN_REF}" \
             --qwen-commit "${QWEN_COMMIT}" \
             --suite "${SUITE}" \
+            --release-id "${RELEASE_ID}" \
+            --trigger "${TRIGGER}" \
             --github-run-id "${GITHUB_RUN_ID}" \
             --github-run-attempt "${GITHUB_RUN_ATTEMPT}")"
           echo "${response}" | jq .
