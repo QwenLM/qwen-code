@@ -25,9 +25,12 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+reset\s+--hard\b/,
   /\bgit\s+checkout\s+--\s+\./,
   // `git checkout .` discards the same tracked changes as the `-- .` form
-  // above. The lookahead keeps `git checkout .gitignore` (a single file, not
-  // the whole tree) and branch names out of this pattern.
-  /\bgit\s+checkout\s+\.(?=\s|$)/,
+  // above. The lookahead admits whitespace, a command separator (so
+  // `git checkout .;rm -rf /` with no space cannot slip past) and `/` (so a
+  // directory pathspec like `git checkout ./src` is caught, matching what the
+  // `-- .` pattern already does), while still keeping single files such as
+  // `git checkout .gitignore` and branch names out.
+  /\bgit\s+checkout\s+\.(?=[\s;&|/]|$)/,
   // The force flag must be matched wherever it appears in the argument list,
   // not only as the first token: `git clean -d -f` and `git clean -d --force`
   // delete exactly what `git clean -fd` does. `--force` is the long spelling

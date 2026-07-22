@@ -157,7 +157,19 @@ describe('isDestructiveCommand — git patterns', () => {
   });
 
   it('blocks git checkout . (same discard as the -- . form)', () => {
-    for (const cmd of ['git checkout .', 'git checkout . && npm test']) {
+    for (const cmd of [
+      'git checkout .',
+      'git checkout . && npm test',
+      // No space before the separator — the `.` is followed by `;`/`&`/`|`
+      // rather than whitespace, which an over-tight lookahead would miss.
+      'git checkout .;rm -rf /tmp/x',
+      'git checkout .&&npm test',
+      'git checkout .|tee out.txt',
+      // A directory pathspec discards everything under it; the `-- ./src`
+      // spelling is already blocked by the sibling pattern.
+      'git checkout ./src',
+      'git checkout ./packages/core',
+    ]) {
       const result = isDestructiveCommand(cmd, 'fix the bug');
       expect(result).not.toBeNull();
       expect(result!.blocked).toBe(true);
