@@ -20,8 +20,9 @@ function settingsSnapshot(
     revision: 'rev-1',
     channels: {
       bot: {
-        type: 'telegram',
-        token: '$BOT_TOKEN',
+        type: 'dingtalk',
+        clientId: 'client-id',
+        clientSecret: '$BOT_SECRET',
         senderPolicy: 'open',
       },
     },
@@ -40,17 +41,17 @@ function setup(options: {
     snapshot: vi.fn(() => persisted),
     upsert: vi.fn(async (name, request) => {
       const previous = persisted.channels[name] ?? {};
-      const token =
-        request.secrets?.token?.operation === 'clear'
+      const clientSecret =
+        request.secrets?.clientSecret?.operation === 'clear'
           ? undefined
-          : previous['token'];
+          : previous['clientSecret'];
       persisted = settingsSnapshot({
         revision: 'rev-2',
         channels: {
           ...persisted.channels,
           [name]: {
             ...request.config,
-            ...(token === undefined ? {} : { token }),
+            ...(clientSecret === undefined ? {} : { clientSecret }),
           },
         },
         startupNames: persisted.startupNames,
@@ -130,8 +131,14 @@ describe('createChannelManagementService', () => {
 
     expect(result.instances['bot']).toEqual({
       name: 'bot',
-      config: { type: 'telegram', senderPolicy: 'open' },
-      secrets: { token: { present: true, source: 'environment' } },
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        senderPolicy: 'open',
+      },
+      secrets: {
+        clientSecret: { present: true, source: 'environment' },
+      },
       startsWithServe: false,
       runtime: { state: 'connected' },
     });
@@ -142,24 +149,28 @@ describe('createChannelManagementService', () => {
       committedNames: ['other', 'bot'],
     });
     manager.reloadWorkspace.mockRejectedValueOnce(
-      new Error('invalid token token=start-secret'),
+      new Error('invalid token clientSecret=start-secret'),
     );
 
     const result = await service.upsert('bot', {
       expectedRevision: 'rev-1',
-      config: { type: 'telegram', senderPolicy: 'pairing' },
-      secrets: { token: { operation: 'clear' } },
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        senderPolicy: 'pairing',
+      },
+      secrets: { clientSecret: { operation: 'clear' } },
     });
 
     expect(store.upsert).toHaveBeenCalledBefore(manager.reloadWorkspace);
-    expect(persisted().channels['bot']).not.toHaveProperty('token');
+    expect(persisted().channels['bot']).not.toHaveProperty('clientSecret');
     expect(manager.setSelection).toHaveBeenCalledWith({
       mode: 'names',
       names: ['other'],
     });
     expect(result.instance.runtime).toEqual({
       state: 'error',
-      lastError: 'invalid token token=<redacted>',
+      lastError: 'invalid token clientSecret=<redacted>',
     });
     expect(manager.reload).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
@@ -188,9 +199,9 @@ describe('createChannelManagementService', () => {
       committedNames: ['first', 'second'],
       snapshot: settingsSnapshot({
         channels: {
-          first: { type: 'telegram' },
-          second: { type: 'telegram' },
-          bot: { type: 'telegram' },
+          first: { type: 'dingtalk' },
+          second: { type: 'dingtalk' },
+          bot: { type: 'dingtalk' },
         },
       }),
     });
