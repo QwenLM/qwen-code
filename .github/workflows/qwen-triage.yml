@@ -266,7 +266,7 @@ jobs:
         run: |-
           set -euo pipefail
           if [ -n "${OPENAI_MODEL:-}" ]; then
-            sed -i "s/qwen3\.7-max/${OPENAI_MODEL}/g" .qwen/skills/triage/references/pr-workflow.md
+            sed -i "s|qwen3\.7-max|${OPENAI_MODEL}|g" .qwen/skills/triage/references/pr-workflow.md
           fi
 
       - name: 'Run Qwen Triage'
