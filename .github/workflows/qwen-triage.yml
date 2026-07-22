@@ -259,6 +259,16 @@ jobs:
             echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: 'Inject model name into triage signature'
+        shell: 'bash'
+        env:
+          OPENAI_MODEL: '${{ vars.QWEN_TRIAGE_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+        run: |-
+          set -euo pipefail
+          if [ -n "${OPENAI_MODEL:-}" ]; then
+            sed -i "s/qwen3\.7-max/${OPENAI_MODEL}/g" .qwen/skills/triage/references/pr-workflow.md
+          fi
+
       - name: 'Run Qwen Triage'
         id: 'triage'
         uses: 'QwenLM/qwen-code-action@6d08e91aa807257b9c8af60edb5bb6bb2d7d951f'
