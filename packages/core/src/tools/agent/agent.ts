@@ -1051,6 +1051,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         }
       }
     }
+    // Some models emit an empty placeholder for the unused optional field.
+    // With isolation selected, normalize it away before downstream routing.
+    if (
+      (typeof params.working_dir === 'string' &&
+        params.working_dir.trim().length === 0) ||
+      params.working_dir === null
+    ) {
+      params.working_dir = undefined;
+    }
 
     if (params.fork_turns !== undefined) {
       if (
