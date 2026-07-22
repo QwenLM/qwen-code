@@ -775,6 +775,10 @@ Content-Type: application/json
 
 Both routes use the strict mutation gate. The qualified route resolves only a
 registered, trusted workspace. Success is `200 {delivered:true,deliveryId}`.
+`delivered:true` means the Channel send Promise resolved; it does not prove
+provider acceptance, user receipt, or a read receipt. Provider-specific
+response validation and consistent error-reason semantics across IM adapters
+are outside this V1 contract.
 Errors are `400 channel_delivery_invalid`, `503 channel_worker_unavailable` or
 `channel_delivery_queue_full`, `504 channel_delivery_timeout`, and `502
 channel_delivery_rejected` or `channel_delivery_failed`. A timeout has an

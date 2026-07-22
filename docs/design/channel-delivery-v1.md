@@ -60,9 +60,9 @@ Authorization is consumed before worker availability is checked, so a transient 
 
 This V1 has no persistence, startup replay, historical scan, retry, or idempotency guarantee. Existing tasks without delivery never send. Existing scheduler catch-up behavior is unchanged. Normal executions carry delivery only when the task already contains it; the synthetic historical missed-one-shot batch explicitly clears delivery so enabling Channel later cannot create a burst of old alerts.
 
-The adapter `permanent`/`transient` error disposition is intentionally not carried through the IPC result in V1; both map to `channel_delivery_failed` (or `channel_delivery_rejected` for permanent). If durable retry is added later, the disposition should be surfaced in the result.
+V1 observes the Channel send Promise only. A rejection is sanitized and mapped to `channel_delivery_failed`, except adapters that already provide a typed permanent disposition map to `channel_delivery_rejected`. Provider-specific response parsing and consistent error-reason semantics across IM adapters are follow-up work; the daemon and worker contain no platform-specific error handling.
 
-Delivery result events and logs include correlation identifiers, source, status, and sanitized error data. They never include message text, target IDs, credentials, or webhook secrets. `delivered` means the adapter accepted the send, not that a user read it.
+Delivery result events and logs include correlation identifiers, source, status, and sanitized error data. They never include message text, target IDs, credentials, or webhook secrets. `delivered` means the adapter send Promise resolved; it does not assert that the provider accepted the message or that a user received or read it.
 
 ## Capability
 

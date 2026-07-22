@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import type {
-  ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
   Envelope,
   SessionTarget,
@@ -92,7 +91,6 @@ vi.mock('@qwen-code/channel-base', async () => {
     '@qwen-code/channel-base',
   );
   return {
-    ChannelProactiveDeliveryError: real.ChannelProactiveDeliveryError,
     ChannelBase: class {
       protected config: Record<string, unknown>;
       protected name: string;
@@ -2427,11 +2425,8 @@ describe('DingtalkChannel proactive send', () => {
         ),
     );
 
-    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
-      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
-        disposition: 'permanent',
-        message: 'DingTalk proactive send failed: invalid direct recipient',
-      }),
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: invalid direct recipient',
     );
   });
 
@@ -2448,12 +2443,8 @@ describe('DingtalkChannel proactive send', () => {
         ),
     );
 
-    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
-      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
-        disposition: 'transient',
-        message:
-          'DingTalk proactive send failed: direct recipient rate limited',
-      }),
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: direct recipient rate limited',
     );
   });
 
@@ -2535,18 +2526,15 @@ describe('DingtalkChannel proactive send', () => {
     expect(directSendCalls()).toHaveLength(1);
   });
 
-  it('keeps API detail in logs and classifies the propagated failure', async () => {
+  it('surfaces API detail in the error and log on failure', async () => {
     const channel = proactive(createChannel());
     const writeSpy = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
     stubProactiveFetch(() => new Response('perm denied', { status: 403 }));
 
-    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toEqual(
-      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
-        disposition: 'permanent',
-        message: 'DingTalk proactive send failed: HTTP 403',
-      }),
+    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: HTTP 403 perm denied',
     );
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
@@ -2564,41 +2552,13 @@ describe('DingtalkChannel proactive send', () => {
       throw new Error('connection reset');
     });
 
-    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
-      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
-        disposition: 'transient',
-        message: 'DingTalk proactive send failed: network error',
-      }),
+    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: connection reset',
     );
 
     const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
     expect(logged).toContain(
       'proactive send error (dm, chunk 1/1): Error: connection reset',
-    );
-  });
-
-  it('wraps a proactive token fetch failure in a typed delivery error', async () => {
-    const channel = proactive(createChannel());
-    const writeSpy = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
-    stubProactiveFetch(
-      () => new Response('{}', { status: 200 }),
-      () => {
-        throw new Error('token api down');
-      },
-    );
-
-    await expect(channel.pushProactive(directTarget, 'hello')).rejects.toEqual(
-      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
-        disposition: 'transient',
-        message: 'DingTalk proactive send failed: token fetch error',
-      }),
-    );
-
-    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
-    expect(logged).toContain(
-      'proactive send failed (dm, chunk 1/1): token fetch error',
     );
   });
 
@@ -2630,7 +2590,7 @@ describe('DingtalkChannel proactive send', () => {
     expect(tokenCalls()).toHaveLength(2);
   });
 
-  it('wraps a token endpoint rejection in a typed delivery error', async () => {
+  it('throws when the token endpoint rejects', async () => {
     const channel = proactive(createChannel());
     vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
     stubProactiveFetch(
@@ -2642,17 +2602,7 @@ describe('DingtalkChannel proactive send', () => {
         ),
     );
 
-    const error = await channel
-      .pushProactive(groupTarget, 'hello')
-      .catch((err: unknown) => err);
-
-    expect(error).toEqual(
-      expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
-        disposition: 'transient',
-        message: 'DingTalk proactive send failed: token fetch error',
-      }),
-    );
-    expect(String((error as { cause?: unknown }).cause)).toContain(
+    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
       'gettoken errcode=40089',
     );
   });
