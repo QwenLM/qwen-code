@@ -1,0 +1,20 @@
+{
+  "name": "enterprise-memory",
+  "displayName": {
+    "en": "Enterprise Memory",
+    "zh": "企业共享记忆"
+  },
+  "description": {
+    "en": "Governed external memory through deterministic hooks and a bounded MCP surface",
+    "zh": "通过确定性 Hooks 与受限 MCP 接口接入企业治理的外部记忆"
+  },
+  "version": "0.1.0",
+  "hooks": "hooks/hooks.json",
+  "mcpServers": {
+    "enterprise-memory": {
+      "command": "qwen-memory-agent-launcher",
+      "args": ["node", "${extensionPath}${/}dist${/}agent${/}main.js", "mcp"],
+      "cwd": "${extensionPath}"
+    }
+  }
+}
