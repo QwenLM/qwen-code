@@ -131,6 +131,51 @@ describe('downloadMedia', () => {
     expect(bodyCancel).toHaveBeenCalled();
   });
 
+  it('awaits body.cancel() so a failing Content-Length teardown is caught, not leaked', async () => {
+    const largeSize = 60 * 1024 * 1024; // 60 MB
+    // Mirror of the reader.cancel() test below, for the Content-Length path:
+    // a body whose cancel() rejects (e.g. the connection was already reset).
+    // Because the call is AWAITED, the rejection lands in downloadMedia's own
+    // catch ("downloadMedia error: …") instead of escaping as an unhandled
+    // rejection — asserting on which branch logged pins the await.
+    const bodyCancel = vi
+      .fn()
+      .mockRejectedValue(new Error('body teardown failed'));
+    const mockResponse = {
+      ok: true,
+      headers: {
+        get: (key: string) => {
+          if (key === 'content-length') return largeSize.toString();
+          return null;
+        },
+      },
+      body: {
+        cancel: bodyCancel,
+        getReader: () => ({
+          read: vi.fn().mockResolvedValue({ done: true, value: undefined }),
+          cancel: vi.fn(),
+        }),
+      },
+    };
+
+    fetchSpy.mockResolvedValueOnce(mockResponse as unknown as Response);
+
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      const result = await downloadMedia('om_msg', 'file_key', 'file', 'token');
+
+      expect(result).toBeNull();
+      expect(bodyCancel).toHaveBeenCalledTimes(1);
+      const logged = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+      expect(logged).toContain('downloadMedia error');
+      expect(logged).toContain('body teardown failed');
+    } finally {
+      stderrSpy.mockRestore();
+    }
+  });
+
   it('should reject stream exceeding 50MB', async () => {
     const chunkSize = 10 * 1024 * 1024; // 10 MB per chunk
     const mockData = new Uint8Array(chunkSize);
