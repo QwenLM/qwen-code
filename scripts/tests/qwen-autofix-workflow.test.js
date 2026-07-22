@@ -3915,8 +3915,11 @@ describe('qwen-autofix workflow', () => {
     // judged the work at all; advancing there strands a fix the agent had
     // already written, which is exactly how the nested-package ENOENT stranded
     // #7329/#7336 until a human deleted the marker.
+    // Ends at the crash decision's own closing `fi`; the consecutive-failure
+    // block that follows is a separate unit with its own test, so anchor on it
+    // rather than the report `{` (which it now sits before).
     const decision = reviewAddressReportStep.match(
-      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n {12}\{/,
+      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n\n {12}# Consecutive-failure/,
     )?.[1];
     expect(decision).toBeTruthy();
     const SENTINEL = '9999-12-31T23:59:59Z';
@@ -4025,6 +4028,98 @@ describe('qwen-autofix workflow', () => {
         ROUND: '2',
       }),
     ).toContain('attempt 3/5');
+  });
+
+  it('stops a PR that fails to push for CONSECUTIVE_FAILURE_CAP rounds in a row', () => {
+    // The total round cap bounds productive iteration; this bounds an UNBROKEN
+    // run of failures under takeover, where the strict cap does not apply.
+    // Observed on #6723: 7 straight failed rounds (3 timeouts, 4 gate
+    // rejections) heading for round 100, each ~50 min. Any push or legitimate
+    // no-op resets the streak; only consecutive failures count.
+    const cap = Number(workflow.match(/CONSECUTIVE_FAILURE_CAP: '(\d+)'/)?.[1]);
+    expect(cap).toBeGreaterThan(0);
+    // The sub-cap must be below the takeover cap or it never binds there.
+    const takeoverCap = Number(
+      workflow.match(/TAKEOVER_MAX_ROUNDS: '(\d+)'/)?.[1],
+    );
+    expect(cap).toBeLessThan(takeoverCap);
+
+    const block = reviewAddressReportStep.match(
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\]; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+
+    const FAIL =
+      '🤖 Could not address the latest feedback automatically (round 3/100).';
+    const FAIL_TIMEOUT = '🤖 AutoFix could not reach the model (attempt 2/3)';
+    const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
+    const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
+
+    const run = (priorHeadlines) => {
+      const dir = mkdtempSync(join(tmpdir(), 'consec-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(dir, 'comments.json'),
+        JSON.stringify(
+          priorHeadlines.map((h) => ({
+            user: { login: 'qwen-code-dev-bot' },
+            body: `${h}\n<!-- autofix-eval ts=x acted=y round=z -->`,
+          })),
+        ),
+      );
+      writeFileSync(
+        join(bin, 'gh'),
+        `#!/usr/bin/env bash\ncat ${JSON.stringify(join(dir, 'comments.json'))}\n`,
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nMARK_ROUND=7\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nHEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+        ],
+        {
+          env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      const [mark, consec, headline] = out.split('|');
+      return {
+        mark,
+        consec: Number(consec),
+        terminal: mark === '100',
+        headline,
+      };
+    };
+
+    // This round alone (no prior failures) never terminates.
+    expect(run([])).toMatchObject({ consec: 1, terminal: false });
+    // cap-1 prior failures + this round = cap → terminal, with the structural
+    // handoff, not the ordinary "could not address".
+    const capped = run(Array(cap - 1).fill(FAIL));
+    expect(capped).toMatchObject({ consec: cap, terminal: true });
+    expect(capped.headline).toContain('consecutive');
+    expect(capped.headline).toContain('/retry');
+    // One short of the cap keeps retrying.
+    expect(run(Array(cap - 2).fill(FAIL))).toMatchObject({ terminal: false });
+    // A push resets the streak — failures before it do not count.
+    expect(run([FAIL, FAIL, PUSH, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    // A legitimate no-op resets it too (the loop was caught up, not stuck).
+    expect(run([...Array(cap).fill(FAIL), NOOP, FAIL])).toMatchObject({
+      consec: 2,
+      terminal: false,
+    });
+    // Timeouts and gate rejections both count — the streak is cause-agnostic.
+    expect(run([FAIL, FAIL_TIMEOUT, FAIL, FAIL_TIMEOUT])).toMatchObject({
+      consec: cap,
+      terminal: true,
+    });
   });
 
   it('makes every known gate rejection declare its verdict', () => {
