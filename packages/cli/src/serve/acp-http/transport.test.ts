@@ -3444,7 +3444,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
     const connId = await initialize();
     const connStream = await openStream(connId);
-    const loadReplies = takeFrames(connStream, 2);
+    // One reply frame per session/load; await each BEFORE opening the
+    // session stream — the GET must not race conn.ownSession() or the
+    // handler 403s and subscribeEvents never fires.
+    const replies = frameReader(connStream);
     await new Promise((r) => setTimeout(r, 50));
 
     // Healthy snapshot: no operator breadcrumb.
@@ -3455,6 +3458,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/load',
       params: { sessionId: 'deg-0' },
     });
+    await replies.next();
     stdioMocks.writeStderrLine.mockClear();
     await openStream(connId, 'deg-0');
     await waitUntil(() => bridge.subscribeCalls.length >= 1);
@@ -3468,7 +3472,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       method: 'session/load',
       params: { sessionId: 'deg-1' },
     });
-    await loadReplies;
+    await replies.next();
     stdioMocks.writeStderrLine.mockClear();
     await openStream(connId, 'deg-1');
     await waitUntil(() => bridge.subscribeCalls.length >= 2);
@@ -3478,6 +3482,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         ([line]) => typeof line === 'string' && line.includes('deg-1'),
       ),
     ).toBe(true);
+    replies.close();
   });
 
   it('defers prompt replies until initial load replay completes', async () => {
