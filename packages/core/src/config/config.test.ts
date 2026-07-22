@@ -6,7 +6,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import type { ConfigParameters, SandboxConfig } from './config.js';
 import {
   Config,
@@ -64,7 +64,15 @@ import {
 } from '../confirmation-bus/types.js';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import type { LoadServerHierarchicalMemoryOptions } from '../utils/memoryDiscovery.js';
-import { readAutoMemoryIndex } from '../memory/store.js';
+import {
+  readAutoMemoryIndex,
+  readUserAutoMemoryIndex,
+} from '../memory/store.js';
+import {
+  clearAutoMemoryRootCache,
+  getAutoMemoryIndexPath,
+  getUserAutoMemoryIndexPath,
+} from '../memory/paths.js';
 import {
   rebuildTeamAutoMemoryIndex,
   TeamMemoryRootSecurityError,
@@ -83,6 +91,7 @@ import {
   SessionWriterLease,
 } from '../services/session-writer-lease.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import { checkPriorRead } from '../tools/priorReadEnforcement.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -3908,6 +3917,68 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+  });
+
+  it('refreshHierarchicalMemory seeds the FileReadCache for project and user MEMORY.md indexes', async () => {
+    const originalMemoryBaseDir = process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+    const tempDir = await mkdtemp(path.join(os.tmpdir(), 'auto-memory-cache-'));
+    const projectRoot = path.join(tempDir, 'project');
+    const memoryBaseDir = path.join(tempDir, 'memory-base');
+
+    await mkdir(projectRoot, { recursive: true });
+    process.env['QWEN_CODE_MEMORY_BASE_DIR'] = memoryBaseDir;
+    clearAutoMemoryRootCache();
+
+    const managedIndexPath = getAutoMemoryIndexPath(projectRoot);
+    const userIndexPath = getUserAutoMemoryIndexPath();
+
+    await mkdir(path.dirname(managedIndexPath), { recursive: true });
+    await mkdir(path.dirname(userIndexPath), { recursive: true });
+    await writeFile(managedIndexPath, '# managed memory\n', 'utf-8');
+    await writeFile(userIndexPath, '# user memory\n', 'utf-8');
+
+    try {
+      const config = new Config({
+        ...baseParams,
+        cwd: projectRoot,
+        targetDir: projectRoot,
+      });
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
+        memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        fileCount: 1,
+        ruleCount: 0,
+        conditionalRules: [],
+        projectRoot,
+      });
+      vi.mocked(readAutoMemoryIndex).mockResolvedValueOnce(
+        '# managed memory\n',
+      );
+      vi.mocked(readUserAutoMemoryIndex).mockResolvedValueOnce(
+        '# user memory\n',
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      await expect(
+        checkPriorRead(
+          config.getFileReadCache(),
+          managedIndexPath,
+          'overwriting',
+        ),
+      ).resolves.toEqual({ ok: true });
+      await expect(
+        checkPriorRead(config.getFileReadCache(), userIndexPath, 'overwriting'),
+      ).resolves.toEqual({ ok: true });
+    } finally {
+      if (originalMemoryBaseDir === undefined) {
+        delete process.env['QWEN_CODE_MEMORY_BASE_DIR'];
+      } else {
+        process.env['QWEN_CODE_MEMORY_BASE_DIR'] = originalMemoryBaseDir;
+      }
+      clearAutoMemoryRootCache();
+      await rm(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {

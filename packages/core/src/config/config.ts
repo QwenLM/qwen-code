@@ -212,7 +212,9 @@ import {
 } from '../utils/debugLogger.js';
 import {
   getAutoMemoryRoot,
+  getAutoMemoryIndexPath,
   getTeamAutoMemoryRoot,
+  getUserAutoMemoryIndexPath,
   getUserAutoMemoryRoot,
 } from '../memory/paths.js';
 import {
@@ -3149,6 +3151,16 @@ export class Config {
         readAutoMemoryIndex(this.getProjectRoot()),
         readUserAutoMemoryIndex().catch(() => null),
       ]);
+      await Promise.all([
+        this.recordAutoMemoryIndexRead(
+          getAutoMemoryIndexPath(this.getProjectRoot()),
+          managedAutoMemoryIndex,
+        ),
+        this.recordAutoMemoryIndexRead(
+          getUserAutoMemoryIndexPath(),
+          userAutoMemoryIndex,
+        ),
+      ]);
       // Always surface the user-level section so the main assistant knows the
       // dir exists and can route ad-hoc "remember this cross-project" saves
       // there. When empty the prompt builder emits a "MEMORY.md is currently
@@ -3179,6 +3191,28 @@ export class Config {
       conditionalRules,
       projectRoot,
     );
+  }
+
+  private async recordAutoMemoryIndexRead(
+    indexPath: string,
+    indexContent: string | null,
+  ): Promise<void> {
+    if (indexContent === null || this.getFileReadCacheDisabled()) {
+      return;
+    }
+
+    try {
+      const stats = await fsPromises.stat(indexPath);
+      this.getFileReadCache().recordRead(indexPath, stats, {
+        full: true,
+        cacheable: true,
+      });
+    } catch (error) {
+      this.debugLogger.warn(
+        `Failed to seed FileReadCache for auto-memory index ${indexPath}`,
+        error,
+      );
+    }
   }
 
   private buildMemoryContextWarning(memoryContent: string): string | undefined {
