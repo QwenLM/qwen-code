@@ -188,6 +188,31 @@ def test_rejects_invalid_max_subagent_depth() -> None:
         validate_query_options(QueryOptions(max_subagent_depth=0))
 
 
+@pytest.mark.parametrize("value", [True, False, 0.5])
+def test_rejects_non_integer_max_tool_calls(value: object) -> None:
+    # The error message promises "-1 or a non-negative integer", and the value
+    # is stringified straight onto the CLI, so `True` would become
+    # `--max-tool-calls True`.
+    with pytest.raises(ValidationError, match="max_tool_calls"):
+        validate_query_options(QueryOptions(max_tool_calls=cast(Any, value)))
+
+
+@pytest.mark.parametrize("value", [True, False, 2.5])
+def test_rejects_non_integer_max_subagent_depth(value: object) -> None:
+    with pytest.raises(ValidationError, match="max_subagent_depth"):
+        validate_query_options(QueryOptions(max_subagent_depth=cast(Any, value)))
+
+
+def test_accepts_valid_integer_limits() -> None:
+    # The in-range integers these options are documented to take must survive.
+    validate_query_options(
+        QueryOptions(max_tool_calls=-1, max_session_turns=-1, max_subagent_depth=1)
+    )
+    validate_query_options(
+        QueryOptions(max_tool_calls=0, max_session_turns=0, max_subagent_depth=100)
+    )
+
+
 def test_rejects_agents_missing_required_fields() -> None:
     with pytest.raises(ValidationError, match="missing required field"):
         validate_query_options(QueryOptions(agents=[{"name": "test"}]))

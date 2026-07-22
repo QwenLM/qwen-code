@@ -135,9 +135,7 @@ def validate_query_options(options: QueryOptions) -> None:
         )
 
     if options.max_session_turns is not None and (
-        isinstance(options.max_session_turns, bool)
-        or not isinstance(options.max_session_turns, int)
-        or options.max_session_turns < -1
+        not _is_int(options.max_session_turns) or options.max_session_turns < -1
     ):
         raise ValidationError("max_session_turns must be -1 or a non-negative integer")
 
@@ -147,11 +145,14 @@ def validate_query_options(options: QueryOptions) -> None:
     ):
         raise ValidationError("path_to_qwen_executable cannot be empty")
 
-    if options.max_tool_calls is not None and options.max_tool_calls < -1:
+    if options.max_tool_calls is not None and (
+        not _is_int(options.max_tool_calls) or options.max_tool_calls < -1
+    ):
         raise ValidationError("max_tool_calls must be -1 or a non-negative integer")
 
-    if options.max_subagent_depth is not None and not (
-        1 <= options.max_subagent_depth <= 100
+    if options.max_subagent_depth is not None and (
+        not _is_int(options.max_subagent_depth)
+        or not (1 <= options.max_subagent_depth <= 100)
     ):
         raise ValidationError("max_subagent_depth must be between 1 and 100")
 
@@ -203,6 +204,15 @@ def validate_query_options(options: QueryOptions) -> None:
 
     if options.proxy is not None and not options.proxy.strip():
         raise ValidationError("proxy cannot be empty")
+
+
+def _is_int(value: object) -> bool:
+    """True for a real integer.
+
+    ``bool`` subclasses ``int``, so ``isinstance(True, int)`` is True and a
+    bare isinstance check would let ``max_tool_calls=True`` through as 1.
+    """
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def _validate_optional_callable(
