@@ -4027,6 +4027,70 @@ describe('qwen-autofix workflow', () => {
     ).toContain('attempt 3/5');
   });
 
+  it('retries a skipped-Prepare (base/infra failure) instead of stranding it terminal', () => {
+    // NEWEST empty has two meanings, and the fix is to stop conflating them:
+    //   - Prepare RAN but the agent crashed/timed out before reading → terminal
+    //   - Prepare was SKIPPED because an earlier step failed (base install/
+    //     build, checkout) → infra/base, transient → RETRY.
+    // Observed: a web-shell TS break on `main` failed the trusted-base build
+    // across a whole scan batch, skipping Prepare, and the old code stranded
+    // SIX healthy PRs (one at round 11) terminally at round=100.
+    const block = reviewAddressReportStep.match(
+      /GATE_CRASHED=false\n[\s\S]*?\n {12}fi\n(?= {12}\{)/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+    const SENTINEL = '9999-12-31T23:59:59Z';
+    const run = (env) => {
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\n${script}\nprintf '%s|%s|%s' "$MARK_TS" "$MARK_ROUND" "$HEADLINE"`,
+        ],
+        {
+          env: {
+            ...process.env,
+            NEWEST: '',
+            WATERMARK: '2026-07-20T09:00:00Z',
+            ROUND: '3',
+            MAX_ROUNDS: '100',
+            OUTCOME: '',
+            JOB_STATUS: 'failure',
+            DETAIL_FILE: '',
+            API_ERROR_DETAIL: '',
+            API_ERROR_KIND: '',
+            API_AUTH_MAX_ROUNDS: '3',
+            PREPARE_OUTCOME: 'skipped',
+            RETRY_COMMAND: '@qwen-code /retry',
+            ...env,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const [ts, round, headline] = out.split('|');
+      return { ts, round, terminal: round === '100', headline };
+    };
+
+    // Prepare skipped, early round → retry: sentinel ts (feedback stays live),
+    // round increments, NOT terminal, and the headline names infra/base.
+    const early = run({ PREPARE_OUTCOME: 'skipped', ROUND: '3' });
+    expect(early).toMatchObject({ ts: SENTINEL, round: '4', terminal: false });
+    expect(early.headline).toContain('setup step');
+    expect(early.headline).toContain('retry on the next scan');
+    // A PERSISTENTLY broken base is still bounded: at the cap it goes terminal
+    // (so it cannot loop forever) but keeps the sentinel ts so /retry recovers.
+    const persistent = run({ PREPARE_OUTCOME: 'skipped', ROUND: '99' });
+    expect(persistent).toMatchObject({ ts: SENTINEL, terminal: true });
+    expect(persistent.headline).toContain('/retry');
+    // Prepare RAN and produced no feedback → a genuine pre-read agent crash:
+    // unchanged terminal behaviour.
+    const crashed = run({ PREPARE_OUTCOME: 'success', ROUND: '3' });
+    expect(crashed).toMatchObject({ terminal: true });
+    expect(crashed.headline).toContain('crashed or timed out before reading');
+    expect(crashed.headline).not.toContain('setup step');
+  });
+
   it('makes every known gate rejection declare its verdict', () => {
     // The retry/advance split above is only sound while each real rejection
     // writes outcome=failed; an unwired check would read as a gate crash and be

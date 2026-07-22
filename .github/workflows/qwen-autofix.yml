@@ -3134,6 +3134,11 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           JOB_STATUS: '${{ job.status }}'
+          # 'skipped' when an EARLIER step failed before Prepare ran (base
+          # install/build, checkout) — an infra/base failure, not the agent.
+          # 'success'/'failure' when Prepare itself ran. Distinguishes a
+          # transient pre-agent crash (retry) from a genuine agent crash.
+          PREPARE_OUTCOME: '${{ steps.prepare.outcome }}'
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
@@ -3333,14 +3338,34 @@ jobs:
               else
                 HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
               fi
+            elif [[ "${PREPARE_OUTCOME}" == 'skipped' ]]; then
+              # NEWEST is empty because Prepare never RAN — an earlier step
+              # failed before the agent started: installing/building the trusted
+              # base, checkout, node setup. That is infra or a broken base, NOT
+              # the agent, and it is usually transient (a base build fixed
+              # minutes later, an ENOSPC runner). Terminal here is wrong: a
+              # web-shell TS break on main failed the base build across a whole
+              # scan batch and stranded SIX healthy PRs terminally, including
+              # ones at round 11. Retry instead — sentinel ts keeps the feedback
+              # live — but still increment the round so a PERSISTENTLY broken
+              # base is bounded and cannot loop forever.
+              MARK_ROUND="$(( ROUND + 1 ))"
+              if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
+                MARK_TS='9999-12-31T23:59:59Z'
+                HEADLINE="🤖 AutoFix could not start — a setup step (installing/building the base, or checkout) failed before the agent ran, so no fix was attempted. This is normally a transient infra issue or a broken base build, not this PR. It will retry on the next scan."
+              else
+                MARK_TS='9999-12-31T23:59:59Z'
+                MARK_ROUND="${MAX_ROUNDS}"
+                HEADLINE="🤖 AutoFix could not start for ${MAX_ROUNDS} rounds — a setup step (base install/build, checkout) keeps failing before the agent runs. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
+              fi
             else
-              # Crashed/timed out before reading the feedback: mark terminal so the
-              # scan skips (it can't advance the watermark without a read), but say
-              # so plainly — do NOT imply MAX_ROUNDS attempts were made when zero
-              # rounds happened. Because the marker is terminal, the max-round guard
-              # skips this PR on EVERY future scan, including a forced dispatch, so
-              # the headline must state the real recovery (delete the marker) rather
-              # than promise a re-trigger that the guard would ignore.
+              # Prepare RAN (outcome success/failure) but produced no feedback to
+              # read — a genuine agent crash or timeout before reading. Mark
+              # terminal so the scan skips (it can't advance the watermark
+              # without a read); do NOT imply MAX_ROUNDS attempts were made when
+              # zero rounds happened. The headline states the real recovery
+              # (delete the marker) rather than promise a re-trigger the
+              # max-round guard would ignore.
               MARK_ROUND="${MAX_ROUNDS}"
               HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
             fi
