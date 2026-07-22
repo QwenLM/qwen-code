@@ -43,7 +43,10 @@ const initializeI18n = vi.fn();
 const resolveLanguageSetting = vi.fn((language?: string) => language || 'auto');
 
 vi.mock('../config/settings.js', () => ({ loadSettings }));
-vi.mock('../ui/utils/updateCheck.js', () => ({ checkForUpdatesDetailed }));
+vi.mock('../ui/utils/updateCheck.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../ui/utils/updateCheck.js')>()),
+  checkForUpdatesDetailed,
+}));
 vi.mock('../utils/installationInfo.js', () => ({
   formatUpdateInstructions,
   getInstallationInfo,
@@ -235,7 +238,7 @@ describe('update command', () => {
     await updateCommand.handler(updateArgs);
 
     expect(writeStderrLine).toHaveBeenCalledWith(
-      'Failed to check for updates. Please check your network or registry configuration.',
+      'Failed to check for updates (registry error). Please check your network or registry configuration.',
     );
     expect(process.exitCode).toBe(1);
     expect(getInstallationInfo).not.toHaveBeenCalled();

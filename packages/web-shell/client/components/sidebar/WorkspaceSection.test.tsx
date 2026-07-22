@@ -135,7 +135,7 @@ describe('WorkspaceSection label', () => {
 });
 
 describe('WorkspaceSection git chip', () => {
-  it('renders a git chip inside a dropdown trigger for a trusted repo', async () => {
+  it('renders a clickable git chip for a trusted repo', async () => {
     const status: DaemonWorkspaceGitStatus = {
       v: 2,
       workspaceCwd: '/tmp/project',
@@ -150,12 +150,22 @@ describe('WorkspaceSection git chip', () => {
 
     const chip = gitChip();
     expect(chip).not.toBeNull();
-    // The chip is now a read-only OUTPUT inside a DropdownMenuTrigger
-    // (the dropdown offers "Changes" and "New Worktree Task").
+    // The chip is a read-only OUTPUT inside a button that opens the changes
+    // view on click.
     expect(chip?.tagName).toBe('OUTPUT');
     expect(chip?.getAttribute('data-dirty')).toBe('true');
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
+
+    // The chip itself is a read-only OUTPUT; the wrapping button is what opens
+    // the Changes view. Click it to prove the onClick handler is actually wired
+    // — a miswire (e.g. a deleted onClick) would otherwise go undetected.
+    const button = chip?.closest('button');
+    expect(button).not.toBeNull();
+    act(() => {
+      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
   });
 
   it('hides the chip for an untrusted workspace and never queries git', async () => {
@@ -214,6 +224,23 @@ describe('WorkspaceSection git chip', () => {
     renderSection({ client, reloadToken: 1, onOpenGitDiff });
     await flush();
     expect(workspaceGit).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not re-fetch git status when only the diff handler changes', async () => {
+    workspaceGit.mockResolvedValue({
+      v: 2,
+      workspaceCwd: '/tmp/project',
+      branch: 'main',
+    });
+    const client = makeClient();
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
+
+    renderSection({ client, onOpenGitDiff: vi.fn() });
+    await flush();
+    expect(workspaceGit).toHaveBeenCalledTimes(1);
   });
 
   it('hides the chip when the workspace is not a git repo (null branch)', async () => {

@@ -2815,8 +2815,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
+    let persistedOutputFiles: string[] | undefined;
+
     // Truncate large output and save full content to a temp file.
     if (typeof llmContent === 'string') {
+      const originalLlmContent = llmContent;
       const truncatedResult = await truncateToolOutput(
         this.config,
         ShellTool.Name,
@@ -2829,14 +2832,23 @@ export class ShellToolInvocation extends BaseToolInvocation<
         // no-op here. lines: Infinity keeps this char-only so the global line
         // cap can't undercut the declared 30k char budget — many short lines
         // (e.g. `find /`, `ls -R`) would otherwise truncate while chars remain.
-        { threshold: 30_000, keep: 'both', lines: Number.POSITIVE_INFINITY },
+        {
+          threshold: 30_000,
+          previewChars: 4000,
+          keep: 'both',
+          lines: Number.POSITIVE_INFINITY,
+        },
       );
 
       if (truncatedResult.outputFile) {
+        persistedOutputFiles = [truncatedResult.outputFile];
         llmContent = truncatedResult.content;
         returnDisplayMessage +=
           (returnDisplayMessage ? '\n' : '') +
           `Output too long and was saved to: ${truncatedResult.outputFile}`;
+      } else if (truncatedResult.content !== originalLlmContent) {
+        persistedOutputFiles = [];
+        llmContent = truncatedResult.content;
       }
     }
 
@@ -2944,6 +2956,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     return {
       llmContent,
       returnDisplay: returnDisplayMessage,
+      ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...executionError,
     };
   }

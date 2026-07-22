@@ -73,6 +73,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     loading: false,
     capacityReached: false,
     loadMore: vi.fn(),
+    release: vi.fn(),
   }),
   useTranscriptStore: () => ({
     dispatch: transcriptDispatch,

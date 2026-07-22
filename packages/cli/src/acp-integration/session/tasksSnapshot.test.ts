@@ -81,4 +81,9 @@ describe('buildSessionTasksStatus agent lineage', () => {
     ]);
     expect(task.depth).toBe(0);
   });
+
+  it('exposes the parent tool call that launched an agent', () => {
+    const [task] = serializedAgents([agentTask({ toolUseId: 'call-1' })]);
+    expect(task.toolUseId).toBe('call-1');
+  });
 });

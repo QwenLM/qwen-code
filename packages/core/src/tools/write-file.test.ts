@@ -506,6 +506,35 @@ describe('WriteFileTool', () => {
       expect(result.llmContent).not.toContain('record_artifact');
     });
 
+    it('suggests workspace-root-relative path inside a worktree', async () => {
+      mockConfigInternal.isRecordArtifactEnabled.mockReturnValue(true);
+      const worktreeDir = path.join(
+        rootDir,
+        '.qwen',
+        'worktrees',
+        'my-feature',
+      );
+      fs.mkdirSync(worktreeDir, { recursive: true });
+      const originalGetTargetDir = mockConfigInternal.getTargetDir;
+      mockConfigInternal.getTargetDir = () => worktreeDir;
+      try {
+        const filePath = path.join(worktreeDir, 'report.html');
+        const params = {
+          file_path: filePath,
+          content: '<!doctype html><html><body>Report</body></html>',
+        };
+
+        const result = await tool.build(params).execute(abortSignal);
+
+        expect(result.llmContent).toContain('record_artifact');
+        expect(result.llmContent).toContain(
+          'workspacePath ".qwen/worktrees/my-feature/report.html"',
+        );
+      } finally {
+        mockConfigInternal.getTargetDir = originalGetTargetDir;
+      }
+    });
+
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
     // permissions, corrupted state) must never break the write_file tool.
     it('completes the write even when trackEdit throws', async () => {

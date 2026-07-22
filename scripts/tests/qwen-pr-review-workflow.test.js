@@ -273,10 +273,7 @@ describe('qwen pr review transient retry', () => {
   });
 
   it('keeps the workflow rate-limit suffix list in sync with errorParsing.ts', () => {
-    const src = readFileSync(
-      'packages/core/src/utils/errorParsing.ts',
-      'utf8',
-    );
+    const src = readFileSync('packages/core/src/utils/errorParsing.ts', 'utf8');
     const blk = src.slice(
       src.indexOf('RATE_LIMIT_MESSAGE_BY_AUTH = {'),
       src.indexOf('} as const;'),

@@ -5645,6 +5645,66 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    // Regression for #7315: the wire schema must not carry
+    // additionalProperties:false on levels with optional properties —
+    // OpenAI-compatible gateways promote every property to required,
+    // forcing mutually exclusive optional fields (Agent working_dir vs
+    // isolation) into every call.
+    it('relaxes additionalProperties:false for schemas with optional fields', async () => {
+      const agentLikeTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'agent',
+              description: 'Launch a new agent',
+              parametersJsonSchema: {
+                $schema: 'http://json-schema.org/draft-07/schema#',
+                type: 'object',
+                properties: {
+                  description: { type: 'string' },
+                  prompt: { type: 'string' },
+                  working_dir: { type: 'string' },
+                  isolation: { type: 'string', enum: ['worktree'] },
+                },
+                required: ['description', 'prompt'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToOpenAI(agentLikeTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBeUndefined();
+      expect(params['$schema']).toBeUndefined();
+      // Required stays exactly as authored — optional fields remain optional.
+      expect(params['required']).toEqual(['description', 'prompt']);
+    });
+
+    it('keeps additionalProperties:false when every property is required', async () => {
+      const strictTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'strict_tool',
+              description: 'All fields required',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToOpenAI(strictTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBe(false);
+    });
+
     it('should convert MCP tools with parametersJsonSchema field', async () => {
       // MCP tools use parametersJsonSchema which contains plain JSON schema (not Gemini types)
       const mcpTools = [
