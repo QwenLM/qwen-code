@@ -37,6 +37,8 @@ export interface AgentViewLastError {
   at: string;
 }
 
+export type AgentViewInputKind = 'blocking' | 'soft';
+
 export interface AgentViewWorktreeState {
   mode: 'none' | 'worktree' | 'shared-unisolated';
   path?: string;
@@ -77,6 +79,7 @@ export interface AgentViewLaunchFile {
   settingsDigest?: string;
   mcpDigest?: string;
   includeDirectories: string[];
+  initialPrompt?: string;
   terminal: {
     columns: number;
     rows: number;
@@ -88,7 +91,11 @@ export interface AgentViewActivityFile {
   schemaVersion: 1;
   summary?: string;
   waitingFor?: string;
+  inputKind?: AgentViewInputKind;
   lastResult?: string;
+  queuedPromptCount?: number;
+  queuedPromptPreview?: string;
+  lastQueuedPromptAt?: string;
   lastActivityAt: string;
   capabilities: string[];
 }
@@ -140,6 +147,7 @@ export interface AgentViewSupervisorFile {
 export interface AgentViewSessionSnapshot {
   sessionId: string;
   state: AgentViewSessionStateFile;
+  launch?: AgentViewLaunchFile;
   activity?: AgentViewActivityFile;
   worker?: AgentViewWorkerFile;
   rosterEntry?: AgentViewRosterEntry;
@@ -171,6 +179,7 @@ export type AgentViewWorkerEvent =
       cwd?: string;
       summary?: string;
       waitingFor?: string;
+      inputKind?: AgentViewInputKind;
       lastResult?: string;
       at?: string;
     };
@@ -195,6 +204,11 @@ export type AgentViewWorkerControlEvent =
       callId?: string;
       outcome?: AgentViewWorkerAnswerOutcome;
       payload?: Record<string, unknown>;
+    }
+  | {
+      type: 'stop';
+      sequence: number;
+      at: string;
     };
 
 export type AgentViewWorkerAnswerOutcome =
