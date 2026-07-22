@@ -3135,6 +3135,52 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('falls back to the live replay when a bounded refresh read fails', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, _params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        throw new Error('transcript page read failed');
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-read-error',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(refreshed.attached).toBe(true);
+    expect(JSON.stringify(refreshed.compactedReplay)).toContain(
+      'initial prompt',
+    );
+
+    await bridge.shutdown();
+  });
+
   it('rejects a bounded refresh when the session starts closing', async () => {
     const transcriptPage = deferred<Record<string, unknown>>();
     const closeResult = deferred<Record<string, unknown>>();

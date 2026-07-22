@@ -621,6 +621,12 @@ export function extractServerTimestamp(event: DaemonEvent): number | undefined {
 function parseTimestamp(value: unknown): number | undefined {
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value !== 'string') return undefined;
+  // Date.parse misreads bare-integer strings ("2000" becomes year 2000 and a
+  // stringified epoch becomes NaN), so treat all-digit strings as epoch ms.
+  if (/^\d+$/.test(value)) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  }
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }

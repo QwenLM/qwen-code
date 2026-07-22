@@ -51,6 +51,7 @@ function renderCompletedThinking(
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
+  mounted.push({ root, container });
   const tree = (isStreaming: boolean) => (
     <I18nProvider language={language}>
       <ThinkingMessage
@@ -64,7 +65,6 @@ function renderCompletedThinking(
   act(() => root.render(tree(true)));
   vi.setSystemTime(durationMs);
   act(() => root.render(tree(false)));
-  mounted.push({ root, container });
   return container;
 }
 
@@ -411,6 +411,26 @@ describe('AssistantMessage streaming markdown', () => {
 
     act(() => root.render(tree('first second final', false)));
     expect(container.textContent).toContain('first second final');
+  });
+
+  it('shows non-monotonic streaming content immediately', () => {
+    vi.useFakeTimers();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const tree = (content: string, isStreaming: boolean) => (
+      <I18nProvider language="en">
+        <AssistantMessage content={content} isStreaming={isStreaming} />
+      </I18nProvider>
+    );
+
+    act(() => root.render(tree('old response text', true)));
+    expect(container.textContent).toContain('old response text');
+
+    act(() => root.render(tree('new unrelated text', true)));
+    expect(container.textContent).toContain('new unrelated text');
+    expect(container.textContent).not.toContain('old response text');
   });
 });
 

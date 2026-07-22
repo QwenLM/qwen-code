@@ -2963,7 +2963,7 @@ describe('daemon UI time schema (PR-B)', () => {
     expect(events[0]).toMatchObject({ serverTimestamp: 1_000 });
   });
 
-  it.each([1_780_905_333_596, '2026-06-08T07:55:33.596Z'])(
+  it.each([1_780_905_333_596, '1780905333596', '2026-06-08T07:55:33.596Z'])(
     'extracts transcript-page timestamp %s',
     (timestamp) => {
       const events = normalizeDaemonEvent({

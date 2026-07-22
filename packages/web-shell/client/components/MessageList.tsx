@@ -2254,6 +2254,7 @@ export const MessageList = memo(
     const turnLayoutTransitionStarted = useRef(false);
     const turnLayoutRowTops = useRef(new Map<string, number>());
     const turnLayoutAnimationTimer = useRef<number | undefined>(undefined);
+    const turnLayoutAnimations = useRef<Animation[]>([]);
     const shouldFollow = useRef(true);
     const followPausedByUserRef = useRef(false);
     const userScrollIntentUntil = useRef(0);
@@ -2655,6 +2656,10 @@ export const MessageList = memo(
     useLayoutEffect(() => {
       if (turnLayoutPending || !turnLayoutTransitionStarted.current) return;
       turnLayoutTransitionStarted.current = false;
+      for (const animation of turnLayoutAnimations.current) {
+        animation.cancel();
+      }
+      turnLayoutAnimations.current = [];
       const reduceMotion =
         typeof window.matchMedia === 'function' &&
         window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -2668,18 +2673,25 @@ export const MessageList = memo(
               ? turnLayoutRowTops.current.get(key)
               : undefined;
             if (previousTop === undefined) {
-              row.animate([{ opacity: 0 }, { opacity: 1 }], {
-                duration: TURN_LAYOUT_ANIMATION_MS,
-                easing: 'ease-out',
-              });
+              turnLayoutAnimations.current.push(
+                row.animate([{ opacity: 0 }, { opacity: 1 }], {
+                  duration: TURN_LAYOUT_ANIMATION_MS,
+                  easing: 'ease-out',
+                }),
+              );
               return;
             }
             const delta = previousTop - row.getBoundingClientRect().top;
             if (Math.abs(delta) < 1) return;
-            row.animate([{ translate: `0 ${delta}px` }, { translate: '0 0' }], {
-              duration: TURN_LAYOUT_ANIMATION_MS,
-              easing: 'ease-out',
-            });
+            turnLayoutAnimations.current.push(
+              row.animate(
+                [{ translate: `0 ${delta}px` }, { translate: '0 0' }],
+                {
+                  duration: TURN_LAYOUT_ANIMATION_MS,
+                  easing: 'ease-out',
+                },
+              ),
+            );
           });
       }
       turnLayoutRowTops.current.clear();
@@ -2697,6 +2709,10 @@ export const MessageList = memo(
         if (turnLayoutAnimationTimer.current !== undefined) {
           window.clearTimeout(turnLayoutAnimationTimer.current);
         }
+        for (const animation of turnLayoutAnimations.current) {
+          animation.cancel();
+        }
+        turnLayoutAnimations.current = [];
       },
       [],
     );

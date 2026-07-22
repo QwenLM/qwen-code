@@ -3909,27 +3909,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     historyPageSize: number,
   ): Promise<ReturnType<typeof replayFieldsFor>> {
     for (let attempt = 0; attempt < 2; attempt++) {
-      const lastEventId = entry.events.lastEventId;
-      const page = await requestSessionTranscriptPage({
-        sessionId: entry.sessionId,
-        direction: 'backward',
-        limit: historyPageSize,
-      });
-      if (
-        byId.get(entry.sessionId) === entry &&
-        !entry.promptActive &&
-        entry.events.lastEventId === lastEventId
-      ) {
-        return {
-          compactedReplay: page.events,
-          liveJournal: [],
-          lastEventId,
-          ...(page.partial === true ? { partial: true as const } : {}),
-          ...(page.replayError !== undefined
-            ? { replayError: page.replayError }
-            : {}),
-          ...(page.hasMore ? { historyHasMore: true as const } : {}),
-        };
+      try {
+        const lastEventId = entry.events.lastEventId;
+        const page = await requestSessionTranscriptPage({
+          sessionId: entry.sessionId,
+          direction: 'backward',
+          limit: historyPageSize,
+        });
+        if (
+          byId.get(entry.sessionId) === entry &&
+          !entry.promptActive &&
+          entry.events.lastEventId === lastEventId
+        ) {
+          return {
+            compactedReplay: page.events,
+            liveJournal: [],
+            lastEventId,
+            ...(page.partial === true ? { partial: true as const } : {}),
+            ...(page.replayError !== undefined
+              ? { replayError: page.replayError }
+              : {}),
+            ...(page.hasMore ? { historyHasMore: true as const } : {}),
+          };
+        }
+      } catch {
+        // A failed bounded read (missing/unreadable persisted transcript or a
+        // workspace timeout) must not tear down a healthy live session; fall
+        // back to the in-memory replay instead of surfacing a terminal error.
+        break;
       }
     }
     return replayFieldsFor(entry, 'load');

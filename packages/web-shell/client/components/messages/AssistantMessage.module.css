@@ -345,7 +345,6 @@
   grid-template-rows: 1fr;
   min-height: 0;
   overflow: hidden;
-  transition: grid-template-rows 180ms ease;
 }
 
 .thinkingExpandedInner {
