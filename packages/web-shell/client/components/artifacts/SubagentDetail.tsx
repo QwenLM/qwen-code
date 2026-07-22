@@ -241,7 +241,6 @@ export function SubagentDetail({
     setLoadError(false);
     const refresh = async () => {
       try {
-        // @ts-expect-error resolveSubagentSession exists in SDK source, not in stale dist
         const resolved = await workspace.client.resolveSubagentSession(
           sessionId,
           rootToolCallId,
@@ -301,7 +300,6 @@ export function SubagentDetail({
       workspaceCwd={workspaceCwd}
       clientId={instance.clientId}
       maxQueued={256}
-      // @ts-expect-error subagentTranscriptMode exists in webui source, not in stale dist
       subagentTranscriptMode="full"
       suppressOwnUserEcho
     >
@@ -309,7 +307,6 @@ export function SubagentDetail({
         rootTool={rootTool}
         resolution={resolution}
         onStop={() =>
-          // @ts-expect-error cancelSubagentSession exists in SDK source, not in stale dist
           workspace.client.cancelSubagentSession(sessionId, rootToolCallId)
         }
       />

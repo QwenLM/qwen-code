@@ -10,9 +10,6 @@ import type {
   DaemonWorkspaceCapability,
 } from '@qwen-code/sdk/daemon';
 
-// displayName exists in SDK source but not in stale dist typings
-type WorkspaceLabelInfo = DaemonWorkspaceCapability & { displayName?: string };
-
 /**
  * Last path segment of an absolute workspace cwd, for a compact per-workspace
  * label (e.g. `/home/me/projects/api` → `api`). Falls back to the full path when
@@ -23,13 +20,17 @@ export function workspaceBasename(cwd: string): string {
   return parts.at(-1) ?? cwd;
 }
 
-export function workspaceLabel(workspace: WorkspaceLabelInfo): string {
+export function workspaceLabel(
+  workspace: Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>,
+): string {
   return workspace.displayName?.trim() || workspaceBasename(workspace.cwd);
 }
 
 export function workspaceLabelForCwd(
   cwd: string,
-  workspaces: readonly WorkspaceLabelInfo[] | undefined,
+  workspaces:
+    | readonly Pick<DaemonWorkspaceCapability, 'cwd' | 'displayName'>[]
+    | undefined,
 ): string {
   const workspace = workspaces?.find((entry) => entry.cwd === cwd);
   return workspace ? workspaceLabel(workspace) : workspaceBasename(cwd);
