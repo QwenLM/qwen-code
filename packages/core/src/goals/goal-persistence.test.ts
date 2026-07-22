@@ -170,6 +170,23 @@ describe('recoverGoalFromRecords', () => {
       ]),
     ).toEqual({ kind: 'none' });
   });
+
+  it('does not revive a paused legacy Goal', () => {
+    expect(
+      recoverGoalFromRecords([
+        record('legacy', {
+          subtype: 'slash_command',
+          systemPayload: {
+            phase: 'result',
+            rawCommand: '/goal',
+            outputHistoryItems: [
+              { type: 'goal_status', kind: 'paused', condition: 'ship it' },
+            ],
+          },
+        }),
+      ]),
+    ).toEqual({ kind: 'none' });
+  });
 });
 
 describe('legacy migration', () => {

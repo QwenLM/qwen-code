@@ -31,6 +31,7 @@ const LEGACY_STOPPED_KINDS = new Set([
   'cleared',
   'failed',
   'aborted',
+  'paused',
 ]);
 
 export function recoverGoalFromRecords(
