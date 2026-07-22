@@ -120,6 +120,7 @@ const {
       getStats: vi.fn().mockResolvedValue({}),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
+      reloadSession: vi.fn().mockResolvedValue(undefined),
     },
     mockWorkspace: {
       capabilities: {
@@ -233,6 +234,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     loading: false,
     capacityReached: false,
     loadMore: vi.fn(),
+    release: vi.fn(),
   }),
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
@@ -1013,6 +1015,7 @@ beforeEach(() => {
   mockSessionActions.clearSession.mockResolvedValue(undefined);
   mockSessionActions.releaseSession.mockResolvedValue(undefined);
   mockSessionActions.loadSession.mockResolvedValue(undefined);
+  mockSessionActions.reloadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);

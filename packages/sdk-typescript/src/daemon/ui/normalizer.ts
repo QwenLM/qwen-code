@@ -575,8 +575,8 @@ function createBase(
  *
  *   1. `event.serverTimestamp` — top-level, preferred when daemon adds it
  *   2. `event._meta.serverTimestamp` — Anthropic-style metadata convention
- *   3. `event.data._meta.serverTimestamp` — sessionUpdate nested location
- *   4. `event.data.update._meta.serverTimestamp|timestamp` — ACP update meta
+ *   3. nested `serverTimestamp` metadata
+ *   4. `timestamp` on direct transcript-page or nested ACP updates
  *
  * Returns undefined when none of them are present or all are non-finite.
  * Forward-compat: SDK reads whichever location the daemon eventually emits
@@ -591,25 +591,44 @@ export function extractServerTimestamp(event: DaemonEvent): number | undefined {
     if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
   }
   if (isRecord(event.data)) {
-    const dataMeta = (event.data as Record<string, unknown>)['_meta'];
+    const dataMeta = event.data['_meta'];
+    const update = event.data['update'];
+    const updateMeta = isRecord(update) ? update['_meta'] : undefined;
     if (isRecord(dataMeta)) {
       const ts = dataMeta['serverTimestamp'];
       if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
     }
-    const update = (event.data as Record<string, unknown>)['update'];
-    if (isRecord(update)) {
-      const updateMeta = update['_meta'];
-      if (isRecord(updateMeta)) {
-        const serverTs = updateMeta['serverTimestamp'];
-        if (typeof serverTs === 'number' && Number.isFinite(serverTs)) {
-          return serverTs;
-        }
-        const ts = updateMeta['timestamp'];
-        if (typeof ts === 'number' && Number.isFinite(ts)) return ts;
+    if (isRecord(updateMeta)) {
+      const serverTs = updateMeta['serverTimestamp'];
+      if (typeof serverTs === 'number' && Number.isFinite(serverTs)) {
+        return serverTs;
       }
+    }
+    const timestampCandidates = [
+      isRecord(updateMeta) ? updateMeta['timestamp'] : undefined,
+      isRecord(update) ? update['timestamp'] : undefined,
+      isRecord(dataMeta) ? dataMeta['timestamp'] : undefined,
+      event.data['timestamp'],
+    ];
+    for (const candidate of timestampCandidates) {
+      const timestamp = parseTimestamp(candidate);
+      if (timestamp !== undefined) return timestamp;
     }
   }
   return undefined;
+}
+
+function parseTimestamp(value: unknown): number | undefined {
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value !== 'string') return undefined;
+  // Date.parse misreads bare-integer strings ("2000" becomes year 2000 and a
+  // stringified epoch becomes NaN), so treat all-digit strings as epoch ms.
+  if (/^\d+$/.test(value)) {
+    const numeric = Number(value);
+    return Number.isFinite(numeric) ? numeric : undefined;
+  }
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
 }
 
 function normalizeSessionUpdate(

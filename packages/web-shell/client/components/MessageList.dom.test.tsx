@@ -9,6 +9,7 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
+import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
@@ -203,6 +204,15 @@ function mount(
     loadingOlderHistory?: boolean;
     historyCapacityReached?: boolean;
     onLoadOlderHistory?: () => Promise<void>;
+    transcriptBlockCount?: number;
+    transcriptActivity?: {
+      getSnapshot(): {
+        lastEventId?: number;
+        blocks?: { readonly length: number };
+      };
+      subscribe(listener: () => void): () => void;
+    };
+    onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
     isResponding?: boolean;
     hideFirstUserMessage?: boolean;
     firstTurnMetrics?: {
@@ -234,6 +244,9 @@ function mount(
             loadingOlderHistory={opts.loadingOlderHistory}
             historyCapacityReached={opts.historyCapacityReached}
             onLoadOlderHistory={opts.onLoadOlderHistory}
+            transcriptBlockCount={opts.transcriptBlockCount}
+            transcriptActivity={opts.transcriptActivity}
+            onReloadTranscript={opts.onReloadTranscript}
             isResponding={opts.isResponding}
             hideFirstUserMessage={opts.hideFirstUserMessage}
             firstTurnMetrics={opts.firstTurnMetrics}
@@ -285,9 +298,7 @@ const assistantActions = (c: HTMLElement, id: string) =>
     .querySelector(`[data-testid="msg-${id}"]`)
     ?.getAttribute('data-assistant-actions');
 const isCollapsed = (c: HTMLElement, id: string) =>
-  c
-    .querySelector(`[data-testid="msg-${id}"]`)
-    ?.closest('[data-collapsed="true"]') !== null;
+  c.querySelector(`[data-testid="msg-${id}"]`) === null;
 const queryToggle = (c: HTMLElement, turnId: string) =>
   c.querySelector(`[data-testid="toggle-${turnId}"]`) as HTMLElement | null;
 const toggle = (c: HTMLElement, turnId: string) =>
@@ -326,6 +337,83 @@ const simpleTurns = (count: number): Message[] =>
   }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    let lastEventId = 10;
+    let notifyActivity = () => undefined;
+    mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      transcriptActivity: {
+        getSnapshot: () => ({ lastEventId }),
+        subscribe: (listener) => {
+          notifyActivity = listener;
+          return () => undefined;
+        },
+      },
+      onReloadTranscript,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+      lastEventId++;
+      notifyActivity();
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    lastEventId++;
+    notifyActivity();
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts an in-flight transcript reload when the reader leaves the tail', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    let resolveReload = () => undefined;
+    let reloadSignal: AbortSignal | undefined;
+    const onReloadTranscript = vi.fn((signal: AbortSignal) => {
+      reloadSignal = signal;
+      return new Promise<void>((resolve) => {
+        resolveReload = resolve;
+      });
+    });
+    const container = mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+    });
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(reloadSignal?.aborted).toBe(false);
+
+    const list = container.firstElementChild as HTMLElement;
+    list.scrollTop = 400;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    expect(reloadSignal?.aborted).toBe(true);
+
+    await act(async () => resolveReload());
+  });
+
   it('hides only the first user message and overrides first-turn metrics', () => {
     const c = mount(
       [
@@ -1449,6 +1537,37 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(c.querySelector('button')).toBeNull();
   });
 
+  it('suppresses the loading status during automatic pagination', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    expect(c.querySelector('[role="status"]')).toBeNull();
+
+    await act(async () => {
+      resolveLoad();
+      await Promise.resolve();
+    });
+  });
+
   it('shows when the history display limit is reached', () => {
     const c = mount([userMsg('u1')], undefined, {
       historyCapacityReached: true,
@@ -1664,7 +1783,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
     ]);
 
-    expect(assistantActions(c, 'mid')).toBe('false');
+    expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 

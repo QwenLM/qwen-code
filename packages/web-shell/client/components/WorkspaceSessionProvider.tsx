@@ -22,6 +22,7 @@ interface WorkspaceSessionProviderProps {
   lockWorkspaceCwd?: string;
   clientId?: string;
   restartSseOnPrompt?: boolean;
+  historyPageSize?: number;
   webShellProps: WebShellProps;
 }
 
@@ -32,6 +33,7 @@ export function WorkspaceSessionProvider({
   lockWorkspaceCwd,
   clientId,
   restartSseOnPrompt,
+  historyPageSize = WEB_SHELL_HISTORY_PAGE_SIZE,
   webShellProps,
 }: WorkspaceSessionProviderProps) {
   const workspace = useWorkspace();
@@ -231,7 +233,7 @@ export function WorkspaceSessionProvider({
       sessionId={effectiveSessionId}
       workspaceCwd={targetWorkspace?.cwd}
       clientId={clientId}
-      historyPageSize={WEB_SHELL_HISTORY_PAGE_SIZE}
+      historyPageSize={historyPageSize}
       subagentTranscriptMode="summary"
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       suppressOwnUserEcho
@@ -239,6 +241,7 @@ export function WorkspaceSessionProvider({
     >
       <App
         {...webShellProps}
+        historyPageSize={historyPageSize}
         restartSseOnPrompt={restartSseOnPrompt}
         lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
         lockedWorkspaceCapability={

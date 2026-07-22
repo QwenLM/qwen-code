@@ -40,6 +40,7 @@ import type {
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import { GitForkIcon, XIcon } from 'lucide-react';
+import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { SubagentDetailsProvider } from './subagentDetailsContext';
@@ -641,6 +642,7 @@ interface AppProps extends WebShellProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
   restartSseOnPrompt?: boolean;
+  historyPageSize?: number;
 }
 
 type SessionActionsWithCreate = {
@@ -1090,6 +1092,7 @@ export function App({
   onSessionChange,
   onSubmitBefore,
   restartSseOnPrompt,
+  historyPageSize,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1318,6 +1321,17 @@ export function App({
     [lockedWorkspaceCwd, workspaces],
   );
   const sessionActions = useActions();
+  const reloadTranscript = useCallback(
+    async (signal: AbortSignal) => {
+      if (!connection.sessionId) return;
+      await sessionActions.reloadSession(signal);
+    },
+    [connection.sessionId, sessionActions],
+  );
+  const transcriptReloadSupported =
+    connection.capabilities?.features.includes(
+      SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
   const dynamicWorkspaceRegistrationSupported =
@@ -7416,6 +7430,7 @@ export function App({
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
+                        historyPageSize={historyPageSize}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -7502,6 +7517,13 @@ export function App({
                                   transcriptHistory.capacityReached
                                 }
                                 onLoadOlderHistory={transcriptHistory.loadMore}
+                                transcriptBlockCount={blocks.length}
+                                transcriptActivity={store}
+                                onReloadTranscript={
+                                  transcriptReloadSupported
+                                    ? reloadTranscript
+                                    : undefined
+                                }
                                 isResponding={streamingState !== 'idle'}
                                 activeTurnStartedAt={activeTurnStartedAt}
                                 workspaceCwd={connection.workspaceCwd || ''}

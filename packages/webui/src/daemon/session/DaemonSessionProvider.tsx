@@ -155,6 +155,14 @@ function getPersistedReplayRecordId(event: DaemonEvent): string | undefined {
   }
 }
 
+function hasFullTranscriptBeforeReplay(event: DaemonEvent): boolean {
+  return (
+    event.type === 'history_truncated' &&
+    isRecord(event.data) &&
+    event.data['fullTranscriptAvailable'] === true
+  );
+}
+
 function prependTranscriptHistory(
   store: DaemonTranscriptStore,
   events: DaemonUiEvent[],
@@ -566,6 +574,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     }
     const abort = new AbortController();
     let disposed = false;
+    const preservingTranscriptDuringLoad =
+      restoreMode === 'load' &&
+      restoreSessionId !== undefined &&
+      restoreSessionId === sessionRef.current?.sessionId &&
+      restoreSessionId === skipNextCleanupDetachSessionIdRef.current;
 
     // ── Batched transcript dispatch ────────────────────────────────
     // The live SSE loop dispatches transcript events through this batcher
@@ -718,15 +731,17 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
           }
           if (!session) {
-            setConnection((current) => ({
-              ...current,
-              status: 'connecting',
-              error: undefined,
-              errorStatus: resolveConnectionErrorStatus(
-                undefined,
-                current.errorStatus,
-              ),
-            }));
+            if (!preservingTranscriptDuringLoad) {
+              setConnection((current) => ({
+                ...current,
+                status: 'connecting',
+                error: undefined,
+                errorStatus: resolveConnectionErrorStatus(
+                  undefined,
+                  current.errorStatus,
+                ),
+              }));
+            }
             const getWorkspaceCapabilities =
               workspaceGetCapabilitiesRef.current;
             const caps =
@@ -894,7 +909,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               ? clientIdRef.current
               : getStableClientId(undefined, targetSessionId);
             loadingRequestedSession = Boolean(restoreSessionId);
-            if (targetSessionId) {
+            if (targetSessionId && !preservingTranscriptDuringLoad) {
               setConnection((current) => ({
                 ...current,
                 sessionId: targetSessionId,
@@ -904,6 +919,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 loadingTranscript: true,
               }));
             }
+            const attemptedLoad =
+              pendingSessionLoadRef.current?.sessionId === targetSessionId
+                ? pendingSessionLoadRef.current
+                : undefined;
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
@@ -963,6 +982,47 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               }).catch((err) =>
                 console.warn('[DaemonSessionProvider] detach failed:', err),
               );
+              return;
+            }
+            // A tail refresh may finish after the reader leaves the bottom or
+            // after its action times out. Undo that new attachment and keep the
+            // old session rather than committing a now-unwanted snapshot.
+            if (
+              preservingTranscriptDuringLoad &&
+              attemptedLoad?.sessionId === nextSession.sessionId &&
+              (attemptedLoad.signal?.aborted ||
+                pendingSessionLoadRef.current !== attemptedLoad)
+            ) {
+              const previousSession = sessionRef.current;
+              if (nextSession !== previousSession) {
+                await nextSession.detach().catch((error: unknown) => {
+                  console.warn(
+                    '[DaemonSessionProvider] detach cancelled reload failed:',
+                    error,
+                  );
+                });
+              }
+              if (pendingSessionLoadRef.current === attemptedLoad) {
+                pendingSessionLoadRef.current = undefined;
+                clearTimeout(attemptedLoad.timeout);
+                attemptedLoad.reject(
+                  new DOMException('Session load cancelled', 'AbortError'),
+                );
+              }
+              if (
+                skipNextCleanupDetachSessionIdRef.current ===
+                nextSession.sessionId
+              ) {
+                skipNextCleanupDetachSessionIdRef.current = undefined;
+              }
+              loadingRequestedSession = false;
+              if (previousSession?.sessionId === nextSession.sessionId) {
+                session = previousSession;
+                reconnectSessionId = previousSession.sessionId;
+                reconnectAttempt = 0;
+                skipMetadataRefresh = true;
+                continue;
+              }
               return;
             }
             const previousSessionId = lastSessionIdRef.current;
@@ -1072,12 +1132,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const firstPersistedRecordId = replayEvents
             .map(getPersistedReplayRecordId)
             .find((recordId): recordId is string => recordId !== undefined);
+          const replayHistoryWasTruncated = replayEvents.some(
+            hasFullTranscriptBeforeReplay,
+          );
           const historyHasMore =
             Array.isArray(capabilities?.features) &&
             capabilities.features.includes(
               SESSION_TRANSCRIPT_PAGINATION_FEATURE,
             ) &&
-            activeSession.historyHasMore &&
+            (activeSession.historyHasMore || replayHistoryWasTruncated) &&
             firstPersistedRecordId !== undefined;
           transcriptHistoryRef.current = {
             sessionId: activeSession.sessionId,
@@ -1120,6 +1183,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   replayUiEvents,
                   addNotice,
                   dismissNotice,
+                  { hideHistoryTruncation: historyHasMore },
                 );
                 allUiEvents.push(
                   ...(subagentTranscriptModeRef.current === 'summary'
@@ -1898,6 +1962,20 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               catchingUp: undefined,
             }));
             return;
+          } else if (
+            preservingTranscriptDuringLoad &&
+            session === undefined &&
+            pendingLoad?.sessionId === restoreSessionId &&
+            sessionRef.current?.sessionId === restoreSessionId
+          ) {
+            // The refresh failed before replacing the old handle. Resume its
+            // SSE directly instead of retrying load and registering another
+            // attachment after the caller's promise has already been rejected.
+            session = sessionRef.current;
+            reconnectSessionId = session.sessionId;
+            reconnectAttempt = 0;
+            skipMetadataRefresh = true;
+            continue;
           } else {
             // Retriable error (network failure, timeout, etc.) — preserve
             // the session so the next iteration skips the full load() and
@@ -2608,7 +2686,14 @@ function filterDaemonUiEventsForTranscript(
   events: DaemonUiEvent[],
   addNotice: AddDaemonSessionNotice,
   dismissNotice: (id: string) => void,
+  behavior: { hideHistoryTruncation?: boolean } = {},
 ): DaemonUiEvent[] {
+  if (
+    behavior.hideHistoryTruncation &&
+    hasFullTranscriptBeforeReplay(sourceEvent)
+  ) {
+    return [];
+  }
   if (
     sourceEvent.type === 'session_snapshot' &&
     isRecord(sourceEvent.data) &&
