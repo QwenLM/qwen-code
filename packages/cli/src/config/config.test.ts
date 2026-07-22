@@ -3103,15 +3103,17 @@ describe('loadCliConfig with includeDirectories', () => {
     ]);
   });
 
-  it('should preserve plansDirectory in bare mode', async () => {
+  it('should preserve plansDirectory and todosDirectory in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
     const settings: Settings = {
       plansDirectory: './project-plans',
+      todosDirectory: './project-todos',
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getPlansDir()).toContain('project-plans');
+    expect(config.getTodosDir()).toContain('project-todos');
   });
 });
 
@@ -4382,6 +4384,43 @@ describe('loadCliConfig plansDirectory', () => {
 
     await expect(loadCliConfig(settings, argv, cwd)).rejects.toThrow(
       'plansDirectory must resolve within the project root',
+    );
+  });
+});
+
+describe('loadCliConfig todosDirectory', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    process.argv = ['node', 'script.js'];
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.restoreAllMocks();
+  });
+
+  it('should resolve relative todosDirectory against cwd', async () => {
+    const argv = await parseArguments();
+    const cwd = path.resolve('workspace', 'my-project');
+    const settings: Settings = {
+      todosDirectory: './project-todos',
+    };
+
+    const config = await loadCliConfig(settings, argv, cwd);
+
+    expect(config.getTodosDir()).toBe(path.join(cwd, 'project-todos'));
+  });
+
+  it('should reject todosDirectory values outside cwd', async () => {
+    const argv = await parseArguments();
+    const cwd = path.resolve('workspace', 'my-project');
+    const settings: Settings = {
+      todosDirectory: '../todos',
+    };
+
+    await expect(loadCliConfig(settings, argv, cwd)).rejects.toThrow(
+      'todosDirectory must resolve within the project root',
     );
   });
 });

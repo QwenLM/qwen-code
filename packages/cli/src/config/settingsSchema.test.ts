@@ -34,6 +34,7 @@ describe('SettingsSchema', () => {
         'security',
         'advanced',
         'plansDirectory',
+        'todosDirectory',
         'voiceModel',
       ];
 
@@ -166,6 +167,15 @@ describe('SettingsSchema', () => {
       expect(getSettingsSchema().plansDirectory.default).toBe(undefined);
       expect(getSettingsSchema().plansDirectory.requiresRestart).toBe(true);
       expect(getSettingsSchema().plansDirectory.showInDialog).toBe(false);
+    });
+
+    it('should have todosDirectory setting in schema', () => {
+      expect(getSettingsSchema().todosDirectory).toBeDefined();
+      expect(getSettingsSchema().todosDirectory.type).toBe('string');
+      expect(getSettingsSchema().todosDirectory.category).toBe('Advanced');
+      expect(getSettingsSchema().todosDirectory.default).toBe(undefined);
+      expect(getSettingsSchema().todosDirectory.requiresRestart).toBe(true);
+      expect(getSettingsSchema().todosDirectory.showInDialog).toBe(false);
     });
 
     it('should have voice model setting in schema', () => {

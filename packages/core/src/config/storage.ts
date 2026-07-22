@@ -20,6 +20,7 @@ const BIN_DIR_NAME = 'bin';
 const PROJECT_DIR_NAME = 'projects';
 const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
+const TODOS_DIR_NAME = 'todos';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
 
@@ -93,6 +94,10 @@ export class Storage {
       // eslint-disable-next-line no-control-regex
       .replace(/[<>:"|?*\x00-\x1F]/g, '_');
     return safeName || '_';
+  }
+
+  static sanitizeTodoSessionId(sessionId: string): string {
+    return Storage.sanitizePlanSessionId(sessionId);
   }
 
   private static resolveRuntimeBaseDir(
@@ -305,6 +310,36 @@ export class Storage {
       Storage.getPlansDir(projectRoot, plansDirectory),
       `${Storage.sanitizePlanSessionId(sessionId)}.md`,
     );
+  }
+
+  static getTodosDir(
+    projectRoot?: string | null,
+    todosDirectory?: string | null,
+  ): string {
+    const configuredTodosDirectory = todosDirectory?.trim();
+    if (configuredTodosDirectory) {
+      if (!projectRoot) {
+        throw new FatalConfigError(
+          'projectRoot is required when todosDirectory is configured.',
+        );
+      }
+
+      const resolvedProjectRoot = path.resolve(projectRoot);
+      const resolvedTodosDirectory = Storage.resolvePath(
+        configuredTodosDirectory,
+        resolvedProjectRoot,
+      );
+
+      Storage.assertPathWithinDirectory(
+        resolvedTodosDirectory,
+        resolvedProjectRoot,
+        `todosDirectory must resolve within the project root.`,
+      );
+
+      return resolvedTodosDirectory;
+    }
+
+    return path.join(Storage.getRuntimeBaseDir(), TODOS_DIR_NAME);
   }
 
   static getGlobalBinDir(): string {

@@ -985,6 +985,7 @@ export interface ConfigParameters {
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
+  todosDirectory?: string;
   proxy?: string;
   cwd: string;
   fileDiscoveryService?: FileDiscoveryService;
@@ -1859,7 +1860,9 @@ export class Config {
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
   private readonly plansDir: string;
+  private readonly todosDir: string;
   private readonly plansDirectoryConfigured: boolean;
+  private readonly todosDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -1914,7 +1917,9 @@ export class Config {
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
     this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
+    this.todosDirectoryConfigured = Boolean(params.todosDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
+    this.todosDir = Storage.getTodosDir(this.targetDir, params.todosDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -2096,6 +2101,7 @@ export class Config {
     }
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
+    this.addLegacyTodoLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
 
@@ -5368,6 +5374,14 @@ export class Config {
     return this.plansDir;
   }
 
+  getTodosDir(): string {
+    return this.todosDir;
+  }
+
+  isTodosDirectoryConfigured(): boolean {
+    return this.todosDirectoryConfigured;
+  }
+
   private assertPlansDirWithinTargetDir(): void {
     if (!this.plansDirectoryConfigured) {
       return;
@@ -5427,6 +5441,45 @@ export class Config {
     }
   }
 
+  private addLegacyTodoLocationWarning(): void {
+    try {
+      if (!this.todosDirectoryConfigured) {
+        return;
+      }
+
+      const legacyTodosDir = Storage.getTodosDir();
+      if (path.resolve(legacyTodosDir) === path.resolve(this.todosDir)) {
+        return;
+      }
+
+      const legacyTodoFiles = this.getTodoFileNames(legacyTodosDir);
+      if (legacyTodoFiles.length === 0) {
+        return;
+      }
+
+      const configuredTodoFiles = new Set(this.getTodoFileNames(this.todosDir));
+      const hiddenLegacyTodoFiles = legacyTodoFiles.filter(
+        (fileName) => !configuredTodoFiles.has(fileName),
+      );
+      if (hiddenLegacyTodoFiles.length === 0) {
+        return;
+      }
+
+      this.warnings.push(
+        `Warning: Saved todo files exist at ${legacyTodosDir}, but ` +
+          `todosDirectory is configured to use ${this.todosDir}. Move ` +
+          `existing todo files to ${this.todosDir} if you want to keep ` +
+          `using them.`,
+      );
+    } catch (err: unknown) {
+      const message = `Failed to check legacy todo directory migration warning: ${
+        err instanceof Error ? err.message : String(err)
+      }`;
+      this.warnings.push(message);
+      this.debugLogger.warn(message, err);
+    }
+  }
+
   private getPlanFileNames(plansDir: string): string[] {
     try {
       return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
@@ -5437,6 +5490,28 @@ export class Config {
       }
       if (code === 'EACCES' || code === 'EPERM') {
         const message = `Failed to read plan directory ${plansDir}: ${
+          err instanceof Error ? err.message : String(err)
+        }`;
+        this.warnings.push(message);
+        this.debugLogger.warn(message, err);
+        return [];
+      }
+      throw err;
+    }
+  }
+
+  private getTodoFileNames(todosDir: string): string[] {
+    try {
+      return fs
+        .readdirSync(todosDir)
+        .filter((entry) => entry.endsWith('.json'));
+    } catch (err: unknown) {
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code === 'ENOENT') {
+        return [];
+      }
+      if (code === 'EACCES' || code === 'EPERM') {
+        const message = `Failed to read todo directory ${todosDir}: ${
           err instanceof Error ? err.message : String(err)
         }`;
         this.warnings.push(message);
