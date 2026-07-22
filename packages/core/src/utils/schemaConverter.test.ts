@@ -71,6 +71,21 @@ describe('convertSchema', () => {
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);
     });
 
+    it('should stringify a non-string const like any other enum', () => {
+      // `enum: [1, 2]` becomes `['1', '2']` because Gemini requires string
+      // enums; a const-derived enum is the same kind of value and must obey
+      // the same rule.
+      expect(convertSchema({ const: 5 }, 'openapi_30')).toEqual({
+        enum: ['5'],
+      });
+      expect(convertSchema({ const: true }, 'openapi_30')).toEqual({
+        enum: ['true'],
+      });
+      expect(
+        convertSchema({ type: 'integer', const: 0 }, 'openapi_30'),
+      ).toEqual({ type: 'integer', enum: ['0'] });
+    });
+
     it('should convert exclusiveMinimum number to boolean', () => {
       const input = { type: 'number', exclusiveMinimum: 10 };
       const expected = {
