@@ -28,6 +28,8 @@ class MemoryServiceHttpError extends Error {
   }
 }
 
+class MemoryServiceTransportError extends Error {}
+
 export class GatewayClient {
   private readonly certificate: Buffer;
   private readonly privateKey: Buffer;
@@ -38,11 +40,21 @@ export class GatewayClient {
   constructor(private readonly options: GatewayClientOptions) {
     requireHttps(options.brokerUrl, 'brokerUrl');
     requireHttps(options.gatewayUrl, 'gatewayUrl');
+    this.responseLimitBytes = options.responseLimitBytes ?? 128 * 1024;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 1_000;
+    if (
+      !Number.isSafeInteger(this.responseLimitBytes) ||
+      this.responseLimitBytes <= 0 ||
+      this.responseLimitBytes > 1024 * 1024 ||
+      !Number.isSafeInteger(this.requestTimeoutMs) ||
+      this.requestTimeoutMs <= 0 ||
+      this.requestTimeoutMs > 60_000
+    ) {
+      throw new Error('Gateway client limits are invalid');
+    }
     this.certificate = readFileSync(options.certificatePath);
     this.privateKey = readFileSync(options.privateKeyPath);
     this.ca = readFileSync(options.caPath);
-    this.responseLimitBytes = options.responseLimitBytes ?? 128 * 1024;
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 1_000;
   }
 
   async post<T>(path: string, value: unknown, operationId: string): Promise<T> {
@@ -135,7 +147,7 @@ export class GatewayClient {
     );
   }
 
-  private requestJson<T>(
+  protected requestJson<T>(
     url: URL,
     input: {
       method: string;
@@ -162,6 +174,14 @@ export class GatewayClient {
         (response) => {
           const chunks: Buffer[] = [];
           let size = 0;
+          response.on('aborted', () => {
+            reject(
+              new MemoryServiceTransportError(
+                'Memory service response was aborted',
+              ),
+            );
+          });
+          response.on('error', reject);
           response.on('data', (chunk: Buffer) => {
             size += chunk.length;
             if (size > this.responseLimitBytes) {
@@ -196,6 +216,9 @@ export class GatewayClient {
 }
 
 function isRetryable(error: unknown): boolean {
+  if (error instanceof MemoryServiceTransportError) {
+    return true;
+  }
   if (error instanceof MemoryServiceHttpError) {
     return error.status >= 500;
   }

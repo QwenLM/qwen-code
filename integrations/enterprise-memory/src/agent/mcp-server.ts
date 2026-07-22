@@ -4,8 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
-import type { AgentStateStore } from './state-store.js';
+import type { AgentOperation, AgentStateStore } from './state-store.js';
 
 const LATEST_PROTOCOL_VERSION = '2025-11-25';
 const SUPPORTED_PROTOCOL_VERSIONS = new Set([
@@ -20,7 +21,9 @@ const MAX_MESSAGE_BYTES = 256 * 1024;
 const requestSchema = z
   .object({
     jsonrpc: z.literal('2.0'),
-    id: z.union([z.string(), z.number()]).optional(),
+    id: z
+      .union([z.string().min(1).max(256), z.number().int().safe()])
+      .optional(),
     method: z.string().min(1).max(128),
     params: z.unknown().optional(),
   })
@@ -38,12 +41,14 @@ const searchSchema = z.object({ query: z.string().min(1).max(2_000) }).strict();
 const getSchema = z.object({ memoryId: z.string().uuid() }).strict();
 const proposalSchema = z
   .object({
+    operationId: z.string().uuid(),
     summary: z.string().min(1).max(1_000),
     references: z.array(z.string().min(1).max(500)).max(10).default([]),
   })
   .strict();
 const feedbackSchema = z
   .object({
+    operationId: z.string().uuid(),
     memoryId: z.string().uuid(),
     signal: z.enum(['helpful', 'not_helpful', 'stale', 'unsafe']),
   })
@@ -88,6 +93,12 @@ const tools = [
     inputSchema: {
       type: 'object',
       properties: {
+        operationId: {
+          type: 'string',
+          format: 'uuid',
+          description:
+            'Caller-generated idempotency key. Reuse it only for an exact retry of this proposal.',
+        },
         summary: { type: 'string', minLength: 1, maxLength: 1_000 },
         references: {
           type: 'array',
@@ -96,7 +107,7 @@ const tools = [
           default: [],
         },
       },
-      required: ['summary'],
+      required: ['operationId', 'summary'],
       additionalProperties: false,
     },
   })),
@@ -107,10 +118,16 @@ const tools = [
     inputSchema: {
       type: 'object',
       properties: {
+        operationId: {
+          type: 'string',
+          format: 'uuid',
+          description:
+            'Caller-generated idempotency key. Reuse it only for an exact retry of this feedback.',
+        },
         memoryId: { type: 'string', format: 'uuid' },
         signal: { enum: ['helpful', 'not_helpful', 'stale', 'unsafe'] },
       },
-      required: ['memoryId', 'signal'],
+      required: ['operationId', 'memoryId', 'signal'],
       additionalProperties: false,
     },
   },
@@ -120,6 +137,7 @@ export async function runMcpServer(
   gateway: McpGatewayClient,
   states: AgentStateStore,
 ): Promise<void> {
+  const connectionId = randomUUID();
   let buffer = Buffer.alloc(0);
   for await (const chunk of process.stdin) {
     const value = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
@@ -131,7 +149,7 @@ export async function runMcpServer(
       if (line.byteLength > MAX_MESSAGE_BYTES) {
         await writeResponse(errorResponse(null, -32600, 'Request too large'));
       } else if (line.byteLength > 0) {
-        await processLine(line, gateway, states);
+        await processLine(line, gateway, states, connectionId);
       }
       lineEnd = buffer.indexOf(0x0a);
     }
@@ -149,6 +167,7 @@ export async function handleMcpMessage(
   value: unknown,
   gateway: McpGatewayClient,
   states: AgentStateStore,
+  connectionId = 'direct-test-connection',
 ): Promise<JsonRpcResponse | null> {
   const request = requestSchema.parse(value);
   if (request.id === undefined) {
@@ -177,7 +196,14 @@ export async function handleMcpMessage(
       try {
         return successResponse(
           id,
-          await callTool(input.name, input.arguments, gateway, states),
+          await callTool(
+            connectionId,
+            id,
+            input.name,
+            input.arguments,
+            gateway,
+            states,
+          ),
         );
       } catch (error) {
         if (error instanceof z.ZodError || error instanceof UnknownToolError) {
@@ -204,6 +230,7 @@ async function processLine(
   line: Buffer,
   gateway: McpGatewayClient,
   states: AgentStateStore,
+  connectionId: string,
 ): Promise<void> {
   let value: unknown;
   try {
@@ -213,7 +240,12 @@ async function processLine(
     return;
   }
   try {
-    const response = await handleMcpMessage(value, gateway, states);
+    const response = await handleMcpMessage(
+      value,
+      gateway,
+      states,
+      connectionId,
+    );
     if (response) {
       await writeResponse(response);
     }
@@ -223,6 +255,8 @@ async function processLine(
 }
 
 async function callTool(
+  connectionId: string,
+  requestId: string | number,
   name: string,
   args: Record<string, unknown>,
   gateway: McpGatewayClient,
@@ -231,19 +265,25 @@ async function callTool(
   if (name === 'memory_search') {
     const input = searchSchema.parse(args);
     return textResult(
-      await withOperation(states, (operationId) =>
-        gateway.post('/v1/runtime/search', input, operationId),
+      await withOperation(
+        states,
+        ['read-v1', connectionId, requestId, name, input],
+        (operation) =>
+          gateway.post('/v1/runtime/search', input, operation.operationId),
       ),
     );
   }
   if (name === 'memory_get') {
     const input = getSchema.parse(args);
     return textResult(
-      await withOperation(states, (operationId) =>
-        gateway.get(
-          `/v1/runtime/memories/${encodeURIComponent(input.memoryId)}`,
-          operationId,
-        ),
+      await withOperation(
+        states,
+        ['read-v1', connectionId, requestId, name, input],
+        (operation) =>
+          gateway.get(
+            `/v1/runtime/memories/${encodeURIComponent(input.memoryId)}`,
+            operation.operationId,
+          ),
       ),
     );
   }
@@ -252,29 +292,41 @@ async function callTool(
     name === 'memory_propose_repository'
   ) {
     const input = proposalSchema.parse(args);
+    const { operationId, ...proposal } = input;
     const scope =
       name === 'memory_propose_personal' ? 'personal' : 'repository';
     return textResult(
-      await withOperation(states, (operationId) =>
-        gateway.post('/v1/runtime/proposals', { scope, ...input }, operationId),
+      await withOperation(
+        states,
+        ['write-v1', name, operationId],
+        (operation) =>
+          gateway.post(
+            '/v1/runtime/proposals',
+            { scope, ...proposal },
+            operation.operationId,
+          ),
       ),
     );
   }
   if (name === 'memory_feedback') {
     const input = feedbackSchema.parse(args);
+    const { operationId, ...feedback } = input;
     return textResult(
-      await withOperation(states, (operationId) =>
-        gateway.post(
-          '/v1/runtime/feedback',
-          {
-            event_id: operationId,
-            session_id: process.env['QWEN_SESSION_ID'] ?? `mcp-${process.pid}`,
-            occurred_at: new Date().toISOString(),
-            memory_id: input.memoryId,
-            signal: input.signal,
-          },
-          operationId,
-        ),
+      await withOperation(
+        states,
+        ['write-v1', name, operationId],
+        (operation) =>
+          gateway.post(
+            '/v1/runtime/feedback',
+            {
+              event_id: operation.operationId,
+              session_id: 'mcp',
+              occurred_at: operation.occurredAt,
+              memory_id: feedback.memoryId,
+              signal: feedback.signal,
+            },
+            operation.operationId,
+          ),
       ),
     );
   }
@@ -283,11 +335,15 @@ async function callTool(
 
 async function withOperation<T>(
   states: AgentStateStore,
-  operation: (operationId: string) => Promise<T>,
+  idempotencyInput: unknown,
+  operation: (agentOperation: AgentOperation) => Promise<T>,
 ): Promise<T> {
-  const operationId = await states.beginOperation('mcp');
-  const result = await operation(operationId);
-  await states.completeOperation('mcp', operationId);
+  const agentOperation = await states.beginOperationWithState('mcp', [
+    'mcp-v1',
+    idempotencyInput,
+  ]);
+  const result = await operation(agentOperation);
+  await states.completeOperation('mcp', agentOperation.operationId);
   return result;
 }
 

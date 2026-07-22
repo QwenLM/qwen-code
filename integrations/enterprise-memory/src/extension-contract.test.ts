@@ -40,6 +40,7 @@ describe('Qwen extension contract', () => {
     for (const groups of Object.values(hooks)) {
       for (const hook of groups.flatMap((group) => group.hooks)) {
         expect(hook.type).toBe('command');
+        expect(hook.command).toMatch(/^qwen-memory-agent-launcher /);
         expect(hook.command).toContain('${CLAUDE_PLUGIN_ROOT}');
         expect(hook.command).not.toMatch(/token|secret|api.?key/i);
         expect(hook.timeout).toBeGreaterThan(0);
@@ -65,8 +66,8 @@ describe('Qwen extension contract', () => {
     expect(manifest.hooks).toBe('hooks/hooks.json');
     expect(Object.keys(manifest.mcpServers)).toEqual(['enterprise-memory']);
     expect(manifest.mcpServers['enterprise-memory']).toEqual({
-      command: 'node',
-      args: ['${extensionPath}${/}dist${/}agent${/}main.js', 'mcp'],
+      command: 'qwen-memory-agent-launcher',
+      args: ['node', '${extensionPath}${/}dist${/}agent${/}main.js', 'mcp'],
       cwd: '${extensionPath}',
     });
   });

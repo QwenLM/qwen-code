@@ -24,6 +24,15 @@ const commonSchema = z.object({
   ]),
   timestamp: z.string().datetime(),
 });
+const sessionContextResponseSchema = z
+  .object({ system_context: z.string().max(4_000) })
+  .passthrough();
+const turnOpenResponseSchema = z
+  .object({
+    turn_id: z.string().uuid(),
+    additional_context: z.string().max(6_000),
+  })
+  .passthrough();
 
 export type HookOutput = Record<string, unknown> | null;
 
@@ -66,18 +75,24 @@ export class HookHandler {
       })
       .passthrough()
       .parse(input);
-    const operationId = await this.states.beginOperation(event.session_id);
-    const result = await this.gateway.post<{
-      system_context: string;
-    }>(
-      '/v1/runtime/session-context',
-      {
-        session_id: event.session_id,
-        source: event.source,
-        model: event.model,
-        permission_mode: event.permission_mode,
-      },
-      operationId,
+    const request = {
+      session_id: event.session_id,
+      source: event.source,
+      model: event.model,
+      permission_mode: event.permission_mode,
+    };
+    const operationId = await this.states.beginOperation(event.session_id, [
+      'hook-v1',
+      event.hook_event_name,
+      event.timestamp,
+      request,
+    ]);
+    const result = sessionContextResponseSchema.parse(
+      await this.gateway.post<unknown>(
+        '/v1/runtime/session-context',
+        request,
+        operationId,
+      ),
     );
     await this.states.completeOperation(event.session_id, operationId);
     return {
@@ -96,25 +111,35 @@ export class HookHandler {
       .extend({ prompt: z.string().max(64_000) })
       .passthrough()
       .parse(input);
-    const operationId = await this.states.beginOperation(event.session_id);
-    const result = await this.gateway.post<{
-      turn_id: string;
-      additional_context: string;
-    }>(
-      '/v1/runtime/turns:open',
-      {
-        event_id: operationId,
-        session_id: event.session_id,
-        occurred_at: event.timestamp,
-        prompt: event.prompt,
-      },
-      operationId,
+    const request = {
+      session_id: event.session_id,
+      occurred_at: event.timestamp,
+      prompt: event.prompt,
+    };
+    const operation = await this.states.beginOperationWithState(
+      event.session_id,
+      ['hook-v1', event.hook_event_name, request],
     );
-    await this.states.update(event.session_id, (state) => ({
-      ...state,
-      turnId: result.turn_id,
-      pendingOperationId: undefined,
-    }));
+    const operationId = operation.operationId;
+    const result = turnOpenResponseSchema.parse(
+      await this.gateway.post<unknown>(
+        '/v1/runtime/turns:open',
+        { event_id: operationId, ...request },
+        operationId,
+      ),
+    );
+    await this.states.update(event.session_id, (state) => {
+      const canAdvanceTurn =
+        state.turnId === operation.turnId || state.turnId === result.turn_id;
+      return {
+        ...state,
+        turnId: canAdvanceTurn ? result.turn_id : state.turnId,
+        pendingOperationId:
+          state.pendingOperationId === operationId
+            ? undefined
+            : state.pendingOperationId,
+      };
+    });
     return {
       continue: true,
       hookSpecificOutput: {
@@ -145,23 +170,26 @@ export class HookHandler {
       })
       .passthrough()
       .parse(input);
-    const { operationId, state } = await this.states.beginOperationWithState(
+    const eventKind = failed ? 'tool_failure' : 'tool_success';
+    const payload = {
+      tool_name: event.tool_name,
+      tool_use_id: event.tool_use_id,
+      status: failed ? 'failed' : 'succeeded',
+      is_interrupt: event.is_interrupt ?? false,
+    };
+    const { operationId, turnId } = await this.states.beginOperationWithState(
       event.session_id,
+      ['hook-v1', event.hook_event_name, event.timestamp, eventKind, payload],
     );
     await this.gateway.post(
       '/v1/runtime/turn-events',
       {
         event_id: operationId,
         session_id: event.session_id,
-        turn_id: state.turnId,
-        event_kind: failed ? 'tool_failure' : 'tool_success',
+        turn_id: turnId,
+        event_kind: eventKind,
         occurred_at: event.timestamp,
-        payload: {
-          tool_name: event.tool_name,
-          tool_use_id: event.tool_use_id,
-          status: failed ? 'failed' : 'succeeded',
-          is_interrupt: event.is_interrupt ?? false,
-        },
+        payload,
       },
       operationId,
     );
@@ -173,18 +201,20 @@ export class HookHandler {
       .extend({ last_assistant_message: z.string().max(64_000) })
       .passthrough()
       .parse(input);
-    const { operationId, state } = await this.states.beginOperationWithState(
+    const payload = { assistant: event.last_assistant_message };
+    const { operationId, turnId } = await this.states.beginOperationWithState(
       event.session_id,
+      ['hook-v1', event.hook_event_name, event.timestamp, payload],
     );
     await this.gateway.post(
       '/v1/runtime/turn-events',
       {
         event_id: operationId,
         session_id: event.session_id,
-        turn_id: state.turnId,
+        turn_id: turnId,
         event_kind: 'stop',
         occurred_at: event.timestamp,
-        payload: { assistant: event.last_assistant_message },
+        payload,
       },
       operationId,
     );
@@ -206,18 +236,20 @@ export class HookHandler {
       })
       .passthrough()
       .parse(input);
-    const { operationId, state } = await this.states.beginOperationWithState(
+    const payload = { error_class: event.error };
+    const { operationId, turnId } = await this.states.beginOperationWithState(
       event.session_id,
+      ['hook-v1', event.hook_event_name, event.timestamp, payload],
     );
     await this.gateway.post(
       '/v1/runtime/turn-events',
       {
         event_id: operationId,
         session_id: event.session_id,
-        turn_id: state.turnId,
+        turn_id: turnId,
         event_kind: 'stop_failure',
         occurred_at: event.timestamp,
-        payload: { error_class: event.error },
+        payload,
       },
       operationId,
     );

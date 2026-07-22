@@ -30,6 +30,24 @@ describe('CapabilityVerifier', () => {
   let privateKey: Awaited<ReturnType<typeof generateKeyPair>>['privateKey'];
   let verifier: CapabilityVerifier;
 
+  it.each([
+    { requestHmacSecret: new Uint8Array() },
+    { maxTokenTtlSeconds: 301 },
+    { clockToleranceSeconds: Number.NaN },
+  ])('rejects unsafe verifier configuration: %o', (override) => {
+    expect(
+      () =>
+        new CapabilityVerifier({
+          issuer,
+          audience,
+          expectedTenantId: 'tenant-a',
+          key: async () => privateKey,
+          requestHmacSecret: requestSecret,
+          ...override,
+        }),
+    ).toThrow('configuration is invalid');
+  });
+
   beforeAll(async () => {
     const keys = await generateKeyPair('ES256');
     privateKey = keys.privateKey;
@@ -81,9 +99,10 @@ describe('CapabilityVerifier', () => {
   }
 
   it('accepts an exact sender-constrained request', async () => {
+    const capability = await token();
     const identity = await verifier.verify({
       ...request,
-      token: await token(),
+      token: capability,
     });
 
     expect(identity).toMatchObject({
@@ -92,6 +111,8 @@ describe('CapabilityVerifier', () => {
       workspaceId: 'workspace-a',
       repositoryId: 'repository-a',
       revocationEpoch: 7,
+      capabilityFingerprint: sha256Base64Url(capability),
+      replayExpiresAt: new Date('2026-07-22T00:01:05.000Z'),
     });
   });
 

@@ -27,21 +27,23 @@ class RecordingGateway implements RuntimeGatewayClient {
     value?: unknown;
     operationId: string;
   }[] = [];
+  sessionContextResponse: unknown = {
+    policy_version: 5,
+    system_context: 'Signed organization policy',
+  };
+  turnOpenResponse: unknown = {
+    turn_id: 'ea09a5be-4e32-48cb-b76d-d513492d9c82',
+    memories: [{ id: '5f2d8477-fcb3-481b-a5aa-859c3d696bd1' }],
+    additional_context: '<enterprise_memory_reference_data />',
+  };
 
   async post<T>(path: string, value: unknown, operationId: string): Promise<T> {
     this.calls.push({ path, value, operationId });
     if (path === '/v1/runtime/session-context') {
-      return {
-        policy_version: 5,
-        system_context: 'Signed organization policy',
-      } as T;
+      return this.sessionContextResponse as T;
     }
     if (path === '/v1/runtime/turns:open') {
-      return {
-        turn_id: 'ea09a5be-4e32-48cb-b76d-d513492d9c82',
-        memories: [{ id: '5f2d8477-fcb3-481b-a5aa-859c3d696bd1' }],
-        additional_context: '<enterprise_memory_reference_data />',
-      } as T;
+      return this.turnOpenResponse as T;
     }
     return { accepted: true } as T;
   }
@@ -135,6 +137,23 @@ describe('HookHandler', () => {
     expect(state.pendingOperationId).toBeUndefined();
   });
 
+  it('rejects an invalid Gateway context response before persisting turn state', async () => {
+    const { gateway, handler, states } = await fixture();
+    gateway.turnOpenResponse = {
+      turn_id: 'not-a-uuid',
+      additional_context: 'x'.repeat(6_001),
+    };
+
+    await expect(
+      handler.handle({
+        ...common,
+        hook_event_name: 'UserPromptSubmit',
+        prompt: 'How should I build this repository?',
+      }),
+    ).rejects.toThrow();
+    expect((await states.read(common.session_id)).turnId).toBeUndefined();
+  });
+
   it('sends allowlisted tool metadata without tool input or output', async () => {
     const { gateway, handler, states } = await fixture();
 
@@ -161,6 +180,69 @@ describe('HookHandler', () => {
     expect(
       (await states.read(common.session_id)).pendingOperationId,
     ).toBeUndefined();
+  });
+
+  it('retries the same hook operation against its originally captured turn', async () => {
+    const { gateway, handler } = await fixture();
+    await handler.handle({
+      ...common,
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'First turn',
+    });
+    const toolEvent = {
+      ...common,
+      hook_event_name: 'PostToolUse',
+      tool_name: 'read_file',
+      tool_use_id: 'tool-a',
+    };
+    await handler.handle(toolEvent);
+    gateway.turnOpenResponse = {
+      turn_id: '8d39189f-cb3d-4a18-bd43-52f7bf9014e9',
+      additional_context: '',
+    };
+    await handler.handle({
+      ...common,
+      timestamp: '2026-07-22T00:00:01.000Z',
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'Second turn',
+    });
+    await handler.handle(toolEvent);
+
+    expect(gateway.calls[1]?.operationId).toBe(gateway.calls[3]?.operationId);
+    expect(gateway.calls[1]?.value).toEqual(gateway.calls[3]?.value);
+    expect(gateway.calls[3]?.value).toMatchObject({
+      turn_id: 'ea09a5be-4e32-48cb-b76d-d513492d9c82',
+    });
+  });
+
+  it('does not roll current state back when an old prompt retry arrives late', async () => {
+    const { gateway, handler, states } = await fixture();
+    const firstPrompt = {
+      ...common,
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'First turn',
+    };
+    await handler.handle(firstPrompt);
+    gateway.turnOpenResponse = {
+      turn_id: '8d39189f-cb3d-4a18-bd43-52f7bf9014e9',
+      additional_context: '',
+    };
+    await handler.handle({
+      ...common,
+      timestamp: '2026-07-22T00:00:01.000Z',
+      hook_event_name: 'UserPromptSubmit',
+      prompt: 'Second turn',
+    });
+    gateway.turnOpenResponse = {
+      turn_id: 'ea09a5be-4e32-48cb-b76d-d513492d9c82',
+      additional_context: '',
+    };
+
+    await handler.handle(firstPrompt);
+
+    expect((await states.read(common.session_id)).turnId).toBe(
+      '8d39189f-cb3d-4a18-bd43-52f7bf9014e9',
+    );
   });
 
   it('reports Stop without requesting a blocking loop', async () => {

@@ -7,7 +7,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { generateKeyPair, SignJWT } from 'jose';
+import { errors, generateKeyPair, SignJWT } from 'jose';
 import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import {
   InMemoryAntiResurrectionLedger,
@@ -92,8 +92,9 @@ class RecordingMaintainers implements RepositoryMaintainerAuthorizer {
   async authorize(
     principal: { tenantId: string; principalId: string },
     repositoryId: string,
-  ): Promise<void> {
+  ): Promise<Date> {
     this.calls.push({ ...principal, repositoryId });
+    return new Date(now.getTime() + 60_000);
   }
 }
 
@@ -120,6 +121,31 @@ async function managementToken(
     .setSubject('principal-a')
     .setIssuedAt(seconds)
     .setExpirationTime(seconds + 60)
+    .sign(privateKey);
+}
+
+async function managementTokenWithoutExpiration(): Promise<string> {
+  const seconds = Math.floor(now.getTime() / 1000);
+  return new SignJWT({ tenant_id: 'tenant-a' })
+    .setProtectedHeader({ alg: 'ES256' })
+    .setIssuer(issuer)
+    .setAudience(audience)
+    .setSubject('principal-a')
+    .setIssuedAt(seconds)
+    .sign(privateKey);
+}
+
+async function managementTokenWithTimes(
+  issuedAt: number,
+  expiresAt: number,
+): Promise<string> {
+  return new SignJWT({ tenant_id: 'tenant-a' })
+    .setProtectedHeader({ alg: 'ES256' })
+    .setIssuer(issuer)
+    .setAudience(audience)
+    .setSubject('principal-a')
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(expiresAt)
     .sign(privateKey);
 }
 
@@ -153,6 +179,21 @@ async function fixture() {
 }
 
 describe('management API', () => {
+  it('requires bounded temporal claims on management tokens', async () => {
+    const seconds = Math.floor(now.getTime() / 1000);
+    await expect(
+      tokens.verify(await managementTokenWithoutExpiration()),
+    ).rejects.toBeInstanceOf(errors.JOSEError);
+    await expect(
+      tokens.verify(
+        await managementTokenWithTimes(seconds + 60, seconds + 120),
+      ),
+    ).rejects.toThrow('temporal claims are invalid');
+    await expect(
+      tokens.verify(await managementTokenWithTimes(seconds, seconds + 3_601)),
+    ).rejects.toThrow('temporal claims are invalid');
+  });
+
   it('lets only the authenticated data subject change personal memory mode', async () => {
     const { baseUrl, preferences } = await fixture();
     const response = await fetch(`${baseUrl}/v1/manage/personal-memory-mode`, {
@@ -317,7 +358,7 @@ describe('management API', () => {
         { tenantId: 'tenant-a', principalId: 'principal-a' },
         'repository-a',
       ),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual(new Date(now.getTime() + 60_000));
 
     const wrongIdentity = new ScmMaintainerAuthorizer({
       baseUrl: 'https://scm.example.test',
@@ -342,5 +383,16 @@ describe('management API', () => {
         'repository-a',
       ),
     ).rejects.toThrow();
+  });
+
+  it('does not allow SCM authorization leases above the fixed policy bound', () => {
+    expect(
+      () =>
+        new ScmMaintainerAuthorizer({
+          baseUrl: 'https://scm.example.test',
+          bearerToken: 'service-token',
+          maxLeaseMs: 60_001,
+        }),
+    ).toThrow('configuration is invalid');
   });
 });

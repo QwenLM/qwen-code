@@ -16,7 +16,12 @@ export class CapabilityReplayError extends Error {}
 export class InMemoryCapabilityReplayStore implements CapabilityReplayStore {
   private readonly bindings = new Map<
     string,
-    { principalId: string; requestBinding: string; expiresAt: number }
+    {
+      principalId: string;
+      capabilityFingerprint: string;
+      requestBinding: string;
+      expiresAt: number;
+    }
   >();
 
   async record(identity: VerifiedRuntimeIdentity): Promise<void> {
@@ -24,8 +29,9 @@ export class InMemoryCapabilityReplayStore implements CapabilityReplayStore {
     const existing = this.bindings.get(key);
     const expected = {
       principalId: identity.principalId,
+      capabilityFingerprint: identity.capabilityFingerprint,
       requestBinding: identity.requestBinding,
-      expiresAt: identity.capabilityExpiresAt.getTime(),
+      expiresAt: identity.replayExpiresAt.getTime(),
     };
     if (existing && !sameBinding(existing, expected)) {
       throw new CapabilityReplayError('Capability ID binding conflict');
@@ -49,23 +55,26 @@ export class PostgresCapabilityReplayStore implements CapabilityReplayStore {
       );
       await client.query(
         `INSERT INTO runtime_capability_replays (
-           tenant_id, capability_id, principal_id, request_binding, expires_at
-         ) VALUES ($1,$2,$3,$4,$5)
+           tenant_id, capability_id, principal_id, capability_fingerprint,
+           request_binding, expires_at
+         ) VALUES ($1,$2,$3,$4,$5,$6)
          ON CONFLICT (tenant_id, capability_id) DO NOTHING`,
         [
           identity.tenantId,
           identity.capabilityId,
           identity.principalId,
+          identity.capabilityFingerprint,
           identity.requestBinding,
-          identity.capabilityExpiresAt,
+          identity.replayExpiresAt,
         ],
       );
       const result = await client.query<{
         principal_id: string;
+        capability_fingerprint: string;
         request_binding: string;
         expires_at: Date;
       }>(
-        `SELECT principal_id, request_binding, expires_at
+        `SELECT principal_id, capability_fingerprint, request_binding, expires_at
            FROM runtime_capability_replays
           WHERE capability_id = $1`,
         [identity.capabilityId],
@@ -74,8 +83,9 @@ export class PostgresCapabilityReplayStore implements CapabilityReplayStore {
       if (
         !existing ||
         existing.principal_id !== identity.principalId ||
+        existing.capability_fingerprint !== identity.capabilityFingerprint ||
         existing.request_binding !== identity.requestBinding ||
-        existing.expires_at.getTime() !== identity.capabilityExpiresAt.getTime()
+        existing.expires_at.getTime() !== identity.replayExpiresAt.getTime()
       ) {
         throw new CapabilityReplayError('Capability ID binding conflict');
       }
@@ -90,11 +100,22 @@ export class PostgresCapabilityReplayStore implements CapabilityReplayStore {
 }
 
 function sameBinding(
-  left: { principalId: string; requestBinding: string; expiresAt: number },
-  right: { principalId: string; requestBinding: string; expiresAt: number },
+  left: {
+    principalId: string;
+    capabilityFingerprint: string;
+    requestBinding: string;
+    expiresAt: number;
+  },
+  right: {
+    principalId: string;
+    capabilityFingerprint: string;
+    requestBinding: string;
+    expiresAt: number;
+  },
 ): boolean {
   return (
     left.principalId === right.principalId &&
+    left.capabilityFingerprint === right.capabilityFingerprint &&
     left.requestBinding === right.requestBinding &&
     left.expiresAt === right.expiresAt
   );

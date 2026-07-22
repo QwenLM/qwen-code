@@ -68,6 +68,16 @@ describe('Mem0SemanticIndex', () => {
 
     const calls = fetchImplementation.mock.calls;
     expect(new URL(calls[0]?.[0] as URL).pathname).toBe('/v3/memories/');
+    expect(JSON.parse(calls[0]?.[1]?.body as string)).toEqual({
+      filters: {
+        AND: [
+          { app_id: record.entityId },
+          { canonical_memory_id: record.canonicalMemoryId },
+          { canonical_version: record.canonicalVersion },
+        ],
+      },
+      show_expired: false,
+    });
     expect(new URL(calls[1]?.[0] as URL).pathname).toBe('/v3/memories/add/');
     expect(JSON.parse(calls[1]?.[1]?.body as string)).toEqual({
       messages: [{ role: 'user', content: record.summary }],
@@ -82,8 +92,14 @@ describe('Mem0SemanticIndex', () => {
     expect(new URL(calls[2]?.[0] as URL).pathname).toBe('/v1/event/event-a/');
     expect(JSON.parse(calls[4]?.[1]?.body as string)).toEqual({
       query: record.summary,
-      filters: { app_id: record.entityId },
-      top_k: 20,
+      filters: {
+        AND: [
+          { app_id: record.entityId },
+          { canonical_memory_id: record.canonicalMemoryId },
+          { canonical_version: record.canonicalVersion },
+        ],
+      },
+      top_k: 1,
       threshold: 0,
       rerank: false,
       show_expired: false,
@@ -119,6 +135,54 @@ describe('Mem0SemanticIndex', () => {
     expect(fetchImplementation).toHaveBeenCalledTimes(2);
   });
 
+  it('fails closed when exact metadata filtering is not honored', async () => {
+    const index = new Mem0SemanticIndex({
+      apiKey: 'test-key',
+      fetchImplementation: vi.fn<typeof fetch>().mockResolvedValue(
+        json({
+          next: null,
+          results: [{ id: 'unrelated', metadata: {} }],
+        }),
+      ),
+    });
+
+    await expect(index.add(record)).rejects.toThrow('was not unique');
+  });
+
+  it('fails closed when exact metadata filtering returns duplicates', async () => {
+    const duplicate = {
+      metadata: {
+        canonical_memory_id: record.canonicalMemoryId,
+        canonical_version: record.canonicalVersion,
+      },
+    };
+    const index = new Mem0SemanticIndex({
+      apiKey: 'test-key',
+      fetchImplementation: vi.fn<typeof fetch>().mockResolvedValue(
+        json({
+          next: '/v3/memories/?page=2',
+          results: [
+            { id: 'provider-a', ...duplicate },
+            { id: 'provider-b', ...duplicate },
+          ],
+        }),
+      ),
+    });
+
+    await expect(index.add(record)).rejects.toThrow('was not unique');
+  });
+
+  it('fails closed when exact lookup omits its pagination marker', async () => {
+    const index = new Mem0SemanticIndex({
+      apiKey: 'test-key',
+      fetchImplementation: vi
+        .fn<typeof fetch>()
+        .mockResolvedValue(json({ results: [] })),
+    });
+
+    await expect(index.add(record)).rejects.toThrow('was not unique');
+  });
+
   it('rejects provider results above the requested bound', async () => {
     const index = new Mem0SemanticIndex({
       apiKey: 'test-key',
@@ -142,6 +206,54 @@ describe('Mem0SemanticIndex', () => {
         threshold: 0,
       }),
     ).rejects.toThrow('result limit');
+  });
+
+  it.each([-0.1, 1.1, Number.NaN])(
+    'rejects an out-of-contract provider score: %s',
+    async (score) => {
+      const index = new Mem0SemanticIndex({
+        apiKey: 'test-key',
+        fetchImplementation: vi
+          .fn<typeof fetch>()
+          .mockResolvedValue(json({ results: [{ id: 'provider-a', score }] })),
+      });
+
+      await expect(
+        index.search({
+          tenantId: record.tenantId,
+          scope: record.scope,
+          entityId: record.entityId,
+          query: record.summary,
+          limit: 1,
+          threshold: 0,
+        }),
+      ).rejects.toThrow('invalid score');
+    },
+  );
+
+  it('enforces the configured score threshold locally', async () => {
+    const index = new Mem0SemanticIndex({
+      apiKey: 'test-key',
+      fetchImplementation: vi.fn<typeof fetch>().mockResolvedValue(
+        json({
+          results: [
+            { id: 'below-threshold', score: 0.4 },
+            { id: 'at-threshold', score: 0.5 },
+          ],
+        }),
+      ),
+    });
+
+    await expect(
+      index.search({
+        tenantId: record.tenantId,
+        scope: record.scope,
+        entityId: record.entityId,
+        query: record.summary,
+        limit: 2,
+        threshold: 0.5,
+      }),
+    ).resolves.toEqual([{ providerMemoryId: 'at-threshold', score: 0.5 }]);
   });
 
   it('deletes by opaque provider ID and verifies exact absence', async () => {

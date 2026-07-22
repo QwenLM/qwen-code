@@ -45,7 +45,8 @@ export interface CapabilityRequest {
 
 export interface VerifiedRuntimeIdentity extends RuntimeIdentity {
   capabilityId: string;
-  capabilityExpiresAt: Date;
+  capabilityFingerprint: string;
+  replayExpiresAt: Date;
   requestBinding: string;
 }
 
@@ -112,6 +113,20 @@ export class CapabilityVerifier {
     this.maxTokenTtlSeconds = options.maxTokenTtlSeconds ?? 300;
     this.clockToleranceSeconds = options.clockToleranceSeconds ?? 5;
     this.now = options.now ?? (() => new Date());
+    if (
+      options.issuer.length === 0 ||
+      options.audience.length === 0 ||
+      options.expectedTenantId.length === 0 ||
+      options.requestHmacSecret.byteLength < 32 ||
+      !Number.isSafeInteger(this.maxTokenTtlSeconds) ||
+      this.maxTokenTtlSeconds <= 0 ||
+      this.maxTokenTtlSeconds > 300 ||
+      !Number.isSafeInteger(this.clockToleranceSeconds) ||
+      this.clockToleranceSeconds < 0 ||
+      this.clockToleranceSeconds > 60
+    ) {
+      throw new Error('Capability verifier configuration is invalid');
+    }
   }
 
   async verify(request: CapabilityRequest): Promise<VerifiedRuntimeIdentity> {
@@ -208,7 +223,10 @@ export class CapabilityVerifier {
       repositoryId: requireString(claims.repository_id, 'repository_id'),
       revocationEpoch,
       capabilityId,
-      capabilityExpiresAt: new Date(expiresAt * 1000),
+      capabilityFingerprint: sha256Base64Url(request.token),
+      replayExpiresAt: new Date(
+        (expiresAt + this.clockToleranceSeconds) * 1000,
+      ),
       requestBinding: actualRequestHmac,
     };
   }

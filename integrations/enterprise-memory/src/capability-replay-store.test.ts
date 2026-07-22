@@ -18,7 +18,8 @@ function identity(
     repositoryId: 'repository-a',
     revocationEpoch: 0,
     capabilityId: 'capability-a',
-    capabilityExpiresAt: new Date('2026-07-22T00:01:00.000Z'),
+    capabilityFingerprint: 'fingerprint-a',
+    replayExpiresAt: new Date('2026-07-22T00:01:05.000Z'),
     requestBinding: 'binding-a',
     ...overrides,
   };
@@ -31,6 +32,9 @@ describe('InMemoryCapabilityReplayStore', () => {
     await expect(store.record(identity())).resolves.toBeUndefined();
     await expect(
       store.record(identity({ requestBinding: 'binding-b' })),
+    ).rejects.toThrow('binding conflict');
+    await expect(
+      store.record(identity({ capabilityFingerprint: 'fingerprint-b' })),
     ).rejects.toThrow('binding conflict');
   });
 

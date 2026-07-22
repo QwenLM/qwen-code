@@ -7,7 +7,9 @@
 import type { Pool, PoolClient, QueryResultRow } from 'pg';
 import type {
   CanonicalMemoryRecord,
+  DeletionReason,
   FeedbackSignal,
+  MemoryScope,
   ProviderBinding,
   RawEventInput,
   RuntimeIdentity,
@@ -33,18 +35,39 @@ export interface CanonicalStore {
     context: StoreContext,
     providerMemoryIds: readonly string[],
   ): Promise<readonly CanonicalMemoryRecord[]>;
+  reserveActivation(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+    authorizationExpiresAt: Date | null,
+  ): Promise<void>;
+  releaseActivation(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+  ): Promise<void>;
   activateWithProvider(
     context: StoreContext,
     memoryId: string,
     expectedVersion: number,
     authority: string,
     binding: ProviderBinding,
+    authorizationExpiresAt: Date | null,
   ): Promise<CanonicalMemoryRecord>;
   getProviderBinding(
     context: StoreContext,
     memoryId: string,
     version: number,
   ): Promise<ProviderBinding | null>;
+  reserveErasure(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+    scope: MemoryScope,
+    reason: DeletionReason,
+    createdAt: Date,
+    authorizationExpiresAt: Date | null,
+  ): Promise<CanonicalMemoryRecord>;
   markPendingErasure(
     context: StoreContext,
     memoryId: string,
@@ -85,7 +108,25 @@ function canRead(
 
 export class InMemoryCanonicalStore implements CanonicalStore {
   private readonly records = new Map<string, CanonicalMemoryRecord>();
+  private readonly sourceReceipts = new Map<
+    string,
+    {
+      canonicalMemoryId: string;
+      sourceFingerprint: string;
+      state: 'live' | 'erased';
+    }
+  >();
   private readonly bindings = new Map<string, ProviderBinding>();
+  private readonly activationReservations = new Map<string, number>();
+  private readonly erasureReservations = new Map<
+    string,
+    {
+      version: number;
+      scope: MemoryScope;
+      reason: DeletionReason;
+      createdAt: Date;
+    }
+  >();
   private readonly rawEvents = new Map<string, string>();
   private readonly feedbackEvents = new Map<string, string>();
 
@@ -94,24 +135,58 @@ export class InMemoryCanonicalStore implements CanonicalStore {
     record: CanonicalMemoryRecord,
   ): Promise<CanonicalMemoryRecord> {
     const key = this.recordKey(identity.tenantId, record.id);
+    if (!canRead(identity, record)) {
+      throw new Error('Candidate scope is outside runtime identity');
+    }
+    const receiptKey = this.sourceReceiptKey(
+      identity.tenantId,
+      record.sourceOperationId,
+    );
+    const receipt = this.sourceReceipts.get(receiptKey);
+    if (receipt?.state === 'erased') {
+      throw new Error('Candidate source operation is no longer reusable');
+    }
+    if (
+      receipt &&
+      (receipt.canonicalMemoryId !== record.id ||
+        receipt.sourceFingerprint !== record.sourceFingerprint)
+    ) {
+      throw new Error(
+        'Operation ID was reused with different candidate content',
+      );
+    }
     const duplicate = [...this.records.values()].find(
       (item) =>
         item.tenantId === identity.tenantId &&
         item.sourceOperationId === record.sourceOperationId,
     );
     if (duplicate) {
+      if (!canRead(identity, duplicate)) {
+        throw new Error('Candidate scope is outside runtime identity');
+      }
       if (duplicate.sourceFingerprint !== record.sourceFingerprint) {
         throw new Error(
           'Operation ID was reused with different candidate content',
         );
+      }
+      if (!receipt) {
+        this.sourceReceipts.set(receiptKey, {
+          canonicalMemoryId: record.id,
+          sourceFingerprint: record.sourceFingerprint,
+          state: 'live',
+        });
       }
       return structuredClone(duplicate);
     }
     if (this.records.has(key)) {
       throw new Error('Canonical memory ID already exists');
     }
-    if (!canRead(identity, record)) {
-      throw new Error('Candidate scope is outside runtime identity');
+    if (!receipt) {
+      this.sourceReceipts.set(receiptKey, {
+        canonicalMemoryId: record.id,
+        sourceFingerprint: record.sourceFingerprint,
+        state: 'live',
+      });
     }
     this.records.set(key, structuredClone(record));
     return structuredClone(record);
@@ -161,9 +236,16 @@ export class InMemoryCanonicalStore implements CanonicalStore {
     expectedVersion: number,
     authority: string,
     binding: ProviderBinding,
+    authorizationExpiresAt: Date | null,
   ): Promise<CanonicalMemoryRecord> {
+    void authorizationExpiresAt;
     const record = this.requireRecord(context, memoryId);
     const activeVersion = expectedVersion + 1;
+    if (
+      this.erasureReservations.has(this.recordKey(context.tenantId, memoryId))
+    ) {
+      throw new Error('Candidate version conflict');
+    }
     if (
       binding.tenantId !== context.tenantId ||
       binding.canonicalMemoryId !== memoryId ||
@@ -180,25 +262,30 @@ export class InMemoryCanonicalStore implements CanonicalStore {
       ) {
         throw new Error('Candidate version conflict');
       }
+      const existing = this.bindings.get(
+        this.bindingKey(context.tenantId, memoryId, activeVersion),
+      );
+      if (!existing || !sameProviderBinding(existing, binding)) {
+        throw new Error('Provider binding conflict');
+      }
+      return structuredClone(record);
     } else if (
       record.erasureState !== 'live' ||
       record.version !== expectedVersion ||
-      record.lifecycleState !== 'candidate'
+      record.lifecycleState !== 'candidate' ||
+      this.activationReservations.get(
+        this.recordKey(context.tenantId, memoryId),
+      ) !== expectedVersion
     ) {
       throw new Error('Candidate version conflict');
     }
-    const active =
-      record.lifecycleState === 'active'
-        ? record
-        : {
-            ...record,
-            authority,
-            lifecycleState: 'active' as const,
-            version: activeVersion,
-          };
-    if (record.lifecycleState !== 'active') {
-      this.records.set(this.recordKey(context.tenantId, memoryId), active);
-    }
+    const active = {
+      ...record,
+      authority,
+      lifecycleState: 'active' as const,
+      version: activeVersion,
+    };
+    this.records.set(this.recordKey(context.tenantId, memoryId), active);
     this.bindings.set(
       this.bindingKey(
         binding.tenantId,
@@ -207,7 +294,52 @@ export class InMemoryCanonicalStore implements CanonicalStore {
       ),
       structuredClone(binding),
     );
+    this.activationReservations.delete(
+      this.recordKey(context.tenantId, memoryId),
+    );
     return structuredClone(active);
+  }
+
+  async reserveActivation(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+    authorizationExpiresAt: Date | null,
+  ): Promise<void> {
+    void authorizationExpiresAt;
+    const record = this.requireRecord(context, memoryId);
+    const key = this.recordKey(context.tenantId, memoryId);
+    const existing = this.activationReservations.get(key);
+    if (existing !== undefined) {
+      throw new Error('Provider activation is already in progress');
+    }
+    if (
+      record.version !== expectedVersion ||
+      record.lifecycleState !== 'candidate' ||
+      record.erasureState !== 'live' ||
+      this.erasureReservations.has(key)
+    ) {
+      throw new Error('Candidate version conflict');
+    }
+    this.activationReservations.set(key, expectedVersion);
+  }
+
+  async releaseActivation(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+  ): Promise<void> {
+    const record = this.requireRecord(context, memoryId);
+    const key = this.recordKey(context.tenantId, memoryId);
+    if (
+      record.version !== expectedVersion ||
+      record.lifecycleState !== 'candidate' ||
+      record.erasureState !== 'live' ||
+      this.activationReservations.get(key) !== expectedVersion
+    ) {
+      throw new Error('Activation reservation binding conflict');
+    }
+    this.activationReservations.delete(key);
   }
 
   async getProviderBinding(
@@ -228,7 +360,13 @@ export class InMemoryCanonicalStore implements CanonicalStore {
     expectedVersion: number,
   ): Promise<CanonicalMemoryRecord> {
     const record = this.requireRecord(context, memoryId);
-    if (record.version !== expectedVersion) {
+    const reservation = this.erasureReservations.get(
+      this.recordKey(context.tenantId, memoryId),
+    );
+    if (
+      record.version !== expectedVersion ||
+      reservation?.version !== expectedVersion
+    ) {
       throw new Error('Memory version conflict');
     }
     const tombstoned: CanonicalMemoryRecord = {
@@ -239,6 +377,58 @@ export class InMemoryCanonicalStore implements CanonicalStore {
     };
     this.records.set(this.recordKey(context.tenantId, memoryId), tombstoned);
     return structuredClone(tombstoned);
+  }
+
+  async reserveErasure(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+    scope: MemoryScope,
+    reason: DeletionReason,
+    createdAt: Date,
+    authorizationExpiresAt: Date | null,
+  ): Promise<CanonicalMemoryRecord> {
+    void authorizationExpiresAt;
+    const record = this.requireRecord(context, memoryId);
+    const key = this.recordKey(context.tenantId, memoryId);
+    const existing = this.erasureReservations.get(key);
+    if (existing) {
+      if (
+        existing.version !== expectedVersion ||
+        existing.scope !== scope ||
+        existing.reason !== reason
+      ) {
+        throw new Error('Erasure reservation binding conflict');
+      }
+      if (
+        !(
+          (record.version === expectedVersion &&
+            record.erasureState === 'live') ||
+          (record.version === expectedVersion + 1 &&
+            record.erasureState === 'pending_erasure')
+        )
+      ) {
+        throw new Error('Memory version conflict');
+      }
+      return structuredClone(record);
+    }
+    if (this.activationReservations.has(key)) {
+      throw new Error('Provider activation is in progress');
+    }
+    if (
+      record.version !== expectedVersion ||
+      record.erasureState !== 'live' ||
+      record.scope !== scope
+    ) {
+      throw new Error('Memory version conflict');
+    }
+    this.erasureReservations.set(key, {
+      version: expectedVersion,
+      scope,
+      reason,
+      createdAt,
+    });
+    return structuredClone(record);
   }
 
   async eraseContent(
@@ -253,7 +443,18 @@ export class InMemoryCanonicalStore implements CanonicalStore {
     ) {
       throw new Error('Memory is not pending erasure at expected version');
     }
+    const receipt = this.sourceReceipts.get(
+      this.sourceReceiptKey(context.tenantId, record.sourceOperationId),
+    );
+    if (!receipt || receipt.canonicalMemoryId !== memoryId) {
+      throw new Error('Candidate source receipt is missing');
+    }
+    receipt.state = 'erased';
     this.records.delete(this.recordKey(context.tenantId, memoryId));
+    this.activationReservations.delete(
+      this.recordKey(context.tenantId, memoryId),
+    );
+    this.erasureReservations.delete(this.recordKey(context.tenantId, memoryId));
     const binding = this.bindings.get(
       this.bindingKey(context.tenantId, memoryId, version - 1),
     );
@@ -294,7 +495,13 @@ export class InMemoryCanonicalStore implements CanonicalStore {
     const record = this.records.get(
       this.recordKey(identity.tenantId, memoryId),
     );
-    if (!record || !canRead(identity, record)) {
+    if (
+      !record ||
+      !canRead(identity, record) ||
+      record.lifecycleState !== 'active' ||
+      record.erasureState !== 'live' ||
+      this.erasureReservations.has(this.recordKey(identity.tenantId, memoryId))
+    ) {
       throw new Error('Canonical memory not found');
     }
     const key = `${identity.tenantId}:${eventId}`;
@@ -331,6 +538,10 @@ export class InMemoryCanonicalStore implements CanonicalStore {
   ): string {
     return `${tenantId}:${memoryId}:${version}`;
   }
+
+  private sourceReceiptKey(tenantId: string, operationId: string): string {
+    return `${tenantId}:${operationId}`;
+  }
 }
 
 interface MemoryRow extends QueryResultRow {
@@ -360,6 +571,12 @@ interface ProviderBindingRow extends QueryResultRow {
   state: ProviderBinding['state'];
 }
 
+interface ErasureReservationRow extends QueryResultRow {
+  canonical_version: number;
+  scope: MemoryScope;
+  reason: DeletionReason;
+}
+
 export class PostgresCanonicalStore implements CanonicalStore {
   constructor(private readonly pool: Pool) {}
 
@@ -368,13 +585,61 @@ export class PostgresCanonicalStore implements CanonicalStore {
     record: CanonicalMemoryRecord,
   ): Promise<CanonicalMemoryRecord> {
     return this.transaction(identity, async (client) => {
+      await this.requirePersonalWrite(
+        client,
+        record.tenantId,
+        record.scope,
+        record.scopeId,
+      );
+      await client.query(
+        `INSERT INTO memory_source_receipts (
+           tenant_id, source_operation_id, canonical_memory_id,
+           source_fingerprint, state
+         ) VALUES ($1,$2,$3,$4,'live')
+         ON CONFLICT (tenant_id, source_operation_id) DO NOTHING`,
+        [
+          record.tenantId,
+          record.sourceOperationId,
+          record.id,
+          record.sourceFingerprint,
+        ],
+      );
+      const receipt = await client.query<{
+        canonical_memory_id: string;
+        source_fingerprint: string;
+        state: string;
+      }>(
+        `SELECT canonical_memory_id, source_fingerprint, state
+           FROM memory_source_receipts
+          WHERE source_operation_id = $1`,
+        [record.sourceOperationId],
+      );
+      if (receipt.rows[0]?.state === 'erased') {
+        throw new Error('Candidate source operation is no longer reusable');
+      }
+      if (
+        receipt.rows[0]?.canonical_memory_id !== record.id ||
+        receipt.rows[0]?.source_fingerprint !== record.sourceFingerprint
+      ) {
+        throw new Error(
+          'Operation ID was reused with different candidate content',
+        );
+      }
       const result = await client.query<MemoryRow>(
         `INSERT INTO memory_records (
            id, tenant_id, scope, scope_id, content_ciphertext,
            content_key_handle, authority, lifecycle_state,
            erasure_state, version, source_operation_id, source_fingerprint,
            created_at, expires_at
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+         )
+         SELECT $1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14
+          WHERE $3 <> 'personal'
+             OR EXISTS (
+               SELECT 1 FROM personal_memory_preferences p
+                WHERE p.tenant_id = $2
+                  AND p.principal_id = $4
+                  AND p.mode = 'read_write'
+             )
          ON CONFLICT (tenant_id, source_operation_id) DO NOTHING
          RETURNING *`,
         [
@@ -398,7 +663,17 @@ export class PostgresCanonicalStore implements CanonicalStore {
         return mapMemoryRow(result.rows[0]);
       }
       const existing = await client.query<MemoryRow>(
-        `SELECT * FROM memory_records WHERE source_operation_id = $1`,
+        `SELECT * FROM memory_records
+          WHERE source_operation_id = $1
+            AND (
+              scope <> 'personal'
+              OR EXISTS (
+                SELECT 1 FROM personal_memory_preferences p
+                 WHERE p.tenant_id = memory_records.tenant_id
+                   AND p.principal_id = memory_records.scope_id
+                   AND p.mode = 'read_write'
+              )
+            )`,
         [record.sourceOperationId],
       );
       const duplicate = mapMemoryRow(existing.rows[0]);
@@ -449,12 +724,83 @@ export class PostgresCanonicalStore implements CanonicalStore {
     });
   }
 
+  async reserveActivation(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+    authorizationExpiresAt: Date | null,
+  ): Promise<void> {
+    await this.transaction(context, async (client) => {
+      const result = await client.query<MemoryRow>(
+        'SELECT * FROM memory_records WHERE id = $1 FOR UPDATE',
+        [memoryId],
+      );
+      const record = mapMemoryRow(result.rows[0]);
+      await this.requireCurrentAuthorization(client, authorizationExpiresAt);
+      await this.requirePersonalWrite(
+        client,
+        record.tenantId,
+        record.scope,
+        record.scopeId,
+      );
+      if (
+        record.version !== expectedVersion ||
+        record.lifecycleState !== 'candidate' ||
+        record.erasureState !== 'live'
+      ) {
+        throw new Error('Candidate version conflict');
+      }
+      const erasure = await client.query(
+        `SELECT 1 FROM memory_erasure_reservations
+          WHERE canonical_memory_id = $1`,
+        [memoryId],
+      );
+      if (erasure.rowCount !== 0) {
+        throw new Error('Candidate version conflict');
+      }
+      const reservation = await client.query(
+        `INSERT INTO memory_activation_reservations (
+           tenant_id, canonical_memory_id, canonical_version, created_at
+         ) VALUES ($1,$2,$3,clock_timestamp())
+         ON CONFLICT (tenant_id, canonical_memory_id) DO NOTHING`,
+        [context.tenantId, memoryId, expectedVersion],
+      );
+      if (reservation.rowCount !== 1) {
+        throw new Error('Provider activation is already in progress');
+      }
+    });
+  }
+
+  async releaseActivation(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+  ): Promise<void> {
+    await this.transaction(context, async (client) => {
+      const result = await client.query(
+        `DELETE FROM memory_activation_reservations r
+          USING memory_records m
+          WHERE m.id = $1 AND m.version = $2
+            AND m.lifecycle_state = 'candidate'
+            AND m.erasure_state = 'live'
+            AND r.tenant_id = m.tenant_id
+            AND r.canonical_memory_id = m.id
+            AND r.canonical_version = m.version`,
+        [memoryId, expectedVersion],
+      );
+      if (result.rowCount !== 1) {
+        throw new Error('Activation reservation binding conflict');
+      }
+    });
+  }
+
   async activateWithProvider(
     context: StoreContext,
     memoryId: string,
     expectedVersion: number,
     authority: string,
     binding: ProviderBinding,
+    authorizationExpiresAt: Date | null,
   ): Promise<CanonicalMemoryRecord> {
     return this.transaction(context, async (client) => {
       if (
@@ -464,14 +810,55 @@ export class PostgresCanonicalStore implements CanonicalStore {
       ) {
         throw new Error('Provider binding does not match activation');
       }
+      const locked = await client.query<
+        Pick<MemoryRow, 'scope' | 'scope_id' | 'tenant_id'>
+      >(
+        `SELECT tenant_id, scope, scope_id
+           FROM memory_records
+          WHERE id = $1
+          FOR UPDATE`,
+        [memoryId],
+      );
+      const lockedRecord = locked.rows[0];
+      if (!lockedRecord) {
+        throw new Error('Candidate version conflict');
+      }
+      await this.requirePersonalWrite(
+        client,
+        lockedRecord.tenant_id,
+        lockedRecord.scope,
+        lockedRecord.scope_id,
+      );
       const result = await client.query<MemoryRow>(
         `UPDATE memory_records
             SET lifecycle_state = 'active', authority = $3, version = version + 1
           WHERE id = $1 AND version = $2
             AND lifecycle_state = 'candidate' AND erasure_state = 'live'
+            AND ($4::timestamptz IS NULL OR clock_timestamp() < $4)
+            AND (
+              scope <> 'personal'
+              OR EXISTS (
+                SELECT 1 FROM personal_memory_preferences p
+                 WHERE p.tenant_id = memory_records.tenant_id
+                   AND p.principal_id = memory_records.scope_id
+                   AND p.mode = 'read_write'
+              )
+            )
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_erasure_reservations r
+               WHERE r.tenant_id = memory_records.tenant_id
+                 AND r.canonical_memory_id = memory_records.id
+            )
+            AND EXISTS (
+              SELECT 1 FROM memory_activation_reservations a
+               WHERE a.tenant_id = memory_records.tenant_id
+                 AND a.canonical_memory_id = memory_records.id
+                 AND a.canonical_version = memory_records.version
+            )
           RETURNING *`,
-        [memoryId, expectedVersion, authority],
+        [memoryId, expectedVersion, authority, authorizationExpiresAt],
       );
+      const activatedCandidate = result.rows[0] !== undefined;
       let active = result.rows[0];
       if (!active) {
         const existing = await client.query<MemoryRow>(
@@ -479,8 +866,14 @@ export class PostgresCanonicalStore implements CanonicalStore {
             WHERE id = $1 AND version = $2
               AND lifecycle_state = 'active'
               AND erasure_state = 'live'
-              AND authority = $3`,
-          [memoryId, expectedVersion + 1, authority],
+              AND authority = $3
+              AND ($4::timestamptz IS NULL OR clock_timestamp() < $4)
+              AND NOT EXISTS (
+                SELECT 1 FROM memory_erasure_reservations r
+                 WHERE r.tenant_id = memory_records.tenant_id
+                   AND r.canonical_memory_id = memory_records.id
+              )`,
+          [memoryId, expectedVersion + 1, authority, authorizationExpiresAt],
         );
         if (!existing.rows[0]) {
           throw new Error('Candidate version conflict');
@@ -490,25 +883,47 @@ export class PostgresCanonicalStore implements CanonicalStore {
       if (binding.scope !== active.scope) {
         throw new Error('Provider binding scope does not match activation');
       }
-      await client.query(
-        `INSERT INTO provider_bindings (
-           tenant_id, canonical_memory_id, canonical_version,
-           provider_memory_id, scope, entity_id, state
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7)
-         ON CONFLICT (tenant_id, canonical_memory_id, canonical_version)
-         DO UPDATE SET provider_memory_id = EXCLUDED.provider_memory_id,
-                       entity_id = EXCLUDED.entity_id,
-                       state = EXCLUDED.state`,
-        [
-          binding.tenantId,
-          binding.canonicalMemoryId,
-          binding.canonicalVersion,
-          binding.providerMemoryId,
-          binding.scope,
-          binding.entityId,
-          binding.state,
-        ],
+      const existingBinding = await client.query<ProviderBindingRow>(
+        `SELECT * FROM provider_bindings
+          WHERE canonical_memory_id = $1 AND canonical_version = $2`,
+        [memoryId, expectedVersion + 1],
       );
+      if (existingBinding.rows[0]) {
+        if (
+          !sameProviderBinding(
+            mapProviderBindingRow(existingBinding.rows[0]),
+            binding,
+          )
+        ) {
+          throw new Error('Provider binding conflict');
+        }
+      } else {
+        await client.query(
+          `INSERT INTO provider_bindings (
+             tenant_id, canonical_memory_id, canonical_version,
+             provider_memory_id, scope, entity_id, state
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [
+            binding.tenantId,
+            binding.canonicalMemoryId,
+            binding.canonicalVersion,
+            binding.providerMemoryId,
+            binding.scope,
+            binding.entityId,
+            binding.state,
+          ],
+        );
+      }
+      if (activatedCandidate) {
+        const released = await client.query(
+          `DELETE FROM memory_activation_reservations
+            WHERE canonical_memory_id = $1 AND canonical_version = $2`,
+          [memoryId, expectedVersion],
+        );
+        if (released.rowCount !== 1) {
+          throw new Error('Activation reservation binding conflict');
+        }
+      }
       return mapMemoryRow(active);
     });
   }
@@ -540,6 +955,12 @@ export class PostgresCanonicalStore implements CanonicalStore {
                 erasure_state = 'pending_erasure',
                 version = version + 1
           WHERE id = $1 AND version = $2 AND erasure_state = 'live'
+            AND EXISTS (
+              SELECT 1 FROM memory_erasure_reservations r
+               WHERE r.tenant_id = memory_records.tenant_id
+                 AND r.canonical_memory_id = memory_records.id
+                 AND r.canonical_version = $2
+            )
           RETURNING *`,
         [memoryId, expectedVersion],
       );
@@ -550,12 +971,95 @@ export class PostgresCanonicalStore implements CanonicalStore {
     });
   }
 
+  async reserveErasure(
+    context: StoreContext,
+    memoryId: string,
+    expectedVersion: number,
+    scope: MemoryScope,
+    reason: DeletionReason,
+    createdAt: Date,
+    authorizationExpiresAt: Date | null,
+  ): Promise<CanonicalMemoryRecord> {
+    return this.transaction(context, async (client) => {
+      const result = await client.query<MemoryRow>(
+        'SELECT * FROM memory_records WHERE id = $1 FOR UPDATE',
+        [memoryId],
+      );
+      const record = mapMemoryRow(result.rows[0]);
+      await this.requireCurrentAuthorization(client, authorizationExpiresAt);
+      const reservations = await client.query<ErasureReservationRow>(
+        `SELECT canonical_version, scope, reason
+           FROM memory_erasure_reservations
+          WHERE canonical_memory_id = $1`,
+        [memoryId],
+      );
+      const existing = reservations.rows[0];
+      if (existing) {
+        if (
+          existing.canonical_version !== expectedVersion ||
+          existing.scope !== scope ||
+          existing.reason !== reason
+        ) {
+          throw new Error('Erasure reservation binding conflict');
+        }
+        if (
+          !(
+            (record.version === expectedVersion &&
+              record.erasureState === 'live') ||
+            (record.version === expectedVersion + 1 &&
+              record.erasureState === 'pending_erasure')
+          )
+        ) {
+          throw new Error('Memory version conflict');
+        }
+        return record;
+      }
+      if (
+        record.version !== expectedVersion ||
+        record.erasureState !== 'live' ||
+        record.scope !== scope
+      ) {
+        throw new Error('Memory version conflict');
+      }
+      const activation = await client.query(
+        `SELECT 1 FROM memory_activation_reservations
+          WHERE canonical_memory_id = $1`,
+        [memoryId],
+      );
+      if (activation.rowCount !== 0) {
+        throw new Error('Provider activation is in progress');
+      }
+      await client.query(
+        `INSERT INTO memory_erasure_reservations (
+           tenant_id, canonical_memory_id, canonical_version,
+           scope, reason, created_at
+         ) VALUES ($1,$2,$3,$4,$5,$6)`,
+        [context.tenantId, memoryId, expectedVersion, scope, reason, createdAt],
+      );
+      return record;
+    });
+  }
+
   async eraseContent(
     context: StoreContext,
     memoryId: string,
     version: number,
   ): Promise<void> {
     await this.transaction(context, async (client) => {
+      const receipt = await client.query(
+        `UPDATE memory_source_receipts r
+            SET state = 'erased'
+           FROM memory_records m
+          WHERE m.id = $1 AND m.version = $2
+            AND m.erasure_state = 'pending_erasure'
+            AND r.source_operation_id = m.source_operation_id
+            AND r.canonical_memory_id = m.id
+          RETURNING r.source_operation_id`,
+        [memoryId, version],
+      );
+      if (receipt.rowCount !== 1) {
+        throw new Error('Candidate source receipt is missing');
+      }
       const result = await client.query(
         `DELETE FROM memory_records
           WHERE id = $1 AND version = $2 AND erasure_state = 'pending_erasure'`,
@@ -631,6 +1135,11 @@ export class PostgresCanonicalStore implements CanonicalStore {
           WHERE id = $7
             AND lifecycle_state = 'active'
             AND erasure_state = 'live'
+            AND NOT EXISTS (
+              SELECT 1 FROM memory_erasure_reservations r
+               WHERE r.tenant_id = memory_records.tenant_id
+                 AND r.canonical_memory_id = memory_records.id
+            )
          ON CONFLICT (tenant_id, event_id) DO NOTHING`,
         [
           eventId,
@@ -657,6 +1166,41 @@ export class PostgresCanonicalStore implements CanonicalStore {
       }
       throw new Error('Canonical memory not found');
     });
+  }
+
+  private async requirePersonalWrite(
+    client: PoolClient,
+    tenantId: string,
+    scope: MemoryScope,
+    principalId: string,
+  ): Promise<void> {
+    if (scope !== 'personal') {
+      return;
+    }
+    const preference = await client.query<{ mode: string }>(
+      `SELECT mode
+         FROM personal_memory_preferences
+        WHERE tenant_id = $1 AND principal_id = $2
+        FOR SHARE`,
+      [tenantId, principalId],
+    );
+    if (preference.rows[0]?.mode !== 'read_write') {
+      throw new Error('Personal memory capture is disabled');
+    }
+  }
+
+  private async requireCurrentAuthorization(
+    client: PoolClient,
+    authorizationExpiresAt: Date | null,
+  ): Promise<void> {
+    const authorization = await client.query<{ current: boolean }>(
+      `SELECT $1::timestamptz IS NULL
+           OR clock_timestamp() < $1 AS current`,
+      [authorizationExpiresAt],
+    );
+    if (!authorization.rows[0]?.current) {
+      throw new Error('Management authorization lease expired');
+    }
   }
 
   private async transaction<T>(
@@ -718,4 +1262,19 @@ function mapProviderBindingRow(row: ProviderBindingRow): ProviderBinding {
     entityId: row.entity_id,
     state: row.state,
   };
+}
+
+function sameProviderBinding(
+  left: ProviderBinding,
+  right: ProviderBinding,
+): boolean {
+  return (
+    left.tenantId === right.tenantId &&
+    left.canonicalMemoryId === right.canonicalMemoryId &&
+    left.canonicalVersion === right.canonicalVersion &&
+    left.providerMemoryId === right.providerMemoryId &&
+    left.scope === right.scope &&
+    left.entityId === right.entityId &&
+    left.state === right.state
+  );
 }

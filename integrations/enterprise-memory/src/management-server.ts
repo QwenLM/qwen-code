@@ -10,7 +10,7 @@ import { createServer, type Server } from 'node:https';
 import { errors, jwtVerify } from 'jose';
 import { z } from 'zod';
 import type { MemoryScope } from './domain.js';
-import type { MemoryService } from './memory-service.js';
+import type { ManagementIdentity, MemoryService } from './memory-service.js';
 import type { PersonalMemoryPreferenceStore } from './privacy-mode-store.js';
 import { readBoundedJson } from './http-json.js';
 
@@ -47,14 +47,33 @@ export interface ManagementTokenVerifierOptions {
   audience: string;
   expectedTenantId: string;
   key: VerificationKey;
+  maxTokenTtlSeconds?: number;
+  clockToleranceSeconds?: number;
   now?: () => Date;
 }
 
 export class ManagementTokenVerifier {
   private readonly now: () => Date;
+  private readonly maxTokenTtlSeconds: number;
+  private readonly clockToleranceSeconds: number;
 
   constructor(private readonly options: ManagementTokenVerifierOptions) {
     this.now = options.now ?? (() => new Date());
+    this.maxTokenTtlSeconds = options.maxTokenTtlSeconds ?? 3_600;
+    this.clockToleranceSeconds = options.clockToleranceSeconds ?? 5;
+    if (
+      options.issuer.length === 0 ||
+      options.audience.length === 0 ||
+      options.expectedTenantId.length === 0 ||
+      !Number.isSafeInteger(this.maxTokenTtlSeconds) ||
+      this.maxTokenTtlSeconds <= 0 ||
+      this.maxTokenTtlSeconds > 86_400 ||
+      !Number.isSafeInteger(this.clockToleranceSeconds) ||
+      this.clockToleranceSeconds < 0 ||
+      this.clockToleranceSeconds > 60
+    ) {
+      throw new Error('Management token verifier configuration is invalid');
+    }
   }
 
   async verify(token: string): Promise<ManagementPrincipal> {
@@ -62,8 +81,26 @@ export class ManagementTokenVerifier {
       issuer: this.options.issuer,
       audience: this.options.audience,
       algorithms: ['ES256', 'RS256'],
+      requiredClaims: ['sub', 'iat', 'exp', 'tenant_id'],
+      clockTolerance: this.clockToleranceSeconds,
       currentDate: this.now(),
     });
+    const issuedAt = result.payload.iat;
+    const expiresAt = result.payload.exp;
+    const nowSeconds = Math.floor(this.now().getTime() / 1000);
+    if (
+      typeof issuedAt !== 'number' ||
+      !Number.isSafeInteger(issuedAt) ||
+      typeof expiresAt !== 'number' ||
+      !Number.isSafeInteger(expiresAt) ||
+      expiresAt <= issuedAt ||
+      issuedAt > nowSeconds + this.clockToleranceSeconds ||
+      expiresAt - issuedAt > this.maxTokenTtlSeconds
+    ) {
+      throw new ManagementAuthorizationError(
+        'Management token temporal claims are invalid',
+      );
+    }
     const tenantId = requireClaim(result.payload['tenant_id'], 'tenant_id');
     if (tenantId !== this.options.expectedTenantId) {
       throw new ManagementAuthorizationError('Management tenant mismatch');
@@ -79,7 +116,7 @@ export interface RepositoryMaintainerAuthorizer {
   authorize(
     principal: ManagementPrincipal,
     repositoryId: string,
-  ): Promise<void>;
+  ): Promise<Date>;
 }
 
 export interface ScmMaintainerAuthorizerOptions {
@@ -94,11 +131,25 @@ export interface ScmMaintainerAuthorizerOptions {
 export class ScmMaintainerAuthorizer implements RepositoryMaintainerAuthorizer {
   private readonly fetchImplementation: typeof fetch;
   private readonly now: () => Date;
+  private readonly requestTimeoutMs: number;
+  private readonly maxLeaseMs: number;
 
   constructor(private readonly options: ScmMaintainerAuthorizerOptions) {
     const baseUrl = new URL(options.baseUrl);
     if (baseUrl.protocol !== 'https:') {
       throw new Error('SCM authorization service must use https');
+    }
+    this.requestTimeoutMs = options.requestTimeoutMs ?? 3_000;
+    this.maxLeaseMs = options.maxLeaseMs ?? 60_000;
+    if (
+      !Number.isSafeInteger(this.requestTimeoutMs) ||
+      this.requestTimeoutMs <= 0 ||
+      this.requestTimeoutMs > 60_000 ||
+      !Number.isSafeInteger(this.maxLeaseMs) ||
+      this.maxLeaseMs <= 0 ||
+      this.maxLeaseMs > 60_000
+    ) {
+      throw new Error('SCM authorization configuration is invalid');
     }
     this.fetchImplementation = options.fetchImplementation ?? fetch;
     this.now = options.now ?? (() => new Date());
@@ -107,7 +158,7 @@ export class ScmMaintainerAuthorizer implements RepositoryMaintainerAuthorizer {
   async authorize(
     principal: ManagementPrincipal,
     repositoryId: string,
-  ): Promise<void> {
+  ): Promise<Date> {
     const response = await this.fetchImplementation(
       new URL('/v1/repositories:authorize-maintainer', this.options.baseUrl),
       {
@@ -122,7 +173,7 @@ export class ScmMaintainerAuthorizer implements RepositoryMaintainerAuthorizer {
           repository_id: repositoryId,
         }),
         redirect: 'error',
-        signal: AbortSignal.timeout(this.options.requestTimeoutMs ?? 3_000),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
       },
     );
     if ([401, 403, 404].includes(response.status)) {
@@ -159,10 +210,11 @@ export class ScmMaintainerAuthorizer implements RepositoryMaintainerAuthorizer {
       result.principal_id !== principal.principalId ||
       result.repository_id !== repositoryId ||
       expiresAt <= now ||
-      expiresAt.getTime() - now.getTime() > (this.options.maxLeaseMs ?? 60_000)
+      expiresAt.getTime() - now.getTime() > this.maxLeaseMs
     ) {
       throw new ManagementAuthorizationError();
     }
+    return expiresAt;
   }
 }
 
@@ -211,19 +263,24 @@ export function createManagementHandler(
         return;
       }
 
-      if (route.scope === 'repository') {
-        await dependencies.maintainers.authorize(principal, route.repositoryId);
-      }
-      const managementIdentity = {
-        tenantId: principal.tenantId,
-        principalId: principal.principalId,
-        repositoryId:
-          route.scope === 'repository' ? route.repositoryId : '__personal__',
-        authority:
-          route.scope === 'repository'
-            ? ('repository_maintainer' as const)
-            : ('data_subject' as const),
-      };
+      const managementIdentity: ManagementIdentity =
+        route.scope === 'repository'
+          ? {
+              tenantId: principal.tenantId,
+              principalId: principal.principalId,
+              repositoryId: route.repositoryId,
+              authority: 'repository_maintainer',
+              authorizationExpiresAt: await dependencies.maintainers.authorize(
+                principal,
+                route.repositoryId,
+              ),
+            }
+          : {
+              tenantId: principal.tenantId,
+              principalId: principal.principalId,
+              repositoryId: '__personal__',
+              authority: 'data_subject',
+            };
       if (route.kind === 'review') {
         const candidate = await dependencies.memory.getCandidateForReview(
           managementIdentity,

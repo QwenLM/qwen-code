@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHmac, randomUUID } from 'node:crypto';
+import { createHmac } from 'node:crypto';
 import type { AntiResurrectionLedger } from './anti-resurrection-ledger.js';
 import type { CanonicalStore, StoreContext } from './canonical-store.js';
 import type { ContentProtector } from './content-protector.js';
@@ -40,9 +40,14 @@ export interface PolicyResolver {
   getPolicy(identity: RuntimeIdentity): Promise<PolicySnapshot | null>;
 }
 
-export interface ManagementIdentity extends StoreContext {
-  authority: 'data_subject' | 'repository_maintainer';
-}
+export type ManagementIdentity = StoreContext &
+  (
+    | { authority: 'data_subject' }
+    | {
+        authority: 'repository_maintainer';
+        authorizationExpiresAt: Date;
+      }
+  );
 
 export interface MemoryServiceOptions {
   idempotencySecret: Uint8Array;
@@ -144,11 +149,22 @@ export class MemoryService {
     this.rawCaptureEnabled = options.rawCaptureEnabled ?? false;
     this.maxEventClockSkewMs = options.maxEventClockSkewMs ?? 5 * 60 * 1000;
     if (
+      options.idempotencySecret.byteLength < 32 ||
+      !Number.isSafeInteger(this.rawRetentionMs) ||
       this.rawRetentionMs <= 0 ||
       this.rawRetentionMs > 24 * 60 * 60 * 1000 ||
+      !Number.isSafeInteger(this.personalRetentionMs) ||
       this.personalRetentionMs <= 0 ||
+      this.personalRetentionMs > 365 * 24 * 60 * 60 * 1000 ||
+      !Number.isSafeInteger(this.searchLimit) ||
       this.searchLimit <= 0 ||
-      this.maxEventClockSkewMs < 0
+      this.searchLimit > 6 ||
+      !Number.isFinite(this.searchThreshold) ||
+      this.searchThreshold < 0 ||
+      this.searchThreshold > 1 ||
+      !Number.isSafeInteger(this.maxEventClockSkewMs) ||
+      this.maxEventClockSkewMs < 0 ||
+      this.maxEventClockSkewMs > 5 * 60 * 1000
     ) {
       throw new Error(
         'Memory service retention or limit configuration is invalid',
@@ -167,7 +183,7 @@ export class MemoryService {
       !Number.isSafeInteger(snapshot.version) ||
       snapshot.version < 0 ||
       !Number.isFinite(snapshot.expiresAt.getTime()) ||
-      snapshot.systemContext.length > 32_000
+      snapshot.systemContext.length > 4_000
     ) {
       throw new Error('Policy snapshot is invalid');
     }
@@ -226,6 +242,9 @@ export class MemoryService {
       this.now(),
       this.fingerprint('feedback-idempotency-v1', [
         identity.tenantId,
+        identity.principalId,
+        identity.workspaceId,
+        identity.repositoryId,
         eventId,
         sessionId,
         memoryId,
@@ -250,6 +269,10 @@ export class MemoryService {
     const now = this.now();
     const scopeId =
       input.scope === 'personal' ? identity.principalId : identity.repositoryId;
+    const canonicalId = operationId;
+    if (await this.ledger.getDeletion(identity.tenantId, canonicalId, 1)) {
+      throw new Error('Candidate operation was already erased');
+    }
     const protectedContent = await this.contentProtector.protect({
       tenantId: identity.tenantId,
       principalId:
@@ -265,7 +288,7 @@ export class MemoryService {
           : null,
     });
     const record: CanonicalMemoryRecord = {
-      id: randomUUID(),
+      id: canonicalId,
       tenantId: identity.tenantId,
       scope: input.scope,
       scopeId,
@@ -280,8 +303,10 @@ export class MemoryService {
           JSON.stringify([
             'candidate-idempotency-v1',
             identity.tenantId,
+            identity.principalId,
             operationId,
             input.scope,
+            scopeId,
             input.summary,
             input.references,
           ]),
@@ -293,22 +318,24 @@ export class MemoryService {
           ? new Date(now.getTime() + this.personalRetentionMs)
           : null,
     };
-    try {
-      const stored = await this.store.insertCandidate(identity, record);
-      if (stored.id !== record.id) {
-        await this.contentProtector.destroy(
-          identity.tenantId,
-          protectedContent.keyHandle,
-        );
-      }
-      return stored;
-    } catch (error) {
+    if (
+      input.scope === 'personal' &&
+      (await this.privacyModes.getPersonalMode(identity)) !== 'read_write'
+    ) {
       await this.contentProtector.destroy(
         identity.tenantId,
         protectedContent.keyHandle,
       );
-      throw error;
+      throw new Error('Personal memory capture is disabled');
     }
+    const stored = await this.store.insertCandidate(identity, record);
+    if (stored.protectedContent.keyHandle !== protectedContent.keyHandle) {
+      await this.contentProtector.destroy(
+        identity.tenantId,
+        protectedContent.keyHandle,
+      );
+    }
+    return stored;
   }
 
   async approveCandidate(
@@ -320,7 +347,16 @@ export class MemoryService {
     if (!candidate) {
       throw new Error('Candidate not found');
     }
-    assertManagementAuthority(manager, candidate.scope);
+    assertManagementAuthority(manager, candidate.scope, this.now());
+    if (
+      await this.ledger.getDeletion(
+        candidate.tenantId,
+        candidate.id,
+        candidate.version,
+      )
+    ) {
+      throw new Error('Candidate deletion is in progress');
+    }
     if (
       candidate.scope === 'personal' &&
       (await this.privacyModes.getPersonalMode(manager)) !== 'read_write'
@@ -333,8 +369,10 @@ export class MemoryService {
       if (
         candidate.erasureState === 'live' &&
         candidate.version === expectedVersion + 1 &&
-        candidate.authority === authority
+        candidate.authority === authority &&
+        (candidate.expiresAt === null || candidate.expiresAt > this.now())
       ) {
+        assertManagementAuthority(manager, candidate.scope, this.now());
         return candidate;
       }
       throw new Error('Candidate version conflict');
@@ -353,6 +391,12 @@ export class MemoryService {
     );
     const canonicalVersion = expectedVersion + 1;
     const entityId = this.entityId(candidate, manager);
+    await this.store.reserveActivation(
+      manager,
+      memoryId,
+      expectedVersion,
+      managementAuthorizationExpiry(manager),
+    );
     const providerMemoryId = await this.semanticIndex.add({
       tenantId: candidate.tenantId,
       scope: candidate.scope,
@@ -361,20 +405,53 @@ export class MemoryService {
       canonicalVersion,
       summary: content.summary,
     });
+    const binding = {
+      tenantId: candidate.tenantId,
+      canonicalMemoryId: candidate.id,
+      canonicalVersion,
+      providerMemoryId,
+      scope: candidate.scope,
+      entityId,
+      state: 'active' as const,
+    };
+    try {
+      if (
+        candidate.scope === 'personal' &&
+        (await this.privacyModes.getPersonalMode(manager)) !== 'read_write'
+      ) {
+        throw new Error('Personal memory capture is disabled');
+      }
+      if (candidate.expiresAt !== null && candidate.expiresAt <= this.now()) {
+        throw new Error('Candidate version conflict');
+      }
+      assertManagementAuthority(manager, candidate.scope, this.now());
+      if (
+        await this.ledger.getDeletion(
+          candidate.tenantId,
+          candidate.id,
+          candidate.version,
+        )
+      ) {
+        throw new Error('Candidate deletion is in progress');
+      }
+    } catch (error) {
+      try {
+        await this.semanticIndex.delete(binding);
+        await this.store.releaseActivation(manager, memoryId, expectedVersion);
+      } catch {
+        throw new Error('Provider activation requires reconciliation', {
+          cause: error,
+        });
+      }
+      throw error;
+    }
     return this.store.activateWithProvider(
       manager,
       memoryId,
       expectedVersion,
       authority,
-      {
-        tenantId: candidate.tenantId,
-        canonicalMemoryId: candidate.id,
-        canonicalVersion,
-        providerMemoryId,
-        scope: candidate.scope,
-        entityId,
-        state: 'active',
-      },
+      binding,
+      managementAuthorizationExpiry(manager),
     );
   }
 
@@ -386,15 +463,46 @@ export class MemoryService {
     if (
       !candidate ||
       candidate.lifecycleState !== 'candidate' ||
-      candidate.erasureState !== 'live'
+      candidate.erasureState !== 'live' ||
+      (candidate.expiresAt !== null && candidate.expiresAt <= this.now())
     ) {
       return null;
     }
-    assertManagementAuthority(manager, candidate.scope);
+    assertManagementAuthority(manager, candidate.scope, this.now());
+    if (
+      await this.ledger.getDeletion(
+        candidate.tenantId,
+        candidate.id,
+        candidate.version,
+      )
+    ) {
+      return null;
+    }
     const content = await this.revealCanonicalContent(
       candidate.tenantId,
       candidate.protectedContent,
     );
+    const current = await this.store.getAuthorized(manager, candidate.id);
+    if (
+      !current ||
+      current.version !== candidate.version ||
+      current.lifecycleState !== 'candidate' ||
+      current.erasureState !== 'live' ||
+      (current.expiresAt !== null && current.expiresAt <= this.now())
+    ) {
+      return null;
+    }
+    assertManagementAuthority(manager, current.scope, this.now());
+    if (
+      await this.ledger.getDeletion(
+        current.tenantId,
+        current.id,
+        current.version,
+      )
+    ) {
+      return null;
+    }
+    assertManagementAuthority(manager, current.scope, this.now());
     return {
       id: candidate.id,
       scope: candidate.scope,
@@ -446,46 +554,33 @@ export class MemoryService {
       }),
     );
     const providerResults = (await Promise.all(searches)).flat();
+    const currentPersonalMode =
+      personalMode === 'off'
+        ? 'off'
+        : await this.privacyModes.getPersonalMode(identity);
     const scoreByProviderId = new Map(
       providerResults.map((result) => [result.providerMemoryId, result.score]),
     );
     const records = await this.store.getAuthorizedByProviderIds(identity, [
       ...scoreByProviderId.keys(),
     ]);
-    const recalled: RecalledMemory[] = [];
-    for (const record of records) {
-      if (record.expiresAt && record.expiresAt <= this.now()) {
-        continue;
-      }
-      const deletion = await this.ledger.getDeletion(
-        record.tenantId,
-        record.id,
-        record.version,
-      );
-      if (deletion) {
-        continue;
-      }
-      const binding = await this.store.getProviderBinding(
-        identity,
-        record.id,
-        record.version,
-      );
-      const content = await this.revealCanonicalContent(
-        record.tenantId,
-        record.protectedContent,
-      );
-      recalled.push({
-        id: record.id,
-        scope: record.scope,
-        authority: record.authority,
-        summary: content.summary,
-        references: content.references,
-        score: binding
-          ? (scoreByProviderId.get(binding.providerMemoryId) ?? 0)
-          : 0,
-      });
-    }
-    recalled.sort((left, right) => right.score - left.score);
+    const recalled = (
+      await Promise.all(
+        records.map((record) =>
+          this.recallSearchRecord(
+            identity,
+            record,
+            scoreByProviderId,
+            currentPersonalMode,
+          ),
+        ),
+      )
+    ).filter((memory): memory is RecalledMemory => memory !== null);
+    recalled.sort(
+      (left, right) =>
+        right.score - left.score ||
+        (left.id < right.id ? -1 : left.id > right.id ? 1 : 0),
+    );
     return { memories: recalled.slice(0, this.searchLimit) };
   }
 
@@ -513,6 +608,23 @@ export class MemoryService {
       record.tenantId,
       record.protectedContent,
     );
+    const current = await this.store.getAuthorized(identity, record.id);
+    if (
+      !current ||
+      current.version !== record.version ||
+      current.lifecycleState !== 'active' ||
+      current.erasureState !== 'live' ||
+      (current.expiresAt !== null && current.expiresAt <= this.now()) ||
+      (record.scope === 'personal' &&
+        (await this.privacyModes.getPersonalMode(identity)) === 'off') ||
+      (await this.ledger.getDeletion(
+        record.tenantId,
+        record.id,
+        record.version,
+      ))
+    ) {
+      return null;
+    }
     return {
       id: record.id,
       scope: record.scope,
@@ -530,43 +642,74 @@ export class MemoryService {
     scope: MemoryScope,
     reason: DeletionReason,
   ): Promise<void> {
-    assertManagementAuthority(manager, scope);
+    if (
+      (scope === 'personal' &&
+        reason !== 'user_request' &&
+        reason !== 'candidate_rejected') ||
+      (scope === 'repository' &&
+        reason !== 'maintainer_request' &&
+        reason !== 'candidate_rejected')
+    ) {
+      throw new Error('Deletion reason does not match memory scope');
+    }
+    assertManagementAuthority(manager, scope, this.now());
     const existingDeletion = await this.ledger.getDeletion(
       manager.tenantId,
       memoryId,
       expectedVersion,
     );
-    if (
-      existingDeletion &&
-      (existingDeletion.scope !== scope || existingDeletion.reason !== reason)
-    ) {
-      throw new Error('Deletion intent binding conflict');
-    }
+    const existingOriginGuard =
+      expectedVersion === 1
+        ? existingDeletion
+        : await this.ledger.getDeletion(manager.tenantId, memoryId, 1);
+    assertManagementAuthority(manager, scope, this.now());
+    assertDeletionBinding(existingDeletion, scope, reason);
+    assertDeletionBinding(existingOriginGuard, scope, reason);
     let pending = await this.store.getAuthorized(manager, memoryId);
     if (!pending) {
-      if (existingDeletion?.state === 'erased') {
+      if (
+        existingDeletion?.state === 'erased' &&
+        (expectedVersion === 1 || existingOriginGuard?.state === 'erased')
+      ) {
         return;
       }
-      if (existingDeletion?.state === 'deletion_intent') {
-        await this.ledger.markErased(
-          manager.tenantId,
-          memoryId,
-          expectedVersion,
-        );
-        return;
+      if (existingDeletion || existingOriginGuard) {
+        throw new Error('Missing memory requires orphan reconciliation');
       }
       throw new Error('Memory not found');
     }
     if (pending.scope !== scope) {
       throw new Error('Memory scope mismatch');
     }
+    if (
+      !existingDeletion &&
+      reason === 'candidate_rejected' &&
+      pending.lifecycleState !== 'candidate'
+    ) {
+      throw new Error('Candidate rejection requires a candidate memory');
+    }
+    assertManagementAuthority(manager, scope, this.now());
+    pending = await this.store.reserveErasure(
+      manager,
+      memoryId,
+      expectedVersion,
+      scope,
+      reason,
+      this.now(),
+      managementAuthorizationExpiry(manager),
+    );
+    if (expectedVersion !== 1 && !existingOriginGuard) {
+      const guard = await this.ledger.beginDeletion(
+        manager.tenantId,
+        memoryId,
+        1,
+        scope,
+        reason,
+        this.now(),
+      );
+      assertDeletionBinding(guard, scope, reason);
+    }
     if (!existingDeletion) {
-      if (
-        pending.version !== expectedVersion ||
-        pending.erasureState !== 'live'
-      ) {
-        throw new Error('Memory version conflict');
-      }
       const deletion = await this.ledger.beginDeletion(
         manager.tenantId,
         memoryId,
@@ -575,15 +718,9 @@ export class MemoryService {
         reason,
         this.now(),
       );
-      if (deletion.scope !== scope || deletion.reason !== reason) {
-        throw new Error('Deletion intent binding conflict');
-      }
-      pending = await this.store.markPendingErasure(
-        manager,
-        memoryId,
-        expectedVersion,
-      );
-    } else if (
+      assertDeletionBinding(deletion, scope, reason);
+    }
+    if (
       pending.version === expectedVersion &&
       pending.erasureState === 'live'
     ) {
@@ -611,8 +748,11 @@ export class MemoryService {
       pending.tenantId,
       pending.protectedContent.keyHandle,
     );
-    await this.store.eraseContent(manager, memoryId, pending.version);
     await this.ledger.markErased(manager.tenantId, memoryId, expectedVersion);
+    if (expectedVersion !== 1) {
+      await this.ledger.markErased(manager.tenantId, memoryId, 1);
+    }
+    await this.store.eraseContent(manager, memoryId, pending.version);
   }
 
   private async recordRawEvent(
@@ -654,6 +794,9 @@ export class MemoryService {
       protectedPayload,
       sourceFingerprint: this.fingerprint('raw-event-idempotency-v1', [
         identity.tenantId,
+        identity.principalId,
+        identity.workspaceId,
+        identity.repositoryId,
         request.eventId,
         request.sessionId,
         request.turnId,
@@ -662,25 +805,72 @@ export class MemoryService {
         request.payload,
       ]),
     };
-    try {
-      const inserted = await this.store.insertRawEvent(
-        identity,
-        event,
-        receipt,
-      );
-      if (!inserted) {
-        await this.contentProtector.destroy(
-          identity.tenantId,
-          protectedPayload.keyHandle,
-        );
-      }
-    } catch (error) {
+    const inserted = await this.store.insertRawEvent(identity, event, receipt);
+    if (!inserted) {
       await this.contentProtector.destroy(
         identity.tenantId,
         protectedPayload.keyHandle,
       );
-      throw error;
     }
+  }
+
+  private async recallSearchRecord(
+    identity: RuntimeIdentity,
+    record: CanonicalMemoryRecord,
+    scoreByProviderId: ReadonlyMap<string, number>,
+    personalMode: PersonalMemoryMode,
+  ): Promise<RecalledMemory | null> {
+    if (
+      (record.scope === 'personal' && personalMode === 'off') ||
+      (record.expiresAt !== null && record.expiresAt <= this.now()) ||
+      (await this.ledger.getDeletion(
+        record.tenantId,
+        record.id,
+        record.version,
+      ))
+    ) {
+      return null;
+    }
+    const binding = await this.store.getProviderBinding(
+      identity,
+      record.id,
+      record.version,
+    );
+    const score = binding
+      ? scoreByProviderId.get(binding.providerMemoryId)
+      : undefined;
+    if (score === undefined) {
+      return null;
+    }
+    const content = await this.revealCanonicalContent(
+      record.tenantId,
+      record.protectedContent,
+    );
+    const current = await this.store.getAuthorized(identity, record.id);
+    if (
+      !current ||
+      current.version !== record.version ||
+      current.lifecycleState !== 'active' ||
+      current.erasureState !== 'live' ||
+      (current.expiresAt !== null && current.expiresAt <= this.now()) ||
+      (record.scope === 'personal' &&
+        (await this.privacyModes.getPersonalMode(identity)) === 'off') ||
+      (await this.ledger.getDeletion(
+        record.tenantId,
+        record.id,
+        record.version,
+      ))
+    ) {
+      return null;
+    }
+    return {
+      id: current.id,
+      scope: current.scope,
+      authority: current.authority,
+      summary: content.summary,
+      references: content.references,
+      score,
+    };
   }
 
   private entityId(
@@ -757,7 +947,7 @@ function deterministicUuid(digest: Uint8Array): string {
 
 function validateCandidate(input: CandidateInput): void {
   const summary = input.summary.trim();
-  if (summary.length === 0 || summary.length > 1_000) {
+  if (summary.length === 0 || input.summary.length > 1_000) {
     throw new Error('Candidate summary must contain 1-1000 characters');
   }
   if (containsDisallowedCandidateContent(summary)) {
@@ -786,11 +976,33 @@ function containsDisallowedCandidateContent(value: string): boolean {
 function assertManagementAuthority(
   manager: ManagementIdentity,
   scope: MemoryScope,
+  now: Date,
 ): void {
   if (
     (scope === 'personal' && manager.authority !== 'data_subject') ||
-    (scope === 'repository' && manager.authority !== 'repository_maintainer')
+    (scope === 'repository' &&
+      (manager.authority !== 'repository_maintainer' ||
+        !Number.isFinite(manager.authorizationExpiresAt.getTime()) ||
+        manager.authorizationExpiresAt <= now))
   ) {
     throw new Error('Management authority does not match memory scope');
+  }
+}
+
+function managementAuthorizationExpiry(
+  manager: ManagementIdentity,
+): Date | null {
+  return manager.authority === 'repository_maintainer'
+    ? manager.authorizationExpiresAt
+    : null;
+}
+
+function assertDeletionBinding(
+  deletion: Awaited<ReturnType<AntiResurrectionLedger['getDeletion']>>,
+  scope: MemoryScope,
+  reason: DeletionReason,
+): void {
+  if (deletion && (deletion.scope !== scope || deletion.reason !== reason)) {
+    throw new Error('Deletion intent binding conflict');
   }
 }

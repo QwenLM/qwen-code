@@ -25,6 +25,7 @@ CREATE TABLE runtime_capability_replays (
   tenant_id text NOT NULL,
   capability_id text NOT NULL,
   principal_id text NOT NULL,
+  capability_fingerprint text NOT NULL,
   request_binding text NOT NULL,
   expires_at timestamptz NOT NULL,
   PRIMARY KEY (tenant_id, capability_id)
@@ -67,6 +68,44 @@ CREATE TABLE provider_bindings (
   ),
   PRIMARY KEY (tenant_id, canonical_memory_id, canonical_version),
   UNIQUE (tenant_id, provider_memory_id),
+  FOREIGN KEY (tenant_id, canonical_memory_id)
+    REFERENCES memory_records (tenant_id, id)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE memory_source_receipts (
+  tenant_id text NOT NULL,
+  source_operation_id text NOT NULL,
+  canonical_memory_id uuid NOT NULL,
+  source_fingerprint text NOT NULL,
+  state text NOT NULL CHECK (state IN ('live', 'erased')),
+  PRIMARY KEY (tenant_id, source_operation_id)
+);
+
+CREATE TABLE memory_activation_reservations (
+  tenant_id text NOT NULL,
+  canonical_memory_id uuid NOT NULL,
+  canonical_version integer NOT NULL CHECK (canonical_version > 0),
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (tenant_id, canonical_memory_id),
+  FOREIGN KEY (tenant_id, canonical_memory_id)
+    REFERENCES memory_records (tenant_id, id)
+    ON DELETE CASCADE
+);
+
+CREATE TABLE memory_erasure_reservations (
+  tenant_id text NOT NULL,
+  canonical_memory_id uuid NOT NULL,
+  canonical_version integer NOT NULL CHECK (canonical_version > 0),
+  scope text NOT NULL CHECK (scope IN ('personal', 'repository')),
+  reason text NOT NULL CHECK (
+    reason IN (
+      'user_request', 'maintainer_request', 'candidate_rejected',
+      'retention_expired', 'tenant_offboarding'
+    )
+  ),
+  created_at timestamptz NOT NULL,
+  PRIMARY KEY (tenant_id, canonical_memory_id),
   FOREIGN KEY (tenant_id, canonical_memory_id)
     REFERENCES memory_records (tenant_id, id)
     ON DELETE CASCADE
@@ -115,6 +154,12 @@ ALTER TABLE workspace_bindings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE workspace_bindings FORCE ROW LEVEL SECURITY;
 ALTER TABLE provider_bindings ENABLE ROW LEVEL SECURITY;
 ALTER TABLE provider_bindings FORCE ROW LEVEL SECURITY;
+ALTER TABLE memory_source_receipts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_source_receipts FORCE ROW LEVEL SECURITY;
+ALTER TABLE memory_activation_reservations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_activation_reservations FORCE ROW LEVEL SECURITY;
+ALTER TABLE memory_erasure_reservations ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_erasure_reservations FORCE ROW LEVEL SECURITY;
 ALTER TABLE raw_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE raw_events FORCE ROW LEVEL SECURITY;
 ALTER TABLE personal_memory_preferences ENABLE ROW LEVEL SECURITY;
@@ -166,6 +211,77 @@ CREATE POLICY provider_bindings_runtime_policy ON provider_bindings
       FROM memory_records m
       WHERE m.tenant_id = provider_bindings.tenant_id
         AND m.id = provider_bindings.canonical_memory_id
+    )
+  );
+
+CREATE POLICY memory_source_receipts_read_policy ON memory_source_receipts
+  FOR SELECT
+  USING (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY memory_source_receipts_insert_policy ON memory_source_receipts
+  FOR INSERT
+  WITH CHECK (tenant_id = current_setting('app.tenant_id', true));
+
+CREATE POLICY memory_source_receipts_update_policy ON memory_source_receipts
+  FOR UPDATE
+  USING (
+    tenant_id = current_setting('app.tenant_id', true)
+    AND EXISTS (
+      SELECT 1
+      FROM memory_records m
+      WHERE m.tenant_id = memory_source_receipts.tenant_id
+        AND m.id = memory_source_receipts.canonical_memory_id
+    )
+  )
+  WITH CHECK (
+    tenant_id = current_setting('app.tenant_id', true)
+    AND EXISTS (
+      SELECT 1
+      FROM memory_records m
+      WHERE m.tenant_id = memory_source_receipts.tenant_id
+        AND m.id = memory_source_receipts.canonical_memory_id
+    )
+  );
+
+CREATE POLICY memory_activation_reservations_scope_policy
+  ON memory_activation_reservations
+  USING (
+    tenant_id = current_setting('app.tenant_id', true)
+    AND EXISTS (
+      SELECT 1
+      FROM memory_records m
+      WHERE m.tenant_id = memory_activation_reservations.tenant_id
+        AND m.id = memory_activation_reservations.canonical_memory_id
+    )
+  )
+  WITH CHECK (
+    tenant_id = current_setting('app.tenant_id', true)
+    AND EXISTS (
+      SELECT 1
+      FROM memory_records m
+      WHERE m.tenant_id = memory_activation_reservations.tenant_id
+        AND m.id = memory_activation_reservations.canonical_memory_id
+    )
+  );
+
+CREATE POLICY memory_erasure_reservations_scope_policy
+  ON memory_erasure_reservations
+  USING (
+    tenant_id = current_setting('app.tenant_id', true)
+    AND EXISTS (
+      SELECT 1
+      FROM memory_records m
+      WHERE m.tenant_id = memory_erasure_reservations.tenant_id
+        AND m.id = memory_erasure_reservations.canonical_memory_id
+    )
+  )
+  WITH CHECK (
+    tenant_id = current_setting('app.tenant_id', true)
+    AND EXISTS (
+      SELECT 1
+      FROM memory_records m
+      WHERE m.tenant_id = memory_erasure_reservations.tenant_id
+        AND m.id = memory_erasure_reservations.canonical_memory_id
     )
   );
 

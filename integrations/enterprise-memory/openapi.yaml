@@ -27,13 +27,23 @@ paths:
               additionalProperties: false
               required: [session_id, source, model, permission_mode]
               properties:
-                session_id: { type: string, maxLength: 256 }
+                session_id: { type: string, minLength: 1, maxLength: 256 }
                 source: { enum: [startup, resume, clear, compact, branch] }
-                model: { type: string, maxLength: 256 }
-                permission_mode: { type: string, maxLength: 64 }
+                model: { type: string, minLength: 1, maxLength: 256 }
+                permission_mode: { type: string, minLength: 1, maxLength: 64 }
       responses:
         '200':
           description: Current signed and authorized policy projection, or an empty projection.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [policy_version, expires_at, system_context]
+                properties:
+                  policy_version: { type: [integer, 'null'], minimum: 0 }
+                  expires_at: { type: [string, 'null'], format: date-time }
+                  system_context: { type: string, maxLength: 4000 }
   /v1/runtime/turns:open:
     post:
       tags: [runtime]
@@ -48,6 +58,16 @@ paths:
       responses:
         '200':
           description: New deterministic turn ID and currently authorized reference context.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [turn_id, memories, additional_context]
+                properties:
+                  turn_id: { type: string, format: uuid }
+                  memories: { type: array, maxItems: 6, items: {} }
+                  additional_context: { type: string, maxLength: 6000 }
   /v1/runtime/turn-events:
     post:
       tags: [runtime]

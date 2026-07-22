@@ -44,6 +44,15 @@ export class Mem0SemanticIndex implements SemanticIndex {
     }
     this.pollIntervalMs = options.pollIntervalMs ?? 250;
     this.operationTimeoutMs = options.operationTimeoutMs ?? 30_000;
+    if (
+      options.apiKey.length === 0 ||
+      !Number.isSafeInteger(this.pollIntervalMs) ||
+      this.pollIntervalMs <= 0 ||
+      !Number.isSafeInteger(this.operationTimeoutMs) ||
+      this.operationTimeoutMs <= 0
+    ) {
+      throw new Error('Mem0 adapter configuration is invalid');
+    }
     this.fetchImplementation = options.fetchImplementation ?? fetch;
   }
 
@@ -89,16 +98,28 @@ export class Mem0SemanticIndex implements SemanticIndex {
     request: IndexRecordRequest,
     providerMemoryId: string,
   ): Promise<void> {
-    const discoverable = await this.search({
-      tenantId: request.tenantId,
-      scope: request.scope,
-      entityId: request.entityId,
-      query: request.summary,
-      limit: 20,
-      threshold: 0,
-    });
+    const response = await this.request<{ results: Mem0Memory[] }>(
+      '/v3/memories/search/',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          query: request.summary,
+          filters: exactFilter(request),
+          top_k: 1,
+          threshold: 0,
+          rerank: false,
+          show_expired: false,
+        }),
+      },
+    );
     if (
-      !discoverable.some((item) => item.providerMemoryId === providerMemoryId)
+      !Array.isArray(response.results) ||
+      response.results.length > 1 ||
+      response.results[0]?.id !== providerMemoryId ||
+      typeof response.results[0].score !== 'number' ||
+      !Number.isFinite(response.results[0].score) ||
+      response.results[0].score < 0 ||
+      response.results[0].score > 1
     ) {
       throw new Error('Mem0 record is not discoverable after successful add');
     }
@@ -127,22 +148,26 @@ export class Mem0SemanticIndex implements SemanticIndex {
     if (response.results.length > request.limit) {
       throw new Error('Mem0 search exceeded the requested result limit');
     }
-    return response.results.map((item) => {
-      if (
-        typeof item.id !== 'string' ||
-        item.id.length === 0 ||
-        item.id.length > 512
-      ) {
-        throw new Error('Mem0 search returned an invalid memory ID');
-      }
-      return {
-        providerMemoryId: item.id,
-        score:
-          typeof item.score === 'number' && Number.isFinite(item.score)
-            ? item.score
-            : 0,
-      };
-    });
+    return response.results
+      .map((item) => {
+        if (
+          typeof item.id !== 'string' ||
+          item.id.length === 0 ||
+          item.id.length > 512
+        ) {
+          throw new Error('Mem0 search returned an invalid memory ID');
+        }
+        if (
+          typeof item.score !== 'number' ||
+          !Number.isFinite(item.score) ||
+          item.score < 0 ||
+          item.score > 1
+        ) {
+          throw new Error('Mem0 search returned an invalid score');
+        }
+        return { providerMemoryId: item.id, score: item.score };
+      })
+      .filter((item) => item.score >= request.threshold);
   }
 
   async delete(binding: ProviderBinding): Promise<void> {
@@ -186,39 +211,35 @@ export class Mem0SemanticIndex implements SemanticIndex {
   private async findExact(
     request: IndexRecordRequest,
   ): Promise<Mem0Memory | null> {
-    let page = 1;
-    while (page <= 5) {
-      const response = await this.request<Mem0Page>(
-        `/v3/memories/?page=${page}&page_size=200`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            filters: entityFilter(request.scope, request.entityId),
-            show_expired: false,
-          }),
-        },
-      );
-      if (!Array.isArray(response.results)) {
-        throw new Error('Mem0 exact lookup has no results');
-      }
-      const match = response.results.find(
-        (item) =>
-          typeof item.id === 'string' &&
-          item.id.length > 0 &&
-          item.id.length <= 512 &&
-          item.metadata?.['canonical_memory_id'] ===
-            request.canonicalMemoryId &&
-          item.metadata?.['canonical_version'] === request.canonicalVersion,
-      );
-      if (match) {
-        return match;
-      }
-      if (!response.next) {
-        return null;
-      }
-      page += 1;
+    const response = await this.request<Mem0Page>(
+      '/v3/memories/?page=1&page_size=200',
+      {
+        method: 'POST',
+        body: JSON.stringify({
+          filters: exactFilter(request),
+          show_expired: false,
+        }),
+      },
+    );
+    if (!Array.isArray(response.results)) {
+      throw new Error('Mem0 exact lookup has no results');
     }
-    throw new Error('Mem0 exact lookup exceeded bounded pagination');
+    const matches = response.results.filter(
+      (item) =>
+        typeof item.id === 'string' &&
+        item.id.length > 0 &&
+        item.id.length <= 512 &&
+        item.metadata?.['canonical_memory_id'] === request.canonicalMemoryId &&
+        item.metadata?.['canonical_version'] === request.canonicalVersion,
+    );
+    if (
+      matches.length !== response.results.length ||
+      matches.length > 1 ||
+      response.next !== null
+    ) {
+      throw new Error('Mem0 exact lookup was not unique');
+    }
+    return matches[0] ?? null;
   }
 
   private async request<T = unknown>(
@@ -261,6 +282,18 @@ function entityFilter(
   entityId: string,
 ): { user_id: string } | { app_id: string } {
   return entityField(scope, entityId);
+}
+
+function exactFilter(request: IndexRecordRequest): {
+  AND: readonly Record<string, string | number>[];
+} {
+  return {
+    AND: [
+      entityFilter(request.scope, request.entityId),
+      { canonical_memory_id: request.canonicalMemoryId },
+      { canonical_version: request.canonicalVersion },
+    ],
+  };
 }
 
 function readEventStatus(

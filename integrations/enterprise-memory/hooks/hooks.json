@@ -4,7 +4,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "command": "qwen-memory-agent-launcher node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
           "name": "enterprise-memory-session-context",
           "timeout": 1800
         }
@@ -16,7 +16,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "command": "qwen-memory-agent-launcher node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
           "name": "enterprise-memory-turn-open",
           "timeout": 1800
         }
@@ -29,7 +29,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "command": "qwen-memory-agent-launcher node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
           "name": "enterprise-memory-tool-evidence",
           "async": true,
           "timeout": 5000
@@ -43,7 +43,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "command": "qwen-memory-agent-launcher node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
           "name": "enterprise-memory-tool-failure",
           "async": true,
           "timeout": 5000
@@ -56,9 +56,9 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "command": "qwen-memory-agent-launcher node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
           "name": "enterprise-memory-turn-stop",
-          "timeout": 1200
+          "timeout": 1800
         }
       ]
     }
@@ -68,7 +68,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "command": "qwen-memory-agent-launcher node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
           "name": "enterprise-memory-turn-failure",
           "async": true,
           "timeout": 5000

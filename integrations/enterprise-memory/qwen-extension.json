@@ -12,8 +12,8 @@
   "hooks": "hooks/hooks.json",
   "mcpServers": {
     "enterprise-memory": {
-      "command": "node",
-      "args": ["${extensionPath}${/}dist${/}agent${/}main.js", "mcp"],
+      "command": "qwen-memory-agent-launcher",
+      "args": ["node", "${extensionPath}${/}dist${/}agent${/}main.js", "mcp"],
       "cwd": "${extensionPath}"
     }
   }

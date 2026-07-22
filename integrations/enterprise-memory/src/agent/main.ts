@@ -16,7 +16,11 @@ const gateway = new GatewayClient({
   privateKeyPath: required('MEMORY_AGENT_TLS_KEY'),
   caPath: required('MEMORY_AGENT_TLS_CA'),
 });
-const states = new AgentStateStore(required('MEMORY_AGENT_STATE_DIR'));
+const states = new AgentStateStore(
+  required('MEMORY_AGENT_STATE_DIR'),
+  250,
+  operationSecret('MEMORY_AGENT_OPERATION_HMAC_SECRET'),
+);
 
 try {
   if (process.argv[2] === 'mcp') {
@@ -38,6 +42,18 @@ function required(name: string): string {
   const value = process.env[name];
   if (!value) {
     throw new Error(`Missing ${name}`);
+  }
+  return value;
+}
+
+function operationSecret(name: string): Uint8Array {
+  const encoded = required(name);
+  if (!/^[A-Za-z0-9_-]+$/.test(encoded)) {
+    throw new Error(`${name} must be unpadded base64url`);
+  }
+  const value = Buffer.from(encoded, 'base64url');
+  if (value.byteLength !== 32 || value.toString('base64url') !== encoded) {
+    throw new Error(`${name} must contain exactly 32 bytes`);
   }
   return value;
 }

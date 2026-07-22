@@ -12,6 +12,9 @@ import { handleMcpMessage, type McpGatewayClient } from './mcp-server.js';
 import { AgentStateStore } from './state-store.js';
 
 const directories: string[] = [];
+const PROPOSAL_OPERATION_ID = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+const FEEDBACK_OPERATION_ID = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+const MEMORY_ID = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
 
 afterEach(async () => {
   await Promise.all(
@@ -96,7 +99,10 @@ describe('handleMcpMessage', () => {
         method: 'tools/call',
         params: {
           name: 'memory_propose_repository',
-          arguments: { summary: 'Use the release checklist' },
+          arguments: {
+            operationId: PROPOSAL_OPERATION_ID,
+            summary: 'Use the release checklist',
+          },
         },
       },
       gateway,
@@ -115,6 +121,96 @@ describe('handleMcpMessage', () => {
     expect(gateway.calls[0]?.operationId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f-]{27}$/,
     );
+  });
+
+  it('uses the caller operation ID across MCP reconnects', async () => {
+    const { gateway, states } = await fixture();
+    const request = (id: string) => ({
+      jsonrpc: '2.0' as const,
+      id,
+      method: 'tools/call',
+      params: {
+        name: 'memory_propose_repository',
+        arguments: {
+          operationId: PROPOSAL_OPERATION_ID,
+          summary: 'Use the release checklist',
+        },
+      },
+    });
+
+    await handleMcpMessage(request('call-a'), gateway, states, 'connection-a');
+    await handleMcpMessage(request('call-b'), gateway, states, 'connection-b');
+
+    expect(gateway.calls[0]?.operationId).toBe(gateway.calls[1]?.operationId);
+  });
+
+  it('does not reuse read operation IDs when JSON-RPC IDs restart', async () => {
+    const { gateway, states } = await fixture();
+    const request = {
+      jsonrpc: '2.0' as const,
+      id: 0,
+      method: 'tools/call',
+      params: { name: 'memory_search', arguments: { query: 'build' } },
+    };
+
+    await handleMcpMessage(request, gateway, states, 'connection-a');
+    await handleMcpMessage(request, gateway, states, 'connection-b');
+
+    expect(gateway.calls[0]?.operationId).not.toBe(
+      gateway.calls[1]?.operationId,
+    );
+  });
+
+  it('requires an explicit idempotency key for MCP writes', async () => {
+    const { gateway, states } = await fixture();
+    const response = await handleMcpMessage(
+      {
+        jsonrpc: '2.0',
+        id: 'call-a',
+        method: 'tools/call',
+        params: {
+          name: 'memory_propose_repository',
+          arguments: { summary: 'Use the release checklist' },
+        },
+      },
+      gateway,
+      states,
+    );
+
+    expect(response?.error).toEqual({
+      code: -32602,
+      message: 'Invalid parameters',
+    });
+    expect(gateway.calls).toEqual([]);
+  });
+
+  it('keeps feedback retries stable without process-specific metadata', async () => {
+    const { gateway, states } = await fixture();
+    const request = (id: string) => ({
+      jsonrpc: '2.0' as const,
+      id,
+      method: 'tools/call',
+      params: {
+        name: 'memory_feedback',
+        arguments: {
+          operationId: FEEDBACK_OPERATION_ID,
+          memoryId: MEMORY_ID,
+          signal: 'helpful',
+        },
+      },
+    });
+
+    await handleMcpMessage(request('call-a'), gateway, states, 'connection-a');
+    await handleMcpMessage(request('call-b'), gateway, states, 'connection-b');
+
+    expect(gateway.calls[0]).toEqual(gateway.calls[1]);
+    expect(gateway.calls[0]?.value).toMatchObject({
+      event_id: gateway.calls[0]?.operationId,
+      session_id: 'mcp',
+      memory_id: MEMORY_ID,
+      signal: 'helpful',
+    });
+    expect(gateway.calls[0]?.value).not.toHaveProperty('operationId');
   });
 
   it('returns a stable tool error without dependency details', async () => {
