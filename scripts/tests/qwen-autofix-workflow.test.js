@@ -4068,9 +4068,13 @@ describe('qwen-autofix workflow', () => {
     // Observed: a web-shell TS break on `main` failed the trusted-base build
     // across a whole scan batch, skipping Prepare, and the old code stranded
     // SIX healthy PRs (one at round 11) terminally at round=100.
+    // End at the decision block's own closing `fi`, anchored on the
+    // consecutive-failure block that follows (not the report `{`): that block
+    // was inserted between this decision and the `{`, and it calls `gh api`, so
+    // a `{`-anchored match over-captures it and fails when gh is unstubbed.
     const block = reviewAddressReportStep.match(
-      /GATE_CRASHED=false\n[\s\S]*?\n {12}fi\n(?= {12}\{)/,
-    )?.[0];
+      /(GATE_CRASHED=false\n[\s\S]*?\n {12}fi)\n\n {12}# Consecutive-failure/,
+    )?.[1];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
     const SENTINEL = '9999-12-31T23:59:59Z';
