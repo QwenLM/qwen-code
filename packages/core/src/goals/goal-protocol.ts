@@ -102,4 +102,9 @@ export interface GoalStateRecordPayloadV2 {
   v: typeof GOAL_STATE_VERSION;
   cause: GoalStateCause;
   snapshot: GoalSnapshotV2;
+  blockedAudit?: {
+    fingerprint: string;
+    count: number;
+    turnIds: string[];
+  };
 }

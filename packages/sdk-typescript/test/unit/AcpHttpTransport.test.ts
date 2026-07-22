@@ -428,6 +428,38 @@ describe('AcpHttpTransport', () => {
 
       transport.dispose();
     });
+
+    it('preserves the REST Goal conflict body shape', async () => {
+      const current = { v: 2, goal: null, activity: 'idle' };
+      const { fetch } = initAwareFetch({
+        subsequentReply: () =>
+          jsonResponse(200, {
+            jsonrpc: '2.0',
+            id: 2,
+            error: {
+              code: -32603,
+              message: 'Goal revision conflict',
+              data: { errorKind: 'goal_conflict', current },
+            },
+          }),
+      });
+      const transport = new AcpHttpTransport('http://d', undefined, fetch);
+      const res = await transport.fetch('http://d/session/s1/goal', {
+        method: 'POST',
+        body: JSON.stringify({
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 1,
+        }),
+      });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        error: 'Goal revision conflict',
+        code: 'goal_conflict',
+        current,
+      });
+      transport.dispose();
+    });
   });
 
   // ---- Abort signal forwarding ------------------------------------------

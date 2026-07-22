@@ -716,6 +716,7 @@ describe('goal runtime', () => {
       'turn_finished',
       'verifier_accept',
     ]);
+    expect(journal.appended.at(-1)?.snapshot.goal?.status).toBe('complete');
     expect(runtime.getSnapshot()).toMatchObject({
       activity: 'verifying',
       goal: { status: 'active' },
@@ -1618,6 +1619,95 @@ describe('goal runtime', () => {
         blockerKind: 'repeated',
       }),
     ).toEqual({ recorded: true, readyForVerification: false });
+  });
+
+  it('restores the repeated blocker audit from the durable Goal state', async () => {
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    runtime.bindHost(host);
+    await runtime.dispatch({ action: 'create', objective: 'ship' });
+
+    for (let index = 0; index < 2; index += 1) {
+      const permit = host.started.at(-1)!;
+      runtime.recordTerminalProposal(permit, {
+        status: 'blocked',
+        reason: 'waiting for access',
+        evidenceRefs: [],
+        blockerKind: 'repeated',
+      });
+      await runtime.finishTurn(permit);
+    }
+
+    const restoredHost = fakeGoalTurnHost();
+    const restored = createGoalRuntime({ journal: fakeGoalJournal() });
+    await restored.restore([
+      {
+        ...goalStateRecord(journal.appended.at(-1)!.snapshot),
+        systemPayload: journal.appended.at(-1)!,
+      },
+    ]);
+    restored.bindHost(restoredHost);
+    await vi.waitFor(() => expect(restoredHost.started).toHaveLength(1));
+
+    expect(
+      restored.recordTerminalProposal(restoredHost.started[0], {
+        status: 'blocked',
+        reason: 'waiting for access',
+        evidenceRefs: [],
+        blockerKind: 'repeated',
+      }),
+    ).toEqual({ recorded: true, readyForVerification: true });
+  });
+
+  it('restores and bounds a repeated blocker audit after verifier rejection', async () => {
+    const activeSnapshot: GoalSnapshotV2 = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'g-rejected',
+        revision: 1,
+        objective: 'ship',
+        status: 'active',
+        evidenceCursor: { recordId: 'create-record' },
+        turnCount: 3,
+        activeTimeMs: 0,
+        createdAt: 1,
+        updatedAt: 2,
+      },
+    };
+    const record = goalStateRecord(activeSnapshot);
+    record.systemPayload = {
+      v: 2,
+      cause: 'verifier_reject',
+      snapshot: activeSnapshot,
+      blockedAudit: {
+        fingerprint: 'repeated\nwaiting for access',
+        count: 3,
+        turnIds: ['turn-1', 'turn-2', 'turn-3'],
+      },
+    };
+    const journal = fakeGoalJournal();
+    const host = fakeGoalTurnHost();
+    const runtime = createGoalRuntime({ journal });
+    await runtime.restore([record]);
+    runtime.bindHost(host);
+    await vi.waitFor(() => expect(host.started).toHaveLength(1));
+
+    expect(
+      runtime.recordTerminalProposal(host.started[0], {
+        status: 'blocked',
+        reason: 'waiting for access',
+        evidenceRefs: [],
+        blockerKind: 'repeated',
+      }),
+    ).toEqual({ recorded: true, readyForVerification: true });
+    await runtime.finishTurn(host.started[0]);
+
+    expect(journal.appended.at(-1)?.blockedAudit).toMatchObject({
+      count: 3,
+      turnIds: ['turn-2', 'turn-3', host.started[0].turnId],
+    });
   });
 
   it('does not count a repeated proposal recorded before pause and resume', async () => {

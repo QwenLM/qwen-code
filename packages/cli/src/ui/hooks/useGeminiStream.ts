@@ -2373,6 +2373,14 @@ export const useGeminiStream = (
               break;
             case ServerGeminiEventType.GoalState:
               if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
+                flushBufferedStreamEvents();
+                if (pendingHistoryItemRef.current) {
+                  commitItem(
+                    pendingHistoryItemRef.current,
+                    userMessageTimestamp,
+                  );
+                  setPendingHistoryItem(null);
+                }
                 addItem(
                   {
                     type: 'goal_state',

@@ -7426,7 +7426,19 @@ export function App({
                       onCreateGoal={async (objective) => {
                         const target = goalsTarget;
                         if (!target) {
-                          throw new Error(t('goals.error.goalUnavailable'));
+                          const sessionId = await ensureSessionForPrompt();
+                          const response = await workspaceActions.controlGoal(
+                            sessionId,
+                            { action: 'create', objective },
+                          );
+                          if (
+                            connectionRef.current.sessionId === sessionId
+                          ) {
+                            goalSnapshotSessionIdRef.current = sessionId;
+                            setGoalSnapshot(response.snapshot);
+                          }
+                          setMainView('chat');
+                          return;
                         }
                         if (target.sessionId === connectionRef.current.sessionId) {
                           await controlCurrentGoal('replace', objective);

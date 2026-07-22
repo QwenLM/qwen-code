@@ -184,6 +184,59 @@ describe('SessionManager Goal protocol v2', () => {
     expect(listSessions(workspaceRoot)[0]?.goalState).toEqual(previous);
   });
 
+  it('persists transient Goal activity as idle while keeping the live state', async () => {
+    const workspaceRoot = mkdtempSync(join(tmpdir(), 'goal-transient-'));
+    tempRoots.push(workspaceRoot);
+    const localWorkspace: Workspace = {
+      ...workspace,
+      id: 'workspace-transient',
+      rootPath: workspaceRoot,
+    };
+    const sessionId = 'session-transient';
+    const sessionDirectory = join(workspaceRoot, 'sessions', sessionId);
+    mkdirSync(sessionDirectory, { recursive: true });
+    writeSessionJsonl(join(sessionDirectory, 'session.jsonl'), {
+      id: sessionId,
+      workspaceRootPath: workspaceRoot,
+      createdAt: 1,
+      lastUsedAt: 1,
+      goalState: snapshot,
+      messages: [],
+      tokenUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+        contextTokens: 0,
+        costUsd: 0,
+      },
+    } satisfies StoredSession);
+    const manager = new SessionManager();
+    const managed = createManagedSession(
+      { id: sessionId, goalState: snapshot },
+      localWorkspace,
+      { messagesLoaded: true },
+    );
+    addSession(manager, managed);
+    const projected: SessionEvent[] = [];
+    manager.setEventSink((_channel, _target, event: SessionEvent) => {
+      projected.push(event);
+    });
+    const running = { ...snapshot, activity: 'running' as const };
+    const internals = manager as unknown as {
+      processEvent(session: TestManagedSession, event: AgentEvent): Promise<void>;
+    };
+    await internals.processEvent(managed, {
+      type: 'goal_state',
+      snapshot: running,
+    });
+    await sessionPersistenceQueue.flushOrThrow(sessionId);
+    expect(managed.goalState).toEqual(running);
+    expect(
+      projected.find((event) => event.type === 'goal_state'),
+    ).toMatchObject({ snapshot: running });
+    expect(listSessions(workspaceRoot)[0]?.goalState).toEqual(snapshot);
+  });
+
   it('keeps an inspected existing Goal unchanged when strict persistence fails', async () => {
     const workspaceRoot = mkdtempSync(join(tmpdir(), 'goal-inspect-failure-'));
     tempRoots.push(workspaceRoot);

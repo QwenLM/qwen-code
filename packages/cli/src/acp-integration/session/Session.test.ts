@@ -1385,6 +1385,26 @@ describe('Session', () => {
       expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
     });
 
+    it('pauses instead of finishing an automatic Goal turn that throws', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === `goal-runtime:${permit.turnId}` ? permit : undefined,
+      );
+      vi.mocked(mockChat.sendMessageStream).mockRejectedValueOnce(
+        new Error('provider unavailable'),
+      );
+      const host = await activateGoalHost();
+      await host.startGoalTurn({ permit, continuationContext: 'continue' });
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+          action: 'pause',
+          expectedGoalId: permit.goalId,
+          expectedRevision: permit.revision,
+        });
+      });
+      expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+    });
+
     it('waits for a running Goal turn, then admits an ordinary prompt on its own exact permit', async () => {
       goalRuntimeSnapshot = activeSnapshot();
       const userPermit: GoalTurnPermit = {

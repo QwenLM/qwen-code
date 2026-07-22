@@ -197,15 +197,23 @@ export function parseGoalStateRecordPayloadV2(
 ): GoalStateRecordPayloadV2 | undefined {
   if (
     !isRecord(value) ||
-    !hasOnlyKeys(value, ['v', 'cause', 'snapshot']) ||
+    !hasOnlyKeys(value, ['v', 'cause', 'snapshot', 'blockedAudit']) ||
     value['v'] !== GOAL_STATE_VERSION ||
-    !isGoalStateCause(value['cause'])
+    !isGoalStateCause(value['cause']) ||
+    !isBlockedAudit(value['blockedAudit'])
   ) {
     return undefined;
   }
   const parsedSnapshot = parseGoalSnapshotV2(value['snapshot']);
   return parsedSnapshot
-    ? { v: GOAL_STATE_VERSION, cause: value['cause'], snapshot: parsedSnapshot }
+    ? {
+        v: GOAL_STATE_VERSION,
+        cause: value['cause'],
+        snapshot: parsedSnapshot,
+        ...(value['blockedAudit']
+          ? { blockedAudit: structuredClone(value['blockedAudit']) }
+          : {}),
+      }
     : undefined;
 }
 
@@ -410,6 +418,26 @@ function isGoalStateCause(value: unknown): value is GoalStateCause {
     value === 'usage_limited' ||
     value === 'clear' ||
     value === 'migrated'
+  );
+}
+
+function isBlockedAudit(
+  value: unknown,
+): value is GoalStateRecordPayloadV2['blockedAudit'] {
+  return (
+    value === undefined ||
+    (isRecord(value) &&
+      hasOnlyKeys(value, ['fingerprint', 'count', 'turnIds']) &&
+      typeof value['fingerprint'] === 'string' &&
+      value['fingerprint'].length > 0 &&
+      isNonNegativeInteger(value['count']) &&
+      value['count'] > 0 &&
+      value['count'] <= 3 &&
+      Array.isArray(value['turnIds']) &&
+      value['turnIds'].length === value['count'] &&
+      value['turnIds'].every(
+        (turnId) => typeof turnId === 'string' && turnId.length > 0,
+      ))
   );
 }
 

@@ -5801,6 +5801,27 @@ describe('App /goal command', () => {
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
   });
 
+  it('creates the first Goal from the workspace page without a session', async () => {
+    mockConnection.sessionId = undefined;
+    mockConnection.goalState = null;
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    await act(async () => {
+      await onCreateGoal('start from empty state');
+    });
+    expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith('session-1', {
+      action: 'create',
+      objective: 'start from empty state',
+    });
+    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
+  });
+
   it('creates a workspace Goal in the split pane session that opened it', async () => {
     mockConnection.sessionId = 'session-a';
     mockConnection.goalState = activeGoal();

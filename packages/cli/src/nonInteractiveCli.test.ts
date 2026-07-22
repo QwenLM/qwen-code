@@ -835,6 +835,45 @@ describe('runNonInteractive', () => {
     expect(finishTurn).toHaveBeenCalledOnce();
   });
 
+  it('settles a plain-text Goal turn before leaving the headless run', async () => {
+    setupMetricsMock();
+    mockGetCommands.mockReturnValue([goalCommand]);
+    await prepareGoalState('paused');
+    const finishTurn = vi
+      .spyOn(goalRuntime, 'finishTurn')
+      .mockResolvedValue(undefined);
+    const flush = vi.fn().mockResolvedValue(undefined);
+    Object.assign(mockConfig, {
+      getChatRecordingService: vi.fn(() => ({
+        flush,
+        finalize: vi.fn().mockResolvedValue(undefined),
+      })),
+    });
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        { type: GeminiEventType.Content, value: 'still working' },
+        {
+          type: GeminiEventType.Finished,
+          value: {
+            reason: undefined,
+            usageMetadata: { totalTokenCount: 0 },
+          },
+        },
+      ]),
+    );
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      '/goal resume',
+      'goal-plain-text',
+    );
+    expect(flush).toHaveBeenCalled();
+    expect(finishTurn).toHaveBeenCalledOnce();
+    expect(flush.mock.invocationCallOrder[0]).toBeLessThan(
+      finishTurn.mock.invocationCallOrder[0]!,
+    );
+  });
+
   it('does not charge runtime Goal continuations to the generic session turn cap', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);

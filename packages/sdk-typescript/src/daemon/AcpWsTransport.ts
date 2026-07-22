@@ -18,6 +18,7 @@ import {
 import {
   matchRoute,
   synthesizeResponse,
+  jsonRpcErrorToHttpBody,
   jsonRpcErrorToHttpStatusWithData,
   isRecord,
 } from './acpTransportUtils.js';
@@ -224,10 +225,10 @@ export class AcpWsTransport implements DaemonTransport {
               response.error.code,
               response.error.data,
             );
-      return synthesizeResponse(status, {
-        error: response.error.message,
-        ...(response.error.data != null ? { data: response.error.data } : {}),
-      });
+      return synthesizeResponse(
+        status,
+        jsonRpcErrorToHttpBody(response.error.message, response.error.data),
+      );
     }
 
     return synthesizeResponse(200, response.result);

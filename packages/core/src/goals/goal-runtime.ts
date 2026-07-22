@@ -159,9 +159,7 @@ export function createGoalRuntime(
         controller: AbortController;
       }
     | undefined;
-  let blockedAudit:
-    | { fingerprint: string; count: number; turnIds: string[] }
-    | undefined;
+  let blockedAudit: GoalStateRecordPayloadV2['blockedAudit'];
   let nextVerifierFeedback: string | undefined;
   let currentTurnFeedback: string | undefined;
   let restored = false;
@@ -398,11 +396,6 @@ export function createGoalRuntime(
           updatedAt: now,
           lastReason: outcome.result.reason,
         };
-        const acceptedSnapshot: GoalSnapshotV2 = {
-          v: GOAL_STATE_VERSION,
-          goal: acceptedGoal,
-          activity: 'idle',
-        };
         const terminalSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,
           goal: {
@@ -414,7 +407,7 @@ export function createGoalRuntime(
         await options.journal.recordGoalState(randomUUID(), {
           v: GOAL_STATE_VERSION,
           cause: 'verifier_accept',
-          snapshot: acceptedSnapshot,
+          snapshot: terminalSnapshot,
         });
         if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
         await options.journal.recordGoalState(randomUUID(), {
@@ -476,6 +469,9 @@ export function createGoalRuntime(
         v: GOAL_STATE_VERSION,
         cause: 'verifier_reject',
         snapshot: rejectedSnapshot,
+        ...(blockedAudit
+          ? { blockedAudit: structuredClone(blockedAudit) }
+          : {}),
       });
       if (!isCurrentVerificationAttempt(attempt) || !snapshot.goal) return;
       verificationAttempt = undefined;
@@ -559,6 +555,9 @@ export function createGoalRuntime(
               ...structuredClone(recovery.payload.snapshot),
               activity: 'idle',
             };
+            blockedAudit = recovery.payload.blockedAudit
+              ? structuredClone(recovery.payload.blockedAudit)
+              : undefined;
             recoveredCause = recovery.payload.cause;
           } else if (recovery.kind === 'legacy') {
             const recordUuid = randomUUID();
@@ -681,10 +680,14 @@ export function createGoalRuntime(
             goal: nextGoal,
             activity: 'idle',
           };
+          const persistedBlockedAudit = currentProposal?.blockedAuditCandidate;
           await options.journal.recordGoalState(recordUuid, {
             v: GOAL_STATE_VERSION,
             cause: 'turn_finished',
             snapshot: persistedSnapshot,
+            ...(persistedBlockedAudit
+              ? { blockedAudit: structuredClone(persistedBlockedAudit) }
+              : {}),
           });
           assertAvailable();
           const nextTurnKey = queuedTurnKey;
@@ -813,7 +816,7 @@ export function createGoalRuntime(
           fingerprint,
           count:
             blockedAudit?.fingerprint === fingerprint
-              ? blockedAudit.count + 1
+              ? Math.min(blockedAudit.count + 1, 3)
               : 1,
           turnIds:
             blockedAudit?.fingerprint === fingerprint

@@ -11860,6 +11860,48 @@ describe('useGeminiStream', () => {
   });
 
   describe('HookSystemMessage Event', () => {
+    it('commits buffered content before a displayed Goal state', async () => {
+      mockSendMessageStream.mockReturnValue(
+        (async function* () {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: 'Final Goal output',
+          };
+          yield {
+            type: ServerGeminiEventType.GoalState,
+            cause: 'complete' as const,
+            value: {
+              v: 2 as const,
+              activity: 'idle' as const,
+              goal: {
+                goalId: 'goal-order',
+                revision: 1,
+                objective: 'deliver output',
+                status: 'complete' as const,
+                evidenceCursor: { recordId: 'record-1' },
+                turnCount: 1,
+                activeTimeMs: 1,
+                createdAt: 1,
+                updatedAt: 2,
+              },
+            },
+          };
+        })(),
+      );
+      const { result } = renderTestHook();
+      await act(async () => {
+        await result.current.submitQuery('finish the Goal');
+      });
+      const contentIndex = mockAddItem.mock.calls.findIndex(
+        ([item]) => item.type === 'gemini' && item.text === 'Final Goal output',
+      );
+      const goalIndex = mockAddItem.mock.calls.findIndex(
+        ([item]) => item.type === 'goal_state' && item.cause === 'complete',
+      );
+      expect(contentIndex).toBeGreaterThanOrEqual(0);
+      expect(goalIndex).toBeGreaterThan(contentIndex);
+    });
+
     it('should handle HookSystemMessage event and add stop_hook_system_message history item', async () => {
       mockSendMessageStream.mockReturnValue(
         (async function* () {

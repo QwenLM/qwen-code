@@ -2139,7 +2139,20 @@ export async function runNonInteractive(
           hasUnsentToolResponse = true;
         } else {
           if (activeGoalTurn) {
-            activeGoalTurn = undefined;
+            const completedGoalTurn = activeGoalTurn;
+            await config.getChatRecordingService()?.flush();
+            const runtime = await config.getGoalRuntimeReady();
+            if (
+              sameGoalPermit(
+                runtime.permitForTurn(completedGoalTurn.turnKey),
+                completedGoalTurn.permit,
+              )
+            ) {
+              await runtime.finishTurn(completedGoalTurn.permit);
+            }
+            if (activeGoalTurn === completedGoalTurn) {
+              activeGoalTurn = undefined;
+            }
             const nextGoalTurn = queuedGoalTurns.shift();
             if (nextGoalTurn) {
               activeGoalTurn = nextGoalTurn;

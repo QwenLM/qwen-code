@@ -2057,6 +2057,7 @@ export class Session implements SessionContext {
       },
     ];
 
+    let completed = false;
     try {
       await Storage.runWithRuntimeBaseDir(
         this.runtimeBaseDir,
@@ -2203,7 +2204,23 @@ export class Session implements SessionContext {
           );
         },
       );
+      completed = !controller.signal.aborted;
     } finally {
+      if (
+        !completed &&
+        sameGoalPermit(runtime.permitForTurn(turnKey), permit) &&
+        runtime.getSnapshot().goal?.status === 'active'
+      ) {
+        try {
+          await runtime.dispatch({
+            action: 'pause',
+            expectedGoalId: permit.goalId,
+            expectedRevision: permit.revision,
+          });
+        } catch (error) {
+          debugLogger.warn('Failed to pause automatic ACP Goal turn', error);
+        }
+      }
       const recorder = this.config.getChatRecordingService();
       let flushed = true;
       try {
@@ -2213,13 +2230,19 @@ export class Session implements SessionContext {
         debugLogger.warn('Failed to flush automatic ACP Goal turn', error);
         await this.#releaseExactGoalTurn(runtime, { permit, turnKey });
       }
-      if (flushed && sameGoalPermit(runtime.permitForTurn(turnKey), permit)) {
+      if (
+        completed &&
+        flushed &&
+        sameGoalPermit(runtime.permitForTurn(turnKey), permit)
+      ) {
         try {
           await runtime.finishTurn(permit);
         } catch (error) {
           debugLogger.warn('Failed to finish automatic ACP Goal turn', error);
           await this.#releaseExactGoalTurn(runtime, { permit, turnKey });
         }
+      } else if (!completed) {
+        await this.#releaseExactGoalTurn(runtime, { permit, turnKey });
       }
     }
   }

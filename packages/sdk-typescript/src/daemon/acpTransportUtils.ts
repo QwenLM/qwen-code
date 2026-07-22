@@ -44,6 +44,30 @@ export function synthesizeResponse(status: number, body: unknown): Response {
   return new Response(bodyStr || null, { status, headers });
 }
 
+export function jsonRpcErrorToHttpBody(
+  message: string,
+  data: unknown,
+): Record<string, unknown> {
+  if (isRecord(data)) {
+    const kind = data['errorKind'];
+    if (
+      kind === 'goal_conflict' ||
+      kind === 'goal_invalid_transition' ||
+      kind === 'goal_persist_failed'
+    ) {
+      return {
+        error: message,
+        code: kind,
+        ...(data['current'] !== undefined ? { current: data['current'] } : {}),
+      };
+    }
+  }
+  return {
+    error: message,
+    ...(data != null ? { data } : {}),
+  };
+}
+
 /**
  * Map a JSON-RPC error code to an HTTP status code.
  */

@@ -3481,6 +3481,9 @@ export class SessionManager implements ISessionManager {
 
     const storedSessionBase: StoredSession = {
       ...pickSessionFields(managed),
+      goalState: managed.goalState
+        ? { ...managed.goalState, activity: 'idle' }
+        : undefined,
       workspaceRootPath: managed.workspace.rootPath,
       createdAt: managed.createdAt ?? Date.now(),
       lastUsedAt: usesQwenCanonicalMessages
