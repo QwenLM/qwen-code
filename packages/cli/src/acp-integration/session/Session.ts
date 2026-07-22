@@ -6335,6 +6335,7 @@ export class Session implements SessionContext {
 
     const toolSpan = startToolSpan(policyToolName, {
       'tool.call_id': callId,
+      'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
       // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
       // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
       // matching daemon/ACP tool spans during the migration window.

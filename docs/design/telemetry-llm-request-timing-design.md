@@ -1,5 +1,13 @@
 # LLM Request Timing Decomposition Design (P3 Phase 4)
 
+> **GenAI attribute migration:**
+> [`gen-ai-arms-field-alignment.md`](./gen-ai-arms-field-alignment.md) supersedes
+> this document's `gen_ai.usage.cached_tokens`,
+> `gen_ai.server.time_to_first_token`, and
+> `gen_ai.usage.reasoning_tokens` aliases, and replaces the LLM Span's
+> `qwen-code.model` alias with `gen_ai.request.model`. The private timing,
+> cache, and reasoning attributes described here remain valid.
+
 > Issue #3731 — Phase 4 of hierarchical session tracing. Adds time-to-first-token, request-setup duration, sampling duration, and per-attempt retry telemetry to the `qwen-code.llm_request` span so operators can answer "why was this LLM call slow?" without guessing.
 >
 > Builds on Phase 1 (#4126), Phase 1.5 (#4302), Phase 2 (#4321). Independent of Phase 3 (#4410, in review) — recommended to land Phase 3 first so Phase 4's per-attempt fields aggregate cleanly under subagent subtrees.

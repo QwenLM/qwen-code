@@ -822,10 +822,12 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
   - **Attributes**: `session.id`, `qwen-code.prompt_id`, `qwen-code.message_type`, `qwen-code.model`, `qwen-code.approval_mode`, `interaction.sequence`, `interaction.duration_ms`, `qwen-code.turn_status` ("ok"/"error"/"cancelled")
 
 - `qwen-code.llm_request`: Wraps a single LLM API call.
-  - **Attributes**: `session.id`, `qwen-code.model`, `qwen-code.prompt_id`, `llm_request.context` ("subagent"/"interaction"/"standalone"), `gen_ai.request.model`, `duration_ms`, `input_tokens`, `output_tokens`, `cached_input_tokens`, `ttft_ms`, `request_setup_ms`, `attempt`, `retry_total_delay_ms`, `sampling_ms`, `output_tokens_per_second`, `success`, `error`, `response_id`, `finish_reason`, `thoughts_token_count`, `subagent_name`, `error_type`, `error_status_code`
+  - **GenAI attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.conversation.id`, `gen_ai.request.model`, optional `gen_ai.output.type`, `gen_ai.response.id`, `gen_ai.response.model`, `gen_ai.response.finish_reasons`, `gen_ai.usage.input_tokens`, `gen_ai.usage.output_tokens`, `gen_ai.usage.cache_read.input_tokens`, `gen_ai.usage.cache_creation.input_tokens`
+  - **Compatibility attributes**: `session.id`, `qwen-code.prompt_id`, `llm_request.context` ("subagent"/"interaction"/"standalone"), `duration_ms`, `input_tokens`, `output_tokens`, `cached_input_tokens`, `ttft_ms`, `request_setup_ms`, `attempt`, `retry_total_delay_ms`, `sampling_ms`, `output_tokens_per_second`, `success`, `error`, `finish_reason`, `thoughts_token_count`, `subagent_name`, `error_type`, `error_status_code`
+  - Standard response fields come from the provider response. Standard token fields are emitted only for non-negative safe integers, and estimated input/output splits are kept in compatibility attributes only.
 
 - `qwen-code.tool`: Wraps the full tool lifecycle (approval wait + execution).
-  - **Attributes**: `session.id`, `tool.name`, `duration_ms`, `success`, `error`
+  - **Attributes**: `session.id`, `gen_ai.operation.name` (`execute_tool`), `gen_ai.tool.name`, `gen_ai.tool.type` (`function`), `gen_ai.tool.call.id`, `tool.call_id`, `duration_ms`, `success`, `error`
 
 - `qwen-code.tool.execution`: Wraps the tool execution phase (after approval).
   - **Attributes**: `session.id`, `duration_ms`, `success`, `error`
@@ -837,7 +839,25 @@ Distributed tracing spans form a tree rooted at `qwen-code.interaction`. Each in
   - **Attributes**: `session.id`, `hook_event` ("PreToolUse"/"PostToolUse"/"PostToolUseFailure"/"PostToolBatch"), `tool.name`, `tool.use_id` (optional), `is_interrupt` (boolean, optional), `duration_ms`, `success`, `should_proceed` (optional), `should_stop` (optional), `block_type` (optional), `error` (optional)
 
 - `qwen-code.subagent`: Wraps a single subagent invocation.
-  - **Attributes**: `gen_ai.operation.name`, `gen_ai.provider.name`, `gen_ai.agent.id`, `gen_ai.agent.name`, `gen_ai.conversation.id`, `qwen-code.subagent.id`, `qwen-code.subagent.name`, `qwen-code.subagent.invocation_kind` ("foreground"/"fork"/"background"), `qwen-code.subagent.is_built_in`, `qwen-code.subagent.depth`, `qwen-code.subagent.status`, `qwen-code.subagent.terminate_reason`, `qwen-code.subagent.duration_ms`
+  - **Attributes**: `gen_ai.operation.name` (`invoke_agent`), `gen_ai.agent.name`, `gen_ai.agent.description`, `gen_ai.conversation.id`, optional `gen_ai.request.model`, `qwen-code.subagent.id`, `qwen-code.subagent.name`, `qwen-code.subagent.invocation_kind` ("foreground"/"fork"/"background"), `qwen-code.subagent.is_built_in`, `qwen-code.subagent.depth`, `qwen-code.subagent.status`, `qwen-code.subagent.terminate_reason`, `qwen-code.subagent.duration_ms`
+
+#### GenAI field migration and ARMS recognition
+
+LLM spans now use `gen_ai.request.model` and `gen_ai.response.id` without the exact-equivalent private `qwen-code.model` and `response_id` aliases. Tool spans similarly use `gen_ai.tool.name` without `tool.name`; blocked-on-user and hook spans keep `tool.name` because they are not GenAI Tool spans. The invalid aliases `gen_ai.usage.cached_tokens`, `gen_ai.server.time_to_first_token`, and `gen_ai.usage.reasoning_tokens` are no longer emitted. Use `gen_ai.usage.cache_read.input_tokens` for provider-reported cache reads; continue using the private `ttft_ms` and `thoughts_token_count` fields where no GenAI/ARMS-common replacement exists. The full version-pinned contract and deferred fields are documented in [GenAI and ARMS field alignment](../../design/gen-ai-arms-field-alignment.md).
+
+To make ARMS recognize exported spans as a GenAI application, configure its resource feature explicitly:
+
+```json
+{
+  "telemetry": {
+    "resourceAttributes": {
+      "acs.arms.service.feature": "genai_app"
+    }
+  }
+}
+```
+
+Qwen Code does not inject this ARMS-specific resource attribute or `gen_ai.span.kind`. ARMS can infer LLM, Tool, and Agent roles from `gen_ai.operation.name`.
 
 - `qwen-code.daemon.request`: Wraps a daemon HTTP request.
   - **Attributes**: `http.request.method`, `http.route`, `qwen-code.daemon.operation`, `session.id`, `http.response.status_code`

@@ -1071,9 +1071,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
     stream: AsyncIterable<RawMessageStreamEvent>,
   ): AsyncGenerator<GenerateContentResponse> {
     let messageId: string | undefined;
-    let model = this.contentGeneratorConfig.model;
+    let model: string | undefined;
     let cachedTokens = 0;
     let cacheCreationTokens = 0;
+    let cachedTokensReported = false;
+    let cacheCreationTokensReported = false;
     let promptTokens = 0;
     let completionTokens = 0;
     let finishReason: string | undefined;
@@ -1086,6 +1088,11 @@ export class AnthropicContentGenerator implements ContentGenerator {
         case 'message_start': {
           messageId = event.message.id ?? messageId;
           model = event.message.model ?? model;
+          cachedTokensReported ||=
+            typeof event.message.usage?.cache_read_input_tokens === 'number';
+          cacheCreationTokensReported ||=
+            typeof event.message.usage?.cache_creation_input_tokens ===
+            'number';
           cachedTokens =
             event.message.usage?.cache_read_input_tokens ?? cachedTokens;
           cacheCreationTokens =
@@ -1229,12 +1236,14 @@ export class AnthropicContentGenerator implements ContentGenerator {
             const cacheRead = usageRecord['cache_read_input_tokens'];
             if (typeof cacheRead === 'number') {
               cachedTokens = cacheRead;
+              cachedTokensReported = true;
             }
           }
           if (usageRecord?.['cache_creation_input_tokens'] !== undefined) {
             const cacheCreate = usageRecord['cache_creation_input_tokens'];
             if (typeof cacheCreate === 'number') {
               cacheCreationTokens = cacheCreate;
+              cacheCreationTokensReported = true;
             }
           }
 
@@ -1249,6 +1258,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
                 outputTokens: completionTokens,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1268,6 +1279,8 @@ export class AnthropicContentGenerator implements ContentGenerator {
                 cacheReadTokens: cachedTokens,
                 cacheCreationTokens,
                 outputTokens: completionTokens,
+                cacheReadTokensReported: cachedTokensReported,
+                cacheCreationTokensReported,
               }),
             );
             collectedResponses.push(chunk);
@@ -1349,7 +1362,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
     const response = new GenerateContentResponse();
     response.responseId = responseId;
     response.createTime = Date.now().toString();
-    response.modelVersion = model || this.contentGeneratorConfig.model;
+    response.modelVersion = model || undefined;
     response.promptFeedback = { safetyRatings: [] };
 
     const candidateParts = part ? [part as unknown as Part] : [];

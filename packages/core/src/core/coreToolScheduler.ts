@@ -2310,8 +2310,8 @@ export class CoreToolScheduler {
         // Phase 2). Every cancel/error path below — and the existing
         // success path in executeSingleToolCall — must call
         // finalizeToolSpan(callId, ...) to avoid leaking spans.
-        // `tool.name` is set automatically by startToolSpan from the first
-        // arg; only namespaced extras go in attrs. `call_id` (non-namespaced)
+        // `gen_ai.tool.name` is set automatically by startToolSpan from the
+        // first arg; only call-id aliases go in attrs. `call_id` (non-namespaced)
         // is dual-emitted for one release as a backwards-compat shim for
         // pre-Phase-2 dashboards/alerts that grep the old key — drop after
         // operators migrate (#4321 review). `tool_name` is dual-emitted on
@@ -2320,6 +2320,7 @@ export class CoreToolScheduler {
         // matching during the rollout.
         const toolSpan = startToolSpan(canonicalName, {
           'tool.call_id': reqInfo.callId,
+          'gen_ai.tool.call.id': reqInfo.providerCallId ?? reqInfo.callId,
           call_id: reqInfo.callId,
           tool_name: canonicalName,
         });
@@ -3694,6 +3695,7 @@ export class CoreToolScheduler {
       const canonical = canonicalToolName(toolName);
       toolSpan = startToolSpan(canonical, {
         'tool.call_id': callId,
+        'gen_ai.tool.call.id': scheduledCall.request.providerCallId ?? callId,
         call_id: callId, // legacy alias — see _schedule for context
         tool_name: canonical, // legacy alias — see _schedule for context
       });

@@ -8705,6 +8705,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       throwSpanSetStatus?: boolean;
       includeSensitiveSpanAttributes?: boolean;
       sensitiveSpanAttributeMaxLength?: number;
+      providerCallId?: string;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -8720,6 +8721,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       [
         {
           callId: 'span-call',
+          providerCallId: options.providerCallId,
           name: 'mockTool',
           args: { input: '/secret/path' },
           isClientInitiated: false,
@@ -8750,6 +8752,21 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(JSON.stringify(spanRecord.statusCalls)).not.toContain('sensitive');
     expect(spanRecord.ended).toBe(true);
   }
+
+  it('uses the provider tool-call id for the GenAI field only', async () => {
+    const { spanRecord } = await runSingleTool({
+      providerCallId: 'provider-call',
+    });
+
+    expect(spanRecord.attributes).toMatchObject({
+      'tool.call_id': 'span-call',
+      call_id: 'span-call',
+      'gen_ai.tool.call.id': 'provider-call',
+    });
+
+    const { spanRecord: fallbackSpan } = await runSingleTool();
+    expect(fallbackSpan.attributes['gen_ai.tool.call.id']).toBe('span-call');
+  });
 
   it('acquires the sleep inhibitor around actual tool execution', async () => {
     mockAcquireSleepInhibitor.mockClear();

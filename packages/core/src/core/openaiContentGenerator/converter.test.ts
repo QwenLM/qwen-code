@@ -23,6 +23,7 @@ import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -150,6 +151,15 @@ describe('OpenAIContentConverter', () => {
       expect(ctx1).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx2).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx1).not.toBe(ctx2);
+    });
+
+    it('preserves the provider model from stream chunks', () => {
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('model', { content: 'ok' }),
+        withStreamParser(),
+      );
+
+      expect(response.modelVersion).toBe('test');
     });
 
     it('isolates two contexts so writes to one do not leak into the other', () => {
@@ -3617,6 +3627,7 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(response.candidates).toEqual([]);
+      expect(response.modelVersion).toBe('test-model');
     });
 
     it('keeps the estimated prompt/completion split summing to total tokens', () => {
@@ -3647,6 +3658,48 @@ describe('OpenAIContentConverter', () => {
       expect(
         (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
       ).toBe(5);
+      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+        tokenCountsEstimated: true,
+        cachedInputTokensReported: false,
+      });
+    });
+
+    it('distinguishes an absent cache field from an explicitly reported zero', () => {
+      const base = {
+        object: 'chat.completion',
+        id: 'chatcmpl-cache',
+        created: 123,
+        model: 'provider-model',
+        choices: [],
+      } as const;
+      const absent = converter.convertOpenAIResponseToGemini(
+        {
+          ...base,
+          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+      const zero = converter.convertOpenAIResponseToGemini(
+        {
+          ...base,
+          usage: {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            total_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 0 },
+          },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(absent.modelVersion).toBe('provider-model');
+      expect(
+        getGenAiUsageProvenance(absent.usageMetadata)
+          ?.cachedInputTokensReported,
+      ).toBe(false);
+      expect(
+        getGenAiUsageProvenance(zero.usageMetadata)?.cachedInputTokensReported,
+      ).toBe(true);
     });
 
     it('estimates missing reasoning tokens from non-streaming content', () => {

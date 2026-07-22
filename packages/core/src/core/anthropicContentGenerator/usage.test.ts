@@ -6,6 +6,7 @@
 
 import { describe, expect, it } from 'vitest';
 import { buildAnthropicUsageMetadata } from './usage.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('buildAnthropicUsageMetadata', () => {
   it('sums all three prompt fields under standard Anthropic semantics', () => {
@@ -52,6 +53,24 @@ describe('buildAnthropicUsageMetadata', () => {
       promptTokenCount: 30_000,
       candidatesTokenCount: 800,
       totalTokenCount: 30_800,
+      cachedContentTokenCount: 25_000,
+    });
+  });
+
+  it('includes cache reads when Anthropic explicitly reports zero cache creation', () => {
+    expect(
+      buildAnthropicUsageMetadata({
+        inputTokens: 30_000,
+        cacheReadTokens: 25_000,
+        cacheCreationTokens: 0,
+        outputTokens: 800,
+        cacheReadTokensReported: true,
+        cacheCreationTokensReported: true,
+      }),
+    ).toEqual({
+      promptTokenCount: 55_000,
+      candidatesTokenCount: 800,
+      totalTokenCount: 55_800,
       cachedContentTokenCount: 25_000,
     });
   });
@@ -126,6 +145,28 @@ describe('buildAnthropicUsageMetadata', () => {
       candidatesTokenCount: 0,
       totalTokenCount: 0,
       cachedContentTokenCount: 0,
+    });
+  });
+
+  it('records cache provenance without changing the public usage shape', () => {
+    const usage = buildAnthropicUsageMetadata({
+      inputTokens: 10,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 5,
+      outputTokens: 2,
+      cacheReadTokensReported: true,
+      cacheCreationTokensReported: true,
+    });
+
+    expect(usage).toEqual({
+      promptTokenCount: 15,
+      candidatesTokenCount: 2,
+      totalTokenCount: 17,
+      cachedContentTokenCount: 0,
+    });
+    expect(getGenAiUsageProvenance(usage)).toEqual({
+      cachedInputTokensReported: true,
+      cacheCreationInputTokens: 5,
     });
   });
 });

@@ -3461,6 +3461,9 @@ describe('AnthropicContentGenerator', () => {
 
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3589,12 +3592,19 @@ describe('AnthropicContentGenerator', () => {
 
       // Usage/finish chunks exist; check the last one.
       const last = chunks[chunks.length - 1]!;
+      expect(
+        chunks.every((chunk) => chunk.modelVersion === 'claude-test'),
+      ).toBe(true);
       expect(last.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(last.usageMetadata).toEqual({
         cachedContentTokenCount: 7,
         promptTokenCount: 9, // input(2) + cached(7) — Anthropic-true (input < cache_read)
         candidatesTokenCount: 5,
         totalTokenCount: 14,
+      });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: undefined,
       });
     });
 
@@ -3608,6 +3618,9 @@ describe('AnthropicContentGenerator', () => {
       // dropped from the displayed total and the Footer under-reports by
       // exactly that many tokens.
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3673,6 +3686,55 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the requested model when a stream omits it', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: { id: 'msg-1', usage: { input_tokens: 1 } },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'ok' },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'requested-model',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      expect(chunks).not.toHaveLength(0);
+      expect(chunks.every((chunk) => chunk.modelVersion === undefined)).toBe(
+        true,
+      );
     });
 
     it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
