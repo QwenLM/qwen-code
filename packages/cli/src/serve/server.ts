@@ -139,6 +139,7 @@ import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.j
 import { registerA2uiActionRoutes } from './routes/a2ui-action.js';
 import { setRateLimiter } from './rate-limit.js';
 import { resolveAcpHttpEnabled } from './acp-http-enabled.js';
+import { VirtualSubagentSessions } from './virtual-subagent-sessions.js';
 import {
   createTotalSessionAdmissionController,
   type TotalSessionAdmissionSnapshot,
@@ -232,10 +233,8 @@ export {
   resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
-export {
-  PromptDeadlineExceededError,
-  resolvePromptDeadlineMs,
-} from './server/prompt-deadline.js';
+export { PromptDeadlineExceededError } from './acp-session-bridge.js';
+export { resolvePromptDeadlineMs } from './server/prompt-deadline.js';
 export { detectFromLoopback } from './server/request-helpers.js';
 export {
   InvalidCursorError,
@@ -1451,6 +1450,8 @@ export function createServeApp(
     installAuthProvider: deps.installAuthProvider,
   });
 
+  const virtualSubagentSessions = new VirtualSubagentSessions();
+
   registerSessionRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
@@ -1462,6 +1463,7 @@ export function createServeApp(
     promptDeadlineMs: opts.promptDeadlineMs,
     sessionShellCommandEnabled,
     languageCodes,
+    virtualSubagentSessions,
   });
 
   registerWorkspaceMcpControlRoutes(app, {
@@ -1725,6 +1727,7 @@ export function createServeApp(
     daemonLog,
     writerIdleTimeoutMs: opts.writerIdleTimeoutMs,
     sendBridgeError,
+    virtualSubagentSessions,
   });
 
   // Official ACP Streamable HTTP transport (RFD #721) mounted at `/acp`

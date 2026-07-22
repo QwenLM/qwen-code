@@ -9,7 +9,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import type { CSSProperties, ReactNode, RefObject } from 'react';
+import type { ReactNode, RefObject } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DAEMON_APPROVAL_MODES } from '@qwen-code/webui/daemon-react-sdk';
 import type { CommandInfo } from '../adapters/types';
@@ -838,6 +838,7 @@ function SlashCommandPanel({
   const [hoverDetail, setHoverDetail] = useState<{
     label: string;
     detail: string;
+    side: 'top' | 'right' | 'bottom' | 'left';
   } | null>(null);
 
   useEffect(() => {
@@ -885,25 +886,6 @@ function SlashCommandPanel({
   }, []);
 
   const rowPlans = planSlashSectionRows(menu.items, menu.kind);
-  const maxLabelLength = Math.max(
-    ...menu.items.map((item) => Array.from(item.label).length),
-    0,
-  );
-  const maxDetailLength = Math.max(
-    ...menu.items.map((item) => Array.from(item.detail ?? '').length),
-    0,
-  );
-  const hasDetailColumn = maxDetailLength > 0;
-  const panelStyle = {
-    '--slash-command-col': `${Math.min(
-      Math.max(maxLabelLength + 1, 10),
-      24,
-    )}ch`,
-    '--slash-desc-col': hasDetailColumn
-      ? `${Math.min(Math.max(maxDetailLength + 1, 18), 36)}ch`
-      : '0px',
-    '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
-  } as CSSProperties;
 
   return (
     <>
@@ -924,11 +906,12 @@ function SlashCommandPanel({
           align="start"
           alignOffset={16}
           sideOffset={8}
+          avoidCollisions={false}
           collisionPadding={12}
           collisionBoundary={collisionBoundary ?? undefined}
+          className="duration-0 data-open:animate-none data-closed:animate-none"
           role="listbox"
           data-web-shell-slash-menu
-          style={panelStyle}
           onOpenAutoFocus={(event) => event.preventDefault()}
           onCloseAutoFocus={(event) => event.preventDefault()}
           onInteractOutside={(event) => {
@@ -1001,9 +984,29 @@ function SlashCommandPanel({
                             return;
                           }
                           hoverAnchorRef.current = event.currentTarget;
+                          const rowRect =
+                            event.currentTarget.getBoundingClientRect();
+                          const boundaryRect =
+                            collisionBoundary?.getBoundingClientRect();
+                          const left = boundaryRect?.left ?? 0;
+                          const right =
+                            boundaryRect?.right ?? window.innerWidth;
+                          const top = boundaryRect?.top ?? 0;
+                          const bottom =
+                            boundaryRect?.bottom ?? window.innerHeight;
+                          const detailWidth = Math.min(320, right - left - 24);
+                          const side =
+                            right - rowRect.right >= detailWidth + 8
+                              ? 'right'
+                              : rowRect.left - left >= detailWidth + 8
+                                ? 'left'
+                                : rowRect.top - top >= bottom - rowRect.bottom
+                                  ? 'top'
+                                  : 'bottom';
                           setHoverDetail({
                             label: item.label,
                             detail: item.detail,
+                            side,
                           });
                         }}
                         onMouseDown={(event) => {
@@ -1043,11 +1046,12 @@ function SlashCommandPanel({
         {hoverDetail && (
           <PopoverContent
             ref={detailRef}
-            side="right"
+            side={hoverDetail.side}
             align="start"
             sideOffset={8}
             collisionPadding={12}
             collisionBoundary={collisionBoundary ?? undefined}
+            className="duration-0 data-open:animate-none data-closed:animate-none"
             data-web-shell-slash-detail
             onOpenAutoFocus={(event) => event.preventDefault()}
             onCloseAutoFocus={(event) => event.preventDefault()}

@@ -1315,6 +1315,47 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('resolveSubagentSession', () => {
+    it('resolves an encoded parent tool call to a detail session', async () => {
+      const body = {
+        sessionId: 'subagent.virtual',
+        taskId: 'general-purpose-agent-1',
+        title: 'agent: research',
+        status: 'completed',
+        durationMs: 1_250,
+        totalTokens: 42,
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.resolveSubagentSession('with/slash', 'agent/1', 'client-1'),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/session/with%2Fslash/subagents/agent%2F1',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('cancels a subagent through its parent tool call', async () => {
+      const body = { cancelled: true };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.cancelSubagentSession('with/slash', 'agent/1', 'client-1'),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        method: 'POST',
+        url: 'http://daemon/session/with%2Fslash/subagents/agent%2F1/cancel',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+  });
+
   describe('session rewind transport', () => {
     it('reuses the negotiated native fetch for REST-only rewind calls', async () => {
       const negotiatedFetch = vi.fn(async (input: string | URL | Request) => {

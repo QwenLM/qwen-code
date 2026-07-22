@@ -2940,6 +2940,316 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('refreshes an attached load from a bounded persisted page', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'latest prompt' },
+                _meta: { 'qwen.session.recordId': 'record-latest' },
+              },
+            },
+          ],
+          hasMore: true,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(handle.agent.loadSessionCalls).toHaveLength(1);
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_STATUS_EXT_METHODS.sessionTranscript,
+      params: {
+        cwd: WS_A,
+        sessionId: loaded.sessionId,
+        direction: 'backward',
+        limit: 100,
+      },
+    });
+    expect(refreshed).toMatchObject({
+      attached: true,
+      historyHasMore: true,
+      lastEventId: loaded.lastEventId,
+      compactedReplay: [
+        {
+          type: 'session_update',
+          data: {
+            content: { type: 'text', text: 'latest prompt' },
+          },
+        },
+      ],
+      liveJournal: [],
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('propagates partial and replayError from a bounded refresh', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'bounded page' },
+                _meta: { 'qwen.session.recordId': 'record-bounded' },
+              },
+            },
+          ],
+          hasMore: true,
+          partial: true,
+          replayError: 'transcript read failed',
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-metadata',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(refreshed).toMatchObject({
+      attached: true,
+      partial: true,
+      replayError: 'transcript read failed',
+      historyHasMore: true,
+    });
+
+    await bridge.shutdown();
+  });
+
+  it('falls back to the live replay when a bounded refresh stays unstable', async () => {
+    let update = 0;
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: async (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        update++;
+        await handle.agentConnection.sessionUpdate({
+          sessionId: params['sessionId'] as string,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: `live update ${update}` },
+          },
+        });
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [
+            {
+              v: 1,
+              type: 'session_update',
+              data: {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'bounded page' },
+              },
+            },
+          ],
+          hasMore: true,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-race',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(handle.agent.extMethodCalls).toHaveLength(2);
+    expect(refreshed).not.toHaveProperty('historyHasMore');
+    expect(JSON.stringify(refreshed.compactedReplay)).not.toContain(
+      'bounded page',
+    );
+    expect(JSON.stringify(refreshed)).toContain('live update 2');
+
+    await bridge.shutdown();
+  });
+
+  it('falls back to the live replay when a bounded refresh read fails', async () => {
+    const handle = makeChannel({
+      loadSessionImpl: () => ({
+        _meta: {
+          'qwen.session.loadReplay': {
+            v: 1,
+            updates: [
+              {
+                sessionUpdate: 'user_message_chunk',
+                content: { type: 'text', text: 'initial prompt' },
+              },
+            ],
+          },
+        },
+      }),
+      extMethodImpl: (method, _params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          throw new Error(`unexpected extMethod ${method}`);
+        }
+        throw new Error('transcript page read failed');
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-read-error',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    const refreshed = await bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+
+    expect(refreshed.attached).toBe(true);
+    expect(JSON.stringify(refreshed.compactedReplay)).toContain(
+      'initial prompt',
+    );
+
+    await bridge.shutdown();
+  });
+
+  it('rejects a bounded refresh when the session starts closing', async () => {
+    const transcriptPage = deferred<Record<string, unknown>>();
+    const closeResult = deferred<Record<string, unknown>>();
+    const handle = makeChannel({
+      extMethodImpl: (method, _params) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+          return transcriptPage.promise;
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionClose) {
+          return closeResult.promise;
+        }
+        throw new Error(`unexpected extMethod ${method}`);
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-live-refresh-closing',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    const refresh = bridge.loadSession({
+      sessionId: loaded.sessionId,
+      workspaceCwd: WS_A,
+      clientId: loaded.clientId,
+      historyReplay: 'response',
+      historyPageSize: 100,
+    });
+    await vi.waitFor(() => expect(handle.agent.extMethodCalls).toHaveLength(1));
+
+    const close = bridge.closeSession(loaded.sessionId, {
+      clientId: loaded.clientId,
+    });
+    await vi.waitFor(() => expect(handle.agent.extMethodCalls).toHaveLength(2));
+    transcriptPage.resolve({
+      v: 1,
+      sessionId: loaded.sessionId,
+      events: [],
+      hasMore: false,
+    });
+
+    await expect(refresh).rejects.toBeInstanceOf(SessionNotFoundError);
+    closeResult.resolve({});
+    await close;
+    await bridge.shutdown();
+  });
+
   it('restores artifacts from response-mode load replay when no snapshot is available', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {
@@ -6900,6 +7210,13 @@ describe('createAcpSessionBridge', () => {
       await new Promise((r) => setTimeout(r, 60));
       expect(terminalsFor(events, 'prompt-queued-deadline')).toHaveLength(1);
 
+      // A queued prompt never ran, so its deadline terminal must not
+      // advertise a session-level turnError nor arm the retry path — those
+      // belong to the ACTIVE turn only.
+      expect(
+        bridge.getSessionSummary(session.sessionId).turnError,
+      ).toBeUndefined();
+
       await bridge.shutdown();
       // Shutdown flushed the still-wedged head prompt exactly once, and the
       // queued prompt's residual FIFO abort stayed latched.
@@ -6910,6 +7227,11 @@ describe('createAcpSessionBridge', () => {
       expect((headTerms[0]?.data as { code?: string }).code).toBe(
         'daemon_shutdown',
       );
+      // The caller sees the same typed rejection as a running-prompt expiry
+      // — the pre-dispatch abort check (reached once shutdown released the
+      // wedged head) propagates the deadline reason instead of a generic
+      // AbortError.
+      await expect(p2).rejects.toBeInstanceOf(PromptDeadlineExceededError);
     });
 
     it('keeps a detached session draining until the last pending prompt settles (DAEMON-005)', async () => {
@@ -7010,6 +7332,145 @@ describe('createAcpSessionBridge', () => {
         // on promptId observe the turn ending before the session vanishes.
         expect(events.indexOf(terms[0]!)).toBeLessThan(closedIdx);
       }
+      await bridge.shutdown();
+    });
+
+    it('still publishes a terminal for a removed RUNNING prompt when the session closes before the agent cooperates', async () => {
+      const handle = wedgeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'wedge' }],
+        },
+        undefined,
+        { promptId: 'prompt-removed-running' },
+      );
+      p1.catch(() => {});
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Remove the RUNNING prompt — the wedged agent ignores the cancel,
+      // so no terminal has been published yet.
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
+      ).toEqual({ removed: true });
+      // The API no longer shows the prompt…
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(0);
+      // …and a repeat removal is a no-op.
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-removed-running'),
+      ).toEqual({ removed: false });
+      expect(terminalsFor(events, 'prompt-removed-running')).toHaveLength(0);
+
+      // Session closes before the agent ever settles: the teardown flush
+      // must still see the removed-but-unsettled prompt and publish its
+      // terminal before the bus closes.
+      await bridge.closeSession(session.sessionId);
+
+      const closedIdx = events.findIndex((e) => e.type === 'session_closed');
+      expect(closedIdx).toBeGreaterThan(-1);
+      const terms = terminalsFor(events, 'prompt-removed-running');
+      expect(terms).toHaveLength(1);
+      expect(terms[0]?.type).toBe('turn_error');
+      expect((terms[0]?.data as { code?: string }).code).toBe('session_closed');
+      expect(events.indexOf(terms[0]!)).toBeLessThan(closedIdx);
+      await bridge.shutdown();
+    });
+
+    it('does not publish a duplicate completed event when a promoted-then-removed running prompt settles', async () => {
+      let releaseFirst: (() => void) | undefined;
+      const firstDone = new Promise<void>((r) => {
+        releaseFirst = r;
+      });
+      let releaseSecond: (() => void) | undefined;
+      const secondDone = new Promise<void>((r) => {
+        releaseSecond = r;
+      });
+      const handle = makeChannel({
+        promptImpl: async (req: PromptRequest) => {
+          const text = (req.prompt[0] as { text?: string }).text;
+          if (text === 'blocker') await firstDone;
+          if (text === 'queued then running') await secondDone;
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const events: BridgeEvent[] = [];
+      subscribe(bridge, session.sessionId, events);
+
+      // Prompt 1 starts running immediately; prompt 2 queues behind it.
+      const p1 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'blocker' }],
+        },
+        undefined,
+        { promptId: 'prompt-blocker' },
+      );
+      const p2 = bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'queued then running' }],
+        },
+        undefined,
+        { promptId: 'prompt-promoted' },
+      );
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Prompt 2 is queued behind prompt 1.
+      expect(
+        bridge
+          .getPendingPrompts(session.sessionId)
+          .find((p) => p.promptId === 'prompt-promoted')?.state,
+      ).toBe('queued');
+
+      // Release prompt 1 so prompt 2 promotes to running.
+      releaseFirst!();
+      await p1;
+      await new Promise((r) => setTimeout(r, 20));
+      expect(
+        bridge
+          .getPendingPrompts(session.sessionId)
+          .find((p) => p.promptId === 'prompt-promoted')?.state,
+      ).toBe('running');
+
+      // Remove the now-running prompt 2.
+      expect(
+        bridge.removePendingPrompt(session.sessionId, 'prompt-promoted'),
+      ).toEqual({ removed: true });
+
+      // Let prompt 2 settle cooperatively.
+      releaseSecond!();
+      await p2;
+      await new Promise((r) => setTimeout(r, 20));
+
+      // Exactly one pending_prompt_completed for prompt-promoted: the
+      // 'removed' one from removePendingPrompt. The result.finally path
+      // must NOT publish a second 'completed' event because the
+      // isQueued && !pendingEntry.removed guard suppresses it.
+      const completedForPromoted = events.filter(
+        (e) =>
+          e.type === 'pending_prompt_completed' &&
+          (e as BridgeEvent & { data: { promptId: string } }).data.promptId ===
+            'prompt-promoted',
+      );
+      expect(completedForPromoted).toHaveLength(1);
+      expect(
+        (completedForPromoted[0] as BridgeEvent & { data: { state: string } })
+          .data.state,
+      ).toBe('removed');
+
+      // The formal terminal is still published exactly once.
+      expect(terminalsFor(events, 'prompt-promoted')).toHaveLength(1);
+
       await bridge.shutdown();
     });
 

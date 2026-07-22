@@ -120,6 +120,7 @@ const {
       getStats: vi.fn().mockResolvedValue({}),
       loadArtifacts: vi.fn().mockResolvedValue({ artifacts: [] }),
       loadSession: vi.fn().mockResolvedValue(undefined),
+      reloadSession: vi.fn().mockResolvedValue(undefined),
     },
     mockWorkspace: {
       capabilities: {
@@ -233,6 +234,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
     loading: false,
     capacityReached: false,
     loadMore: vi.fn(),
+    release: vi.fn(),
   }),
   useTranscriptStore: () => mockStore,
   useWorkspace: () => mockWorkspace,
@@ -1013,6 +1015,7 @@ beforeEach(() => {
   mockSessionActions.clearSession.mockResolvedValue(undefined);
   mockSessionActions.releaseSession.mockResolvedValue(undefined);
   mockSessionActions.loadSession.mockResolvedValue(undefined);
+  mockSessionActions.reloadSession.mockResolvedValue(undefined);
   mockSessionActions.refreshCommands.mockResolvedValue(undefined);
   mockSessionActions.setModel.mockResolvedValue(undefined);
   mockSessionActions.setApprovalMode.mockResolvedValue(undefined);
@@ -1849,7 +1852,7 @@ describe('App session callbacks', () => {
     }
 
     it('shows the toggle in the empty state for a trusted git workspace', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
     });
 
@@ -1859,7 +1862,7 @@ describe('App session callbacks', () => {
           { id: 'primary', cwd: '/workspace', primary: true, trusted: false },
         ],
       };
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await flush();
       await flush();
       expect(container.querySelector(toggleSelector)).toBeNull();
@@ -1870,14 +1873,14 @@ describe('App session callbacks', () => {
         workspaceGit: vi.fn().mockRejectedValue(new Error('not a git repo')),
         workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
       }));
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await flush();
       await flush();
       expect(container.querySelector(toggleSelector)).toBeNull();
     });
 
     it('toggles the pending badge on and off', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
 
       await clickButton(container, toggleSelector);
@@ -1890,7 +1893,7 @@ describe('App session callbacks', () => {
     });
 
     it('creates the session with worktree when the toggle is enabled', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
       await clickButton(container, toggleSelector);
 
@@ -1907,7 +1910,7 @@ describe('App session callbacks', () => {
     });
 
     it('creates the session without worktree when the toggle is off', async () => {
-      renderApp();
+      renderApp({ showWorktreeToggle: true });
       await flush();
 
       await act(async () => {
@@ -1923,7 +1926,7 @@ describe('App session callbacks', () => {
     });
 
     it('clears the pending worktree intent when starting a new session from the sidebar', async () => {
-      const { container } = renderApp();
+      const { container } = renderApp({ showWorktreeToggle: true });
       await waitForToggle(container);
       await clickButton(container, toggleSelector);
       expect(container.textContent).toContain(badgeDesc);
@@ -4515,8 +4518,8 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('Pane artifact');
-    expect(container.textContent).toContain('10 B');
+    expect(document.body.textContent).toContain('Pane artifact');
+    expect(document.body.textContent).toContain('10 B');
 
     await act(async () => {
       container
@@ -4527,7 +4530,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('20 B');
+    expect(document.body.textContent).toContain('20 B');
 
     await act(async () => {
       container
@@ -4538,7 +4541,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('Artifact not found.');
+    expect(document.body.textContent).toContain('Artifact not found.');
   });
 
   it('clears split pane artifact snapshots when switching sessions', async () => {
@@ -4566,7 +4569,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('Pane artifact');
+    expect(document.body.textContent).toContain('Pane artifact');
 
     await act(async () => {
       mockConnection.sessionId = 'session-2';
@@ -4574,7 +4577,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).not.toContain('Pane artifact');
+    expect(document.body.textContent).not.toContain('Pane artifact');
   });
 
   it('enters the split view from a ?split= URL and consumes the param', async () => {
