@@ -5871,6 +5871,35 @@ describe('OpenAIContentConverter', () => {
       });
     });
 
+    it('converts subschemas of properties named after schema keywords', () => {
+      // A tool can declare a parameter literally called `maximum` or
+      // `minItems`. Those are property NAMES, not constraints, so their
+      // subschemas must still be converted like any other property.
+      const params = {
+        type: 'OBJECT',
+        properties: {
+          maximum: {
+            type: 'INTEGER',
+            description: 'upper bound',
+            minimum: '5',
+          },
+          minItems: { type: 'STRING' },
+          normalProp: { type: 'STRING' },
+        },
+      };
+
+      const result = converter.convertGeminiToolParametersToOpenAI(params);
+      const properties = result?.['properties'] as Record<string, unknown>;
+
+      expect(properties?.['maximum']).toEqual({
+        type: 'integer',
+        description: 'upper bound',
+        minimum: 5,
+      });
+      expect(properties?.['minItems']).toEqual({ type: 'string' });
+      expect(properties?.['normalProp']).toEqual({ type: 'string' });
+    });
+
     it('should convert string numeric constraints to numbers', () => {
       const params = {
         type: 'object',
