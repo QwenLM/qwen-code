@@ -83,6 +83,61 @@ function getInteractiveInteractionModePrompt(): {
   };
 }
 
+/**
+ * Default leading identity sentence of the core system prompt.
+ * Factored out so `QWEN_SYSTEM_IDENTITY_MD` can replace this single unit
+ * without fragile splicing of the large base-prompt template.
+ */
+function getDefaultCoreIdentitySentence(role: string): string {
+  return `You are Qwen Code, ${role} developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.`;
+}
+
+/**
+ * Resolve an opt-in identity override from `QWEN_SYSTEM_IDENTITY_MD`.
+ *
+ * This is a **trusted distributor-level** system-prompt fragment: the file is
+ * inserted verbatim as the leading identity paragraph of the default core
+ * prompt (not a sanitized branding field). Only a real file path enables it
+ * (unlike `QWEN_SYSTEM_MD`, there is no default identity file, so switch
+ * values like `1`/`true` are ignored). Missing files, empty/whitespace-only
+ * files, and path-resolution failures fail loud.
+ */
+function resolveCoreIdentityOverride(): string | null {
+  const rawEnv = process.env['QWEN_SYSTEM_IDENTITY_MD'];
+  const trimmed = rawEnv?.trim();
+  // Unset or whitespace → no override.
+  if (!trimmed) {
+    return null;
+  }
+
+  const resolution = resolvePathFromEnv(rawEnv);
+  // Boolean-like switches → no override (no default identity file).
+  if (resolution.isSwitch) {
+    return null;
+  }
+
+  // Env was set to a path-like value but resolution produced no path
+  // (e.g. `~/...` when `os.homedir()` fails). Do not silently fall back to
+  // the default Qwen identity when an explicit override was configured.
+  if (!resolution.value) {
+    throw new Error(`failed to resolve system identity path '${trimmed}'`);
+  }
+
+  const identityPath = resolution.value;
+  if (!fs.existsSync(identityPath)) {
+    throw new Error(`missing system identity file '${identityPath}'`);
+  }
+
+  const contents = fs.readFileSync(identityPath, 'utf8');
+  if (!contents.trim()) {
+    throw new Error(`empty system identity file '${identityPath}'`);
+  }
+
+  // Trim trailing whitespace/newlines so the blank line before
+  // `# Core Mandates` stays a clean paragraph separator.
+  return contents.trimEnd();
+}
+
 export function resolvePathFromEnv(envVar?: string): {
   isSwitch: boolean;
   value: string | null;
@@ -209,10 +264,18 @@ export function getCoreSystemPrompt(
   // purpose of the override. Custom prompts are responsible for their own mode
   // awareness (e.g. not instructing the model to ask questions in headless
   // runs). `appendInstruction` below still applies in both branches.
-  const basePrompt = systemMdEnabled
-    ? fs.readFileSync(systemMdPath, 'utf8')
-    : `
-You are Qwen Code, ${interaction.role} developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.
+  //
+  // `QWEN_SYSTEM_IDENTITY_MD` only applies on the default-prompt branch and is
+  // ignored whenever `QWEN_SYSTEM_MD` is in effect (including empty-file clear).
+  let basePrompt: string;
+  if (systemMdEnabled) {
+    basePrompt = fs.readFileSync(systemMdPath, 'utf8');
+  } else {
+    const coreIdentity =
+      resolveCoreIdentityOverride() ??
+      getDefaultCoreIdentitySentence(interaction.role);
+    basePrompt = `
+${coreIdentity}
 
 # Core Mandates
 
@@ -361,6 +424,7 @@ Your core function is efficient and safe assistance. Balance conciseness with th
 
 Interaction mode reminder: ${interaction.questions}
 `.trim();
+  }
 
   // if QWEN_WRITE_SYSTEM_MD is set (and not 0|false), write base system prompt to file
   const writeSystemMdResolution = resolvePathFromEnv(
