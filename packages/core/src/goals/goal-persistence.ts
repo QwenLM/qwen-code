@@ -118,6 +118,10 @@ export interface MigratedGoalStateInput {
 export function createMigratedGoalState(
   input: MigratedGoalStateInput,
 ): GoalStateRecordPayloadV2 {
+  const objective = input.objective.trim();
+  if (!objective) {
+    throw new Error('Migrated Goal objective must not be empty');
+  }
   return {
     v: GOAL_STATE_VERSION,
     cause: 'migrated',
@@ -127,7 +131,7 @@ export function createMigratedGoalState(
       goal: {
         goalId: input.goalId,
         revision: 1,
-        objective: input.objective.trim(),
+        objective,
         status: 'active',
         evidenceCursor: { recordId: input.recordUuid },
         turnCount: 0,

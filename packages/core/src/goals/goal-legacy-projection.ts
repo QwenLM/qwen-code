@@ -34,8 +34,6 @@ export interface LegacyActiveGoal {
   readonly lastReason?: string;
 }
 
-export type ActiveGoal = LegacyActiveGoal;
-
 export interface LegacyGoalTerminal {
   kind: 'achieved' | 'failed' | 'aborted';
   condition: string;

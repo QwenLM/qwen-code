@@ -24,4 +24,11 @@ export {
   parseGoalSnapshotV2,
   parseGoalStateRecordPayloadV2,
 } from './goal-reducer.js';
-export { projectGoalStateToLegacy } from './goal-legacy-projection.js';
+export {
+  projectGoalStateToLegacy,
+  type LegacyActiveGoal,
+  type LegacyGoalProjection,
+  type LegacyGoalStatus,
+  type LegacyGoalStatusKind,
+  type LegacyGoalTerminal,
+} from './goal-legacy-projection.js';

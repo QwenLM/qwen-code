@@ -201,4 +201,15 @@ describe('legacy migration', () => {
       },
     });
   });
+
+  it('rejects an empty migrated objective', () => {
+    expect(() =>
+      createMigratedGoalState({
+        objective: '  ',
+        goalId: 'new-goal',
+        recordUuid: 'migration-record',
+        now: 1000,
+      }),
+    ).toThrow('Migrated Goal objective must not be empty');
+  });
 });

@@ -5,7 +5,11 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { GoalRecord, GoalSnapshotV2 } from './goal-protocol.js';
+import {
+  goalRequiresExactPermit,
+  type GoalRecord,
+  type GoalSnapshotV2,
+} from './goal-protocol.js';
 import {
   GoalConflictError,
   GoalInvalidTransitionError,
@@ -179,6 +183,21 @@ describe('goal reducer', () => {
     });
   });
 
+  it('rejects resuming an already-active goal', () => {
+    expect(() =>
+      reduceGoalControl(goalRecord(), {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      }),
+    ).toThrow(GoalInvalidTransitionError);
+  });
+
   it.each(['paused', 'blocked', 'usage_limited'] as const)(
     'edits a %s goal without changing its status',
     (status) => {
@@ -316,6 +335,29 @@ describe('goal reducer', () => {
     });
   });
 
+  it.each(['blocked', 'usage_limited', 'complete'] as const)(
+    'rejects finishing a turn for a %s goal',
+    (status) => {
+      expect(() =>
+        reduceGoalTurnFinished(goalRecord({ status }), { now: 200 }),
+      ).toThrow(GoalInvalidTransitionError);
+    },
+  );
+
+  it.each([
+    [null, 'idle', false],
+    [goalRecord(), 'idle', true],
+    [goalRecord({ status: 'paused' }), 'idle', false],
+    [goalRecord({ status: 'paused' }), 'running', true],
+  ] as const)(
+    'requires an exact permit for the matching goal and activity state',
+    (goal, activity, expected) => {
+      expect(goalRequiresExactPermit({ ...snapshot(goal), activity })).toBe(
+        expected,
+      );
+    },
+  );
+
   it('strictly parses persisted idle goal snapshots and control requests', () => {
     const record = goalRecord();
     expect(
@@ -404,5 +446,22 @@ describe('goal reducer', () => {
         blockedAudit,
       }),
     ).toBeUndefined();
+  });
+
+  it('parses and clones a valid blocked audit', () => {
+    const blockedAudit = {
+      fingerprint: 'same',
+      count: 2,
+      turnIds: ['turn-1', 'turn-2'],
+    };
+    const parsed = parseGoalStateRecordPayloadV2({
+      v: 2,
+      cause: 'turn_finished',
+      snapshot: snapshot(goalRecord()),
+      blockedAudit,
+    });
+
+    expect(parsed?.blockedAudit).toEqual(blockedAudit);
+    expect(parsed?.blockedAudit).not.toBe(blockedAudit);
   });
 });
