@@ -104,11 +104,9 @@ and builds its own map of what "correct" means inside the partition.
 
 A partition is a starting boundary, not a fence. A subagent may follow a
 call chain, import graph, or contract reference into another partition to
-build evidence. When a finding's evidence lands in a report-only path —
-`packages/core/src/**`, any `packages/*/src/auth/**`, `providers/**`,
-`models/**`, `config/**`, `tools/**`, `services/**`, or any cross-package
-contract — record it under `reportOnly`, never under `fixes`, regardless
-of how small or certain the fix would be.
+build evidence. When a finding's minimal fix would touch more than three
+files or more than one hundred lines of production code, record it under
+`reportOnly`, never under `fixes`.
 
 ### Six angles (applied inside each partition)
 
@@ -152,11 +150,10 @@ prove it fails or misaligns before the fix; how to verify after the fix.
 - At most 8 fixes per run. Fewer is fine; zero is fine.
 - Each fix: production diff ≤ 20 lines. Tests or docs may exceed slightly, but
   the change must stay a small, single-root-cause fix.
-- Report-only paths: `packages/core/src/**`, any `packages/*/src/auth/**`,
-  `providers/**`, `models/**`, `config/**`, `tools/**`, `services/**`, and any
-  cross-package contract. Findings there go to `report-only.md` with full
-  evidence — never into the diff. There is no "tiny but certain" exemption in
-  headless mode.
+- Any finding whose minimal fix spans more than three files or more than one
+  hundred lines of production code is report-only, regardless of how certain
+  the finding is. The threshold is the floor, not a goal — a four-file fix is
+  already past it.
 
 ## Mode: scan-and-fix
 
