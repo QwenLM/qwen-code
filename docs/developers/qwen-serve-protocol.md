@@ -2474,6 +2474,29 @@ Errors:
 
 SSE event (workspace-scoped): `workspace_initialized` with `{path, action, originatorClientId?}`.
 
+#### `POST /workspace/mcp/reload`
+
+Reload persisted MCP settings into the workspace discovery config and every
+active session. The workspace-qualified form is
+`POST /workspaces/:workspace/mcp/reload`.
+
+Request body:
+
+```json
+{ "forceReconnectAll": true }
+```
+
+`forceReconnectAll` is optional and defaults to `false`, preserving
+incremental reconciliation. When true, the daemon reconnects every eligible
+configured MCP server after the settings reconciliation. Alternatively, pass
+`forceReconnectWhich: ["server-a", "server-b"]` to reconnect only named
+servers. The options are mutually exclusive. A forced reconnect causes each
+transport to read credentials that another local Qwen Code process may have
+written to token storage; it does not start an OAuth authorization flow.
+
+The route returns `202 { "accepted": true }`; poll `GET /workspace/mcp` for
+the final connection status. Invalid option values return 400.
+
 #### `POST /workspace/mcp/:server/restart`
 
 Capability tag: `workspace_mcp_restart`. Bridge → ACP extMethod `qwen/control/workspace/mcp/restart`.

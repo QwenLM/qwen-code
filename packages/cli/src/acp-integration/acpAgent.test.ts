@@ -13069,6 +13069,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       filesystem: { command: 'node', args: ['server.js'] },
     };
     const runtimeServer = { command: 'runtime-server' };
+    const forceDiscover = vi.fn().mockResolvedValue(undefined);
     let finishDiscovery!: () => void;
     const discoveryPending = new Promise<void>((resolve) => {
       finishDiscovery = resolve;
@@ -13116,6 +13117,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockConfig.getWorkingDir = vi.fn().mockReturnValue('/tmp');
     mockConfig.isMcpServerDisabled = vi.fn().mockReturnValue(false);
     mockConfig.getToolRegistry = vi.fn().mockReturnValue({
+      discoverToolsForServer: forceDiscover,
       getMcpClientManager: vi.fn().mockReturnValue({
         getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
         getMcpClientAccounting: vi.fn().mockReturnValue({
@@ -13210,6 +13212,15 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         ],
       });
     });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {
+        forceReconnectWhich: ['runtime'],
+      }),
+    ).resolves.toEqual({ accepted: true });
+    await vi.waitFor(() =>
+      expect(forceDiscover).toHaveBeenCalledWith('runtime'),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

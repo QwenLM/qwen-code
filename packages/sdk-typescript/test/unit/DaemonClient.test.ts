@@ -742,9 +742,18 @@ describe('DaemonClient', () => {
       await expect(
         client.workspaceById('workspace/id').reloadWorkspaceMcp(),
       ).resolves.toEqual(result);
+      await expect(
+        client.reloadWorkspaceMcp({ forceReconnectWhich: ['docs'] }),
+      ).resolves.toEqual(result);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['POST', 'http://daemon/workspace/mcp/reload'],
         ['POST', 'http://daemon/workspaces/workspace%2Fid/mcp/reload'],
+        ['POST', 'http://daemon/workspace/mcp/reload'],
+      ]);
+      expect(calls.map((call) => call.body)).toEqual([
+        '{}',
+        '{}',
+        '{"forceReconnectWhich":["docs"]}',
       ]);
     });
 

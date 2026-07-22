@@ -76,6 +76,7 @@ import type {
   DaemonGitCommitDetail,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
+  DaemonWorkspaceMcpReloadOptions,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
@@ -1008,13 +1009,15 @@ export class DaemonClient {
     );
   }
 
-  async reloadWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
+  async reloadWorkspaceMcp(
+    options: DaemonWorkspaceMcpReloadOptions = {},
+  ): Promise<DaemonWorkspaceMcpInitializeResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/reload`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: '{}',
+        body: JSON.stringify(options),
       },
       async (res) => {
         if (!res.ok) {
@@ -4233,11 +4236,13 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  reloadWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
+  reloadWorkspaceMcp(
+    options: DaemonWorkspaceMcpReloadOptions = {},
+  ): Promise<DaemonWorkspaceMcpInitializeResult> {
     return this.post(
       '/mcp/reload',
       'POST /workspaces/:workspace/mcp/reload',
-      {},
+      options,
     );
   }
 

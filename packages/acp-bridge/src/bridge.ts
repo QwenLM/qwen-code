@@ -7641,7 +7641,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     },
 
-    async reloadWorkspaceMcp() {
+    async reloadWorkspaceMcp(options) {
       const info = await ensureChannel();
       info.workspaceMcpDiscoveryRequested = true;
       try {
@@ -7649,7 +7649,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           withTimeout(
             info.connection.extMethod(
               SERVE_CONTROL_EXT_METHODS.workspaceMcpReload,
-              { cwd: boundWorkspace },
+              { cwd: boundWorkspace, ...options },
             ),
             initTimeoutMs,
             SERVE_CONTROL_EXT_METHODS.workspaceMcpReload,

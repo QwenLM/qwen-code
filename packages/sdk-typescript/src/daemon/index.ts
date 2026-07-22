@@ -524,6 +524,7 @@ export type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
+  DaemonWorkspaceMcpReloadOptions,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourceStatus,
