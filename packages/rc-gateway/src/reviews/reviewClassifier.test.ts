@@ -107,7 +107,7 @@ describe('classifyReviewToolCall — contract', () => {
       'go build ./...',
       'tsc --noEmit',
       'qwen review fetch-pr 42 owner/repo --remote origin',
-      'mkdir -p /proj/.qwen/reviews',
+      'mkdir -p /proj/worktree/.qwen/reviews',
     ]) {
       expect(classifyReviewToolCall(shell(c), AUTO)).toBe('approve');
     }
@@ -206,15 +206,46 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
     for (const c of [
       'mkdir /etc/cron.d/x', // not under .qwen
       'mkdir -p /tmp/evil', // not under .qwen
-      'mkdir -p /proj/.qwen/../../../etc/evil', // traversal escapes .qwen
+      'mkdir -p /proj/worktree/.qwen/../../../etc/evil', // traversal escapes .qwen
       'mkdir -p /tmp/.qwenevil/x', // .qwen is not a real path segment
     ]) {
       expect(classifyReviewToolCall(shell(c), AUTO)).toBe('escalate');
     }
-    // still approves the sanctioned form
+    // still approves the sanctioned form (absolute, under the worktree)
     expect(
-      classifyReviewToolCall(shell('mkdir -p /proj/.qwen/reviews'), AUTO),
+      classifyReviewToolCall(
+        shell('mkdir -p /proj/worktree/.qwen/reviews'),
+        AUTO,
+      ),
     ).toBe('approve');
+  });
+
+  it('confines mkdir to the worktree root (out-of-tree .qwen escalates)', () => {
+    const WT: ReviewPolicy = { ...AUTO, worktreeRoot: '/proj/wt' };
+    // Absolute target UNDER the worktree → approve.
+    expect(
+      classifyReviewToolCall(shell('mkdir -p /proj/wt/.qwen/reviews'), WT),
+    ).toBe('approve');
+    // Relative target (resolves under the worktree) → approve.
+    expect(classifyReviewToolCall(shell('mkdir -p .qwen/reviews'), WT)).toBe(
+      'approve',
+    );
+    // DISCRIMINATOR: has a `.qwen` segment and no `..`, so the pre-fix code
+    // approved it — only worktree confinement escalates this out-of-tree target.
+    expect(
+      classifyReviewToolCall(shell('mkdir -p /home/victim/.qwen/x'), WT),
+    ).toBe('escalate');
+    // Traversal out of the worktree → escalate.
+    expect(
+      classifyReviewToolCall(shell('mkdir -p /proj/wt/../evil/.qwen'), WT),
+    ).toBe('escalate');
+    // Null worktreeRoot → cannot confine → escalate even the sanctioned form.
+    expect(
+      classifyReviewToolCall(shell('mkdir -p /proj/wt/.qwen/reviews'), {
+        ...WT,
+        worktreeRoot: null,
+      }),
+    ).toBe('escalate');
   });
 
   it('escalates gh subcommands beyond posting a PR review comment', () => {

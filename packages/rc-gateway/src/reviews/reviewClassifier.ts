@@ -290,13 +290,28 @@ function classifyGh(argv: string[], policy: ReviewPolicy): ReviewDecision {
   return 'approve';
 }
 
-function classifyMkdir(argv: string[]): ReviewDecision {
+/**
+ * A `mkdir` (the review skill's `mkdir -p <cwd>/.qwen/reviews`) auto-approves
+ * ONLY when every target path resolves INSIDE the review worktree — the SAME
+ * string-level confinement `classifyEdit` applies, so an empty-dir mutation can
+ * no longer land out-of-tree (`mkdir -p /home/victim/.qwen/x` used to approve on
+ * the mere presence of a `.qwen` segment). `worktreeRoot` null/empty → escalate
+ * (cannot confine). The legitimate absolute (`<worktree>/.qwen/reviews`) and
+ * relative (`.qwen/reviews`) forms both still approve.
+ */
+function classifyMkdir(argv: string[], policy: ReviewPolicy): ReviewDecision {
+  const { worktreeRoot } = policy;
+  if (typeof worktreeRoot !== 'string' || worktreeRoot.length === 0) {
+    return 'escalate';
+  }
+  const rootAbs = resolve(worktreeRoot);
   const paths = argv.slice(1).filter((t) => !t.startsWith('-'));
   if (paths.length === 0) return 'escalate';
   for (const p of paths) {
     const segs = p.split('/');
     if (segs.includes('..')) return 'escalate'; // traversal escapes .qwen
     if (!segs.includes('.qwen')) return 'escalate'; // must be under a real .qwen
+    if (!isInsideRoot(rootAbs, p)) return 'escalate'; // out-of-tree target
   }
   return 'approve';
 }
@@ -316,7 +331,7 @@ function classifyShell(command: unknown, policy: ReviewPolicy): ReviewDecision {
     case 'gh':
       return classifyGh(argv, policy);
     case 'mkdir':
-      return classifyMkdir(argv);
+      return classifyMkdir(argv, policy);
     case 'git':
       if (!GIT_SUBCOMMANDS.has(argv[1])) return 'escalate';
       return validateShellArgs(argv.slice(2), { flags: GIT_FLAGS });

@@ -526,82 +526,89 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // capability route reads its live state through this closure.
   let mdnsAdvertiser: MdnsAdvertiser | undefined;
 
-  const { app, notifier, audit, ownerEvents, bridgeRegistry, agentLifecycle } =
-    createGatewayApp({
-      daemon: handle.daemon,
-      store,
-      pairing,
-      vapid,
-      pushStore,
-      apnsStore,
-      ...(apnsDelivery ? { apns: apnsDelivery } : {}),
-      nativeShellsCapability: () => {
-        const keyPath = nativePushConfig.apns?.keyPath;
-        // apnsEnabled reflects a LOADABLE P-8 key, not mere file presence: parse
-        // it as an EC private key so a present-but-malformed key reads false
-        // (mirrors bind-security's createSecureContext check). Re-checked live.
-        let keyLoadable = false;
-        if (keyPath) {
-          try {
-            createPrivateKey(readFileSync(expandTilde(keyPath)));
-            keyLoadable = true;
-          } catch {
-            keyLoadable = false;
-          }
+  const {
+    app,
+    notifier,
+    audit,
+    ownerEvents,
+    bridgeRegistry,
+    agentLifecycle,
+    reviewLifecycle,
+  } = createGatewayApp({
+    daemon: handle.daemon,
+    store,
+    pairing,
+    vapid,
+    pushStore,
+    apnsStore,
+    ...(apnsDelivery ? { apns: apnsDelivery } : {}),
+    nativeShellsCapability: () => {
+      const keyPath = nativePushConfig.apns?.keyPath;
+      // apnsEnabled reflects a LOADABLE P-8 key, not mere file presence: parse
+      // it as an EC private key so a present-but-malformed key reads false
+      // (mirrors bind-security's createSecureContext check). Re-checked live.
+      let keyLoadable = false;
+      if (keyPath) {
+        try {
+          createPrivateKey(readFileSync(expandTilde(keyPath)));
+          keyLoadable = true;
+        } catch {
+          keyLoadable = false;
         }
-        return buildNativeShellsCapability(
-          resolveApnsEnabled(nativePushConfig, keyLoadable),
-        );
-      },
-      assetLinks: () => buildAssetLinks(nativePushConfig),
-      snooze,
-      routing,
-      idleToggles,
-      idleStatus,
-      usageReader: usageStore,
-      usageBroadcaster: usageStore ? usageBroadcaster : undefined,
-      costCurrencyLabel: () => rates.current().currencyLabel,
-      mdnsStatus: () =>
-        mdnsAdvertiser?.advertising
-          ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
-          : { advertising: false },
-      clientsManifestReadToml: () =>
-        readFile(join(homedir(), '.qwen', 'rc', 'clients.toml'), 'utf8').then(
-          (text) => text,
-          (err: NodeJS.ErrnoException) => {
-            if (err.code === 'ENOENT') return null; // not configured → warning
-            throw err; // unexpected → route degrades to warning, never 5xx
-          },
-        ),
-      onPromptAccepted: usageStore
-        ? (sid, attr) => {
-            sessionAttribution.set(sid, attr);
-            usageIngester?.notePromptBoundary(sid);
-          }
-        : undefined,
-      agents: {
-        registry: agentRegistry,
-        costFor,
-      },
-      review: {
-        registry: reviewRegistry,
-        costFor,
-        resolveReport: resolveReviewReport,
-      },
-      workflows: {
-        runsDir: join(homedir(), '.qwen', 'workflows', 'runs'),
-        // Gateway { name } resolution reuses the CLI tool's EXACT guarded
-        // resolver (core resolveNamedWorkflow): project `.qwen/workflows` then
-        // user `~/.qwen/workflows`, with the same traversal guard. The gateway
-        // is deliberately NOT given an unguarded name resolver.
-        resolveNamed: (name: string) =>
-          resolveNamedWorkflow(name, {
-            workingDir: process.cwd(),
-            homeDir: homedir(),
-          }),
-      },
-      hookIngest: { ingestToken: hookIngestToken },
-    });
+      }
+      return buildNativeShellsCapability(
+        resolveApnsEnabled(nativePushConfig, keyLoadable),
+      );
+    },
+    assetLinks: () => buildAssetLinks(nativePushConfig),
+    snooze,
+    routing,
+    idleToggles,
+    idleStatus,
+    usageReader: usageStore,
+    usageBroadcaster: usageStore ? usageBroadcaster : undefined,
+    costCurrencyLabel: () => rates.current().currencyLabel,
+    mdnsStatus: () =>
+      mdnsAdvertiser?.advertising
+        ? { advertising: true, instanceName: mdnsAdvertiser.instanceName }
+        : { advertising: false },
+    clientsManifestReadToml: () =>
+      readFile(join(homedir(), '.qwen', 'rc', 'clients.toml'), 'utf8').then(
+        (text) => text,
+        (err: NodeJS.ErrnoException) => {
+          if (err.code === 'ENOENT') return null; // not configured → warning
+          throw err; // unexpected → route degrades to warning, never 5xx
+        },
+      ),
+    onPromptAccepted: usageStore
+      ? (sid, attr) => {
+          sessionAttribution.set(sid, attr);
+          usageIngester?.notePromptBoundary(sid);
+        }
+      : undefined,
+    agents: {
+      registry: agentRegistry,
+      costFor,
+    },
+    review: {
+      registry: reviewRegistry,
+      costFor,
+      resolveReport: resolveReviewReport,
+    },
+    workflows: {
+      runsDir: join(homedir(), '.qwen', 'workflows', 'runs'),
+      // Gateway { name } resolution reuses the CLI tool's EXACT guarded
+      // resolver (core resolveNamedWorkflow): project `.qwen/workflows` then
+      // user `~/.qwen/workflows`, with the same traversal guard. The gateway
+      // is deliberately NOT given an unguarded name resolver.
+      resolveNamed: (name: string) =>
+        resolveNamedWorkflow(name, {
+          workingDir: process.cwd(),
+          homeDir: homedir(),
+        }),
+    },
+    hookIngest: { ingestToken: hookIngestToken },
+  });
 
   // Startup reconciliation (design: "Reconciliation"): running/blocked agent
   // records whose daemon session is gone become `orphaned` — surfaced in
@@ -1076,7 +1083,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // The session-event pump runs when EITHER push is configured OR cost tracking
   // is on (cost ingestion must see every session_update, independent of push).
   let pump: SessionEventPump | undefined;
-  if (notifier || usageIngester || agentLifecycle) {
+  if (notifier || usageIngester || agentLifecycle || reviewLifecycle) {
     pump = new SessionEventPump(handle.daemon, notifier, {
       enforcer, // already notifier-gated (undefined when push off) → no auto-vote change
       // Idle suggestions previously rode on the push pump (they only ran when a
@@ -1084,7 +1091,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       // NOT newly activate idle suggestions — enabling cost tracking must not change
       // idle behavior. So gate the idle hook on `notifier`, not just `onSessionIdle`.
       ...(onSessionIdle && notifier ? { onSessionIdle } : {}),
-      ...(usageIngester || agentLifecycle
+      ...(usageIngester || agentLifecycle || reviewLifecycle
         ? {
             onEvent: (sid: string, ev: { type: string; data: unknown }) => {
               usageIngester?.ingest(sid, ev.data, sessionAttribution.get(sid));
@@ -1096,6 +1103,13 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
                   data: ev.data,
                 })
                 .catch(() => {});
+              // Review lifecycle (add-remote-review): a mid-review daemon
+              // session_died drives the review to `failed` and emits
+              // review_failed — the wire-protocol registry promise. Same
+              // fire-and-forget contract as agents above.
+              void reviewLifecycle
+                ?.handleSessionEvent(sid, { type: ev.type, data: ev.data })
+                .catch(() => {});
             },
           }
         : {}),
@@ -1105,6 +1119,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
     if (notifier) consumers.push('push');
     if (usageIngester) consumers.push('cost tracking');
     if (agentLifecycle) consumers.push('agents');
+    if (reviewLifecycle) consumers.push('reviews');
     // eslint-disable-next-line no-console
     console.log(`session pump: started (${consumers.join(', ')})`);
   }
