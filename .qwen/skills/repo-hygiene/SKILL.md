@@ -75,15 +75,38 @@ fixing is a valid, silent outcome.
 
 ## Scan Targets
 
-Use subagents to scan the six angles below in parallel. A subagent reports
-**candidates only** — it does not modify the working tree, does not commit,
-and does not run verification. The main agent collects, deduplicates, then
-decides which candidates to accept as findings. A pattern hit (from `rg`,
-`grep`, or any other scanner) is a lead, not a finding — confirm each hit by
-reading the surrounding context before recording it.
+Dispatch one subagent per partition below (nine subagents, parallel). A
+subagent owns its partition and reports **candidates only** — it does not
+modify the working tree, does not commit, and does not run verification. A
+pattern hit (from `rg`, `grep`, or any other scanner) is a lead, not a
+finding — confirm each hit by reading the surrounding context before
+recording it. The main agent collects, deduplicates across partitions, then
+decides which candidates to accept as findings.
 
-For each angle, grep/code-reference evidence is required; a candidate that
-cannot point at file:line with a quote is not a finding.
+For each candidate, grep/code-reference evidence is required; a candidate
+that cannot point at file:line with a quote is not a finding.
+
+### Nine partitions (one subagent each)
+
+The scope line is a starting boundary, not a reading list. The subagent
+finds the package's own entry points, schemas, registries, and contracts
+and builds its own map of what "correct" means inside the partition.
+
+- **cli/config**: `packages/cli/src/config/` — settings schema, settings.ts, config loader, migration.
+- **cli/runtime**: `packages/cli/src/commands/` + `packages/cli/src/services/` — subcommand entry points, argv parsers, help text, daemon services, workers, background tasks.
+- **cli/ui**: `packages/cli/src/ui/` — Ink components, views, TUI state.
+- **core**: `packages/core/src/` — exported types, protocol definitions, daemon protocol.
+- **extensions**: `packages/{vscode-ide-companion,chrome-extension,zed-extension}/` — host IDE integrations, manifest, host API surface.
+- **sdk-typescript**: `packages/sdk-typescript/` — ACP / streamable-http client for TypeScript consumers.
+- **sdk-python-java**: `packages/sdk-python/` + `packages/sdk-java/` + `packages/acp-bridge/` — non-TS SDKs and the ACP bridge.
+- **ui-apps**: `packages/{desktop,web-shell,webui}/` — Electron app, web shell, web UI.
+- **docs**: `docs/`, `README.md`, each package's root docs. Cross-reference against the source files the prose points at.
+
+A subagent must stay inside its partition. If a finding needs context from
+another partition to prove, record it as `crossPartition: true` with the
+other partition's name so the main agent can merge or drop it.
+
+### Six angles (applied inside each partition)
 
 - **Test-coverage truthfulness**: a test name, `describe` block, wrapper
   argument, mock input shape, env var, feature flag, or version gate claims
