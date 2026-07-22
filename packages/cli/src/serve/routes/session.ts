@@ -1555,6 +1555,12 @@ export function registerSessionRoutes(
                   });
                 });
               }
+            } else if (branchMeta) {
+              // Another client attached before we could reap — the session
+              // is alive. Transfer the in-flight reservation to the active
+              // map so the workspace is tracked, not permanently blocked.
+              activeBranchSessions.set(workspaceCwd, session.sessionId);
+              inFlightBranchWorkspaces.delete(workspaceCwd);
             }
           } catch {
             // Best-effort cleanup; channel.exited will eventually reap.

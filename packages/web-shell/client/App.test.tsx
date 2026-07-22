@@ -50,6 +50,12 @@ type ChatEditorTestProps = {
   onOpenExistingWorkspace?: () => void;
   scratchWorkspaceSupported?: boolean;
   existingFolderWorkspaceSupported?: boolean;
+  gitModeIntent?: { mode: string; name?: string; slug?: string };
+  onGitModeIntentChange?: (intent: {
+    mode: string;
+    name?: string;
+    slug?: string;
+  }) => void;
 };
 
 type AddWorkspaceDialogTestProps = {
@@ -1816,6 +1822,50 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.createSession).toHaveBeenCalledWith(
       expect.objectContaining({ workspaceCwd: '/work/secondary' }),
     );
+  });
+
+  it('clears the git mode intent when starting a new session from the sidebar', async () => {
+    mockConnection.sessionId = undefined;
+    mockWorkspace.capabilities = {
+      workspaces: [
+        { id: 'primary', cwd: '/workspace', primary: true, trusted: true },
+      ],
+    };
+    mockWorkspace.client.workspaceByCwd.mockImplementation(() => ({
+      workspaceGit: vi.fn().mockResolvedValue({ branch: 'main' }),
+      workspaceSkills: mockWorkspaceActions.loadSkillsStatus,
+    }));
+    const { container } = renderApp();
+    await flush();
+    await flush();
+
+    // Set branch intent via the ChatEditor prop.
+    const intentChange = testState.latestChatEditorProps?.onGitModeIntentChange;
+    expect(intentChange).toBeDefined();
+    act(() => {
+      intentChange?.({ mode: 'branch', name: 'feat/test' });
+    });
+    await flush();
+
+    // Click "New session" from the sidebar — should reset the intent.
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('[data-testid="new-session"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    // Submit a message — createSession should NOT include branch.
+    await act(async () => {
+      testState.latestChatEditorProps?.onSubmit('regular session');
+      await vi.waitFor(() => {
+        expect(mockSessionActions.createSession).toHaveBeenCalled();
+      });
+    });
+    const arg = mockSessionActions.createSession.mock.calls[0]?.[0] as
+      | Record<string, unknown>
+      | undefined;
+    expect(arg?.['branch']).toBeUndefined();
   });
 
   it('reloads skills from the target workspace when starting a new session', async () => {

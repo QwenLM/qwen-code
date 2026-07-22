@@ -557,7 +557,7 @@ index f00a278..07a98d0 100644
 +                        .map(line => line.length > 0 ? ' '.repeat(textOffset.x) : '')
 +                        .join('\n');
 +                    output.write(x, y + textOffset.y, padding, {
-+                        transformers: newTransformers,
++                        transformers: [],
 +                        semantic: {
 +                            flowId,
 +                            selectable: false,
