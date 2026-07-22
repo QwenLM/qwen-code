@@ -165,6 +165,31 @@ test('git mode chip worktree mode sends worktree intent', async ({
   expect(sessionCreateBody(daemon)?.['branch']).toBeUndefined();
 });
 
+test('git mode chip default current-branch mode sends neither branch nor worktree', async ({
+  page,
+}, testInfo) => {
+  const scenario = createGitWorkspaceScenario();
+  const daemon = await installScenario(
+    page,
+    scenario,
+    String(testInfo.project.use.baseURL),
+  );
+
+  await page.goto('/');
+
+  const chip = page.locator('[data-testid="git-mode-chip"]');
+  await expect(chip).toBeVisible({ timeout: 10_000 });
+  // Leave the git mode intent at its default (current branch): do not open
+  // the popover or select branch/worktree before submitting.
+
+  await fillComposer(page, 'plain task on current branch');
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  await expect.poll(() => sessionCreateBody(daemon) !== undefined).toBe(true);
+  expect(sessionCreateBody(daemon)?.['branch']).toBeUndefined();
+  expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
+});
+
 test('git mode chip clear button resets to current branch', async ({
   page,
 }, testInfo) => {

@@ -98,6 +98,8 @@ async function main() {
       path: `${OUT_DIR}/git-mode-debug-no-branch-input.png`,
       animations: 'disabled',
     });
+    await browser.close();
+    return;
   }
   await branchInput.fill('feat/git-mode-selector');
   await page.waitForTimeout(300);

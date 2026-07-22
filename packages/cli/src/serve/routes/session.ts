@@ -429,6 +429,11 @@ export function registerSessionRoutes(
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
   // Prevents concurrent branch sessions that would conflict on HEAD.
   const activeBranchSessions = new Map<string, string>();
+  // Workspaces with a branch creation currently in flight (reserved between
+  // the conflict guard and `activeBranchSessions.set`, which only happens
+  // after spawn). Closes the TOCTOU where two concurrent requests both pass
+  // the guard before either populates `activeBranchSessions`.
+  const inFlightBranchWorkspaces = new Set<string>();
 
   const getTranscriptCursorCodec = (
     runtime: WorkspaceRuntime,
@@ -1316,11 +1321,26 @@ export function registerSessionRoutes(
         return;
       }
       const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
+      // Reserve the workspace before mutating HEAD. The conflict guard above
+      // runs before several awaits (rev-parse, status, checkout), so two
+      // concurrent `POST /session { branch }` can both pass it and race on
+      // `git checkout -b`. This synchronous check-and-add (no await between)
+      // serializes the checkout; every exit path below clears the reservation
+      // (transferred to `activeBranchSessions` on success).
+      if (inFlightBranchWorkspaces.has(workspaceCwd)) {
+        res.status(409).json({
+          error: 'A branch session is already being created for this workspace',
+          code: 'branch_session_conflict',
+        });
+        return;
+      }
+      inFlightBranchWorkspaces.add(workspaceCwd);
       try {
         await execFileAsync('git', ['checkout', '-b', branchName], {
           cwd: workspaceCwd,
         });
       } catch (checkoutErr) {
+        inFlightBranchWorkspaces.delete(workspaceCwd);
         res.status(500).json({
           error: `Failed to create branch: ${checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr)}`,
           code: 'branch_checkout_failed',
@@ -1484,6 +1504,7 @@ export function registerSessionRoutes(
               // Roll back the branch if one was created for this session.
               if (branchMeta) {
                 activeBranchSessions.delete(workspaceCwd);
+                inFlightBranchWorkspaces.delete(workspaceCwd);
                 await execFileAsync(
                   'git',
                   ['checkout', branchMeta.baseBranch],
@@ -1514,6 +1535,12 @@ export function registerSessionRoutes(
             .catch(() => {
               // Best-effort cleanup; channel.exited will eventually reap.
             });
+          // A branch was checked out and the session lives on for the other
+          // attached client; release the in-flight reservation so the
+          // workspace isn't permanently blocked from future branch creation.
+          if (branchMeta) {
+            inFlightBranchWorkspaces.delete(workspaceCwd);
+          }
         }
         return;
       }
@@ -1601,6 +1628,7 @@ export function registerSessionRoutes(
 
       if (branchMeta) {
         activeBranchSessions.set(workspaceCwd, session.sessionId);
+        inFlightBranchWorkspaces.delete(workspaceCwd);
       }
 
       res.status(200).json(session);
@@ -1617,6 +1645,7 @@ export function registerSessionRoutes(
       // branch and delete the newly created one.
       if (branchMeta) {
         activeBranchSessions.delete(workspaceCwd);
+        inFlightBranchWorkspaces.delete(workspaceCwd);
         await execFileAsync('git', ['checkout', branchMeta.baseBranch], {
           cwd: workspaceCwd,
         }).catch(() => {});
