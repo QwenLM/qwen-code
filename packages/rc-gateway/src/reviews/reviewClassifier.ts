@@ -358,10 +358,44 @@ function classifyShell(command: unknown, policy: ReviewPolicy): ReviewDecision {
   }
 }
 
+// Every path-like field an `edit`/`write` (Kind.Edit) tool can carry:
+// `edit`/`write_file` use `file_path`, `notebook_edit` uses `notebook_path`.
+// `path`/`filePath`/`absolute_path` are included defensively so a divergent
+// decoy field can never slip an out-of-tree write past confinement.
+const EDIT_PATH_FIELDS = [
+  'file_path',
+  'notebook_path',
+  'path',
+  'filePath',
+  'absolute_path',
+] as const;
+
+/** True iff `p` resolves (string-level only) inside `rootAbs`. */
+function isInsideRoot(rootAbs: string, p: string): boolean {
+  const targetAbs = resolve(rootAbs, p);
+  const rel = relative(rootAbs, targetAbs);
+  if (rel.length === 0) return true; // path === root (degenerate, inside)
+  if (isAbsolute(rel)) return false; // different filesystem root
+  if (rel === '..' || rel.startsWith('..' + sep)) return false; // escapes
+  return true;
+}
+
 /**
  * An `edit`/`write` under `autofix` may auto-approve ONLY when its target path
- * resolves strictly inside the review worktree. Reads both `file_path` and
- * `path` (the two ACP path field names). Pure path math — no fs.
+ * resolves inside the review worktree. EVERY present path field is confined —
+ * not first-wins — so a divergent decoy (`{file_path:'src/a.ts',
+ * path:'/etc/passwd'}`) cannot slip through. Escalate if no path field is
+ * present, or if any present one is non-string/empty or resolves outside.
+ *
+ * SECURITY CAVEAT — STRING-LEVEL ONLY: this uses `path.resolve` and does NOT
+ * resolve symlinks. A symlink committed *inside* the worktree (e.g.
+ * `evil -> /home/user/.ssh/authorized_keys`) resolves "inside" by path math yet
+ * the write follows it OUTSIDE the worktree. A pure function has no fs and
+ * cannot detect this. The caller (the permission bridge, C.2) MUST
+ * `fs.realpath`-verify the edit target — or its parent dir, for a
+ * not-yet-existing file — against the realpath'd worktree root before honoring
+ * an `approve` for an `edit`/write. The classifier alone does NOT guarantee the
+ * write lands inside the worktree.
  */
 function classifyEdit(
   rawInput: Record<string, unknown> | undefined,
@@ -370,17 +404,33 @@ function classifyEdit(
   if (typeof worktreeRoot !== 'string' || worktreeRoot.length === 0) {
     return 'escalate';
   }
-  const raw = rawInput?.['file_path'] ?? rawInput?.['path'];
-  if (typeof raw !== 'string' || raw.length === 0) return 'escalate';
   const rootAbs = resolve(worktreeRoot);
-  const targetAbs = resolve(rootAbs, raw);
-  const rel = relative(rootAbs, targetAbs);
-  if (rel.length === 0) return 'approve'; // path === root (degenerate, inside)
-  if (isAbsolute(rel)) return 'escalate'; // different filesystem root
-  if (rel === '..' || rel.startsWith('..' + sep)) return 'escalate'; // escapes
+  let sawPath = false;
+  for (const key of EDIT_PATH_FIELDS) {
+    const v = rawInput?.[key];
+    if (v === undefined || v === null) continue; // field absent
+    sawPath = true;
+    if (typeof v !== 'string' || v.length === 0) return 'escalate';
+    if (!isInsideRoot(rootAbs, v)) return 'escalate';
+  }
+  if (!sawPath) return 'escalate'; // no path to confine
   return 'approve';
 }
 
+/**
+ * Classify a single review tool call into `approve` (auto-approve) or
+ * `escalate` (human vote).
+ *
+ * TRUST BOUNDARY — this classifier trusts the INTEGRITY of `toolCall.kind`: the
+ * daemon assigns it from each tool's registered `Kind` enum, NOT from the model
+ * or the reviewed diff, so keying auto-approval on `kind` is sound. C.2 must
+ * confirm this assumption holds for the frames it feeds in (a spoofable `kind`
+ * would break the `read`/`search`-approve-on-kind-alone shortcut below).
+ *
+ * SECURITY CAVEAT — an `edit` approval is STRING-LEVEL path confinement only and
+ * does NOT resolve symlinks; the bridge (C.2) MUST `fs.realpath`-verify the edit
+ * target against the worktree root before honoring it. See `classifyEdit`.
+ */
 export function classifyReviewToolCall(
   toolCall: ReviewToolCall,
   policy: ReviewPolicy,
@@ -388,6 +438,9 @@ export function classifyReviewToolCall(
   // Vote mode: escalate everything — nothing auto-approves.
   if (!policy.autoApprove) return 'escalate';
   switch (toolCall.kind) {
+    // read/search approve on `kind` alone with no payload inspection — safe
+    // ONLY because the daemon sets `kind` from the tool's registered Kind (see
+    // the trust-boundary note above), not from attacker-influenced input.
     case 'read':
     case 'search':
       return 'approve';

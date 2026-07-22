@@ -377,7 +377,7 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
         { ...FIX, worktreeRoot: null },
       ),
     ).toBe('escalate');
-    // in-tree edits approve (both field names).
+    // in-tree edits approve (both field names, incl. notebook_path).
     expect(
       classifyReviewToolCall(
         { kind: 'edit', rawInput: { file_path: 'src/a.ts' } },
@@ -387,6 +387,55 @@ describe('classifyReviewToolCall — adversarial hardening', () => {
     expect(
       classifyReviewToolCall(
         { kind: 'edit', rawInput: { path: 'packages/x/y.ts' } },
+        FIX,
+      ),
+    ).toBe('approve');
+    expect(
+      classifyReviewToolCall(
+        { kind: 'edit', rawInput: { notebook_path: 'nb/x.ipynb' } },
+        FIX,
+      ),
+    ).toBe('approve');
+  });
+
+  it('CRITICAL (round 3): confines EVERY edit path field, not first-wins', () => {
+    const FIX: ReviewPolicy = { ...AUTO, autofix: true };
+    // dual-field decoy: first field in-tree, second field escapes → escalate.
+    expect(
+      classifyReviewToolCall(
+        {
+          kind: 'edit',
+          rawInput: { file_path: 'src/a.ts', path: '/etc/passwd' },
+        },
+        FIX,
+      ),
+    ).toBe('escalate');
+    expect(
+      classifyReviewToolCall(
+        {
+          kind: 'edit',
+          rawInput: { file_path: 'src/a.ts', path: '../../../etc/passwd' },
+        },
+        FIX,
+      ),
+    ).toBe('escalate');
+    // decoy via notebook_path too.
+    expect(
+      classifyReviewToolCall(
+        {
+          kind: 'edit',
+          rawInput: { file_path: 'src/a.ts', notebook_path: '/etc/hosts' },
+        },
+        FIX,
+      ),
+    ).toBe('escalate');
+    // both fields in-tree → approve.
+    expect(
+      classifyReviewToolCall(
+        {
+          kind: 'edit',
+          rawInput: { file_path: 'src/a.ts', path: 'src/a.ts' },
+        },
         FIX,
       ),
     ).toBe('approve');
