@@ -112,6 +112,29 @@ describe('useFolderTrust', () => {
     expect(onTrustChange).toHaveBeenLastCalledWith(true);
   });
 
+  it('should keep the dialog open when the trust write fails', () => {
+    isWorkspaceTrustedSpy.mockReturnValue({
+      isTrusted: undefined,
+      source: undefined,
+    });
+    vi.mocked(mockTrustedFolders.setValue).mockImplementation(() => {
+      throw new Error('invalid trusted folders file');
+    });
+    const { result } = renderHook(() =>
+      useFolderTrust(mockSettings, onTrustChange),
+    );
+
+    expect(() => {
+      act(() => {
+        result.current.handleFolderTrustSelect(FolderTrustChoice.TRUST_FOLDER);
+      });
+    }).not.toThrow();
+
+    expect(result.current.isFolderTrustDialogOpen).toBe(true);
+    expect(result.current.isRestarting).toBe(false);
+    expect(onTrustChange).toHaveBeenCalledTimes(1);
+  });
+
   it('should handle TRUST_PARENT choice', () => {
     isWorkspaceTrustedSpy.mockReturnValue({
       isTrusted: undefined,

@@ -176,6 +176,72 @@ describe('useTrustModify', () => {
     expect(mockOnExit).toHaveBeenCalled();
   });
 
+  it('should report an immediate trust write failure without closing', () => {
+    const mockSetValue = vi.fn(() => {
+      throw new Error('invalid trusted folders file');
+    });
+    mockedLoadTrustedFolders.mockReturnValue({
+      user: { config: {} },
+      setValue: mockSetValue,
+    } as unknown as LoadedTrustedFolders);
+    mockedIsWorkspaceTrusted.mockReturnValue({
+      isTrusted: true,
+      source: 'file',
+    });
+
+    const { result } = renderHook(() =>
+      useTrustModify(mockOnExit, mockAddItem),
+    );
+
+    act(() => {
+      result.current.updateTrustLevel(TrustLevel.TRUST_PARENT);
+    });
+
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'error',
+        text: 'Could not update workspace trust: invalid trusted folders file',
+      },
+      expect.any(Number),
+    );
+    expect(mockOnExit).not.toHaveBeenCalled();
+  });
+
+  it('should clear a superseded pending trust change when a later write fails', () => {
+    const mockSetValue = vi.fn(() => {
+      throw new Error('disk full');
+    });
+    mockedLoadTrustedFolders.mockReturnValue({
+      user: { config: {} },
+      setValue: mockSetValue,
+    } as unknown as LoadedTrustedFolders);
+    mockedIsWorkspaceTrusted.mockImplementation(
+      (_settings: unknown, trustConfig?: Record<string, TrustLevel>) => ({
+        isTrusted:
+          trustConfig?.['/test/dir'] === TrustLevel.TRUST_FOLDER ? true : false,
+        source: 'file',
+      }),
+    );
+
+    const { result } = renderHook(() =>
+      useTrustModify(mockOnExit, mockAddItem),
+    );
+
+    act(() => {
+      result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
+    });
+    expect(result.current.needsRestart).toBe(true);
+
+    act(() => {
+      result.current.updateTrustLevel(TrustLevel.DO_NOT_TRUST);
+    });
+
+    expect(result.current.needsRestart).toBe(false);
+    expect(result.current.commitTrustLevelChange()).toBe(false);
+    expect(mockSetValue).toHaveBeenCalledTimes(1);
+    expect(mockOnExit).not.toHaveBeenCalled();
+  });
+
   it('should commit the pending trust level change', () => {
     const mockSetValue = vi.fn();
     mockedLoadTrustedFolders.mockReturnValue({
@@ -204,6 +270,41 @@ describe('useTrustModify', () => {
     expect(mockSetValue).toHaveBeenCalledWith(
       '/test/dir',
       TrustLevel.TRUST_FOLDER,
+    );
+  });
+
+  it('should report a pending trust write failure', () => {
+    const mockSetValue = vi.fn(() => {
+      throw new Error('invalid trusted folders file');
+    });
+    mockedLoadTrustedFolders.mockReturnValue({
+      user: { config: {} },
+      setValue: mockSetValue,
+    } as unknown as LoadedTrustedFolders);
+    mockedIsWorkspaceTrusted
+      .mockReturnValueOnce({ isTrusted: false, source: 'file' })
+      .mockReturnValueOnce({ isTrusted: true, source: 'file' });
+
+    const { result } = renderHook(() =>
+      useTrustModify(mockOnExit, mockAddItem),
+    );
+
+    act(() => {
+      result.current.updateTrustLevel(TrustLevel.TRUST_FOLDER);
+    });
+
+    let committed = true;
+    act(() => {
+      committed = result.current.commitTrustLevelChange();
+    });
+
+    expect(committed).toBe(false);
+    expect(mockAddItem).toHaveBeenCalledWith(
+      {
+        type: 'error',
+        text: 'Could not update workspace trust: invalid trusted folders file',
+      },
+      expect.any(Number),
     );
   });
 
