@@ -162,8 +162,7 @@ prove it fails or misaligns before the fix; how to verify after the fix.
 
 Inputs: `--workdir`, `--branch`.
 
-1. Run scans A and B. Write every confirmed finding to
-   `<workdir>/findings.json`:
+1. Dispatch the nine partition subagents. Each subagent applies the six angles inside its partition and reports candidates. Collect, deduplicate across partitions, and write every confirmed finding to `<workdir>/findings.json`:
 
    ```json
    {
