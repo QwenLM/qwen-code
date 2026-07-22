@@ -3789,34 +3789,36 @@ export const AppContainer = (props: AppContainerProps) => {
         isTogglingRef.current = true;
         config
           .switchModel(switchTo.authType, switchTo.modelId, switchOptions)
-          .then(() => {
-            previousModelRef.current =
-              action.type === 'forward' ? action.previous : null;
-            historyManager.addItem(
-              {
-                type: MessageType.INFO,
-                text: 'Switched to ' + switchTo.modelId,
-              },
-              Date.now(),
-            );
-          })
-          .catch((err) => {
-            debugLogger.debug(`toggle-${action.type} failed`, err);
-            // Clear ref — after a failed toggle the return path is unreliable;
-            // the next Ctrl+F will attempt a fresh forward toggle.
-            previousModelRef.current = null;
-            historyManager.addItem(
-              {
-                type: MessageType.ERROR,
-                text:
-                  '⚠ Failed to switch to ' +
-                  switchTo.modelId +
-                  ': ' +
-                  (err instanceof Error ? err.message : String(err)),
-              },
-              Date.now(),
-            );
-          })
+          .then(
+            () => {
+              previousModelRef.current =
+                action.type === 'forward' ? action.previous : null;
+              historyManager.addItem(
+                {
+                  type: MessageType.INFO,
+                  text: 'Switched to ' + switchTo.modelId,
+                },
+                Date.now(),
+              );
+            },
+            (err) => {
+              debugLogger.debug(`toggle-${action.type} failed`, err);
+              // Clear ref — after a failed toggle the return path is unreliable;
+              // the next Ctrl+F will attempt a fresh forward toggle.
+              previousModelRef.current = null;
+              historyManager.addItem(
+                {
+                  type: MessageType.ERROR,
+                  text:
+                    '⚠ Failed to switch to ' +
+                    switchTo.modelId +
+                    ': ' +
+                    (err instanceof Error ? err.message : String(err)),
+                },
+                Date.now(),
+              );
+            },
+          )
           .finally(() => {
             isTogglingRef.current = false;
           });
