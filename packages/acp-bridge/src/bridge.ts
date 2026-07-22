@@ -124,6 +124,7 @@ import type {
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
   BridgeSessionTranscriptPage,
+  BridgeSessionTranscriptPageRequest,
   BridgeGenerationStreamEvent,
 } from './bridgeTypes.js';
 import type {
@@ -4019,6 +4020,75 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return publicState;
   };
 
+  async function requestSessionTranscriptPage(
+    req: BridgeSessionTranscriptPageRequest,
+  ): Promise<BridgeSessionTranscriptPage> {
+    const info = await ensureChannel();
+    try {
+      const response = await withWorkspaceControl(info, () =>
+        withTimeout(
+          Promise.race([
+            info.connection.extMethod(
+              SERVE_STATUS_EXT_METHODS.sessionTranscript,
+              { ...req, cwd: boundWorkspace },
+            ),
+            getChannelClosedReject(info),
+          ]),
+          Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
+          SERVE_STATUS_EXT_METHODS.sessionTranscript,
+        ),
+      );
+      return response as unknown as BridgeSessionTranscriptPage;
+    } catch (err) {
+      if (isAcpSessionResourceNotFound(err, req.sessionId)) {
+        throw new SessionNotFoundError(req.sessionId);
+      }
+      throw err;
+    } finally {
+      if (hasNoChannelWork(info)) {
+        await startIdleTimer(info, 'session transcript');
+      }
+    }
+  }
+
+  async function refreshedReplayFieldsFor(
+    entry: SessionEntry,
+    historyPageSize: number,
+  ): Promise<ReturnType<typeof replayFieldsFor>> {
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const lastEventId = entry.events.lastEventId;
+        const page = await requestSessionTranscriptPage({
+          sessionId: entry.sessionId,
+          direction: 'backward',
+          limit: historyPageSize,
+        });
+        if (
+          byId.get(entry.sessionId) === entry &&
+          !entry.promptActive &&
+          entry.events.lastEventId === lastEventId
+        ) {
+          return {
+            compactedReplay: page.events,
+            liveJournal: [],
+            lastEventId,
+            ...(page.partial === true ? { partial: true as const } : {}),
+            ...(page.replayError !== undefined
+              ? { replayError: page.replayError }
+              : {}),
+            ...(page.hasMore ? { historyHasMore: true as const } : {}),
+          };
+        }
+      } catch {
+        // A failed bounded read (missing/unreadable persisted transcript or a
+        // workspace timeout) must not tear down a healthy live session; fall
+        // back to the in-memory replay instead of surfacing a terminal error.
+        break;
+      }
+    }
+    return replayFieldsFor(entry, 'load');
+  }
+
   async function restoreSession(
     action: 'load' | 'resume',
     req: BridgeRestoreSessionRequest,
@@ -4047,6 +4117,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'The session is closing; retry after close completes',
         );
       }
+      const replayFields =
+        action === 'load' && req.historyPageSize !== undefined
+          ? await refreshedReplayFieldsFor(existing, req.historyPageSize)
+          : replayFieldsFor(existing, action);
+      if (byId.get(req.sessionId) !== existing || existing.closing) {
+        throw new SessionNotFoundError(req.sessionId);
+      }
       existing.attachCount++;
       const clientId = registerClient(existing, req.clientId);
       recordAttachRef(existing, clientId);
@@ -4067,7 +4144,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // caller saw; spawn-only sessions don't carry a state payload.
         state: existing.restoreState ?? {},
         hasActivePrompt: existing.promptActive,
-        ...replayFieldsFor(existing, action),
+        ...replayFields,
       };
     }
 
@@ -6514,36 +6591,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     async getSessionTranscriptPage(req) {
-      const info = await ensureChannel();
-      try {
-        const response = await withWorkspaceControl(info, () =>
-          withTimeout(
-            Promise.race([
-              info.connection.extMethod(
-                SERVE_STATUS_EXT_METHODS.sessionTranscript,
-                { ...req, cwd: boundWorkspace },
-              ),
-              getChannelClosedReject(info),
-            ]),
-            Math.max(initTimeoutMs, SESSION_TRANSCRIPT_TIMEOUT_MS),
-            SERVE_STATUS_EXT_METHODS.sessionTranscript,
-          ),
-        );
-        return response as unknown as BridgeSessionTranscriptPage;
-      } catch (err) {
-        // A missing transcript file (ENOENT without a cursor) surfaces from the
-        // child as a raw resourceNotFound JSON-RPC error. Translate it to
-        // SessionNotFoundError so the route maps it to HTTP 404 — mirroring the
-        // load/resume path above — instead of falling through to a 500.
-        if (isAcpSessionResourceNotFound(err, req.sessionId)) {
-          throw new SessionNotFoundError(req.sessionId);
-        }
-        throw err;
-      } finally {
-        if (hasNoChannelWork(info)) {
-          await startIdleTimer(info, 'session transcript');
-        }
-      }
+      return requestSessionTranscriptPage(req);
     },
 
     async cancelSessionTask(sessionId, taskId, taskKind) {

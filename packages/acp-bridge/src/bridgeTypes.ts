@@ -251,6 +251,8 @@ export interface BridgeSessionTranscriptPageRequest {
   sessionId: string;
   cursor?: string;
   beforeRecordId?: string;
+  /** Internal newest-page read used to refresh an attached session's UI. */
+  direction?: 'backward';
   limit?: number;
 }
 

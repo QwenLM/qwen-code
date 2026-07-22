@@ -151,6 +151,10 @@ import {
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
 } from '../config/trustedFolders.js';
+import {
+  createVirtualSubagentSessionId,
+  VirtualSubagentSessions,
+} from './virtual-subagent-sessions.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -478,8 +482,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_sessions',
   'multi_workspace_session_rewind',
   'multi_workspace_session_shell',
+  'dynamic_workspace_registration',
   'persistent_workspace_registration',
   'workspace_display_name',
+  'scratch_workspace_registration',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
@@ -2498,6 +2504,21 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'dynamic_workspace_registration') {
+          expect(
+            predicate({ dynamicWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ dynamicWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              dynamicWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
         if (feature === 'persistent_workspace_registration') {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
@@ -2514,6 +2535,21 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'scratch_workspace_registration') {
+          expect(
+            predicate({ scratchWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ scratchWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              scratchWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
           continue;
         }
         if (feature === 'workspace_runtime_removal') {
@@ -3094,6 +3130,7 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, {
         bridge: primaryBridge,
         workspaceRegistry: registry,
+        createWorkspaceRuntime: vi.fn(),
         workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
       });
 
@@ -3103,6 +3140,10 @@ describe('createServeApp', () => {
       expect(before.status).toBe(200);
       expect(before.body.features).toContain(
         'persistent_workspace_registration',
+      );
+      expect(before.body.features).toContain('dynamic_workspace_registration');
+      expect(before.body.features).not.toContain(
+        'scratch_workspace_registration',
       );
       expect(before.body.features).not.toContain('multi_workspace_sessions');
       expect(before.body.workspaces).toEqual([
@@ -3128,6 +3169,52 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('advertises scratch only with a compatible root and complete disposal owner', async () => {
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        createWorkspaceRuntime: vi.fn(),
+        managedScratchRoot: {
+          canonicalRoot: '/managed-scratch',
+          device: 1,
+          inode: 1,
+        },
+        workspaceRuntimeRemoval: {},
+        voiceCoordinator: {},
+      } as Parameters<typeof createServeApp>[2]);
+
+      const supported = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(supported.body.features).toContain(
+        'scratch_workspace_registration',
+      );
+
+      registry.add(
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'conflict',
+          workspaceCwd: '/managed-scratch/project',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+      );
+      const conflicted = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(conflicted.body.features).not.toContain(
+        'scratch_workspace_registration',
+      );
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
@@ -7335,6 +7422,142 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('resolves and cancels a virtual subagent through its routes', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const resolveSpy = vi
+        .spyOn(VirtualSubagentSessions.prototype, 'resolve')
+        .mockResolvedValue({
+          sessionId: createVirtualSubagentSessionId('s-1', 'agent-1'),
+          taskId: 'agent-1',
+          title: 'Investigate',
+          status: 'running',
+        });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      try {
+        const resolveRes = await request(app)
+          .get('/session/s-1/subagents/tool-1')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        const cancelRes = await request(app)
+          .post('/session/s-1/subagents/tool-1/cancel')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+
+        expect(resolveRes.status).toBe(200);
+        expect(resolveRes.headers['cache-control']).toBe('no-store');
+        expect(resolveRes.body).toMatchObject({
+          taskId: 'agent-1',
+          status: 'running',
+        });
+        expect(cancelRes.status).toBe(200);
+        expect(cancelRes.body).toEqual({ cancelled: true });
+        expect(resolveSpy).toHaveBeenCalledTimes(2);
+        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'tool-1']);
+        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'tool-1']);
+        expect(bridge.cancelSessionTaskCalls).toEqual([
+          { sessionId: 's-1', taskId: 'agent-1', taskKind: 'agent' },
+        ]);
+      } finally {
+        resolveSpy.mockRestore();
+      }
+    });
+
+    it('requires the parent runtime for virtual heartbeat and detach', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+      const sessionId = createVirtualSubagentSessionId(
+        'missing-parent',
+        'agent-1',
+      );
+
+      const heartbeat = await request(app)
+        .post(`/session/${sessionId}/heartbeat`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      const detach = await request(app)
+        .post(`/session/${sessionId}/detach`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(heartbeat.status).toBe(404);
+      expect(heartbeat.body.sessionId).toBe('missing-parent');
+      expect(detach.status).toBe(404);
+      expect(detach.body.sessionId).toBe('missing-parent');
+    });
+
+    it('serves virtual session stubs without calling the parent bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const sessionId = createVirtualSubagentSessionId('s-1', 'agent-1');
+
+      const context = await request(app)
+        .get(`/session/${sessionId}/context`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const commands = await request(app)
+        .get(`/session/${sessionId}/supported-commands`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const heartbeat = await request(app)
+        .post(`/session/${sessionId}/heartbeat`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'detail-client')
+        .send({});
+
+      expect(context.status).toBe(200);
+      expect(context.body).toEqual({
+        v: 1,
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        state: {},
+      });
+      expect(commands.status).toBe(200);
+      expect(commands.body).toEqual({
+        v: 1,
+        sessionId,
+        availableCommands: [],
+        availableSkills: [],
+      });
+      expect(heartbeat.status).toBe(200);
+      expect(heartbeat.body).toMatchObject({
+        sessionId,
+        clientId: 'detail-client',
+      });
+      expect(heartbeat.body.lastSeenAt).toEqual(expect.any(Number));
+      expect(bridge.sessionContextCalls).toEqual([]);
+      expect(bridge.sessionSupportedCommandsCalls).toEqual([]);
+      expect(bridge.heartbeatCalls).toEqual([]);
+    });
+
     it('maps task cancellation bridge errors', async () => {
       const bridge = fakeBridge({
         cancelSessionTaskImpl: async (sessionId) => {
@@ -8319,6 +8542,29 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/load and /resume', () => {
+    it('reports resume as unsupported for virtual subagent sessions', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const sessionId = createVirtualSubagentSessionId('parent-1', 'agent-1');
+
+      const res = await request(app)
+        .post(`/session/${sessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Virtual subagent sessions do not support resume',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      expect(bridge.resumeCalls).toEqual([]);
+    });
+
     it('passes the requested initial history page size to load', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -19760,6 +20006,56 @@ describe('GET /session/:id/events (SSE)', () => {
     });
     expect(frames[1]?.id).toBe('2');
     expect(JSON.parse(frames[1]!.data!)).not.toHaveProperty('promptId');
+  });
+
+  it('streams virtual subagent events without subscribing to the parent session', async () => {
+    const bridge = fakeBridge({
+      subscribeImpl: () => {
+        throw new Error('parent bridge must not be subscribed');
+      },
+    });
+    const subscribeSpy = vi
+      .spyOn(VirtualSubagentSessions.prototype, 'subscribe')
+      .mockResolvedValue(
+        (async function* () {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: { source: 'subagent' },
+          } satisfies BridgeEvent;
+          await new Promise(() => {});
+        })(),
+      );
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const sessionId = createVirtualSubagentSessionId('parent-1', 'agent-1');
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/${sessionId}/events?maxQueued=32`,
+        { headers: { 'Last-Event-ID': '7' } },
+      );
+      expect(res.status).toBe(200);
+
+      const frames = await readSseFrames(res.body!, 1);
+
+      expect(JSON.parse(frames[0]!.data!)).toMatchObject({
+        id: 1,
+        data: { source: 'subagent' },
+      });
+      expect(subscribeSpy).toHaveBeenCalledTimes(1);
+      expect(subscribeSpy.mock.calls[0]?.[1]).toBe(sessionId);
+      expect(subscribeSpy.mock.calls[0]?.[2]).toMatchObject({
+        lastEventId: 7,
+        maxQueued: 32,
+      });
+    } finally {
+      subscribeSpy.mockRestore();
+    }
   });
 
   it('stamps _meta.serverTimestamp on every SSE frame (#4175 F4 prereq, chiga0 #19 P0)', async () => {

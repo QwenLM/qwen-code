@@ -548,6 +548,7 @@ export interface DaemonWorkspaceActions {
     cwd: string,
     options?: { persist?: boolean; displayName?: string },
   ): Promise<DaemonAddWorkspaceResult>;
+  addScratchWorkspace(): Promise<DaemonAddWorkspaceResult>;
   suggestWorkspacePaths(
     prefix: string,
   ): Promise<DaemonWorkspacePathSuggestions>;

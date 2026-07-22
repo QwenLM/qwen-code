@@ -836,6 +836,18 @@ export interface DaemonSessionTranscriptPage {
   replayError?: string;
 }
 
+export interface DaemonSubagentSessionResolution {
+  sessionId: string;
+  taskId: string;
+  title: string;
+  status: string;
+  durationMs?: number;
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedTokens?: number;
+}
+
 export type DaemonSessionArchiveState = 'active' | 'archived';
 
 export type DaemonSessionGroupPresetColor =
@@ -1951,6 +1963,8 @@ export interface DaemonSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /**
    * `id` of the agent task that spawned this one. Absent for agents
    * launched by the top-level session. Sub-agents may spawn sub-agents
