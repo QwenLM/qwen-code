@@ -8,13 +8,25 @@ import type { RequestHandler } from 'express';
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import { OWNER, hasScope } from '../scopes.js';
-import type {
-  ReviewRegistry,
-  ReviewTarget,
+import {
+  TERMINAL_REVIEW_STATUSES,
+  type ReviewRecord,
+  type ReviewRegistry,
+  type ReviewStatus,
+  type ReviewTarget,
 } from '../reviews/reviewRegistry.js';
 import type { ReviewLifecycle } from '../reviews/reviewLifecycle.js';
 import type { ReviewPermissionBridge } from '../reviews/reviewPermissionBridge.js';
 import { PromptQueue } from './promptQueue.js';
+
+const REVIEW_STATUSES: readonly ReviewStatus[] = [
+  'running',
+  'blocked',
+  'completed',
+  'failed',
+  'cancelled',
+  'orphaned',
+];
 
 /**
  * Dependencies for the review control-plane routes (D.2 trigger; D.3 reuses
@@ -362,5 +374,107 @@ export function createTriggerReviewRoute(
         });
       }
     }
+  };
+}
+
+/** A record plus its read-time cost rollup (mirrors routes/agents.ts's `withCost`). */
+export function withReviewCost(
+  rec: ReviewRecord,
+  costFor?: (sessionId: string) => number | undefined,
+): ReviewRecord & { costMicrocents?: number } {
+  const cost = costFor?.(rec.sessionId);
+  return cost !== undefined ? { ...rec, costMicrocents: cost } : { ...rec };
+}
+
+/** GET /rc/reviews?status= — SESSION_READ scope at the mount. */
+export function createListReviewsRoute(deps: ReviewRoutesDeps): RequestHandler {
+  return (req, res) => {
+    const statusRaw = req.query['status'];
+    let status: ReviewStatus | undefined;
+    if (typeof statusRaw === 'string' && statusRaw.length > 0) {
+      if (!REVIEW_STATUSES.includes(statusRaw as ReviewStatus)) {
+        res
+          .status(400)
+          .json({ error: 'Invalid status', code: 'invalid_status' });
+        return;
+      }
+      status = statusRaw as ReviewStatus;
+    }
+    const reviews = deps.registry
+      .list({ status })
+      .map((r) => withReviewCost(r, deps.costFor));
+    res.status(200).json({ reviews });
+  };
+}
+
+/** GET /rc/reviews/:id — SESSION_READ scope at the mount. */
+export function createGetReviewRoute(deps: ReviewRoutesDeps): RequestHandler {
+  return (req, res) => {
+    const rec = deps.registry.get(req.params.id);
+    if (!rec) {
+      res
+        .status(404)
+        .json({ error: 'Unknown review', code: 'review_not_found' });
+      return;
+    }
+    res.status(200).json(withReviewCost(rec, deps.costFor));
+  };
+}
+
+/**
+ * POST /rc/reviews/:id/cancel — proxies to the daemon's session end (the
+ * same call the trigger saga's rollback makes) and marks the record
+ * cancelled. WRITE scope at the mount. 409 review_not_running on terminal
+ * records (mirrors routes/agents.ts's createAgentCancelRoute).
+ */
+export function createCancelReviewRoute(
+  deps: ReviewRoutesDeps,
+): RequestHandler {
+  return async (req, res) => {
+    const rec = deps.registry.get(req.params.id);
+    if (!rec) {
+      res
+        .status(404)
+        .json({ error: 'Unknown review', code: 'review_not_found' });
+      return;
+    }
+    if (TERMINAL_REVIEW_STATUSES.has(rec.status)) {
+      res
+        .status(409)
+        .json({ error: 'Review not running', code: 'review_not_running' });
+      return;
+    }
+    try {
+      await deps.daemon.endSession(rec.sessionId);
+    } catch {
+      res
+        .status(502)
+        .json({ error: 'Daemon unavailable', code: 'daemon_unavailable' });
+      return;
+    }
+    // Atomic terminal transition: two concurrent cancels can both pass the
+    // pre-check above and both reach here. setStatus is the single source of
+    // truth for "who won" — only the caller whose transition actually landed
+    // audits/emits/200s; the loser gets 409, matching the pre-check's
+    // terminal-status response.
+    const transitioned = await deps.registry.setStatus(
+      rec.reviewId,
+      'cancelled',
+    );
+    if (!transitioned) {
+      res
+        .status(409)
+        .json({ error: 'Review not running', code: 'review_not_running' });
+      return;
+    }
+    await deps.lifecycle.onCancelled(rec.reviewId);
+    void deps.audit?.record({
+      action: 'review_cancelled',
+      actorTokenId: req.rcClient?.id,
+      subActor: req.rcClient?.subActor,
+      target: rec.reviewId,
+      detail: { sessionId: rec.sessionId },
+    });
+    res.status(200).json({ reviewId: rec.reviewId, status: 'cancelled' });
   };
 }

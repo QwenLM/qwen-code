@@ -40,6 +40,7 @@ function fakeBridge() {
 async function setup(
   stubOpts: Parameters<typeof startStubDaemon>[0] = {},
   promptAcceptWindowMs = 25,
+  costFor?: (sessionId: string) => number | undefined,
 ): Promise<{
   url: string;
   tokens: { owner: string; write: string; read: string };
@@ -48,7 +49,9 @@ async function setup(
   frames: OwnerEvent[];
 }> {
   // Keep the review prompt in-flight past the accept window so the 202-accept
-  // path is deterministic (never a race on an instant settle).
+  // path is deterministic (never a race on an instant settle) — this ALSO
+  // keeps a triggered review 'running' well past cancel, so cancel-while-
+  // running tests never race prompt-settle (see D.3 report).
   stub = await startStubDaemon({ promptDelayMs: 2000, ...stubOpts });
   const dir = await mkdtemp(join(tmpdir(), 'review-route-'));
   const store = await TokenStore.open(join(dir, 'tokens.json'));
@@ -67,6 +70,7 @@ async function setup(
       registry,
       bridge: bridge as unknown as ReviewPermissionBridge,
       promptAcceptWindowMs,
+      ...(costFor ? { costFor } : {}),
     },
   });
   const frames: OwnerEvent[] = [];
@@ -424,5 +428,148 @@ describe('POST /rc/reviews (trigger saga)', () => {
     expect(res.status).toBe(202);
     const body = (await res.json()) as { reviewId: string };
     expect(registry.get(body.reviewId)?.target).toEqual({ kind: 'local' });
+  });
+});
+
+describe('GET /rc/reviews, GET /rc/reviews/:id (list/detail)', () => {
+  it('list returns registered reviews with cost rollup; read token can list', async () => {
+    const { url, tokens } = await setup({}, 25, (sid) =>
+      sid.startsWith('stub-agent') ? 4242 : undefined,
+    );
+    const trigger = await post(url, tokens.owner, { target: { local: true } });
+    expect(trigger.status).toBe(202);
+    const { reviewId } = (await trigger.json()) as { reviewId: string };
+
+    const list = await fetch(`${url}/rc/reviews`, {
+      headers: { Authorization: `Bearer ${tokens.read}` },
+    });
+    expect(list.status).toBe(200);
+    const listBody = (await list.json()) as {
+      reviews: Array<{ reviewId: string; costMicrocents?: number }>;
+    };
+    expect(listBody.reviews).toHaveLength(1);
+    expect(listBody.reviews[0].reviewId).toBe(reviewId);
+    expect(listBody.reviews[0].costMicrocents).toBe(4242);
+  });
+
+  it('read token can fetch detail; unknown id → 404 review_not_found', async () => {
+    const { url, tokens } = await setup({}, 25, () => 4242);
+    const trigger = await post(url, tokens.owner, { target: { local: true } });
+    const { reviewId } = (await trigger.json()) as { reviewId: string };
+
+    const detail = await fetch(`${url}/rc/reviews/${reviewId}`, {
+      headers: { Authorization: `Bearer ${tokens.read}` },
+    });
+    expect(detail.status).toBe(200);
+    const detailBody = (await detail.json()) as {
+      reviewId: string;
+      costMicrocents?: number;
+    };
+    expect(detailBody.reviewId).toBe(reviewId);
+    expect(detailBody.costMicrocents).toBe(4242);
+
+    const missing = await fetch(`${url}/rc/reviews/does-not-exist`, {
+      headers: { Authorization: `Bearer ${tokens.read}` },
+    });
+    expect(missing.status).toBe(404);
+    expect((await missing.json()) as { code: string }).toMatchObject({
+      code: 'review_not_found',
+    });
+  });
+
+  it('list with an invalid status filter → 400 invalid_status', async () => {
+    const { url, tokens } = await setup();
+    const res = await fetch(`${url}/rc/reviews?status=bogus`, {
+      headers: { Authorization: `Bearer ${tokens.read}` },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { code: string }).toMatchObject({
+      code: 'invalid_status',
+    });
+  });
+});
+
+describe('POST /rc/reviews/:id/cancel', () => {
+  it('cancels a running review: 200 + review_cancelled owner frame + session ended + registry cancelled', async () => {
+    // Default setup() keeps promptDelayMs at 2000ms, so the triggered review
+    // is still 'running' when cancel is called — deterministic, no race
+    // against prompt-settle (see D.3 report for why this avoids the flake
+    // shape noted in agents.integration.test.ts).
+    const { url, tokens, registry, frames } = await setup();
+    const trigger = await post(url, tokens.owner, { target: { local: true } });
+    expect(trigger.status).toBe(202);
+    const { reviewId, sessionId } = (await trigger.json()) as {
+      reviewId: string;
+      sessionId: string;
+    };
+    expect(registry.get(reviewId)?.status).toBe('running');
+
+    const cancel = await fetch(`${url}/rc/reviews/${reviewId}/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokens.owner}` },
+    });
+    expect(cancel.status).toBe(200);
+    expect(
+      (await cancel.json()) as { reviewId: string; status: string },
+    ).toEqual({ reviewId, status: 'cancelled' });
+
+    expect(stub!.lastEndedSessionId).toBe(sessionId);
+    expect(registry.get(reviewId)?.status).toBe('cancelled');
+
+    const cancelled = frames.find((f) => f.type === 'review_cancelled');
+    expect(cancelled).toBeDefined();
+    expect(
+      (cancelled as Extract<OwnerEvent, { type: 'review_cancelled' }>).review,
+    ).toMatchObject({ reviewId, sessionId, status: 'cancelled' });
+
+    await waitFor(() =>
+      frames.some(
+        (f) =>
+          f.type === 'audit' &&
+          (f as Extract<OwnerEvent, { type: 'audit' }>).record.action ===
+            'review_cancelled',
+      ),
+    );
+    const auditFrame = frames.find(
+      (f) =>
+        f.type === 'audit' &&
+        (f as Extract<OwnerEvent, { type: 'audit' }>).record.action ===
+          'review_cancelled',
+    ) as Extract<OwnerEvent, { type: 'audit' }>;
+    expect(auditFrame.record.detail).toMatchObject({ sessionId });
+  });
+
+  it('cancel on an already-terminal review → 409 review_not_running', async () => {
+    const { url, tokens, registry } = await setup();
+    const trigger = await post(url, tokens.owner, { target: { local: true } });
+    const { reviewId } = (await trigger.json()) as { reviewId: string };
+
+    const first = await fetch(`${url}/rc/reviews/${reviewId}/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokens.owner}` },
+    });
+    expect(first.status).toBe(200);
+    expect(registry.get(reviewId)?.status).toBe('cancelled');
+
+    const second = await fetch(`${url}/rc/reviews/${reviewId}/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokens.owner}` },
+    });
+    expect(second.status).toBe(409);
+    expect((await second.json()) as { code: string }).toMatchObject({
+      code: 'review_not_running',
+    });
+  });
+
+  it('cancel on an unknown review id → 404 review_not_found', async () => {
+    const { url, tokens } = await setup();
+    const res = await fetch(`${url}/rc/reviews/does-not-exist/cancel`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${tokens.owner}` },
+    });
+    expect(res.status).toBe(404);
+    expect((await res.json()) as { code: string }).toMatchObject({
+      code: 'review_not_found',
+    });
   });
 });

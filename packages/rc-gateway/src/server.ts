@@ -65,7 +65,12 @@ import {
 import type { ReviewRegistry, ReviewRecord } from './reviews/reviewRegistry.js';
 import { ReviewLifecycle } from './reviews/reviewLifecycle.js';
 import { ReviewPermissionBridge } from './reviews/reviewPermissionBridge.js';
-import { createTriggerReviewRoute } from './routes/review.js';
+import {
+  createTriggerReviewRoute,
+  createListReviewsRoute,
+  createGetReviewRoute,
+  createCancelReviewRoute,
+} from './routes/review.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
 import { createClientsManifestRoute } from './routes/clientsManifest.js';
@@ -1132,9 +1137,10 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
 
   // Remote review control plane (add-remote-review). The trigger saga
   // (POST /rc/reviews) enforces the owner-scope gate + pre-flight skill guard
-  // and wires the per-review permission bridge. List/detail/cancel mounts are
-  // added by D.3. WRITE at the mount; the in-handler OWNER gate escalates for
-  // privileged flags (comment/autofix/autoApprove).
+  // and wires the per-review permission bridge. WRITE at the mount; the
+  // in-handler OWNER gate escalates for privileged flags (comment/autofix/
+  // autoApprove). List/detail (SESSION_READ) and cancel (WRITE) mirror the
+  // agent observability routes above.
   let reviewLifecycle: ReviewLifecycle | undefined;
   if (deps.review) {
     reviewLifecycle = new ReviewLifecycle(
@@ -1160,6 +1166,22 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
       requireScope(WRITE, audit),
       recordActivity(workingDevice),
       createTriggerReviewRoute(reviewDeps),
+    );
+    app.get(
+      '/rc/reviews',
+      requireScope(SESSION_READ, audit),
+      createListReviewsRoute(reviewDeps),
+    );
+    app.get(
+      '/rc/reviews/:id',
+      requireScope(SESSION_READ, audit),
+      createGetReviewRoute(reviewDeps),
+    );
+    app.post(
+      '/rc/reviews/:id/cancel',
+      requireScope(WRITE, audit),
+      recordActivity(workingDevice),
+      createCancelReviewRoute(reviewDeps),
     );
   }
 
