@@ -5,6 +5,8 @@
  */
 
 import * as crypto from 'node:crypto';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -1198,6 +1200,106 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
 
+    // ── Branch creation ────────────────────────────────────────────
+    // When `branch` is present, create and checkout a new git branch
+    // before spawning. The session runs in the same working directory
+    // but on the new branch. Mutually exclusive with `worktree`.
+    const execFileAsync = promisify(execFile);
+    let branchMeta: { name: string; baseBranch: string } | undefined;
+    const rawBranch = body['branch'];
+    if (rawBranch !== undefined && rawBranch !== null) {
+      if (body['worktree'] !== undefined && body['worktree'] !== null) {
+        res.status(400).json({
+          error: '`branch` and `worktree` are mutually exclusive',
+          code: 'branch_and_worktree_conflict',
+        });
+        return;
+      }
+      if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
+        res.status(400).json({
+          error:
+            '`branch` must be an object (e.g. `{"name":"feat/my-feature"}`)',
+          code: 'invalid_branch',
+        });
+        return;
+      }
+      const branchReq = rawBranch as Record<string, unknown>;
+      const branchName = branchReq['name'];
+      if (typeof branchName !== 'string' || branchName.length === 0) {
+        res.status(400).json({
+          error: '`branch.name` must be a non-empty string',
+          code: 'branch_invalid_name',
+        });
+        return;
+      }
+      // Validate git branch name characters.
+      if (
+        /[^a-zA-Z0-9._/-]/.test(branchName) ||
+        branchName.includes('..') ||
+        branchName.startsWith('.') ||
+        branchName.startsWith('-') ||
+        branchName.startsWith('/') ||
+        branchName.endsWith('/') ||
+        branchName.endsWith('.')
+      ) {
+        res.status(400).json({
+          error: `Invalid branch name: ${branchName}`,
+          code: 'branch_invalid_name',
+        });
+        return;
+      }
+      const wtService = new GitWorktreeService(workspaceCwd);
+      if (!(await wtService.isGitRepository())) {
+        res.status(400).json({
+          error: 'Branch creation requires a git repository',
+          code: 'branch_not_git_repo',
+        });
+        return;
+      }
+      // Check the branch doesn't already exist.
+      try {
+        await execFileAsync(
+          'git',
+          ['rev-parse', '--verify', `refs/heads/${branchName}`],
+          { cwd: workspaceCwd },
+        );
+        res.status(409).json({
+          error: `Branch "${branchName}" already exists`,
+          code: 'branch_already_exists',
+        });
+        return;
+      } catch {
+        // rev-parse fails → branch doesn't exist, good.
+      }
+      // Check for dirty working tree.
+      const { stdout: statusOut } = await execFileAsync(
+        'git',
+        ['status', '--porcelain'],
+        { cwd: workspaceCwd },
+      );
+      if (statusOut.trim().length > 0) {
+        res.status(409).json({
+          error: 'Uncommitted changes detected. Commit or stash first.',
+          code: 'branch_dirty_tree',
+        });
+        return;
+      }
+      const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
+      try {
+        await execFileAsync('git', ['checkout', '-b', branchName], {
+          cwd: workspaceCwd,
+        });
+      } catch (checkoutErr) {
+        res.status(500).json({
+          error: `Failed to create branch: ${checkoutErr instanceof Error ? checkoutErr.message : String(checkoutErr)}`,
+          code: 'branch_checkout_failed',
+        });
+        return;
+      }
+      branchMeta = { name: branchName, baseBranch };
+      sessionScope = 'thread';
+    }
+
     // ── Worktree isolation ──────────────────────────────────────────
     // When `worktree` is present, create a git worktree before spawning
     // and relocate the session into it immediately after. The workspace
@@ -1287,6 +1389,7 @@ export function registerSessionRoutes(
           : {}),
         ...(source.sourceId !== undefined ? { sourceId: source.sourceId } : {}),
         ...(worktreeMeta ? { worktree: worktreeMeta } : {}),
+        ...(branchMeta ? { branch: branchMeta } : {}),
       });
       // Client may have disconnected during the 1–3s spawn window. If
       // so, the response can't be delivered. The session is otherwise
@@ -1460,6 +1563,16 @@ export function registerSessionRoutes(
         await new GitWorktreeService(workspaceCwd)
           .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
           .catch(() => {});
+      }
+      // Roll back the branch if spawn failed — switch back to the base
+      // branch and delete the newly created one.
+      if (branchMeta) {
+        await execFileAsync('git', ['checkout', branchMeta.baseBranch], {
+          cwd: workspaceCwd,
+        }).catch(() => {});
+        await execFileAsync('git', ['branch', '-D', branchMeta.name], {
+          cwd: workspaceCwd,
+        }).catch(() => {});
       }
       sendBridgeError(res, err, { route: 'POST /session' });
     }

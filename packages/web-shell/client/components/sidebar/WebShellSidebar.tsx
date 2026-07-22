@@ -41,6 +41,7 @@ import {
   ArchiveRestoreIcon,
   DownloadIcon,
   FolderInputIcon,
+  GitBranchIcon,
   GitForkIcon,
   PencilIcon,
   PinIcon,
@@ -2641,6 +2642,14 @@ export function WebShellSidebar({
                         strokeWidth={1.5}
                         className={styles.sessionBadgeIcon}
                         aria-label={t('sidebar.newWorktreeTask')}
+                      />
+                    )}
+                    {session.branch && (
+                      <GitBranchIcon
+                        size={11}
+                        strokeWidth={1.5}
+                        className={styles.sessionBadgeIcon}
+                        aria-label={session.branch.name}
                       />
                     )}
                     {label}

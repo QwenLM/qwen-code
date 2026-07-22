@@ -96,6 +96,8 @@ export interface BridgeSpawnRequest {
   approvalMode?: ApprovalMode;
   /** Worktree isolation metadata, set by the daemon route before spawn. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Branch metadata, set by the daemon route before spawn. */
+  branch?: { name: string; baseBranch: string };
 }
 
 export interface BridgeSession {
@@ -130,6 +132,8 @@ export interface BridgeSession {
   sourcePersisted?: boolean;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Present when the session was created with a new branch. */
+  branch?: { name: string; baseBranch: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -420,6 +424,8 @@ export interface BridgeSessionSummary {
   color?: SessionGroupPresetColor | null;
   /** Present when the session was created with worktree isolation. */
   worktree?: { slug: string; path: string; branch: string };
+  /** Present when the session was created with a new branch. */
+  branch?: { name: string; baseBranch: string };
 }
 
 /**

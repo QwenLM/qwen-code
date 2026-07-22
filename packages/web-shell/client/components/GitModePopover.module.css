@@ -1,0 +1,333 @@
+.wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* ── chip ─────────────────────────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--web-shell-font-mono, 'JetBrains Mono', monospace);
+  font-size: 11.5px;
+  font-weight: 500;
+  padding: 3px 9px;
+  border-radius: 20px;
+  cursor: pointer;
+  border: 1px solid rgba(61, 220, 151, 0.2);
+  background: rgba(61, 220, 151, 0.1);
+  color: var(--web-shell-git-mode-current, #3ddc97);
+  transition:
+    border-color 0.2s,
+    background 0.2s,
+    color 0.2s;
+  white-space: nowrap;
+  line-height: 1.4;
+}
+.chip:hover {
+  border-color: rgba(61, 220, 151, 0.45);
+  background: rgba(61, 220, 151, 0.16);
+}
+.chipBranch {
+  color: var(--web-shell-git-mode-branch, #f5a623);
+  background: rgba(245, 166, 35, 0.1);
+  border-color: rgba(245, 166, 35, 0.22);
+}
+.chipBranch:hover {
+  border-color: rgba(245, 166, 35, 0.45);
+  background: rgba(245, 166, 35, 0.16);
+}
+.chipWorktree {
+  color: var(--web-shell-git-mode-worktree, #b48eff);
+  background: rgba(180, 142, 255, 0.1);
+  border-color: rgba(180, 142, 255, 0.22);
+}
+.chipWorktree:hover {
+  border-color: rgba(180, 142, 255, 0.45);
+  background: rgba(180, 142, 255, 0.16);
+}
+.chipCompact {
+  padding: 3px 7px;
+}
+.chipIcon {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+}
+.chipIcon svg {
+  width: 14px;
+  height: 14px;
+}
+.chipText {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.chevron {
+  width: 9px;
+  height: 9px;
+  opacity: 0.5;
+  transition: transform 0.25s cubic-bezier(0.34, 1.4, 0.44, 1);
+  flex-shrink: 0;
+}
+.chevronOpen {
+  transform: rotate(180deg);
+}
+
+.clearBtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  border-radius: 50%;
+  font-size: 9px;
+  cursor: pointer;
+  transition: background 0.15s;
+  flex-shrink: 0;
+  line-height: 1;
+}
+.clearBtn:hover {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+/* ── popover ──────────────────────────────── */
+.popover {
+  width: 310px;
+  padding: 6px;
+  gap: 2px;
+}
+
+.header {
+  font-size: 10.5px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--web-shell-text-dim, #5c6478);
+  padding: 6px 10px 4px;
+}
+
+/* ── mode options ─────────────────────────── */
+.option {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 10px;
+  border: none;
+  background: none;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  position: relative;
+  transition: background 0.15s;
+  font-family: inherit;
+  color: inherit;
+}
+.option:hover {
+  background: var(--web-shell-bg-hover, rgba(255, 255, 255, 0.05));
+}
+.optionSelected {
+  background: var(--web-shell-bg-hover, rgba(255, 255, 255, 0.05));
+}
+
+.optionIcon {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid transparent;
+  margin-top: 1px;
+}
+.optionIcon svg {
+  width: 15px;
+  height: 15px;
+}
+.iconCurrent {
+  background: rgba(61, 220, 151, 0.1);
+  color: var(--web-shell-git-mode-current, #3ddc97);
+  border-color: rgba(61, 220, 151, 0.18);
+}
+.iconBranch {
+  background: rgba(245, 166, 35, 0.1);
+  color: var(--web-shell-git-mode-branch, #f5a623);
+  border-color: rgba(245, 166, 35, 0.18);
+}
+.iconWorktree {
+  background: rgba(180, 142, 255, 0.1);
+  color: var(--web-shell-git-mode-worktree, #b48eff);
+  border-color: rgba(180, 142, 255, 0.18);
+}
+
+.optionText {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-right: 14px;
+}
+.optionName {
+  font-size: 13px;
+  font-weight: 600;
+}
+.optionDesc {
+  font-size: 11px;
+  color: var(--web-shell-text-secondary, #8b93a8);
+  line-height: 1.4;
+}
+
+.checkCurrent,
+.checkBranch,
+.checkWorktree {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.checkCurrent {
+  color: var(--web-shell-git-mode-current, #3ddc97);
+}
+.checkBranch {
+  color: var(--web-shell-git-mode-branch, #f5a623);
+}
+.checkWorktree {
+  color: var(--web-shell-git-mode-worktree, #b48eff);
+}
+
+/* ── branch input ─────────────────────────── */
+.branchBox {
+  margin: 2px 4px 4px;
+  background: var(--web-shell-bg-deep, rgba(0, 0, 0, 0.2));
+  border: 1px solid var(--web-shell-border, rgba(255, 255, 255, 0.08));
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.branchRow {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.branchLabel {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--web-shell-text-dim, #5c6478);
+  flex-shrink: 0;
+}
+.branchInputWrap {
+  flex: 1;
+  position: relative;
+}
+.branchInput {
+  width: 100%;
+  padding: 6px 26px 6px 9px;
+  background: var(--web-shell-bg-surface, rgba(255, 255, 255, 0.04));
+  border: 1px solid var(--web-shell-border, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  color: var(--web-shell-text-primary, #e8ecf4);
+  font-family: var(--web-shell-font-mono, 'JetBrains Mono', monospace);
+  font-size: 12px;
+  outline: none;
+  transition:
+    border-color 0.2s,
+    box-shadow 0.2s;
+}
+.branchInput::placeholder {
+  color: var(--web-shell-text-dim, #5c6478);
+}
+.branchInput:focus {
+  border-color: var(--web-shell-git-mode-branch, #f5a623);
+  box-shadow: 0 0 0 2px rgba(245, 166, 35, 0.1);
+}
+.branchInputInvalid {
+  border-color: var(--web-shell-git-mode-invalid, #ff6b6b);
+  box-shadow: 0 0 0 2px rgba(255, 107, 107, 0.08);
+}
+.branchInputValid {
+  border-color: var(--web-shell-git-mode-valid, #3ddc97);
+  box-shadow: 0 0 0 2px rgba(61, 220, 151, 0.08);
+}
+.branchStatus {
+  position: absolute;
+  right: 7px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 12px;
+  pointer-events: none;
+}
+.branchHint {
+  margin-top: 6px;
+  font-size: 10.5px;
+  color: var(--web-shell-text-dim, #5c6478);
+  line-height: 1.45;
+}
+.branchHintError {
+  color: var(--web-shell-git-mode-invalid, #ff6b6b);
+}
+
+/* ── footer ───────────────────────────────── */
+.footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 10px 6px;
+  border-top: 1px solid var(--web-shell-border, rgba(255, 255, 255, 0.08));
+  margin-top: 4px;
+}
+.cmd {
+  font-family: var(--web-shell-font-mono, 'JetBrains Mono', monospace);
+  font-size: 10.5px;
+  color: var(--web-shell-text-dim, #5c6478);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+.confirmBranch,
+.confirmWorktree {
+  padding: 4px 12px;
+  border: none;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    transform 0.15s,
+    filter 0.15s;
+  flex-shrink: 0;
+}
+.confirmBranch {
+  background: var(--web-shell-git-mode-branch, #f5a623);
+  color: #1a1200;
+}
+.confirmWorktree {
+  background: var(--web-shell-git-mode-worktree, #b48eff);
+  color: #140a24;
+}
+.confirmBranch:hover,
+.confirmWorktree:hover {
+  transform: translateY(-1px);
+  filter: brightness(1.1);
+}
+.confirmBranch:active,
+.confirmWorktree:active {
+  transform: translateY(0);
+}
+.confirmBranch:disabled,
+.confirmWorktree:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+  transform: none;
+  filter: none;
+}

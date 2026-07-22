@@ -39,6 +39,7 @@ import type {
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
 import { GitForkIcon, XIcon } from 'lucide-react';
+import { type SessionGitIntent } from './components/GitModePopover';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
@@ -645,9 +646,11 @@ type SessionActionsWithCreate = {
     approvalMode?: string;
     sourceType?: string;
     worktree?: { slug?: string };
+    branch?: { name: string };
   }) => Promise<{
     sessionId: string;
     worktree?: { slug: string; path: string; branch: string };
+    branch?: { name: string; baseBranch: string };
   }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
@@ -1335,6 +1338,10 @@ export function App({
   const [sessionWorktree, setSessionWorktree] = useState<
     { slug: string; path: string; branch: string } | undefined
   >(undefined);
+  /** Branch metadata for the current session (set after creation with branch mode). */
+  const [sessionBranch, setSessionBranch] = useState<
+    { name: string; baseBranch: string } | undefined
+  >(undefined);
   // Tracks the session id from the latest effect run. In-flight fetches
   // compare their captured sid against this ref on resolve: a match means
   // the response is still relevant and may set OR clear the worktree state;
@@ -1363,6 +1370,7 @@ export function App({
       .catch(() => {
         if (worktreeSessionIdRef.current === sid) {
           setSessionWorktree(undefined);
+          setSessionBranch(undefined);
         }
       });
   }, [connection.sessionId, workspace.client]);
@@ -2791,10 +2799,10 @@ export function App({
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
-  /** Worktree request for the next lazily-created session. */
-  const pendingWorktreeRef = useRef<{ slug?: string } | undefined>(undefined);
-  /** Render-visible mirror of pendingWorktreeRef for the empty-state badge. */
-  const [worktreePending, setWorktreePending] = useState(false);
+  /** Git mode intent for the next lazily-created session (branch or worktree). */
+  const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
+    mode: 'current',
+  });
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -2857,7 +2865,14 @@ export function App({
           lockedWorkspaceCwd ??
           selectedWorkspaceCwdRef.current ??
           primaryWorkspaceCwd,
-        worktree: pendingWorktreeRef.current,
+        worktree:
+          gitModeIntent.mode === 'worktree'
+            ? { slug: gitModeIntent.slug }
+            : undefined,
+        branch:
+          gitModeIntent.mode === 'branch'
+            ? { name: gitModeIntent.name }
+            : undefined,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
@@ -2867,11 +2882,13 @@ export function App({
         if (result.worktree) {
           setSessionWorktree(result.worktree);
         }
+        if (result.branch) {
+          setSessionBranch(result.branch);
+        }
         // Clear the pending intent only on success. On failure the
-        // welcome badge stays visible so the user knows the isolation
-        // intent was not fulfilled and can retry.
-        pendingWorktreeRef.current = undefined;
-        setWorktreePending(false);
+        // composer chip stays in the selected mode so the user knows
+        // the intent was not fulfilled and can retry.
+        setGitModeIntent({ mode: 'current' });
       });
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
@@ -2887,7 +2904,7 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [lockedWorkspaceCwd, sessionActions, workspaces]);
+  }, [lockedWorkspaceCwd, sessionActions, workspaces, gitModeIntent]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const onSlashCommandRef = useRef(onSlashCommand);
@@ -3963,8 +3980,7 @@ export function App({
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Starting a fresh chat drops any pending worktree intent set from the
       // empty-state toggle, so it never leaks into the next created session.
-      pendingWorktreeRef.current = undefined;
-      setWorktreePending(false);
+      setGitModeIntent({ mode: 'current' });
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -4192,8 +4208,7 @@ export function App({
     async (sessionId: string, workspaceCwd?: string) => {
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
-      pendingWorktreeRef.current = undefined;
-      setWorktreePending(false);
+      setGitModeIntent({ mode: 'current' });
       setSessionWorktree(undefined);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
@@ -6025,13 +6040,11 @@ export function App({
   const worktreeCancelRef = useRef<HTMLButtonElement>(null);
   const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
   const handleEnableWorktree = useCallback(() => {
-    pendingWorktreeRef.current = {};
-    setWorktreePending(true);
+    setGitModeIntent({ mode: 'worktree' });
     worktreeFocusTarget.current = 'cancel';
   }, []);
   const handleCancelWorktree = useCallback(() => {
-    pendingWorktreeRef.current = undefined;
-    setWorktreePending(false);
+    setGitModeIntent({ mode: 'current' });
     worktreeFocusTarget.current = 'toggle';
   }, []);
   useEffect(() => {
@@ -6043,7 +6056,7 @@ export function App({
     } else {
       worktreeToggleRef.current?.focus();
     }
-  }, [worktreePending]);
+  }, [gitModeIntent]);
   const welcomeHeader = useMemo(
     () => (
       <>
@@ -6052,7 +6065,7 @@ export function App({
         ) : (
           <WelcomeHeader {...welcomeHeaderProps} />
         )}
-        {worktreePending ? (
+        {gitModeIntent.mode === 'worktree' ? (
           <div className={styles.worktreeWelcomeBadge}>
             <span className={styles.worktreeBadgeIcon}>
               <GitForkIcon size={18} strokeWidth={1.8} />
@@ -6104,7 +6117,7 @@ export function App({
     [
       renderWelcomeHeader,
       welcomeHeaderProps,
-      worktreePending,
+      gitModeIntent,
       worktreeToggleEligible,
       handleEnableWorktree,
       handleCancelWorktree,
@@ -7413,12 +7426,17 @@ export function App({
                             sessionWorktree
                               ? (selectedWorkspaceGitStatus?.branch ??
                                 sessionWorktree.branch)
-                              : (connection.sessionId
-                                ? connection.gitBranch
-                                : (selectedWorkspaceGitStatus?.branch ??
-                                  undefined))
+                              : sessionBranch
+                                ? (selectedWorkspaceGitStatus?.branch ??
+                                  sessionBranch.name)
+                                : (connection.sessionId
+                                  ? connection.gitBranch
+                                  : (selectedWorkspaceGitStatus?.branch ??
+                                    undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
+                          gitModeIntent={gitModeIntent}
+                          onGitModeIntentChange={setGitModeIntent}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd && !sessionWorktree

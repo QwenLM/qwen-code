@@ -476,6 +476,13 @@ export interface CreateSessionRequest {
    * are always created with `sessionScope: 'thread'`.
    */
   worktree?: { slug?: string };
+  /**
+   * Create a new git branch and check it out before starting the
+   * session. The session runs in the same working directory but on
+   * the new branch. Mutually exclusive with `worktree`. Branch
+   * sessions are always created with `sessionScope: 'thread'`.
+   */
+  branch?: { name: string };
 }
 
 export interface RestoreSessionRequest {
@@ -2024,6 +2031,7 @@ export class DaemonClient {
             : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
           ...(req.worktree !== undefined ? { worktree: req.worktree } : {}),
+          ...(req.branch !== undefined ? { branch: req.branch } : {}),
         }),
       },
       async (res) => {
