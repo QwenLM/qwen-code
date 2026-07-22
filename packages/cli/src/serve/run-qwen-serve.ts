@@ -21,11 +21,6 @@ import express, {
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import { isWithinRoot } from '../config/path-comparison.js';
 import {
-  resolveSkillSettings,
-  skillSettingStrings,
-  updateWorkspaceSkillSettingLists,
-} from '../config/skill-settings.js';
-import {
   DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
   normalizeCompactedReplayMaxBytes,
 } from '@qwen-code/acp-bridge/replayWindowLimits';
@@ -3249,6 +3244,11 @@ async function runQwenServeImpl(
       enabled: boolean,
     ) =>
       withSettingsLock(workspace, async () => {
+        const {
+          resolveSkillSettings,
+          skillSettingStrings,
+          updateWorkspaceSkillSettingLists,
+        } = await import('../config/skill-settings.js');
         const fresh = settingsRuntime.settings.loadSettings(workspace);
         const normalizedName = skillName.trim().toLowerCase();
         const resolved = resolveSkillSettings(fresh);
