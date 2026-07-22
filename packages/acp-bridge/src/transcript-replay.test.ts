@@ -67,6 +67,18 @@ function goalStateRecord(
 }
 
 describe('createTranscriptReplayMachine', () => {
+  it('does not replay internal Goal runtime prompts as user messages', () => {
+    expect(
+      updates(
+        createTranscriptReplayMachine(),
+        record('goal-runtime', 'user', {
+          subtype: 'goal_runtime',
+          message: { role: 'user', parts: [{ text: 'Continue working.' }] },
+        }),
+      ),
+    ).toEqual([]);
+  });
+
   it('projects goal_state through v2-first metadata and preserves its UUID', () => {
     const projected = updates(
       createTranscriptReplayMachine(),

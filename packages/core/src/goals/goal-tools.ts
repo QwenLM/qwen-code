@@ -266,6 +266,7 @@ export class UpdateGoalTool extends BaseDeclarativeTool<
             type: 'array',
             minItems: 1,
             uniqueItems: true,
+            maxItems: 12,
             description:
               'Exact values from the latest get_goal evidenceCatalog.entries[].uuid.',
             items: {

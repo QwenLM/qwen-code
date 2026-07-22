@@ -2239,6 +2239,29 @@ describe('Server Config (config.ts)', () => {
       ).rejects.toThrow('Goal runtime has been disposed');
     });
 
+    it('rebases the Goal runtime from the active transcript chain', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+      const first = await config.getGoalRuntimeReady();
+      const recorder = config.getChatRecordingService();
+      expect(recorder).toBeDefined();
+      vi.spyOn(recorder!, 'readActiveTranscriptChain').mockResolvedValue(
+        resumedGoalSession('active').conversation.messages,
+      );
+
+      await config.rebaseGoalRuntimeFromActiveTranscript();
+
+      const rebased = await config.getGoalRuntimeReady();
+      expect(rebased).not.toBe(first);
+      expect(rebased.getSnapshot().goal?.status).toBe('active');
+      await expect(
+        first.dispatch({ action: 'create', objective: 'stale' }),
+      ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
     it('rebinds the current Goal host to every replacement runtime', async () => {
       const config = new Config({
         ...baseParams,

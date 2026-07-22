@@ -560,9 +560,16 @@ describe('AppContainer State Management', () => {
     } as unknown as ReturnType<Config['getFileHistoryService']>);
 
     const rewindRecording = vi.fn();
+    const rebaseGoalRuntimeFromActiveTranscript = vi
+      .fn()
+      .mockResolvedValue(undefined);
     vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
       rewindRecording,
     } as unknown as NonNullable<ReturnType<Config['getChatRecordingService']>>);
+    vi.spyOn(
+      mockConfig,
+      'rebaseGoalRuntimeFromActiveTranscript',
+    ).mockImplementation(rebaseGoalRuntimeFromActiveTranscript);
 
     render(
       <AppContainer
@@ -582,6 +589,7 @@ describe('AppContainer State Management', () => {
       getHistoryShallow,
       truncateHistory,
       rewindRecording,
+      rebaseGoalRuntimeFromActiveTranscript,
       snapshots,
     };
   };
@@ -4693,6 +4701,9 @@ describe('AppContainer State Management', () => {
         { truncatedCount: 2 },
         harness.snapshots.slice(0, 2),
       );
+      expect(
+        harness.rebaseGoalRuntimeFromActiveTranscript,
+      ).toHaveBeenCalledOnce();
     });
 
     it('restores code only without truncating conversation history', async () => {
@@ -4732,6 +4743,9 @@ describe('AppContainer State Management', () => {
         { truncatedCount: 2 },
         harness.snapshots.slice(0, 2),
       );
+      expect(
+        harness.rebaseGoalRuntimeFromActiveTranscript,
+      ).toHaveBeenCalledOnce();
     });
 
     it('shows an error and returns for conversation-only rewind with no client', async () => {

@@ -95,6 +95,7 @@ import {
   getPlanModeSystemReminder,
   getArenaSystemReminder,
   getStartupContextLength,
+  isGoalRuntimePromptText,
   isSystemReminderContent,
   buildSessionRecoveryPlanFromApiHistory,
   TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
@@ -2266,13 +2267,13 @@ export class Session implements SessionContext {
     await this.historyReplayer.replay(records, gaps);
   }
 
-  rewindToTurn(
+  async rewindToTurn(
     targetTurnIndex: number,
     opts?: { rewindFiles?: boolean },
-  ): {
+  ): Promise<{
     targetTurnIndex: number;
     apiTruncateIndex: number;
-  } {
+  }> {
     if (!Number.isInteger(targetTurnIndex) || targetTurnIndex < 0) {
       throw RequestError.invalidParams(
         undefined,
@@ -2320,13 +2321,15 @@ export class Session implements SessionContext {
       fileHistoryService.restoreFromSnapshots(survivingSnapshots);
     }
 
-    this.config
-      .getChatRecordingService()
-      ?.rewindRecording(
-        targetTurnIndex,
-        { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
-        survivingSnapshots,
-      );
+    const recorder = this.config.getChatRecordingService();
+    recorder?.rewindRecording(
+      targetTurnIndex,
+      { truncatedCount: Math.max(0, apiHistory.length - apiTruncateIndex) },
+      survivingSnapshots,
+    );
+    if (recorder) {
+      await this.config.rebaseGoalRuntimeFromActiveTranscript();
+    }
 
     if (shouldDrainAutomaticQueues) {
       void this.#drainCronQueue();
@@ -2415,6 +2418,14 @@ export class Session implements SessionContext {
     // per-turn reminder prepended still has a non-reminder prompt part, so it
     // is NOT excluded.
     if (isSystemReminderContent(content)) return false;
+
+    if (
+      content.parts.some(
+        (part) => 'text' in part && isGoalRuntimePromptText(part.text),
+      )
+    ) {
+      return false;
+    }
 
     if (
       content.parts.some(

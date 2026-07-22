@@ -1242,7 +1242,6 @@ export class ChatRecordingService {
     goalContext: GoalTurnPermit,
   ): void {
     try {
-      this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         subtype: 'goal_runtime',
@@ -1655,6 +1654,7 @@ export class ChatRecordingService {
       const record = messages[i];
       if (
         record.type === 'user' &&
+        record.subtype !== 'goal_runtime' &&
         record.subtype !== 'notification' &&
         record.subtype !== 'cron' &&
         record.subtype !== 'mid_turn_user_message'

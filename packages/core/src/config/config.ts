@@ -189,6 +189,7 @@ import {
 import { Storage } from './storage.js';
 import {
   ChatRecordingService,
+  type ChatRecord,
   type ChatRecordingFailureEvent,
   type ChatRecordingFailureListener,
 } from '../services/chatRecordingService.js';
@@ -2277,7 +2278,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
-    this.initializeGoalRuntime(this.sessionData);
+    this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     this.extensionManager = new ExtensionManager({
       workspaceDir: this.targetDir,
       enabledExtensionOverrides: this.overrideExtensions,
@@ -3422,7 +3423,7 @@ export class Config {
     this.chatRecordingService = this.chatRecordingEnabled
       ? this.createChatRecordingService()
       : undefined;
-    this.initializeGoalRuntime(this.sessionData);
+    this.initializeGoalRuntime(this.sessionData?.conversation.messages);
     // The file-read cache is session-scoped: its `file_unchanged`
     // placeholder relies on the model having seen the prior full read
     // earlier in the *current* conversation. Carrying entries across
@@ -6414,6 +6415,18 @@ export class Config {
     return this.goalRuntimeReady.then(() => runtime);
   }
 
+  async rebaseGoalRuntimeFromActiveTranscript(): Promise<void> {
+    if (!this.chatRecordingService || !this.goalRuntime) {
+      throw new GoalPersistenceUnavailableError();
+    }
+    const records = await this.chatRecordingService.readActiveTranscriptChain();
+    this.goalTurnHostUnbind?.();
+    this.goalTurnHostUnbind = undefined;
+    this.goalRuntime.dispose();
+    this.initializeGoalRuntime(records);
+    await this.goalRuntimeReady;
+  }
+
   bindGoalTurnHost(host: GoalTurnHost): () => void {
     const generation = this.goalTurnHostGeneration + 1;
     this.goalTurnHostGeneration = generation;
@@ -6451,7 +6464,7 @@ export class Config {
     );
   }
 
-  private initializeGoalRuntime(sessionData?: ResumedSessionData): void {
+  private initializeGoalRuntime(records?: readonly ChatRecord[]): void {
     this.goalTurnHostUnbind?.();
     this.goalTurnHostUnbind = undefined;
     if (!this.chatRecordingService) {
@@ -6468,9 +6481,7 @@ export class Config {
     if (this.goalTurnHost) {
       this.goalTurnHostUnbind = runtime.bindHost(this.goalTurnHost);
     }
-    this.goalRuntimeReady = runtime
-      .restore(sessionData?.conversation.messages ?? [])
-      .then(() => runtime);
+    this.goalRuntimeReady = runtime.restore(records ?? []).then(() => runtime);
     void this.goalRuntimeReady.catch(() => undefined);
   }
 

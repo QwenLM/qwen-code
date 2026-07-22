@@ -19,6 +19,7 @@ export * from './goal-persistence.js';
 export * from './goal-legacy-projection.js';
 export * from './goal-runtime.js';
 export { goalTurnContext } from './goal-turn-context.js';
+export { isGoalRuntimePromptText } from './goal-runtime-prompt.js';
 export type {
   GoalControlTransition,
   GoalTurnFinishedTransition,

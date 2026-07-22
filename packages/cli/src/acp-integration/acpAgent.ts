@@ -9122,7 +9122,7 @@ class QwenAgent implements Agent {
         const historyBeforeRewind = session.captureHistorySnapshot();
         let rewindResult;
         try {
-          rewindResult = session.rewindToTurn(turnIndex as number, {
+          rewindResult = await session.rewindToTurn(turnIndex as number, {
             rewindFiles,
           });
         } catch (err) {

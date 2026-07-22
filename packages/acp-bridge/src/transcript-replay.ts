@@ -474,6 +474,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
     if (
+      record.subtype === 'goal_runtime' ||
       record.subtype === 'notification' ||
       record.subtype === 'cron' ||
       record.subtype === 'mid_turn_user_message'

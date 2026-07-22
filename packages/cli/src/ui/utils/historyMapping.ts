@@ -9,6 +9,7 @@ import type { Content } from '@google/genai';
 import {
   CompressionStatus,
   getStartupContextLength,
+  isGoalRuntimePromptText,
   isSystemReminderContent,
 } from '@qwen-code/qwen-code-core';
 import { isSlashCommand } from './commandUtils.js';
@@ -55,6 +56,14 @@ function isUserTextContent(content: Content): boolean {
   // a per-turn reminder prepended still has a non-reminder prompt part, so it
   // is NOT excluded.
   if (isSystemReminderContent(content)) return false;
+
+  if (
+    content.parts.some(
+      (part) => 'text' in part && isGoalRuntimePromptText(part.text),
+    )
+  ) {
+    return false;
+  }
 
   return content.parts.some((part) => 'text' in part && part.text);
 }

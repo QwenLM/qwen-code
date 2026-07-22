@@ -147,6 +147,54 @@ function validate(
 }
 
 describe('Goal evidence catalog', () => {
+  it('bounds catalog entries and terminal evidence references', () => {
+    const records = [
+      record('cursor', 'system', {
+        provenance: 'goal_control',
+        subtype: 'goal_state',
+      }),
+      ...Array.from({ length: 101 }, (_, index) =>
+        record(`evidence-${index}`, 'assistant', {
+          provenance: 'assistant_output',
+          turnId: 'turn-3',
+          text: `output ${index}`,
+        }),
+      ),
+    ];
+    const input = { records: chain(records), goal: goal(), permit: permit() };
+
+    expect(buildGoalEvidenceCatalog(input)).toMatchObject({ truncated: true });
+    expect(buildGoalEvidenceCatalog(input).entries).toHaveLength(100);
+    expect(() =>
+      validateGoalEvidenceReferences({
+        ...input,
+        proposal: complete(
+          Array.from({ length: 13 }, (_, index) => `evidence-${index}`),
+        ),
+      }),
+    ).toThrowError(
+      expect.objectContaining({ code: 'too_many_evidence_references' }),
+    );
+  });
+
+  it('rejects cited evidence that exceeds the verifier byte budget', () => {
+    const records = [
+      record('cursor', 'system', {
+        provenance: 'goal_control',
+        subtype: 'goal_state',
+      }),
+      record('oversized', 'assistant', {
+        provenance: 'assistant_output',
+        turnId: 'turn-3',
+        text: 'x'.repeat(24_001),
+      }),
+    ];
+
+    expect(() => validate(records, complete(['oversized']))).toThrowError(
+      expect.objectContaining({ code: 'evidence_payload_too_large' }),
+    );
+  });
+
   it('keeps delivered output from earlier Goal turns citable', () => {
     const records = [
       record('cursor', 'system', {
@@ -238,6 +286,7 @@ describe('Goal evidence catalog', () => {
         },
       ],
       lineageTurnIds: ['turn-3'],
+      truncated: false,
     });
     expect(() => validate(records, complete(['before']))).toThrowError(
       expect.objectContaining({

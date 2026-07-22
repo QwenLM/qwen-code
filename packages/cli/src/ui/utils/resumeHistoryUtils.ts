@@ -335,6 +335,7 @@ function convertToHistoryItems(
     }
     switch (record.type) {
       case 'user': {
+        if (record.subtype === 'goal_runtime') break;
         // Restore notification items (background agent completions and cron fires)
         if (record.subtype === 'notification' || record.subtype === 'cron') {
           const payload = record.systemPayload as

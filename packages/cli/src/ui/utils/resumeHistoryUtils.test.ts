@@ -109,6 +109,34 @@ describe('resumeHistoryUtils', () => {
     ]);
   });
 
+  it('does not replay internal Goal runtime prompts as user history', () => {
+    const conversation = {
+      messages: [
+        {
+          type: 'user',
+          subtype: 'goal_runtime',
+          uuid: 'goal-runtime',
+          message: {
+            parts: [{ text: 'Continue working on the active Goal.' }],
+          },
+        },
+        {
+          type: 'user',
+          uuid: 'user',
+          message: { parts: [{ text: 'real user prompt' }] },
+        },
+      ],
+    } as unknown as ConversationRecord;
+
+    expect(
+      buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({}),
+        100,
+      ),
+    ).toMatchObject([{ type: 'user', text: 'real user prompt' }]);
+  });
+
   it('inserts a history-gap divider before the gap child record', () => {
     // The gap child is the first reachable record; the notice sits above it and
     // states the earlier history could not be recovered.

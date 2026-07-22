@@ -3556,7 +3556,8 @@ export const AppContainer = (props: AppContainerProps) => {
             Date.now(),
           );
 
-          config.getChatRecordingService()?.rewindRecording(
+          const recorder = config.getChatRecordingService();
+          recorder?.rewindRecording(
             targetTurnIndex,
             { truncatedCount: effectiveLength - truncatedUi.length },
             !hasRestoreFailure
@@ -3566,6 +3567,9 @@ export const AppContainer = (props: AppContainerProps) => {
                   .slice(0, targetTurnIndex + 1)
               : undefined,
           );
+          if (recorder) {
+            await config.rebaseGoalRuntimeFromActiveTranscript();
+          }
         }
 
         // Show file restore result after conversation truncation so the

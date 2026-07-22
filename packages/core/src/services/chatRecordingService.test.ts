@@ -541,7 +541,7 @@ describe('ChatRecordingService', () => {
       ]);
     });
 
-    it('treats Goal runtime continuations as top-level rewind boundaries', async () => {
+    it('does not treat Goal runtime continuations as rewind boundaries', async () => {
       chatRecordingService.recordAssistantTurn({
         model: 'gemini-pro',
         message: [{ text: 'before Goal runtime turn' }],
@@ -564,7 +564,7 @@ describe('ChatRecordingService', () => {
       expect(records[3]).toMatchObject({
         type: 'system',
         subtype: 'rewind',
-        parentUuid: records[0].uuid,
+        parentUuid: null,
       });
     });
 

@@ -209,6 +209,26 @@ describe('computeApiTruncationIndex', () => {
       expect(computeApiTruncationIndex(ui, 5, api)).toBe(6);
     });
 
+    it('does not count Goal runtime continuations as user prompts', () => {
+      const ui: HistoryItem[] = [
+        userItem(1),
+        geminiItem(2),
+        userItem(3),
+        geminiItem(4),
+      ];
+      const api: Content[] = [
+        userContent('prompt 1'),
+        modelContent('response 1'),
+        userContent(
+          'Continue working on the active Goal.\nUse get_goal for the authoritative objective and evidence state.\n',
+        ),
+        userContent('prompt 3'),
+        modelContent('response 3'),
+      ];
+
+      expect(computeApiTruncationIndex(ui, 3, api)).toBe(3);
+    });
+
     it('still counts a real turn that has a per-turn reminder prepended', () => {
       // In plan mode the reminder is an extra part on the SAME Content as the
       // prompt: parts = [<system-reminder>…, prompt]. That entry IS a real

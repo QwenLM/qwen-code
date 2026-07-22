@@ -15,6 +15,11 @@ import type {
 } from './goal-protocol.js';
 
 const CATALOG_PREVIEW_LIMIT = 240;
+const CATALOG_ENTRY_LIMIT = 100;
+const CATALOG_BYTE_LIMIT = 24_000;
+const CATALOG_LINEAGE_LIMIT = 16;
+const VERIFIER_REFERENCE_LIMIT = 12;
+const VERIFIER_EVIDENCE_BYTE_LIMIT = 24_000;
 
 export type GoalEvidenceProvenance = Extract<
   ChatRecordProvenance,
@@ -37,6 +42,7 @@ export interface GoalEvidenceCatalogEntry {
 export interface GoalEvidenceCatalog {
   entries: GoalEvidenceCatalogEntry[];
   lineageTurnIds: string[];
+  truncated: boolean;
 }
 
 export interface ValidatedGoalEvidenceRecord extends GoalEvidenceCatalogEntry {
@@ -80,6 +86,8 @@ export class EvidenceSourceUnavailableError extends Error {
 
 export type InvalidGoalEvidenceReferenceCode =
   | 'no_evidence_references'
+  | 'too_many_evidence_references'
+  | 'evidence_payload_too_large'
   | 'missing_reference'
   | 'pre_cursor_reference'
   | 'ineligible_reference'
@@ -107,6 +115,7 @@ interface EvidenceAnalysis {
   eligibleByUuid: Map<string, ValidatedGoalEvidenceRecord>;
   indexByUuid: Map<string, number>;
   lineageTurnIds: string[];
+  catalogTruncated: boolean;
 }
 
 interface ParsedGoalContext {
@@ -121,7 +130,10 @@ export function buildGoalEvidenceCatalog(
   const analysis = analyzeEvidence(input);
   return {
     entries: analysis.catalog.map((entry) => ({ ...entry })),
-    lineageTurnIds: [...analysis.lineageTurnIds],
+    lineageTurnIds: catalogLineageTurnIds(analysis.lineageTurnIds),
+    truncated:
+      analysis.catalogTruncated ||
+      analysis.lineageTurnIds.length > CATALOG_LINEAGE_LIMIT,
   };
 }
 
@@ -135,16 +147,33 @@ export function validateGoalEvidenceReferences(
       'A terminal Goal proposal must cite at least one evidence record.',
     );
   }
+  if (input.proposal.evidenceRefs.length > VERIFIER_REFERENCE_LIMIT) {
+    throw new InvalidGoalEvidenceReferenceError(
+      'too_many_evidence_references',
+      `A terminal Goal proposal may cite at most ${VERIFIER_REFERENCE_LIMIT} evidence records.`,
+    );
+  }
   const citedRecords = input.proposal.evidenceRefs.map((reference) =>
     validateReference(reference, input, analysis),
   );
+  if (
+    citedRecords.reduce(
+      (total, record) => total + Buffer.byteLength(record.content, 'utf8'),
+      0,
+    ) > VERIFIER_EVIDENCE_BYTE_LIMIT
+  ) {
+    throw new InvalidGoalEvidenceReferenceError(
+      'evidence_payload_too_large',
+      `Cited Goal evidence exceeds the ${VERIFIER_EVIDENCE_BYTE_LIMIT}-byte verifier limit.`,
+    );
+  }
 
   validateBlockerCoverage(input.proposal, citedRecords, analysis);
 
   return {
     catalog: analysis.catalog.map((entry) => ({ ...entry })),
     citedRecords: citedRecords.map((entry) => ({ ...entry })),
-    lineageTurnIds: [...analysis.lineageTurnIds],
+    lineageTurnIds: catalogLineageTurnIds(analysis.lineageTurnIds),
   };
 }
 
@@ -235,11 +264,23 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
   }
 
   const catalog: GoalEvidenceCatalogEntry[] = [];
+  let catalogBytes = 0;
+  let catalogTruncated = false;
   const eligibleByUuid = new Map<string, ValidatedGoalEvidenceRecord>();
   for (let index = cursorIndex + 1; index < input.records.length; index++) {
     const evidence = eligibleEvidence(input.records[index]!, input);
     if (!evidence) continue;
-    catalog.push(stripContent(evidence));
+    const entry = stripContent(evidence);
+    const entryBytes = Buffer.byteLength(JSON.stringify(entry), 'utf8');
+    if (
+      catalog.length >= CATALOG_ENTRY_LIMIT ||
+      catalogBytes + entryBytes > CATALOG_BYTE_LIMIT
+    ) {
+      catalogTruncated = true;
+      continue;
+    }
+    catalog.push(entry);
+    catalogBytes += entryBytes;
     eligibleByUuid.set(evidence.uuid, evidence);
   }
 
@@ -249,7 +290,12 @@ function analyzeEvidence(input: GoalEvidenceContext): EvidenceAnalysis {
     eligibleByUuid,
     indexByUuid,
     lineageTurnIds,
+    catalogTruncated,
   };
+}
+
+function catalogLineageTurnIds(lineageTurnIds: readonly string[]): string[] {
+  return lineageTurnIds.slice(-CATALOG_LINEAGE_LIMIT);
 }
 
 function validateReference(

@@ -587,6 +587,9 @@ describe('Session', () => {
       getChatRecordingService: vi
         .fn()
         .mockReturnValue(mockChatRecordingService),
+      rebaseGoalRuntimeFromActiveTranscript: vi
+        .fn()
+        .mockResolvedValue(undefined),
       getToolRegistry: vi.fn().mockReturnValue(mockToolRegistry),
       getFileService: vi.fn().mockReturnValue(fileService),
       getFileFilteringRespectGitIgnore: vi.fn().mockReturnValue(true),
@@ -2698,7 +2701,7 @@ describe('Session', () => {
   });
 
   describe('rewindToTurn', () => {
-    it('truncates model history before the requested user turn and records rewind', () => {
+    it('truncates model history before the requested user turn and records rewind', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -2708,7 +2711,7 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      const result = session.rewindToTurn(1);
+      const result = await session.rewindToTurn(1);
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
@@ -2718,9 +2721,12 @@ describe('Session', () => {
         { truncatedCount: 2 },
         [],
       );
+      expect(
+        mockConfig.rebaseGoalRuntimeFromActiveTranscript,
+      ).toHaveBeenCalledOnce();
     });
 
-    it('can rewind the conversation without restoring file history', () => {
+    it('can rewind the conversation without restoring file history', async () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: 'first' }] },
         { role: 'model', parts: [{ text: 'first reply' }] },
@@ -2737,7 +2743,7 @@ describe('Session', () => {
         },
       ]);
 
-      const result = session.rewindToTurn(1, { rewindFiles: false });
+      const result = await session.rewindToTurn(1, { rewindFiles: false });
 
       expect(result).toEqual({ targetTurnIndex: 1, apiTruncateIndex: 2 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(2);
@@ -2751,7 +2757,7 @@ describe('Session', () => {
       );
     });
 
-    it('preserves startup context when rewinding to the first user turn', () => {
+    it('preserves startup context when rewinding to the first user turn', async () => {
       const history: Content[] = [
         {
           role: 'user',
@@ -2767,7 +2773,7 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      const result = session.rewindToTurn(0);
+      const result = await session.rewindToTurn(0);
 
       expect(result).toEqual({ targetTurnIndex: 0, apiTruncateIndex: 1 });
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(1);
@@ -2800,7 +2806,28 @@ describe('Session', () => {
       expect(session.getRewindableUserTurnCount()).toBe(2);
     });
 
-    it('does not count a mid-history MCP added-tool reminder as a user turn', () => {
+    it('does not count Goal runtime continuations as user turns', async () => {
+      const goalRuntimePrompt =
+        'Continue working on the active Goal.\nUse get_goal for the authoritative objective and evidence state.\nRuntime continuation context: continue';
+      const history: Content[] = [
+        { role: 'user', parts: [{ text: 'first' }] },
+        { role: 'model', parts: [{ text: 'first reply' }] },
+        { role: 'user', parts: [{ text: goalRuntimePrompt }] },
+        { role: 'model', parts: [{ text: 'Goal reply' }] },
+        { role: 'user', parts: [{ text: 'second' }] },
+      ];
+      vi.mocked(mockChat.getHistory).mockReturnValue(history);
+      vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
+
+      expect(session.getRewindableUserTurnCount()).toBe(2);
+      await expect(session.rewindToTurn(1)).resolves.toEqual({
+        targetTurnIndex: 1,
+        apiTruncateIndex: 4,
+      });
+      expect(mockChat.truncateHistory).toHaveBeenCalledWith(4);
+    });
+
+    it('does not count a mid-history MCP added-tool reminder as a user turn', async () => {
       // drainPendingAddedMcpToolsReminder injects a pure <system-reminder>
       // user entry mid-history. Counting it as a real turn would land the
       // rewind one entry early, dropping the reminder plus a turn's context.
@@ -2829,7 +2856,7 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      const result = session.rewindToTurn(1);
+      const result = await session.rewindToTurn(1);
 
       // Keep startup + turn 1 + the MCP reminder (indices 0–3); truncate at
       // the second prompt (index 4). Counting the reminder would return 3.
@@ -2837,7 +2864,7 @@ describe('Session', () => {
       expect(mockChat.truncateHistory).toHaveBeenCalledWith(4);
     });
 
-    it('does not count Todo Stop Guard continuations as user turns', () => {
+    it('does not count Todo Stop Guard continuations as user turns', async () => {
       const guardPrompt =
         '[Todo Stop Guard] 1 todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
       const history: Content[] = [
@@ -2861,7 +2888,7 @@ describe('Session', () => {
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
       expect(session.getRewindableUserTurnCount()).toBe(2);
-      expect(session.rewindToTurn(1)).toEqual({
+      await expect(session.rewindToTurn(1)).resolves.toEqual({
         targetTurnIndex: 1,
         apiTruncateIndex: 6,
       });
@@ -2884,51 +2911,51 @@ describe('Session', () => {
       expect(session.getRewindableUserTurnCount()).toBe(1);
     });
 
-    it('rejects unreachable user turns', () => {
+    it('rejects unreachable user turns', async () => {
       const history: Content[] = [{ role: 'user', parts: [{ text: 'first' }] }];
       vi.mocked(mockChat.getHistory).mockReturnValue(history);
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
 
-      expect(() => session.rewindToTurn(2)).toThrow(
+      await expect(session.rewindToTurn(2)).rejects.toThrow(
         'Cannot rewind to the requested turn',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('rejects rewinds while a cron prompt is mutating history', () => {
+    it('rejects rewinds while a cron prompt is mutating history', async () => {
       (session as unknown as { cronProcessing: boolean }).cronProcessing = true;
 
-      expect(() => session.rewindToTurn(0)).toThrow(
+      await expect(session.rewindToTurn(0)).rejects.toThrow(
         'Cannot rewind while a prompt is running',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('rejects invalid target turn indexes', () => {
-      expect(() => session.rewindToTurn(-1)).toThrow(
+    it('rejects invalid target turn indexes', async () => {
+      await expect(session.rewindToTurn(-1)).rejects.toThrow(
         'targetTurnIndex must be a non-negative integer',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('rejects rewinds while a prompt is running', () => {
+    it('rejects rewinds while a prompt is running', async () => {
       (session as unknown as { pendingPrompt: AbortController }).pendingPrompt =
         new AbortController();
 
-      expect(() => session.rewindToTurn(0)).toThrow(
+      await expect(session.rewindToTurn(0)).rejects.toThrow(
         'Cannot rewind while a prompt is running',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('rejects history mutation until an aborted prompt actually settles', () => {
+    it('rejects history mutation until an aborted prompt actually settles', async () => {
       (
         session as unknown as {
           pendingPromptCompletion: Promise<void> | null;
         }
       ).pendingPromptCompletion = new Promise<void>(() => {});
 
-      expect(() => session.rewindToTurn(0)).toThrow(
+      await expect(session.rewindToTurn(0)).rejects.toThrow(
         'Cannot rewind while a prompt is running',
       );
       expect(() => session.restoreHistory([])).toThrow(
@@ -2938,10 +2965,10 @@ describe('Session', () => {
       expect(mockChat.setHistory).not.toHaveBeenCalled();
     });
 
-    it('rejects history mutation while close is in progress', () => {
+    it('rejects history mutation while close is in progress', async () => {
       const releaseClose = session.beginClose();
 
-      expect(() => session.rewindToTurn(0)).toThrow(
+      await expect(session.rewindToTurn(0)).rejects.toThrow(
         'Cannot rewind while a prompt is running',
       );
       expect(() => session.restoreHistory([])).toThrow(
@@ -2950,34 +2977,34 @@ describe('Session', () => {
       releaseClose();
     });
 
-    it('rejects rewinds while a cron abort is active', () => {
+    it('rejects rewinds while a cron abort is active', async () => {
       (
         session as unknown as { cronAbortController: AbortController }
       ).cronAbortController = new AbortController();
 
-      expect(() => session.rewindToTurn(0)).toThrow(
+      await expect(session.rewindToTurn(0)).rejects.toThrow(
         'Cannot rewind while a prompt is running',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('rejects rewinds while a notification prompt is processing', () => {
+    it('rejects rewinds while a notification prompt is processing', async () => {
       (
         session as unknown as { notificationProcessing: boolean }
       ).notificationProcessing = true;
 
-      expect(() => session.rewindToTurn(0)).toThrow(
+      await expect(session.rewindToTurn(0)).rejects.toThrow(
         'Cannot rewind while a prompt is running',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
     });
 
-    it('rejects rewinds while a notification abort controller is active', () => {
+    it('rejects rewinds while a notification abort controller is active', async () => {
       (
         session as unknown as { notificationAbortController: AbortController }
       ).notificationAbortController = new AbortController();
 
-      expect(() => session.rewindToTurn(0)).toThrow(
+      await expect(session.rewindToTurn(0)).rejects.toThrow(
         'Cannot rewind while a prompt is running',
       );
       expect(mockChat.truncateHistory).not.toHaveBeenCalled();
@@ -20711,7 +20738,7 @@ describe('Session', () => {
         { role: 'model', parts: [{ text: 'working' }] },
       ];
       vi.mocked(mockChat.getHistoryShallow).mockReturnValue(history);
-      session.rewindToTurn(0);
+      await session.rewindToTurn(0);
 
       mockBackgroundTaskRegistry.getAll.mockReturnValue([
         {
