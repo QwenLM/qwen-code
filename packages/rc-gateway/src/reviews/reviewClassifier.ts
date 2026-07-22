@@ -362,7 +362,12 @@ function classifyShell(command: unknown, policy: ReviewPolicy): ReviewDecision {
 // `edit`/`write_file` use `file_path`, `notebook_edit` uses `notebook_path`.
 // `path`/`filePath`/`absolute_path` are included defensively so a divergent
 // decoy field can never slip an out-of-tree write past confinement.
-const EDIT_PATH_FIELDS = [
+//
+// Exported so the permission bridge (C.2) confines the SAME field set with its
+// `fs.realpath` symlink check — the two layers must never drift (a field the
+// classifier string-confines but the bridge does not realpath-verify would be a
+// hole). See reviewPermissionBridge.ts Guard 2.
+export const EDIT_PATH_FIELDS = [
   'file_path',
   'notebook_path',
   'path',
