@@ -98,14 +98,12 @@ async function buildWorkspaceSkillsStatus(
       skillManager = new SkillManager(shim as Config);
       managers.set(workspaceCwd, skillManager);
     }
-    const disablements = isSafeModeEnv()
-      ? new Map()
-      : resolveSkillSettings(
-          loadSettings(workspaceCwd, {
-            consumeCorruptionEnvVars: false,
-            skipLoadEnvironment: true,
-          }),
-        ).disablements;
+    const disablements = resolveSkillSettings(
+      loadSettings(workspaceCwd, {
+        consumeCorruptionEnvVars: false,
+        skipLoadEnvironment: true,
+      }),
+    ).disablements;
     const skills = await skillManager.listSkills();
     return {
       v: STATUS_SCHEMA_VERSION,

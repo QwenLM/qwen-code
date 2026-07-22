@@ -166,6 +166,55 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(hardDisabled?.lockedScope).toBeUndefined();
   });
 
+  it('resolves disablements in safe mode (status matches execution)', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'available',
+        description: 'Available skill',
+        body: 'Visible',
+        filePath: '/skills/available/SKILL.md',
+        level: 'bundled',
+      },
+      {
+        name: 'blocked',
+        description: 'Blocked skill',
+        body: 'Hidden',
+        filePath: '/skills/blocked/SKILL.md',
+        level: 'bundled',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-safe-mode-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        skills: {
+          disabled: ['blocked'],
+        },
+      }),
+    );
+    const saved = process.env['QWEN_CODE_SAFE_MODE'];
+    process.env['QWEN_CODE_SAFE_MODE'] = '1';
+    try {
+      const provider = createWorkspaceSkillsStatusProvider();
+
+      const status = await provider(workspace);
+
+      expect(status.skills).toMatchObject([
+        { name: 'available', status: 'ok' },
+        { name: 'blocked', status: 'disabled', disabledReason: 'hard' },
+      ]);
+    } finally {
+      if (saved === undefined) {
+        delete process.env['QWEN_CODE_SAFE_MODE'];
+      } else {
+        process.env['QWEN_CODE_SAFE_MODE'] = saved;
+      }
+    }
+  });
+
   it('reuses one SkillManager per workspace across calls', async () => {
     const listSpy = vi.spyOn(SkillManager.prototype, 'listSkills');
     const provider = createWorkspaceSkillsStatusProvider();
