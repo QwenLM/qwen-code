@@ -1001,11 +1001,13 @@ export interface DaemonTranscriptState
   nextOrdinal: number;
   now: number;
   maxBlocks: number;
+  retainSubagentBlocks: boolean;
 }
 
 export interface DaemonTranscriptReducerOptions {
   maxBlocks?: number;
   now?: number;
+  retainSubagentBlocks?: boolean;
   onTruncation?: (detail: DaemonTranscriptTruncationDetail) => void;
 }
 

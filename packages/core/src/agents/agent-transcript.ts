@@ -16,6 +16,8 @@
  *                            notification XML points here
  *   agent-<id>.meta.json   — sidecar with agentType, description, parent
  *                            session/agent IDs, createdAt
+ *   agent-<id>.jsonl.stream — transient live text, removed when the writer
+ *                            closes
  */
 
 import * as fs from 'node:fs';
@@ -27,6 +29,7 @@ import {
   type AgentToolCallEvent,
   type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
+  type AgentStreamTextEvent,
   type AgentExternalMessageEvent,
 } from './runtime/agent-events.js';
 import type {
@@ -40,6 +43,7 @@ import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
 import type { FunctionDeclaration, Content } from '@google/genai';
 
 const debugLogger = createDebugLogger('AGENT_TRANSCRIPT');
+const MAX_PENDING_STREAM_BYTES = 64 * 1024;
 
 export function sanitizeFilenameComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -101,6 +105,8 @@ export interface AgentMeta {
   description: string;
   /** SessionId of the user session that launched this agent. */
   parentSessionId: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /** AgentId of the launching subagent for nested forks; null for top-level. */
   parentAgentId: string | null;
   /** ISO 8601 creation time. */
@@ -152,6 +158,8 @@ export interface AgentPersistedCliFlags {
   sandbox?: SandboxConfig | null;
   screenReader?: boolean;
   model?: string;
+  authType?: string;
+  baseUrl?: string;
   maxSessionTurns?: number;
   maxToolCalls?: number;
   /**
@@ -348,7 +356,22 @@ export function attachJsonlTranscriptWriter(
         ? readLastTranscriptRecordUuidSync(jsonlPath)
         : null;
   let fd: number | null = null;
+  let streamFd: number | null = null;
+  const streamPath = `${jsonlPath}.stream`;
+  const streamRunId = randomUUID();
+  let pendingStreamText = '';
+  let pendingStreamBytes = 0;
+  let streamFlushTimer: NodeJS.Timeout | null = null;
   let openFailed = false;
+
+  try {
+    fs.rmSync(streamPath, { force: true });
+  } catch (error) {
+    debugLogger.warn(
+      `Failed to reset streaming transcript ${streamPath}:`,
+      error,
+    );
+  }
 
   const ensureOpen = (): boolean => {
     if (fd !== null) return true;
@@ -389,11 +412,67 @@ export function attachJsonlTranscriptWriter(
     }
   };
 
+  const flushStreamText = () => {
+    streamFlushTimer = null;
+    if (!pendingStreamText) return;
+    const text = pendingStreamText;
+    pendingStreamText = '';
+    pendingStreamBytes = 0;
+    try {
+      if (streamFd === null) {
+        fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
+        streamFd = fs.openSync(streamPath, 'w');
+      }
+      fs.writeSync(streamFd, text);
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to append streaming transcript ${streamPath}:`,
+        error,
+      );
+    }
+  };
+
+  const appendStreamText = (event: AgentStreamTextEvent) => {
+    const record = `${JSON.stringify({
+      v: 1,
+      runId: event.runId ?? streamRunId,
+      round: event.round,
+      text: event.text,
+      thought: event.thought === true,
+      timestamp: event.timestamp,
+    })}\n`;
+    pendingStreamText += record;
+    pendingStreamBytes += Buffer.byteLength(record);
+    if (pendingStreamBytes >= MAX_PENDING_STREAM_BYTES) {
+      if (streamFlushTimer !== null) {
+        clearTimeout(streamFlushTimer);
+        streamFlushTimer = null;
+      }
+      flushStreamText();
+      return;
+    }
+    if (streamFlushTimer === null) {
+      streamFlushTimer = setTimeout(flushStreamText, 100);
+      streamFlushTimer.unref();
+    }
+  };
+
   const onRoundText = (event: AgentRoundTextEvent) => {
-    if (!event.text) return;
+    if (!event.text && !event.thoughtText) return;
     append({
       ...baseFields('assistant'),
-      message: { role: 'model', parts: [{ text: event.text }] },
+      message: {
+        role: 'model',
+        parts: [
+          ...(event.thoughtText
+            ? [{ text: event.thoughtText, thought: true }]
+            : []),
+          ...(event.text ? [{ text: event.text }] : []),
+        ],
+      },
+      usageMetadata: event.usageMetadata,
+      agentRunId: event.runId ?? streamRunId,
+      agentRound: event.round,
     });
   };
 
@@ -493,18 +572,25 @@ export function attachJsonlTranscriptWriter(
   }
 
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
+  emitter.on(AgentEventType.STREAM_TEXT, appendStreamText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
   emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
   const cleanup = () => {
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
+    emitter.off(AgentEventType.STREAM_TEXT, appendStreamText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
     emitter.off(
       AgentEventType.TOOL_RESPONSES_FINALIZED,
       onToolResponsesFinalized,
     );
     emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
+    if (streamFlushTimer !== null) {
+      clearTimeout(streamFlushTimer);
+      streamFlushTimer = null;
+    }
+    flushStreamText();
     if (fd !== null) {
       try {
         fs.closeSync(fd);
@@ -512,6 +598,22 @@ export function attachJsonlTranscriptWriter(
         // best effort
       }
       fd = null;
+    }
+    if (streamFd !== null) {
+      try {
+        fs.closeSync(streamFd);
+      } catch {
+        // Best-effort cleanup; the process will release the descriptor.
+      }
+      streamFd = null;
+    }
+    try {
+      fs.rmSync(streamPath, { force: true });
+    } catch (error) {
+      debugLogger.warn(
+        `Failed to remove streaming transcript ${streamPath}:`,
+        error,
+      );
     }
   };
 

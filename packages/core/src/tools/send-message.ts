@@ -80,7 +80,7 @@ class SendMessageInvocation extends BaseToolInvocation<
     return 'ask';
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     if (isPlanRequiredTeammateAwaitingApproval(this.config)) {
       const msg = getPlanRequiredTeammatePreApprovalMessage(
         ToolNames.SEND_MESSAGE,
@@ -141,10 +141,22 @@ class SendMessageInvocation extends BaseToolInvocation<
         };
       }
 
-      // A completed background agent is revived from its persisted transcript
-      // and continued with this message — lets the model keep iterating on a
-      // finished sub-agent instead of spawning a fresh one.
+      // Prefer the same in-process runtime when the completed agent is still
+      // resident. This preserves its live chat and prepared tool surface. A
+      // compatible runtime is not retained across session restore, so the
+      // persisted transcript remains the cold fallback for resumable agents.
       if (entry.status === 'completed') {
+        const continued = registry.continueResidentAgent(
+          this.params.task_id,
+          this.params.message,
+        );
+        if (continued) {
+          return {
+            llmContent: `Background task "${this.params.task_id}" continued on its existing runtime with your message as the next instruction.`,
+            returnDisplay: `Continued ${entry.description}`,
+          };
+        }
+
         const revived = await this.config.reviveCompletedBackgroundAgent(
           this.params.task_id,
           this.params.message,
@@ -177,7 +189,27 @@ class SendMessageInvocation extends BaseToolInvocation<
         };
       }
 
-      registry.queueMessage(this.params.task_id, this.params.message);
+      if (
+        registry.isFinishing(this.params.task_id) ||
+        !registry.queueMessage(this.params.task_id, this.params.message)
+      ) {
+        const settled = await registry.waitForFinishing(
+          this.params.task_id,
+          signal,
+        );
+        if (!settled) {
+          const message = `Message delivery to background task "${this.params.task_id}" was cancelled.`;
+          return {
+            llmContent: `Error: ${message}`,
+            returnDisplay: message,
+            error: {
+              message,
+              type: ToolErrorType.SEND_MESSAGE_NOT_RUNNING,
+            },
+          };
+        }
+        return this.execute(signal);
+      }
 
       return {
         llmContent: `Message queued for delivery to background task "${this.params.task_id}". The task will receive it at the next tool-round boundary.`,
@@ -265,10 +297,10 @@ export class SendMessageTool extends BaseDeclarativeTool<
     super(
       SendMessageTool.Name,
       ToolDisplayNames.SEND_MESSAGE,
-      'Send a message to a teammate (use "to") or to a running background task (use "task_id"). ' +
+      'Send a message to a teammate (use "to") or to a running, paused, or completed background task (use "task_id"); completed tasks are revived. ' +
         'For teams, set "to" to a bare teammate name (no @) or "*" to broadcast. ' +
         'For background tasks, set "task_id" to the id from the launch response or list_agents. ' +
-        'Running tasks receive it at the next tool-round boundary; paused recovered tasks are resumed with the message as their first continuation instruction; a completed task is revived from its transcript and continued with your message. ' +
+        'Running tasks receive it at the next tool-round boundary; paused recovered tasks resume with the message as their first continuation instruction; completed tasks continue on their resident runtime when available and otherwise revive from their transcript and continue with your message. ' +
         'Your text output is NOT visible to other agents — use this tool to communicate.',
       Kind.Other,
       {
@@ -281,7 +313,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
           task_id: {
             type: 'string',
             description:
-              'The ID of the background task (from the launch response, a recovered paused task, or a completed task to revive).',
+              'The ID of the background task (from the launch response, a recovered paused task, or a completed task to continue).',
           },
           message: {
             type: 'string',

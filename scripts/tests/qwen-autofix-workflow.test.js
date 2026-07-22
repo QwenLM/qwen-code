@@ -294,9 +294,16 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('.conclusion // .state // ""');
     expect(reviewScanJob).toContain('.workflowName // ""');
     expect(reviewScanJob).toContain('startswith("review-address")');
+    // Every failed-check selector must carry the address-check carve-out, or
+    // the loop reads its OWN runs as feedback about the PR. Asserting the
+    // property rather than the count lets a new selector be added, but not
+    // one that forgets the carve-out.
+    const scanCheckSelectors =
+      reviewScanJob.match(/IN\("(?:FAILURE|QUEUED)"/g) ?? [];
+    expect(scanCheckSelectors.length).toBeGreaterThanOrEqual(3);
     expect(
       reviewScanJob.match(/startswith\("review-address"\)/g) ?? [],
-    ).toHaveLength(2);
+    ).toHaveLength(scanCheckSelectors.length);
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
@@ -394,6 +401,182 @@ describe('qwen-autofix workflow', () => {
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
   });
 
+  it('keeps a still-red check visible, but only once per head', () => {
+    // A red check is a STATE, not the instant it turned red. Counting only
+    // "failed since the watermark" made a still-failing PR invisible the
+    // moment the watermark passed the failure. Measured: #6451 (3 reds
+    // completed 09:30-09:51, watermark 10:55), #7357 (red 07:59, watermark
+    // 09:18), #7390 (red and watermark BOTH 11:27:37, so a strict `>` hid it
+    // the instant it appeared) — all three sat red for hours while every scan
+    // logged "nothing new".
+    const block = reviewScanJob.match(
+      /LIVE_HEAD="\$\(jq -r[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+    const run = (reds, redHead, liveHead) =>
+      execFileSync(
+        'bash',
+        ['-c', `set -uo pipefail\n${script}\nprintf '%s' "$N_RED_NOW"`],
+        {
+          env: {
+            ...process.env,
+            PR_META: JSON.stringify({ headRefOid: liveHead }),
+            CHECKS_JSON: JSON.stringify(
+              reds.map((name) => ({
+                name,
+                conclusion: 'FAILURE',
+                workflowName: 'CI',
+              })),
+            ),
+            RED_HEAD: redHead,
+          },
+          encoding: 'utf8',
+        },
+      );
+
+    // Never evaluated: the red is visible however old it is.
+    expect(run(['Test'], '', 'abc123')).toBe('1');
+    // Already evaluated on THIS head: left alone. This is what bounds it to
+    // one look per head instead of re-selecting the PR every single scan.
+    expect(run(['Test'], 'abc123', 'abc123')).toBe('0');
+    // A new commit re-opens it — the reds now belong to a head nobody judged.
+    expect(run(['Test'], 'old999', 'abc123')).toBe('1');
+    // Green stays green.
+    expect(run([], '', 'abc123')).toBe('0');
+    expect(run(['a', 'b', 'c'], '', 'abc123')).toBe('3');
+    // Empty LIVE_HEAD → fail-closed regardless of RED_HEAD. Without this,
+    // a simplified guard (removing -n) would select a PR with no evaluable head.
+    expect(run(['Test'], '', '')).toBe('0');
+    expect(run(['Test'], 'abc123', '')).toBe('0');
+
+    // The count must actually GATE selection — computing it and then not
+    // consulting it is the whole bug, and every other assertion here still
+    // passes without this line.
+    const idleGate = reviewScanJob.match(
+      /if \[\[ "\$\{N_REVIEWS\}" -eq 0[^\n]*\]\]; then/,
+    )?.[0];
+    expect(idleGate).toBeTruthy();
+    expect(idleGate).toContain('"${N_RED_NOW}" -eq 0');
+
+    // The head is recorded by its OWN marker inside the eval comment, so no
+    // ts/acted/round parser changes — and the comment still matches the eval
+    // filter, so the agent never sees it as feedback.
+    expect(reviewScanJob).toContain('autofix-redcheck head=([0-9a-f]+)');
+    expect(
+      workflow.match(/<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g) ?? [],
+    ).toHaveLength(3);
+    // Every step that EMITS the marker must define REPORT_HEAD itself — a
+    // shell variable does not cross step boundaries — and no step may define
+    // it without emitting. Counting the two kinds separately missed exactly
+    // this: one assignment had landed in `issue-autofix`, which emits no
+    // marker and has no ${PR} in scope, while review-address's handoff step
+    // emitted the marker with the variable unset. Both counts were "right";
+    // the pairing was not.
+    // Checked PER STEP BLOCK, not by step name: `Report dry-run / failure`
+    // exists in BOTH issue-autofix and review-address, so a name-keyed set
+    // merges them and the misplacement stays invisible — that is how the
+    // first version of this assertion passed while the bug was live.
+    let emitterSteps = 0;
+    for (const m of workflow.matchAll(
+      /\n {6}- name: '(?:[^']+)'\n([\s\S]*?)(?=\n {6}- name: '|\n {2}[a-z][a-z0-9-]*:\n|$)/g,
+    )) {
+      const body = m[1];
+      const emits = body.includes(
+        '<!-- autofix-redcheck head=${REPORT_HEAD} -->',
+      );
+      const defines = body.includes('REPORT_HEAD="${CHECKED_OUT_HEAD}"');
+      expect(emits).toBe(defines);
+      if (emits) emitterSteps += 1;
+    }
+    expect(emitterSteps).toBe(2);
+    // The head is captured in prepare (before agent mutations) and forwarded
+    // via a step output — not re-fetched from the API at report time, which
+    // could return a DIFFERENT head if the branch moved during the run.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'CHECKED_OUT_HEAD="$(git rev-parse HEAD)"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'checked_out_head=${CHECKED_OUT_HEAD}',
+    );
+    expect(workflow).not.toContain('REPORT_HEAD="$(gh api');
+    // The handoff step must NOT stamp the redcheck marker when the agent
+    // evaluated nothing (sentinel ts): doing so would make RED_HEAD ==
+    // LIVE_HEAD and the retry scan would see N_RED_NOW=0, going idle
+    // despite the handoff promising a retry.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${MARK_TS}" != \'9999-12-31T23:59:59Z\' ]]; then',
+    );
+  });
+
+  it('renders persistent red checks into the agent feedback', () => {
+    // The scan selects a PR via N_RED_NOW (currently-red, head unjudged),
+    // but the prepare step's "Failed checks" renderer only shows checks
+    // that completed AFTER the watermark. In the exact case N_RED_NOW
+    // targets (red completed before/equal to the watermark), the agent
+    // would receive an empty "Failed checks" section with no check name
+    // to reproduce. The "Still-red checks" section closes that gap.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '## Still-red checks (persisting from before the last evaluation)',
+    );
+    // The still-red section must use <= (complement of the > in "Failed
+    // checks") so the two sections partition the red checks without overlap
+    // or gap.
+    const stillRedBlock = prepareBranchAndFeedbackStep.match(
+      /Still-red checks[\s\S]*?checks\.json"/,
+    )?.[0];
+    expect(stillRedBlock).toBeTruthy();
+    expect(stillRedBlock).toContain('<= $wm');
+    // Must carry the same conclusion filter as N_RED_NOW (no CANCELLED:
+    // a cancelled check is not a persistent red state).
+    expect(stillRedBlock).toContain(
+      'IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")',
+    );
+    expect(stillRedBlock).not.toContain('CANCELLED');
+    // Must carry the address-check carve-out, same as every other
+    // failed-check selector.
+    expect(stillRedBlock).toContain('startswith("review-address")');
+
+    // Behavioral: the jq filter renders a persistent red check that the
+    // "Failed checks" section (completedAt > wm) would miss.
+    const jqFilter = stillRedBlock.match(
+      /jq -r --arg wm.*?'([\s\S]*?)'\s*\\/,
+    )?.[1];
+    expect(jqFilter).toBeTruthy();
+    const checksJson = JSON.stringify([
+      {
+        name: 'Test / unit',
+        conclusion: 'FAILURE',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T09:00:00Z',
+      },
+      {
+        name: 'Lint',
+        conclusion: 'SUCCESS',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T09:00:00Z',
+      },
+      {
+        name: 'Build',
+        conclusion: 'FAILURE',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T11:00:00Z',
+      },
+    ]);
+    const result = execFileSync(
+      'jq',
+      ['-r', '--arg', 'wm', '2026-01-01T10:00:00Z', jqFilter],
+      { encoding: 'utf8', input: checksJson },
+    );
+    // Test / unit completed BEFORE the watermark: shown in still-red.
+    expect(result).toContain('Test / unit: FAILURE');
+    // Build completed AFTER the watermark: NOT in still-red (it is in
+    // "Failed checks" instead).
+    expect(result).not.toContain('Build');
+    // Green check: never shown.
+    expect(result).not.toContain('Lint');
+  });
+
   it('bounds fleet-wide simultaneity below the per-scan target budget', () => {
     // max-parallel is the ONE place different PRs wait on each other: the scan
     // emits every eligible PR (up to MAX_TARGETS_PER_SCAN) and the matrix
@@ -444,6 +627,9 @@ describe('qwen-autofix workflow', () => {
       // Default: the job was selected under the CURRENT window (the latest
       // ack, or 'none' before any takeover) — the normal, non-raced case.
       window = undefined,
+      // The head this job checked out (CHECKED_OUT_HEAD). The no-op same-head
+      // duplicate signature compares the live redcheck marker against it.
+      head = 'aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111',
     }) => {
       const effWindow =
         window ?? (acks.length ? acks[acks.length - 1] : 'none');
@@ -455,7 +641,7 @@ describe('qwen-autofix workflow', () => {
             ...marks.map((m) => ({
               user: { login: 'qwen-code-dev-bot' },
               created_at: m.at ?? '2026-07-18T09:00:00Z',
-              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->`,
+              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->${m.head ? `\n<!-- autofix-redcheck head=${m.head} -->` : ''}`,
             })),
             ...acks.map((at) => ({
               user: { login: 'qwen-code-dev-bot' },
@@ -491,6 +677,7 @@ describe('qwen-autofix workflow', () => {
               CONFLICT: conflict,
               MAX_ROUNDS: '5',
               WINDOW: effWindow,
+              CHECKED_OUT_HEAD: head,
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               REVIEW_BOT: 'qwen-code-ci-bot',
               TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
@@ -668,6 +855,51 @@ describe('qwen-autofix workflow', () => {
         commands: ['2026-07-18T08:45:00Z'],
       }).stale,
     ).toBe(true);
+    // No-op same-head duplicate (signature c): two scans both emit the PR with
+    // watermark W; the first serialized job ends in a no-op, recording a
+    // redcheck marker for head H while keeping ts=W and round UNCHANGED.
+    // Neither the watermark nor the round trigger fires, so without the
+    // redcheck re-check the second job would run the agent again and post a
+    // duplicate report for the same head.
+    const H = 'aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111';
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: H,
+      }).stale,
+    ).toBe(true);
+    // A new commit moved the head: the sibling judged a DIFFERENT head, so
+    // this target is real work, not a duplicate.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: 'bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222',
+      }).stale,
+    ).toBe(false);
+    // Same head, but trusted feedback arrived after the watermark the no-op
+    // sibling evaluated through: the queued job has real work and proceeds.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: H,
+        reviews: [F2],
+      }).stale,
+    ).toBe(false);
+    // Same head, but a live conflict is actionable regardless of the redcheck.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'true',
+        round: 2,
+        head: H,
+      }).stale,
+    ).toBe(false);
   });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
@@ -1379,7 +1611,7 @@ describe('qwen-autofix workflow', () => {
       ).length - 1,
     ).toBe(2);
     expect(reviewScanJob).toContain(
-      '--json headRefName,statusCheckRollup,createdAt,labels',
+      '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels',
     );
     // Command-style comments are instructions, not feedback — excluded at
     // ALL FOUR feedback sites (scan count via $cf; NEWEST, LIVE_NEW, and
@@ -2357,13 +2589,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
     );
-    // Three sites: the NEWEST computation, the live-watermark revalidation,
-    // and the feedback rendering — all must share the same address-check
-    // carve-out.
+    // Four sites: the NEWEST computation, the live-watermark revalidation,
+    // the "Failed checks" rendering, and the "Still-red checks" rendering
+    // — all must share the same address-check carve-out.
     expect(
       prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
         [],
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );

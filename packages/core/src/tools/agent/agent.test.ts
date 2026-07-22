@@ -37,6 +37,7 @@ import type {
   AgentEventEmitter,
 } from '../../agents/runtime/agent-events.js';
 import { partToString } from '../../utils/partUtils.js';
+import { AuthType } from '../../core/contentGenerator.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
@@ -151,6 +152,7 @@ describe('AgentTool', () => {
       get: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       drainMessages: vi.fn().mockReturnValue([]),
+      beginFinishing: vi.fn().mockReturnValue(true),
       queueMessage: vi.fn(),
       queueExternalInput: vi.fn(),
       wakeExternalInputWaiters: vi.fn(),
@@ -190,6 +192,10 @@ describe('AgentTool', () => {
       isAgentTeamEnabled: vi.fn().mockReturnValue(false),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
+      getContentGeneratorConfig: vi.fn().mockReturnValue({
+        model: 'parent-model',
+        authType: 'openai',
+      }),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
       getSandbox: vi.fn().mockReturnValue(undefined),
@@ -376,7 +382,10 @@ describe('AgentTool', () => {
         'paused agents resume with it as their first continuation instruction',
       );
       expect(tool.description).toContain(
-        'completed agents are revived from their retained transcript',
+        'completed agents continue on their resident runtime when available',
+      );
+      expect(tool.description).toContain(
+        'otherwise revive from their retained transcript',
       );
       expect(tool.description).toContain('return to their direct parent');
       expect(tool.description).not.toContain('Top-level one-shot agents');
@@ -759,6 +768,47 @@ describe('AgentTool', () => {
           working_dir: '   ',
         }),
       ).toMatch(/working_dir/i);
+    });
+
+    it('accepts an empty working_dir with worktree isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts a whitespace-only working_dir with worktree isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '   ',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('normalizes an empty working_dir before creating an isolated invocation', () => {
+      const params = {
+        ...validParams,
+        working_dir: '',
+        isolation: 'worktree' as const,
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+
+      const invocation = (
+        agentTool as AgentTool & {
+          createInvocation(params: AgentParams): {
+            params: AgentParams;
+          };
+        }
+      ).createInvocation(params);
+
+      expect(invocation.params.working_dir).toBeUndefined();
+      expect(invocation.params.isolation).toBe('worktree');
     });
 
     it('accepts redundant worktree isolation when working_dir is set', () => {
@@ -4288,6 +4338,7 @@ describe('AgentTool', () => {
   describe('Agent-level background: true', () => {
     let mockAgent: AgentHeadless;
     let mockContextState: ContextState;
+    let mockSubagentDispose: ReturnType<typeof vi.fn>;
     let mockRegistry: {
       assertCanStartBackgroundAgent: ReturnType<typeof vi.fn>;
       canStartBackgroundAgent: ReturnType<typeof vi.fn>;
@@ -4295,16 +4346,21 @@ describe('AgentTool', () => {
       waitForBackgroundSlot: ReturnType<typeof vi.fn>;
       releaseBackgroundSlot: ReturnType<typeof vi.fn>;
       getQueuedCount: ReturnType<typeof vi.fn>;
+      get: ReturnType<typeof vi.fn>;
       register: ReturnType<typeof vi.fn>;
       unregisterForeground: ReturnType<typeof vi.fn>;
       complete: ReturnType<typeof vi.fn>;
       fail: ReturnType<typeof vi.fn>;
       finalizeCancelled: ReturnType<typeof vi.fn>;
       drainMessages: ReturnType<typeof vi.fn>;
+      beginFinishing: ReturnType<typeof vi.fn>;
       waitForMessages: ReturnType<typeof vi.fn>;
       queueExternalInput: ReturnType<typeof vi.fn>;
       wakeExternalInputWaiters: ReturnType<typeof vi.fn>;
       appendActivity: ReturnType<typeof vi.fn>;
+      registerResidentAgent: ReturnType<typeof vi.fn>;
+      unregisterResidentAgent: ReturnType<typeof vi.fn>;
+      restartCompletedAgent: ReturnType<typeof vi.fn>;
     };
 
     const bgSubagent: SubagentConfig = {
@@ -4319,6 +4375,7 @@ describe('AgentTool', () => {
     beforeEach(() => {
       mockAgent = {
         execute: vi.fn().mockResolvedValue(undefined),
+        executeExternalInputs: vi.fn().mockResolvedValue(undefined),
         getFinalText: vi.fn().mockReturnValue('Monitor done'),
         getTerminateMode: vi.fn().mockReturnValue(AgentTerminateMode.GOAL),
         getExecutionSummary: vi.fn().mockReturnValue({}),
@@ -4335,6 +4392,7 @@ describe('AgentTool', () => {
       mockContextState = { set: vi.fn() } as unknown as ContextState;
       MockedContextState.mockImplementation(() => mockContextState);
 
+      const restartedEntry = { status: 'running' };
       mockRegistry = {
         assertCanStartBackgroundAgent: vi.fn(),
         canStartBackgroundAgent: vi.fn().mockReturnValue(true),
@@ -4346,16 +4404,21 @@ describe('AgentTool', () => {
           .mockResolvedValue({ id: Symbol('background-slot') }),
         releaseBackgroundSlot: vi.fn(),
         getQueuedCount: vi.fn().mockReturnValue(0),
+        get: vi.fn().mockReturnValue(restartedEntry),
         register: vi.fn(),
         unregisterForeground: vi.fn(),
         complete: vi.fn(),
         fail: vi.fn(),
         finalizeCancelled: vi.fn(),
         drainMessages: vi.fn().mockReturnValue([]),
+        beginFinishing: vi.fn().mockReturnValue(true),
         waitForMessages: vi.fn().mockResolvedValue([]),
         queueExternalInput: vi.fn(),
         wakeExternalInputWaiters: vi.fn(),
         appendActivity: vi.fn(),
+        registerResidentAgent: vi.fn(),
+        unregisterResidentAgent: vi.fn().mockReturnValue(true),
+        restartCompletedAgent: vi.fn().mockReturnValue(restartedEntry),
       };
 
       vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
@@ -4379,9 +4442,10 @@ describe('AgentTool', () => {
       ] = vi.fn();
 
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(bgSubagent);
+      mockSubagentDispose = vi.fn().mockResolvedValue(undefined);
       vi.mocked(mockSubagentManager.createAgentHeadless).mockResolvedValue({
         subagent: mockAgent,
-        dispose: vi.fn().mockResolvedValue(undefined),
+        dispose: mockSubagentDispose,
       });
     });
 
@@ -4403,6 +4467,7 @@ describe('AgentTool', () => {
       expect(llmText).toContain(
         `Use ${ToolNames.SEND_MESSAGE} to continue this agent`,
       );
+      expect(llmText).toContain('task_id: monitor-');
       expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
       expect(llmText).not.toContain('with to:');
       expect(llmText).not.toContain('Use send_message with task_id:');
@@ -4439,9 +4504,48 @@ describe('AgentTool', () => {
         expect.objectContaining({
           persistedCliFlags: expect.objectContaining({
             model: 'subagent-model',
+            authType: 'openai',
           }),
         }),
       );
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+      writeMetaSpy.mockRestore();
+    });
+
+    it('does not persist the parent base URL for a cross-provider runtime', async () => {
+      const writeMetaSpy = vi.spyOn(transcript, 'writeAgentMeta');
+      vi.mocked(config.getContentGeneratorConfig).mockReturnValue({
+        model: 'parent-model',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://parent-provider.example.com',
+      });
+      vi.mocked(mockAgent.getCore).mockReturnValue({
+        modelConfig: { model: 'subagent-model' },
+        runtimeView: {
+          contentGenerator: {},
+          contentGeneratorConfig: {
+            model: 'subagent-model',
+            authType: AuthType.USE_ANTHROPIC,
+          },
+        },
+        getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
+      } as never);
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+      await invocation.execute();
+
+      const persistedFlags = writeMetaSpy.mock.calls[0]?.[1].persistedCliFlags;
+      expect(persistedFlags).toMatchObject({
+        model: 'subagent-model',
+        authType: 'anthropic',
+      });
+      expect(persistedFlags).toHaveProperty('baseUrl', undefined);
       writeMetaSpy.mockRestore();
     });
 
@@ -4536,7 +4640,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('cleans up owned monitor routing when a background agent finishes', async () => {
+    it('keeps runtime resources while idle and cleans them when disposed', async () => {
       const params: AgentParams = {
         description: 'Start monitor',
         prompt: 'Watch for changes',
@@ -4556,6 +4660,20 @@ describe('AgentTool', () => {
       };
 
       await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalled();
+      });
+      expect(
+        monitorRegistry.setAgentNotificationCallback,
+      ).not.toHaveBeenCalledWith(agentId, undefined);
+      expect(mockSubagentDispose).not.toHaveBeenCalled();
+
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { dispose: () => void }
+        | undefined;
+      expect(resident).toBeDefined();
+      resident?.dispose();
+
+      await vi.waitFor(() => {
         expect(
           monitorRegistry.setAgentNotificationCallback,
         ).toHaveBeenCalledWith(agentId, undefined);
@@ -4568,6 +4686,188 @@ describe('AgentTool', () => {
           { notify: false },
         );
       });
+      expect(mockSubagentDispose).toHaveBeenCalledOnce();
+    });
+
+    it('continues a completed background agent on the same runtime', async () => {
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(1);
+      });
+
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { continue: (message: string) => boolean }
+        | undefined;
+      expect(resident).toBeDefined();
+      expect(resident?.continue('Now inspect the helper')).toBe(true);
+
+      await vi.waitFor(() => {
+        expect(mockAgent.execute).toHaveBeenCalledTimes(2);
+        expect(mockRegistry.complete).toHaveBeenCalledTimes(2);
+      });
+      expect(mockRegistry.restartCompletedAgent).toHaveBeenCalledWith(
+        expect.stringContaining('monitor-'),
+        expect.any(AbortController),
+      );
+      expect(mockContextState.set).toHaveBeenCalledWith(
+        'task_prompt',
+        'Now inspect the helper',
+      );
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledTimes(1);
+      expect(mockSubagentManager.createAgentHeadless).toHaveBeenCalledWith(
+        expect.any(Object),
+        expect.any(Object),
+        expect.objectContaining({
+          modelConfigOverrides: { model: 'parent-model' },
+          runtimeAuthOverrides: expect.objectContaining({
+            authType: 'openai',
+          }),
+        }),
+      );
+      expect(mockSubagentDispose).not.toHaveBeenCalled();
+    });
+
+    it('claims finishing-window input before publishing completion', async () => {
+      mockRegistry.drainMessages
+        .mockReturnValueOnce(['late correction'])
+        .mockReturnValue([]);
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalledOnce();
+      });
+
+      expect(mockAgent.execute).toHaveBeenCalledOnce();
+      expect(mockAgent.executeExternalInputs).toHaveBeenCalledWith(
+        ['late correction'],
+        expect.any(AbortSignal),
+        { resetStats: false },
+      );
+      expect(
+        vi.mocked(mockAgent.executeExternalInputs).mock.invocationCallOrder[0],
+      ).toBeLessThan(mockRegistry.complete.mock.invocationCallOrder[0]!);
+    });
+
+    it('persists completion before publishing the terminal notification', async () => {
+      const patchMetaSpy = vi.spyOn(transcript, 'patchAgentMeta');
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalled();
+      });
+
+      const completedPatchIndex = patchMetaSpy.mock.calls.findIndex(
+        ([, update]) => update.status === 'completed',
+      );
+      expect(completedPatchIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        patchMetaSpy.mock.invocationCallOrder[completedPatchIndex],
+      ).toBeLessThan(mockRegistry.complete.mock.invocationCallOrder[0]!);
+      patchMetaSpy.mockRestore();
+    });
+
+    it('does not retain an agent whose frontmatter hooks are globally registered', async () => {
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        hooks: { PreToolUse: [] },
+      });
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start hooked monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalled();
+        expect(mockSubagentDispose).toHaveBeenCalledOnce();
+      });
+      expect(mockRegistry.registerResidentAgent).not.toHaveBeenCalled();
+    });
+
+    it('does not retain an agent that needs a child-only AUTO permission lease', async () => {
+      let releaseExecution: (() => void) | undefined;
+      vi.mocked(mockAgent.execute).mockImplementation(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseExecution = resolve;
+          }),
+      );
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'auto',
+      });
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Run classified work',
+        prompt: 'Inspect the helper',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.AUTO);
+      releaseExecution?.();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalled();
+        expect(mockSubagentDispose).toHaveBeenCalledOnce();
+      });
+      expect(mockRegistry.registerResidentAgent).not.toHaveBeenCalled();
+    });
+
+    it('disposes an idle AUTO resident if the parent leaves AUTO mode', async () => {
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.AUTO);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue({
+        ...bgSubagent,
+        approvalMode: 'auto',
+      });
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Run classified work',
+        prompt: 'Inspect the helper',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.waitFor(() => {
+        expect(mockRegistry.complete).toHaveBeenCalled();
+      });
+      const resident = mockRegistry.registerResidentAgent.mock.calls[0]?.[1] as
+        | { continue: (message: string) => boolean }
+        | undefined;
+      expect(resident).toBeDefined();
+      expect(mockSubagentDispose).not.toHaveBeenCalled();
+
+      vi.mocked(config.getApprovalMode).mockReturnValue(ApprovalMode.DEFAULT);
+      expect(resident?.continue('Continue')).toBe(false);
+
+      expect(mockRegistry.unregisterResidentAgent).toHaveBeenCalled();
+      expect(mockSubagentDispose).toHaveBeenCalledOnce();
     });
 
     it('should run in background when run_in_background is true even without background config', async () => {

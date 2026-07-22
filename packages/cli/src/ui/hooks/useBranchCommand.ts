@@ -209,8 +209,8 @@ export function useBranchCommand(
         startNewSession(newSessionId);
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
-        resetBackgroundStateForSessionSwitch(config);
         uiSwapped = true;
+        resetBackgroundStateForSessionSwitch(config);
 
         // 9. Re-arm /goal under the fork's new sessionId. The branched JSONL
         // is a verbatim copy of the parent's, so an active goal sentinel

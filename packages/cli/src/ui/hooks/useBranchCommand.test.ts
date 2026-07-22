@@ -33,6 +33,22 @@ describe('useBranchCommand', () => {
   let setSessionName: ReturnType<typeof vi.fn>;
   let remount: ReturnType<typeof vi.fn>;
   let addItem: ReturnType<typeof vi.fn>;
+  let backgroundTaskRegistry: {
+    hasRunningTasks: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let monitorRegistry: {
+    getRunning: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let backgroundShellRegistry: {
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
+  let workflowRunRegistry: {
+    hasRunningEntries: ReturnType<typeof vi.fn>;
+    reset: ReturnType<typeof vi.fn>;
+  };
   // Mock Config shape covers only what useBranchCommand touches.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   let config: any;
@@ -85,6 +101,22 @@ describe('useBranchCommand', () => {
     setSessionName = vi.fn();
     remount = vi.fn();
     addItem = vi.fn();
+    backgroundTaskRegistry = {
+      hasRunningTasks: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    };
+    monitorRegistry = {
+      getRunning: vi.fn().mockReturnValue([]),
+      reset: vi.fn(),
+    };
+    backgroundShellRegistry = {
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    };
+    workflowRunRegistry = {
+      hasRunningEntries: vi.fn().mockReturnValue(false),
+      reset: vi.fn(),
+    };
     config = {
       getSessionId: () => '12345678-aaaa-bbbb-cccc-dddddddddddd',
       getSessionService: () => ({
@@ -96,39 +128,26 @@ describe('useBranchCommand', () => {
       }),
       getChatRecordingService: () => ({ finalize, flush }),
       getGeminiClient: () => ({ initialize: vi.fn() }),
+      getBackgroundTaskRegistry: () => backgroundTaskRegistry,
+      getMonitorRegistry: () => monitorRegistry,
+      getBackgroundShellRegistry: () => backgroundShellRegistry,
+      getWorkflowRunRegistry: () => workflowRunRegistry,
       startNewSession: startNewSessionConfig,
       getDebugLogger: () => ({ warn: vi.fn() }),
-      getBackgroundTaskRegistry: () => ({
-        hasRunningTasks: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getMonitorRegistry: () => ({
-        getRunning: vi.fn().mockReturnValue([]),
-        reset: vi.fn(),
-      }),
-      getBackgroundShellRegistry: () => ({
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
-      getWorkflowRunRegistry: () => ({
-        hasRunningEntries: vi.fn().mockReturnValue(false),
-        reset: vi.fn(),
-      }),
     };
   });
 
-  it('blocks branching while background work is running', async () => {
-    config.getBackgroundTaskRegistry = () => ({
-      hasRunningTasks: vi.fn().mockReturnValue(true),
-      reset: vi.fn(),
-    });
+  it('refuses to branch while background work is running', async () => {
+    backgroundTaskRegistry.hasRunningTasks.mockReturnValue(true);
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('blocked');
     });
 
+    expect(finalize).not.toHaveBeenCalled();
     expect(forkSession).not.toHaveBeenCalled();
+    expect(startNewSessionConfig).not.toHaveBeenCalled();
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
@@ -138,37 +157,19 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('clears the prior session roster after a successful branch', async () => {
-    const backgroundReset = vi.fn();
-    const monitorReset = vi.fn();
-    const shellReset = vi.fn();
-    const workflowReset = vi.fn();
-    config.getBackgroundTaskRegistry = () => ({
-      hasRunningTasks: vi.fn().mockReturnValue(false),
-      reset: backgroundReset,
-    });
-    config.getMonitorRegistry = () => ({
-      getRunning: vi.fn().mockReturnValue([]),
-      reset: monitorReset,
-    });
-    config.getBackgroundShellRegistry = () => ({
-      hasRunningEntries: vi.fn().mockReturnValue(false),
-      reset: shellReset,
-    });
-    config.getWorkflowRunRegistry = () => ({
-      hasRunningEntries: vi.fn().mockReturnValue(false),
-      reset: workflowReset,
-    });
-
+  it('clears terminal background state after the branch initializes', async () => {
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('ready');
     });
 
-    expect(backgroundReset).toHaveBeenCalledOnce();
-    expect(monitorReset).toHaveBeenCalledOnce();
-    expect(shellReset).toHaveBeenCalledOnce();
-    expect(workflowReset).toHaveBeenCalledOnce();
+    expect(backgroundTaskRegistry.reset).toHaveBeenCalledOnce();
+    expect(monitorRegistry.reset).toHaveBeenCalledOnce();
+    expect(backgroundShellRegistry.reset).toHaveBeenCalledOnce();
+    expect(workflowRunRegistry.reset).toHaveBeenCalledOnce();
+    expect(startNewSessionUI.mock.invocationCallOrder[0]).toBeLessThan(
+      backgroundTaskRegistry.reset.mock.invocationCallOrder[0]!,
+    );
   });
 
   it('persists and reloads the title before switching core or UI', async () => {
@@ -575,6 +576,7 @@ describe('useBranchCommand', () => {
     expect(startNewSessionUI).not.toHaveBeenCalled();
     expect(setSessionName).not.toHaveBeenCalled();
     expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(backgroundTaskRegistry.reset).not.toHaveBeenCalled();
     // User sees the failure.
     expect(addItem).toHaveBeenCalledWith(
       expect.objectContaining({
