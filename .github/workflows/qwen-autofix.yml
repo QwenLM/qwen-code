@@ -1744,7 +1744,7 @@ jobs:
             # (the watermark floor below), and labels (the effective round
             # cap) — avoids extra round-trips per candidate PR.
             PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
-              --json headRefName,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
             HEAD_REPO_FULL="${REPO}"
             if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" == "true" ]]; then
               HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_META}")"
@@ -1902,6 +1902,16 @@ jobs:
               [ .[] | select((.user.login // "") == $ab)
                 | select((.body // "") | contains("<!-- autofix-rearm -->"))
                 | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+            # The head this PR's red checks were last reported against. Carried
+            # as its OWN marker inside the eval comment rather than a new field
+            # on autofix-eval, so none of the ts/acted/round parsers change —
+            # and the comment still matches the eval filter, so the agent never
+            # sees it as feedback.
+            RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+                | {sha: .[0], at: ($c.created_at // "")} ]
+              | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
             # A maintainer '@qwen-code /retry' posts that marker to say
             # "evaluate this feedback again": markers written BEFORE it stop
             # holding the watermark down. This is the sanctioned exception to
@@ -1995,6 +2005,30 @@ jobs:
                 | select((.completedAt // .updatedAt // "") > $wm) ]
               | length
             ' <<< "${CHECKS_JSON}")"
+            # A red check is a persistent STATE, not the instant it turned red.
+            # Counting only "failed since the watermark" made a still-failing PR
+            # invisible the moment the watermark passed the failure: measured on
+            # #6451 (3 reds, all completed 09:30-09:51, watermark 10:55),
+            # #7357 (red 07:59, watermark 09:18) and #7390 (red and watermark
+            # both 11:27:37, so a strict `>` hid it the instant it appeared) —
+            # all three sat red for hours while every scan logged "nothing new".
+            #
+            # So: a currently-red check counts as feedback until the head it ran
+            # against has been evaluated. The address job records the head it
+            # reported on; a PR whose recorded head still matches is left alone,
+            # which bounds this to ONE look per head instead of every scan.
+            # Empty LIVE_HEAD → N_RED_NOW stays 0: fail-closed (no head → cannot judge → do not act),
+            # unlike the recording side where an empty REPORT_HEAD keeps reds visible.
+            LIVE_HEAD="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            N_RED_NOW=0
+            if [[ -n "${LIVE_HEAD}" && "${RED_HEAD}" != "${LIVE_HEAD}" ]]; then
+              N_RED_NOW="$(jq '
+                [ .[]
+                  | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                  | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address")))) ]
+                | length
+              ' <<< "${CHECKS_JSON}")"
+            fi
 
             gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
             gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
@@ -2049,14 +2083,14 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${N_RED_NOW}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
-            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, ${N_RED_NOW} still-red on ${LIVE_HEAD:0:9}, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new, ${N_RED_NOW} still-red (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
               --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
@@ -2402,6 +2436,12 @@ jobs:
             git checkout -B "${BRANCH}" "origin/${BRANCH}"
           fi
 
+          # The exact SHA the agent will evaluate. Captured HERE, before any
+          # agent mutation, so the marker records what was actually looked at —
+          # not the report-time remote head, which can move during the run.
+          CHECKED_OUT_HEAD="$(git rev-parse HEAD)"
+          echo "checked_out_head=${CHECKED_OUT_HEAD}" >> "${GITHUB_OUTPUT}"
+
           # Does the branch conflict with base? merge-tree computes the merge
           # without touching the tree; exit 1 means conflicts. UNKNOWN/errors are
           # treated as no-conflict so we never block on a transient state.
@@ -2455,14 +2495,17 @@ jobs:
           # QUEUES the duplicate rather than discarding it — but that queueing
           # is exactly what makes this check sound: address jobs for one PR run
           # strictly one at a time, so by the time the duplicate runs here, the
-          # first job's eval marker is posted and visible. Two duplicate
+          # first job's eval marker is posted and visible. Three duplicate
           # signatures: (a) a sibling evaluated through a NEWER live ts than
           # our matrix watermark; (b) a conflict-only sibling resolved and
           # marked at the SAME ts — with no newer feedback its marker keeps
           # ts=watermark while its ROUND advances past ours (ours is the max
-          # round observed at scan time). Either way, if there is no live
-          # conflict left and nothing newer than the live watermark, this run
-          # is a stale duplicate and discards itself.
+          # round observed at scan time); (c) a no-op sibling judged THIS exact
+          # head (its redcheck marker matches CHECKED_OUT_HEAD) while keeping
+          # BOTH ts and round unchanged — neither (a) nor (b) fires, but
+          # re-running would post a duplicate report for the same head. Either
+          # way, if there is no live conflict left and nothing newer than the
+          # live watermark, this run is a stale duplicate and discards itself.
           STALE='false'
           LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
             [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
@@ -2486,6 +2529,16 @@ jobs:
                     or ((.body // "") | contains("<!-- autofix-rearm -->")))
               | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
           LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
+          # The head a sibling last judged, mirrored from the scan's RED_HEAD
+          # parse. A no-op sibling records this marker while leaving BOTH ts and
+          # round UNCHANGED — so the watermark/round triggers below never fire,
+          # yet a second same-watermark target for the same head would otherwise
+          # run the agent again and post a duplicate report for that head.
+          LIVE_RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+              | {sha: .[0], at: ($c.created_at // "")} ]
+            | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
           # A re-arm SUPERSEDES every job selected under the old window key:
           # the maintainer asked for a fresh start, so a queued old-window job
           # must discard instead of finishing and stamping an old-sequence
@@ -2495,7 +2548,8 @@ jobs:
             echo "🫥 window superseded: selected under key '${WINDOW:-none}' but the live window is '${LIVE_REARM_KEY}' (re-armed while queued) — discarding without action or marker"
           fi
           if [[ -n "${LIVE_EVAL_WM}" && "${CONFLICT}" != "true" ]] \
-            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; }; then
+            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]] \
+              || { [[ -n "${LIVE_RED_HEAD}" ]] && [[ "${LIVE_RED_HEAD}" == "${CHECKED_OUT_HEAD}" ]]; }; }; then
             LIVE_NEW="$(jq -rs \
               --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
@@ -2597,6 +2651,20 @@ jobs:
               | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
               | select((.completedAt // .updatedAt // "") > $wm)
+              | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
+              "${WORKDIR}/checks.json"
+            # Checks that turned red BEFORE the watermark and are STILL red.
+            # The section above only shows checks that failed AFTER the
+            # watermark, so a persistent red (the exact case the scan's
+            # N_RED_NOW gate selects) would leave the agent with an empty
+            # "Failed checks" section and no check name to reproduce.
+            echo
+            echo "## Still-red checks (persisting from before the last evaluation)"
+            jq -r --arg wm "${WATERMARK}" '
+              .[]
+              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") <= $wm)
               | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
               "${WORKDIR}/checks.json"
             # If the LAST round ended in a gate rejection, show the agent WHY.
@@ -2905,7 +2973,13 @@ jobs:
           # Surfaced in the report footer for diagnosis + attribution; a repo
           # variable (not a secret), already the agent's OPENAI_MODEL.
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
           # Prepare may have adopted a sibling's live round; the matrix value
           # would double-write that round's marker.
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
@@ -3011,6 +3085,7 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
@@ -3027,6 +3102,7 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
@@ -3061,7 +3137,13 @@ jobs:
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
           ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
           MODEL_DISPLAY="${MODEL:-default}"
           SUFFIX=''
@@ -3313,6 +3395,14 @@ jobs:
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
               echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
+              # A sentinel ts means the agent evaluated NOTHING (crash, API
+              # error, gate crash) and the next scan must retry. Recording a
+              # judged head here would make RED_HEAD == LIVE_HEAD, so the
+              # retry scan sees N_RED_NOW=0 and goes idle despite the handoff
+              # promising a retry.
+              if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
+                echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi
