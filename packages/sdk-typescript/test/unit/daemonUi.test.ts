@@ -7075,6 +7075,60 @@ describe('parallel subAgent text interleaving fix', () => {
     });
   });
 
+  it('keeps merged subagent totals consistent without mutating the event', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-C',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          executionSummary: {
+            inputTokens: 5000,
+            outputTokens: 800,
+            totalTokens: 5800,
+          },
+        },
+      },
+    ] as DaemonUiEvent[]);
+    const completed = {
+      type: 'tool.update' as const,
+      toolCallId: 'agent-task-C',
+      toolName: 'agent',
+      status: 'completed',
+      rawOutput: {
+        type: 'task_execution',
+        executionSummary: {
+          inputTokens: 4500,
+          outputTokens: 1000,
+          totalTokens: 5500,
+        },
+      },
+    };
+
+    state = reduceDaemonTranscriptEvents(state, [completed]);
+
+    expect(state.blocks[0]).toMatchObject({
+      rawOutput: {
+        executionSummary: {
+          inputTokens: 5000,
+          outputTokens: 1000,
+          totalTokens: 6000,
+        },
+      },
+    });
+    expect(completed.rawOutput.executionSummary).toEqual({
+      inputTokens: 4500,
+      outputTokens: 1000,
+      totalTokens: 5500,
+    });
+  });
+
   it('keeps subagent block filtering enabled after store reset', () => {
     const store = createDaemonTranscriptStore({ retainSubagentBlocks: false });
     store.reset();

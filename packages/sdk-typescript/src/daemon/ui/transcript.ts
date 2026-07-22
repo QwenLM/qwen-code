@@ -736,7 +736,7 @@ function upsertToolBlock(
     !state.retainSubagentBlocks &&
     isRecord(event.rawOutput) &&
     event.rawOutput['type'] === 'task_execution';
-  const rawOutput = compactTaskExecutionOutput(
+  let rawOutput = compactTaskExecutionOutput(
     event.rawOutput,
     state.retainSubagentBlocks,
   );
@@ -790,19 +790,36 @@ function upsertToolBlock(
           ? rawOutput['executionSummary']
           : undefined;
         if (prevSummary && nextSummary) {
-          for (const key of [
-            'inputTokens',
-            'outputTokens',
-            'cachedTokens',
-            'totalTokens',
-          ]) {
-            const prev = finiteNumber(prevSummary[key]);
-            if (prev > finiteNumber(nextSummary[key])) {
-              nextSummary[key] = prev;
-            }
-          }
+          const inputTokens = Math.max(
+            finiteNumber(prevSummary['inputTokens']),
+            finiteNumber(nextSummary['inputTokens']),
+          );
+          const outputTokens = Math.max(
+            finiteNumber(prevSummary['outputTokens']),
+            finiteNumber(nextSummary['outputTokens']),
+          );
+          rawOutput = {
+            ...rawOutput,
+            executionSummary: {
+              ...nextSummary,
+              inputTokens,
+              outputTokens,
+              cachedTokens: Math.max(
+                finiteNumber(prevSummary['cachedTokens']),
+                finiteNumber(nextSummary['cachedTokens']),
+              ),
+              totalTokens: Math.max(
+                finiteNumber(prevSummary['totalTokens']),
+                finiteNumber(nextSummary['totalTokens']),
+                inputTokens + outputTokens,
+              ),
+            },
+          };
         } else if (prevSummary) {
-          rawOutput['executionSummary'] = prevSummary;
+          rawOutput = {
+            ...rawOutput,
+            executionSummary: { ...prevSummary },
+          };
         }
       }
       existing.rawOutput = rawOutput;

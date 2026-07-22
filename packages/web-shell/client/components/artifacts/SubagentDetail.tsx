@@ -86,6 +86,17 @@ export function findSubagentRootTool(
   return undefined;
 }
 
+export function getSubagentPrompt(
+  messages: readonly Message[],
+  rootTool: ACPToolCall,
+): string {
+  const firstUserMessage = messages.find((message) => message.role === 'user');
+  return (
+    (firstUserMessage?.role === 'user' ? firstUserMessage.content : '') ||
+    (typeof rootTool.args?.prompt === 'string' ? rootTool.args.prompt : '')
+  );
+}
+
 function statusLabel(status: string, t: ReturnType<typeof useI18n>['t']) {
   switch (status) {
     case 'completed':
@@ -117,8 +128,7 @@ function SubagentDetailContent({
   const connection = useConnection();
   const messages = useMessages(t);
   const description = getAgentDescription(rootTool);
-  const prompt =
-    typeof rootTool.args?.prompt === 'string' ? rootTool.args.prompt : '';
+  const prompt = getSubagentPrompt(messages, rootTool);
   const metrics = useMemo(
     () => getSubagentMetrics(rootTool, resolution),
     [resolution, rootTool],
