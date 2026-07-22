@@ -108,6 +108,24 @@ export async function gotoSession(
   );
 }
 
+/**
+ * Navigate to the new-session empty state (`/`) in the requested theme. Every
+ * other scenario lands on `/session/:id` via `gotoSession`, so without this the
+ * suite never renders the empty state at all — anything that lives only there
+ * (the onboarding copy, the worktree-isolation toggle) is invisible to the
+ * before/after preview. Asserts the theme took effect, same as `gotoSession`;
+ * there is no replay to settle because no session is loaded.
+ */
+export async function gotoNewSession(
+  page: Page,
+  theme: VisualTheme,
+): Promise<void> {
+  await primeTheme(page, theme);
+  await page.goto(`/?theme=${theme}`);
+  await expect(page.locator('[data-web-shell-root]')).toBeVisible();
+  await expect(page.locator('html')).toHaveClass(new RegExp(`theme-${theme}`));
+}
+
 export async function completeReplay(
   page: Page,
   daemon: MockDaemonController,

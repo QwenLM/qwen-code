@@ -116,6 +116,7 @@ import type {
   DaemonWorkspaceTrustSource,
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
+  DaemonWorkspaceUpdate,
   DaemonWorkspaceMemoryDreamOptions,
   DaemonWorkspaceMemoryDreamResult,
   DaemonWorkspaceMemoryDreamTask,
@@ -256,6 +257,9 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonWorkspaceTrustSource>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustState>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceTrustStatus>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceUpdate>().toEqualTypeOf<{
+      displayName: string | null;
+    }>();
     expectTypeOf<DaemonVoiceAudioInput>().not.toBeNever();
     expectTypeOf<DaemonVoiceMode>().not.toBeNever();
     expectTypeOf<DaemonVoiceModelDescriptor>().not.toBeNever();

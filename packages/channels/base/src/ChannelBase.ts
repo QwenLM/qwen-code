@@ -59,6 +59,7 @@ import {
   type ChannelMemoryIntent,
 } from './channel-memory-intent.js';
 import {
+  CHANNEL_MEMORY_RECALL_MAX_ENTRIES,
   createChannelMemoryRecallIndex,
   selectRelevantChannelMemory,
   selectRelevantChannelMemoryFromIndex,
@@ -163,6 +164,27 @@ interface ChannelMemoryRecallCacheEntry {
   index: ChannelMemoryRecallIndex;
 }
 
+export type ChannelMemoryRecallCacheStatus = 'hit' | 'miss' | 'bypass';
+export type ChannelMemoryRecallResult =
+  | 'selected'
+  | 'empty'
+  | 'stale'
+  | 'read_error'
+  | 'revision_unstable';
+
+export interface ChannelMemoryRecallObservation {
+  durationMs: number;
+  selectedCount: number;
+  cache: ChannelMemoryRecallCacheStatus;
+  result: ChannelMemoryRecallResult;
+}
+
+interface ChannelMemoryRecallSelection {
+  entries: ChannelMemoryEntry[];
+  cache: ChannelMemoryRecallCacheStatus;
+  result?: 'revision_unstable';
+}
+
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
@@ -171,6 +193,9 @@ export interface ChannelBaseOptions {
   allowLegacyCredentialFallback?: boolean;
   channelMemory?: ChannelMemoryCallbacks;
   memoryIntentClassifier?: ChannelMemoryIntentClassifier;
+  channelMemoryRecallObserver?: (
+    observation: ChannelMemoryRecallObservation,
+  ) => void;
   /**
    * Set when a channel owns a supplied router and should consume bridge
    * events directly.
@@ -311,6 +336,9 @@ export abstract class ChannelBase {
   protected proxy?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
   private readonly memoryIntentClassifier?: ChannelMemoryIntentClassifier;
+  private readonly channelMemoryRecallObserver?: (
+    observation: ChannelMemoryRecallObservation,
+  ) => void;
   private groupHistory: GroupHistoryStore;
   private readonly loopController?: ChannelLoopController;
   private readonly observedContacts?: ChannelBaseOptions['observedContacts'];
@@ -348,6 +376,18 @@ export abstract class ChannelBase {
   private readonly preflightedEnvelopes = new WeakSet<Envelope>();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
+  };
+  private readonly bridgeBackgroundResponseListener = (
+    sessionId: string,
+    text: string,
+  ): void => {
+    void this.dispatchBackgroundResponse(sessionId, text).catch(
+      (err: unknown) => {
+        process.stderr.write(
+          `[${this.name}] background response delivery failed for session ${sanitizeLogText(sessionId, 128)}: ${this.lifecycleError(err)}\n`,
+        );
+      },
+    );
   };
   private readonly bridgeSessionDiedListener = (
     event: SessionDiedEvent,
@@ -404,6 +444,25 @@ export abstract class ChannelBase {
       });
     }
     this.onToolCall(chatId, event);
+  }
+
+  async dispatchBackgroundResponse(
+    sessionId: string,
+    text: string,
+  ): Promise<void> {
+    const target = this.router.getTarget(sessionId);
+    if (
+      !target ||
+      target.channelName !== this.name ||
+      text.trim().length === 0
+    ) {
+      return;
+    }
+    if (this.supportsProactiveSend() && this.supportsProactiveTarget(target)) {
+      await this.pushProactive(target, text);
+      return;
+    }
+    await this.sendResponseMessage(target.chatId, text, sessionId);
   }
 
   async dispatchPermissionRequest(
@@ -505,6 +564,7 @@ export abstract class ChannelBase {
     this.memoryScope = Object.freeze(this.resolveMemoryScope(name, config));
     this.channelMemory = options?.channelMemory;
     this.memoryIntentClassifier = options?.memoryIntentClassifier;
+    this.channelMemoryRecallObserver = options?.channelMemoryRecallObserver;
     this.groupHistory = new GroupHistoryStore(
       options?.groupHistoryPath ??
         join(
@@ -828,13 +888,16 @@ export abstract class ChannelBase {
     envelope: Envelope,
     target: ChannelMemoryTarget,
     read: ChannelMemoryReadToken,
-  ): Promise<ChannelMemoryEntry[]> {
+  ): Promise<ChannelMemoryRecallSelection> {
     const message = envelope.text;
     const channelMemory = this.channelMemory;
-    if (!channelMemory) return [];
+    if (!channelMemory) return { entries: [], cache: 'bypass' };
     if (!channelMemory.getChannelMemoryRevision) {
       const entries = await channelMemory.listChannelMemoryEntries(target);
-      return selectRelevantChannelMemory(message, entries);
+      return {
+        entries: selectRelevantChannelMemory(message, entries),
+        cache: 'bypass',
+      };
     }
 
     let revision: string;
@@ -842,14 +905,20 @@ export abstract class ChannelBase {
       revision = await channelMemory.getChannelMemoryRevision(target);
     } catch {
       const entries = await channelMemory.listChannelMemoryEntries(target);
-      return selectRelevantChannelMemory(message, entries);
+      return {
+        entries: selectRelevantChannelMemory(message, entries),
+        cache: 'bypass',
+      };
     }
 
     let latestEntries: ChannelMemoryEntry[] = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const cached = this.getCachedChannelMemoryRecallIndex(read.key, revision);
       if (cached) {
-        return selectRelevantChannelMemoryFromIndex(message, cached);
+        return {
+          entries: selectRelevantChannelMemoryFromIndex(message, cached),
+          cache: 'hit',
+        };
       }
 
       latestEntries = await channelMemory.listChannelMemoryEntries(target);
@@ -857,10 +926,15 @@ export abstract class ChannelBase {
       try {
         verifiedRevision = await channelMemory.getChannelMemoryRevision(target);
       } catch {
-        return selectRelevantChannelMemory(message, latestEntries);
+        return {
+          entries: selectRelevantChannelMemory(message, latestEntries),
+          cache: 'bypass',
+        };
       }
       if (revision !== verifiedRevision) {
-        if (read.generation !== read.state.generation) return [];
+        if (read.generation !== read.state.generation) {
+          return { entries: [], cache: 'miss' };
+        }
         revision = verifiedRevision;
         continue;
       }
@@ -869,14 +943,42 @@ export abstract class ChannelBase {
       if (read.generation === read.state.generation) {
         this.setCachedChannelMemoryRecallIndex(read.key, revision, index);
       }
-      return selectRelevantChannelMemoryFromIndex(message, index);
+      return {
+        entries: selectRelevantChannelMemoryFromIndex(message, index),
+        cache: 'miss',
+      };
     }
     this.logChannelMemoryError(
       'read',
       envelope,
       'recall revision unstable after retry',
     );
-    return selectRelevantChannelMemory(message, latestEntries);
+    return {
+      entries: selectRelevantChannelMemory(message, latestEntries),
+      cache: 'miss',
+      result: 'revision_unstable',
+    };
+  }
+
+  private observeChannelMemoryRecall(
+    startedAt: number,
+    cache: ChannelMemoryRecallCacheStatus,
+    result: ChannelMemoryRecallResult,
+    selectedCount: number,
+  ): void {
+    try {
+      this.channelMemoryRecallObserver?.({
+        durationMs: Math.max(0, performance.now() - startedAt),
+        selectedCount: Math.min(
+          CHANNEL_MEMORY_RECALL_MAX_ENTRIES,
+          Math.max(0, Math.trunc(selectedCount)),
+        ),
+        cache,
+        result,
+      });
+    } catch {
+      // Telemetry must never affect channel delivery.
+    }
   }
 
   private drainCollectBufferForCurrentPrompt(
@@ -1707,6 +1809,7 @@ export abstract class ChannelBase {
 
   private attachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.on('toolCall', this.bridgeToolCallListener);
+    bridge.on('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.on('sessionDied', this.bridgeSessionDiedListener);
     bridge.on('permissionRequest', this.bridgePermissionRequestListener);
     bridge.on('permissionResolved', this.bridgePermissionResolvedListener);
@@ -1714,6 +1817,7 @@ export abstract class ChannelBase {
 
   private detachBridgeEvents(bridge: ChannelAgentBridge): void {
     bridge.off('toolCall', this.bridgeToolCallListener);
+    bridge.off('backgroundResponse', this.bridgeBackgroundResponseListener);
     bridge.off('sessionDied', this.bridgeSessionDiedListener);
     bridge.off('permissionRequest', this.bridgePermissionRequestListener);
     bridge.off('permissionResolved', this.bridgePermissionResolvedListener);
@@ -4529,17 +4633,35 @@ export abstract class ChannelBase {
       ) {
         const memoryTarget = this.channelMemoryTarget(envelope);
         recallRead = this.beginChannelMemoryRead(memoryTarget);
+        const recallStartedAt = performance.now();
         try {
-          const relevantEntries = await this.selectRelevantChannelMemory(
+          const selection = await this.selectRelevantChannelMemory(
             envelope,
             memoryTarget,
             recallRead,
+          );
+          const stale = recallRead.generation !== recallRead.state.generation;
+          const relevantEntries = stale ? [] : selection.entries;
+          this.observeChannelMemoryRecall(
+            recallStartedAt,
+            selection.cache,
+            stale
+              ? 'stale'
+              : (selection.result ??
+                  (relevantEntries.length > 0 ? 'selected' : 'empty')),
+            relevantEntries.length,
           );
           if (relevantEntries.length > 0) {
             recallContext =
               this.formatRelevantChannelMemoryContext(relevantEntries);
           }
         } catch {
+          this.observeChannelMemoryRecall(
+            recallStartedAt,
+            'bypass',
+            'read_error',
+            0,
+          );
           this.releaseChannelMemoryRead(recallRead);
           recallRead = undefined;
           this.logChannelMemoryError('read', envelope, 'entry listing failed');

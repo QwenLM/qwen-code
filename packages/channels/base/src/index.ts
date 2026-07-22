@@ -29,6 +29,9 @@ export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
 export type {
   ChannelBaseOptions,
+  ChannelMemoryRecallCacheStatus,
+  ChannelMemoryRecallObservation,
+  ChannelMemoryRecallResult,
   ChannelLoopController,
 } from './ChannelBase.js';
 export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';

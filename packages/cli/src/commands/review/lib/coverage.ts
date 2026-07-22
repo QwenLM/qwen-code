@@ -833,6 +833,15 @@ export interface VerificationReport {
    * orchestrator reads. Never rendered into the body.
    */
   remediation: string[];
+  /**
+   * True when this review posts findings and NO verifier's delivery came back
+   * clean — the structured form of the `verification — …` gap line, for the
+   * verdict computation. A Request changes is "earned by a confirmed
+   * Critical", and this is the bit that says the confirmation never happened;
+   * parsing the gap text for it would put the verdict at the mercy of a
+   * wording change.
+   */
+  unverifiedFindings: boolean;
 }
 
 /**
@@ -950,6 +959,7 @@ export function verificationGaps(
   // non-deterministic body Criticals, and excludes deterministic `[build]`/`[test]`
   // findings, which are pre-confirmed and skip verification by design. A review that
   // confirmed nothing has nothing to verify.
+  let unverifiedFindings = false;
   if (opts.postsFindings) {
     // The whole key family: `verify--<digest>` per shard (the record now folds
     // the findings in, so a launch that dropped them matches nothing), plus the
@@ -959,6 +969,7 @@ export function verificationGaps(
     );
     const verify = bestDelivery(verifyKeys);
     if (verify !== 'ok') {
+      unverifiedFindings = true;
       gaps.push(`verification — ${VERIFY_GAP[verify].gap}`);
       remediation.push(
         `verification: ${VERIFY_GAP[verify].fix.replace(
@@ -971,7 +982,7 @@ export function verificationGaps(
     }
   }
 
-  return { ok: gaps.length === 0, gaps, remediation };
+  return { ok: gaps.length === 0, gaps, remediation, unverifiedFindings };
 }
 
 export { TranscriptsUnavailableError };

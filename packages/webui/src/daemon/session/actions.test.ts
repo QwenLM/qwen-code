@@ -303,6 +303,89 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
   });
 
+  it('detaches the old same-session attachment after its replacement loads', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+
+    const loadPromise = actions.loadSession('session-a');
+
+    expect(existingSession.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(existingSession);
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(getConnection()).toEqual({
+      status: 'connected',
+      sessionId: 'session-a',
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.resolve();
+    await loadPromise;
+    expect(existingSession.detach).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the old same-session attachment when its replacement fails', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, pendingSessionLoadRef, sessionRef } = createActionsHarness(
+      {
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      },
+    );
+
+    const loadPromise = actions.loadSession('session-a');
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.reject(new Error('load failed'));
+
+    await expect(loadPromise).rejects.toThrow('load failed');
+    expect(existingSession.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(existingSession);
+  });
+
+  it('does not start a session reload with an aborted signal', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      actions.reloadSession(controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(pendingSessionLoadRef.current).toBeUndefined();
+    expect(sessionRef.current).toBe(existingSession);
+    expect(existingSession.detach).not.toHaveBeenCalled();
+    expect(store.reset).not.toHaveBeenCalled();
+  });
+
+  it('keeps the reload abort signal with the pending load', () => {
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: createMockSession('session-a'),
+    });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.signal).toBe(controller.signal);
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
   it('keeps the active workspace when a session load omits one', () => {
     const setRestoreWorkspaceCwd = vi.fn();
     const { actions } = createActionsHarness({
@@ -532,12 +615,13 @@ function createActionsHarness(
     ({ current: undefined } as {
       current: PendingSessionLoad | undefined;
     });
+  const store = {
+    reset: vi.fn(),
+    appendLocalUserMessage: vi.fn(),
+    dispatch: vi.fn(),
+  };
   const actions = createDaemonSessionActions({
-    store: {
-      reset: vi.fn(),
-      appendLocalUserMessage: vi.fn(),
-      dispatch: vi.fn(),
-    } as never,
+    store: store as never,
     sessionRef,
     activePromptsRef,
     settledPromptsRef: { current: new Map<string, SettledPrompt>() },
@@ -577,6 +661,7 @@ function createActionsHarness(
     getConnection: () => connection,
     pendingSessionLoadRef,
     sessionRef,
+    store,
   };
 }
 

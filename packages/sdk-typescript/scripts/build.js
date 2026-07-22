@@ -56,13 +56,12 @@ const rootDir = join(__dirname, '..');
 // Bumped from 155KB to 160KB to accommodate recent growth and reduce churn,
 // from repeated 1KB bumps as new daemon APIs are added.
 // Bumped from 160KB to 161KB after merging upstream main.
-// Bumped from 161KB to 165KB for the Web Shell git-diff REST helpers
+// Bumped from 161KB to 167KB for the Web Shell git-diff and subagent REST helpers
 // (workspaceGitDiff / workspaceGitDiffFile on both client classes) and the
 // ChatRecord transcript projection in the default UI API.
-// Bumped from 165KB to 168KB for Channel QR authentication helpers on both
-// client classes (171964-byte bundle, 3004 bytes over the previous limit).
-// Bumped to 170KB for workspace-scoped Channel pairing list/approve helpers.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 170 * 1024;
+// Bumped from 167KB to 174KB for Channel QR authentication and workspace-scoped
+// pairing helpers on both client classes after merging the latest daemon APIs.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 174 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

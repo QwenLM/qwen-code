@@ -115,6 +115,8 @@ export interface DaemonSessionProviderProps {
   maxBlocks?: number;
   /** Latest persisted records requested during an existing-session load. */
   historyPageSize?: number;
+  /** Keep the full subagent transcript, or retain only bounded root summaries. */
+  subagentTranscriptMode?: 'full' | 'summary';
   /** Hide this client's own user prompt echo when the daemon replays events. */
   suppressOwnUserEcho?: boolean;
   /** Attach raw daemon events to normalized transcript blocks for debugging. */
@@ -339,6 +341,7 @@ export interface DaemonSessionActions {
     sessionId: string,
     options?: { workspaceCwd?: string },
   ): Promise<void>;
+  reloadSession(signal: AbortSignal): Promise<void>;
   resumeSession(
     sessionId: string,
     options?: { workspaceCwd?: string },
@@ -471,4 +474,5 @@ export interface PendingSessionLoad {
   timeout: ReturnType<typeof setTimeout>;
   resolve: () => void;
   reject: (error: unknown) => void;
+  signal?: AbortSignal;
 }

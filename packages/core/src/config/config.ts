@@ -11,9 +11,6 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-// External dependencies
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
-
 // Types
 import type {
   ContentGenerator,
@@ -39,6 +36,7 @@ import type { TeamContext } from '../agents/team/types.js';
 // Core
 import { BaseLlmClient } from '../core/baseLlmClient.js';
 import { GeminiClient } from '../core/client.js';
+import { resolveInteractionMode } from '../core/prompts.js';
 import {
   AuthType,
   createContentGenerator,
@@ -157,6 +155,7 @@ import {
   type PostToolBatchToolCall,
 } from '../hooks/types.js';
 import { fireNotificationHook } from '../core/toolHookTriggers.js';
+import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 
 // Utils
 import { shouldAttemptBrowserLaunch } from '../utils/browser.js';
@@ -166,6 +165,7 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
+import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -195,6 +195,13 @@ import {
   SessionService,
   type ResumedSessionData,
 } from '../services/sessionService.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterError,
+  SessionWriterLease,
+  SessionWriterLostError,
+  SessionWriterUnavailableError,
+} from '../services/session-writer-lease.js';
 import { randomUUID } from 'node:crypto';
 import { loadServerHierarchicalMemory } from '../utils/memoryDiscovery.js';
 import { ConditionalRulesRegistry } from '../utils/rulesDiscovery.js';
@@ -232,9 +239,11 @@ import {
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
   type AvailableModel,
+  type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
+import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 export function parseVisionModelSetting(setting: string | undefined):
@@ -1182,6 +1191,16 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
+   * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
+   * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
+   * is true and `model` resolves to a DashScope-compatible modelProviders
+   * entry carrying a direct API key — or, for environments that cannot write
+   * settings.json, when an env-declared backend is supplied (`baseUrl` from
+   * WEB_SEARCH_BASE_URL, `apiKeyEnv` naming the key variable), which takes
+   * precedence over modelProviders resolution.
+   */
+  webSearch?: WebSearchSettings;
+  /**
    * Safe mode: disables all user customizations (context files, hooks,
    * extensions, skills, MCP servers, rules) for troubleshooting.
    * Activated via `--safe-mode` CLI flag or `QWEN_CODE_SAFE_MODE=true` env var.
@@ -1567,6 +1586,9 @@ export type SubSessionSpawner = (
 export class Config {
   private sessionId: string;
   private sessionData?: ResumedSessionData;
+  private readonly sessionRuntimeBaseDir: string;
+  private sessionProjectDirRegistered = false;
+  private pendingSessionWriterLease?: SessionWriterLease;
   /**
    * One-shot notice produced by `setupStartupWorktree` (Phase D-1) when the
    * CLI was launched with `--worktree`. The active entry point (TUI XOR
@@ -1821,6 +1843,7 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
+  private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
@@ -1851,6 +1874,8 @@ export class Config {
   private readonly autoSkillConfirm: boolean;
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private fastModel?: string;
+  private readonly webSearchSettings?: WebSearchSettings;
+  private webSearchNoticeEmitted = false;
   private visionModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
@@ -1869,6 +1894,7 @@ export class Config {
   private readonly settingsWatcher?: { stopWatching(): void };
 
   constructor(params: ConfigParameters) {
+    this.sessionRuntimeBaseDir = Storage.getRuntimeBaseDir();
     this.sessionId = params.sessionId ?? randomUUID();
     // Only set the global env marker once per process lifetime, so
     // throwaway Config instances (e.g. telemetry-only) don't clobber
@@ -2125,7 +2151,7 @@ export class Config {
     this.jsonSchema = params.jsonSchema;
     this.inputFile = params.inputFile;
     this.defaultFileEncoding = params.defaultFileEncoding;
-    this.storage = new Storage(this.targetDir);
+    this.storage = new Storage(this.targetDir, this.sessionRuntimeBaseDir);
     // Publish the project dir a subprocess needs to find this session's harness
     // records. It is derived from the session's *launch* cwd, so a subprocess
     // that has `cd`-ed elsewhere — which the /review skill explicitly does, into
@@ -2137,7 +2163,6 @@ export class Config {
     // booted first, and every later session would hand its subprocesses another
     // session's directory. The env var is still set for the single-session CLI,
     // where it is the only consumer and there is nothing to collide with.
-    registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
     if (!projectDirEnvClaimed && process.env) {
       process.env['QWEN_CODE_PROJECT_DIR'] = this.storage.getProjectDir();
       projectDirEnvClaimed = true;
@@ -2188,7 +2213,14 @@ export class Config {
       this.telemetrySettings.enabled &&
       !this.telemetryInitializationDeferred
     ) {
-      initializeTelemetry(this);
+      // Fire-and-forget: the SDK module loads asynchronously (issue #4748),
+      // and spans/logs emitted before it settles are dropped by the
+      // isTelemetrySdkInitialized() gates — same as the deferred TUI path.
+      // Promise.resolve guards against auto-mocked initializeTelemetry
+      // returning undefined in tests.
+      void Promise.resolve(initializeTelemetry(this)).catch((error) => {
+        this.debugLogger.error('Failed to initialize telemetry:', error);
+      });
     }
 
     const proxyUrl = this.getProxy();
@@ -2203,9 +2235,32 @@ export class Config {
       // `--proxy` / `settings.proxy` value (resolved by `getProxy()`)
       // overrides env `http(s)_proxy`; `NO_PROXY` continues to come from the
       // environment. See issue #3696 (local MCP + corporate proxy).
-      setGlobalDispatcher(
-        new EnvHttpProxyAgent({ httpProxy: proxyUrl, httpsProxy: proxyUrl }),
-      );
+      //
+      // undici loads behind a dynamic import to keep it out of the eager
+      // startup closure (issue #7264); initialize() awaits this promise so
+      // the dispatcher is installed before any network activity.
+      this.proxyDispatcherReady = loadUndici()
+        .then(({ EnvHttpProxyAgent, setGlobalDispatcher }) => {
+          setGlobalDispatcher(
+            new EnvHttpProxyAgent({
+              httpProxy: proxyUrl,
+              httpsProxy: proxyUrl,
+            }),
+          );
+        })
+        .catch((error) => {
+          // Redact before logging: the error can embed the proxy URL with
+          // credentials. Rethrow so initialize() fails loudly, matching the
+          // old synchronous constructor behavior.
+          this.debugLogger.error(
+            'Failed to install proxy dispatcher:',
+            redactProxyError(error),
+          );
+          throw error;
+        });
+      // Swallow an early rejection so it cannot become an unhandledRejection
+      // before initialize() awaits (and surfaces) the stored promise.
+      this.proxyDispatcherReady.catch(() => {});
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -2232,6 +2287,7 @@ export class Config {
         ? params.memoryAgentTimeoutMinutes
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     // Guard: nothing validates settings.json on the load path, so this is the
     // only real gate. `AbortSignal.timeout()` requires an integer in
@@ -2269,7 +2325,35 @@ export class Config {
       throw Error('Config was already initialized');
     }
     this.initialized = true;
+    try {
+      await this.activateChatRecording();
+      registerSessionProjectDir(this.sessionId, this.storage.getProjectDir());
+      this.sessionProjectDirRegistered = true;
+      await this.initializeInternal(options);
+    } catch (error) {
+      if (this.sessionProjectDirRegistered) {
+        unregisterSessionProjectDir(this.sessionId);
+        this.sessionProjectDirRegistered = false;
+      }
+      try {
+        await this.chatRecordingService?.close();
+      } catch (closeError) {
+        throw new SessionWriterUnavailableError({
+          cause: new AggregateError(
+            [error, closeError],
+            'Chat recording close failed during failed initialization',
+          ),
+        });
+      }
+      throw error;
+    }
+  }
+
+  private async initializeInternal(
+    options?: ConfigInitializeOptions,
+  ): Promise<void> {
     this.debugLogger.info('Config initialization started');
+    await this.proxyDispatcherReady;
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
@@ -2336,6 +2420,8 @@ export class Config {
             // Execute the appropriate hook based on eventName
             let result;
             let stopHookCount: number | undefined;
+            let hasNonGoalBlockingStopHook: boolean | undefined;
+            let nonGoalBlockingStopReason: string | undefined;
             const input = request.input || {};
             const signal = request.signal;
             switch (request.eventName) {
@@ -2370,6 +2456,32 @@ export class Config {
                   ? createHookOutput('Stop', stopResult.finalOutput)
                   : undefined;
                 stopHookCount = stopResult.allOutputs.length;
+                const goalHookId =
+                  stopResult.finalOutput?.hookSpecificOutput?.[
+                    GOAL_HOOK_ID_OUTPUT_KEY
+                  ];
+                if (typeof goalHookId === 'string') {
+                  const nonGoalBlockingOutputs = stopResult.allOutputs.filter(
+                    (output) =>
+                      output.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] !==
+                        goalHookId &&
+                      (output.decision === 'block' ||
+                        output.decision === 'deny' ||
+                        output.continue === false),
+                  );
+                  hasNonGoalBlockingStopHook =
+                    nonGoalBlockingOutputs.length > 0;
+                  if (hasNonGoalBlockingStopHook) {
+                    nonGoalBlockingStopReason = nonGoalBlockingOutputs
+                      .map(
+                        (output) =>
+                          output.stopReason ||
+                          output.reason ||
+                          'No reason provided',
+                      )
+                      .join('\n');
+                  }
+                }
                 break;
               }
               case 'MessageDisplay': {
@@ -2498,6 +2610,8 @@ export class Config {
               output: result,
               // Include stop hook count for Stop events
               stopHookCount,
+              hasNonGoalBlockingStopHook,
+              nonGoalBlockingStopReason,
             } as HookExecutionResponse);
           } catch (error) {
             this.debugLogger.warn(`Hook execution failed: ${error}`);
@@ -2700,6 +2814,78 @@ export class Config {
           );
         }
       })();
+    }
+  }
+
+  private async activateChatRecording(): Promise<void> {
+    if (!this.chatRecordingEnabled || !this.experimentalZedIntegration) return;
+    const recorder = this.chatRecordingService;
+    if (!recorder) throw new SessionWriterUnavailableError();
+    let lease: SessionWriterLease | undefined;
+    try {
+      lease = await SessionWriterLease.acquire({
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+        sessionId: this.sessionId,
+        transcriptPath: this.getTranscriptPath(),
+        processKind: 'acp',
+        qwenVersion: this.cliVersion ?? null,
+        onOwnershipAcquired: (acquiredLease) => {
+          lease = acquiredLease;
+          this.pendingSessionWriterLease = acquiredLease;
+        },
+      });
+      const location = await this.getSessionService().getSessionLocation(
+        this.sessionId,
+      );
+      if (location === 'conflict' || location === 'archived') {
+        throw new SessionTranscriptChangedError();
+      }
+      let authoritative: ResumedSessionData | undefined;
+      if (this.sessionData || lease.transcriptExistedAtAcquire) {
+        authoritative = await this.getSessionService().loadSession(
+          this.sessionId,
+        );
+        if (!authoritative) throw new SessionWriterUnavailableError();
+      } else if (location !== undefined) {
+        throw new SessionTranscriptChangedError();
+      }
+      const persistedTitleInfo = authoritative
+        ? this.getSessionService().getSessionTitleInfo(this.sessionId)
+        : undefined;
+      await lease.assertOwnedAndUnchanged();
+      this.sessionData = authoritative;
+      recorder.activate(lease, authoritative, persistedTitleInfo);
+      this.pendingSessionWriterLease = undefined;
+      lease = undefined;
+    } catch (error) {
+      let failure: unknown = error;
+      if (
+        !(failure instanceof SessionWriterError) &&
+        failure &&
+        typeof failure === 'object' &&
+        typeof (failure as NodeJS.ErrnoException).code === 'string'
+      ) {
+        failure = new SessionWriterUnavailableError({ cause: failure });
+      }
+      try {
+        const ownedLease = lease ?? this.pendingSessionWriterLease;
+        await ownedLease?.release();
+        if (this.pendingSessionWriterLease === ownedLease) {
+          this.pendingSessionWriterLease = undefined;
+        }
+      } catch (releaseError) {
+        if (releaseError instanceof SessionWriterLostError) {
+          this.pendingSessionWriterLease = undefined;
+        } else {
+          failure = new SessionWriterUnavailableError({
+            cause: new AggregateError(
+              [failure, releaseError],
+              'Session writer lease release failed during activation cleanup',
+            ),
+          });
+        }
+      }
+      throw failure;
     }
   }
 
@@ -3100,6 +3286,7 @@ export class Config {
       modelProvidersConfig,
       providerProtocolConfig,
     );
+    this.baseLlmClient?.clearPerModelGeneratorCache();
   }
 
   /**
@@ -3220,6 +3407,9 @@ export class Config {
     sessionId?: string,
     sessionData?: ResumedSessionData,
   ): string {
+    if (this.chatRecordingService?.hasWriteOwnership()) {
+      throw new SessionWriterUnavailableError();
+    }
     // Finalize the outgoing session before switching.
     const outgoingChatRecordingService = this.chatRecordingService;
     try {
@@ -3449,6 +3639,14 @@ export class Config {
     return rawSelector?.authType
       ? `${rawSelector.authType}:${selector.modelId}`
       : selector.modelId;
+  }
+
+  /**
+   * Settings for the built-in WebSearch tool. Undefined when the feature was
+   * never configured.
+   */
+  getWebSearchSettings(): WebSearchSettings | undefined {
+    return this.webSearchSettings;
   }
 
   private resolveFastModelSelector() {
@@ -3846,6 +4044,19 @@ export class Config {
   }
 
   /**
+   * Get the fully resolved provider model config (generationConfig defaults
+   * applied) for a specific modelProviders entry.
+   * Delegates to ModelsConfig.
+   */
+  getResolvedModelConfig(
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ): ResolvedModelConfig | undefined {
+    return this.modelsConfig.getResolvedModel(authType, modelId, baseUrl);
+  }
+
+  /**
    * Get the currently active runtime model snapshot.
    * Delegates to ModelsConfig.
    */
@@ -4035,6 +4246,12 @@ export class Config {
     expectedCanonicalDir?: string,
     opts?: { skipProcessChdir?: boolean; skipArtifactMigration?: boolean },
   ): Promise<{ memoryRefreshError?: unknown }> {
+    if (
+      !opts?.skipArtifactMigration &&
+      this.chatRecordingService?.hasWriteOwnership()
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
     const oldDir = opts?.skipProcessChdir
       ? this.cwd
       : fs.realpathSync(process.cwd());
@@ -4071,7 +4288,7 @@ export class Config {
 
     const oldStorage = this.storage;
     if (!opts?.skipArtifactMigration) {
-      const newStorage = new Storage(expected);
+      const newStorage = new Storage(expected, this.sessionRuntimeBaseDir);
       await this.prepareSessionArtifactMigration(
         oldStorage,
         newStorage,
@@ -4082,6 +4299,7 @@ export class Config {
       this.chatRecordingService?.resetStoragePaths();
     }
 
+    this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
     await this.refreshCurrentRuntimeStatus(expected);
@@ -4143,13 +4361,16 @@ export class Config {
    * This method is idempotent and safe to call multiple times.
    * It handles the case where initialization was not completed.
    */
-  async shutdown(): Promise<void> {
+  async shutdown(options?: { shutdownTelemetry?: boolean }): Promise<void> {
     try {
-      // Drop this session's project-dir registry entry. It is registered in the
-      // constructor, so it is released here regardless of initialization state —
+      // Drop this session's project-dir registry entry. It is registered during
+      // initialization, so it is released here whenever that step completed —
       // in daemon mode, where one process serves many sessions, an unreleased
       // entry per session is a leak that grows for the life of the process.
-      unregisterSessionProjectDir(this.sessionId);
+      if (this.sessionProjectDirRegistered) {
+        unregisterSessionProjectDir(this.sessionId);
+        this.sessionProjectDirRegistered = false;
+      }
 
       // Stop the settings watcher regardless of initialization state —
       // it is started before Config.initialize() and would leak otherwise.
@@ -4185,8 +4406,31 @@ export class Config {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
     } finally {
+      await this.chatRecordingService?.close().catch((error) => {
+        this.debugLogger.error(
+          'Failed to release session writer lease:',
+          error,
+        );
+      });
+      const pendingLease = this.pendingSessionWriterLease;
+      if (pendingLease) {
+        try {
+          await pendingLease.release();
+          if (this.pendingSessionWriterLease === pendingLease) {
+            this.pendingSessionWriterLease = undefined;
+          }
+        } catch (error) {
+          if (error instanceof SessionWriterLostError) {
+            this.pendingSessionWriterLease = undefined;
+          }
+          this.debugLogger.error(
+            'Failed to release pending session writer lease:',
+            error,
+          );
+        }
+      }
       this.chatRecordingFailureListeners.clear();
-      if (isTelemetrySdkInitialized()) {
+      if (options?.shutdownTelemetry !== false && isTelemetrySdkInitialized()) {
         await shutdownTelemetry();
       }
     }
@@ -6163,9 +6407,13 @@ export class Config {
   }
 
   private createChatRecordingService(): ChatRecordingService {
-    return new ChatRecordingService(this, (event) => {
-      this.notifyChatRecordingFailure(event);
-    });
+    return new ChatRecordingService(
+      this,
+      (event) => {
+        this.notifyChatRecordingFailure(event);
+      },
+      this.experimentalZedIntegration,
+    );
   }
 
   private notifyChatRecordingFailure(event: ChatRecordingFailureEvent): void {
@@ -6201,12 +6449,31 @@ export class Config {
     return path.join(projectDir, 'chats', safeFilename);
   }
 
+  async assertCanStartTurn(): Promise<void> {
+    if (this.chatRecordingService?.hasWriteOwnership()) {
+      await this.chatRecordingService.assertCanStartTurn();
+    }
+  }
+
+  hasSessionWriteOwnership(): boolean {
+    return (
+      this.pendingSessionWriterLease !== undefined ||
+      this.chatRecordingService?.hasWriteOwnership() === true
+    );
+  }
+
+  getSessionRuntimeBaseDir(): string {
+    return this.sessionRuntimeBaseDir;
+  }
+
   /**
    * Gets or creates a SessionService for managing chat sessions.
    */
   getSessionService(): SessionService {
     if (!this.sessionService) {
-      this.sessionService = new SessionService(this.targetDir);
+      this.sessionService = new SessionService(this.storage.getProjectRoot(), {
+        runtimeBaseDir: this.sessionRuntimeBaseDir,
+      });
     }
     return this.sessionService;
   }
@@ -6614,17 +6881,22 @@ export class Config {
       const { TodoWriteTool } = await import('../tools/todoWrite.js');
       return new TodoWriteTool(this);
     });
-    await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
-      const { AskUserQuestionTool } = await import(
-        '../tools/askUserQuestion.js'
-      );
-      return new AskUserQuestionTool(this);
-    });
-    if (!this.sdkMode) {
+    const supportsUserInteraction = resolveInteractionMode(this) !== 'headless';
+    if (supportsUserInteraction) {
+      await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
+        const { AskUserQuestionTool } = await import(
+          '../tools/askUserQuestion.js'
+        );
+        return new AskUserQuestionTool(this);
+      });
+    }
+    if (!this.sdkMode && (supportsUserInteraction || options?.forSubAgent)) {
       await registerLazy(ToolNames.EXIT_PLAN_MODE, async () => {
         const { ExitPlanModeTool } = await import('../tools/exitPlanMode.js');
         return new ExitPlanModeTool(this);
       });
+    }
+    if (!this.sdkMode && supportsUserInteraction) {
       await registerLazy(ToolNames.ENTER_PLAN_MODE, async () => {
         const { EnterPlanModeTool } = await import('../tools/enterPlanMode.js');
         return new EnterPlanModeTool(this);
@@ -6642,6 +6914,23 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    // WebSearch is opt-in: it registers only when explicitly enabled AND the
+    // configured search model resolves to a usable DashScope entry. A failed
+    // gate surfaces a one-time startup notice instead of a silently missing
+    // tool. Nothing is imported unless the feature is enabled.
+    if (this.webSearchSettings?.enabled) {
+      const { evaluateWebSearchGate } = await import('../tools/web-search.js');
+      const gate = evaluateWebSearchGate(this);
+      if (gate.ok) {
+        await registerLazy(ToolNames.WEB_SEARCH, async () => {
+          const { WebSearchTool } = await import('../tools/web-search.js');
+          return new WebSearchTool(this);
+        });
+      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+        this.webSearchNoticeEmitted = true;
+        this.warnings.push(gate.notice);
+      }
+    }
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
         const { ArtifactTool } = await import(

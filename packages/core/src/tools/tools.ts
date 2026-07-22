@@ -493,6 +493,12 @@ export interface ToolResult {
   llmContent: PartListUnion;
 
   /**
+   * Producer output artifacts persisted before final aggregation.
+   * Internal runtimes use these paths to avoid writing the same output again.
+   */
+  persistedOutputFiles?: string[];
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -792,6 +798,10 @@ export interface ToolEditConfirmationDetails {
   isModifying?: boolean;
   /** Hide UI affordances that let the user edit the proposed content. */
   hideModify?: boolean;
+  /** Skip opening or resolving an IDE diff for this confirmation. */
+  skipIdeDiff?: boolean;
+  /** Informational warnings to render alongside the proposed diff. */
+  warnings?: string[];
 }
 
 export interface ToolConfirmationPayload {
@@ -871,13 +881,22 @@ export interface ToolInfoConfirmationDetails {
   permissionRules?: string[];
 }
 
-export type ToolCallConfirmationDetails =
+export interface AutoModeFallbackConfirmation {
+  reason: 'classifier_unavailable';
+  message: string;
+}
+
+export type ToolCallConfirmationDetails = (
   | ToolEditConfirmationDetails
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
   | ToolPlanConfirmationDetails
-  | ToolAskUserQuestionConfirmationDetails;
+  | ToolAskUserQuestionConfirmationDetails
+) & {
+  /** Explains why an AUTO-mode call was routed to manual confirmation. */
+  autoModeFallback?: AutoModeFallbackConfirmation;
+};
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
@@ -921,6 +940,8 @@ export interface ToolAskUserQuestionConfirmationDetails {
  */
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
+  /** Approve this call once and change the runtime session to Default mode. */
+  ProceedOnceAndSwitchToDefault = 'proceed_once_and_switch_to_default',
   ProceedAlways = 'proceed_always',
   /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysServer = 'proceed_always_server',

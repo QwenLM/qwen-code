@@ -79,6 +79,9 @@ export function registerCapabilitiesRoutes(
       workspaces: runtimes.map((runtime) => ({
         id: runtime.workspaceId,
         cwd: runtime.workspaceCwd,
+        ...(runtime.displayName !== undefined
+          ? { displayName: runtime.displayName }
+          : {}),
         primary: runtime.primary,
         trusted: runtime.trusted,
         ...(runtimeRemoval ? { removable: runtime.removable === true } : {}),

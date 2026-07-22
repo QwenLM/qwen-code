@@ -40,6 +40,7 @@ import type {
   DaemonSessionExportResult,
   DaemonSessionTranscriptPage,
   DaemonSessionTranscriptPageOptions,
+  DaemonSubagentSessionResolution,
   DaemonSessionGroup,
   DaemonSessionGroupCatalog,
   DaemonSessionGroupInput,
@@ -72,8 +73,11 @@ import type {
   DaemonWorkspaceGitStatus,
   DaemonWorkspaceGitDiff,
   DaemonWorkspaceGitDiffHunks,
+  DaemonGitLog,
+  DaemonGitCommitDetail,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpInitializeResult,
+  DaemonWorkspaceMcpReloadOptions,
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
@@ -91,7 +95,9 @@ import type {
   DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
+  DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
+  DaemonWorkspaceUpdate,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -477,6 +483,15 @@ export interface CreateSessionRequest {
   sourceType?: string;
   /** Optional source-specific identifier. Requires `sourceType`. */
   sourceId?: string;
+  /**
+   * Create the session in an isolated git worktree. The daemon creates
+   * a worktree under `<repoRoot>/.qwen/worktrees/<slug>` and relocates
+   * the session's working directory into it. Pass `{}` for an
+   * auto-generated slug, or `{ slug: 'my-task' }` for a named one.
+   * Requires the workspace to be a git repository. Worktree sessions
+   * are always created with `sessionScope: 'thread'`.
+   */
+  worktree?: { slug?: string };
 }
 
 export interface RestoreSessionRequest {
@@ -1048,13 +1063,15 @@ export class DaemonClient {
     );
   }
 
-  async reloadWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
+  async reloadWorkspaceMcp(
+    options: DaemonWorkspaceMcpReloadOptions = {},
+  ): Promise<DaemonWorkspaceMcpInitializeResult> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp/reload`,
       {
         method: 'POST',
         headers: this.headers({ 'Content-Type': 'application/json' }),
-        body: '{}',
+        body: JSON.stringify(options),
       },
       async (res) => {
         if (!res.ok) {
@@ -1091,6 +1108,26 @@ export class DaemonClient {
     return await this.jsonRequest<DaemonWorkspaceGitDiffHunks>(
       query,
       'GET /workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (skip != null) params.set('skip', String(skip));
+    const qs = params.toString();
+    return await this.jsonRequest<DaemonGitLog>(
+      `/workspace/git/log${qs ? `?${qs}` : ''}`,
+      'GET /workspace/git/log',
+      { mode: 'rest' },
+    );
+  }
+
+  async workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+    return await this.jsonRequest<DaemonGitCommitDetail>(
+      `/workspace/git/log/commit?sha=${urlEncode(sha)}`,
+      'GET /workspace/git/log/commit',
       { mode: 'rest' },
     );
   }
@@ -1149,29 +1186,22 @@ export class DaemonClient {
       timeoutMs !== undefined
         ? `?timeoutMs=${encodeURIComponent(timeoutMs)}`
         : '';
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/acp/preheat${suffix}`,
-      { method: 'POST', headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'POST /workspace/acp/preheat');
-        }
-        return (await res.json()) as DaemonWorkspaceAcpPreheatResult;
+    return await this.jsonRequest<DaemonWorkspaceAcpPreheatResult>(
+      `/workspace/acp/preheat${suffix}`,
+      'POST /workspace/acp/preheat',
+      {
+        method: 'POST',
+        timeoutMs: serverBudgetMs + 2_000,
+        mode: 'rest',
       },
-      serverBudgetMs + 2_000,
     );
   }
 
   async workspaceAcpStatus(): Promise<DaemonWorkspaceAcpStatusResult> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/acp/status`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/acp/status');
-        }
-        return (await res.json()) as DaemonWorkspaceAcpStatusResult;
-      },
+    return await this.jsonRequest<DaemonWorkspaceAcpStatusResult>(
+      '/workspace/acp/status',
+      'GET /workspace/acp/status',
+      { mode: 'rest' },
     );
   }
 
@@ -2050,6 +2080,7 @@ export class DaemonClient {
             ? { sourceType: req.sourceType }
             : {}),
           ...(req.sourceId !== undefined ? { sourceId: req.sourceId } : {}),
+          ...(req.worktree !== undefined ? { worktree: req.worktree } : {}),
         }),
       },
       async (res) => {
@@ -2215,6 +2246,30 @@ export class DaemonClient {
         clientId: opts.clientId,
         mode: 'rest',
       },
+    );
+  }
+
+  async resolveSubagentSession(
+    sessionId: string,
+    toolCallId: string,
+    clientId?: string,
+  ): Promise<DaemonSubagentSessionResolution> {
+    return await this.jsonRequest<DaemonSubagentSessionResolution>(
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}`,
+      'GET /session/:id/subagents/:toolCallId',
+      { clientId, mode: 'rest' },
+    );
+  }
+
+  async cancelSubagentSession(
+    sessionId: string,
+    toolCallId: string,
+    clientId?: string,
+  ): Promise<{ cancelled: boolean }> {
+    return await this.jsonRequest<{ cancelled: boolean }>(
+      `/session/${urlEncode(sessionId)}/subagents/${urlEncode(toolCallId)}/cancel`,
+      'POST /session/:id/subagents/:toolCallId/cancel',
+      { clientId, mode: 'rest', method: 'POST' },
     );
   }
 
@@ -4293,10 +4348,11 @@ export class DaemonClient {
 
   async addWorkspace(
     cwd: string,
-    options: { persist?: boolean } = {},
+    options: { persist?: boolean; displayName?: string } = {},
   ): Promise<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     persisted?: boolean;
@@ -4309,7 +4365,53 @@ export class DaemonClient {
         body: JSON.stringify({
           cwd,
           ...(options.persist ? { persist: true } : {}),
+          ...(options.displayName !== undefined
+            ? { displayName: options.displayName }
+            : {}),
         }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspaces');
+        }
+        return (await res.json()) as {
+          id: string;
+          cwd: string;
+          displayName?: string;
+          primary: boolean;
+          trusted: boolean;
+          persisted?: boolean;
+        };
+      },
+    );
+  }
+
+  async updateWorkspace(
+    workspaceSelector: string,
+    update: DaemonWorkspaceUpdate,
+  ): Promise<DaemonWorkspaceCapability> {
+    return await this.workspaceJsonRequest<DaemonWorkspaceCapability>(
+      urlEncode(workspaceSelector),
+      '',
+      'PATCH /workspaces/:workspace',
+      { method: 'PATCH', body: update, mode: 'rest' },
+    );
+  }
+
+  /** Requests a process-local workspace in a daemon-managed empty directory. */
+  async addScratchWorkspace(): Promise<{
+    id: string;
+    cwd: string;
+    primary: boolean;
+    trusted: boolean;
+    persisted: false;
+  }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspaces`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ kind: 'scratch' }),
       },
       async (res) => {
         if (!res.ok) {
@@ -4320,7 +4422,7 @@ export class DaemonClient {
           cwd: string;
           primary: boolean;
           trusted: boolean;
-          persisted?: boolean;
+          persisted: false;
         };
       },
     );
@@ -4667,11 +4769,13 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  reloadWorkspaceMcp(): Promise<DaemonWorkspaceMcpInitializeResult> {
+  reloadWorkspaceMcp(
+    options: DaemonWorkspaceMcpReloadOptions = {},
+  ): Promise<DaemonWorkspaceMcpInitializeResult> {
     return this.post(
       '/mcp/reload',
       'POST /workspaces/:workspace/mcp/reload',
-      {},
+      options,
     );
   }
 
@@ -4707,10 +4811,11 @@ export class WorkspaceDaemonClient {
     );
   }
 
-  workspaceGit(): Promise<DaemonWorkspaceGitStatus> {
+  workspaceGit(cwd?: string): Promise<DaemonWorkspaceGitStatus> {
+    const suffix = cwd ? `/git?cwd=${encodeURIComponent(cwd)}` : '/git';
     return this.client.workspaceJsonRequest<DaemonWorkspaceGitStatus>(
       this.workspaceSelector,
-      '/git',
+      suffix,
       'GET /workspaces/:workspace/git',
       { mode: 'rest' },
     );
@@ -4736,6 +4841,28 @@ export class WorkspaceDaemonClient {
       this.workspaceSelector,
       query,
       'GET /workspaces/:workspace/git/diff/file',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitLog(limit?: number, skip?: number): Promise<DaemonGitLog> {
+    const params = new URLSearchParams();
+    if (limit != null) params.set('limit', String(limit));
+    if (skip != null) params.set('skip', String(skip));
+    const qs = params.toString();
+    return this.client.workspaceJsonRequest<DaemonGitLog>(
+      this.workspaceSelector,
+      `/git/log${qs ? `?${qs}` : ''}`,
+      'GET /workspaces/:workspace/git/log',
+      { mode: 'rest' },
+    );
+  }
+
+  workspaceGitCommitDetail(sha: string): Promise<DaemonGitCommitDetail> {
+    return this.client.workspaceJsonRequest<DaemonGitCommitDetail>(
+      this.workspaceSelector,
+      `/git/log/commit?sha=${urlEncode(sha)}`,
+      'GET /workspaces/:workspace/git/log/commit',
       { mode: 'rest' },
     );
   }

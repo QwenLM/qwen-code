@@ -51,7 +51,9 @@ interface CreateServeFeaturesDeps {
   channelAuthAvailable: boolean;
   sessionShellCommandEnabled: boolean;
   multiWorkspaceSessionsEnabled: () => boolean;
+  dynamicWorkspaceRegistrationAvailable: boolean;
   persistentWorkspaceRegistrationAvailable: boolean;
+  scratchWorkspaceRegistrationAvailable: () => boolean;
   workspaceRuntimeRemovalAvailable?: boolean;
   env?: Readonly<Record<string, string | undefined>>;
 }
@@ -78,7 +80,9 @@ export function createServeFeatures(
     channelAuthAvailable,
     sessionShellCommandEnabled,
     multiWorkspaceSessionsEnabled,
+    dynamicWorkspaceRegistrationAvailable,
     persistentWorkspaceRegistrationAvailable,
+    scratchWorkspaceRegistrationAvailable,
     workspaceRuntimeRemovalAvailable,
   } = deps;
   const env = deps.env ?? process.env;
@@ -122,7 +126,10 @@ export function createServeFeatures(
         channelManagementAvailable,
         channelAuthAvailable,
         multiWorkspaceSessionsEnabled: multiWorkspaceSessionsEnabled(),
+        dynamicWorkspaceRegistrationAvailable,
         persistentWorkspaceRegistrationAvailable,
+        scratchWorkspaceRegistrationAvailable:
+          scratchWorkspaceRegistrationAvailable(),
         workspaceRuntimeRemovalAvailable,
         acpHttpEnabled: resolveAcpHttpEnabled(),
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,

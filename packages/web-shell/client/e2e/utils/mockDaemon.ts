@@ -18,6 +18,7 @@ import {
   type DaemonSessionState,
   type DaemonSessionSummary,
   type DaemonWorkspaceExtensionsStatus,
+  type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceMcpResourcesStatus,
   type DaemonWorkspaceMcpStatus,
   type DaemonWorkspaceMcpToolsStatus,
@@ -51,6 +52,7 @@ export interface WebShellDaemonScenario {
   providers: DaemonWorkspaceProvidersStatus;
   skills: DaemonWorkspaceSkillsStatus;
   settings: DaemonWorkspaceSettingsStatus;
+  voice: DaemonWorkspaceVoiceStatus;
   extensions: DaemonWorkspaceExtensionsStatus;
   extensionOperations: ExtensionActiveOperations;
   extensionUpdateCheck: ExtensionUpdateCheckResponse;
@@ -61,6 +63,11 @@ export interface WebShellDaemonScenario {
   bearerToken: string;
   channelWorkspaces: Record<string, MockChannelWorkspaceState>;
   channelFailures: Record<string, MockChannelFailure[]>;
+  /**
+   * Response for `GET /workspaces/:cwd/git`. Defaults to a null-branch status
+   * (non-git workspace), matching the real daemon's graceful degradation.
+   */
+  gitStatus?: DaemonWorkspaceGitStatus;
 }
 
 export interface MockChannelFailure {
@@ -96,6 +103,7 @@ type ScenarioOverrides = Partial<
     | 'providers'
     | 'skills'
     | 'settings'
+    | 'voice'
     | 'extensions'
     | 'extensionOperations'
     | 'extensionUpdateCheck'
@@ -108,6 +116,7 @@ type ScenarioOverrides = Partial<
   providers?: Partial<DaemonWorkspaceProvidersStatus>;
   skills?: Partial<DaemonWorkspaceSkillsStatus>;
   settings?: Partial<DaemonWorkspaceSettingsStatus>;
+  voice?: Partial<DaemonWorkspaceVoiceStatus>;
   extensions?: Partial<DaemonWorkspaceExtensionsStatus>;
   extensionOperations?: Partial<ExtensionActiveOperations>;
   extensionUpdateCheck?: Partial<ExtensionUpdateCheckResponse>;
@@ -257,6 +266,17 @@ export function createWebShellDaemonScenario(
     ...(overrides.settings ?? {}),
   };
 
+  const voice: DaemonWorkspaceVoiceStatus = {
+    v: 1,
+    workspaceCwd,
+    enabled: false,
+    mode: 'hold',
+    language: 'en',
+    voiceModel: null,
+    availableVoiceModels: [],
+    ...(overrides.voice ?? {}),
+  };
+
   const extensions: DaemonWorkspaceExtensionsStatus = {
     v: 1,
     workspaceCwd,
@@ -316,6 +336,7 @@ export function createWebShellDaemonScenario(
     providers,
     skills,
     settings,
+    voice,
     extensions,
     extensionOperations,
     extensionUpdateCheck,
@@ -326,6 +347,7 @@ export function createWebShellDaemonScenario(
     bearerToken: overrides.bearerToken ?? defaultBearerToken,
     channelWorkspaces,
     channelFailures: overrides.channelFailures ?? {},
+    gitStatus: overrides.gitStatus,
   };
 }
 
@@ -608,6 +630,7 @@ function isDaemonPath(path: string): boolean {
     /^\/workspace\/mcp\/[^/]+\/resources\/?$/.test(path) ||
     /^\/workspaces?\/.+\/sessions\/?$/.test(path) ||
     /^\/workspaces?\/.+\/session-groups\/?$/.test(path) ||
+    /^\/workspaces\/.+\/git\/?$/.test(path) ||
     path === '/session' ||
     /^\/permission\/[^/]+\/?$/.test(path) ||
     /^\/session\/[^/]+\/pending-prompts(?:\/[^/]+)?\/?$/.test(path) ||
@@ -664,6 +687,9 @@ function isDaemonRoute(method: string, path: string): boolean {
     return true;
   }
   if (method === 'GET' && /^\/session\/[^/]+\/events\/?$/.test(path)) {
+    return true;
+  }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
     return true;
   }
   if (
@@ -1159,6 +1185,17 @@ async function handleDaemonRoute(
     await json(route, catalog);
     return;
   }
+  if (method === 'GET' && /^\/workspaces\/.+\/git\/?$/.test(path)) {
+    await json(
+      route,
+      scenario.gitStatus ?? {
+        v: 2,
+        workspaceCwd: scenario.workspaceCwd,
+        branch: null,
+      },
+    );
+    return;
+  }
   if (method === 'POST' && path === '/session') {
     await json(route, sessionEnvelope(scenario, { attached: false }));
     return;
@@ -1445,15 +1482,7 @@ function workspaceTools(
 function workspaceVoice(
   scenario: WebShellDaemonScenario,
 ): DaemonWorkspaceVoiceStatus {
-  return {
-    v: 1,
-    workspaceCwd: scenario.workspaceCwd,
-    enabled: false,
-    mode: 'hold',
-    language: 'en',
-    voiceModel: null,
-    availableVoiceModels: [],
-  };
+  return scenario.voice;
 }
 
 async function json(route: Route, body: unknown, status = 200): Promise<void> {

@@ -1,3 +1,4 @@
+import './styles/globals.css';
 import {
   createContext,
   useCallback,
@@ -30,7 +31,7 @@ import {
   type DaemonSessionNotice,
   type DaemonStreamingState,
 } from '@qwen-code/webui/daemon-react-sdk';
-import { isDaemonTurnError } from '@qwen-code/sdk/daemon';
+import { DaemonHttpError, isDaemonTurnError } from '@qwen-code/sdk/daemon';
 import type {
   DaemonInputAnnotation,
   DaemonTranscriptBlock,
@@ -39,8 +40,11 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
+import { GitForkIcon, XIcon } from 'lucide-react';
+import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
+import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -75,7 +79,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
-import { GitDiffDialog } from './components/dialogs/GitDiffDialog';
+import { GitDialog, type GitDialogView } from './components/dialogs/GitDialog';
 import { SkillsManagerPage } from './components/skills/SkillsManagerPage';
 import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { SessionOverviewPanel } from './components/SessionOverviewPanel';
@@ -84,13 +88,18 @@ import {
   ArtifactPanel,
   type ArtifactPanelTab,
 } from './components/artifacts/ArtifactPanel';
+import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
   TurnOutputKind,
   TurnOutputOpenRequest,
   TurnOutputScheduledTask,
 } from './components/artifacts/TurnOutputs';
-import { TURN_OUTPUT_KINDS } from './components/artifacts/TurnOutputs';
+import {
+  displayPath,
+  getFileChangePreviewContent,
+  TURN_OUTPUT_KINDS,
+} from './components/artifacts/TurnOutputs';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -123,13 +132,18 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
+import { AddWorkspaceDialog } from './components/dialogs/AddWorkspaceDialog';
+import { Button } from './components/ui/button';
 import {
   WebShellSidebar,
   type WebShellSidebarBranding,
   type WebShellSidebarFooterOptions,
   type WebShellSidebarLockedWorkspace,
+  type WebShellSidebarPrimaryNavOptions,
+  type WebShellSidebarSessionActionsOptions,
 } from './components/sidebar/WebShellSidebar';
 import { isSidebarToggleShortcut } from './components/sidebar/sidebarToggleShortcut';
+import { workspaceLabel } from './utils/workspace';
 import {
   getLocalCommands,
   localizeBuiltinDescriptions,
@@ -154,6 +168,10 @@ import {
   COPY_MESSAGES,
 } from './utils/copyCommand';
 import { isEditableTarget } from './utils/dom';
+import {
+  invokeSlashCommandHandler,
+  SLASH_COMMAND_PATTERN,
+} from './utils/slash-command-action';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { isVisibleComposerModel } from './utils/composerModels';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
@@ -250,7 +268,6 @@ import {
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
-import './styles/globals.css';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
@@ -428,6 +445,12 @@ export interface WebShellSidebarOptions {
   showCompactToggle?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
+  /** Customize the primary navigation area (new task button, custom entries). */
+  primaryNav?: WebShellSidebarPrimaryNavOptions;
+  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  hideProjectHeader?: boolean;
+  /** Customize which action buttons appear on session rows. */
+  sessionActions?: WebShellSidebarSessionActionsOptions;
   /** Hide the footer completely or select the built-in entries it exposes. */
   footer?: false | WebShellSidebarFooterOptions;
   /** Customize the workspace row shown when lockWorkspaceCwd is active. */
@@ -455,6 +478,19 @@ export type WebShellComposerPlaceholderState = ComposerPlaceholderState;
 export type WebShellComposerPlaceholders = Readonly<
   Partial<Record<WebShellComposerPlaceholderState, string>>
 >;
+
+export interface WebShellSlashCommand {
+  /** Slash command name without the leading slash, normalized to lower case. */
+  command: string;
+  /** Trimmed text following the command name. */
+  args: string;
+  /** Original text submitted from the composer. */
+  input: string;
+}
+
+export type WebShellSlashCommandHandler = (
+  command: WebShellSlashCommand,
+) => boolean | void;
 
 export interface WebShellProps {
   /** Called whenever the attached daemon session or workspace changes. */
@@ -521,6 +557,11 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /**
+   * Called before Web Shell handles a slash command. Return true to skip the
+   * built-in or daemon behavior after handling the command in the host.
+   */
+  onSlashCommand?: WebShellSlashCommandHandler;
   /** Built-in @ mention providers to enable. Defaults to all built-ins. */
   builtinAtProviders?: WebShellBuiltinAtProvidersConfig;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
@@ -531,6 +572,8 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  /** Show the worktree-isolation action in the empty welcome state. Defaults to false. */
+  showWorktreeToggle?: boolean;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
   /**
@@ -607,6 +650,7 @@ interface AppProps extends WebShellProps {
   lockedWorkspaceCwd?: string;
   lockedWorkspaceCapability?: DaemonWorkspaceCapability;
   restartSseOnPrompt?: boolean;
+  historyPageSize?: number;
 }
 
 type SessionActionsWithCreate = {
@@ -614,7 +658,11 @@ type SessionActionsWithCreate = {
     workspaceCwd?: string;
     approvalMode?: string;
     sourceType?: string;
-  }) => Promise<{ sessionId: string }>;
+    worktree?: { slug?: string };
+  }) => Promise<{
+    sessionId: string;
+    worktree?: { slug: string; path: string; branch: string };
+  }>;
   attachSession: () => Promise<void>;
   clearSession: () => Promise<void>;
   releaseSession: (sessionId: string) => Promise<void>;
@@ -644,6 +692,9 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
   defaultCollapsed: boolean;
   showCompactToggle: boolean;
   branding?: false | WebShellSidebarBranding;
+  primaryNav?: WebShellSidebarPrimaryNavOptions;
+  hideProjectHeader?: boolean;
+  sessionActions?: WebShellSidebarSessionActionsOptions;
   footer?: false | WebShellSidebarFooterOptions;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
 } {
@@ -658,6 +709,9 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     defaultCollapsed: sidebar.defaultCollapsed ?? false,
     showCompactToggle: sidebar.showCompactToggle ?? true,
     branding: sidebar.branding,
+    primaryNav: sidebar.primaryNav,
+    hideProjectHeader: sidebar.hideProjectHeader,
+    sessionActions: sidebar.sessionActions,
     footer: sidebar.footer,
     lockedWorkspace: sidebar.lockedWorkspace,
   };
@@ -1002,11 +1056,13 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  onSlashCommand,
   builtinAtProviders,
   atProviders,
   composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
+  showWorktreeToggle = false,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
   parseUserMessageContent,
@@ -1045,6 +1101,7 @@ export function App({
   onSessionChange,
   onSubmitBefore,
   restartSseOnPrompt,
+  historyPageSize,
   lockedWorkspaceCwd,
   lockedWorkspaceCapability,
 }: AppProps = {}) {
@@ -1077,6 +1134,7 @@ export function App({
   // once) is only offered on large screens; below that there is no room for it
   // to be useful.
   const isLargeScreen = useIsLargeScreen();
+  const canDockArtifactPanel = useIsLargeScreen('(min-width: 1001px)');
   // In split view the session sidebar competes with the panes for width. Below
   // this width it auto-collapses to its icon rail so the panes get the room, and
   // expands again once the window grows back. A wide split keeps the full
@@ -1272,8 +1330,49 @@ export function App({
     [lockedWorkspaceCwd, workspaces],
   );
   const sessionActions = useActions();
+  const reloadTranscript = useCallback(
+    async (signal: AbortSignal) => {
+      if (!connection.sessionId) return;
+      await sessionActions.reloadSession(signal);
+    },
+    [connection.sessionId, sessionActions],
+  );
+  const transcriptReloadSupported =
+    connection.capabilities?.features.includes(
+      SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const dynamicWorkspaceRegistrationSupported =
+    workspace.capabilities?.features?.includes(
+      'dynamic_workspace_registration',
+    ) === true;
+  const persistentWorkspaceRegistrationSupported =
+    workspace.capabilities?.features?.includes(
+      'persistent_workspace_registration',
+    ) === true;
+  const scratchWorkspaceRegistrationSupported =
+    workspace.capabilities?.features?.includes(
+      'scratch_workspace_registration',
+    ) === true;
+  const workspaceDisplayNameSupported =
+    workspace.capabilities?.features?.includes('workspace_display_name') ===
+    true;
+  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
+  const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
+  const workspaceMutationTokenRef = useRef<symbol | null>(null);
+  const workspaceSwitchTokenRef = useRef<symbol | null>(null);
+  type ScratchOutcomeState = 'clear' | 'refreshing' | 'awaiting-ack';
+  const scratchOutcomeUnknownRef = useRef<ScratchOutcomeState>('clear');
+  const committedScratchCwdRef = useRef<string | undefined>(undefined);
+  const [scratchOutcomeUnknown, setScratchOutcomeUnknown] =
+    useState<ScratchOutcomeState>('clear');
+  // The ref is the synchronous authority: a second click can arrive before
+  // React commits the disabled state rendered from its state mirror.
+  const setScratchOutcome = useCallback((state: ScratchOutcomeState) => {
+    scratchOutcomeUnknownRef.current = state;
+    setScratchOutcomeUnknown(state);
+  }, []);
   // Phase 4: the workspace picked for the *next* new session on multi-workspace
   // daemons. Kept in a ref too because session creation is lazy (first prompt),
   // so the ensureSessionForPrompt callback must read the latest value.
@@ -1285,11 +1384,56 @@ export function App({
   const [selectedWorkspaceGitStatus, setSelectedWorkspaceGitStatus] = useState<
     DaemonWorkspaceGitStatus | undefined
   >(undefined);
+
+  useEffect(() => {
+    if (!workspace.capabilities || !selectedWorkspaceCwd) return;
+    const selected = workspaces.find(
+      (entry) => entry.cwd === selectedWorkspaceCwd,
+    );
+    if (selected?.trusted) return;
+    selectedWorkspaceCwdRef.current = undefined;
+    setSelectedWorkspaceCwd(undefined);
+  }, [selectedWorkspaceCwd, workspace.capabilities, workspaces]);
   // The workspace the chip's status was last fetched for. On a workspace switch
   // we clear the status immediately so the chip never shows the previous repo's
   // branch/dirty counts while the new fetch is in flight; same-workspace
   // re-runs (branch change, focus, poll) keep the live value to avoid flicker.
   const gitStatusWorkspaceCwdRef = useRef<string | undefined>(undefined);
+  /** Worktree metadata for the current session (set after creation). */
+  const [sessionWorktree, setSessionWorktree] = useState<
+    { slug: string; path: string; branch: string } | undefined
+  >(undefined);
+  // Tracks the session id from the latest effect run. In-flight fetches
+  // compare their captured sid against this ref on resolve: a match means
+  // the response is still relevant and may set OR clear the worktree state;
+  // a mismatch means connection.sessionId moved on (reconnect cycling or a
+  // user-initiated switch) and the stale response is dropped.
+  const worktreeSessionIdRef = useRef<string | undefined>(undefined);
+  // Restore worktree info from the server when switching to an existing
+  // session. The effect intentionally does NOT cancel in-flight fetches on
+  // cleanup: connection.sessionId can cycle through several sessions during
+  // the DaemonSessionProvider reconnection loop, and cancelling would
+  // discard the one response we actually need.
+  useEffect(() => {
+    const sid = connection.sessionId;
+    worktreeSessionIdRef.current = sid;
+    if (!sid) {
+      setSessionWorktree(undefined);
+      return;
+    }
+    workspace.client
+      .sessionStatus(sid)
+      .then((summary) => {
+        if (worktreeSessionIdRef.current === sid) {
+          setSessionWorktree(summary.worktree);
+        }
+      })
+      .catch(() => {
+        if (worktreeSessionIdRef.current === sid) {
+          setSessionWorktree(undefined);
+        }
+      });
+  }, [connection.sessionId, workspace.client]);
   // Active workspace: the connected session's workspace, else the workspace
   // picked for the next session (locked / selected / primary). Computed once
   // and shared by the git-status effect and the Changes-dialog entry point so
@@ -1317,21 +1461,25 @@ export function App({
   const channelAttention = Object.values(
     channelOverview.snapshot?.instances ?? {},
   ).some((instance) => instance.runtime.state === 'error');
+  // Worktree sessions query git status with the worktree path (?cwd=
+  // parameter); the chip prefers the live branch from that status, falling
+  // back to the creation-time sessionWorktree.branch.
   useEffect(() => {
     if (!activeWorkspaceCwd) {
       gitStatusWorkspaceCwdRef.current = undefined;
       setSelectedWorkspaceGitStatus(undefined);
       return;
     }
-    if (gitStatusWorkspaceCwdRef.current !== activeWorkspaceCwd) {
-      gitStatusWorkspaceCwdRef.current = activeWorkspaceCwd;
+    const statusTarget = sessionWorktree?.path ?? activeWorkspaceCwd;
+    if (gitStatusWorkspaceCwdRef.current !== statusTarget) {
+      gitStatusWorkspaceCwdRef.current = statusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
     let cancelled = false;
     const fetchStatus = () => {
       void workspace.client
         .workspaceByCwd(activeWorkspaceCwd)
-        .workspaceGit()
+        .workspaceGit(sessionWorktree?.path)
         .then((git) => {
           if (!cancelled) setSelectedWorkspaceGitStatus(git);
         })
@@ -1353,7 +1501,12 @@ export function App({
       window.removeEventListener('focus', onFocus);
       window.clearInterval(poll);
     };
-  }, [activeWorkspaceCwd, connection.gitBranch, workspace.client]);
+  }, [
+    activeWorkspaceCwd,
+    connection.gitBranch,
+    workspace.client,
+    sessionWorktree,
+  ]);
   const onToastRef = useRef(onToast);
   onToastRef.current = onToast;
   const toastIdRef = useRef(0);
@@ -1697,15 +1850,22 @@ export function App({
     [artifactPanelArtifacts, getDefaultReviewPanelWidth],
   );
   const openReviewPanel = useCallback(
-    (changes: readonly TurnOutputFileChange[], selectedPath?: string) => {
+    (
+      changes: readonly TurnOutputFileChange[],
+      selectedPath?: string,
+      workspaceActions?: DaemonWorkspaceActions,
+      reviewWorkspaceCwd?: string,
+    ) => {
       const reviewTab: ArtifactPanelTab = {
         id: 'review',
         kind: 'review',
         title: t('turnOutputs.review'),
+        ...(workspaceActions ? { workspaceActions } : {}),
+        ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
-          ? tabs
+          ? tabs.map((item) => (item.id === reviewTab.id ? reviewTab : item))
           : [reviewTab, ...tabs],
       );
       setActiveArtifactPanelTabId(reviewTab.id);
@@ -1745,6 +1905,56 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openSubagentPanelForSession = useCallback(
+    (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
+      const rawOutput =
+        tool.rawOutput && typeof tool.rawOutput === 'object'
+          ? (tool.rawOutput as Record<string, unknown>)
+          : undefined;
+      const subagentType =
+        (typeof tool.args?.subagent_type === 'string'
+          ? tool.args.subagent_type
+          : undefined) ??
+        (typeof rawOutput?.['subagentName'] === 'string'
+          ? rawOutput['subagentName']
+          : undefined);
+      const tab: ArtifactPanelTab = {
+        id: `subagent:${sessionId}:${tool.callId}`,
+        kind: 'subagent',
+        title: tool.title || subagentType || t('agent.label'),
+        sessionId,
+        rootToolCallId: tool.callId,
+        rootTool: tool,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
+  const openSubagentPanel = useCallback(
+    (tool: ACPToolCall) => {
+      if (!connection.sessionId) return;
+      openSubagentPanelForSession(
+        tool,
+        connection.sessionId,
+        connection.workspaceCwd,
+      );
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      openSubagentPanelForSession,
+    ],
+  );
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (onRightPanelOpen) {
@@ -1752,11 +1962,24 @@ export function App({
         return;
       }
       if (request.kind === 'review') {
-        openReviewPanel(request.changes, request.selectedPath);
+        openReviewPanel(
+          request.changes,
+          request.selectedPath,
+          request.workspaceActions,
+          request.workspaceCwd,
+        );
         return;
       }
       if (request.kind === 'scheduled_task') {
         openScheduledTaskPanel(request.task, request.workspaceActions);
+        return;
+      }
+      if (request.kind === 'subagent') {
+        openSubagentPanelForSession(
+          request.tool,
+          request.sessionId,
+          request.workspaceCwd,
+        );
         return;
       }
 
@@ -1801,7 +2024,32 @@ export function App({
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
+      openSubagentPanelForSession,
     ],
+  );
+  const openFilePreview = useCallback(
+    (
+      change: TurnOutputFileChange,
+      workspaceActions: DaemonWorkspaceActions,
+      previewWorkspaceCwd?: string,
+    ) => {
+      const previewContent = getFileChangePreviewContent(change);
+      const tab: ArtifactPanelTab = {
+        id: `file:${previewWorkspaceCwd ?? ''}:${change.path}`,
+        kind: 'file',
+        title: displayPath(change.path, previewWorkspaceCwd),
+        workspacePath: change.path,
+        workspaceActions,
+        ...(previewContent !== undefined ? { previewContent } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+    },
+    [],
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
@@ -2212,12 +2460,12 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
-  // The workspace the Changes dialog reads. Set by whichever entry point opened
+  // The workspace the Git dialog reads. Set by whichever entry point opened
   // it — the composer git chip / `/diff` (current workspace) or a sidebar
   // folder's git chip (that workspace) — so each can target its own repo.
-  const [diffWorkspaceCwd, setDiffWorkspaceCwd] = useState<string | undefined>(
-    undefined,
-  );
+  const [gitDialog, setGitDialog] = useState<
+    { workspaceCwd: string; view: GitDialogView } | undefined
+  >(undefined);
   // Main content view. The scheduled-tasks page replaces the chat pane inline
   // (not a modal overlay), mirroring the reference design; creating or opening
   // a chat returns to 'chat'. (Daemon Status is no longer a boolean dialog — it
@@ -2225,6 +2473,8 @@ export function App({
   const [mainView, setMainView] = useState<
     'chat' | 'scheduledTasks' | 'goals' | 'split'
   >('chat');
+  const useFloatingArtifactPanel =
+    !canDockArtifactPanel || mainView === 'split';
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   // Latest pane list, readable from the shrink-close effect without making it a
@@ -2726,6 +2976,10 @@ export function App({
   const [isPreparingPrompt, setIsPreparingPrompt] = useState(false);
   const createSessionPromiseRef = useRef<Promise<void> | null>(null);
   const preparingSessionIdRef = useRef<string | null>(null);
+  /** Worktree request for the next lazily-created session. */
+  const pendingWorktreeRef = useRef<{ slug?: string } | undefined>(undefined);
+  /** Render-visible mirror of pendingWorktreeRef for the empty-state badge. */
+  const [worktreePending, setWorktreePending] = useState(false);
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -2779,20 +3033,35 @@ export function App({
       const primaryWorkspaceCwd = workspaces.find(
         (entry) => entry.primary,
       )?.cwd;
+      const requestedWorkspaceCwd = selectedWorkspaceCwdRef.current;
+      const acceptedWorkspaceCwd = requestedWorkspaceCwd
+        ? workspaces.find(
+            (entry) =>
+              entry.cwd === requestedWorkspaceCwd && entry.trusted === true,
+          )?.cwd
+        : undefined;
       await createAndAttachSessionForPrompt({
         sessionActions: sessionActions as typeof sessionActions &
           SessionActionsWithCreate,
         modelId,
         modeId,
         workspaceCwd:
-          lockedWorkspaceCwd ??
-          selectedWorkspaceCwdRef.current ??
-          primaryWorkspaceCwd,
+          lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd,
+        worktree: pendingWorktreeRef.current,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
           preparingSessionIdRef.current = sessionId;
         },
         getCurrentSessionId: () => connectionRef.current.sessionId,
+      }).then((result) => {
+        if (result.worktree) {
+          setSessionWorktree(result.worktree);
+        }
+        // Clear the pending intent only on success. On failure the
+        // welcome badge stays visible so the user knows the isolation
+        // intent was not fulfilled and can retry.
+        pendingWorktreeRef.current = undefined;
+        setWorktreePending(false);
       });
       // One-shot: the picker targets only the *next* new session, so clear
       // it after creation. The next new chat defaults back to the primary
@@ -2811,6 +3080,8 @@ export function App({
   }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
+  const onSlashCommandRef = useRef(onSlashCommand);
+  onSlashCommandRef.current = onSlashCommand;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
   const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -2959,7 +3230,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
-    diffWorkspaceCwd !== undefined ||
+    gitDialog !== undefined ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
     tasksDialogMessage !== null ||
@@ -2967,6 +3238,8 @@ export function App({
     agentsDialogMode !== null ||
     showMemoryDialog ||
     showAuthDialog ||
+    showAddWorkspaceDialog ||
+    scratchOutcomeUnknown !== 'clear' ||
     externalInteractionBlockCount > 0 ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
     // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
@@ -3880,6 +4153,10 @@ export function App({
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
+      // Starting a fresh chat drops any pending worktree intent set from the
+      // empty-state toggle, so it never leaks into the next created session.
+      pendingWorktreeRef.current = undefined;
+      setWorktreePending(false);
       // Close the drawer before awaiting so a failed createSession() doesn't leave
       // it stuck open with the page scroll still locked, matching loadSidebarSession.
       closeMobileDrawer();
@@ -3897,6 +4174,9 @@ export function App({
           clearPromise,
           reloadLoadedSkills(targetWorkspaceCwd),
         ]);
+        // Clear after successful clearSession — if it rejects, the old
+        // session's worktree state is preserved.
+        setSessionWorktree(undefined);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -3916,6 +4196,190 @@ export function App({
       sessionActions,
     ],
   );
+  /**
+   * Serializes workspace intent. An active session keeps its owner and is
+   * replaced by a fresh chat; a draft only changes its next-session target.
+   */
+  const switchWorkspace = useCallback(
+    async (
+      workspaceCwd: string | undefined,
+      acceptedWorkspaces: readonly DaemonWorkspaceCapability[] = workspaces,
+    ) => {
+      if (workspaceSwitchTokenRef.current) return;
+      const token = Symbol('workspace-switch');
+      workspaceSwitchTokenRef.current = token;
+      try {
+        const primaryCwd = acceptedWorkspaces.find(
+          (entry) => entry.primary,
+        )?.cwd;
+        const targetCwd = workspaceCwd ?? primaryCwd;
+        if (workspaceCwd) {
+          const target = acceptedWorkspaces.find(
+            (entry) => entry.cwd === workspaceCwd,
+          );
+          if (!target?.trusted) return;
+        }
+        if (connectionRef.current.sessionId) {
+          if (connectionRef.current.workspaceCwd === targetCwd) return;
+          await createNewSession(workspaceCwd);
+          return;
+        }
+        selectedWorkspaceCwdRef.current = workspaceCwd;
+        setSelectedWorkspaceCwd(workspaceCwd);
+      } finally {
+        if (workspaceSwitchTokenRef.current === token) {
+          workspaceSwitchTokenRef.current = null;
+        }
+      }
+    },
+    [createNewSession, workspaces],
+  );
+
+  /** Refreshes once and switches only from the accepted capability snapshot. */
+  const reconcileAddedWorkspace = useCallback(
+    async (canonicalCwd: string): Promise<boolean> => {
+      try {
+        const capabilities = await workspace.refreshCapabilities?.();
+        const acceptedWorkspaces = capabilities?.workspaces ?? [];
+        const added = acceptedWorkspaces.find(
+          (entry) => entry.cwd === canonicalCwd,
+        );
+        if (added?.trusted) {
+          await switchWorkspace(
+            added.primary ? undefined : added.cwd,
+            acceptedWorkspaces,
+          );
+        }
+        return capabilities !== undefined;
+      } catch (error) {
+        reportError(error, 'Failed to refresh the workspace list');
+        return false;
+      }
+    },
+    [reportError, switchWorkspace, workspace],
+  );
+
+  /** Registers an existing directory through the shared mutation lane. */
+  const handleAddWorkspace = useCallback(
+    async (cwd: string, persist: boolean, displayName?: string) => {
+      if (workspaceMutationTokenRef.current) {
+        throw new Error(t('sidebar.addWorkspaceBusyError'));
+      }
+      const token = Symbol('workspace-mutation');
+      workspaceMutationTokenRef.current = token;
+      setWorkspaceMutationBusy(true);
+      try {
+        const effectivePersist =
+          persistentWorkspaceRegistrationSupported === true && persist;
+        const effectiveDisplayName = workspaceDisplayNameSupported
+          ? displayName
+          : undefined;
+        const result = await workspaceActions.addWorkspace(cwd, {
+          persist: effectivePersist,
+          ...(effectiveDisplayName
+            ? { displayName: effectiveDisplayName }
+            : {}),
+        });
+        if (effectivePersist && result.persisted !== true) {
+          throw new Error(t('sidebar.addWorkspacePersistenceError'));
+        }
+        const reconciled = await reconcileAddedWorkspace(result.cwd);
+        if (!reconciled) {
+          throw new Error(t('sidebar.addWorkspaceRefreshError'));
+        }
+      } finally {
+        if (workspaceMutationTokenRef.current === token) {
+          workspaceMutationTokenRef.current = null;
+          setWorkspaceMutationBusy(false);
+        }
+      }
+    },
+    [
+      persistentWorkspaceRegistrationSupported,
+      reconcileAddedWorkspace,
+      t,
+      workspaceDisplayNameSupported,
+      workspaceActions,
+    ],
+  );
+
+  /**
+   * Reconciles either a known committed cwd or an unknown POST outcome. Known
+   * commits may switch; unknown outcomes require explicit user acknowledgement.
+   */
+  const refreshScratchOutcome = useCallback(async () => {
+    setScratchOutcome('refreshing');
+    try {
+      const capabilities = await workspace.refreshCapabilities?.();
+      if (!capabilities) return;
+      const acceptedWorkspaces = capabilities.workspaces ?? [];
+      const committedCwd = committedScratchCwdRef.current;
+      if (committedCwd) {
+        const added = acceptedWorkspaces.find(
+          (entry) => entry.cwd === committedCwd,
+        );
+        if (added?.trusted) {
+          await switchWorkspace(
+            added.primary ? undefined : added.cwd,
+            acceptedWorkspaces,
+          );
+        }
+        committedScratchCwdRef.current = undefined;
+        setScratchOutcome('clear');
+      } else {
+        setScratchOutcome('awaiting-ack');
+      }
+    } catch (error) {
+      reportError(error, 'Failed to refresh the workspace list');
+    }
+  }, [reportError, setScratchOutcome, switchWorkspace, workspace]);
+
+  /**
+   * Creates at most one scratch directory per intent and locks further POSTs
+   * whenever timeout, transport failure, or refresh leaves the result unclear.
+   */
+  const handleCreateScratchWorkspace = useCallback(async () => {
+    if (
+      scratchOutcomeUnknownRef.current !== 'clear' ||
+      workspaceMutationTokenRef.current
+    ) {
+      return;
+    }
+    const token = Symbol('workspace-mutation');
+    workspaceMutationTokenRef.current = token;
+    setWorkspaceMutationBusy(true);
+    try {
+      const result = await workspaceActions.addScratchWorkspace();
+      const reconciled = await reconcileAddedWorkspace(result.cwd);
+      if (!reconciled) {
+        committedScratchCwdRef.current = result.cwd;
+        setScratchOutcome('refreshing');
+      }
+    } catch (error) {
+      const definitelyRejected =
+        error instanceof DaemonHttpError &&
+        (error.status < 500 || error.status === 501);
+      if (definitelyRejected) {
+        reportError(error, t('sidebar.addWorkspaceError'));
+      } else {
+        committedScratchCwdRef.current = undefined;
+        setScratchOutcome('refreshing');
+        await refreshScratchOutcome();
+      }
+    } finally {
+      if (workspaceMutationTokenRef.current === token) {
+        workspaceMutationTokenRef.current = null;
+        setWorkspaceMutationBusy(false);
+      }
+    }
+  }, [
+    reconcileAddedWorkspace,
+    refreshScratchOutcome,
+    reportError,
+    setScratchOutcome,
+    t,
+    workspaceActions,
+  ]);
   useEffect(
     () => () => {
       if (composerTextDebounceRef.current) {
@@ -4104,6 +4568,9 @@ export function App({
     async (sessionId: string, workspaceCwd?: string) => {
       composerFocusRequestRef.current += 1;
       setSidebarSwitchingSessionId(sessionId);
+      pendingWorktreeRef.current = undefined;
+      setWorktreePending(false);
+      setSessionWorktree(undefined);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
@@ -4466,6 +4933,11 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
+      if (
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -4504,7 +4976,7 @@ export function App({
         return clearComposerOnPromptStart ? false : true;
       };
       if (text.startsWith('/')) {
-        const match = text.match(/^\/([\w-]+)/);
+        const match = text.match(SLASH_COMMAND_PATTERN);
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
@@ -4529,13 +5001,19 @@ export function App({
             return true;
           }
           if (cmd === 'diff') {
-            // Local intercept: open the working-tree Changes dialog instead of
-            // forwarding `/diff` to the agent. Targets the current workspace.
             if (!gitDiffWorkspaceCwd) {
               pushToast('info', t('localCommand.diffNoWorkspace'));
               return true;
             }
-            setDiffWorkspaceCwd(gitDiffWorkspaceCwd);
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'diff' });
+            return true;
+          }
+          if (cmd === 'log') {
+            if (!gitDiffWorkspaceCwd) {
+              pushToast('info', t('localCommand.logNoWorkspace'));
+              return true;
+            }
+            setGitDialog({ workspaceCwd: gitDiffWorkspaceCwd, view: 'log' });
             return true;
           }
           if (cmd === 'tasks') {
@@ -5912,14 +6390,109 @@ export function App({
     ],
   );
 
+  // The empty-state toggle is offered only when the workspace the next
+  // session would land in is trusted and is a git repository — the daemon
+  // rejects worktree creation otherwise. Mirrors the sidebar entry's gating.
+  const worktreeToggleEligible = Boolean(
+    showWorktreeToggle &&
+      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+      selectedWorkspaceGitStatus?.branch,
+  );
+  const worktreeToggleRef = useRef<HTMLButtonElement>(null);
+  const worktreeCancelRef = useRef<HTMLButtonElement>(null);
+  const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
+  const handleEnableWorktree = useCallback(() => {
+    pendingWorktreeRef.current = {};
+    setWorktreePending(true);
+    worktreeFocusTarget.current = 'cancel';
+  }, []);
+  const handleCancelWorktree = useCallback(() => {
+    pendingWorktreeRef.current = undefined;
+    setWorktreePending(false);
+    worktreeFocusTarget.current = 'toggle';
+  }, []);
+  useEffect(() => {
+    if (showWorktreeToggle) return;
+    pendingWorktreeRef.current = undefined;
+    setWorktreePending(false);
+  }, [showWorktreeToggle]);
+  useEffect(() => {
+    if (!worktreeFocusTarget.current) return;
+    const target = worktreeFocusTarget.current;
+    worktreeFocusTarget.current = null;
+    if (target === 'cancel') {
+      worktreeCancelRef.current?.focus();
+    } else {
+      worktreeToggleRef.current?.focus();
+    }
+  }, [worktreePending]);
   const welcomeHeader = useMemo(
-    () =>
-      renderWelcomeHeader ? (
-        renderWelcomeHeader(welcomeHeaderProps)
-      ) : (
-        <WelcomeHeader {...welcomeHeaderProps} />
-      ),
-    [renderWelcomeHeader, welcomeHeaderProps],
+    () => (
+      <>
+        {renderWelcomeHeader ? (
+          renderWelcomeHeader(welcomeHeaderProps)
+        ) : (
+          <WelcomeHeader {...welcomeHeaderProps} />
+        )}
+        {showWorktreeToggle && worktreePending ? (
+          <div className={styles.worktreeWelcomeBadge}>
+            <span className={styles.worktreeBadgeIcon}>
+              <GitForkIcon size={18} strokeWidth={1.8} />
+            </span>
+            <span className={styles.worktreeBadgeText}>
+              <span className={styles.worktreeWelcomeTitle}>
+                {t('worktree.welcomeTitle')}
+              </span>
+              <span className={styles.worktreeWelcomeDesc}>
+                {t('worktree.welcomeDesc')}
+              </span>
+            </span>
+            <button
+              ref={worktreeCancelRef}
+              type="button"
+              className={styles.worktreeWelcomeCancel}
+              aria-label={t('worktree.cancel')}
+              data-testid="worktree-welcome-cancel"
+              onClick={handleCancelWorktree}
+            >
+              <XIcon size={14} strokeWidth={2} />
+            </button>
+          </div>
+        ) : (
+          worktreeToggleEligible && (
+            <button
+              ref={worktreeToggleRef}
+              type="button"
+              className={styles.worktreeWelcomeToggle}
+              data-testid="worktree-welcome-toggle"
+              onClick={handleEnableWorktree}
+            >
+              <span className={styles.worktreeToggleIcon}>
+                <GitForkIcon size={16} strokeWidth={1.8} />
+              </span>
+              <span className={styles.worktreeToggleText}>
+                <span className={styles.worktreeToggleLabel}>
+                  {t('worktree.welcomeTitle')}
+                </span>
+                <span className={styles.worktreeToggleHint}>
+                  {t('worktree.toggleHint')}
+                </span>
+              </span>
+            </button>
+          )
+        )}
+      </>
+    ),
+    [
+      renderWelcomeHeader,
+      showWorktreeToggle,
+      welcomeHeaderProps,
+      worktreePending,
+      worktreeToggleEligible,
+      handleEnableWorktree,
+      handleCancelWorktree,
+      t,
+    ],
   );
   const welcomeFooter = useMemo(
     () => renderWelcomeFooter?.(welcomeHeaderProps),
@@ -6148,10 +6721,12 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
-          {diffWorkspaceCwd && (
-            <GitDiffDialog
-              workspaceCwd={diffWorkspaceCwd}
-              onClose={() => setDiffWorkspaceCwd(undefined)}
+          {gitDialog && (
+            <GitDialog
+              key={`${gitDialog.workspaceCwd}:${gitDialog.view}`}
+              workspaceCwd={gitDialog.workspaceCwd}
+              initialView={gitDialog.view}
+              onClose={() => setGitDialog(undefined)}
             />
           )}
           {tasksDialogMessage && (
@@ -6332,6 +6907,53 @@ export function App({
               />
             </DialogShell>
           )}
+          {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
+            <AddWorkspaceDialog
+              onClose={() => setShowAddWorkspaceDialog(false)}
+              onAdd={handleAddWorkspace}
+              onSuggest={(prefix) =>
+                workspaceActions.suggestWorkspacePaths(prefix)
+              }
+              persistenceSupported={
+                persistentWorkspaceRegistrationSupported
+              }
+              displayNameEnabled={workspaceDisplayNameSupported}
+            />
+          )}
+          {scratchOutcomeUnknown !== 'clear' && (
+            <DialogShell
+              title={t('sidebar.scratchOutcomeUnknownTitle')}
+              size="md"
+              dismissible={false}
+              onClose={() => undefined}
+            >
+              <div className="flex flex-col gap-4">
+                <p>{t('sidebar.scratchOutcomeUnknown')}</p>
+                <ul className="max-h-48 overflow-y-auto text-sm text-muted-foreground">
+                  {workspaces.map((entry) => (
+                    <li key={entry.id}>{entry.cwd}</li>
+                  ))}
+                </ul>
+                <div className="flex justify-end">
+                  {scratchOutcomeUnknown === 'refreshing' ? (
+                    <Button
+                      type="button"
+                      onClick={() => void refreshScratchOutcome()}
+                    >
+                      {t('sidebar.scratchOutcomeRefresh')}
+                    </Button>
+                  ) : (
+                    <Button
+                      type="button"
+                      onClick={() => setScratchOutcome('clear')}
+                    >
+                      {t('sidebar.scratchOutcomeAcknowledge')}
+                    </Button>
+                  )}
+                </div>
+              </div>
+            </DialogShell>
+          )}
 
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
@@ -6406,9 +7028,7 @@ export function App({
                       webShellThemeToSettingValue(theme),
                     );
                   }}
-                  onNewSession={(workspaceCwd) => {
-                    return createNewSession(workspaceCwd);
-                  }}
+                  onNewSession={(workspaceCwd) => createNewSession(workspaceCwd)}
                   onLoadSession={(sessionId, workspaceCwd) => {
                     setMainView('chat');
                     return loadSidebarSession(sessionId, workspaceCwd);
@@ -6423,11 +7043,21 @@ export function App({
                   sessionListReloadToken={sessionListReloadToken}
                   selectedWorkspaceCwd={selectedWorkspaceCwd}
                   onSelectWorkspace={setSelectedWorkspaceCwd}
-                  onOpenGitDiff={setDiffWorkspaceCwd}
+                  onOpenGitDiff={(workspaceCwd) =>
+                    setGitDialog({ workspaceCwd, view: 'diff' })
+                  }
+                  onOpenAddWorkspace={
+                    dynamicWorkspaceRegistrationSupported
+                      ? () => setShowAddWorkspaceDialog(true)
+                      : undefined
+                  }
                   workspaces={workspaces}
                   lockedWorkspaceCwd={lockedWorkspaceCwd}
                   lockedWorkspace={sidebarOptions.lockedWorkspace}
                   branding={sidebarOptions.branding}
+                  primaryNav={sidebarOptions.primaryNav}
+                  hideProjectHeader={sidebarOptions.hideProjectHeader}
+                  sessionActions={sidebarOptions.sessionActions}
                   footer={sidebarOptions.footer}
                 />
               </div>
@@ -6898,10 +7528,12 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onSlashCommand={onSlashCommand}
                         onRightPanelOpen={handleTurnOutputOpen}
                         onPaneArtifactsChange={handlePaneArtifactsChange}
                         messageTurnOutputs={messageTurnOutputs}
                         restartSseOnPrompt={restartSseOnPrompt}
+                        historyPageSize={historyPageSize}
                       />
                     </CompactModeContext.Provider>
                   </WebShellCustomizationProvider>
@@ -6974,7 +7606,7 @@ export function App({
                               .filter(Boolean)
                               .join(' ');
 
-                            const messageList = (
+                            const messageListContent = (
                               <MessageList
                                 ref={messageListRef}
                                 messages={displayMessages}
@@ -6988,6 +7620,13 @@ export function App({
                                   transcriptHistory.capacityReached
                                 }
                                 onLoadOlderHistory={transcriptHistory.loadMore}
+                                transcriptBlockCount={blocks.length}
+                                transcriptActivity={store}
+                                onReloadTranscript={
+                                  transcriptReloadSupported
+                                    ? reloadTranscript
+                                    : undefined
+                                }
                                 isResponding={streamingState !== 'idle'}
                                 activeTurnStartedAt={activeTurnStartedAt}
                                 workspaceCwd={connection.workspaceCwd || ''}
@@ -7037,6 +7676,13 @@ export function App({
                                     : undefined
                                 }
                               />
+                            );
+                            const messageList = (
+                              <SubagentDetailsProvider
+                                onOpen={openSubagentPanel}
+                              >
+                                {messageListContent}
+                              </SubagentDetailsProvider>
                             );
 
                             const btwPanel =
@@ -7245,14 +7891,23 @@ export function App({
                           currentMode={currentMode}
                           currentModel={currentModel}
                           gitBranch={
-                            connection.sessionId
-                              ? connection.gitBranch
-                              : (selectedWorkspaceGitStatus?.branch ?? undefined)
+                            sessionWorktree
+                              ? (selectedWorkspaceGitStatus?.branch ??
+                                sessionWorktree.branch)
+                              : (connection.sessionId
+                                ? connection.gitBranch
+                                : (selectedWorkspaceGitStatus?.branch ??
+                                  undefined))
                           }
+                          gitWorktree={Boolean(sessionWorktree)}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
-                            gitDiffWorkspaceCwd
-                              ? () => setDiffWorkspaceCwd(gitDiffWorkspaceCwd)
+                            gitDiffWorkspaceCwd && !sessionWorktree
+                              ? () =>
+                                  setGitDialog({
+                                    workspaceCwd: gitDiffWorkspaceCwd,
+                                    view: 'diff',
+                                  })
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}
@@ -7263,16 +7918,13 @@ export function App({
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
                           workspaces={
-                            !lockedWorkspaceCwd && workspaces.length > 1
+                            !lockedWorkspaceCwd
                               ? workspaces.map((entry) => ({
                                     id: entry.id,
                                     cwd: entry.cwd,
-                                    label:
-                                      entry.cwd
-                                        .split(/[\\/]+/)
-                                        .filter(Boolean)
-                                        .at(-1) ?? entry.cwd,
+                                    label: workspaceLabel(entry),
                                     primary: entry.primary,
+                                    trusted: entry.trusted,
                                   }))
                               : undefined
                           }
@@ -7286,9 +7938,7 @@ export function App({
                                 : connection.workspaceCwd
                               : selectedWorkspaceCwd
                           }
-                          workspaceSelectionDisabled={Boolean(
-                            connection.sessionId,
-                          )}
+                          workspaceSelectionDisabled={false}
                           atWorkspaceCwd={
                             lockedWorkspaceCwd ??
                             (connection.sessionId
@@ -7297,9 +7947,21 @@ export function App({
                                 workspaces.find((entry) => entry.primary)?.cwd))
                           }
                           onSelectWorkspace={(cwd) => {
-                            selectedWorkspaceCwdRef.current = cwd;
-                            setSelectedWorkspaceCwd(cwd);
+                            void switchWorkspace(cwd);
                           }}
+                          scratchWorkspaceSupported={
+                            scratchWorkspaceRegistrationSupported
+                          }
+                          existingFolderWorkspaceSupported={
+                            dynamicWorkspaceRegistrationSupported
+                          }
+                          workspaceMutationBusy={workspaceMutationBusy}
+                          onCreateScratchWorkspace={() => {
+                            void handleCreateScratchWorkspace();
+                          }}
+                          onOpenExistingWorkspace={() =>
+                            setShowAddWorkspaceDialog(true)
+                          }
                           onChatWidthModeChange={handleChatWidthModeChange}
                           sessionName={sessionDisplayName}
                           dialogOpen={
@@ -7411,7 +8073,35 @@ export function App({
                 </div>
               </div>
             </div>
-            {artifactPanelOpen && (
+            {artifactPanelOpen && useFloatingArtifactPanel ? (
+              <Drawer
+                open
+                direction="right"
+                shouldScaleBackground={false}
+                onOpenChange={(open) => {
+                  if (!open) closeArtifactPanel();
+                }}
+              >
+                <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]">
+                  <DrawerTitle className="sr-only">Right panel</DrawerTitle>
+                  <ArtifactPanel
+                    artifacts={artifactPanelArtifacts}
+                    tabs={artifactPanelTabs}
+                    activeTabId={activeArtifactPanelTabId}
+                    reviewChanges={reviewChanges}
+                    selectedReviewPath={selectedReviewPath}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    loading={artifactsLoading}
+                    error={artifactsError}
+                    onSelectTab={setActiveArtifactPanelTabId}
+                    onCloseTab={closeArtifactPanelTab}
+                    onOpenFilePreview={openFilePreview}
+                    onClose={closeArtifactPanel}
+                    variant="drawer"
+                  />
+                </DrawerContent>
+              </Drawer>
+            ) : artifactPanelOpen ? (
               <>
                 <div
                   className={styles.artifactResizeHandle}
@@ -7434,10 +8124,11 @@ export function App({
                   error={artifactsError}
                   onSelectTab={setActiveArtifactPanelTabId}
                   onCloseTab={closeArtifactPanelTab}
+                  onOpenFilePreview={openFilePreview}
                   onClose={closeArtifactPanel}
                 />
               </>
-            )}
+            ) : null}
           </div>
         </div>
         </WebShellPortalRootContext.Provider>

@@ -190,14 +190,8 @@
 }
 
 :global([data-web-shell-slash-menu]) {
-  width: min(
-    max(
-      240px,
-      calc(
-        var(--slash-command-col) + var(--slash-desc-col) +
-          var(--slash-column-gap) + 20px
-      )
-    ),
+  width: 620px;
+  max-width: min(
     calc(var(--radix-popover-trigger-width) - 32px),
     var(--radix-popover-content-available-width),
     calc(100vw - 24px)
@@ -208,11 +202,7 @@
 
 :global([data-web-shell-slash-detail]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
-  width: min(
-    320px,
-    var(--radix-popover-content-available-width),
-    calc(100vw - 24px)
-  );
+  width: min(320px, calc(100vw - 24px));
   max-height: min(200px, var(--radix-popover-content-available-height));
   overflow: hidden;
 }
@@ -303,8 +293,8 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 2fr)
-    minmax(0, 3fr);
+    minmax(0, 220px)
+    minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
   padding: 5px 8px;
@@ -379,6 +369,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -695,18 +686,6 @@
   font-size: 12px;
 }
 
-@container (max-width: 699px) {
-  .slashList {
-    width: 100%;
-  }
-
-  .slashItem {
-    width: 100%;
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 2px;
-  }
-}
-
 .attachments {
   display: flex;
   min-height: 0;
@@ -958,14 +937,12 @@
   border: 0;
   background: transparent;
   cursor: pointer;
-  font: inherit;
-  color: inherit;
-  padding: 0;
   margin: 0;
 }
 
 .gitBranchChipButton:hover {
-  background: var(--subtle-bg);
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
 }
 
 .gitBranchChipButton:focus-visible {
@@ -994,6 +971,10 @@
 
 .gitBranchChip[data-detached='true'] .gitBranchText {
   color: var(--warning-color);
+}
+
+.gitBranchChip[data-worktree='true'] {
+  color: var(--color-accent-fg, #8b5cf6);
 }
 
 .gitBranchIconWrap {

@@ -427,9 +427,11 @@ function CodeBlock({
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
 
   useEffect(() => {
-    // Don't highlight unsupported languages or blocks too large to tokenize
-    // without freezing the main thread — render them as plain text.
+    // Stream code as plain text. Highlighting a growing fence on every chunk
+    // repeatedly tokenizes its entire contents and can dominate rendering for
+    // long responses; the settled render below highlights the final text once.
     if (
+      isStreaming ||
       lang === 'mermaid' ||
       resolvedLang === 'text' ||
       isTooLargeToHighlight(code)
@@ -446,21 +448,7 @@ function CodeBlock({
       return;
     }
 
-    // Re-highlight synchronously on every code change. With the Oniguruma
-    // engine a normal-sized block tokenizes in ~1–7ms, so there's no need to
-    // throttle or keep a stale snapshot around: `html` always matches the
-    // current `code`, so no streamed text is ever hidden and there's no flicker.
-    // `isTooLargeToHighlight` above bounds the worst-case per-chunk cost.
-    //
-    // Don't persist streaming intermediates: the growing block produces a new
-    // cache key every chunk and would otherwise evict other blocks from the LRU.
-    const persist = !isStreaming;
-    const warmHtml = highlightToHtmlSync(
-      code,
-      resolvedLang,
-      shikiTheme,
-      persist,
-    );
+    const warmHtml = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
     if (warmHtml !== null) {
       setHtml(warmHtml);
       return;
@@ -471,19 +459,13 @@ function CodeBlock({
     // not-yet-loaded language on regeneration) so we render the current code as
     // plain text — not the prior block's stale highlight — until the load
     // resolves. Then re-check cancellation *before* the synchronous tokenization
-    // so superseded streaming snapshots that queued behind the same load don't
-    // each run codeToHtml.
+    // so a superseded settled block does not run codeToHtml.
     setHtml(null);
     let cancelled = false;
     getCodeHighlighter(resolvedLang)
       .then(() => {
         if (cancelled) return;
-        const cold = highlightToHtmlSync(
-          code,
-          resolvedLang,
-          shikiTheme,
-          persist,
-        );
+        const cold = highlightToHtmlSync(code, resolvedLang, shikiTheme, true);
         if (cold !== null) setHtml(cold);
       })
       .catch((err) => {
@@ -515,9 +497,6 @@ function CodeBlock({
     return <MermaidBlock code={code} />;
   }
 
-  // `html` is always the highlight of the *current* `code` (re-highlighted
-  // synchronously per chunk), so it can be rendered directly — no prefix gate
-  // is needed to guard against showing a stale/previous block's HTML.
   return (
     <div className={styles.codeBlock}>
       <div className={styles.codeBlockHeader}>
@@ -526,7 +505,7 @@ function CodeBlock({
           {copied ? t('code.copied') : t('code.copy')}
         </button>
       </div>
-      {html !== null ? (
+      {!isStreaming && html !== null ? (
         <div
           className={styles.codeBlockContent}
           dangerouslySetInnerHTML={{ __html: html }}

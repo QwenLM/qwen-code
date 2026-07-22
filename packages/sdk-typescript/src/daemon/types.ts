@@ -29,10 +29,15 @@ export interface DaemonCapabilitiesLimits {
 export interface DaemonWorkspaceCapability {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+}
+
+export interface DaemonWorkspaceUpdate {
+  displayName: string | null;
 }
 
 export interface DaemonWorkspaceRemovalActivity {
@@ -155,6 +160,61 @@ export interface DaemonWorkspaceGitDiffHunks {
    * daemons and untruncated responses (additive to v=1).
    */
   truncated?: boolean;
+}
+
+/** A single commit entry in the log list. */
+export interface DaemonGitLogEntry {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Unix timestamp in seconds. */
+  authorDate: number;
+  subject: string;
+  /** Ref decorations, e.g. `"HEAD -> main, origin/main, v1.2.0"`. */
+  refs?: string;
+  /** Parent SHAs (length > 1 ⇒ merge commit). */
+  parents: string[];
+}
+
+/** Response from `GET /workspace/git/log`. */
+export interface DaemonGitLog {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when git is not available for this workspace. */
+  available: boolean;
+  entries: DaemonGitLogEntry[];
+  hasMore: boolean;
+}
+
+/** Per-file numstat entry within a commit detail. */
+export interface DaemonGitCommitFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+/** Response from `GET /workspace/git/log/commit?sha=`. */
+export interface DaemonGitCommitDetail {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the commit was not found or git is unavailable. */
+  available: boolean;
+  sha?: string;
+  shortSha?: string;
+  authorName?: string;
+  authorEmail?: string;
+  authorDate?: number;
+  subject?: string;
+  body?: string;
+  refs?: string;
+  parents?: string[];
+  files?: DaemonGitCommitFileStat[];
+  filesCount?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  hiddenCount?: number;
 }
 
 /** Capabilities envelope returned from `GET /capabilities`. */
@@ -555,6 +615,13 @@ export interface DaemonStatusReport {
   };
 }
 
+/** Worktree metadata returned when a session is created with worktree isolation. */
+export interface DaemonWorktreeInfo {
+  slug: string;
+  path: string;
+  branch: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -576,6 +643,8 @@ export interface DaemonSession {
   sourceId?: string;
   /** True iff supplied source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: DaemonWorktreeInfo;
 }
 
 /**
@@ -719,6 +788,8 @@ export interface DaemonSessionSummary {
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: DaemonSessionGroupPresetColor | null;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: DaemonWorktreeInfo;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -748,6 +819,18 @@ export interface DaemonSessionTranscriptPage {
   lastUpdated?: string;
   partial?: true;
   replayError?: string;
+}
+
+export interface DaemonSubagentSessionResolution {
+  sessionId: string;
+  taskId: string;
+  title: string;
+  status: string;
+  durationMs?: number;
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedTokens?: number;
 }
 
 export type DaemonSessionArchiveState = 'active' | 'archived';
@@ -1199,6 +1282,11 @@ export interface DaemonWorkspaceMcpStatus {
 export interface DaemonWorkspaceMcpInitializeResult {
   /** True only when this request started a new background discovery task. */
   accepted: boolean;
+}
+
+export interface DaemonWorkspaceMcpReloadOptions {
+  forceReconnectAll?: boolean;
+  forceReconnectWhich?: string[];
 }
 
 export interface DaemonWorkspaceMcpToolStatus {
@@ -1865,6 +1953,8 @@ export interface DaemonSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /**
    * `id` of the agent task that spawned this one. Absent for agents
    * launched by the top-level session. Sub-agents may spawn sub-agents

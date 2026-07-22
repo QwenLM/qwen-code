@@ -1024,6 +1024,15 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    /** Applies the standard mutation timeout without retrying the POST. */
+    async addScratchWorkspace() {
+      const client = requireClient(getClient, 'Add scratch workspace failed');
+      return withActionTimeout(
+        client.addScratchWorkspace(),
+        'Add scratch workspace timed out',
+      );
+    },
+
     async suggestWorkspacePaths(prefix) {
       const client = requireClient(getClient, 'Suggest workspace paths failed');
       const result = await withActionTimeout(
@@ -1031,6 +1040,14 @@ export function createDaemonWorkspaceActions({
         'Suggest workspace paths timed out',
       );
       return result as DaemonWorkspacePathSuggestions;
+    },
+
+    async updateWorkspace(workspaceSelector, update) {
+      const client = requireClient(getClient, 'Update workspace failed');
+      return withActionTimeout(
+        client.updateWorkspace(workspaceSelector, update),
+        'Update workspace timed out',
+      );
     },
 
     async removeWorkspace(workspaceId, options) {

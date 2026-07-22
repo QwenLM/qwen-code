@@ -94,6 +94,8 @@ export interface BridgeSpawnRequest {
   /** Optional source-specific identifier. Valid only with `sourceType`. */
   sourceId?: string;
   approvalMode?: ApprovalMode;
+  /** Worktree isolation metadata, set by the daemon route before spawn. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeSession {
@@ -126,6 +128,8 @@ export interface BridgeSession {
   sourceId?: string;
   /** True iff the source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -234,6 +238,8 @@ export interface BridgeSessionTranscriptPageRequest {
   sessionId: string;
   cursor?: string;
   beforeRecordId?: string;
+  /** Internal newest-page read used to refresh an attached session's UI. */
+  direction?: 'backward';
   limit?: number;
 }
 
@@ -266,6 +272,14 @@ export interface BridgeForkAgentResult {
 
 export interface ChangeSessionCwdRequest {
   path: string;
+  /**
+   * Server-controlled containment roots. When present, the agent-side
+   * sessionCd handler verifies (after its own realpath) that the
+   * canonical target is under one of these roots. Only set by the
+   * daemon's worktree create/restore paths; direct user cd omits this
+   * field, preserving existing behavior.
+   */
+  allowedRoots?: string[];
 }
 
 export interface ChangeSessionCwdResult {
@@ -406,6 +420,8 @@ export interface BridgeSessionSummary {
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: SessionGroupPresetColor | null;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 /**
@@ -433,7 +449,11 @@ export interface SessionMetadataUpdate {
 export interface CloseSessionOpts {
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
-  /** Require the ACP child to acknowledge session close before resolving. */
+  /**
+   * Require pending recorder writes to flush successfully. All closes await
+   * the ACP child acknowledgement and may cancel in-flight turns even when
+   * the close attempt ultimately fails.
+   */
   requireAgentClose?: boolean;
 }
 
@@ -467,6 +487,14 @@ export interface BridgeClientRequestContext {
    * smuggle a continuation through the prompt path.
    */
   continue?: boolean;
+  /**
+   * Absolute wallclock budget (ms) for this prompt, measured from admission
+   * (the 202 semantic point) and covering queue wait. When exceeded, the
+   * bridge publishes a `turn_error{code:'prompt_deadline_exceeded'}` terminal,
+   * releases the FIFO, and best-effort cancels the agent. Populated by the
+   * REST prompt route from `resolvePromptDeadlineMs(serverMs, requestMs)`.
+   */
+  deadlineMs?: number;
 }
 
 /**
@@ -567,6 +595,19 @@ export interface PendingPromptEntry {
   text: string;
   abortController: AbortController;
   state: 'queued' | 'running';
+  /**
+   * Exactly-once latch for the prompt's formal terminal event
+   * (`turn_complete` / `turn_error`). Set by `publishPromptTerminal`;
+   * later publish attempts for the same prompt are suppressed.
+   */
+  terminalPublished?: boolean;
+  /**
+   * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
+   * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until
+   * the prompt settles, so the teardown flush can still publish its
+   * terminal if the session closes before the agent cooperates.
+   */
+  removed?: boolean;
 }
 
 /**
@@ -716,6 +757,17 @@ export interface AcpSessionBridge {
     req: ChangeSessionCwdRequest,
     context?: BridgeClientRequestContext,
   ): Promise<ChangeSessionCwdResult>;
+
+  /**
+   * Set worktree metadata on an existing session entry. Used when
+   * restoring a worktree session after daemon restart — the sidecar
+   * file provides the metadata, and this populates the in-memory entry
+   * so `getSessionSummary` returns it.
+   */
+  setSessionWorktree(
+    sessionId: string,
+    worktree: { slug: string; path: string; branch: string },
+  ): void;
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same
@@ -966,7 +1018,10 @@ export interface AcpSessionBridge {
   initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
 
   /** Reload persisted MCP settings into workspace and active session configs. */
-  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+  reloadWorkspaceMcp(options?: {
+    forceReconnectAll?: boolean;
+    forceReconnectWhich?: string[];
+  }): Promise<{ accepted: boolean }>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.

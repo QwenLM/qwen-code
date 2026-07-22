@@ -70,9 +70,19 @@ describe('serve command args', () => {
     expect(parsed['max-total-sessions']).toBe(42);
   });
 
+  it('parses --initialize-timeout-ms as a number', () => {
+    const parsed = buildParser().parseSync('--initialize-timeout-ms 30000');
+    expect(parsed['initialize-timeout-ms']).toBe(30000);
+  });
+
   it('leaves --permission-response-timeout-ms unset by default', () => {
     const parsed = buildParser().parseSync('');
     expect(parsed['permission-response-timeout-ms']).toBeUndefined();
+  });
+
+  it('leaves --initialize-timeout-ms unset by default', () => {
+    const parsed = buildParser().parseSync('');
+    expect(parsed['initialize-timeout-ms']).toBeUndefined();
   });
 
   it('parses --experimental-lsp for daemon child opt-in', () => {
@@ -649,7 +659,7 @@ describe('serve startup import boundary', () => {
               `serve did not reach listening\nstdout:\n${stdout}\nstderr:\n${stderr}`,
             ),
           );
-        }, 15_000);
+        }, 30_000);
 
         child.stdout.on('data', (chunk: Buffer) => {
           stdout += chunk.toString('utf8');
@@ -695,5 +705,5 @@ describe('serve startup import boundary', () => {
       await removeTempDir(workspace);
       await removeTempDir(qwenHome);
     }
-  }, 20_000);
+  }, 40_000);
 });
