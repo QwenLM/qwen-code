@@ -79,16 +79,32 @@ jobs:
       contents: read
 
     steps:
-      - name: 'Checkout benchmarked release'
-        uses: 'actions/checkout@v4'
-        with:
-          ref: '${{ inputs.qwen_ref }}'
-          fetch-depth: 1
-
       - name: 'Resolve immutable release commit'
         id: revision
         shell: bash
-        run: 'echo "commit=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"'
+        env:
+          QWEN_REF: '${{ inputs.qwen_ref }}'
+          GH_TOKEN: '${{ github.token }}'
+        run: |-
+          set -euo pipefail
+          object="$(curl --fail --silent --show-error \
+            --header "Authorization: Bearer ${GH_TOKEN}" \
+            --header 'Accept: application/vnd.github+json' \
+            --header 'X-GitHub-Api-Version: 2022-11-28' \
+            "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/ref/tags/${QWEN_REF}")"
+          object_type="$(jq -r '.object.type' <<<"${object}")"
+          object_sha="$(jq -r '.object.sha' <<<"${object}")"
+          while [[ "${object_type}" == 'tag' ]]; do
+            object="$(curl --fail --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2022-11-28' \
+              "${GITHUB_API_URL}/repos/${GITHUB_REPOSITORY}/git/tags/${object_sha}")"
+            object_type="$(jq -r '.object.type' <<<"${object}")"
+            object_sha="$(jq -r '.object.sha' <<<"${object}")"
+          done
+          [[ "${object_type}" == 'commit' && "${object_sha}" =~ ^[0-9a-f]{40}$ ]]
+          echo "commit=${object_sha}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Queue benchmark on local ECS service'
         env:
