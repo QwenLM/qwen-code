@@ -69,6 +69,11 @@ packages/cli/src/ui/components/
    (active, current-project only). Ambiguous title (>1 match) → the completion
    UI already disambiguates; at submit time a still-ambiguous title is reported
    as an unresolved mention (left as literal text, with a note), not guessed.
+   Note: title matching compares against the session's explicit `customTitle`
+   (set by auto-title or `/rename`), not the first-prompt label shown in the
+   completion dropdown. The picker always inserts `@session:<uuid>`, so the
+   mainline path is unaffected; a hand-typed `@session:<free text>` resolves
+   only when it case-insensitively equals an existing session title.
 2. **Load.** `SessionService.loadSession(id)` → `ConversationRecord.messages`
    (`ChatRecord[]`). Guard: `sessionBelongsToCurrentProject` (already enforced
    inside `loadSession`) — cross-project ids resolve to "not found".
