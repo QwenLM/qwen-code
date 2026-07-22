@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useMemo, useState } from 'react';
+import { useCallback, useMemo, useRef, useState } from 'react';
 import { CircleDotIcon, GitForkIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
@@ -71,6 +71,8 @@ export function GitModePopover({
   const [branchName, setBranchName] = useState(
     intent.mode === 'branch' ? intent.name : '',
   );
+
+  const contentRef = useRef<HTMLDivElement>(null);
 
   const branchValid = useMemo(
     () => validateBranchName(branchName),
@@ -152,12 +154,20 @@ export function GitModePopover({
           </button>
         </PopoverTrigger>
         <PopoverContent
+          ref={contentRef}
           side="top"
           align="end"
           sideOffset={8}
           className={styles.popover}
           onOpenAutoFocus={(e) => e.preventDefault()}
-          onInteractOutside={(e) => e.preventDefault()}
+          onInteractOutside={(e) => {
+            // The portal container fools Radix's dismissable-layer into
+            // thinking clicks inside the popover are "outside". Only
+            // prevent dismissal when the target is genuinely inside.
+            if (contentRef.current?.contains(e.target as Node)) {
+              e.preventDefault();
+            }
+          }}
         >
           <div className={styles.header}>{t('gitMode.title')}</div>
 

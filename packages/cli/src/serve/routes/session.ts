@@ -93,6 +93,11 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 
+const execFileAsync = promisify(execFile);
+
+/** The only ref name git refuses to create as a branch. */
+const GIT_RESERVED_BRANCH = 'HEAD';
+
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
@@ -1204,7 +1209,6 @@ export function registerSessionRoutes(
     // When `branch` is present, create and checkout a new git branch
     // before spawning. The session runs in the same working directory
     // but on the new branch. Mutually exclusive with `worktree`.
-    const execFileAsync = promisify(execFile);
     let branchMeta: { name: string; baseBranch: string } | undefined;
     const rawBranch = body['branch'];
     if (rawBranch !== undefined && rawBranch !== null) {
@@ -1232,7 +1236,7 @@ export function registerSessionRoutes(
         });
         return;
       }
-      // Validate git branch name characters.
+      // Validate git branch name characters and reserved names.
       if (
         /[^a-zA-Z0-9._/-]/.test(branchName) ||
         branchName.includes('..') ||
@@ -1240,7 +1244,8 @@ export function registerSessionRoutes(
         branchName.startsWith('-') ||
         branchName.startsWith('/') ||
         branchName.endsWith('/') ||
-        branchName.endsWith('.')
+        branchName.endsWith('.') ||
+        branchName === GIT_RESERVED_BRANCH
       ) {
         res.status(400).json({
           error: `Invalid branch name: ${branchName}`,
@@ -1449,6 +1454,19 @@ export function registerSessionRoutes(
                 await new GitWorktreeService(workspaceCwd)
                   .removeUserWorktree(worktreeMeta.slug, { deleteBranch: true })
                   .catch(() => {});
+              }
+              // Roll back the branch if one was created for this session.
+              if (branchMeta) {
+                await execFileAsync(
+                  'git',
+                  ['checkout', branchMeta.baseBranch],
+                  {
+                    cwd: workspaceCwd,
+                  },
+                ).catch(() => {});
+                await execFileAsync('git', ['branch', '-D', branchMeta.name], {
+                  cwd: workspaceCwd,
+                }).catch(() => {});
               }
             }
           } catch {

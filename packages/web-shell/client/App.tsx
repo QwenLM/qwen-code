@@ -1358,6 +1358,7 @@ export function App({
     worktreeSessionIdRef.current = sid;
     if (!sid) {
       setSessionWorktree(undefined);
+      setSessionBranch(undefined);
       return;
     }
     workspace.client
@@ -1365,6 +1366,7 @@ export function App({
       .then((summary) => {
         if (worktreeSessionIdRef.current === sid) {
           setSessionWorktree(summary.worktree);
+          setSessionBranch(summary.branch);
         }
       })
       .catch(() => {
@@ -3999,8 +4001,9 @@ export function App({
           reloadLoadedSkills(targetWorkspaceCwd),
         ]);
         // Clear after successful clearSession — if it rejects, the old
-        // session's worktree state is preserved.
+        // session's worktree/branch state is preserved.
         setSessionWorktree(undefined);
+        setSessionBranch(undefined);
         return true;
       } catch (error) {
         if (composerFocusRequestRef.current === focusRequest) {
@@ -4210,6 +4213,7 @@ export function App({
       setSidebarSwitchingSessionId(sessionId);
       setGitModeIntent({ mode: 'current' });
       setSessionWorktree(undefined);
+      setSessionBranch(undefined);
       // Close the drawer before awaiting the load; the transcript clears
       // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
