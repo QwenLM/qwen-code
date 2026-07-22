@@ -452,9 +452,13 @@ describe('CLI entry import boundary', () => {
     expect(requestHelpersSource).toContain(
       "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
     );
-    expect(requestHelpersSource).toContain(
-      "import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';",
+    // MAX_WORKSPACE_PATH_LENGTH (and, since #7139, the sandbox path
+    // translation) must come from the workspacePaths subpath — never the
+    // acp-bridge barrel or the compatibility shim.
+    expect(requestHelpersSource).toMatch(
+      /import \{[^}]*\bMAX_WORKSPACE_PATH_LENGTH\b[^}]*\} from '@qwen-code\/acp-bridge\/workspacePaths';/,
     );
+    expect(requestHelpersSource).not.toMatch(/from '@qwen-code\/acp-bridge';/);
   });
 
   it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {

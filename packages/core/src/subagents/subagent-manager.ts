@@ -1091,6 +1091,13 @@ export class SubagentManager {
       (config.tools && config.tools.length > 0) ||
       (config.disallowedTools && config.disallowedTools.length > 0)
     ) {
+      // Unresolved names (e.g. `WebSearch` while the opt-in web_search tool
+      // is unregistered) stay in the list as dead, restrictive entries: an
+      // explicit allow-list must never be widened on resolution failure, so
+      // an agent whose every tool is unavailable runs tool-less (fail
+      // closed) rather than inheriting shell/write it was not configured
+      // for. Deliberate: this supersedes the earlier compatibility fallback
+      // for converted Claude agents.
       const toolNames = config.tools
         ? await this.transformToToolNames(config.tools)
         : ['*'];

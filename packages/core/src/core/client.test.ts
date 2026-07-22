@@ -598,6 +598,7 @@ describe('Gemini Client (client.ts)', () => {
       // Explicit values are hard caps; the cap tests below set a finite value
       // and rely on hard-cap behavior.
       isMaxToolCallsPerTurnExplicit: vi.fn().mockReturnValue(true),
+      assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
@@ -4129,6 +4130,47 @@ describe('Gemini Client (client.ts)', () => {
       const history = JSON.stringify(getCacheSafeParams()?.history);
       expect(history).not.toContain('image-bytes');
       expect(history).toContain('pdf-bytes');
+    });
+
+    it.each([
+      SendMessageType.UserQuery,
+      SendMessageType.Cron,
+      SendMessageType.Notification,
+      SendMessageType.Teammate,
+    ])('checks session writer admission before a %s turn', async (type) => {
+      const failure = new Error('writer admission failed');
+      vi.mocked(mockConfig.assertCanStartTurn).mockRejectedValueOnce(failure);
+
+      const stream = client.sendMessageStream(
+        [{ text: 'blocked' }],
+        new AbortController().signal,
+        `prompt-${type}`,
+        { type },
+      );
+
+      await expect(stream.next()).rejects.toBe(failure);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+    });
+
+    it('does not re-run session writer admission for a mid-turn hook continuation', async () => {
+      mockTurnRunFn.mockReturnValue(
+        (async function* () {
+          yield { type: GeminiEventType.Content, value: 'continued' };
+        })(),
+      );
+
+      const stream = client.sendMessageStream(
+        [{ text: 'continue' }],
+        new AbortController().signal,
+        'prompt-hook',
+        { type: SendMessageType.Hook },
+      );
+      for await (const _ of stream) {
+        // drain
+      }
+
+      expect(mockConfig.assertCanStartTurn).not.toHaveBeenCalled();
+      expect(mockTurnRunFn).toHaveBeenCalled();
     });
 
     it('should merge editor context into the user request when ideMode is enabled', async () => {

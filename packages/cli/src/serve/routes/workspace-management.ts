@@ -5,11 +5,14 @@
  */
 
 import { readdir, stat } from 'node:fs/promises';
+import {
+  translateAndCheckAbsoluteWorkspacePath,
+  MAX_WORKSPACE_PATH_LENGTH,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
-import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
 import type {
@@ -290,19 +293,24 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      if (!isAbsolute(cwd)) {
+      // Bound the input before any filesystem work, matching the limit other
+      // workspace routes enforce (memory-amplification guard). Must run
+      // before the sandbox translation below — its existence probe is a
+      // filesystem call.
+      if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
         res.status(400).json({
-          error: '`cwd` must be an absolute path',
+          error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
           code: 'invalid_path',
         });
         return;
       }
 
-      // Bound the input before any filesystem work, matching the limit other
-      // workspace routes enforce (memory-amplification guard).
-      if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
+      // #7139: the shared helper maps a Windows-shaped cwd to its container
+      // bind mount before the absolute-path check.
+      const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
+      if (sandboxCwd === null) {
         res.status(400).json({
-          error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+          error: '`cwd` must be an absolute path',
           code: 'invalid_path',
         });
         return;
@@ -315,7 +323,7 @@ export function registerWorkspaceManagementRoutes(
       // two distinct canonical strings and defeat the duplicate check.
       let canonical: string;
       try {
-        canonical = realpathSync.native(resolve(cwd));
+        canonical = realpathSync.native(resolve(sandboxCwd));
       } catch {
         res.status(400).json({
           error: 'Path does not exist or is not accessible',

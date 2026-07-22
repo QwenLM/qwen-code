@@ -1142,7 +1142,7 @@ describe('runQwenServe telemetry validation', () => {
     tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tv-')));
     const initializeTelemetry = vi
       .spyOn(qwenCore, 'initializeTelemetry')
-      .mockImplementation(() => {});
+      .mockResolvedValue(undefined);
     vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
       enabled: false,
       sensitiveSpanAttributeMaxLength: 1024 * 1024,
@@ -1170,6 +1170,46 @@ describe('runQwenServe telemetry validation', () => {
       expect(runtimeConfig.getTelemetryResourceAttributes()).toMatchObject({
         'service.instance.id': `daemon:${process.pid}`,
       });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('awaits telemetry initialization before daemon metrics', async () => {
+    tmpDir = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tm-')));
+    const callOrder: string[] = [];
+    vi.spyOn(qwenCore, 'initializeTelemetry').mockImplementation(async () => {
+      callOrder.push('telemetry-start');
+      await Promise.resolve();
+      callOrder.push('telemetry-resolved');
+    });
+    vi.spyOn(qwenCore, 'initializeDaemonMetrics').mockImplementation(() => {
+      callOrder.push('daemon-metrics');
+    });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: true,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+      },
+    );
+    try {
+      expect(callOrder).toEqual([
+        'telemetry-start',
+        'telemetry-resolved',
+        'daemon-metrics',
+      ]);
     } finally {
       await handle.close();
     }

@@ -9,6 +9,7 @@ import type { Mock } from 'vitest';
 import { SpanStatusCode } from '@opentelemetry/api';
 import type {
   AnyDeclarativeTool,
+  ChatRecordingService,
   Config,
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
@@ -706,12 +707,14 @@ describe('CoreToolScheduler', () => {
       totalUnavailable: number;
     };
     setAutoModeDenialState?: ReturnType<typeof vi.fn>;
+    setApprovalMode?: ReturnType<typeof vi.fn>;
     onAllToolCallsComplete?: ReturnType<typeof vi.fn>;
     onToolCallsUpdate?: ReturnType<typeof vi.fn>;
     memoryMonitor?: { scheduleCheck: () => void };
     toolOutputBatchBudget?: number;
     truncateToolOutputThreshold?: number;
     truncateToolOutputLines?: number;
+    chatRecordingService?: ChatRecordingService;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -741,6 +744,7 @@ describe('CoreToolScheduler', () => {
         getUsageStatisticsEnabled: () => true,
         getDebugMode: () => false,
         getApprovalMode: () => options.approvalMode ?? ApprovalMode.YOLO,
+        setApprovalMode: options.setApprovalMode ?? vi.fn(),
         getPermissionsAllow: () => [],
         getPermissionsDeny: options.getPermissionsDeny ?? (() => undefined),
         getContentGeneratorConfig: () => ({
@@ -797,6 +801,7 @@ describe('CoreToolScheduler', () => {
       onToolCallsUpdate,
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
+      chatRecordingService: options.chatRecordingService,
     });
 
     return {
@@ -2036,10 +2041,11 @@ describe('CoreToolScheduler', () => {
     expect(output).toContain('POSTHOOK_HEAD_MARKER');
   });
 
-  it('offloads the largest tool outputs when a batch exceeds the budget', async () => {
+  it('deterministically bounds tool outputs when a batch exceeds the budget', async () => {
     // Both outputs are individually under the single-result threshold (25k),
     // so PR-A truncation leaves them alone; only their SUM (12k) exceeds the
-    // per-message batch budget (10k), so the largest is offloaded.
+    // per-message batch budget (10k). The small result fits intact and the
+    // remaining budget is assigned to the large result.
     const bigExecute = vi.fn().mockResolvedValue({
       llmContent: 'a'.repeat(9000),
       returnDisplay: 'big',
@@ -2058,10 +2064,14 @@ describe('CoreToolScheduler', () => {
         new MockTool({ name: 'smallBatchTool', execute: smallExecute }),
       ],
     ]);
+    const recordToolResult = vi.fn();
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
         toolsByName,
         toolOutputBatchBudget: 10_000,
+        chatRecordingService: {
+          recordToolResult,
+        } as unknown as ChatRecordingService,
       });
 
     await scheduler.schedule(
@@ -2100,12 +2110,79 @@ describe('CoreToolScheduler', () => {
         : '';
     };
 
-    // Largest output is offloaded to disk (recoverable pointer).
-    expect(outputOf('bigBatchTool')).toContain(
-      'Tool output was too large and has been truncated',
-    );
-    // Smaller output stays untouched (batch back under budget after offload).
+    expect(outputOf('bigBatchTool')).toContain('Tool output truncated.');
+    // Water-fill allocation keeps the smaller output intact.
     expect(outputOf('smallBatchTool')).toBe('b'.repeat(3000));
+    expect(
+      outputOf('bigBatchTool').length + outputOf('smallBatchTool').length,
+    ).toBeLessThanOrEqual(10_000);
+    expect(recordToolResult).toHaveBeenCalledTimes(2);
+    expect(recordToolResult.mock.calls.flatMap((call) => call[0])).toEqual(
+      calls.flatMap((call) =>
+        'response' in call ? call.response.responseParts : [],
+      ),
+    );
+  });
+
+  it('hard-caps a batch whose producer outputs already carry truncation markers', async () => {
+    const prefix = 'Tool output was too large and has been truncated';
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'firstShell',
+        new MockTool({
+          name: 'firstShell',
+          execute: vi.fn().mockResolvedValue({
+            llmContent: `${prefix}${'a'.repeat(7000)}`,
+            returnDisplay: 'first',
+            persistedOutputFiles: ['/tmp/first.output'],
+          }),
+        }),
+      ],
+      [
+        'secondShell',
+        new MockTool({
+          name: 'secondShell',
+          execute: vi.fn().mockResolvedValue({
+            llmContent: `${prefix}${'b'.repeat(7000)}`,
+            returnDisplay: 'second',
+            persistedOutputFiles: ['/tmp/second.output'],
+          }),
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName,
+        toolOutputBatchBudget: 10_000,
+      });
+
+    await scheduler.schedule(
+      ['firstShell', 'secondShell'].map((name) => ({
+        callId: name,
+        name,
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'p',
+      })),
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => expect(onAllToolCallsComplete).toHaveBeenCalled());
+
+    const calls = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    const outputs = calls.map((call) =>
+      'response' in call
+        ? String(
+            call.response.responseParts[0].functionResponse?.response?.[
+              'output'
+            ] ?? '',
+          )
+        : '',
+    );
+    expect(
+      outputs.reduce((sum, output) => sum + output.length, 0),
+    ).toBeLessThanOrEqual(10_000);
+    expect(outputs.join('\n')).toContain('/tmp/first.output');
+    expect(outputs.join('\n')).toContain('/tmp/second.output');
   });
 
   it('offloads timeout error detail while preserving failure metadata', async () => {
@@ -2173,9 +2250,7 @@ describe('CoreToolScheduler', () => {
     if (big?.status === 'error' && small?.status === 'error') {
       const bigResponse =
         big.response.responseParts[0].functionResponse?.response;
-      expect(bigResponse?.['error']).toContain(
-        'Tool output was too large and has been truncated',
-      );
+      expect(bigResponse?.['error']).toContain('Tool output truncated.');
       expect(bigResponse).not.toHaveProperty('output');
       expect(big.response.error?.message).toBe('Command timed out.');
       expect(big.response.errorType).toBe(ToolErrorType.EXECUTION_TIMEOUT);
@@ -2185,12 +2260,11 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-  it('preserves PostToolBatch additionalContext in the offload preview tail', async () => {
+  it('preserves PostToolBatch additionalContext in the aggregate preview tail', async () => {
     // The PostToolBatch hook context is appended to the TAIL of the last call.
-    // When that call is the batch's largest and gets offloaded, the offload
-    // preview uses keep:'both' (head + tail), so the tail-resident context
-    // survives in the preview — the model still sees the hook guidance, and the
-    // full output (context included) is recoverable from the spill file.
+    // When that call needs aggregate reduction, the head-and-tail preview keeps
+    // the tail-resident context visible to the model. The reused producer
+    // artifact contains the producer output, not hook context added later.
     const bigExecute = vi.fn().mockResolvedValue({
       llmContent: 'a'.repeat(9000),
       returnDisplay: 'big',
@@ -2243,7 +2317,7 @@ describe('CoreToolScheduler', () => {
       });
 
     // big is scheduled last, so it is the call PostToolBatch context attaches
-    // to — and it is also the batch's largest, so it gets offloaded.
+    // to — and it is also the large response that needs aggregate reduction.
     await scheduler.schedule(
       [
         {
@@ -2280,11 +2354,8 @@ describe('CoreToolScheduler', () => {
     };
 
     const bigOutput = outputOf('bigBatchTool');
-    // big is offloaded (largest), yet the PostToolBatch context survives
-    // because it is appended after the budget pass.
-    expect(bigOutput).toContain(
-      'Tool output was too large and has been truncated',
-    );
+    // The PostToolBatch context survives the final aggregate pass.
+    expect(bigOutput).toContain('Tool output truncated.');
     expect(bigOutput).toContain('POSTBATCH_MARKER');
   });
 
@@ -2663,21 +2734,29 @@ describe('CoreToolScheduler', () => {
     }
   });
 
-  it('fires PermissionDenied hooks for AUTO classifier unavailable blocks', async () => {
+  it('asks on AUTO classifier unavailable and can switch to Default', async () => {
     runSideQueryMock
       .mockResolvedValueOnce({ shouldBlock: true })
       .mockRejectedValueOnce(new Error('classifier timed out'));
     const execute = vi.fn().mockResolvedValue({
-      llmContent: 'should not execute',
-      returnDisplay: 'should not execute',
+      llmContent: 'executed',
+      returnDisplay: 'executed',
     });
+    const originalOnConfirm = vi.fn().mockResolvedValue(undefined);
     const toolsByName = new Map<string, MockTool>([
       [
         ToolNames.SHELL,
         new MockTool({
           name: ToolNames.SHELL,
           getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
-          getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+          getConfirmationDetails: () =>
+            Promise.resolve({
+              type: 'exec',
+              title: 'Confirm shell',
+              command: 'touch /tmp/example',
+              rootCommand: 'touch',
+              onConfirm: originalOnConfirm,
+            }),
           execute,
         }),
       ],
@@ -2685,12 +2764,16 @@ describe('CoreToolScheduler', () => {
     const hookSystem = {
       firePermissionDeniedEvent: vi.fn().mockResolvedValue(undefined),
     };
+    const setApprovalMode = vi.fn();
+    const onToolCallsUpdate = vi.fn();
     const { scheduler, onAllToolCallsComplete } =
       createSchedulerForLegacyToolTests({
         toolsByName,
         approvalMode: ApprovalMode.AUTO,
         hookSystem,
         disableHooks: false,
+        setApprovalMode,
+        onToolCallsUpdate,
       });
     const abortController = new AbortController();
 
@@ -2699,7 +2782,7 @@ describe('CoreToolScheduler', () => {
         {
           callId: 'auto-unavailable',
           name: ToolNames.SHELL,
-          args: { command: 'rm -rf /tmp/example' },
+          args: { command: 'touch /tmp/example' },
           isClientInitiated: false,
           prompt_id: 'prompt-auto-unavailable',
         },
@@ -2707,18 +2790,33 @@ describe('CoreToolScheduler', () => {
       abortController.signal,
     );
 
+    const waiting = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(waiting.confirmationDetails).toMatchObject({
+      hideAlwaysAllow: true,
+      autoModeFallback: {
+        reason: 'classifier_unavailable',
+        message: expect.stringContaining('Switching to Default Mode'),
+      },
+    });
+    expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+
+    await waiting.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    );
+
     await vi.waitFor(() => {
       expect(onAllToolCallsComplete).toHaveBeenCalled();
     });
-    expect(hookSystem.firePermissionDeniedEvent).toHaveBeenCalledWith(
-      ToolNames.SHELL,
-      { command: 'rm -rf /tmp/example' },
-      'auto-unavailable',
-      'classifier_unavailable',
-      abortController.signal,
-      'auto-unavailable',
+    expect(originalOnConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      undefined,
     );
-    expect(execute).not.toHaveBeenCalled();
+    expect(setApprovalMode).toHaveBeenCalledWith(ApprovalMode.DEFAULT);
+    expect(execute).toHaveBeenCalledOnce();
   });
 
   it('skips PermissionDenied hooks when hooks are disabled', async () => {

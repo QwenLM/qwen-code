@@ -25,7 +25,7 @@ import {
   AgentEventType,
   type AgentEventEmitter,
   type AgentToolCallEvent,
-  type AgentToolResultEvent,
+  type AgentToolResponsesFinalizedEvent,
   type AgentRoundTextEvent,
   type AgentExternalMessageEvent,
 } from './runtime/agent-events.js';
@@ -313,7 +313,7 @@ export interface AttachJsonlTranscriptResult {
  * the transcript tree the same way they walk the main session log.
  *
  * Holds a single append-mode fd for the lifetime of the writer so streaming
- * tools (which can fire many TOOL_CALL/TOOL_RESULT events per round) avoid
+ * tools (which can fire many TOOL_CALL events per round) avoid
  * an open+write+close syscall storm. The fd is opened lazily on the first
  * write so callers that attach but never produce a record don't materialize
  * an empty file.
@@ -397,31 +397,21 @@ export function attachJsonlTranscriptWriter(
     });
   };
 
-  const onToolResult = (event: AgentToolResultEvent) => {
-    // Prefer the real response parts the model saw; fall back to a status
-    // stub only when the agent aborted before a response was formed.
-    const parts = event.responseParts ?? [
-      {
-        functionResponse: {
-          id: event.callId,
-          name: event.name,
-          response: {
-            success: event.success,
-            ...(event.error ? { error: event.error } : {}),
-          },
+  const onToolResponsesFinalized = (
+    event: AgentToolResponsesFinalizedEvent,
+  ) => {
+    for (const response of event.responses) {
+      append({
+        ...baseFields('tool_result'),
+        message: { role: 'user', parts: response.responseParts },
+        toolCallResult: {
+          callId: response.callId,
+          ...(response.durationMs !== undefined
+            ? { durationMs: response.durationMs }
+            : {}),
         },
-      },
-    ];
-    append({
-      ...baseFields('tool_result'),
-      message: { role: 'user', parts },
-      toolCallResult: {
-        callId: event.callId,
-        ...(event.durationMs !== undefined
-          ? { durationMs: event.durationMs }
-          : {}),
-      },
-    });
+      });
+    }
   };
 
   const recordUserMessage = (
@@ -486,13 +476,16 @@ export function attachJsonlTranscriptWriter(
 
   emitter.on(AgentEventType.ROUND_TEXT, onRoundText);
   emitter.on(AgentEventType.TOOL_CALL, onToolCall);
-  emitter.on(AgentEventType.TOOL_RESULT, onToolResult);
+  emitter.on(AgentEventType.TOOL_RESPONSES_FINALIZED, onToolResponsesFinalized);
   emitter.on(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
 
   const cleanup = () => {
     emitter.off(AgentEventType.ROUND_TEXT, onRoundText);
     emitter.off(AgentEventType.TOOL_CALL, onToolCall);
-    emitter.off(AgentEventType.TOOL_RESULT, onToolResult);
+    emitter.off(
+      AgentEventType.TOOL_RESPONSES_FINALIZED,
+      onToolResponsesFinalized,
+    );
     emitter.off(AgentEventType.EXTERNAL_MESSAGE, onExternalMessage);
     if (fd !== null) {
       try {

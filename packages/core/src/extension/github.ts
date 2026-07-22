@@ -184,7 +184,15 @@ export async function cloneFromGit(
     const git = restrictGitEnvironment(
       simpleGit(destination, {
         ...(signal ? { abort: signal } : {}),
-        ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
+        ...(networkConfig.length > 0
+          ? {
+              config: networkConfig,
+              unsafe: {
+                allowUnsafeConfigPaths: true,
+                allowUnsafeProtocolOverride: true,
+              },
+            }
+          : {}),
       }),
       installMetadata.networkPolicy,
     );
@@ -452,7 +460,15 @@ export async function checkForExtensionUpdate(
       const git = restrictGitEnvironment(
         simpleGit(extension.path, {
           ...(signal ? { abort: signal } : {}),
-          ...(networkConfig.length > 0 ? { config: networkConfig } : {}),
+          ...(networkConfig.length > 0
+            ? {
+                config: networkConfig,
+                unsafe: {
+                  allowUnsafeConfigPaths: true,
+                  allowUnsafeProtocolOverride: true,
+                },
+              }
+            : {}),
         }),
         installMetadata.networkPolicy,
       );
