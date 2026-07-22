@@ -19,6 +19,8 @@ import {
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { ACPToolCall } from '../adapters/types';
+import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
 import { useMessages } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
@@ -140,6 +142,38 @@ export function ChatPane({
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
+  const openSubagentDetails = useCallback(
+    (tool: ACPToolCall) => {
+      if (!connection.sessionId || !onRightPanelOpen) return;
+      const rawOutput =
+        tool.rawOutput && typeof tool.rawOutput === 'object'
+          ? (tool.rawOutput as Record<string, unknown>)
+          : undefined;
+      const subagentType =
+        (typeof tool.args?.subagent_type === 'string'
+          ? tool.args.subagent_type
+          : undefined) ??
+        (typeof rawOutput?.['subagentName'] === 'string'
+          ? rawOutput['subagentName']
+          : undefined);
+      onRightPanelOpen({
+        id: `subagent:${connection.sessionId}:${tool.callId}`,
+        kind: 'subagent',
+        title: tool.title || subagentType || t('agent.label'),
+        turnId: tool.callId,
+        tool,
+        sessionId: connection.sessionId,
+        workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
+      });
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      onRightPanelOpen,
+      t,
+      workspaceCwd,
+    ],
+  );
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
@@ -535,36 +569,40 @@ export function ChatPane({
       )}
 
       <div className={styles.body}>
-        <MessageList
-          messages={messages}
-          pendingApproval={pendingToolApproval}
-          loadingTranscript={connection.loadingTranscript}
-          catchingUp={connection.catchingUp}
-          hasOlderHistory={transcriptHistory.hasMore}
-          loadingOlderHistory={transcriptHistory.loading}
-          historyCapacityReached={transcriptHistory.capacityReached}
-          onLoadOlderHistory={transcriptHistory.loadMore}
-          isResponding={isResponding}
-          workspaceCwd={connection.workspaceCwd || ''}
-          hideSessionTimeline
-          turnFileChanges={
-            visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
-          }
-          turnArtifacts={
-            visibleTurnOutputKinds.has('artifact') ? artifactsByTurn : undefined
-          }
-          turnScheduledTasks={
-            visibleTurnOutputKinds.has('scheduled_task')
-              ? scheduledTasksByTurn
-              : undefined
-          }
-          onTurnOutputOpen={handleRightPanelOpen}
-          generateContent={
-            connection.capabilities?.features.includes('session_generation')
-              ? actions.generateSessionContent
-              : undefined
-          }
-        />
+        <SubagentDetailsProvider onOpen={openSubagentDetails}>
+          <MessageList
+            messages={messages}
+            pendingApproval={pendingToolApproval}
+            loadingTranscript={connection.loadingTranscript}
+            catchingUp={connection.catchingUp}
+            hasOlderHistory={transcriptHistory.hasMore}
+            loadingOlderHistory={transcriptHistory.loading}
+            historyCapacityReached={transcriptHistory.capacityReached}
+            onLoadOlderHistory={transcriptHistory.loadMore}
+            isResponding={isResponding}
+            workspaceCwd={connection.workspaceCwd || ''}
+            hideSessionTimeline
+            turnFileChanges={
+              visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
+            }
+            turnArtifacts={
+              visibleTurnOutputKinds.has('artifact')
+                ? artifactsByTurn
+                : undefined
+            }
+            turnScheduledTasks={
+              visibleTurnOutputKinds.has('scheduled_task')
+                ? scheduledTasksByTurn
+                : undefined
+            }
+            onTurnOutputOpen={handleRightPanelOpen}
+            generateContent={
+              connection.capabilities?.features.includes('session_generation')
+                ? actions.generateSessionContent
+                : undefined
+            }
+          />
+        </SubagentDetailsProvider>
       </div>
 
       <div className={styles.footer}>

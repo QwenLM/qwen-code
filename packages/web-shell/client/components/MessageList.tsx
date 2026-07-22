@@ -85,6 +85,14 @@ interface MessageListProps {
    */
   bottomOverlayInset?: number;
   hideSessionTimeline?: boolean;
+  hideFirstUserMessage?: boolean;
+  firstTurnMetrics?: {
+    durationMs?: number;
+    inputTokens?: number;
+    outputTokens?: number;
+    cachedTokens?: number;
+  };
+  includeSubagentToolUsageInMetrics?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   onBranchSession?: () => void;
@@ -467,6 +475,7 @@ export interface ApplyTurnCollapseOptions {
    * compact mode's `isForceExpandGroup`).
    */
   pendingApprovalCallId?: string | null;
+  includeSubagentToolUsageInMetrics?: boolean;
   /** Master switch; when false the items pass through untouched. */
   enabled: boolean;
 }
@@ -1089,10 +1098,8 @@ function assistantContentTimestamp(item: DisplayItem): number | undefined {
 }
 
 /**
- * Per-turn token usage contribution of a row. The SDK reducer folds each round's
- * usage — including the sub-agent rounds a turn spawns — onto the turn's
- * top-level assistant blocks, so summing the turn's assistant messages yields
- * its true total cost.
+ * Main-agent token usage contribution of a row. Subagent usage is carried by
+ * the root agent tool's execution summary and is added separately below.
  */
 function itemAssistantUsage(item: DisplayItem):
   | {
@@ -1104,6 +1111,57 @@ function itemAssistantUsage(item: DisplayItem):
   return item.type === 'message' && item.message.role === 'assistant'
     ? item.message.usage
     : undefined;
+}
+
+interface TurnTokenUsage {
+  inputTokens: number;
+  outputTokens: number;
+  cachedTokens?: number;
+}
+
+function finiteTokenCount(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? value
+    : undefined;
+}
+
+function subagentUsage(
+  tool: ACPToolCall,
+): { callId: string; usage: TurnTokenUsage } | undefined {
+  if (tool.parentToolCallId || !isSubAgentToolCall(tool)) return undefined;
+  const raw =
+    tool.rawOutput && typeof tool.rawOutput === 'object'
+      ? (tool.rawOutput as Record<string, unknown>)
+      : undefined;
+  const summary =
+    raw?.['executionSummary'] && typeof raw['executionSummary'] === 'object'
+      ? (raw['executionSummary'] as Record<string, unknown>)
+      : undefined;
+  const inputTokens = finiteTokenCount(summary?.['inputTokens']);
+  const outputTokens = finiteTokenCount(summary?.['outputTokens']);
+  if (inputTokens === undefined && outputTokens === undefined) return undefined;
+  const cachedTokens = finiteTokenCount(summary?.['cachedTokens']);
+  return {
+    callId: tool.callId,
+    usage: {
+      inputTokens: inputTokens ?? 0,
+      outputTokens: outputTokens ?? 0,
+      ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+    },
+  };
+}
+
+function itemSubagentUsages(
+  item: DisplayItem,
+): Array<{ callId: string; usage: TurnTokenUsage }> {
+  if (item.type === 'parallel_agents') {
+    return item.agents.flatMap((agent) => subagentUsage(agent) ?? []);
+  }
+  if (item.type === 'turn_content') {
+    return item.items.flatMap(itemSubagentUsages);
+  }
+  if (item.type !== 'message' || item.message.role !== 'tool_group') return [];
+  return item.message.tools.flatMap((tool) => subagentUsage(tool) ?? []);
 }
 
 function itemToolCallCount(item: DisplayItem): number {
@@ -1253,6 +1311,7 @@ export function applyTurnCollapse(
     isResponding,
     activeTurnStartedAt,
     pendingApprovalCallId,
+    includeSubagentToolUsageInMetrics = true,
     enabled,
   }: ApplyTurnCollapseOptions,
 ): DisplayItem[] {
@@ -1296,6 +1355,7 @@ export function applyTurnCollapse(
     let toolCallCount = 0;
     let thinkingCount = 0;
     let hasUsage = false;
+    const countedSubagents = new Set<string>();
     let hasTurnError = false;
     for (let i = start + 1; i <= end; i++) {
       const item = items[i]!;
@@ -1330,6 +1390,16 @@ export function applyTurnCollapse(
         outputTokens += usage.outputTokens;
         cachedTokens += usage.cachedTokens ?? 0;
         hasUsage = true;
+      }
+      if (includeSubagentToolUsageInMetrics) {
+        for (const subagent of itemSubagentUsages(item)) {
+          if (countedSubagents.has(subagent.callId)) continue;
+          countedSubagents.add(subagent.callId);
+          inputTokens += subagent.usage.inputTokens;
+          outputTokens += subagent.usage.outputTokens;
+          cachedTokens += subagent.usage.cachedTokens ?? 0;
+          hasUsage = true;
+        }
       }
     }
 
@@ -1574,7 +1644,9 @@ type Translate = (
 ) => string;
 
 function durationMetricText(elapsedMs: number | undefined): string {
-  return elapsedMs !== undefined ? formatDuration(elapsedMs) : '';
+  return elapsedMs !== undefined && elapsedMs > 0
+    ? formatDuration(elapsedMs)
+    : '';
 }
 
 function tokenMetricText(collapse: TurnCollapseHead, t: Translate): string {
@@ -2194,6 +2266,9 @@ export const MessageList = memo(
       autoScrollTailIntoView = false,
       bottomOverlayInset = 0,
       hideSessionTimeline = false,
+      hideFirstUserMessage = false,
+      firstTurnMetrics,
+      includeSubagentToolUsageInMetrics = true,
       showRetryHint = false,
       onRetryClick,
       onBranchSession,
@@ -2401,24 +2476,63 @@ export const MessageList = memo(
       },
       [scheduleScrollOverflowReport],
     );
-    const visibleItems = useMemo(
-      () =>
-        applyTurnCollapse(displayItems, {
-          overrides: collapseOverrides,
-          isResponding,
-          activeTurnStartedAt,
-          pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
-          enabled: collapseEnabled,
-        }),
-      [
-        displayItems,
-        collapseOverrides,
+    const visibleItems = useMemo(() => {
+      const collapsedItems = applyTurnCollapse(displayItems, {
+        overrides: collapseOverrides,
         isResponding,
         activeTurnStartedAt,
-        pendingApproval?.toolCallId,
-        collapseEnabled,
-      ],
-    );
+        pendingApprovalCallId: pendingApproval?.toolCallId ?? null,
+        includeSubagentToolUsageInMetrics,
+        enabled: collapseEnabled,
+      });
+      let metricsApplied = false;
+      const itemsWithMetrics = firstTurnMetrics
+        ? collapsedItems.map((item) => {
+            if (metricsApplied || item.type !== 'turn_collapse') return item;
+            metricsApplied = true;
+            return {
+              ...item,
+              turnCollapse: {
+                ...item.turnCollapse,
+                ...(firstTurnMetrics.durationMs !== undefined &&
+                firstTurnMetrics.durationMs > 0
+                  ? { elapsedMs: firstTurnMetrics.durationMs }
+                  : {}),
+                ...(firstTurnMetrics.inputTokens !== undefined
+                  ? { inputTokens: firstTurnMetrics.inputTokens }
+                  : {}),
+                ...(firstTurnMetrics.outputTokens !== undefined
+                  ? { outputTokens: firstTurnMetrics.outputTokens }
+                  : {}),
+                ...(firstTurnMetrics.cachedTokens !== undefined
+                  ? { cachedTokens: firstTurnMetrics.cachedTokens }
+                  : {}),
+              },
+            };
+          })
+        : collapsedItems;
+      if (!hideFirstUserMessage) return itemsWithMetrics;
+      const firstUserId = mergedMessages.find(
+        (message) => message.role === 'user',
+      )?.id;
+      return firstUserId
+        ? itemsWithMetrics.filter(
+            (item) =>
+              item.type !== 'message' || item.message.id !== firstUserId,
+          )
+        : itemsWithMetrics;
+    }, [
+      displayItems,
+      collapseOverrides,
+      isResponding,
+      activeTurnStartedAt,
+      pendingApproval?.toolCallId,
+      collapseEnabled,
+      hideFirstUserMessage,
+      firstTurnMetrics,
+      includeSubagentToolUsageInMetrics,
+      mergedMessages,
+    ]);
     const visibleTurnIdByDisplayIndex = useMemo(
       () => getTurnIdByDisplayIndex(visibleItems),
       [visibleItems],

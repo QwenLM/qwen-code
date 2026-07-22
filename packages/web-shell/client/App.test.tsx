@@ -4515,8 +4515,8 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('Pane artifact');
-    expect(container.textContent).toContain('10 B');
+    expect(document.body.textContent).toContain('Pane artifact');
+    expect(document.body.textContent).toContain('10 B');
 
     await act(async () => {
       container
@@ -4527,7 +4527,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('20 B');
+    expect(document.body.textContent).toContain('20 B');
 
     await act(async () => {
       container
@@ -4538,7 +4538,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('Artifact not found.');
+    expect(document.body.textContent).toContain('Artifact not found.');
   });
 
   it('clears split pane artifact snapshots when switching sessions', async () => {
@@ -4566,7 +4566,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).toContain('Pane artifact');
+    expect(document.body.textContent).toContain('Pane artifact');
 
     await act(async () => {
       mockConnection.sessionId = 'session-2';
@@ -4574,7 +4574,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.textContent).not.toContain('Pane artifact');
+    expect(document.body.textContent).not.toContain('Pane artifact');
   });
 
   it('enters the split view from a ?split= URL and consumes the param', async () => {

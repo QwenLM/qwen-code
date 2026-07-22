@@ -3033,6 +3033,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentType: hookOpts.agentType,
           description: this.params.description,
           parentSessionId: sessionId,
+          toolUseId: this.callId,
           // Populated when a subagent (whose reasoning loop is wrapped in
           // runWithAgentContext below) launches a nested agent. Null at
           // top-level launches from the user session.
@@ -3607,6 +3608,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           agentType: hookOpts.agentType,
           description: this.params.description,
           parentSessionId: fgSessionId,
+          toolUseId: this.callId,
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',

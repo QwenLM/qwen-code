@@ -42,6 +42,7 @@ import type {
 import { GitForkIcon, XIcon } from 'lucide-react';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
+import { SubagentDetailsProvider } from './subagentDetailsContext';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -85,6 +86,7 @@ import {
   ArtifactPanel,
   type ArtifactPanelTab,
 } from './components/artifacts/ArtifactPanel';
+import { Drawer, DrawerContent, DrawerTitle } from './components/ui/drawer';
 import type {
   TurnOutputFileChange,
   TurnOutputKind,
@@ -1120,6 +1122,7 @@ export function App({
   // once) is only offered on large screens; below that there is no room for it
   // to be useful.
   const isLargeScreen = useIsLargeScreen();
+  const canDockArtifactPanel = useIsLargeScreen('(min-width: 1001px)');
   // In split view the session sidebar competes with the panes for width. Below
   // this width it auto-collapses to its icon rail so the panes get the room, and
   // expands again once the window grows back. A wide split keeps the full
@@ -1864,6 +1867,56 @@ export function App({
     },
     [getDefaultReviewPanelWidth, t],
   );
+  const openSubagentPanelForSession = useCallback(
+    (tool: ACPToolCall, sessionId: string, workspaceCwd?: string) => {
+      const rawOutput =
+        tool.rawOutput && typeof tool.rawOutput === 'object'
+          ? (tool.rawOutput as Record<string, unknown>)
+          : undefined;
+      const subagentType =
+        (typeof tool.args?.subagent_type === 'string'
+          ? tool.args.subagent_type
+          : undefined) ??
+        (typeof rawOutput?.['subagentName'] === 'string'
+          ? rawOutput['subagentName']
+          : undefined);
+      const tab: ArtifactPanelTab = {
+        id: `subagent:${sessionId}:${tool.callId}`,
+        kind: 'subagent',
+        title: tool.title || subagentType || t('agent.label'),
+        sessionId,
+        rootToolCallId: tool.callId,
+        rootTool: tool,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelWidth((width) =>
+        artifactPanelOpenRef.current ? width : getDefaultReviewPanelWidth(),
+      );
+      setArtifactPanelOpen(true);
+    },
+    [getDefaultReviewPanelWidth, t],
+  );
+  const openSubagentPanel = useCallback(
+    (tool: ACPToolCall) => {
+      if (!connection.sessionId) return;
+      openSubagentPanelForSession(
+        tool,
+        connection.sessionId,
+        connection.workspaceCwd,
+      );
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      openSubagentPanelForSession,
+    ],
+  );
   const handleTurnOutputOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (onRightPanelOpen) {
@@ -1876,6 +1929,14 @@ export function App({
       }
       if (request.kind === 'scheduled_task') {
         openScheduledTaskPanel(request.task, request.workspaceActions);
+        return;
+      }
+      if (request.kind === 'subagent') {
+        openSubagentPanelForSession(
+          request.tool,
+          request.sessionId,
+          request.workspaceCwd,
+        );
         return;
       }
 
@@ -1920,6 +1981,7 @@ export function App({
       onRightPanelOpen,
       openReviewPanel,
       openScheduledTaskPanel,
+      openSubagentPanelForSession,
     ],
   );
   const closeArtifactPanel = useCallback(() => {
@@ -2344,6 +2406,8 @@ export function App({
   const [mainView, setMainView] = useState<
     'chat' | 'scheduledTasks' | 'goals' | 'split'
   >('chat');
+  const useFloatingArtifactPanel =
+    !canDockArtifactPanel || mainView === 'split';
   // Sessions to seed the split view with (e.g. the selection from the overview).
   const [splitSessionIds, setSplitSessionIds] = useState<string[]>([]);
   // Latest pane list, readable from the shrink-close effect without making it a
@@ -7424,7 +7488,7 @@ export function App({
                               .filter(Boolean)
                               .join(' ');
 
-                            const messageList = (
+                            const messageListContent = (
                               <MessageList
                                 ref={messageListRef}
                                 messages={displayMessages}
@@ -7487,6 +7551,13 @@ export function App({
                                     : undefined
                                 }
                               />
+                            );
+                            const messageList = (
+                              <SubagentDetailsProvider
+                                onOpen={openSubagentPanel}
+                              >
+                                {messageListContent}
+                              </SubagentDetailsProvider>
                             );
 
                             const btwPanel =
@@ -7877,7 +7948,34 @@ export function App({
                 </div>
               </div>
             </div>
-            {artifactPanelOpen && (
+            {artifactPanelOpen && useFloatingArtifactPanel ? (
+              <Drawer
+                open
+                direction="right"
+                shouldScaleBackground={false}
+                onOpenChange={(open) => {
+                  if (!open) closeArtifactPanel();
+                }}
+              >
+                <DrawerContent className="data-[vaul-drawer-direction=right]:w-[min(520px,calc(100vw-16px))] data-[vaul-drawer-direction=right]:sm:max-w-[520px]">
+                  <DrawerTitle className="sr-only">Right panel</DrawerTitle>
+                  <ArtifactPanel
+                    artifacts={artifactPanelArtifacts}
+                    tabs={artifactPanelTabs}
+                    activeTabId={activeArtifactPanelTabId}
+                    reviewChanges={reviewChanges}
+                    selectedReviewPath={selectedReviewPath}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    loading={artifactsLoading}
+                    error={artifactsError}
+                    onSelectTab={setActiveArtifactPanelTabId}
+                    onCloseTab={closeArtifactPanelTab}
+                    onClose={closeArtifactPanel}
+                    variant="drawer"
+                  />
+                </DrawerContent>
+              </Drawer>
+            ) : artifactPanelOpen ? (
               <>
                 <div
                   className={styles.artifactResizeHandle}
@@ -7903,7 +8001,7 @@ export function App({
                   onClose={closeArtifactPanel}
                 />
               </>
-            )}
+            ) : null}
           </div>
         </div>
         </WebShellPortalRootContext.Provider>

@@ -1,4 +1,5 @@
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { ACPToolCall } from '../../adapters/types';
 import type { DaemonWorkspaceActions } from '@qwen-code/webui/daemon-react-sdk';
 import { memo, useState } from 'react';
 import { useI18n } from '../../i18n';
@@ -74,6 +75,15 @@ export type TurnOutputOpenRequest =
       turnId: string;
       task: TurnOutputScheduledTask;
       workspaceActions?: DaemonWorkspaceActions;
+    }
+  | {
+      id: string;
+      kind: 'subagent';
+      title: string;
+      turnId: string;
+      tool: ACPToolCall;
+      sessionId: string;
+      workspaceCwd?: string;
     };
 
 interface TurnOutputsProps {
