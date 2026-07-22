@@ -1163,13 +1163,17 @@ describe('createAcpSessionBridge', () => {
     await bridge1.spawnOrAttach({ workspaceCwd: WS_A });
     await bridge2.spawnOrAttach({ workspaceCwd: WS_A });
     expect(seenEnvs).toHaveLength(2);
-    expect(seenEnvs[0]).toMatchObject({
+    expect(seenEnvs[0]).toEqual({
       QWEN_SERVE_MCP_CLIENT_BUDGET: '5',
       QWEN_SERVE_MCP_BUDGET_MODE: 'enforce',
+      QWEN_CODE_PRIVATE_ACP_CAPABILITY:
+        expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
     });
-    expect(seenEnvs[1]).toMatchObject({
+    expect(seenEnvs[1]).toEqual({
       QWEN_SERVE_MCP_CLIENT_BUDGET: '20',
       QWEN_SERVE_MCP_BUDGET_MODE: 'warn',
+      QWEN_CODE_PRIVATE_ACP_CAPABILITY:
+        expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
     });
     const capabilities = seenEnvs.map(
       (env) => env?.['QWEN_CODE_PRIVATE_ACP_CAPABILITY'],
