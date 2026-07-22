@@ -3146,7 +3146,7 @@ jobs:
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           JOB_STATUS: '${{ job.status }}'
           # 'skipped' when an EARLIER step failed before Prepare ran (base
-          # install/build, checkout) — an infra/base failure, not the agent.
+          # install/build) — an infra/base failure, not the agent.
           # 'success'/'failure' when Prepare itself ran. Distinguishes a
           # transient pre-agent crash (retry) from a genuine agent crash.
           PREPARE_OUTCOME: '${{ steps.prepare.outcome }}'
@@ -3352,7 +3352,7 @@ jobs:
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
               # NEWEST is empty because Prepare never RAN TO A VERDICT — an
               # earlier step failed or the job stopped before the agent started:
-              # installing/building the trusted base, checkout, node setup. That
+              # installing/building the trusted base, node setup. That
               # is infra or a broken base, NOT the agent, and it is usually
               # transient (a base build fixed minutes later, an ENOSPC runner).
               # Match on "not a real Prepare run" rather than 'skipped' alone, so
@@ -3368,13 +3368,12 @@ jobs:
               # increment the round so a PERSISTENTLY broken base is bounded and
               # cannot loop forever.
               MARK_ROUND="$(( ROUND + 1 ))"
+              MARK_TS='9999-12-31T23:59:59Z'
               if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
-                MARK_TS='9999-12-31T23:59:59Z'
-                HEADLINE="🤖 AutoFix could not start — a setup step (installing/building the base, or checkout) failed before the agent ran, so no fix was attempted. This is normally a transient infra issue or a broken base build, not this PR. It will retry on the next scan."
+                HEADLINE="🤖 AutoFix could not start — a setup step (installing/building the base) failed before the agent ran, so no fix was attempted. This is normally a transient infra issue or a broken base build, not this PR. It will retry on the next scan."
               else
-                MARK_TS='9999-12-31T23:59:59Z'
                 MARK_ROUND="${MAX_ROUNDS}"
-                HEADLINE="🤖 AutoFix could not start for ${MAX_ROUNDS} rounds — a setup step (base install/build, checkout) keeps failing before the agent runs. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
+                HEADLINE="🤖 AutoFix could not start for ${MAX_ROUNDS} rounds — a setup step (base install/build) keeps failing before the agent runs. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
               fi
             else
               # Prepare RAN (outcome success/failure) but produced no feedback to
@@ -3410,7 +3409,13 @@ jobs:
             # that would mark every in-flight PR terminal at once during a
             # provider outage — the failures are not the PR's fault and DO
             # self-heal. Auth errors are NOT exempt (they never self-heal).
-            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+            # Pre-agent infra failures (skipped/cancelled/empty Prepare outcome)
+            # are exempt for the same reason: a broken base build or a runner
+            # crash is not the PR's fault, self-heals, and hits the whole scan
+            # batch at once — the exact scenario the retry path above exists to
+            # prevent. The round cap + sentinel-ts /retry recovery already
+            # bounds a persistently broken base.
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
               CONSEC_FAIL=1
               if [[ -f "${WORKDIR}/ic.json" ]]; then
                 COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"

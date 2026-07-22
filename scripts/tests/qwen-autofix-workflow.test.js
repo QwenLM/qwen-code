@@ -4064,7 +4064,7 @@ describe('qwen-autofix workflow', () => {
     // NEWEST empty has two meanings, and the fix is to stop conflating them:
     //   - Prepare RAN but the agent crashed/timed out before reading → terminal
     //   - Prepare was SKIPPED because an earlier step failed (base install/
-    //     build, checkout) → infra/base, transient → RETRY.
+    //     build) → infra/base, transient → RETRY.
     // Observed: a web-shell TS break on `main` failed the trusted-base build
     // across a whole scan batch, skipping Prepare, and the old code stranded
     // SIX healthy PRs (one at round 11) terminally at round=100.
@@ -4162,7 +4162,7 @@ describe('qwen-autofix workflow', () => {
     expect(cap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -4175,7 +4175,13 @@ describe('qwen-autofix workflow', () => {
 
     const run = (
       priorHeadlines,
-      { window, markRound = 7, apiErrorDetail = '', apiErrorKind = '' } = {},
+      {
+        window,
+        markRound = 7,
+        apiErrorDetail = '',
+        apiErrorKind = '',
+        prepareOutcome = 'success',
+      } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
       const bin = join(dir, 'bin');
@@ -4203,7 +4209,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -4262,6 +4268,20 @@ describe('qwen-autofix workflow', () => {
         apiErrorKind: 'auth',
       }),
     ).toMatchObject({ consec: cap, terminal: true });
+    // A skipped-Prepare (pre-agent infra failure) is exempt from the breaker —
+    // same failure class as transient 429/5xx: not the PR's fault, self-heals,
+    // hits the whole scan batch. The round cap + sentinel-ts /retry already
+    // bounds a persistently broken base; the breaker must not override that
+    // and re-introduce the mass-stranding this retry path exists to prevent.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: 'skipped' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: 'cancelled' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
+    expect(
+      run(Array(cap - 1).fill(FAIL), { prepareOutcome: '' }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
