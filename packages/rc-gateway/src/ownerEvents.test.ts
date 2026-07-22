@@ -103,4 +103,21 @@ describe('agent + hook OwnerEvent variants', () => {
     expect(seen[0]).toMatchObject({ type: 'agent_spawned' });
     expect(seen[1]).toMatchObject({ type: 'hook_event', dropped: 2 });
   });
+
+  it('publishes a review lifecycle event to subscribers', () => {
+    const bus = new OwnerEventBus();
+    const seen: OwnerEvent[] = [];
+    bus.subscribe((e) => seen.push(e));
+    bus.publish({
+      type: 'review_started',
+      review: {
+        reviewId: 'r1',
+        sessionId: 's1',
+        target: { kind: 'local' },
+        status: 'running',
+      },
+    });
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ type: 'review_started' });
+  });
 });

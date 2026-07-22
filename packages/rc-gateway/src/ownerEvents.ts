@@ -87,6 +87,29 @@ export interface AgentLifecyclePayload {
   costMicrocents?: number;
 }
 
+/** The four review lifecycle SSE event types (wire-protocol registry rows). */
+export type ReviewLifecycleEventType =
+  | 'review_started'
+  | 'review_completed'
+  | 'review_failed'
+  | 'review_cancelled';
+
+/**
+ * Payload of a review lifecycle frame (design: `{ reviewId, sessionId, target,
+ * status, reportPath?, summary? }`).
+ */
+export interface ReviewLifecyclePayload {
+  reviewId: string;
+  sessionId: string;
+  target:
+    | { kind: 'pr'; number: number }
+    | { kind: 'path'; path: string }
+    | { kind: 'local' };
+  status: string;
+  reportPath?: string | null;
+  summary?: { findingsCount?: number; verdict?: string } | null;
+}
+
 /**
  * A frame broadcast on the owner-level event stream. A discriminated union so
  * producers can add variants without breaking consumers (clients switch on
@@ -106,6 +129,9 @@ export interface AgentLifecyclePayload {
  *  - `session_event`: a WAL frame (session lifecycle event such as
  *    `session_forked` or `child_forked`) emitted by the fork route so
  *    subscribers can observe fork lifecycle in real time.
+ *  - `review_*`: review lifecycle frames (add-remote-review) emitted as a
+ *    tagged daemon session runs the `/review` skill against a PR, path, or
+ *    the local working tree.
  */
 export type OwnerEvent =
   | { type: 'audit'; record: AuditRecord }
@@ -129,6 +155,11 @@ export type OwnerEvent =
       /** Agent lifecycle frame (add-agent-observability). */
       type: AgentLifecycleEventType;
       agent: AgentLifecyclePayload;
+    }
+  | {
+      /** Review lifecycle frame (add-remote-review). */
+      type: ReviewLifecycleEventType;
+      review: ReviewLifecyclePayload;
     }
   | {
       /**
