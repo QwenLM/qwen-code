@@ -6846,6 +6846,25 @@ class QwenAgent implements Agent {
             'Transcript cursor and record boundary are mutually exclusive',
           );
         }
+        const rawDirection = params['direction'];
+        if (rawDirection !== undefined && rawDirection !== 'backward') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid transcript direction',
+          );
+        }
+        if (rawCursor !== undefined && rawDirection !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript cursor and direction are mutually exclusive',
+          );
+        }
+        if (rawBeforeRecordId !== undefined && rawDirection !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Transcript record boundary and direction are mutually exclusive',
+          );
+        }
         const rawLimit = params['limit'];
         if (
           rawLimit !== undefined &&
@@ -6862,11 +6881,21 @@ class QwenAgent implements Agent {
         try {
           const settings = loadSettingsCached(cwd);
           return await runWithAcpRuntimeOutputDir(settings, cwd, async () => {
+            if (rawDirection === 'backward') {
+              await this.sessions
+                .get(sessionId)
+                ?.getConfig()
+                .getChatRecordingService()
+                ?.flush();
+            }
             const reader = new SessionTranscriptReader(cwd);
             const page = await reader.readPage(sessionId, {
               ...(typeof rawCursor === 'string' ? { cursor: rawCursor } : {}),
               ...(typeof rawBeforeRecordId === 'string'
                 ? { beforeRecordId: rawBeforeRecordId }
+                : {}),
+              ...(rawDirection === 'backward'
+                ? { direction: rawDirection }
                 : {}),
               ...(typeof rawLimit === 'number' ? { limit: rawLimit } : {}),
               maxBytes: SESSION_TRANSCRIPT_MAX_PAGE_BYTES,

@@ -71,6 +71,7 @@ function serializeAgentTask(
         }
       : {}),
     ...optionalField('prompt', entry.prompt),
+    ...optionalField('toolUseId', entry.toolUseId),
   };
 }
 

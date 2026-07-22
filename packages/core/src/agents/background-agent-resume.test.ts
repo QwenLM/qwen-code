@@ -2242,7 +2242,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(readMetaStatus(metaPath)).toBe('cancelled');
   });
 
-  it('preserves pending trailing user text in history and sends continuation as the new turn', async () => {
+  it('drops usage-only assistant records while preserving tool history and pending user text', async () => {
     const sessionId = 'session-pending-user';
     const agentId = 'agent-pending-user';
     const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
@@ -2271,10 +2271,57 @@ describe('BackgroundAgentResumeService', () => {
           message: { role: 'user', parts: [{ text: 'original task' }] },
         }),
         JSON.stringify({
-          uuid: 'a1',
+          uuid: 'usage-only',
           parentUuid: 'u1',
           sessionId,
           timestamp: '2026-04-20T00:00:00.100Z',
+          type: 'assistant',
+          message: { role: 'model', parts: [] },
+          usageMetadata: { totalTokenCount: 42 },
+        }),
+        JSON.stringify({
+          uuid: 'call-1',
+          parentUuid: 'usage-only',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.200Z',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  args: { file_path: '/tmp/input.txt' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'result-1',
+          parentUuid: 'call-1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.300Z',
+          type: 'tool_result',
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'read-1',
+                  name: 'read_file',
+                  response: { output: 'contents' },
+                },
+              },
+            ],
+          },
+        }),
+        JSON.stringify({
+          uuid: 'a1',
+          parentUuid: 'result-1',
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.400Z',
           type: 'assistant',
           message: { role: 'model', parts: [{ text: 'working' }] },
         }),
@@ -2282,7 +2329,7 @@ describe('BackgroundAgentResumeService', () => {
           uuid: 'u2',
           parentUuid: 'a1',
           sessionId,
-          timestamp: '2026-04-20T00:00:00.200Z',
+          timestamp: '2026-04-20T00:00:00.500Z',
           type: 'user',
           message: { role: 'user', parts: [{ text: 'and another thing' }] },
         }),
@@ -2340,6 +2387,30 @@ describe('BackgroundAgentResumeService', () => {
         promptConfigOverrides: {
           initialMessages: [
             { role: 'user', parts: [{ text: 'original task' }] },
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'read-1',
+                    name: 'read_file',
+                    args: { file_path: '/tmp/input.txt' },
+                  },
+                },
+              ],
+            },
+            {
+              role: 'user',
+              parts: [
+                {
+                  functionResponse: {
+                    id: 'read-1',
+                    name: 'read_file',
+                    response: { output: 'contents' },
+                  },
+                },
+              ],
+            },
             { role: 'model', parts: [{ text: 'working' }] },
             { role: 'user', parts: [{ text: 'and another thing' }] },
           ],

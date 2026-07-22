@@ -85,6 +85,8 @@ export interface SessionTranscriptReadPageOptions {
   cursor?: string;
   /** Start a newest-to-oldest snapshot immediately before this active record. */
   beforeRecordId?: string;
+  /** Start at the persisted tail and page newest-to-oldest. */
+  direction?: 'backward';
   limit?: number;
   maxBytes?: number;
 }
@@ -976,7 +978,10 @@ export class SessionTranscriptReader {
         ? (this.cursorCodec?.decode(options.cursor) ??
           decodeSessionTranscriptCursor(options.cursor, this.workspaceCwd))
         : undefined;
-    if (cursor && options.beforeRecordId !== undefined) {
+    if (
+      cursor &&
+      (options.beforeRecordId !== undefined || options.direction !== undefined)
+    ) {
       throw new InvalidSessionTranscriptCursorError();
     }
     if (cursor && cursor.sessionId !== sessionId) {
@@ -1020,8 +1025,11 @@ export class SessionTranscriptReader {
 
     const direction =
       cursor?.direction ??
+      options.direction ??
       (options.beforeRecordId !== undefined ? 'backward' : 'forward');
-    let position = cursor?.position ?? 0;
+    let position =
+      cursor?.position ??
+      (direction === 'backward' ? index.activeUuids.length : 0);
     if (!cursor && options.beforeRecordId !== undefined) {
       if (options.beforeRecordId.length === 0) {
         throw new InvalidSessionTranscriptCursorError();
