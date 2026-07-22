@@ -4,13 +4,36 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { beforeEach, describe, it, expect, vi } from 'vitest';
+import { AuthType } from '@qwen-code/qwen-code-core';
 import { learnCommand } from './learn-command.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 import type { SubmitPromptActionReturn } from './types.js';
 import { CommandKind } from './types.js';
 
+const mockReadPathFromWorkspace = vi.hoisted(() => vi.fn());
+vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+  const original = await importOriginal<object>();
+  return {
+    ...original,
+    readPathFromWorkspace: mockReadPathFromWorkspace,
+  };
+});
+
 describe('learnCommand', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockReadPathFromWorkspace.mockResolvedValue([
+      {
+        inlineData: {
+          data: 'AAAA',
+          mimeType: 'video/mp4',
+          displayName: 'tutorial.mp4',
+        },
+      },
+    ]);
+  });
+
   it('has correct metadata', () => {
     expect(learnCommand.name).toBe('learn');
     expect(learnCommand.kind).toBe(CommandKind.BUILT_IN);
@@ -54,5 +77,134 @@ describe('learnCommand', () => {
     expect((result as SubmitPromptActionReturn).content).toContain(
       'https://example.com/docs',
     );
+  });
+
+  it.each([AuthType.USE_OPENAI, AuthType.QWEN_OAUTH])(
+    'submits a native video part through %s',
+    async (authType) => {
+      const ctx = createMockCommandContext({
+        services: {
+          config: {
+            getProjectRoot: () => '/tmp/test-project',
+            getEffectiveInputModalities: () => ({ video: true }),
+            getContentGeneratorConfig: () => ({ authType }),
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          } as any,
+        },
+      });
+      const result = await learnCommand.action!(
+        ctx,
+        'https://cdn.example.com/tutorial.mp4 focus on visual verification',
+      );
+      const content = (result as SubmitPromptActionReturn).content;
+
+      expect(result).toMatchObject({ type: 'submit_prompt' });
+      expect(content).toEqual([
+        {
+          fileData: {
+            fileUri: 'https://cdn.example.com/tutorial.mp4',
+            mimeType: 'video/mp4',
+            displayName: 'tutorial-video',
+          },
+        },
+        { text: expect.stringContaining('focus on visual verification') },
+      ]);
+    },
+  );
+
+  it('attaches a local video through the video-specific /learn path', async () => {
+    const ctx = createMockCommandContext({
+      services: {
+        config: {
+          getProjectRoot: () => '/tmp/test-project',
+          getEffectiveInputModalities: () => ({ video: true }),
+          getContentGeneratorConfig: () => ({ authType: AuthType.USE_OPENAI }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      },
+    });
+    const result = await learnCommand.action!(
+      ctx,
+      './tutorial.mp4 focus on the hover animation',
+    );
+
+    expect(mockReadPathFromWorkspace).toHaveBeenCalledWith(
+      './tutorial.mp4',
+      ctx.services.config,
+    );
+    expect(result).toMatchObject({
+      type: 'submit_prompt',
+      content: [
+        { inlineData: { mimeType: 'video/mp4', data: 'AAAA' } },
+        { text: expect.stringContaining('references/source.md') },
+      ],
+    });
+  });
+
+  it('rejects a YouTube page URL with local-file guidance', async () => {
+    const ctx = createMockCommandContext({
+      services: {
+        config: {
+          getProjectRoot: () => '/tmp/test-project',
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      },
+    });
+    const result = await learnCommand.action!(ctx, 'https://youtu.be/abc123');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringMatching(/download.*local video/i),
+    });
+  });
+
+  it('rejects a local video that cannot be attached', async () => {
+    mockReadPathFromWorkspace.mockRejectedValueOnce(
+      new Error('Absolute path is outside of the allowed workspace'),
+    );
+    const ctx = createMockCommandContext({
+      services: {
+        config: {
+          getProjectRoot: () => '/tmp/test-project',
+          getEffectiveInputModalities: () => ({ video: true }),
+          getContentGeneratorConfig: () => ({ authType: AuthType.USE_OPENAI }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      },
+    });
+    const result = await learnCommand.action!(ctx, '/tmp/tutorial.mp4');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringMatching(/could not be attached.*outside/i),
+    });
+  });
+
+  it.each([
+    ['a text-only model', AuthType.USE_OPENAI, false],
+    ['a non-OpenAI-compatible provider', AuthType.USE_ANTHROPIC, true],
+  ])('rejects native video input for %s', async (_label, authType, video) => {
+    const ctx = createMockCommandContext({
+      services: {
+        config: {
+          getProjectRoot: () => '/tmp/test-project',
+          getEffectiveInputModalities: () => ({ video }),
+          getContentGeneratorConfig: () => ({ authType }),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        } as any,
+      },
+    });
+    const result = await learnCommand.action!(
+      ctx,
+      'https://cdn.example.com/tutorial.mp4',
+    );
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringMatching(/native video input/i),
+    });
   });
 });
