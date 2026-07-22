@@ -595,7 +595,7 @@ describe('useWebViewMessages', () => {
     );
   });
 
-  it('inserts resolved image attachments as escaped absolute references', () => {
+  it('inserts resolved image attachments as raw absolute references', () => {
     const rendered = renderHookHarness();
     root = rendered.root;
     container = rendered.container;
@@ -626,10 +626,10 @@ describe('useWebViewMessages', () => {
       'C:\\Users\\Me\\Pictures\\screen shot.png',
     );
     expect(input.textContent).toBe(
-      '@C:\\Users\\Me\\Pictures\\screen\\ shot.png ',
+      '@C:\\Users\\Me\\Pictures\\screen shot.png ',
     );
     expect(rendered.handlers.setInputText).toHaveBeenCalledWith(
-      '@C:\\Users\\Me\\Pictures\\screen\\ shot.png ',
+      '@C:\\Users\\Me\\Pictures\\screen shot.png ',
     );
   });
 
