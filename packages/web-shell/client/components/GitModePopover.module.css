@@ -25,7 +25,8 @@
   white-space: nowrap;
   line-height: 1.4;
 }
-.chip:hover {
+.chip:hover,
+.chip:focus-visible {
   border-color: rgba(61, 220, 151, 0.45);
   background: rgba(61, 220, 151, 0.16);
 }
@@ -34,7 +35,8 @@
   background: rgba(245, 166, 35, 0.1);
   border-color: rgba(245, 166, 35, 0.22);
 }
-.chipBranch:hover {
+.chipBranch:hover,
+.chipBranch:focus-visible {
   border-color: rgba(245, 166, 35, 0.45);
   background: rgba(245, 166, 35, 0.16);
 }
@@ -43,7 +45,8 @@
   background: rgba(180, 142, 255, 0.1);
   border-color: rgba(180, 142, 255, 0.22);
 }
-.chipWorktree:hover {
+.chipWorktree:hover,
+.chipWorktree:focus-visible {
   border-color: rgba(180, 142, 255, 0.45);
   background: rgba(180, 142, 255, 0.16);
 }
@@ -91,7 +94,8 @@
   flex-shrink: 0;
   line-height: 1;
 }
-.clearBtn:hover {
+.clearBtn:hover,
+.clearBtn:focus-visible {
   background: rgba(255, 255, 255, 0.18);
 }
 
@@ -128,7 +132,8 @@
   font-family: inherit;
   color: inherit;
 }
-.option:hover {
+.option:hover,
+.option:focus-visible {
   background: var(--web-shell-bg-hover, rgba(255, 255, 255, 0.05));
 }
 .optionSelected {
@@ -316,7 +321,9 @@
   color: #140a24;
 }
 .confirmBranch:hover,
-.confirmWorktree:hover {
+.confirmBranch:focus-visible,
+.confirmWorktree:hover,
+.confirmWorktree:focus-visible {
   transform: translateY(-1px);
   filter: brightness(1.1);
 }

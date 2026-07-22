@@ -62,9 +62,6 @@ const EN: Messages = {
   'gitMode.branchConflictWarning':
     'Only one branch session per workspace at a time',
   'gitMode.branchInvalidName': 'Invalid branch name',
-  'gitMode.branchExists': 'Branch already exists',
-  'gitMode.branchDirtyTree':
-    'Uncommitted changes detected. Commit or stash first.',
   'gitMode.worktree': 'Worktree',
   'gitMode.worktreeDesc': 'Isolated copy · can run in parallel',
   'gitMode.confirmBranch': 'Create branch',
@@ -2253,8 +2250,6 @@ const ZH: Messages = {
   'gitMode.branchLabel': '分支名',
   'gitMode.branchConflictWarning': '同一 workspace 同时只能有一个分支会话',
   'gitMode.branchInvalidName': '分支名不合法',
-  'gitMode.branchExists': '分支已存在',
-  'gitMode.branchDirtyTree': '检测到未提交改动，请先 commit 或 stash',
   'gitMode.worktree': 'Worktree 隔离',
   'gitMode.worktreeDesc': '独立副本 · 可并行',
   'gitMode.confirmBranch': '创建分支',

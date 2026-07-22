@@ -426,6 +426,10 @@ export function registerSessionRoutes(
     SessionTranscriptCursorCodec
   >();
 
+  // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
+  // Prevents concurrent branch sessions that would conflict on HEAD.
+  const activeBranchSessions = new Map<string, string>();
+
   const getTranscriptCursorCodec = (
     runtime: WorkspaceRuntime,
   ): SessionTranscriptCursorCodec => {
@@ -1225,6 +1229,22 @@ export function registerSessionRoutes(
         });
         return;
       }
+      // Reject when another branch session is already active for this
+      // workspace — concurrent branch sessions conflict on HEAD.
+      const existingBranchSession = activeBranchSessions.get(workspaceCwd);
+      if (existingBranchSession) {
+        try {
+          runtime.bridge.getSessionSummary(existingBranchSession);
+          res.status(409).json({
+            error: 'A branch session is already active for this workspace',
+            code: 'branch_session_conflict',
+            existingSessionId: existingBranchSession,
+          });
+          return;
+        } catch {
+          activeBranchSessions.delete(workspaceCwd);
+        }
+      }
       if (typeof rawBranch !== 'object' || Array.isArray(rawBranch)) {
         res.status(400).json({
           error:
@@ -1463,6 +1483,7 @@ export function registerSessionRoutes(
               }
               // Roll back the branch if one was created for this session.
               if (branchMeta) {
+                activeBranchSessions.delete(workspaceCwd);
                 await execFileAsync(
                   'git',
                   ['checkout', branchMeta.baseBranch],
@@ -1578,6 +1599,10 @@ export function registerSessionRoutes(
         }
       }
 
+      if (branchMeta) {
+        activeBranchSessions.set(workspaceCwd, session.sessionId);
+      }
+
       res.status(200).json(session);
     } catch (err) {
       // Roll back the worktree if spawn failed — otherwise the directory
@@ -1591,6 +1616,7 @@ export function registerSessionRoutes(
       // Roll back the branch if spawn failed — switch back to the base
       // branch and delete the newly created one.
       if (branchMeta) {
+        activeBranchSessions.delete(workspaceCwd);
         await execFileAsync('git', ['checkout', branchMeta.baseBranch], {
           cwd: workspaceCwd,
         }).catch(() => {});

@@ -46,7 +46,8 @@ function validateBranchName(name: string): boolean {
     name.startsWith('-') ||
     name.startsWith('/') ||
     name.endsWith('/') ||
-    name.endsWith('.')
+    name.endsWith('.') ||
+    name === 'HEAD'
   );
 }
 
