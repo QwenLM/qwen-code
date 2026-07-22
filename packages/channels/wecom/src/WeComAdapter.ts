@@ -768,6 +768,10 @@ export class WeComChannel extends ChannelBase {
     threadId?: string,
   ): string {
     switch (this.config.sessionScope) {
+      case 'chat_thread':
+        return threadId
+          ? `${this.name}:${chatId}:${threadId}`
+          : `${this.name}:${chatId}`;
       case 'thread':
         return `${this.name}:${threadId || chatId}`;
       case 'single':
