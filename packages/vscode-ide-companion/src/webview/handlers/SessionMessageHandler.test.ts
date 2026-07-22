@@ -264,12 +264,21 @@ describe('SessionMessageHandler', () => {
             value: '/workspace/screen shot.png',
             isImage: true,
           },
+          {
+            type: 'file',
+            name: 'notes.md',
+            value: '/workspace/notes.md',
+            isImage: false,
+          },
         ],
       },
     });
 
     expect(agentManager.sendMessage).toHaveBeenCalledWith([
-      { type: 'text', text: '/workspace/screen shot.png\n\ndescribe it' },
+      {
+        type: 'text',
+        text: '/workspace/screen shot.png\n/workspace/notes.md\n\ndescribe it',
+      },
       {
         type: 'resource_link',
         name: 'screen shot.png',

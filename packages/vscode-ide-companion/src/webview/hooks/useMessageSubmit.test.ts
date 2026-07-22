@@ -310,6 +310,53 @@ describe('useMessageSubmit', () => {
     });
   });
 
+  it('resolves multiple file references in one message', () => {
+    const imagePath = '/workspace/screen shot.png';
+    const notePath = '/workspace/notes.md';
+    const props = createDefaultProps({
+      inputText: `compare @${imagePath} with @${notePath}`,
+    });
+    props.fileContext.getFileReference = vi.fn((name: string) => {
+      if (name === imagePath) {
+        return imagePath;
+      }
+      if (name === notePath) {
+        return notePath;
+      }
+      return undefined;
+    });
+    const rendered = renderHookHarness(props);
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      rendered.api.handleSubmit(createSubmitEvent());
+    });
+
+    expect(props.vscode.postMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: {
+        text: `compare @${imagePath} with @${notePath}`,
+        context: [
+          {
+            type: 'file',
+            name: imagePath,
+            value: imagePath,
+            isImage: true,
+          },
+          {
+            type: 'file',
+            name: notePath,
+            value: notePath,
+            isImage: false,
+          },
+        ],
+        fileContext: undefined,
+        attachments: undefined,
+      },
+    });
+  });
+
   it('does not resolve file references from strict token prefixes', () => {
     const props = createDefaultProps({
       inputText: 'open @data.csv.bak',
