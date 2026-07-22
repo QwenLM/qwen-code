@@ -9,7 +9,10 @@ import * as vscode from 'vscode';
 import { BaseMessageHandler } from './BaseMessageHandler.js';
 import type { ChatMessage } from '../../services/qwenAgentManager.js';
 import type { Conversation } from '../../services/conversationStore.js';
-import type { ImageAttachment } from '../../utils/imageSupport.js';
+import {
+  getDisplayableImageMimeType,
+  type ImageAttachment,
+} from '../../utils/imageSupport.js';
 import type { ApprovalModeValue } from '../../types/approvalModeValueTypes.js';
 import {
   processImageAttachments,
@@ -484,6 +487,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
       value: string;
       startLine?: number;
       endLine?: number;
+      isImage?: boolean;
     }>,
     fileContext?: {
       fileName: string;
@@ -544,6 +548,18 @@ export class SessionMessageHandler extends BaseMessageHandler {
       savedImageCount,
       promptImages,
     } = await processImageAttachments(promptText, attachments);
+    for (const ctx of context ?? []) {
+      const mimeType = ctx.isImage
+        ? getDisplayableImageMimeType(ctx.value)
+        : undefined;
+      if (mimeType) {
+        promptImages.push({
+          path: ctx.value,
+          name: ctx.name,
+          mimeType,
+        });
+      }
+    }
     promptText = formattedText;
     displayText = updatedDisplayText;
 

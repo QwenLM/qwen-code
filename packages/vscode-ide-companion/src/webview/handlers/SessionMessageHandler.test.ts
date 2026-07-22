@@ -224,6 +224,61 @@ describe('SessionMessageHandler', () => {
     ]);
   });
 
+  it('sends image file context as prompt image blocks', async () => {
+    mockProcessImageAttachments.mockImplementation(
+      async (promptText: string) => ({
+        formattedText: promptText,
+        displayText: promptText,
+        savedImageCount: 0,
+        promptImages: [],
+      }),
+    );
+
+    const agentManager = {
+      isConnected: true,
+      currentSessionId: 'session-1',
+      sendMessage: vi.fn().mockResolvedValue(undefined),
+    };
+    const conversationStore = {
+      createConversation: vi.fn().mockResolvedValue({ id: 'conversation-1' }),
+      getConversation: vi.fn().mockResolvedValue(null),
+      addMessage: vi.fn(),
+      renameConversationId: vi.fn().mockResolvedValue(true),
+    };
+
+    const handler = new SessionMessageHandler(
+      agentManager as never,
+      conversationStore as never,
+      'conversation-1',
+      vi.fn(),
+    );
+
+    await handler.handle({
+      type: 'sendMessage',
+      data: {
+        text: 'describe it',
+        context: [
+          {
+            type: 'file',
+            name: 'screen shot.png',
+            value: '/workspace/screen shot.png',
+            isImage: true,
+          },
+        ],
+      },
+    });
+
+    expect(agentManager.sendMessage).toHaveBeenCalledWith([
+      { type: 'text', text: '/workspace/screen shot.png\n\ndescribe it' },
+      {
+        type: 'resource_link',
+        name: 'screen shot.png',
+        mimeType: 'image/png',
+        uri: 'file:///workspace/screen shot.png',
+      },
+    ]);
+  });
+
   it('keeps the conversation store aligned with the ACP session id before editing', async () => {
     mockProcessImageAttachments.mockImplementation(
       async (promptText: string) => ({

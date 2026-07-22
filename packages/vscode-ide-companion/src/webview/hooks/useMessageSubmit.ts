@@ -9,6 +9,7 @@ import type { VSCodeAPI } from './useVSCode.js';
 import { getRandomLoadingMessage } from '../../constants/loadingMessages.js';
 import type { ImageAttachment } from './useImage.js';
 import { ZERO_WIDTH_SPACE, stripZeroWidthSpaces } from '@qwen-code/webui';
+import { isDisplayableImagePath } from '../../utils/imageSupport.js';
 
 interface UseMessageSubmitProps {
   vscode: VSCodeAPI;
@@ -76,6 +77,10 @@ function findFileReferences(
       const name = text.slice(atIndex + 1, end).trimEnd();
       const value = getFileReference(name);
       if (value) {
+        const nextChar = end < text.length ? text[end] : '';
+        if (nextChar !== '' && nextChar !== '@' && !/\s/.test(nextChar)) {
+          continue;
+        }
         references.push({ name, value });
         currentIndex = end;
         matched = true;
@@ -170,6 +175,7 @@ export const useMessageSubmit = ({
         value: string;
         startLine?: number;
         endLine?: number;
+        isImage?: boolean;
       }> = [];
       for (const reference of findFileReferences(
         textToSend,
@@ -179,6 +185,7 @@ export const useMessageSubmit = ({
           type: 'file',
           name: reference.name,
           value: reference.value,
+          isImage: isDisplayableImagePath(reference.value),
         });
       }
 

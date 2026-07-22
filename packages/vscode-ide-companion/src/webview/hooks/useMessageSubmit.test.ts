@@ -301,8 +301,35 @@ describe('useMessageSubmit', () => {
             type: 'file',
             name: imagePath,
             value: imagePath,
+            isImage: true,
           },
         ],
+        fileContext: undefined,
+        attachments: undefined,
+      },
+    });
+  });
+
+  it('does not resolve file references from strict token prefixes', () => {
+    const props = createDefaultProps({
+      inputText: 'open @data.csv.bak',
+    });
+    props.fileContext.getFileReference = vi.fn((name: string) =>
+      name === 'data.csv' ? '/workspace/data.csv' : undefined,
+    );
+    const rendered = renderHookHarness(props);
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      rendered.api.handleSubmit(createSubmitEvent());
+    });
+
+    expect(props.vscode.postMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: {
+        text: 'open @data.csv.bak',
+        context: undefined,
         fileContext: undefined,
         attachments: undefined,
       },
