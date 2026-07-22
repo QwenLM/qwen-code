@@ -3343,7 +3343,10 @@ jobs:
               # failed before the agent started: installing/building the trusted
               # base, checkout, node setup. That is infra or a broken base, NOT
               # the agent, and it is usually transient (a base build fixed
-              # minutes later, an ENOSPC runner). Terminal here is wrong: a
+              # minutes later, an ENOSPC runner). A job CANCELLED before Prepare
+              # (concurrency cancel, manual cancel) also lands here with outcome
+              # 'skipped' and retries the same way — intentionally, since a cancel
+              # is not the agent's fault either. Terminal here is wrong: a
               # web-shell TS break on main failed the base build across a whole
               # scan batch and stranded SIX healthy PRs terminally, including
               # ones at round 11. Retry instead — sentinel ts keeps the feedback
