@@ -719,6 +719,9 @@ export async function resolveAtCommandQuery({
     // Cross-form dedup: a UUID ref and a title ref may resolve to the
     // same session — skip if already injected.
     if (resolvedSessionIds.has(sessionId)) {
+      onDebugMessage(
+        `Session reference "@${originalAtPath.substring(1)}" resolves to session ${sessionId}, which was already referenced; skipping duplicate.`,
+      );
       continue;
     }
     resolvedSessionIds.add(sessionId);

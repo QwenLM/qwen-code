@@ -241,6 +241,9 @@ describe('handleAtCommand @session:', () => {
       (d) => d.name === 'Referenced Session',
     );
     expect(cards).toHaveLength(1);
+    expect(mockOnDebugMessage).toHaveBeenCalledWith(
+      expect.stringContaining('already referenced'),
+    );
   });
 
   it('deduplicates identical session mentions', async () => {
