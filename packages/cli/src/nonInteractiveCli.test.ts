@@ -334,6 +334,8 @@ describe('runNonInteractive', () => {
       // --worktree flag, so return null to short-circuit injection
       // and let the resume-restore branch run.
       consumePendingStartupWorktreeNotice: vi.fn().mockReturnValue(null),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
     } as unknown as Config;
 
     mockSettings = {
@@ -454,6 +456,93 @@ describe('runNonInteractive', () => {
     );
     expect(processStdoutSpy).toHaveBeenCalledWith('Hello World\n');
     expect(mockShutdownTelemetry).toHaveBeenCalled();
+  });
+
+  it('prepends the recovered background agents notice on a resumed headless prompt', async () => {
+    setupMetricsMock();
+    // A resumed session with a one-shot recovered-agents notice pending.
+    vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({} as never);
+    vi.mocked(mockConfig.consumePendingRecoveredAgentsNotice).mockReturnValue(
+      'Restored 2 background agents from the previous session.',
+    );
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Continue the work',
+      'prompt-resume-notice',
+    );
+
+    expect(mockConfig.consumePendingRecoveredAgentsNotice).toHaveBeenCalled();
+    const [request] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    // The notice is prepended as a system-reminder ahead of the user prompt.
+    expect(request).toEqual([
+      {
+        text: expect.stringContaining(
+          'Restored 2 background agents from the previous session.',
+        ),
+      },
+      { text: 'Continue the work' },
+    ]);
+    expect((request as Array<{ text: string }>)[0].text).toContain(
+      SYSTEM_REMINDER_OPEN,
+    );
+  });
+
+  it('does not consume the recovered-agents notice on an interrupted-turn continuation', async () => {
+    setupMetricsMock();
+    // A resumed session with a one-shot recovered-agents notice pending, but
+    // this run is an interrupted-turn continuation. The `!continueInterrupted`
+    // guard must leave the notice for the user's next ordinary prompt.
+    vi.mocked(mockConfig.getResumedSessionData).mockReturnValue({} as never);
+    vi.mocked(mockConfig.consumePendingRecoveredAgentsNotice).mockReturnValue(
+      'Restored 2 background agents from the previous session.',
+    );
+    mockGeminiClient.getChat = vi.fn(() => ({
+      getDebugResponses: mockGetDebugResponses,
+      getHistory: vi.fn().mockReturnValue([
+        {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-1', name: 'shell' } }],
+        },
+      ]),
+    }));
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: GeminiEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
+        },
+      ]),
+    );
+
+    await runNonInteractive(mockConfig, mockSettings, '', 'prompt-c-notice', {
+      continueInterrupted: true,
+    });
+
+    // The notice is not consumed, and the continuation send carries only the
+    // synthesized functionResponse — no recovered-agents system-reminder.
+    expect(
+      mockConfig.consumePendingRecoveredAgentsNotice,
+    ).not.toHaveBeenCalled();
+    const [request] = mockGeminiClient.sendMessageStream.mock.calls[0]!;
+    expect(request).toEqual([
+      {
+        functionResponse: {
+          id: 'call-1',
+          name: 'shell',
+          response: { error: expect.stringContaining('not recorded') },
+        },
+      },
+    ]);
   });
 
   it('does not let headless YOLO bypass explicit teammate approval', async () => {
