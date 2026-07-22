@@ -38,7 +38,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
 } from '@qwen-code/sdk/daemon';
-import { GitForkIcon, XIcon } from 'lucide-react';
+
 import { type SessionGitIntent } from './components/GitModePopover';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
@@ -6029,34 +6029,6 @@ export function App({
     ],
   );
 
-  // The empty-state toggle is offered only when the workspace the next
-  // session would land in is trusted and is a git repository — the daemon
-  // rejects worktree creation otherwise. Mirrors the sidebar entry's gating.
-  const worktreeToggleEligible = Boolean(
-    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
-      selectedWorkspaceGitStatus?.branch,
-  );
-  const worktreeToggleRef = useRef<HTMLButtonElement>(null);
-  const worktreeCancelRef = useRef<HTMLButtonElement>(null);
-  const worktreeFocusTarget = useRef<'cancel' | 'toggle' | null>(null);
-  const handleEnableWorktree = useCallback(() => {
-    setGitModeIntent({ mode: 'worktree' });
-    worktreeFocusTarget.current = 'cancel';
-  }, []);
-  const handleCancelWorktree = useCallback(() => {
-    setGitModeIntent({ mode: 'current' });
-    worktreeFocusTarget.current = 'toggle';
-  }, []);
-  useEffect(() => {
-    if (!worktreeFocusTarget.current) return;
-    const target = worktreeFocusTarget.current;
-    worktreeFocusTarget.current = null;
-    if (target === 'cancel') {
-      worktreeCancelRef.current?.focus();
-    } else {
-      worktreeToggleRef.current?.focus();
-    }
-  }, [gitModeIntent]);
   const welcomeHeader = useMemo(
     () => (
       <>
@@ -6065,64 +6037,9 @@ export function App({
         ) : (
           <WelcomeHeader {...welcomeHeaderProps} />
         )}
-        {gitModeIntent.mode === 'worktree' ? (
-          <div className={styles.worktreeWelcomeBadge}>
-            <span className={styles.worktreeBadgeIcon}>
-              <GitForkIcon size={18} strokeWidth={1.8} />
-            </span>
-            <span className={styles.worktreeBadgeText}>
-              <span className={styles.worktreeWelcomeTitle}>
-                {t('worktree.welcomeTitle')}
-              </span>
-              <span className={styles.worktreeWelcomeDesc}>
-                {t('worktree.welcomeDesc')}
-              </span>
-            </span>
-            <button
-              ref={worktreeCancelRef}
-              type="button"
-              className={styles.worktreeWelcomeCancel}
-              aria-label={t('worktree.cancel')}
-              data-testid="worktree-welcome-cancel"
-              onClick={handleCancelWorktree}
-            >
-              <XIcon size={14} strokeWidth={2} />
-            </button>
-          </div>
-        ) : (
-          worktreeToggleEligible && (
-            <button
-              ref={worktreeToggleRef}
-              type="button"
-              className={styles.worktreeWelcomeToggle}
-              data-testid="worktree-welcome-toggle"
-              onClick={handleEnableWorktree}
-            >
-              <span className={styles.worktreeToggleIcon}>
-                <GitForkIcon size={16} strokeWidth={1.8} />
-              </span>
-              <span className={styles.worktreeToggleText}>
-                <span className={styles.worktreeToggleLabel}>
-                  {t('worktree.welcomeTitle')}
-                </span>
-                <span className={styles.worktreeToggleHint}>
-                  {t('worktree.toggleHint')}
-                </span>
-              </span>
-            </button>
-          )
-        )}
       </>
     ),
-    [
-      renderWelcomeHeader,
-      welcomeHeaderProps,
-      gitModeIntent,
-      worktreeToggleEligible,
-      handleEnableWorktree,
-      handleCancelWorktree,
-      t,
-    ],
+    [renderWelcomeHeader, welcomeHeaderProps],
   );
   const welcomeFooter = useMemo(
     () => renderWelcomeFooter?.(welcomeHeaderProps),

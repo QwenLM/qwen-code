@@ -16,7 +16,6 @@ import {
   captureScreenshot,
   completeReplay,
   fillComposer,
-  gotoNewSession,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -392,40 +391,6 @@ for (const theme of THEMES) {
       // screenshot and the capture differs between runs.
       await expect(sidebar.getByText(primarySessionName)).toBeVisible();
       await captureScreenshot(page, `workspace-sidebar-${theme}`);
-    });
-
-    test(`worktree empty state`, async ({ page }, testInfo) => {
-      // The new-session empty state offers worktree isolation only when the
-      // workspace the next session would use is trusted AND a git repo (the
-      // daemon rejects worktree creation otherwise). Every other scenario lands
-      // on /session/:id, so this is the suite's only view of the empty state —
-      // without it the toggle is invisible to the before/after preview.
-      const workspaceCwd = '/tmp/qwen-web-shell-e2e';
-      const scenario = createWebShellDaemonScenario({
-        workspaceCwd,
-        capabilities: {
-          workspaces: [
-            { id: 'primary', cwd: workspaceCwd, primary: true, trusted: true },
-          ],
-        },
-        gitStatus: { v: 2, workspaceCwd, branch: 'main' },
-      });
-      await installScenario(page, scenario, resolveBaseURL(testInfo));
-      await gotoNewSession(page, theme);
-
-      const toggle = page.locator('[data-testid="worktree-welcome-toggle"]');
-      await expect(toggle).toBeVisible();
-      await captureScreenshot(page, `worktree-empty-state-${theme}`);
-
-      // Enabling it swaps the toggle for the pending-worktree badge — the state
-      // the next session would be created in — with a cancel affordance. Assert
-      // the swap so a regression that drops the enabled state fails here, not
-      // only in the (visually reviewed) screenshot.
-      await toggle.click();
-      await expect(
-        page.locator('[data-testid="worktree-welcome-cancel"]'),
-      ).toBeVisible();
-      await captureScreenshot(page, `worktree-empty-state-enabled-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {
