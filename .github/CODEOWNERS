@@ -1,12 +1,13 @@
 # ============================================================
 # Qwen Code CODEOWNERS
 # ============================================================
+# packages/core/ review routing is handled by the
+# core-review-router workflow, which assigns reviewers based
+# on diff size and affected sub-modules instead of requesting
+# all four maintainers on every PR.
 
 # --- CODEOWNERS file itself ---
 /.github/CODEOWNERS    @pomelo-nwu
-
-# --- Core package ---
-/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan
 
 # --- CUA Driver & Mobile MCP ---
 /packages/cua-driver/  @LaZzyMan

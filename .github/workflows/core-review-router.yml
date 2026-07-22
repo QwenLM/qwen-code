@@ -1,0 +1,79 @@
+name: 'Core Review Router'
+
+on:
+  pull_request_target:
+    types: ['opened', 'synchronize', 'ready_for_review']
+
+permissions:
+  contents: 'read'
+  pull-requests: 'write'
+
+jobs:
+  route:
+    if: |-
+      !github.event.pull_request.draft &&
+      !contains(fromJSON('["wenshao","tanzhenxin","yiliang114","LaZzyMan"]'), github.event.pull_request.user.login)
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    concurrency:
+      group: 'core-review-router-${{ github.event.pull_request.number }}'
+      cancel-in-progress: true
+    steps:
+      - name: 'Checkout router script'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          sparse-checkout: '.github/scripts/core-review-router.mjs'
+
+      - name: 'Collect changed files'
+        id: 'files'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          files="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '[.files[].path]')"
+          echo "files=$files" >> "$GITHUB_OUTPUT"
+
+      - name: 'Classify and pick reviewers'
+        id: 'classify'
+        env:
+          FILES: '${{ steps.files.outputs.files }}'
+          AUTHOR: '${{ github.event.pull_request.user.login }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          result="$(node .github/scripts/core-review-router.mjs --files "$FILES" --author "$AUTHOR" --pr "$PR_NUMBER")"
+          reviewers="$(echo "$result" | jq -r '.reviewers | join(",")')"
+          reason="$(echo "$result" | jq -r '.reason')"
+          echo "reviewers=$reviewers" >> "$GITHUB_OUTPUT"
+          echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "Routing decision: reviewers=[$reviewers] reason=$reason"
+
+      - name: 'Apply review requests'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+          REVIEWERS: '${{ steps.classify.outputs.reviewers }}'
+          REASON: '${{ steps.classify.outputs.reason }}'
+        run: |-
+          set -euo pipefail
+          api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/requested_reviewers"
+          maintainers='["wenshao","tanzhenxin","yiliang114","LaZzyMan"]'
+
+          # Remove stale maintainer requests (only the four we manage).
+          current="$(gh api "$api" --jq '[.users[].login]')"
+          stale="$(echo "$current" | jq -c --argjson m "$maintainers" '[.[] | select(. as $l | $m | index($l))]')"
+          if [ "$stale" != "[]" ]; then
+            echo "$stale" | jq '{reviewers: .}' \
+              | gh api --method DELETE "$api" --input - > /dev/null 2>&1 || true
+          fi
+
+          # Add the new set.
+          if [ -n "$REVIEWERS" ]; then
+            echo "$REVIEWERS" | tr ',' '\n' | jq -R . | jq -sc '{reviewers: .}' \
+              | gh api --method POST "$api" --input - > /dev/null
+            echo "Requested: $REVIEWERS ($REASON)"
+          else
+            echo "No core reviewers needed ($REASON)"
+          fi
