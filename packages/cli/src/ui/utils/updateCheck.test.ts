@@ -473,6 +473,47 @@ describe('checkForUpdates', () => {
     ).resolves.toMatchObject({ current: '1.0.0', latest: '1.0.0' });
   });
 
+  it('accepts array-wrapped dist-tag output from npm 11+ (#7515)', async () => {
+    // npm 11+ prints `npm view <pkg> dist-tags.<tag> --json` as ["0.20.1"]
+    // instead of "0.20.1"; rejecting it re-broke the update check with
+    // "Invalid npm latest version response".
+    const run = vi
+      .fn()
+      .mockResolvedValue({ stdout: '[\n"1.1.0"\n]\n', stderr: '' });
+
+    await expect(
+      fetchGlobalNpmUpdateInfo(
+        '@qwen-code/qwen-code',
+        '1.0.0',
+        'latest',
+        run as unknown as NonNullable<
+          Parameters<typeof fetchGlobalNpmUpdateInfo>[3]
+        >,
+      ),
+    ).resolves.toMatchObject({ current: '1.0.0', latest: '1.1.0' });
+  });
+
+  it.each([
+    ['a multi-element array', '["1.1.0","1.2.0"]'],
+    ['a non-string value', '42'],
+    ['an array of non-strings', '[42]'],
+  ])('rejects %s as an invalid dist-tag response', async (_desc, stdout) => {
+    const run = vi
+      .fn()
+      .mockResolvedValue({ stdout: `${stdout}\n`, stderr: '' });
+
+    await expect(
+      fetchGlobalNpmUpdateInfo(
+        '@qwen-code/qwen-code',
+        '1.0.0',
+        'latest',
+        run as unknown as NonNullable<
+          Parameters<typeof fetchGlobalNpmUpdateInfo>[3]
+        >,
+      ),
+    ).rejects.toThrow('Invalid npm latest version response');
+  });
+
   it('should pass the exact package name and version to fetchGlobalNpm', async () => {
     getPackageJson.mockResolvedValue({
       name: 'test-package',

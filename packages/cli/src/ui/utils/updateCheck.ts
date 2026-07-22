@@ -219,8 +219,18 @@ export async function fetchGlobalNpmUpdateInfo(
       name: packageName,
     };
   }
-  const latest: unknown = JSON.parse(output);
-  if (typeof latest !== 'string') {
+  // npm ≤10 prints the field as a bare JSON string ("0.20.1"); npm 11+ wraps
+  // single `view` field results in an array (["0.20.1"]). Accept both.
+  const parsed: unknown = JSON.parse(output);
+  const latest =
+    typeof parsed === 'string'
+      ? parsed
+      : Array.isArray(parsed) &&
+          parsed.length === 1 &&
+          typeof parsed[0] === 'string'
+        ? parsed[0]
+        : undefined;
+  if (latest === undefined) {
     throw new Error(`Invalid npm ${distTag} version response`);
   }
   return {
