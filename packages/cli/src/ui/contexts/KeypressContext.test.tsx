@@ -359,6 +359,79 @@ describe('KeypressContext - Kitty Protocol', () => {
       );
     });
 
+    it('decodes Shift+Enter modifyOtherKeys form without Kitty enabled', () => {
+      // Ghostty (and other xterm modifyOtherKeys terminals) send Shift+Enter as
+      // ESC [ 27 ; 2 ; 13 ~ when the Kitty protocol is not negotiated. readline
+      // shreds this into a partial CSI plus stray "13~" characters; without the
+      // reassembly path the tail leaks into the input instead of inserting a
+      // newline. This is the core Shift+Enter fix.
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: false }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.sendKittySequence(`\x1b[27;2;13~`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'return', ctrl: false, shift: true }),
+      );
+      // The stray digits/tilde must not leak as literal input.
+      expect(keyHandler).not.toHaveBeenCalledWith(
+        expect.objectContaining({ sequence: '~' }),
+      );
+    });
+
+    it('decodes Ctrl+Enter modifyOtherKeys form without Kitty enabled', () => {
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: false }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      // ESC [ 27 ; 5 ; 13 ~  (modifier 5 = Ctrl)
+      act(() => {
+        stdin.sendKittySequence(`\x1b[27;5;13~`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'return', ctrl: true, shift: false }),
+      );
+    });
+
+    it('decodes Shift+Enter modifyOtherKeys form with Kitty enabled (not Escape)', () => {
+      // With Kitty enabled the same bytes were previously misread as Escape
+      // (the leading 27 marker mistaken for the Escape key code), which tripped
+      // the double-Esc rewind prompt. The third parameter is the real key code.
+      const keyHandler = vi.fn();
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper: ({ children }) =>
+          wrapper({ children, kittyProtocolEnabled: true }),
+      });
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.sendKittySequence(`\x1b[27;2;13~`);
+      });
+
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'return', shift: true }),
+      );
+      expect(keyHandler).not.toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'escape' }),
+      );
+    });
+
     it('Ctrl+C escapes a paste mode that never received its paste-end marker', async () => {
       // Regression test for the "must restart terminal" lockup reported by
       // a user on Ghostty + Sogou pinyin: bracketed-paste-start arrived,
