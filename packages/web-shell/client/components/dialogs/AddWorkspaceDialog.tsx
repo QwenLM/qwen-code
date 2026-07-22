@@ -27,15 +27,18 @@ export interface WorkspacePathSuggestions {
 
 interface AddWorkspaceDialogProps {
   onClose: () => void;
-  onAdd: (cwd: string, persist: boolean) => Promise<void>;
+  onAdd: (cwd: string, persist: boolean, displayName?: string) => Promise<void>;
+  displayNameEnabled?: boolean;
   /**
    * Directory autocomplete backend. When provided, typing an absolute path
    * surfaces matching subdirectories in a listbox under the input.
    */
   onSuggest?: (prefix: string) => Promise<WorkspacePathSuggestions>;
+  persistenceSupported?: boolean;
 }
 
 const HINT_ID = 'add-workspace-hint';
+const DISPLAY_NAME_HINT_ID = 'add-workspace-display-name-hint';
 const ERROR_ID = 'add-workspace-error';
 const LISTBOX_ID = 'add-workspace-suggestions';
 const SUGGEST_DEBOUNCE_MS = 150;
@@ -47,10 +50,13 @@ function isAbsoluteLike(value: string): boolean {
 export function AddWorkspaceDialog({
   onClose,
   onAdd,
+  displayNameEnabled = false,
   onSuggest,
+  persistenceSupported = true,
 }: AddWorkspaceDialogProps) {
   const { t } = useI18n();
   const [path, setPath] = useState('');
+  const [displayName, setDisplayName] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [persist, setPersist] = useState(true);
@@ -192,7 +198,13 @@ export function AddWorkspaceDialog({
       setSubmitting(true);
       closeList();
       try {
-        await onAdd(trimmed, persist);
+        const effectivePersist = persistenceSupported ? persist : false;
+        const trimmedDisplayName = displayNameEnabled ? displayName.trim() : '';
+        if (trimmedDisplayName) {
+          await onAdd(trimmed, effectivePersist, trimmedDisplayName);
+        } else {
+          await onAdd(trimmed, effectivePersist);
+        }
         onClose();
       } catch (err) {
         setError(
@@ -202,7 +214,17 @@ export function AddWorkspaceDialog({
         setSubmitting(false);
       }
     },
-    [path, persist, onAdd, onClose, closeList, t],
+    [
+      path,
+      displayName,
+      displayNameEnabled,
+      persist,
+      persistenceSupported,
+      onAdd,
+      onClose,
+      closeList,
+      t,
+    ],
   );
 
   const showList = listOpen && suggestions.length > 0;
@@ -292,22 +314,44 @@ export function AddWorkspaceDialog({
             </FieldDescription>
             {error && <FieldError id={ERROR_ID}>{error}</FieldError>}
           </Field>
-          <Field orientation="horizontal">
-            <FieldContent>
-              <FieldLabel htmlFor="add-workspace-persist">
-                {t('sidebar.addWorkspacePersist')}
+          {displayNameEnabled && (
+            <Field>
+              <FieldLabel htmlFor="add-workspace-display-name">
+                {t('sidebar.addWorkspaceDisplayName')}
               </FieldLabel>
-              <FieldDescription>
-                {t('sidebar.addWorkspacePersistHint')}
+              <Input
+                id="add-workspace-display-name"
+                type="text"
+                value={displayName}
+                onChange={(event) => setDisplayName(event.target.value)}
+                disabled={submitting}
+                maxLength={256}
+                autoComplete="off"
+                aria-describedby={DISPLAY_NAME_HINT_ID}
+              />
+              <FieldDescription id={DISPLAY_NAME_HINT_ID}>
+                {t('sidebar.addWorkspaceDisplayNameHint')}
               </FieldDescription>
-            </FieldContent>
-            <Switch
-              id="add-workspace-persist"
-              checked={persist}
-              onCheckedChange={setPersist}
-              disabled={submitting}
-            />
-          </Field>
+            </Field>
+          )}
+          {persistenceSupported && (
+            <Field orientation="horizontal">
+              <FieldContent>
+                <FieldLabel htmlFor="add-workspace-persist">
+                  {t('sidebar.addWorkspacePersist')}
+                </FieldLabel>
+                <FieldDescription>
+                  {t('sidebar.addWorkspacePersistHint')}
+                </FieldDescription>
+              </FieldContent>
+              <Switch
+                id="add-workspace-persist"
+                checked={persist}
+                onCheckedChange={setPersist}
+                disabled={submitting}
+              />
+            </Field>
+          )}
         </FieldGroup>
         <div className="flex justify-end gap-2">
           <Button

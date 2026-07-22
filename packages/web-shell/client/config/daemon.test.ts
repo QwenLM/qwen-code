@@ -98,6 +98,9 @@ describe('getAllowedDaemonOrigin (via getDaemonBaseUrl)', () => {
 describe('getDaemonToken', () => {
   beforeEach(() => {
     vi.resetModules();
+    // The token now persists per-tab (#7301); isolate tests from each
+    // other's persisted copies.
+    window.sessionStorage.clear();
   });
 
   function setupToken(search: string, hash: string) {
@@ -130,6 +133,59 @@ describe('getDaemonToken', () => {
     setupToken('', '');
     const mod = await import('./daemon');
     expect(mod.getDaemonToken()).toBeUndefined();
+  });
+
+  // Regression for #7301: removeDaemonTokenFromUrl() strips the fragment
+  // for history hygiene, so a refreshed page has no token in the URL at
+  // all. The first load must persist the token per-tab and later loads
+  // must fall back to it.
+  it('survives a page refresh via the per-tab persisted copy', async () => {
+    setupToken('', '#token=frag-secret');
+    const first = await import('./daemon');
+    expect(first.getDaemonToken()).toBe('frag-secret');
+
+    // Simulate the refresh: fresh module state (in-memory cache gone),
+    // URL already cleaned — sessionStorage is all that remains.
+    vi.resetModules();
+    setupToken('', '#/chat');
+    const second = await import('./daemon');
+    expect(second.getDaemonToken()).toBe('frag-secret');
+    expect(second.getDaemonAuthHeaders()).toEqual({
+      Authorization: 'Bearer frag-secret',
+    });
+  });
+
+  it('prefers a fresh URL token over a stale persisted one', async () => {
+    window.sessionStorage.setItem('qwen-daemon-token', 'stale-secret');
+    setupToken('', '#token=new-secret');
+    const mod = await import('./daemon');
+    expect(mod.getDaemonToken()).toBe('new-secret');
+    // The persisted copy is refreshed for the next reload.
+    expect(window.sessionStorage.getItem('qwen-daemon-token')).toBe(
+      'new-secret',
+    );
+  });
+
+  it('degrades gracefully when sessionStorage throws', async () => {
+    const original = window.sessionStorage;
+    Object.defineProperty(window, 'sessionStorage', {
+      get() {
+        throw new Error('storage disabled');
+      },
+      configurable: true,
+    });
+    try {
+      setupToken('', '#token=frag-secret');
+      const mod = await import('./daemon');
+      // Same-load behavior is unaffected; only refresh persistence is lost.
+      expect(mod.getDaemonToken()).toBe('frag-secret');
+    } finally {
+      Object.defineProperty(window, 'sessionStorage', {
+        value: original,
+        writable: true,
+        configurable: true,
+      });
+    }
   });
 });
 

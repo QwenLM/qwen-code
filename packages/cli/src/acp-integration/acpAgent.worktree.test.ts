@@ -149,6 +149,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     _args: args,
   })),
   SessionService: vi.fn(),
+  Storage: {
+    getRuntimeBaseDir: vi.fn(() => '/tmp/qwen-runtime-test'),
+  },
   SESSION_TITLE_MAX_LENGTH: 200,
   DEFAULT_TOOL_OUTPUT_BATCH_BUDGET: 200_000,
   tokenLimit: vi.fn(),

@@ -44,8 +44,10 @@ import {
   buildChildMessage,
   buildPinnedWorktreeNotice,
   buildWorktreeNotice,
-  isForkSubagentEnabled,
+  normalizeForkTurns,
   runInForkContext,
+  selectForkHistory,
+  type ForkTurns,
 } from './fork-subagent.js';
 import {
   generateAgentWorktreeSlug,
@@ -54,6 +56,7 @@ import {
 } from '../../services/gitWorktreeService.js';
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
+import { getStartupContextLength } from '../../utils/environmentContext.js';
 import {
   childLaunchDepth,
   getCurrentAgentId,
@@ -201,6 +204,11 @@ export interface AgentParams {
   description: string;
   prompt: string;
   subagent_type?: string;
+  /**
+   * Parent conversation turns inherited by a fork. Omitted or `all` inherits
+   * everything; a positive integer string inherits that many recent user turns.
+   */
+  fork_turns?: ForkTurns;
   run_in_background?: boolean;
   /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
   name?: string;
@@ -227,8 +235,8 @@ export interface AgentParams {
    * (This is a cwd pin, not a filesystem sandbox — absolute paths can still
    * reach outside, same as `isolation:'worktree'`.) Must resolve to a
    * worktree registered against this repository, and must live inside it —
-   * pinning rebinds the child's workspace boundary. Mutually exclusive with
-   * `isolation`.
+   * pinning rebinds the child's workspace boundary. If `isolation` is also
+   * provided, it is ignored and the caller-owned worktree is reused.
    */
   working_dir?: string;
 }
@@ -754,11 +762,25 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'string',
           description: 'The type of specialized agent to use for this task',
         },
+        fork_turns: {
+          oneOf: [
+            {
+              type: 'string',
+              enum: ['all'],
+            },
+            {
+              type: 'string',
+              pattern: '^[1-9][0-9]*$',
+            },
+          ],
+          description:
+            'Only valid with subagent_type "fork". Omit it or use "all" to inherit the full parent conversation; use a positive integer string such as "3" to inherit the most recent three real user turns. Tool responses and pure system reminders do not count as turns.',
+        },
         run_in_background: {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level one-shot agents. Set to false to run in the foreground and return the result inline. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
+            'Defaults to true for top-level regular subagents. Set to false to run in the foreground and return the result inline. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -775,7 +797,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         working_dir: {
           type: 'string',
           description:
-            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. Mutually exclusive with 'isolation'.",
+            "Pin the sub-agent's working directory to an EXISTING git worktree of this repo (absolute path, or relative to the current directory). Unlike 'isolation', the worktree is NOT created or cleaned up — the caller owns its lifecycle. The sub-agent's cwd-relative file and shell operations resolve inside this directory, and search tools (grep, glob) default to it as their root. This is a cwd pin, not a filesystem sandbox — file, shell, and search tools can still be pointed outside via an explicit absolute path. Must be a worktree already registered against the current repository, and must live inside it. If both working_dir and isolation are provided, isolation is ignored and the caller-owned worktree is reused.",
         },
       },
       required: ['description', 'prompt'],
@@ -854,11 +876,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-${
-  isForkSubagentEnabled(this.config)
-    ? `When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.`
-    : `When using the Agent tool, specify a subagent_type parameter to select which agent type to use. If omitted, the general-purpose agent is used. Top-level one-shot agents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing.`
-}
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -876,19 +894,18 @@ Usage notes:
 - Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
 - A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
+- Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.SEND_MESSAGE} with the \`agentId\` from its launch result as its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents are revived from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
+- Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`; omit it for the full conversation or use a positive integer string such as \`"3"\` for a bounded recent window.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
 - Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
 - If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 - If the user asks for agents "in parallel", group independent launches in a single message with multiple Agent tool use content blocks. Do not parallelize overlapping code changes.
-- Top-level one-shot agents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agents run in the foreground. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
+- Top-level regular subagents run in the background by default. Set \`run_in_background: false\` when the current turn must wait for the result before continuing. Nested agent launches run in the foreground and return to their direct parent, so the main agent cannot independently address them as background tasks. Caller-owned \`working_dir\` launches default to foreground and cannot run in the background.
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
-${
-  isForkSubagentEnabled(this.config)
-    ? `
 ## When to fork
 
-A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context, but its findings do NOT come back to you in a form you can act on. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
+A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context by default, but its findings do NOT come back to you in a form you can act on. Set \`fork_turns\` to a positive integer string only when a bounded recent window is sufficient. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
 
 Fork only when you genuinely won't need the result back — a detached background chore the user asked you to kick off and move on from. The criterion is qualitative: "will I need to read this output?" If yes, don't fork.
 
@@ -898,20 +915,18 @@ Forks are cheap because they share your prompt cache. Don't set \`model\` on a f
 
 **Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
 
-**Writing a fork prompt.** Since the fork inherits your context, the prompt is a *directive* — what to do, not what the situation is. Be specific about scope: what's in, what's out, what another agent is handling. Don't re-explain background.
-`
-    : ''
-}
+**Writing a fork prompt.** With the default full history, the prompt is a *directive* — what to do, not what the situation is. When \`fork_turns\` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
+
 ## Writing the prompt
 
-${isForkSubagentEnabled(this.config) ? 'When spawning a fresh agent (with a `subagent_type`), it starts with zero context. ' : ''}Brief the agent like a smart colleague who just walked into the room — it has not seen this conversation, does not know what you've tried, and does not understand why this task matters.
+Brief the agent like a smart colleague: make the delegated task, boundaries, and expected output explicit. Regular subagents have not seen this conversation; forks inherit all or the selected recent window.
 - Explain what you're trying to accomplish and why.
 - Describe what you've already learned or ruled out.
 - Give enough context about the surrounding problem that the agent can make judgment calls rather than just following a narrow instruction.
 - If you need a short response, say so explicitly.
 - For lookups, provide the exact target. For investigations, provide the actual question rather than an over-prescribed sequence of steps.
 
-${isForkSubagentEnabled(this.config) ? 'For fresh agents, terse' : 'Terse'} command-style prompts produce shallow, generic work.
+Terse command-style prompts produce shallow, generic work.
 
 **Never delegate understanding.** Do not write prompts like "based on your findings, fix the bug" or "based on the research, implement it." Those phrases push synthesis onto the agent instead of doing it yourself. Write prompts that prove you understood the task: include relevant file paths, constraints, what specifically needs to be learned or changed, and what is out of scope.
 
@@ -1009,8 +1024,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         return 'Parameter "subagent_type" must be a non-empty string.';
       }
       // `fork` is an explicit pseudo-type resolved by the dispatch logic (not
-      // a loadable subagent), so it never appears in the registered list; when
-      // forking is unavailable, dispatch falls back to general-purpose.
+      // a loadable subagent), so it never appears in the registered list.
       const lowerType = params.subagent_type.toLowerCase();
       if (lowerType !== FORK_SUBAGENT_TYPE) {
         const subagentExists = this.availableSubagents.some(
@@ -1026,6 +1040,23 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
           // cache and schema catch up for subsequent calls.
           void this.refreshSubagents();
         }
+      }
+    }
+
+    if (params.fork_turns !== undefined) {
+      if (
+        typeof params.fork_turns !== 'string' ||
+        !(
+          params.fork_turns === 'all' || /^[1-9][0-9]*$/.test(params.fork_turns)
+        )
+      ) {
+        return 'Parameter "fork_turns" must be "all" or a positive integer string such as "3".';
+      }
+      if (params.subagent_type?.toLowerCase() !== FORK_SUBAGENT_TYPE) {
+        return 'Parameter "fork_turns" can only be used with subagent_type "fork".';
+      }
+      if (params.name !== undefined) {
+        return 'Parameter "fork_turns" cannot be used when spawning a named teammate.';
       }
     }
 
@@ -1045,6 +1076,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       }
     }
 
+    if (
+      params.isolation === 'worktree' &&
+      typeof params.working_dir === 'string' &&
+      params.working_dir.trim().length === 0
+    ) {
+      params.working_dir = undefined;
+    }
+
     if (params.working_dir !== undefined) {
       if (
         typeof params.working_dir !== 'string' ||
@@ -1060,12 +1099,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
       if (params.run_in_background === true) {
         return 'Parameters "working_dir" and "run_in_background" are incompatible: the caller owns the worktree lifecycle and could remove it while a background agent is still running.';
       }
-      // A worktree pin and a fresh-worktree isolation are contradictory —
-      // one reuses a caller-owned directory, the other provisions and
-      // reaps its own. Reject the ambiguous combination up front.
-      if (params.isolation !== undefined) {
-        return 'Parameters "working_dir" and "isolation" are mutually exclusive.';
-      }
+      // `working_dir` is the more specific workspace instruction. Some
+      // providers require every advertised schema property and therefore send
+      // the optional `isolation: "worktree"` alongside it. Accept that
+      // redundant combination; createInvocation drops isolation so the
+      // caller-owned worktree is reused rather than provisioning another one.
       // Same rationale as isolation: a fork shares the parent's
       // conversation context and working tree, so it cannot be rebound to
       // a different directory; and the pin is only meaningful for an
@@ -1100,7 +1138,14 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
   }
 
   protected createInvocation(params: AgentParams) {
-    return new AgentToolInvocation(this.config, this.subagentManager, params);
+    const invocationParams = params.working_dir
+      ? { ...params, isolation: undefined }
+      : params;
+    return new AgentToolInvocation(
+      this.config,
+      this.subagentManager,
+      invocationParams,
+    );
   }
 
   override toAutoClassifierInput(params: AgentParams): Record<string, unknown> {
@@ -1111,6 +1156,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // command for the same reason.
     return {
       subagent_type: params.subagent_type,
+      fork_turns: params.fork_turns,
       // Include working_dir: it rebinds the child's cwd to another registered
       // worktree, which the AUTO-mode classifier must be able to see — a
       // launch that looks benign from subagent_type + prompt alone could be
@@ -1485,10 +1531,48 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     toolConfig: ToolConfig;
   }> {
     const geminiClient = this.config.getGeminiClient();
-    const rawHistory = geminiClient
-      ? (geminiClient.getHistoryShallow?.(true) ??
-        geminiClient.getHistory(true))
-      : [];
+    const forkTurns = normalizeForkTurns(this.params.fork_turns);
+    let rawHistory: Content[] = [];
+    if (geminiClient) {
+      // The `all` and numeric paths curate history differently on purpose.
+      // `all` takes curated history directly. The numeric path reads
+      // *uncurated* history so the startup context can be sliced off on its own
+      // (getStartupContextLength) before curation coalesces it with the first
+      // real user turn; the startup prefix is then reattached to the bounded
+      // window from getHistoryForForkWindow (which curates *after* stripping
+      // startup). Sharing the curated `all` source here would drop the startup
+      // reminder into the first turn and break bounded selection.
+      if (forkTurns === 'all') {
+        rawHistory = selectForkHistory(
+          geminiClient.getHistoryShallow?.(true) ??
+            geminiClient.getHistory(true),
+          forkTurns,
+        );
+      } else {
+        const comprehensiveHistory =
+          geminiClient.getHistoryShallow?.() ?? geminiClient.getHistory();
+        const startupContext = comprehensiveHistory.slice(
+          0,
+          getStartupContextLength(comprehensiveHistory),
+        );
+        rawHistory = [
+          ...structuredClone(startupContext),
+          ...selectForkHistory(
+            // Fallback uses *uncurated* history, not getHistory(true). Curation
+            // (extractCuratedHistory) coalesces the leading startup reminder
+            // into the first real user turn, so getStartupContextLength can no
+            // longer detect it as a pure prefix — selectForkHistory would then
+            // leave the startup text embedded in the first turn while the
+            // startupContext above prepends it again, duplicating startup.
+            // Uncurated history keeps the startup reminder as its own pure
+            // entry, which selectForkHistory strips cleanly.
+            geminiClient.getHistoryForForkWindow?.() ??
+              geminiClient.getHistory(),
+            forkTurns,
+          ),
+        ];
+      }
+    }
 
     // Build the history that will seed the fork's chat. Must end with a
     // model message so agent-headless can send the task_prompt as a user
@@ -2257,45 +2341,40 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     };
 
     try {
-      // Forking is explicit: `subagent_type: "fork"` selects a fork, and only
-      // when forking is available (interactive session). Any other value — or
-      // an omitted subagent_type — resolves to a regular subagent
+      // Forking is explicit: `subagent_type: "fork"` selects a fork. Any other
+      // value — or an omitted subagent_type — resolves to a regular subagent
       // (general-purpose by default). Its execution mode is decided separately
       // below; a fork is opt-in, never the default.
       const requestedType = this.params.subagent_type;
       const isForkRequested =
         requestedType?.toLowerCase() === FORK_SUBAGENT_TYPE;
-      const isFork =
-        isForkRequested &&
-        isForkSubagentEnabled(this.config) &&
-        // v1: fork is a top-level-only capability. A sub-agent — which may now
-        // carry the AgentTool via nesting — that requests a fork falls back to
-        // a general-purpose sub-agent (via effectiveSubagentType below) instead
-        // of opening a nested fork. Fork nesting is deferred past v1.
-        isTopLevelSession();
-      const effectiveSubagentType = isFork
-        ? undefined
-        : isForkRequested
-          ? // Explicit fork requested but unavailable (non-interactive) →
-            // fall back to the general-purpose subagent.
-            DEFAULT_BUILTIN_SUBAGENT_TYPE
-          : (requestedType ?? DEFAULT_BUILTIN_SUBAGENT_TYPE);
-      if (isForkRequested && !isFork) {
+      if (isForkRequested && !isTopLevelSession()) {
         debugLogger.debug(
-          `[AgentTool] Fork request downgraded to a regular sub-agent (${
-            isTopLevelSession()
-              ? 'forking unavailable in this session'
-              : 'forks do not nest'
+          '[AgentTool] Fork request rejected because forks do not nest.',
+        );
+        return this.buildSpawnBlockedResult(
+          'Error: subagent_type "fork" is not supported from within a sub-agent. Complete this task directly with your own tools instead of requesting a nested fork.',
+          'Nested forks are not supported',
+        );
+      }
+      const isFork = isForkRequested;
+      if (isFork) {
+        debugLogger.debug(
+          `[AgentTool] Fork request accepted with inherited context (${
+            this.config.isInteractive() ? 'interactive' : 'headless'
           }).`,
         );
       }
+      const effectiveSubagentType = requestedType
+        ? requestedType
+        : DEFAULT_BUILTIN_SUBAGENT_TYPE;
       let subagentConfig: SubagentConfig;
 
       if (isFork) {
         subagentConfig = FORK_AGENT;
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
-          effectiveSubagentType!,
+          effectiveSubagentType,
         );
         if (!loadedConfig) {
           // loadSubagent() reads from disk, so reaching this point means the
@@ -2316,7 +2395,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             llmContent: notFoundMessage,
             returnDisplay: {
               type: 'task_execution' as const,
-              subagentName: effectiveSubagentType!,
+              subagentName: effectiveSubagentType,
               taskDescription: this.params.description,
               taskPrompt: this.params.prompt,
               status: 'failed' as const,
@@ -2326,7 +2405,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         }
         subagentConfig = loadedConfig;
       }
-
       // Initialize the current display state
       this.currentDisplay = {
         type: 'task_execution' as const,
@@ -2341,12 +2419,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         updateOutput(this.currentDisplay);
       }
 
-      // An explicit tool parameter wins. Otherwise, an agent-level background
-      // flag retains its existing meaning, and safe ordinary one-shot launches
-      // default to background. Caller-owned working_dir launches stay
-      // foreground unless explicitly configured for background, which the
-      // incompatibility guard below rejects. Unavailable fork requests retain
-      // their existing foreground general-purpose fallback.
+      // Headless forks always use the background registry, even when
+      // run_in_background is false. Forks are detached by definition, and a
+      // short-lived non-interactive process must hold open until the inherited
+      // work completes. Otherwise, an explicit tool parameter wins. An
+      // agent-level background flag retains its existing meaning, and safe
+      // ordinary one-shot launches default to background.
       //
       // This is the source of truth for the background-classification rule. Two
       // UI classifiers replicate it from tool-call args (they cannot see
@@ -2356,24 +2434,26 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       //   - packages/desktop/packages/shared/src/agent/tool-matching.ts
       //     (detectBackgroundEvents)
       //
-      // Background delegation is top-level-only in v1, mirroring the fork
-      // downgrade above: a nested launcher would be handed a completion
-      // contract it cannot honor — the success guidance names send_message
-      // and task_stop (both excluded from sub-agent toolsets), and
+      // Background delegation is top-level-only in v1. A nested launcher would
+      // be handed a completion contract it cannot honor — the success guidance
+      // names send_message and task_stop (both excluded from sub-agent
+      // toolsets), and
       // BackgroundTaskRegistry's single session-level notification callback
       // would inject the child's completion into the top-level conversation
       // while the launcher (typically finished by then) never hears back.
       // Downgrade to an awaited foreground run instead of orphaning the
       // child's results.
       const backgroundRequested =
-        this.params.run_in_background ??
-        (subagentConfig.background === true ||
-          (!isForkRequested &&
-            this.params.working_dir === undefined &&
-            // A `name` passed without an active team falls through to a regular
-            // one-shot agent above; keep it foreground so both UI classifiers
-            // (which exclude `name`) stay consistent with core dispatch.
-            this.params.name === undefined));
+        isFork && !this.config.isInteractive()
+          ? true
+          : (this.params.run_in_background ??
+            (subagentConfig.background === true ||
+              (!isForkRequested &&
+                this.params.working_dir === undefined &&
+                // A `name` passed without an active team falls through to a regular
+                // one-shot agent above; keep it foreground so both UI classifiers
+                // (which exclude `name`) stay consistent with core dispatch.
+                this.params.name === undefined)));
       const shouldRunInBackground = backgroundRequested && isTopLevelSession();
       if (this.params.working_dir !== undefined && shouldRunInBackground) {
         // A caller-owned worktree has no lifecycle coupling to a backgrounded
@@ -2665,9 +2745,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const hookOpts = {
         agentId: `${subagentConfig.name}-${agentIdSuffix}`,
-        // Resolved config name, not the raw requested type: a fork request
-        // that fell back to the awaitable path (nested / non-interactive)
-        // must report the agent that actually runs — hooks, spans, task
+        // Resolved config name, not the raw requested type. Hooks, spans, task
         // rows, and the meta sidecar all read this field.
         agentType: subagentConfig.name,
         resolvedMode,

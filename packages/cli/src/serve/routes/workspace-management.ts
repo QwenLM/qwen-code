@@ -5,11 +5,14 @@
  */
 
 import { readdir, stat } from 'node:fs/promises';
+import {
+  translateAndCheckAbsoluteWorkspacePath,
+  MAX_WORKSPACE_PATH_LENGTH,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import { realpathSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join, resolve, sep } from 'node:path';
 import type { Application, Request, Response } from 'express';
 import { isWithinRoot } from '@qwen-code/qwen-code-core';
-import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_REGISTERED_WORKSPACES } from '../workspace-inputs.js';
 import type {
@@ -22,11 +25,19 @@ import {
   resolveManagedWorkspaceRuntimeByPathSelector,
 } from '../workspace-route-runtime.js';
 import {
+  normalizeWorkspaceDisplayName,
   workspaceRegistrationId,
+  WorkspaceDisplayNameValidationError,
   WorkspaceRegistrationStoreCommittedError,
   WorkspaceRegistrationStoreLimitError,
   type WorkspaceRegistrationStore,
 } from '../workspace-registration-store.js';
+import {
+  createManagedScratchDirectory,
+  isScratchRootCompatible,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from '../managed-scratch-workspace.js';
 
 // Upper bound on total registered workspaces (startup + dynamic). Each
 // registration allocates a full runtime (bridge, channel factory, sub-session
@@ -43,7 +54,11 @@ export interface WorkspaceManagementRouteDeps {
   workspaceRegistry: WorkspaceRegistry;
   mutate: (opts?: { strict?: boolean }) => import('express').RequestHandler;
   safeBody: (req: Request) => Record<string, unknown>;
-  createWorkspaceRuntime?: (cwd: string) => Promise<WorkspaceRuntime>;
+  createWorkspaceRuntime?: (
+    cwd: string,
+    options: { provenance: WorkspaceRuntimeProvenance },
+  ) => Promise<WorkspaceRuntime>;
+  managedScratchRoot?: ManagedScratchRoot;
   workspaceRegistrationStore?: WorkspaceRegistrationStore;
   getAcpHandle?: () => AcpHttpHandle | undefined;
   runtimeRemoval?: WorkspaceRuntimeRemovalController;
@@ -88,19 +103,21 @@ export function registerWorkspaceManagementRoutes(
     mutate,
     safeBody,
     createWorkspaceRuntime,
+    managedScratchRoot,
     workspaceRegistrationStore,
     getAcpHandle,
     runtimeRemoval,
   } = deps;
-  // Serialize runtime addition, persistence promotion/forget, and removal by
-  // canonical cwd so conflicting management mutations cannot cross their
-  // validation and persistence commit points concurrently.
+  // Serialize runtime addition, persistence promotion/forget, updates, and
+  // removal by canonical cwd so conflicting management mutations cannot cross
+  // their validation and persistence commit points concurrently.
   const inFlight = new Map<
     string,
-    'addition' | 'promotion' | 'removal' | 'forget'
+    'addition' | 'promotion' | 'removal' | 'forget' | 'update'
   >();
   let sealed = false;
   let activeOperations = 0;
+  let pendingScratchCreations = 0;
   const idleWaiters = new Set<() => void>();
   const operationStarted = (): void => {
     activeOperations++;
@@ -116,6 +133,211 @@ export function registerWorkspaceManagementRoutes(
       error: 'Daemon is shutting down',
       code: 'daemon_shutting_down',
     });
+  };
+  const attachRegistrationIds = (
+    runtime: WorkspaceRuntime,
+    registrationIds: readonly string[],
+  ): void => {
+    runtime.registrationIds ??= [];
+    for (const registrationId of registrationIds) {
+      if (!runtime.registrationIds.includes(registrationId)) {
+        runtime.registrationIds.push(registrationId);
+      }
+    }
+  };
+  const restorePersistedDisplayName = async (
+    runtime: WorkspaceRuntime,
+    canonical: string,
+  ): Promise<void> => {
+    const snapshot = await workspaceRegistrationStore!.read();
+    const storedWorkspace = snapshot.workspaces.find((stored) =>
+      process.platform === 'win32'
+        ? stored.toLowerCase() === canonical.toLowerCase()
+        : stored === canonical,
+    );
+    const storedDisplayName = storedWorkspace
+      ? snapshot.displayNames?.[workspaceRegistrationId(storedWorkspace)]
+      : undefined;
+    if (storedWorkspace) {
+      attachRegistrationIds(runtime, [
+        workspaceRegistrationId(storedWorkspace),
+      ]);
+    }
+    if (storedDisplayName === undefined) {
+      delete runtime.displayName;
+    } else {
+      runtime.displayName = storedDisplayName;
+    }
+  };
+  const projectedWorkspaceCount = (): number => {
+    // A scratch request reserves capacity before its cwd exists, while normal
+    // additions reserve by canonical cwd. Count both forms exactly once.
+    const cwdSet = new Set(
+      workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
+    );
+    for (const [cwd, operation] of inFlight) {
+      if (operation === 'addition') cwdSet.add(cwd);
+    }
+    return cwdSet.size + pendingScratchCreations;
+  };
+
+  /** Creates and registers one trusted, process-local daemon-owned workspace. */
+  const createScratchWorkspace = async (res: Response): Promise<void> => {
+    if (!createWorkspaceRuntime || !managedScratchRoot || !runtimeRemoval) {
+      res.status(501).json({
+        error: 'Scratch workspace registration is not available',
+        code: 'scratch_not_available',
+      });
+      return;
+    }
+    if (sealed) {
+      sendSealed(res);
+      return;
+    }
+    if (
+      workspaceRegistry
+        .listManaged()
+        .some(
+          (runtime) =>
+            !isScratchRootCompatible(
+              runtime.workspaceCwd,
+              managedScratchRoot.canonicalRoot,
+            ),
+        ) ||
+      [...inFlight].some(
+        ([cwd, operation]) =>
+          operation === 'addition' &&
+          !isScratchRootCompatible(cwd, managedScratchRoot.canonicalRoot),
+      )
+    ) {
+      res.status(409).json({
+        error: 'Managed scratch root conflicts with a registered workspace',
+        code: 'scratch_root_conflict',
+      });
+      return;
+    }
+    if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
+      res.status(409).json({
+        error: 'Workspace registration limit reached',
+        code: 'workspace_limit_reached',
+      });
+      return;
+    }
+
+    pendingScratchCreations++;
+    operationStarted();
+    let reservationHeld = true;
+    let canonical: string | undefined;
+    let runtime: WorkspaceRuntime | undefined;
+    let registered = false;
+    try {
+      canonical = await createManagedScratchDirectory(managedScratchRoot);
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+
+      // Convert the anonymous capacity reservation into the same cwd-keyed
+      // addition lane used by normal registrations without yielding between.
+      pendingScratchCreations--;
+      reservationHeld = false;
+      inFlight.set(canonical, 'addition');
+
+      const boundCwds = workspaceRegistry
+        .listManaged()
+        .map((entry) => entry.workspaceCwd);
+      for (const [cwd, operation] of inFlight) {
+        if (operation === 'addition' && cwd !== canonical) boundCwds.push(cwd);
+      }
+      if (
+        boundCwds.some(
+          (cwd) =>
+            !isScratchRootCompatible(cwd, managedScratchRoot.canonicalRoot) ||
+            isWithinRoot(canonical!, cwd) ||
+            isWithinRoot(cwd, canonical!),
+        )
+      ) {
+        res.status(409).json({
+          error: 'Workspace path nests with an existing workspace',
+          code: 'workspace_nested',
+        });
+        return;
+      }
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+
+      runtime = await createWorkspaceRuntime(canonical, {
+        provenance: 'managed-scratch',
+      });
+      // Trust is granted only through managed provenance. Enforce the factory
+      // contract before the runtime becomes observable through the registry.
+      if (
+        runtime.workspaceCwd !== canonical ||
+        runtime.primary ||
+        !runtime.trusted
+      ) {
+        throw new Error(
+          'Scratch runtime violated the managed runtime contract',
+        );
+      }
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+      workspaceRegistry.add(runtime);
+      registered = true;
+      try {
+        await runtimeRemoval.runtimeAdded?.(runtime);
+      } catch (err) {
+        try {
+          writeStderrLine(
+            `qwen serve: workspace runtime adapter notification failed after registry add: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        } catch {
+          // The runtime is registered; diagnostics are best-effort.
+        }
+      }
+      res.status(201).json({
+        id: runtime.workspaceId,
+        cwd: runtime.workspaceCwd,
+        primary: false,
+        trusted: true,
+        persisted: false,
+      });
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: scratch workspace registration failed: ${
+          err instanceof Error ? err.message : String(err)
+        }${canonical ? `; retained directory: ${canonical}` : ''}`,
+      );
+      if (!res.headersSent) {
+        res.status(500).json({
+          error: 'Failed to register scratch workspace',
+          code: 'runtime_creation_failed',
+        });
+      }
+    } finally {
+      // A constructed but unregistered runtime belongs to this operation and
+      // must be fully disposed. The directory is intentionally retained.
+      if (runtime && !registered) {
+        await runtimeRemoval
+          .disposeRuntime(runtime, 'workspace_removed')
+          .catch(() => {
+            try {
+              runtime?.bridge.killAllSync();
+            } catch {
+              // Preserve the registration failure.
+            }
+          });
+      }
+      if (reservationHeld) pendingScratchCreations--;
+      if (canonical) inFlight.delete(canonical);
+      operationFinished();
+    }
   };
 
   // Read-only directory suggestions for the "Add workspace" flow. The
@@ -209,8 +431,39 @@ export function registerWorkspaceManagementRoutes(
     mutate({ strict: true }),
     async (req: Request, res: Response) => {
       const body = safeBody(req);
+      if ('kind' in body) {
+        if (
+          body['kind'] !== 'scratch' ||
+          'cwd' in body ||
+          'persist' in body ||
+          Object.keys(body).some((key) => key !== 'kind')
+        ) {
+          res.status(400).json({
+            error:
+              'Scratch workspace requests must be exactly { kind: "scratch" }',
+            code: 'invalid_workspace_request',
+          });
+          return;
+        }
+        await createScratchWorkspace(res);
+        return;
+      }
       const cwd = body['cwd'];
       const persist = body['persist'] ?? false;
+      const hasDisplayName = Object.hasOwn(body, 'displayName');
+      let displayName: string | undefined;
+      if (hasDisplayName) {
+        try {
+          displayName = normalizeWorkspaceDisplayName(body['displayName']);
+        } catch (err) {
+          if (!(err instanceof WorkspaceDisplayNameValidationError)) throw err;
+          res.status(400).json({
+            error: err.message,
+            code: 'invalid_display_name',
+          });
+          return;
+        }
+      }
       if (typeof cwd !== 'string' || cwd.trim().length === 0) {
         res.status(400).json({
           error: '`cwd` must be a non-empty string',
@@ -240,19 +493,24 @@ export function registerWorkspaceManagementRoutes(
         return;
       }
 
-      if (!isAbsolute(cwd)) {
+      // Bound the input before any filesystem work, matching the limit other
+      // workspace routes enforce (memory-amplification guard). Must run
+      // before the sandbox translation below — its existence probe is a
+      // filesystem call.
+      if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
         res.status(400).json({
-          error: '`cwd` must be an absolute path',
+          error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
           code: 'invalid_path',
         });
         return;
       }
 
-      // Bound the input before any filesystem work, matching the limit other
-      // workspace routes enforce (memory-amplification guard).
-      if (cwd.length > MAX_WORKSPACE_PATH_LENGTH) {
+      // #7139: the shared helper maps a Windows-shaped cwd to its container
+      // bind mount before the absolute-path check.
+      const sandboxCwd = translateAndCheckAbsoluteWorkspacePath(cwd);
+      if (sandboxCwd === null) {
         res.status(400).json({
-          error: `\`cwd\` exceeds the ${MAX_WORKSPACE_PATH_LENGTH}-character limit`,
+          error: '`cwd` must be an absolute path',
           code: 'invalid_path',
         });
         return;
@@ -265,11 +523,22 @@ export function registerWorkspaceManagementRoutes(
       // two distinct canonical strings and defeat the duplicate check.
       let canonical: string;
       try {
-        canonical = realpathSync.native(resolve(cwd));
+        canonical = realpathSync.native(resolve(sandboxCwd));
       } catch {
         res.status(400).json({
           error: 'Path does not exist or is not accessible',
           code: 'invalid_path',
+        });
+        return;
+      }
+
+      if (
+        managedScratchRoot &&
+        !isScratchRootCompatible(canonical, managedScratchRoot.canonicalRoot)
+      ) {
+        res.status(409).json({
+          error: 'Workspace path conflicts with the managed scratch root',
+          code: 'scratch_root_conflict',
         });
         return;
       }
@@ -357,7 +626,7 @@ export function registerWorkspaceManagementRoutes(
         operationStarted();
         try {
           const snapshot = await workspaceRegistrationStore!.read();
-          const alreadyPersisted = snapshot.workspaces.some(
+          const persistedWorkspaces = snapshot.workspaces.filter(
             (stored) =>
               existingRuntime.registrationIds?.includes(
                 workspaceRegistrationId(stored),
@@ -366,6 +635,7 @@ export function registerWorkspaceManagementRoutes(
                 ? stored.toLowerCase() === canonical.toLowerCase()
                 : stored === canonical),
           );
+          const alreadyPersisted = persistedWorkspaces.length > 0;
           if (
             !alreadyPersisted &&
             snapshot.workspaces.length >= MAX_REGISTERED_WORKSPACES - 1
@@ -376,23 +646,67 @@ export function registerWorkspaceManagementRoutes(
             });
             return;
           }
-          if (!alreadyPersisted) {
+          if (alreadyPersisted) {
+            attachRegistrationIds(
+              existingRuntime,
+              persistedWorkspaces.map(workspaceRegistrationId),
+            );
+            const storedDisplayName = persistedWorkspaces
+              .map(
+                (stored) =>
+                  snapshot.displayNames?.[workspaceRegistrationId(stored)],
+              )
+              .find((name) => name !== undefined);
+            if (storedDisplayName === undefined) {
+              delete existingRuntime.displayName;
+            } else {
+              existingRuntime.displayName = storedDisplayName;
+            }
+          } else {
+            let added = false;
             try {
-              await workspaceRegistrationStore!.add(canonical);
+              const persistedDisplayName = hasDisplayName
+                ? displayName
+                : existingRuntime.displayName;
+              added =
+                persistedDisplayName === undefined
+                  ? await workspaceRegistrationStore!.add(canonical)
+                  : await workspaceRegistrationStore!.add(
+                      canonical,
+                      persistedDisplayName,
+                    );
             } catch (err) {
               if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
                 throw err;
               }
+              added = true;
               try {
                 writeStderrLine(`qwen serve: ${err.message}`);
               } catch {
                 // The registration is committed; diagnostics are best-effort.
               }
             }
+            if (added) {
+              attachRegistrationIds(existingRuntime, [
+                workspaceRegistrationId(canonical),
+              ]);
+            }
+            if (added && hasDisplayName) {
+              if (displayName === undefined) {
+                delete existingRuntime.displayName;
+              } else {
+                existingRuntime.displayName = displayName;
+              }
+            } else if (!added) {
+              await restorePersistedDisplayName(existingRuntime, canonical);
+            }
           }
           res.status(200).json({
             id: existingRuntime.workspaceId,
             cwd: existingRuntime.workspaceCwd,
+            ...(existingRuntime.displayName !== undefined
+              ? { displayName: existingRuntime.displayName }
+              : {}),
             primary: existingRuntime.primary,
             trusted: existingRuntime.trusted,
             persisted: true,
@@ -458,13 +772,7 @@ export function registerWorkspaceManagementRoutes(
         }
       }
 
-      const projectedWorkspaceCwds = new Set(
-        workspaceRegistry.listManaged().map((runtime) => runtime.workspaceCwd),
-      );
-      for (const [cwd, operation] of inFlight) {
-        if (operation === 'addition') projectedWorkspaceCwds.add(cwd);
-      }
-      if (projectedWorkspaceCwds.size >= MAX_REGISTERED_WORKSPACES) {
+      if (projectedWorkspaceCount() >= MAX_REGISTERED_WORKSPACES) {
         res.status(409).json({
           error: 'Workspace registration limit reached',
           code: 'workspace_limit_reached',
@@ -476,14 +784,24 @@ export function registerWorkspaceManagementRoutes(
       operationStarted();
       let persistenceFailed = false;
       try {
-        const runtime = await createWorkspaceRuntime(canonical);
+        const runtime = await createWorkspaceRuntime(canonical, {
+          provenance: 'existing',
+        });
+        if (!persist && displayName !== undefined) {
+          runtime.displayName = displayName;
+        }
         let persistedRecordAdded = false;
         try {
           if (persist) {
             try {
               try {
                 persistedRecordAdded =
-                  await workspaceRegistrationStore!.add(canonical);
+                  displayName === undefined
+                    ? await workspaceRegistrationStore!.add(canonical)
+                    : await workspaceRegistrationStore!.add(
+                        canonical,
+                        displayName,
+                      );
               } catch (err) {
                 if (
                   !(err instanceof WorkspaceRegistrationStoreCommittedError)
@@ -496,6 +814,16 @@ export function registerWorkspaceManagementRoutes(
                 } catch {
                   // The registration is committed; diagnostics are best-effort.
                 }
+              }
+              if (persistedRecordAdded) {
+                attachRegistrationIds(runtime, [
+                  workspaceRegistrationId(canonical),
+                ]);
+                if (displayName !== undefined) {
+                  runtime.displayName = displayName;
+                }
+              } else {
+                await restorePersistedDisplayName(runtime, canonical);
               }
             } catch (err) {
               persistenceFailed = true;
@@ -550,6 +878,9 @@ export function registerWorkspaceManagementRoutes(
         res.status(201).json({
           id: runtime.workspaceId,
           cwd: runtime.workspaceCwd,
+          ...(runtime.displayName !== undefined
+            ? { displayName: runtime.displayName }
+            : {}),
           primary: runtime.primary,
           trusted: runtime.trusted,
           ...(persist ? { persisted: true } : {}),
@@ -629,6 +960,112 @@ export function registerWorkspaceManagementRoutes(
     });
     return undefined;
   };
+
+  app.patch(
+    '/workspaces/:workspace',
+    mutate({ strict: true }),
+    async (req: Request, res: Response) => {
+      const body = safeBody(req);
+      const unsupportedField = Object.keys(body).find(
+        (field) => field !== 'displayName',
+      );
+      if (unsupportedField) {
+        res.status(400).json({
+          error: `\`${unsupportedField}\` is not an updatable workspace field`,
+          code: 'unsupported_field',
+        });
+        return;
+      }
+      if (!Object.hasOwn(body, 'displayName')) {
+        res.status(400).json({
+          error: 'No updatable fields provided',
+          code: 'empty_patch',
+        });
+        return;
+      }
+      let displayName: string | undefined;
+      try {
+        displayName =
+          body['displayName'] === null
+            ? undefined
+            : normalizeWorkspaceDisplayName(body['displayName']);
+      } catch (err) {
+        if (!(err instanceof WorkspaceDisplayNameValidationError)) throw err;
+        res.status(400).json({
+          error: err.message,
+          code: 'invalid_display_name',
+        });
+        return;
+      }
+      if (sealed) {
+        sendSealed(res);
+        return;
+      }
+      const runtime = resolveManagedRuntime(req, res);
+      if (!runtime) return;
+      if (inFlight.has(runtime.workspaceCwd)) {
+        res.status(409).json({
+          error: 'Workspace registration is in progress',
+          code: 'workspace_registration_in_progress',
+        });
+        return;
+      }
+
+      inFlight.set(runtime.workspaceCwd, 'update');
+      operationStarted();
+      try {
+        if (
+          workspaceRegistrationStore &&
+          runtime.registrationIds !== undefined &&
+          runtime.registrationIds.length > 0
+        ) {
+          try {
+            await workspaceRegistrationStore.setDisplayNameByIds(
+              runtime.registrationIds,
+              displayName,
+            );
+          } catch (err) {
+            if (!(err instanceof WorkspaceRegistrationStoreCommittedError)) {
+              throw err;
+            }
+            try {
+              writeStderrLine(`qwen serve: ${err.message}`);
+            } catch {
+              // The update is committed; diagnostics are best-effort.
+            }
+          }
+        }
+        if (displayName === undefined) {
+          delete runtime.displayName;
+        } else {
+          runtime.displayName = displayName;
+        }
+        res.status(200).json({
+          id: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          ...(runtime.displayName !== undefined
+            ? { displayName: runtime.displayName }
+            : {}),
+          primary: runtime.primary,
+          trusted: runtime.trusted,
+          ...(runtimeRemoval ? { removable: runtime.removable === true } : {}),
+        });
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to persist workspace display name: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        res.status(500).json({
+          error: 'Failed to persist workspace display name',
+          code: 'workspace_registration_store_error',
+        });
+      } finally {
+        inFlight.delete(runtime.workspaceCwd);
+        operationFinished();
+      }
+    },
+  );
 
   app.delete(
     '/workspaces/:workspace',
@@ -907,13 +1344,16 @@ export function registerWorkspaceManagementRoutes(
         schemaVersion: snapshot.schemaVersion,
         primaryWorkspace: snapshot.primaryWorkspace,
         entries: snapshot.workspaces.map((cwd) => {
+          const registrationId = workspaceRegistrationId(cwd);
           const runtime = workspaceRegistry.getByWorkspaceCwd(cwd);
           return {
-            id: workspaceRegistrationId(cwd),
+            id: registrationId,
             cwd,
+            ...(snapshot.displayNames?.[registrationId] !== undefined
+              ? { displayName: snapshot.displayNames[registrationId] }
+              : {}),
             active:
-              runtime !== undefined ||
-              registrationIsActive(workspaceRegistrationId(cwd)),
+              runtime !== undefined || registrationIsActive(registrationId),
             persisted: true,
           };
         }),
@@ -1031,6 +1471,11 @@ export function registerWorkspaceManagementRoutes(
             code: 'workspace_registration_not_found',
           });
           return;
+        }
+        if (runtime?.registrationIds) {
+          runtime.registrationIds = runtime.registrationIds.filter(
+            (id) => id !== registrationId,
+          );
         }
         res.json({
           removed: true,

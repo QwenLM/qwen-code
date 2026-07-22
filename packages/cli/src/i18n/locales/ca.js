@@ -2098,8 +2098,14 @@ export default {
     'Hi ha una versió nova de Qwen Code disponible! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} està actualitzat!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    "No s'han pogut comprovar les actualitzacions. Comproveu la xarxa o la configuració del registre.",
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    "No s'han pogut comprovar les actualitzacions ({{reason}}). Comproveu la xarxa o la configuració del registre.",
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    "S'ha omès la comprovació d'actualitzacions ({{reason}}) — executeu /update per tornar-ho a provar.",
+  'registry did not respond within {{seconds}}s':
+    'el registre no ha respost en {{seconds}}s',
+  'registry unreachable': 'no es pot accedir al registre',
+  'registry error': 'error del registre',
   'Unable to check for updates: {{reason}}':
     'No es poden comprovar les actualitzacions: {{reason}}',
   'Update successful! The new version will be used on your next run.':
@@ -2264,7 +2270,8 @@ export default {
   Installed: 'Instal·lades',
   'Installed extension "{{name}}".': "S'ha instal·lat l'extensió «{{name}}».",
   'Installed extensions ({{count}}):': 'Extensions instal·lades ({{count}}):',
-  'Installed {{count}} extension(s).': "S'han instal·lat {{count}} extensió/ns.",
+  'Installed {{count}} extension(s).':
+    "S'han instal·lat {{count}} extensió/ns.",
   '{{name}}: installed, but the scope rollback failed — it may be disabled at all scopes; re-enable it from the Installed tab.':
     "{{name}}: instal·lada, però la restauració de l'àmbit ha fallat — pot estar desactivada a tots els àmbits; reactiveu-la des de la pestanya Instal·lades.",
   'Could not change scope, and the rollback also failed — "{{name}}" may be disabled at all scopes. Re-enable it from the Installed tab. ({{error}})':

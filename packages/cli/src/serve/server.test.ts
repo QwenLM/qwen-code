@@ -159,12 +159,32 @@ import {
 // `mockWt.impl` to control instance behaviour.
 const mockWt = vi.hoisted(() => ({
   impl: undefined as (() => Record<string, unknown>) | undefined,
+  readSidecar: undefined as (() => Promise<unknown>) | undefined,
+  realpath: undefined as ((p: string) => string) | undefined,
 }));
+vi.mock('node:fs', async (importOriginal) => {
+  const original = await importOriginal<typeof import('node:fs')>();
+  const wrapped = ((p: fs.PathLike) =>
+    mockWt.realpath
+      ? mockWt.realpath(String(p))
+      : original.realpathSync(p)) as typeof original.realpathSync;
+  wrapped.native = original.realpathSync.native;
+  return {
+    ...original,
+    realpathSync: wrapped,
+  };
+});
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...original,
+    readWorktreeSession: (...args: unknown[]) =>
+      mockWt.readSidecar
+        ? mockWt.readSidecar()
+        : (original.readWorktreeSession as (...a: unknown[]) => unknown)(
+            ...args,
+          ),
     GitWorktreeService: class MockGitWorktreeService {
       static validateUserWorktreeSlug =
         original.GitWorktreeService.validateUserWorktreeSlug;
@@ -363,6 +383,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_extensions',
   'session_branch',
   'workspace_channel_observed_contacts',
+  'workspace_display_name',
   'workspace_qualified_rest_core',
   'extension_management_v2',
   'workspace_persisted_transcript',
@@ -414,6 +435,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_extensions' &&
       f !== 'session_branch' &&
       f !== 'workspace_channel_observed_contacts' &&
+      f !== 'workspace_display_name' &&
       f !== 'workspace_qualified_rest_core' &&
       f !== 'extension_management_v2' &&
       f !== 'workspace_persisted_transcript' &&
@@ -456,7 +478,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_sessions',
   'multi_workspace_session_rewind',
   'multi_workspace_session_shell',
+  'dynamic_workspace_registration',
   'persistent_workspace_registration',
+  'workspace_display_name',
+  'scratch_workspace_registration',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
@@ -500,6 +525,15 @@ interface FakeBridgeOpts {
     promptId: string,
   ) => { removed: boolean };
   spawnImpl?: (req: BridgeSpawnRequest) => Promise<BridgeSession>;
+  changeSessionCwdImpl?: (
+    sessionId: string,
+    req: { path: string },
+  ) => Promise<{
+    sessionId: string;
+    previousCwd: string;
+    newCwd: string;
+    warnings: string[];
+  }>;
   loadImpl?: (
     req: BridgeRestoreSessionRequest,
   ) => Promise<BridgeRestoredSession>;
@@ -754,6 +788,10 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   detachCalls: Array<{ sessionId: string; clientId?: string }>;
   changeSessionCwdCalls: Array<{ sessionId: string; path: string }>;
+  setSessionWorktreeCalls: Array<{
+    sessionId: string;
+    worktree: { slug: string; path: string; branch: string };
+  }>;
   enqueueMidTurnCalls: Array<{
     sessionId: string;
     message: string;
@@ -932,6 +970,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   }> = [];
   const detachCalls: FakeBridge['detachCalls'] = [];
   const changeSessionCwdCalls: Array<{ sessionId: string; path: string }> = [];
+  const setSessionWorktreeCalls: Array<{
+    sessionId: string;
+    worktree: { slug: string; path: string; branch: string };
+  }> = [];
   const enqueueMidTurnCalls: FakeBridge['enqueueMidTurnCalls'] = [];
   const enqueueMidTurnImpl =
     opts.enqueueMidTurnImpl ?? (() => ({ accepted: true }));
@@ -1497,6 +1539,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     killCalls,
     detachCalls,
     changeSessionCwdCalls,
+    setSessionWorktreeCalls,
     enqueueMidTurnCalls,
     permissionVotes,
     sessionPermissionVotes,
@@ -1976,12 +2019,18 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     async changeSessionCwd(sessionId, req) {
       changeSessionCwdCalls.push({ sessionId, path: req.path });
+      if (opts.changeSessionCwdImpl) {
+        return opts.changeSessionCwdImpl(sessionId, req);
+      }
       return {
         sessionId,
         previousCwd: '/fake/previous',
         newCwd: req.path,
         warnings: [],
       };
+    },
+    setSessionWorktree(sessionId, worktree) {
+      setSessionWorktreeCalls.push({ sessionId, worktree });
     },
     isChannelLive() {
       return false;
@@ -2108,15 +2157,6 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
     expect(detectFromLoopback(reqWithForwardedHeader)).toBe(false);
   });
 });
-
-function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
-  return (_sid, _req, signal) =>
-    new Promise((resolve) => {
-      const onAbort = () => resolve({ stopReason: 'cancelled' });
-      if (signal?.aborted) onAbort();
-      else signal?.addEventListener('abort', onAbort, { once: true });
-    });
-}
 
 describe('createServeApp', () => {
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
@@ -2453,6 +2493,21 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'dynamic_workspace_registration') {
+          expect(
+            predicate({ dynamicWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ dynamicWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              dynamicWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
         if (feature === 'persistent_workspace_registration') {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
@@ -2469,6 +2524,21 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'scratch_workspace_registration') {
+          expect(
+            predicate({ scratchWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ scratchWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              scratchWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
           continue;
         }
         if (feature === 'workspace_runtime_removal') {
@@ -3049,6 +3119,7 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, {
         bridge: primaryBridge,
         workspaceRegistry: registry,
+        createWorkspaceRuntime: vi.fn(),
         workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
       });
 
@@ -3058,6 +3129,10 @@ describe('createServeApp', () => {
       expect(before.status).toBe(200);
       expect(before.body.features).toContain(
         'persistent_workspace_registration',
+      );
+      expect(before.body.features).toContain('dynamic_workspace_registration');
+      expect(before.body.features).not.toContain(
+        'scratch_workspace_registration',
       );
       expect(before.body.features).not.toContain('multi_workspace_sessions');
       expect(before.body.workspaces).toEqual([
@@ -3083,6 +3158,52 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('advertises scratch only with a compatible root and complete disposal owner', async () => {
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        createWorkspaceRuntime: vi.fn(),
+        managedScratchRoot: {
+          canonicalRoot: '/managed-scratch',
+          device: 1,
+          inode: 1,
+        },
+        workspaceRuntimeRemoval: {},
+        voiceCoordinator: {},
+      } as Parameters<typeof createServeApp>[2]);
+
+      const supported = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(supported.body.features).toContain(
+        'scratch_workspace_registration',
+      );
+
+      registry.add(
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'conflict',
+          workspaceCwd: '/managed-scratch/project',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+      );
+      const conflicted = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(conflicted.body.features).not.toContain(
+        'scratch_workspace_registration',
+      );
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
@@ -8842,6 +8963,141 @@ describe('createServeApp', () => {
     // CI. The same constraint applies here. The cleanup behavior
     // is exercised manually via the route handler closure shared
     // between both routes in `restoreSessionHandler`.
+
+    it('restores worktree isolation on load when sidecar exists', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      // Identity realpath so the containment check passes in the test env.
+      mockWt.realpath = (p) => p;
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'my-task',
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/my-task`,
+          worktreeBranch: 'worktree-my-task',
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/wt-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toEqual({
+          slug: 'my-task',
+          path: `${WS_BOUND}/.qwen/worktrees/my-task`,
+          branch: 'worktree-my-task',
+        });
+        expect(bridge.changeSessionCwdCalls).toHaveLength(1);
+        expect(bridge.changeSessionCwdCalls[0].path).toBe(
+          `${WS_BOUND}/.qwen/worktrees/my-task`,
+        );
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(1);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.realpath = undefined;
+      }
+    });
+
+    it('skips worktree restore when no sidecar exists', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.readSidecar = () => Promise.resolve(null);
+
+      try {
+        const res = await request(app)
+          .post('/session/plain-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toBeUndefined();
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+      } finally {
+        mockWt.readSidecar = undefined;
+      }
+    });
+
+    it('returns 200 without worktree when changeSessionCwd fails', async () => {
+      const bridge = fakeBridge({
+        changeSessionCwdImpl: async () => {
+          throw new Error('cd failed');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.realpath = (p) => p;
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'dead-task',
+          worktreePath: `${WS_BOUND}/.qwen/worktrees/dead-task`,
+          worktreeBranch: 'worktree-dead-task',
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/dead-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toBeUndefined();
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+      } finally {
+        mockWt.readSidecar = undefined;
+        mockWt.realpath = undefined;
+      }
+    });
+
+    it('skips restore when sidecar path fails containment check', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.readSidecar = () =>
+        Promise.resolve({
+          slug: 'escape',
+          worktreePath: '/etc/passwd',
+          worktreeBranch: 'worktree-escape',
+          originalCwd: WS_BOUND,
+          originalBranch: 'main',
+          originalHeadCommit: 'abc123',
+        });
+
+      try {
+        const res = await request(app)
+          .post('/session/escape-session/load')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ cwd: WS_BOUND });
+
+        expect(res.status).toBe(200);
+        expect(res.body.worktree).toBeUndefined();
+        expect(bridge.changeSessionCwdCalls).toHaveLength(0);
+        expect(bridge.setSessionWorktreeCalls).toHaveLength(0);
+      } finally {
+        mockWt.readSidecar = undefined;
+      }
+    });
   });
 
   describe('POST /session/:id/prompt', () => {
@@ -22037,20 +22293,15 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       },
     );
 
-    it('returns cleanly when client disconnects in the same tick the deadline fires (wenshao review #3)', async () => {
-      // Critical regression from wenshao's CHANGES_REQUESTED on #4530:
-      // when `res.writableEnded` was true at the moment the deadline
-      // rejection surfaced, the early code `if (err instanceof
-      // PromptDeadlineExceededError && !res.writableEnded) { ...
-      // return; }` would skip BOTH the body AND the return, fall
-      // through to `sendBridgeError`, and try to write 500 to an
-      // already-ended response → ERR_STREAM_WRITE_AFTER_END.
-      //
-      // We force the race by destroying the client socket
-      // immediately after the bridge starts the prompt, so by the
-      // time the 50ms deadline fires the response is already ended.
-      // The route MUST handle this without throwing — assertion is
-      // implicit: a thrown uncaughtException would fail the test.
+    it('returns cleanly when client disconnects right after admission (wenshao review #3)', async () => {
+      // Historic regression from wenshao's CHANGES_REQUESTED on #4530:
+      // the route-side deadline rejection used to race `res.writableEnded`
+      // and write 500 to an already-ended response →
+      // ERR_STREAM_WRITE_AFTER_END. The deadline timer has since moved
+      // into the bridge (DAEMON-003), but the socket-destroy-after-202
+      // scenario stays as a regression guard: the route MUST handle the
+      // disconnect without throwing — assertion is implicit: a thrown
+      // uncaughtException would fail the test.
       let promptStarted: (() => void) | undefined;
       const promptStartedPromise = new Promise<void>((r) => {
         promptStarted = r;
@@ -22100,10 +22351,11 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         // block to handle the race.
         await new Promise((r) => setTimeout(r, 200));
         expect(bridge.promptCalls).toHaveLength(1);
-        // The bridge's signal MUST still have been aborted with the
-        // typed reason — the cleanup path still runs even though the
-        // response was already ended.
-        expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+        // The deadline race now lives in the bridge: after admission the
+        // route neither arms a timer nor aborts the signal, it only
+        // forwards the effective deadline via `context.deadlineMs`.
+        expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
+        expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
       } finally {
         await localHandle.close();
       }
@@ -22127,12 +22379,16 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
     });
 
-    it('fires the server-side deadline and aborts the bridge signal', async () => {
-      // 50ms server deadline + a prompt that resolves only on abort:
-      // the deadline timer must abort the AbortController. With non-
-      // blocking prompt the HTTP response is always 202; the deadline
-      // outcome is delivered via `turn_error` on the SSE bus.
-      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+    it('forwards the server-side deadline to the bridge via context.deadlineMs', async () => {
+      // The bridge owns the deadline race (DAEMON-003): the route only
+      // resolves the effective deadline and passes it through the
+      // sendPrompt context. With non-blocking prompt the HTTP response
+      // is always 202; the deadline outcome (`turn_error` with code
+      // `prompt_deadline_exceeded`) is published by the bridge and is
+      // covered by bridge.test.ts.
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise(() => {}),
+      });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 50 },
         undefined,
@@ -22145,13 +22401,9 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       expect(res.status).toBe(202);
       expect(res.body).toHaveProperty('promptId');
       expect(res.body).toHaveProperty('lastEventId');
-      // Wait for the deadline timer to fire asynchronously.
-      await new Promise((r) => setTimeout(r, 200));
       expect(bridge.promptCalls).toHaveLength(1);
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
     });
 
     it('strips route-only deadlineMs before forwarding the prompt body', async () => {
@@ -22185,10 +22437,11 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
     });
 
     it('caps a per-prompt `deadlineMs` override at the server flag', async () => {
-      // Server flag 50ms, request asks for 5000ms — effective deadline
-      // must be 50ms. With non-blocking prompt the HTTP response is
-      // always 202; we verify the abort signal fires within ~50ms.
-      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+      // Server flag 50ms, request asks for 5000ms — the effective
+      // deadline forwarded to the bridge must be min(server, request).
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise(() => {}),
+      });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 50 },
         undefined,
@@ -22202,17 +22455,16 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
           deadlineMs: 5_000,
         });
       expect(res.status).toBe(202);
-      await new Promise((r) => setTimeout(r, 200));
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
     });
 
     it('uses the per-prompt override when shorter than the server flag', async () => {
       // Server flag 10s, request 30ms — request wins as the tighter
-      // bound. Abort signal should fire within ~30ms.
-      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+      // bound; the bridge receives the request value.
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise(() => {}),
+      });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 10_000 },
         undefined,
@@ -22226,17 +22478,15 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
           deadlineMs: 30,
         });
       expect(res.status).toBe(202);
-      await new Promise((r) => setTimeout(r, 200));
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(30);
     });
 
-    it('still aborts the signal when the bridge IGNORES the abort (non-cooperative bridge)', async () => {
-      // With non-blocking prompt the HTTP response is always 202. The
-      // deadline timer must still fire and abort the signal so the
-      // bridge can observe it, even if it ignores the abort.
+    it('never aborts the bridge signal from a route-side timer (deadline owned by the bridge)', async () => {
+      // Regression guard for the DAEMON-003 timer migration: even well
+      // past the configured deadline the route must NOT abort the
+      // signal — deadline enforcement (terminal publication, FIFO
+      // release, best-effort agent cancel) is the bridge's job.
       const bridge = fakeBridge({
         promptImpl: () => new Promise(() => {}),
       });
@@ -22251,10 +22501,8 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .send({ prompt: [{ type: 'text', text: 'slow' }] });
       expect(res.status).toBe(202);
       await new Promise((r) => setTimeout(r, 200));
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
     });
 
     it('returns 202 without deadline when the flag is unset', async () => {
@@ -22269,10 +22517,14 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       expect(res.status).toBe(202);
       expect(res.body).toHaveProperty('promptId');
       expect(res.body).toHaveProperty('lastEventId');
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBeUndefined();
     });
 
-    it('does not fire the deadline when the prompt resolves promptly', async () => {
-      // 5s deadline + immediate resolve: the timer must not fire.
+    it('forwards the deadline even when the prompt resolves promptly', async () => {
+      // 5s deadline + immediate resolve: the route passes the deadline
+      // through unconditionally; the bridge clears its own timer when
+      // the prompt settles (covered by bridge.test.ts).
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -22287,9 +22539,21 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
       expect(res.status).toBe(202);
       expect(res.body).toHaveProperty('promptId');
-      // Give enough time for a timer to fire if it were going to.
+      // Give enough time for a stray route-side timer to fire if one
+      // still existed.
       await new Promise((r) => setTimeout(r, 100));
       expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(5_000);
+    });
+
+    it('keeps re-exporting PromptDeadlineExceededError after the bridge migration', () => {
+      // The class definition moved into acp-bridge (DAEMON-003); the
+      // server module must keep exporting it so SDK consumers and
+      // `instanceof` checks across the package boundary stay intact.
+      const err = new PromptDeadlineExceededError(75);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.name).toBe('PromptDeadlineExceededError');
+      expect(err.deadlineMs).toBe(75);
     });
   });
 

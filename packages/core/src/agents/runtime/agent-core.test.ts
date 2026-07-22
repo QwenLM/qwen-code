@@ -5,8 +5,12 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { FunctionDeclaration } from '@google/genai';
 import { AgentCore, type ReasoningLoopResult } from './agent-core.js';
+import { attachJsonlTranscriptWriter } from '../agent-transcript.js';
 import {
   getCurrentAgentDepth,
   getCurrentAgentId,
@@ -381,6 +385,7 @@ describe('AgentCore.prepareTools', () => {
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],
     maxSubagentDepth = 5,
+    toolOutputBatchBudget = Number.POSITIVE_INFINITY,
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
@@ -400,6 +405,8 @@ describe('AgentCore.prepareTools', () => {
         getFunctionDeclarationsFiltered: getFunctionDeclarationsFilteredSpy,
       }),
       getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
+      getToolOutputBatchBudget: vi.fn().mockReturnValue(toolOutputBatchBudget),
+      getToolResultBytesWritten: vi.fn().mockReturnValue(500 * 1024 * 1024),
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -684,6 +691,74 @@ describe('AgentCore.prepareTools', () => {
       expect(response?.error).not.toContain('not found');
     },
   );
+
+  it('hard-caps the aggregate subagent tool response', async () => {
+    const { core } = buildAgentForTools(undefined, [], 5, 1000);
+    const missingName = `missing_${'a'.repeat(2000)}`;
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-core-'));
+    const jsonlPath = path.join(tempDir, 'agent.jsonl');
+    const writer = attachJsonlTranscriptWriter(
+      core.getEventEmitter(),
+      jsonlPath,
+      {
+        agentId: 'agent-budget',
+        agentName: 'test-subagent',
+        sessionId: 'session-budget',
+        cwd: tempDir,
+        version: 'test',
+      },
+    );
+
+    try {
+      const result = await core.processFunctionCalls(
+        [
+          { name: missingName, args: {} },
+          { name: missingName, args: {} },
+        ],
+        new AbortController(),
+        'prompt-budget',
+        1,
+        [],
+      );
+
+      const parts = result.messages[0].parts ?? [];
+      const total = parts.reduce((sum, part) => {
+        const response = part.functionResponse?.response;
+        const output = response?.['output'];
+        const error = response?.['error'];
+        return (
+          sum +
+          (typeof output === 'string' ? output.length : 0) +
+          (typeof error === 'string' ? error.length : 0)
+        );
+      }, 0);
+      expect(total).toBeLessThanOrEqual(1000);
+      const responseIds = parts.map((part) => part.functionResponse?.id);
+      expect(new Set(responseIds).size).toBe(2);
+      expect(responseIds[0]).toMatch(/-0$/);
+      expect(responseIds[1]).toMatch(/-1$/);
+
+      writer.cleanup();
+      const records = fs
+        .readFileSync(jsonlPath, 'utf8')
+        .trim()
+        .split('\n')
+        .map(
+          (line) =>
+            JSON.parse(line) as {
+              type?: string;
+              message?: { parts?: unknown[] };
+            },
+        );
+      const transcriptParts = records
+        .filter((record) => record.type === 'tool_result')
+        .flatMap((record) => record.message?.parts ?? []);
+      expect(transcriptParts).toEqual(parts);
+    } finally {
+      writer.cleanup();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
 
   // ─── Nested sub-agents ──────────────────────────────────────────
   // The AgentTool is depth-gated: available to a sub-agent only while

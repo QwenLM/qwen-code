@@ -51,6 +51,7 @@ const BOUNDARY_TOOLS = new Set<string>([
   ToolNames.ENTER_PLAN_MODE,
   ToolNames.TEAM_PLAN_APPROVAL,
   ToolNames.WEB_FETCH,
+  ToolNames.WEB_SEARCH,
 ]);
 
 /**

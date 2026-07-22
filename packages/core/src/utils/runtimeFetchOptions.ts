@@ -4,16 +4,53 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  Agent,
-  EnvHttpProxyAgent,
-  fetch as undiciFetch,
-  type Dispatcher,
-} from 'undici';
+import type { Dispatcher } from 'undici';
 
 import { createDebugLogger } from './debugLogger.js';
 
 const debugLogger = createDebugLogger('RUNTIME_FETCH');
+
+type UndiciModule = typeof import('undici');
+
+let undiciModule: UndiciModule | undefined;
+let undiciModulePromise: Promise<UndiciModule> | undefined;
+
+/**
+ * Load undici behind a dynamic import so it stays out of the eager startup
+ * closure (issue #7264). esbuild compiles the CJS undici package into a
+ * default-only dynamic chunk (no named exports), while Node and vitest
+ * expose named exports directly — unwrap only the default-only shape.
+ */
+export async function loadUndici(): Promise<UndiciModule> {
+  undiciModulePromise ??= import('undici').then((mod) => {
+    const keys = Object.keys(mod);
+    if (keys.length === 1 && keys[0] === 'default') {
+      return (mod as unknown as { default: UndiciModule }).default;
+    }
+    return mod;
+  });
+  return undiciModulePromise;
+}
+
+/**
+ * Async entry points that lead to the synchronous dispatcher builders below
+ * (content generator creation, preconnect) must await this before calling
+ * them.
+ */
+export async function preloadRuntimeFetchModule(): Promise<void> {
+  if (undiciModule) return;
+  undiciModule = await loadUndici();
+}
+
+function requireUndici(): UndiciModule {
+  if (!undiciModule) {
+    throw new Error(
+      'undici is not loaded yet; await preloadRuntimeFetchModule() before ' +
+        'building runtime fetch options or dispatchers',
+    );
+  }
+  return undiciModule;
+}
 
 /**
  * JavaScript runtime type
@@ -219,6 +256,7 @@ export function getOrCreateSharedDispatcher(
     return cached;
   }
 
+  const { EnvHttpProxyAgent } = requireUndici();
   const dispatcher = new EnvHttpProxyAgent({
     httpProxy: proxyUrl,
     httpsProxy: proxyUrl,
@@ -644,6 +682,7 @@ function buildFetchOptionsWithDispatcher(
   proxyUrl?: string,
 ): OpenAIRuntimeFetchOptions | AnthropicRuntimeFetchOptions {
   const insecure = isTlsVerificationDisabled();
+  const { Agent, fetch: undiciFetch } = requireUndici();
   // When no proxy is configured, use a cached plain undici Agent with disabled
   // timeouts (headersTimeout: 0, bodyTimeout: 0). This prevents undici's 300s
   // default bodyTimeout from aborting long-running requests to local LLM
