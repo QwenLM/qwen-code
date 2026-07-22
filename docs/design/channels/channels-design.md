@@ -63,7 +63,7 @@ Slash commands (`/clear`, `/help`, `/status`) are handled in ChannelBase before 
 
 ### Sessions
 
-One `qwen-code --acp` process with multiple ACP sessions. Scope per channel: **`user`** (default), **`thread`**, or **`single`**. Routing keys namespaced as `<channelName>:<key>`.
+One `qwen-code --acp` process with multiple ACP sessions. Scope per channel: **`user`** (default), **`thread`**, **`chat_thread`**, or **`single`**. Routing keys namespaced as `<channelName>:<key>`. See [Code Hosting Adapters](./channel-code-hosting.md) for the `chat_thread` scope design.
 
 ### Error Handling
 
@@ -125,7 +125,7 @@ Plugins run in-process (no sandbox), same trust model as npm dependencies.
       "token": "$TELEGRAM_BOT_TOKEN", // env var reference
       "senderPolicy": "allowlist", // allowlist | pairing | open
       "allowedUsers": ["123456"],
-      "sessionScope": "user", // user | thread | single
+      "sessionScope": "user", // user | thread | chat_thread | single
       "cwd": "/path/to/project",
       "model": "qwen3.5-plus",
       "instructions": "Keep responses short.",

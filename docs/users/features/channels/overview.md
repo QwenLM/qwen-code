@@ -61,7 +61,7 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 | `model`                  | No                              | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                                                                               |
 | `senderPolicy`           | No                              | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                                                                   |
 | `allowedUsers`           | No                              | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                                                                   |
-| `sessionScope`           | No                              | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                                                                       |
+| `sessionScope`           | No                              | How sessions are scoped: `user` (default), `thread`, `chat_thread`, or `single`                                                                                                                                        |
 | `cwd`                    | No                              | Working directory for the agent. Defaults to the current directory                                                                                                                                                     |
 | `instructions`           | No                              | Custom instructions prepended to the first message of each session                                                                                                                                                     |
 | `groupPolicy`            | No                              | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                                                                       |
@@ -87,6 +87,7 @@ Controls how conversation sessions are managed:
 
 - **`user`** (default) — One session per user. All messages from the same user share a conversation.
 - **`thread`** — One session per thread/topic. Useful for group chats with threads.
+- **`chat_thread`** — One session per chat + thread combination. Like `thread`, but includes the chat identity in the routing key to prevent cross-chat session collision. Recommended for polling channels (GitHub, GitLab, Gitea) where thread IDs are local to a repository.
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
 
 ### Channel Memory
@@ -407,7 +408,7 @@ Polling channels use a repository-per-chat, issue-per-thread model:
 
 - **`chatId`** — the repository path (e.g., `owner/repo`)
 - **`threadId`** — the issue or pull/merge request (e.g., `issue:42`, `pr:17` for GitHub/Gitea, or `mr:17` for GitLab)
-- **`sessionScope: thread`** is the natural fit — each issue or pull request gets its own session
+- **`sessionScope: chat_thread`** is recommended — each issue or pull request gets its own session, scoped by repository to prevent cross-repo collision
 
 ### Proactive Responses
 
@@ -421,7 +422,7 @@ Polling channels support proactive sends: the agent can create new issues or pos
     "my-github": {
       "type": "github",
       "token": "$GITHUB_TOKEN",
-      "sessionScope": "thread",
+      "sessionScope": "chat_thread",
       "cwd": "/path/to/repo",
       "pollInterval": 30000
     }
