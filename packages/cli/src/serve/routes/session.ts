@@ -428,6 +428,10 @@ export function registerSessionRoutes(
 
   // Tracks workspaces with an active branch session (workspaceCwd → sessionId).
   // Prevents concurrent branch sessions that would conflict on HEAD.
+  // Known limitation: this guard only prevents branch-vs-branch conflicts.
+  // A concurrent current-branch session in the same workspace is not blocked;
+  // the dirty-tree check mitigates the most common case but a clean tree can
+  // still be silently moved to the new branch.
   const activeBranchSessions = new Map<string, string>();
   // Workspaces with a branch creation currently in flight (reserved between
   // the conflict guard and `activeBranchSessions.set`, which only happens
@@ -1239,6 +1243,7 @@ export function registerSessionRoutes(
       const existingBranchSession = activeBranchSessions.get(workspaceCwd);
       if (existingBranchSession) {
         try {
+          // Throws if the session is gone, letting us clean up the stale entry.
           runtime.bridge.getSessionSummary(existingBranchSession);
           res.status(409).json({
             error: 'A branch session is already active for this workspace',
@@ -1271,11 +1276,15 @@ export function registerSessionRoutes(
       if (
         /[^a-zA-Z0-9._/-]/.test(branchName) ||
         branchName.includes('..') ||
+        branchName.includes('//') ||
         branchName.startsWith('.') ||
         branchName.startsWith('-') ||
         branchName.startsWith('/') ||
         branchName.endsWith('/') ||
         branchName.endsWith('.') ||
+        branchName
+          .split('/')
+          .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
         branchName === GIT_RESERVED_BRANCH
       ) {
         res.status(400).json({
@@ -1308,11 +1317,20 @@ export function registerSessionRoutes(
         // rev-parse fails → branch doesn't exist, good.
       }
       // Check for dirty working tree.
-      const { stdout: statusOut } = await execFileAsync(
-        'git',
-        ['status', '--porcelain'],
-        { cwd: workspaceCwd },
-      );
+      let statusOut: string;
+      try {
+        ({ stdout: statusOut } = await execFileAsync(
+          'git',
+          ['status', '--porcelain'],
+          { cwd: workspaceCwd, maxBuffer: 10 * 1024 * 1024 },
+        ));
+      } catch {
+        res.status(500).json({
+          error: 'Failed to check working tree status',
+          code: 'branch_status_failed',
+        });
+        return;
+      }
       if (statusOut.trim().length > 0) {
         res.status(409).json({
           error: 'Uncommitted changes detected. Commit or stash first.',
@@ -1511,10 +1529,18 @@ export function registerSessionRoutes(
                   {
                     cwd: workspaceCwd,
                   },
-                ).catch(() => {});
+                ).catch((rollbackErr) => {
+                  daemonLog?.warn('branch rollback checkout failed', {
+                    error: rollbackErr,
+                  });
+                });
                 await execFileAsync('git', ['branch', '-D', branchMeta.name], {
                   cwd: workspaceCwd,
-                }).catch(() => {});
+                }).catch((rollbackErr) => {
+                  daemonLog?.warn('branch rollback delete failed', {
+                    error: rollbackErr,
+                  });
+                });
               }
             }
           } catch {
@@ -1535,9 +1561,9 @@ export function registerSessionRoutes(
             .catch(() => {
               // Best-effort cleanup; channel.exited will eventually reap.
             });
-          // A branch was checked out and the session lives on for the other
-          // attached client; release the in-flight reservation so the
-          // workspace isn't permanently blocked from future branch creation.
+          // Unreachable for branch sessions (sessionScope='thread' forces a
+          // fresh spawn, never attach), but kept as a safety net: release the
+          // in-flight reservation so the workspace is not permanently blocked.
           if (branchMeta) {
             inFlightBranchWorkspaces.delete(workspaceCwd);
           }
@@ -1648,10 +1674,18 @@ export function registerSessionRoutes(
         inFlightBranchWorkspaces.delete(workspaceCwd);
         await execFileAsync('git', ['checkout', branchMeta.baseBranch], {
           cwd: workspaceCwd,
-        }).catch(() => {});
+        }).catch((rollbackErr) => {
+          daemonLog?.warn('branch rollback checkout failed', {
+            error: rollbackErr,
+          });
+        });
         await execFileAsync('git', ['branch', '-D', branchMeta.name], {
           cwd: workspaceCwd,
-        }).catch(() => {});
+        }).catch((rollbackErr) => {
+          daemonLog?.warn('branch rollback delete failed', {
+            error: rollbackErr,
+          });
+        });
       }
       sendBridgeError(res, err, { route: 'POST /session' });
     }

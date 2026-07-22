@@ -42,11 +42,13 @@ function validateBranchName(name: string): boolean {
   return !(
     /[^a-zA-Z0-9._/-]/.test(name) ||
     name.includes('..') ||
+    name.includes('//') ||
     name.startsWith('.') ||
     name.startsWith('-') ||
     name.startsWith('/') ||
     name.endsWith('/') ||
     name.endsWith('.') ||
+    name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
     name === 'HEAD'
   );
 }
@@ -132,7 +134,7 @@ export function GitModePopover({
             className={`${styles.chip} ${isBranch ? styles.chipBranch : ''} ${isWorktree ? styles.chipWorktree : ''} ${compact ? styles.chipCompact : ''}`}
             data-web-shell-git-branch
             data-testid="git-mode-chip"
-            aria-label={t('gitMode.title')}
+            aria-label={`${t('gitMode.title')}: ${chipLabel}`}
           >
             <span className={styles.chipIcon}>
               {isWorktree ? (
