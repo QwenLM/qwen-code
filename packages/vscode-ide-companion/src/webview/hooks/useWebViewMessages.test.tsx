@@ -625,6 +625,10 @@ describe('useWebViewMessages', () => {
       'screen shot.png',
       'C:\\Users\\Me\\Pictures\\screen shot.png',
     );
+    expect(rendered.handlers.fileContext.addFileReference).toHaveBeenCalledWith(
+      'C:\\Users\\Me\\Pictures\\screen shot.png',
+      'C:\\Users\\Me\\Pictures\\screen shot.png',
+    );
     expect(input.textContent).toBe(
       '@C:\\Users\\Me\\Pictures\\screen shot.png ',
     );

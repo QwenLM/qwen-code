@@ -275,4 +275,37 @@ describe('useMessageSubmit', () => {
       },
     });
   });
+
+  it('resolves raw image picker paths with spaces on submit', () => {
+    const imagePath = 'C:\\Users\\Me\\Pictures\\screen shot.png';
+    const props = createDefaultProps({
+      inputText: `describe @${imagePath} please`,
+    });
+    props.fileContext.getFileReference = vi.fn((name: string) =>
+      name === imagePath ? imagePath : undefined,
+    );
+    const rendered = renderHookHarness(props);
+    root = rendered.root;
+    container = rendered.container;
+
+    act(() => {
+      rendered.api.handleSubmit(createSubmitEvent());
+    });
+
+    expect(props.vscode.postMessage).toHaveBeenCalledWith({
+      type: 'sendMessage',
+      data: {
+        text: `describe @${imagePath} please`,
+        context: [
+          {
+            type: 'file',
+            name: imagePath,
+            value: imagePath,
+          },
+        ],
+        fileContext: undefined,
+        attachments: undefined,
+      },
+    });
+  });
 });

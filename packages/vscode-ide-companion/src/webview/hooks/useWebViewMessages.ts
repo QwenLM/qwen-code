@@ -1300,6 +1300,12 @@ export const useWebViewMessages = ({
             const referenceText = isDisplayableImagePath(attachment.value)
               ? attachment.value
               : attachment.name;
+            if (referenceText !== attachment.name) {
+              handlers.fileContext.addFileReference(
+                referenceText,
+                attachment.value,
+              );
+            }
             const newText = currentText
               ? `${currentText} @${referenceText} `
               : `@${referenceText} `;

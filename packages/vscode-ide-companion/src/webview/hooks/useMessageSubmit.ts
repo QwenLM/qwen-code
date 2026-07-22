@@ -57,6 +57,40 @@ export const shouldSendMessage = ({
   return hasText || hasAttachments;
 };
 
+function findFileReferences(
+  text: string,
+  getFileReference: (fileName: string) => string | undefined,
+): Array<{ name: string; value: string }> {
+  const references: Array<{ name: string; value: string }> = [];
+  let currentIndex = 0;
+
+  while (currentIndex < text.length) {
+    const atIndex = text.indexOf('@', currentIndex);
+    if (atIndex === -1) {
+      break;
+    }
+
+    let matched = false;
+    // ponytail: O(n²) against short composer text; replace with map-key scan if composer parsing gets hot.
+    for (let end = text.length; end > atIndex + 1; end -= 1) {
+      const name = text.slice(atIndex + 1, end).trimEnd();
+      const value = getFileReference(name);
+      if (value) {
+        references.push({ name, value });
+        currentIndex = end;
+        matched = true;
+        break;
+      }
+    }
+
+    if (!matched) {
+      currentIndex = atIndex + 1;
+    }
+  }
+
+  return references;
+}
+
 /**
  * Message submit Hook
  * Handles message submission logic and context parsing
@@ -137,20 +171,15 @@ export const useMessageSubmit = ({
         startLine?: number;
         endLine?: number;
       }> = [];
-      const fileRefPattern = /@([^\s]+)/g;
-      let match;
-
-      while ((match = fileRefPattern.exec(textToSend)) !== null) {
-        const fileName = match[1];
-        const filePath = fileContext.getFileReference(fileName);
-
-        if (filePath) {
-          context.push({
-            type: 'file',
-            name: fileName,
-            value: filePath,
-          });
-        }
+      for (const reference of findFileReferences(
+        textToSend,
+        fileContext.getFileReference,
+      )) {
+        context.push({
+          type: 'file',
+          name: reference.name,
+          value: reference.value,
+        });
       }
 
       // Add active file selection context if present and not skipped
