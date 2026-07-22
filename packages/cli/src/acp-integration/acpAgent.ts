@@ -242,6 +242,7 @@ import {
   STATUS_SCHEMA_VERSION,
   SERVE_CONTROL_EXT_METHODS,
   SERVE_STATUS_EXT_METHODS,
+  SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS,
   mapDomainErrorToErrorKind,
   type AcpPreflightKind,
   type ServeErrorKind,
@@ -3055,6 +3056,23 @@ class QwenAgent implements Agent {
       return this.config;
     }
     return this.workspaceMcpDiscoveryConfig ?? this.config;
+  }
+
+  private async notifyMcpAuthenticationCompleted(
+    operationId: string | undefined,
+    serverName: string,
+  ): Promise<void> {
+    if (operationId === undefined) return;
+    await this.connection
+      .extNotification(
+        SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS.mcpAuthenticationCompleted,
+        { v: 1, operationId, serverName },
+      )
+      .catch((error: unknown) => {
+        debugLogger.debug(
+          `MCP OAuth completion notification failed for ${serverName}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
   }
 
   private getLiveMcpConfigs(serverName: string): Config[] {
@@ -7493,6 +7511,7 @@ class QwenAgent implements Agent {
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpManage: {
         const serverName = params['serverName'];
         const action = params['action'];
+        const operationId = params['operationId'];
         if (typeof serverName !== 'string' || serverName.length === 0) {
           throw RequestError.invalidParams(
             undefined,
@@ -7511,18 +7530,70 @@ class QwenAgent implements Agent {
             'Invalid or missing MCP manage action',
           );
         }
-        const config = this.getWorkspaceMcpConfig(serverName);
-        const servers = config.getMcpServers() ?? {};
+        if (operationId !== undefined && typeof operationId !== 'string') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid MCP operationId',
+          );
+        }
+        let config: Config;
+        try {
+          config = this.getWorkspaceMcpConfig(serverName);
+        } catch (error) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
+          throw error;
+        }
+        let servers: ReturnType<Config['getMcpServers']>;
+        try {
+          servers = config.getMcpServers();
+        } catch (error) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
+          throw error;
+        }
+        servers ??= {};
         const server = servers[serverName];
         if (!server) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
           throw new RequestError(
             -32004,
             `MCP server not configured: ${JSON.stringify(serverName)}`,
             { errorKind: 'mcp_server_not_found', serverName },
           );
         }
-        const toolRegistry = config.getToolRegistry();
+        let toolRegistry: ReturnType<Config['getToolRegistry']>;
+        try {
+          toolRegistry = config.getToolRegistry();
+        } catch (error) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
+          throw error;
+        }
         if (!toolRegistry) {
+          if (action === 'authenticate') {
+            await this.notifyMcpAuthenticationCompleted(
+              operationId,
+              serverName,
+            );
+          }
           throw RequestError.internalError(
             undefined,
             'ToolRegistry unavailable on this Config',
@@ -7751,6 +7822,10 @@ class QwenAgent implements Agent {
               );
               appEvents.removeListener(AppEvent.OauthAuthUrl, authUrlListener);
               this.pendingMcpAuthentications.delete(serverName);
+              await this.notifyMcpAuthenticationCompleted(
+                operationId,
+                serverName,
+              );
             }
           })();
         }
@@ -8933,6 +9008,64 @@ class QwenAgent implements Agent {
           );
         }
         return { ok: true };
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceRuntimeExtensionsRefresh: {
+        const sessions = Array.from(this.sessions.values());
+        const configs = new Set(
+          [
+            this.config,
+            ...(this.workspaceMcpDiscoveryConfig
+              ? [this.workspaceMcpDiscoveryConfig]
+              : []),
+            ...sessions.map((session) => session.getConfig()),
+          ].filter(
+            (config) => typeof config.getExtensionManager === 'function',
+          ),
+        );
+        const errors: unknown[] = [];
+        let generation: number | undefined;
+        const runRefresh = async (refresh: () => Promise<unknown>) => {
+          try {
+            await refresh();
+          } catch (error) {
+            errors.push(error);
+          }
+        };
+        for (const config of configs) {
+          const extensionManager = config.getExtensionManager();
+          await runRefresh(async () => {
+            const snapshot = await extensionManager.refreshCacheWithSnapshot();
+            if (config === this.config) {
+              generation = snapshot.generation;
+            }
+          });
+          await runRefresh(async () => await extensionManager.refreshTools());
+          await runRefresh(
+            async () =>
+              await config.getGeminiClient()?.refreshSystemInstruction(),
+          );
+        }
+        for (const session of sessions) {
+          await runRefresh(
+            async () => await session.sendAvailableCommandsUpdate(),
+          );
+        }
+        if (errors.length > 0) {
+          const details = errors
+            .map((error) =>
+              error instanceof Error ? error.message : String(error),
+            )
+            .join('; ');
+          throw new AggregateError(
+            errors,
+            `Extension runtime refresh failed: ${details}`,
+          );
+        }
+        return {
+          ok: true,
+          refreshed: configs.size,
+          ...(generation === undefined ? {} : { generation }),
+        };
       }
       case 'deleteSession': {
         const sessionId = params['sessionId'] as string;

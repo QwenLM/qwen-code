@@ -314,9 +314,9 @@ export function createDaemonWorkspaceService(
       // SkillManager (including extension-provided skills). `queryWorkspaceStatus`
       // returns the idle placeholder (`initialized: false`, empty `skills`)
       // whenever no child channel is live — before the first session, after
-      // the child is reaped on session close (`--channel-idle-timeout-ms`
-      // defaults to an immediate kill), and when a cold-start preheat times
-      // out before the child ever answers. In those windows the Web Shell's
+      // an explicitly configured channel idle timeout reaps the child, and
+      // when a cold-start preheat times out before the child ever answers. In
+      // those windows the Web Shell's
       // pre-first-prompt slash-command list would otherwise drop every skill,
       // so `/rev` stops autocompleting `/review`. `initialized` cleanly
       // separates a real child answer (always `true`) from the placeholder.
@@ -349,10 +349,10 @@ export function createDaemonWorkspaceService(
         durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
       });
 
-      if (channelLive()) {
-        return finish({ ready: true, channelLive: true });
-      }
       if (!preheatAcpChildOnBridge) {
+        if (channelLive()) {
+          return finish({ ready: true, channelLive: true });
+        }
         return finish({
           ready: false,
           channelLive: false,
@@ -409,6 +409,9 @@ export function createDaemonWorkspaceService(
             err instanceof TimeoutError
               ? 'ACP preheat did not complete before the timeout'
               : 'ACP preheat failed',
+          ...(err instanceof TimeoutError && !live
+            ? { backgroundInProgress: true }
+            : {}),
         });
       }
 

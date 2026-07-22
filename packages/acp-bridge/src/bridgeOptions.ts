@@ -400,11 +400,9 @@ export interface BridgeOptions {
    */
   onDiagnosticLine?: DiagnosticLineSink;
   /**
-   * Milliseconds to keep the ACP child alive after the last session
-   * closes. When a new session arrives during the idle window, the
-   * warm channel is reused without a cold start. `0` (default) kills
-   * the channel immediately (current behavior). The timer is `.unref()`'d
-   * so it does not prevent daemon exit.
+   * Keeps the ACP child alive after the last session and workspace operation
+   * drain. `0` or unset kills it immediately. Timers are `.unref()`'d so they
+   * do not prevent daemon exit.
    */
   channelIdleTimeoutMs?: number;
   /**

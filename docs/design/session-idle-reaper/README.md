@@ -92,7 +92,7 @@ Bridge closure (createHttpAcpBridge)
 
 | Mechanism                                 | Scope                     | What it manages                                                                  |
 | ----------------------------------------- | ------------------------- | -------------------------------------------------------------------------------- |
-| `channelIdleTimeoutMs` + `startIdleTimer` | Channel (child process)   | Kills the `qwen --acp` child when ALL sessions are gone                          |
+| `channelIdleTimeoutMs` + `startIdleTimer` | Channel (child process)   | Unset keeps the child live; a positive value delays reap                         |
 | **Session reaper** (this design)          | Session (in-memory entry) | Closes individual sessions when idle                                             |
 | `ConnectionRegistry` sweep                | ACP-over-HTTP connection  | Reaps `/acp` transport-layer connections (different layer)                       |
 | `writerIdleTimeoutMs`                     | SSE subscriber            | Evicts a single stuck SSE subscriber                                             |
@@ -309,6 +309,8 @@ function.
 
 - `startSessionReaper()` is called at bridge construction time (after
   option validation, alongside the existing `channelIdleTimeoutMs` setup).
+  Omitting that channel option keeps the Workspace Runtime live; configured
+  values must be positive.
 - `stopSessionReaper()` is called in both `shutdown()` and `killAllSync()`.
 
 ### 4.6 Interaction with existing `closeSession` callers
@@ -367,20 +369,20 @@ generic terminal-frame handler (`isTerminalLifecycleEvent`) already handles
 
 ### 5.1 Unit tests (`bridge.test.ts`)
 
-| #   | Test                                                   | Description                                                                                                                                                                            |
-| --- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 1   | Idle session is reaped after timeout                   | Create a session, advance time past `sessionIdleTimeoutMs`, trigger reaper tick, verify session removed from `byId` and `session_closed` event published with `reason: 'idle_timeout'` |
-| 2   | Session with active prompt is NOT reaped               | Create a session, start a prompt, advance time, verify session survives reaper tick                                                                                                    |
-| 3   | Session with live SSE subscriber is NOT reaped         | Create a session, subscribe to its EventBus, advance time, verify session survives                                                                                                     |
-| 4   | Session with registered client is NOT reaped           | Create a session, register a clientId, advance time, verify session survives                                                                                                           |
-| 5   | Reaper disabled when interval = 0                      | Pass `sessionReapIntervalMs: 0`, verify no `setInterval` is armed                                                                                                                      |
-| 6   | Reaper disabled when timeout = 0                       | Pass `sessionIdleTimeoutMs: 0`, verify no `setInterval` is armed                                                                                                                       |
-| 7   | Reaper stopped on shutdown                             | Call `shutdown()`, verify `clearInterval` was called                                                                                                                                   |
-| 8   | closeSession reason defaults to 'client_close'         | Call `closeSession` without explicit reason, verify published event has `reason: 'client_close'`                                                                                       |
-| 9   | closeSession with explicit reason                      | Call `closeSession` with `reason: 'idle_timeout'`, verify published event                                                                                                              |
-| 10  | Multiple idle sessions reaped in one tick              | Create 3 idle sessions, advance time, trigger tick, verify all 3 reaped                                                                                                                |
-| 11  | Session with heartbeat within TTL survives             | Create a session, record heartbeat, advance time to just under TTL, verify session survives                                                                                            |
-| 12  | Channel idle timer triggered after last session reaped | Create 1 session (last on channel), reap it, verify `startIdleTimer` is called on the channel                                                                                          |
+| #   | Test                                                    | Description                                                                                                                                                                            |
+| --- | ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | Idle session is reaped after timeout                    | Create a session, advance time past `sessionIdleTimeoutMs`, trigger reaper tick, verify session removed from `byId` and `session_closed` event published with `reason: 'idle_timeout'` |
+| 2   | Session with active prompt is NOT reaped                | Create a session, start a prompt, advance time, verify session survives reaper tick                                                                                                    |
+| 3   | Session with live SSE subscriber is NOT reaped          | Create a session, subscribe to its EventBus, advance time, verify session survives                                                                                                     |
+| 4   | Session with registered client is NOT reaped            | Create a session, register a clientId, advance time, verify session survives                                                                                                           |
+| 5   | Reaper disabled when interval = 0                       | Pass `sessionReapIntervalMs: 0`, verify no `setInterval` is armed                                                                                                                      |
+| 6   | Reaper disabled when timeout = 0                        | Pass `sessionIdleTimeoutMs: 0`, verify no `setInterval` is armed                                                                                                                       |
+| 7   | Reaper stopped on shutdown                              | Call `shutdown()`, verify `clearInterval` was called                                                                                                                                   |
+| 8   | closeSession reason defaults to 'client_close'          | Call `closeSession` without explicit reason, verify published event has `reason: 'client_close'`                                                                                       |
+| 9   | closeSession with explicit reason                       | Call `closeSession` with `reason: 'idle_timeout'`, verify published event                                                                                                              |
+| 10  | Multiple idle sessions reaped in one tick               | Create 3 idle sessions, advance time, trigger tick, verify all 3 reaped                                                                                                                |
+| 11  | Session with heartbeat within TTL survives              | Create a session, record heartbeat, advance time to just under TTL, verify session survives                                                                                            |
+| 12  | Channel idle policy evaluated after last session reaped | Create 1 session (last on channel), reap it, verify an unset timeout keeps the channel and an explicit positive timeout arms the compatibility timer                                   |
 
 ### 5.2 Integration tests (`server.test.ts`)
 
@@ -431,4 +433,4 @@ generic terminal-frame handler (`isTerminalLifecycleEvent`) already handles
 | `closeSession` inside reaper throws, poisoning the scan loop                    | Each close is in its own `.catch()` — one failure doesn't block others                                                                                                            |
 | Reaper iteration over `byId` during concurrent `closeSession` from another path | ES2015 Map iteration tolerates deletion of current/previous keys. Double-close is idempotent (`byId.get` returns undefined → `SessionNotFoundError` caught by reaper's `.catch`). |
 | Performance of scanning 20 sessions every 60s                                   | Trivial — 20 Map reads + 4 field checks each. No I/O.                                                                                                                             |
-| Channel idle timer interaction                                                  | When the last session is reaped, `closeSession` already calls `startIdleTimer` on the channel. No additional logic needed.                                                        |
+| Channel idle timer interaction                                                  | When the last session is reaped, `closeSession` calls `startIdleTimer`; an unset or zero timeout reaps immediately, while an explicit positive timeout arms the timer.            |

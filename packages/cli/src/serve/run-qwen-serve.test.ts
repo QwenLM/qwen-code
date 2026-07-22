@@ -999,6 +999,7 @@ describe('runQwenServe telemetry validation', () => {
         maxSessions: 1,
         eventRingSize: 1234,
         compactedReplayMaxBytes: 1024,
+        channelIdleTimeoutMs: 60_000,
         serveWebShell: false,
       },
       {
@@ -1011,11 +1012,13 @@ describe('runQwenServe telemetry validation', () => {
       await handle.runtimeReady;
       expect(createBridge).toHaveBeenCalledTimes(2);
       expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+        channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         permissionPolicy: 'local-only',
       });
       expect(createBridge.mock.calls[1]?.[0]).toMatchObject({
+        channelIdleTimeoutMs: 60_000,
         compactedReplayMaxBytes: 1024,
         eventRingSize: 1234,
         permissionPolicy: 'local-only',
@@ -1023,6 +1026,35 @@ describe('runQwenServe telemetry validation', () => {
       expect(createBridge.mock.calls[1]?.[0]).not.toHaveProperty(
         'permissionConsensusQuorum',
       );
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('accepts an explicit zero channel idle timeout', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-idle-timeout-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+
+    const createBridge = vi.spyOn(acpBridge, 'createAcpSessionBridge');
+    const handle = await runQwenServe({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace: tmpDir,
+      channelIdleTimeoutMs: 0,
+      serveWebShell: false,
+    });
+    try {
+      await handle.runtimeReady;
+      expect(createBridge).toHaveBeenCalled();
+      expect(createBridge.mock.calls[0]?.[0]).toMatchObject({
+        channelIdleTimeoutMs: 0,
+      });
     } finally {
       await handle.close();
     }
@@ -8479,6 +8511,31 @@ describe('runQwenServe startup observability', () => {
       expect(await waitForPreheatStatus(handle, 'succeeded')).toMatchObject({
         status: 'succeeded',
         durationMs: expect.any(Number),
+      });
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps the primary workspace runtime cold by default', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-startup-lazy-runtime-')),
+    );
+    const bridge = installInternalBridge(() => Promise.resolve());
+
+    const handle = await runQwenServe({
+      port: 0,
+      hostname: '127.0.0.1',
+      mode: 'http-bridge',
+      workspace: tmpDir,
+      maxSessions: 1,
+      serveWebShell: false,
+    });
+
+    try {
+      expect(bridge.preheat).not.toHaveBeenCalled();
+      expect((await readStartup(handle))?.preheat).toMatchObject({
+        status: 'not_scheduled',
       });
     } finally {
       await handle.close();

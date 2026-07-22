@@ -40,9 +40,8 @@ are logged rather than restoring the removed runtime.
 
 Runtime isolation covers cwd, environment overlay, filesystem/trust boundary,
 workspace services, bridge, Voice lease state, channel worker, and the ACP/MCP
-resource boundary. Production attempts to preheat the primary ACP child and
-retries on first use after failure; trusted secondaries start theirs on demand,
-and untrusted secondaries do not start ACP.
+resource boundary. Every trusted workspace starts its ACP child on the first
+runtime-backed command or Session; untrusted workspaces do not start ACP.
 Authentication, HTTP rate limits, listener and Voice admission caps,
 total-session admission, metrics, shutdown, and the process fault radius remain
 daemon-global. Run separate daemons when those process-level boundaries must be

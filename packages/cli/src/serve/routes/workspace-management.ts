@@ -19,6 +19,7 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
+import { getWorkspaceRuntimeCoordinator } from '../workspace-runtime-coordinator.js';
 import type { AcpHttpHandle } from '../acp-http/index.js';
 import {
   isPortableAbsolutePath,
@@ -62,6 +63,7 @@ export interface WorkspaceRemovalActivity {
   memoryTasks: number;
   channelWorkers: number;
   voiceSessions: number;
+  workspaceRuntime: number;
 }
 
 export interface WorkspaceRuntimeRemovalController {
@@ -723,6 +725,9 @@ export function registerWorkspaceManagementRoutes(
       memoryTasks: acpActivity.memoryTasks,
       channelWorkers: controllerActivity.channelWorkers,
       voiceSessions: controllerActivity.voiceSessions,
+      workspaceRuntime: getWorkspaceRuntimeCoordinator(runtime).hasActiveWork()
+        ? 1
+        : 0,
     };
   };
   const isBusy = (activity: WorkspaceRemovalActivity): boolean =>
@@ -931,6 +936,7 @@ export function registerWorkspaceManagementRoutes(
       let registryDraining = false;
       let controllerDraining = false;
       let acpDraining = false;
+      let runtimeCoordinatorDraining = false;
       const rollbackDrain = (): void => {
         if (acpDraining) {
           try {
@@ -947,6 +953,14 @@ export function registerWorkspaceManagementRoutes(
             // Continue rolling back the remaining gates.
           }
           controllerDraining = false;
+        }
+        if (runtimeCoordinatorDraining) {
+          try {
+            getWorkspaceRuntimeCoordinator(runtime).cancelDrain();
+          } catch {
+            // Continue rolling back the remaining gates.
+          }
+          runtimeCoordinatorDraining = false;
         }
         if (registryDraining) {
           try {
@@ -1018,6 +1032,7 @@ export function registerWorkspaceManagementRoutes(
         registryDraining = false;
         controllerDraining = false;
         acpDraining = false;
+        runtimeCoordinatorDraining = false;
       };
 
       try {
@@ -1029,6 +1044,8 @@ export function registerWorkspaceManagementRoutes(
           });
           return;
         }
+        getWorkspaceRuntimeCoordinator(runtime).beginDrain();
+        runtimeCoordinatorDraining = true;
         runtimeRemoval.beginDrain(runtime);
         controllerDraining = true;
         getAcpHandle?.()?.beginWorkspaceDrain(runtime.workspaceId);

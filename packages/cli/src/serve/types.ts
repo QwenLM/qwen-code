@@ -18,9 +18,8 @@ import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): production attempts to preheat the primary
- *   `qwen --acp` child and retries on first use after failure; trusted
- *   secondaries start one on demand, while untrusted secondaries do not.
+ * `http-bridge` (Stage 1): each trusted workspace starts its `qwen --acp`
+ *   child on first runtime command or Session; untrusted workspaces do not.
  *   Multiple sessions in one runtime multiplex onto its child via the
  *   agent's native `connection.newSession()` (see
  *   `acp-integration/acpAgent.ts:194`),
@@ -215,7 +214,7 @@ export interface ServeOptions {
    * Per-SSE-connection idle deadline.
    */
   writerIdleTimeoutMs?: number;
-  /** Non-negative ms to keep ACP child alive after last session closes. 0 = immediate kill (default). */
+  /** ACP child auto-reap delay in ms. 0 or unset = immediate kill. */
   channelIdleTimeoutMs?: number;
   /** Session reaper scan interval in ms. 0 = disabled. Default: 60000. */
   sessionReapIntervalMs?: number;

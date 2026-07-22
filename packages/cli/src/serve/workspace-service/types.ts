@@ -268,6 +268,7 @@ export interface WorkspaceAcpPreheatResult {
   durationMs: number;
   reason?: 'timeout' | 'error';
   error?: string;
+  backgroundInProgress?: boolean;
 }
 
 export interface WorkspaceAcpStatusResult {

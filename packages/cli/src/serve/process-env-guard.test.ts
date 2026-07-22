@@ -157,7 +157,6 @@ const allowedProcessEnvAccesses = normalizeAllowances([
         'key:QWEN_CODE_IDE_WORKSPACE_PATH': 1,
         'key:QWEN_SERVE_NO_MCP_POOL': 1,
         'key:QWEN_SERVE_NO_PERSISTENT_REGISTRATION': 1,
-        'key:VITEST_WORKER_ID': 1,
         whole: 4,
       },
     },

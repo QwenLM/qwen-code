@@ -83,6 +83,7 @@ const {
 });
 
 const mockMcpServerRequiresOAuth = vi.hoisted(() => new Map<string, boolean>());
+const mockMcpAuthenticate = vi.hoisted(() => vi.fn());
 
 const { mockMcpApprovals, mockGetPendingGatedMcpServers } = vi.hoisted(() => ({
   mockMcpApprovals: {
@@ -457,6 +458,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   MCPOAuthTokenStorage: vi.fn().mockImplementation(() => ({
     getCredentials: vi.fn().mockResolvedValue(null),
   })),
+  MCPOAuthProvider: vi.fn().mockImplementation(() => ({
+    authenticate: mockMcpAuthenticate,
+  })),
   // SkillError is referenced by status.ts's `mapDomainErrorToErrorKind`
   // helper for `instanceof` classification. The mock must surface it as
   // a real class so that `instanceof` works inside the helper.
@@ -822,6 +826,7 @@ import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import {
   SERVE_STATUS_EXT_METHODS,
   SERVE_CONTROL_EXT_METHODS,
+  SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS,
 } from '@qwen-code/acp-bridge/status';
 import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import {
@@ -12990,6 +12995,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockMcpApprovals.getState.mockReturnValue('approved');
     mockMcpApprovals.setState.mockResolvedValue(undefined);
     mockGetPendingGatedMcpServers.mockReset();
+    mockMcpAuthenticate.mockReset();
     mockGetPendingGatedMcpServers.mockReturnValue([]);
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
@@ -13053,15 +13059,18 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     stdoutDestroySpy.mockRestore();
   });
 
-  async function getAgent() {
+  async function getAgent(connectionOverrides: Record<string, unknown> = {}) {
     const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
     await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
-    const agent = capturedAgentFactory!({
+    const connection = {
       get closed() {
         return mockConnectionState.promise;
       },
-    });
-    return { agent, agentPromise };
+      extNotification: vi.fn().mockResolvedValue(undefined),
+      ...connectionOverrides,
+    };
+    const agent = capturedAgentFactory!(connection);
+    return { agent, agentPromise, connection };
   }
 
   it('initializes discovery without reloading sessions, then reloads persisted settings', async () => {
@@ -13501,6 +13510,42 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     );
     expect(approveMcpServerForSession).toHaveBeenCalledWith('docs');
     expect(discoverToolsForServer).toHaveBeenCalledWith('docs');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('notifies the bridge when MCP authentication finishes', async () => {
+    const server = {
+      command: 'node',
+      args: ['server.js'],
+      scope: 'workspace' as const,
+    };
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: vi.fn().mockReturnValue({ docs: server }),
+    } as unknown as Config;
+    mockMcpAuthenticate.mockRejectedValue(new Error('authentication failed'));
+    const extNotification = vi.fn().mockResolvedValue(undefined);
+    const { agent, agentPromise } = await getAgent({ extNotification });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpManage, {
+        serverName: 'docs',
+        action: 'authenticate',
+        operationId: 'operation-1',
+      }),
+    ).rejects.toThrow('authentication failed');
+    await vi.waitFor(() =>
+      expect(extNotification).toHaveBeenCalledWith(
+        SERVE_WORKSPACE_NOTIFICATION_EXT_METHODS.mcpAuthenticationCompleted,
+        {
+          v: 1,
+          operationId: 'operation-1',
+          serverName: 'docs',
+        },
+      ),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14290,7 +14335,7 @@ describe('sessionLanguage multi-session propagation', () => {
 
   it('refreshes extension state without a duplicate direct skill refresh', async () => {
     const extensionManager = {
-      refreshCache: vi.fn().mockResolvedValue(undefined),
+      refreshCacheWithSnapshot: vi.fn().mockResolvedValue({ generation: 7 }),
       refreshTools: vi.fn().mockResolvedValue(undefined),
     };
     const skillManager = {
@@ -14329,7 +14374,7 @@ describe('sessionLanguage multi-session propagation', () => {
     );
 
     const agentPromise = runAcpAgent(
-      makeConfig() as unknown as Config,
+      cfg as unknown as Config,
       { merged: { mcpServers: {} } } as unknown as LoadedSettings,
       mockArgv,
     );
@@ -14342,12 +14387,13 @@ describe('sessionLanguage multi-session propagation', () => {
 
     await agent.newSession({ cwd: '/ext', mcpServers: [] });
     await expect(
-      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh, {
-        sessionId: 's-ext',
-      }),
-    ).resolves.toEqual({ ok: true });
+      agent.extMethod(
+        SERVE_CONTROL_EXT_METHODS.workspaceRuntimeExtensionsRefresh,
+        {},
+      ),
+    ).resolves.toEqual({ ok: true, refreshed: 1, generation: 7 });
 
-    expect(extensionManager.refreshCache).toHaveBeenCalledOnce();
+    expect(extensionManager.refreshCacheWithSnapshot).toHaveBeenCalledOnce();
     expect(skillManager.refreshCache).not.toHaveBeenCalled();
     expect(extensionManager.refreshTools).toHaveBeenCalledOnce();
     expect(refreshHierarchicalMemory).not.toHaveBeenCalled();

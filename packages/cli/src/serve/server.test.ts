@@ -21943,6 +21943,65 @@ describe('auth device-flow routes', () => {
   });
 });
 
+describe('POST /workspace/settings user-scope fan-out (#7308)', () => {
+  it('broadcasts settings_changed to all workspace runtimes on user-scope write', async () => {
+    const primaryBridgeInstance = fakeBridge();
+    const secondaryBridgeInstance = fakeBridge();
+    const primaryPublish = vi.spyOn(
+      primaryBridgeInstance,
+      'publishWorkspaceEvent',
+    );
+    const secondaryPublish = vi.spyOn(
+      secondaryBridgeInstance,
+      'publishWorkspaceEvent',
+    );
+    const registry = createWorkspaceRegistry([
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'primary',
+        workspaceCwd: WS_BOUND,
+        primary: true,
+        bridge: primaryBridgeInstance,
+      }),
+      makeWorkspaceRuntimeForTest({
+        workspaceId: 'secondary',
+        workspaceCwd: WS_DIFFERENT,
+        primary: false,
+        bridge: secondaryBridgeInstance,
+      }),
+    ]);
+    const app = createServeApp({ ...baseOpts, token: 'tkn' }, undefined, {
+      workspaceRegistry: registry,
+      persistSetting: async () => {},
+    });
+
+    const res = await request(app)
+      .post('/workspace/settings')
+      .set('Authorization', 'Bearer tkn')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .send({ scope: 'user', key: 'general.cleanupPeriodDays', value: 30 });
+
+    expect(res.status).toBe(200);
+    expect(primaryPublish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings_changed',
+        data: expect.objectContaining({
+          key: 'general.cleanupPeriodDays',
+          scope: 'user',
+        }),
+      }),
+    );
+    expect(secondaryPublish).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'settings_changed',
+        data: expect.objectContaining({
+          key: 'general.cleanupPeriodDays',
+          scope: 'user',
+        }),
+      }),
+    );
+  });
+});
+
 describe('GET /workspace/mcp/:server/tools', () => {
   it('returns tools for a valid server name', async () => {
     const bridge = fakeBridge();

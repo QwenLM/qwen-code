@@ -2,7 +2,7 @@
 
 ## Overview
 
-`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts`) is the F2 (#4175 commit 5) workspace-scoped pool: multiple ACP sessions inside one runtime share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. When pool mode is enabled, every started ACP child owns an independent pool (`QwenAgent.mcpPool`). Production attempts to preheat the primary child and retries on first use after failure; a trusted secondary starts its child on demand, while an untrusted secondary starts neither. The pool is constructed once at agent startup with the runtime's bootstrap `Config` and survives session lifecycles. Entries reference-count session attaches and close after a configurable grace period when the reference count reaches zero.
+`McpTransportPool` (`packages/core/src/tools/mcp-transport-pool.ts`) is the F2 (#4175 commit 5) workspace-scoped pool: multiple ACP sessions inside one runtime share one transport per unique `(serverName + configFingerprint)` tuple, instead of each spawning its own MCP child process. When pool mode is enabled, every started ACP child owns an independent pool (`QwenAgent.mcpPool`). Every trusted workspace starts its child on demand; an untrusted workspace starts neither the child nor its pool. The pool is constructed once at agent startup with the runtime's bootstrap `Config` and survives session lifecycles. Entries reference-count session attaches and close after a configurable grace period when the reference count reaches zero.
 
 It is the main mechanism that prevents a multi-session daemon from forking one copy of every MCP server per session.
 

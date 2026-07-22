@@ -17,6 +17,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { errorMessage } from '../error-message.js';
 import {
   BranchWhilePromptActiveError,
   CancelSentinelCollisionError,
@@ -55,6 +56,7 @@ import {
   WorkspaceSkillNotFoundError,
   WorkspaceSkillNotToggleableError,
 } from '../workspace-service/types.js';
+import { WorkspaceRuntimeStillStartingError } from '../workspace-runtime-coordinator.js';
 
 export type BridgeErrorContext = {
   route?: string;
@@ -168,6 +170,14 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof WorkspaceRuntimeStillStartingError) {
+    res.set('Retry-After', '5');
+    res.status(503).json({
+      error: err.message,
+      code: 'runtime_still_starting',
+    });
+    return;
+  }
   if (err instanceof SessionWriterError) {
     res.status(err.httpStatus).json({
       error: err.message,
@@ -759,25 +769,7 @@ export function sendBridgeError(
   res.status(500).json(errorPayload(err));
 }
 
-/**
- * Coerce an arbitrary thrown value to a useful string. Plain `String(err)`
- * yields `[object Object]` for JSON-RPC-shaped errors (`{code, message,
- * data}`) which are exactly what the ACP SDK forwards from the agent. Try
- * the `message` field first, fall back to JSON-stringify, then `String`.
- */
-export function errorMessage(err: unknown): string {
-  if (err instanceof Error) return err.message;
-  if (err && typeof err === 'object') {
-    const maybe = (err as { message?: unknown }).message;
-    if (typeof maybe === 'string' && maybe.length > 0) return maybe;
-    try {
-      return JSON.stringify(err);
-    } catch {
-      /* fall through */
-    }
-  }
-  return String(err);
-}
+export { errorMessage } from '../error-message.js';
 
 /**
  * Build the JSON body for a 5xx response. The ACP SDK forwards
