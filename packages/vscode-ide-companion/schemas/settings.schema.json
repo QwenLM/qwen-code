@@ -283,11 +283,6 @@
           "type": "boolean",
           "default": true
         },
-        "defaultToFleetView": {
-          "description": "When true, start in Fleet View instead of a new session. Only works when a daemon is running. (Reserved for future use — not yet implemented.)",
-          "type": "boolean",
-          "default": false
-        },
         "fleetViewGroupMode": {
           "description": "How to group sessions in Fleet View. \"state\" groups by running/idle/persisted status. \"directory\" groups by workspace path. Options: state, directory",
           "enum": [

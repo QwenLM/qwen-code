@@ -3647,7 +3647,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
-      // Fleet View owns all input while open, but always allow force-quit.
+      // Fleet View owns all input while open; QUIT/EXIT close the view (not the app).
       if (isFleetViewOpen) {
         if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
           setIsFleetViewOpen(false);

@@ -853,16 +853,6 @@ const SETTINGS_SCHEMA = {
           'When true, pressing the left arrow key twice on an empty input opens Fleet View to manage sessions.',
         showInDialog: true,
       },
-      defaultToFleetView: {
-        type: 'boolean',
-        label: 'Default to Fleet View',
-        category: 'UI',
-        requiresRestart: true,
-        default: false,
-        description:
-          'When true, start in Fleet View instead of a new session. Only works when a daemon is running. (Reserved for future use — not yet implemented.)',
-        showInDialog: false,
-      },
       fleetViewGroupMode: {
         type: 'enum',
         label: 'Fleet View Group Mode',

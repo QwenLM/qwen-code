@@ -11,7 +11,7 @@ import {
 } from '../contexts/FleetViewContext.js';
 import { useConfig } from '../contexts/ConfigContext.js';
 
-const POLL_INTERVAL_MS = 3000;
+const POLL_INTERVAL_MS = 10_000;
 export const SESSION_LIST_SIZE = 100;
 
 export interface UseFleetViewSessionsResult {

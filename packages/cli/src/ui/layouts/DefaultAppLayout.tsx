@@ -64,13 +64,14 @@ const FleetViewContainer: React.FC = () => {
   }, [uiActions]);
 
   const handleDelete = useCallback(
-    (sessionId: string) => {
-      if (sessionId === config.getSessionId()) return;
+    (sessionId: string): boolean => {
+      if (sessionId === config.getSessionId()) return false;
       void config
         .getSessionService()
         .removeSession(sessionId)
         .then(() => refresh())
         .catch(() => refresh());
+      return true;
     },
     [refresh, config],
   );
@@ -215,7 +216,7 @@ export const DefaultAppLayout: React.FC = () => {
               CoordinatorAgentStatus position). Hidden whenever any
               dialog is open (auth / permission / background tasks /
               etc.) so the modal surface doesn't compete with the
-              live roster, and the panel's own internal self-hide
+              live roster, and the panel's internal self-hide logic
               handles the empty-roster case.
 
               The panel renders INSIDE `mainControlsRef` so its rows
@@ -231,7 +232,7 @@ export const DefaultAppLayout: React.FC = () => {
               Panel uses `terminalWidth`, not `mainAreaWidth` —
               `mainAreaWidth` is hard-capped at 100 cols (intended
               for markdown / code blocks where soft-wrap matters);
-              live progress lines have nothing to soft-wrap, so the
+              live progress lines have no reason to soft-wrap, so the
               panel wants the full terminal width.
             */}
             {!uiState.dialogsVisible && (

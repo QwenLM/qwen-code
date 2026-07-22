@@ -15,10 +15,10 @@ import type { FleetSessionEntry } from '../../contexts/FleetViewContext.js';
 import type { SessionService } from '@qwen-code/qwen-code-core';
 import { sanitizeDisplayText } from '../../../utils/extension-mention.js';
 
-type FleetSessionState = 'working' | 'idle';
+type FleetSessionState = 'current' | 'idle';
 
 const STATE_ICONS: Record<FleetSessionState, string> = {
-  working: '✽',
+  current: '❯',
   idle: '✻',
 };
 
@@ -46,12 +46,12 @@ function shortenPath(fullPath: string, maxLen: number): string {
 }
 
 function getSessionState(entry: FleetSessionEntry): FleetSessionState {
-  if (entry.status === 'active') return 'working';
+  if (entry.status === 'current') return 'current';
   return 'idle';
 }
 
 function getIconColor(state: FleetSessionState): string {
-  if (state === 'working') return theme.text.accent;
+  if (state === 'current') return theme.text.accent;
   return theme.text.secondary;
 }
 
@@ -122,14 +122,14 @@ const GroupHeader: React.FC<GroupHeaderProps> = ({ label }) => (
 function groupByState(
   sessions: FleetSessionEntry[],
 ): Array<{ label: string; entries: FleetSessionEntry[] }> {
-  const working: FleetSessionEntry[] = [];
+  const current: FleetSessionEntry[] = [];
   const idle: FleetSessionEntry[] = [];
   for (const s of sessions) {
-    if (s.status === 'active') working.push(s);
+    if (s.status === 'current') current.push(s);
     else idle.push(s);
   }
   const groups: Array<{ label: string; entries: FleetSessionEntry[] }> = [];
-  if (working.length > 0) groups.push({ label: 'Working', entries: working });
+  if (current.length > 0) groups.push({ label: 'Current', entries: current });
   if (idle.length > 0) groups.push({ label: 'Idle', entries: idle });
   return groups;
 }
@@ -160,7 +160,7 @@ export interface FleetViewProps {
   onSelect: (index: number) => void;
   onAttach: (sessionId: string) => void;
   onClose: () => void;
-  onDelete: (sessionId: string) => void;
+  onDelete: (sessionId: string) => boolean;
   onCreateNew: () => void;
   onCycleGroupMode: () => void;
   onDispatch?: (prompt: string) => void;
@@ -251,8 +251,8 @@ export const FleetView: React.FC<FleetViewProps> = ({
   }, [deletePendingId, selectedEntry?.sessionId]);
 
   // Count stats
-  const workingCount = sessions.filter((s) => s.status === 'active').length;
-  const idleCount = sessions.length - workingCount;
+  const currentCount = sessions.filter((s) => s.status === 'current').length;
+  const idleCount = sessions.length - currentCount;
 
   const handleKeypress = useCallback(
     (key: Key) => {
@@ -299,6 +299,47 @@ export const FleetView: React.FC<FleetViewProps> = ({
         return;
       }
 
+      // --- Peek mode (before dispatch input so printable chars don't leak) ---
+      if (viewMode === 'peek') {
+        if (key.name === 'space' || key.name === 'escape') {
+          setViewMode('list');
+          return;
+        }
+        if (key.name === 'up') {
+          onSelect(Math.max(0, clampedIndex - 1));
+          return;
+        }
+        if (key.name === 'down') {
+          onSelect(Math.min(flatEntries.length - 1, clampedIndex + 1));
+          return;
+        }
+        if ((key.name === 'return' || key.name === 'right') && selectedEntry) {
+          onAttach(selectedEntry.sessionId);
+          return;
+        }
+        if (key.ctrl && key.name === 'x' && selectedEntry) {
+          if (deletePendingId === selectedEntry.sessionId) {
+            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+            setDeletePendingId(null);
+            setViewMode('list');
+            const deleted = onDelete(selectedEntry.sessionId);
+            showStatus(
+              deleted ? 'Session deleted' : 'Cannot delete the active session',
+            );
+          } else {
+            setDeletePendingId(selectedEntry.sessionId);
+            showStatus('Press Ctrl+X again to confirm deletion');
+            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+            deleteTimerRef.current = setTimeout(() => {
+              setDeletePendingId(null);
+              deleteTimerRef.current = null;
+            }, 2000);
+          }
+          return;
+        }
+        return;
+      }
+
       // --- Input has text: dispatch on Enter ---
       if (key.name === 'return' && inputValue.length > 0) {
         if (onDispatch) {
@@ -337,45 +378,6 @@ export const FleetView: React.FC<FleetViewProps> = ({
         return;
       }
 
-      // --- Peek mode ---
-      if (viewMode === 'peek') {
-        if (key.name === 'space' || key.name === 'escape') {
-          setViewMode('list');
-          return;
-        }
-        if (key.name === 'up') {
-          onSelect(Math.max(0, clampedIndex - 1));
-          return;
-        }
-        if (key.name === 'down') {
-          onSelect(Math.min(flatEntries.length - 1, clampedIndex + 1));
-          return;
-        }
-        if ((key.name === 'return' || key.name === 'right') && selectedEntry) {
-          onAttach(selectedEntry.sessionId);
-          return;
-        }
-        if (key.ctrl && key.name === 'x' && selectedEntry) {
-          if (deletePendingId === selectedEntry.sessionId) {
-            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-            setDeletePendingId(null);
-            setViewMode('list');
-            onDelete(selectedEntry.sessionId);
-            showStatus('Session deleted');
-          } else {
-            setDeletePendingId(selectedEntry.sessionId);
-            showStatus('Press Ctrl+X again to confirm deletion');
-            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-            deleteTimerRef.current = setTimeout(() => {
-              setDeletePendingId(null);
-              deleteTimerRef.current = null;
-            }, 2000);
-          }
-          return;
-        }
-        return;
-      }
-
       // --- List mode shortcuts ---
       if (key.name === 'up') {
         onSelect(Math.max(0, clampedIndex - 1));
@@ -406,8 +408,10 @@ export const FleetView: React.FC<FleetViewProps> = ({
           // Second press — confirm deletion
           if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
           setDeletePendingId(null);
-          onDelete(selectedEntry.sessionId);
-          showStatus('Session deleted');
+          const deleted = onDelete(selectedEntry.sessionId);
+          showStatus(
+            deleted ? 'Session deleted' : 'Cannot delete the active session',
+          );
         } else {
           // First press — arm deletion
           setDeletePendingId(selectedEntry.sessionId);
@@ -423,7 +427,9 @@ export const FleetView: React.FC<FleetViewProps> = ({
       } else if (key.ctrl && key.name === 'r') {
         if (selectedEntry) {
           setRenaming(true);
-          setRenameValue(selectedEntry.displayName);
+          setRenameValue(
+            selectedEntry.customTitle ?? selectedEntry.prompt ?? '',
+          );
         }
       }
     },
@@ -496,8 +502,9 @@ export const FleetView: React.FC<FleetViewProps> = ({
             {workspaceCwd ? shortenPath(workspaceCwd, 60) : ''}
           </Text>
           <Text color={theme.text.secondary}>
-            {workingCount} working · {idleCount} idle
+            {currentCount} current · {idleCount} idle
             {loading ? ' · ↻' : ''}
+            {sessions.length >= 100 ? ' · +' : ''}
           </Text>
         </Box>
 

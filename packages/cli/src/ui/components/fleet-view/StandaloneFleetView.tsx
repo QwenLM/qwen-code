@@ -90,6 +90,7 @@ function StandaloneFleetViewScreen({
           .catch(() => {
             void fetchSessions();
           });
+        return true;
       }}
       onCreateNew={handleExit}
       onCycleGroupMode={() =>
