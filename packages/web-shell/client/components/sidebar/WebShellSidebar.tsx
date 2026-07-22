@@ -2608,14 +2608,17 @@ export function WebShellSidebar({
               ) : (
                 <>
                   <span className={styles.sessionText}>
-                    {session.worktree && (
-                      <GitForkIcon
-                        size={11}
-                        strokeWidth={1.5}
-                        className={styles.sessionBadgeIcon}
-                        aria-label={t('sidebar.newWorktreeTask')}
-                      />
-                    )}
+                    {
+                      // @ts-expect-error worktree exists in SDK source, not in stale dist
+                      session.worktree && (
+                        <GitForkIcon
+                          size={11}
+                          strokeWidth={1.5}
+                          className={styles.sessionBadgeIcon}
+                          aria-label={t('sidebar.newWorktreeTask')}
+                        />
+                      )
+                    }
                     {label}
                   </span>
                   <div className={styles.sessionMetaSlot}>
