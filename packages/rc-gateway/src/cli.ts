@@ -10,7 +10,7 @@ import { writeBootstrapCode, displayHint } from './bootstrap.js';
 import { createServer as createHttpsServer } from 'node:https';
 import { createSecureContext } from 'node:tls';
 import { homedir, hostname } from 'node:os';
-import { join } from 'node:path';
+import { join, basename } from 'node:path';
 import { createInterface } from 'node:readline';
 import { resolveBindSecurity, BindSecurityError } from './bindSecurity.js';
 import {
@@ -70,6 +70,7 @@ import { IdleSessionToggles } from './idle/sessionToggles.js';
 import type { IdleStatusResolver } from './routes/idleToggle.js';
 import { SessionEventPump } from './webpush/pump.js';
 import { AgentRegistry } from './agents/agentRegistry.js';
+import { ReviewRegistry, type ReviewRecord } from './reviews/reviewRegistry.js';
 import { loadOrCreateHookIngestToken } from './agents/hookIngestToken.js';
 import {
   DEFAULT_RATE_TABLE,
@@ -96,7 +97,7 @@ import {
   resolveIdleEnabled,
   createIdleSuggestionHandler,
 } from './idle/idleSuggestions.js';
-import { readFile } from 'node:fs/promises';
+import { readFile, readdir } from 'node:fs/promises';
 import {
   loadIdleConfig,
   applyIdleReload,
@@ -421,6 +422,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const agentRegistry = await AgentRegistry.open(
     join(homedir(), '.qwen', 'rc', 'agents.json'),
   );
+  // Remote review control plane (add-remote-review): persisted registry of
+  // triggered-review records, booted before createGatewayApp so review routes
+  // mount from the very first request (mirrors agentRegistry above).
+  const reviewRegistry = await ReviewRegistry.open(
+    join(homedir(), '.qwen', 'rc', 'reviews.json'),
+  );
   // Hook event mirror (add-agent-observability): mint-or-load the dedicated
   // loopback ingest token once and persist it 0600 alongside the bootstrap
   // code file. Regenerating per start would invalidate the hook config that
@@ -428,6 +435,81 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   const hookIngestToken = await loadOrCreateHookIngestToken(
     join(homedir(), '.qwen', 'rc', 'hook-ingest-token'),
   );
+  // Shared read-time cost rollup (UsageStore.sessionTotals) — the SAME
+  // function is handed to both `agents.costFor` and `review.costFor` so the
+  // two control planes never disagree on a session's cost.
+  const costFor = usageStore
+    ? (sid: string) => usageStore.sessionTotals(sid).costMicrocentsSesTotal
+    : undefined;
+  /**
+   * Resolve the saved review report + (for a PR target) its cached findings
+   * summary. Best-effort throughout: any fs/daemon failure collapses to
+   * `{reportPath: null, summary: null}` rather than breaking review
+   * completion. Mirrors the bundled `review` skill's Step 10 persistence:
+   *   - report dir: `<workspaceCwd>/.qwen/reviews/`
+   *   - filename:   `<date>-<time>-<suffix>.md`, suffix = `pr-<n>` | `local` |
+   *     `<basename-of-path>`; filenames sort lexically newest-last.
+   *   - PR summary: `<workspaceCwd>/.qwen/review-cache/pr-<n>.json`
+   *     (`{findingsCount, verdict}`).
+   * Fetches `capabilities()` fresh (rather than reusing the boot-time
+   * `workspaceCwd`) so a daemon that was unreachable at boot still resolves
+   * once it comes back.
+   */
+  async function resolveReviewReport(
+    rec: ReviewRecord,
+  ): Promise<{ reportPath: string | null; summary: ReviewRecord['summary'] }> {
+    try {
+      const caps = await handle.daemon.capabilities();
+      const cwd = caps.workspaceCwd;
+      if (!cwd) return { reportPath: null, summary: null };
+
+      const suffix =
+        rec.target.kind === 'pr'
+          ? `pr-${rec.target.number}`
+          : rec.target.kind === 'path'
+            ? basename(rec.target.path)
+            : 'local';
+
+      let reportPath: string | null = null;
+      try {
+        const reviewsDir = join(cwd, '.qwen', 'reviews');
+        const entries = await readdir(reviewsDir);
+        const matches = entries.filter((f) => f.endsWith(`-${suffix}.md`));
+        // Filenames sort lexically by <date>-<time>-<suffix> — the max string
+        // is the newest report.
+        matches.sort();
+        const newest = matches.at(-1);
+        reportPath = newest ? join(reviewsDir, newest) : null;
+      } catch {
+        reportPath = null;
+      }
+
+      let summary: ReviewRecord['summary'] = null;
+      if (rec.target.kind === 'pr') {
+        try {
+          const cachePath = join(
+            cwd,
+            '.qwen',
+            'review-cache',
+            `pr-${rec.target.number}.json`,
+          );
+          const parsed = JSON.parse(await readFile(cachePath, 'utf8')) as {
+            findingsCount?: number;
+            verdict?: string;
+          };
+          summary = {
+            findingsCount: parsed.findingsCount,
+            verdict: parsed.verdict,
+          };
+        } catch {
+          summary = null;
+        }
+      }
+      return { reportPath, summary };
+    } catch {
+      return { reportPath: null, summary: null };
+    }
+  }
   const rates = new RateTableHolder(DEFAULT_RATE_TABLE);
   if (usageStore) {
     try {
@@ -499,9 +581,12 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         : undefined,
       agents: {
         registry: agentRegistry,
-        costFor: usageStore
-          ? (sid) => usageStore.sessionTotals(sid).costMicrocentsSesTotal
-          : undefined,
+        costFor,
+      },
+      review: {
+        registry: reviewRegistry,
+        costFor,
+        resolveReport: resolveReviewReport,
       },
       workflows: {
         runsDir: join(homedir(), '.qwen', 'workflows', 'runs'),
@@ -534,6 +619,16 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
       if (orphaned.length > 0) {
         // eslint-disable-next-line no-console
         console.warn(`agents: marked ${orphaned.length} record(s) orphaned`);
+      }
+      // Same reconciliation for triggered reviews (add-remote-review): a
+      // running/blocked review whose session is gone becomes `orphaned` —
+      // surfaced in GET /rc/reviews, never silently dropped.
+      const orphanedReviews = await reviewRegistry.reconcile(
+        live.map((s) => s.sessionId),
+      );
+      if (orphanedReviews.length > 0) {
+        // eslint-disable-next-line no-console
+        console.warn(`reviews: marked ${orphanedReviews.length} orphaned`);
       }
     }
   } catch {

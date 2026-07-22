@@ -1143,14 +1143,32 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
   // agent observability routes above.
   let reviewLifecycle: ReviewLifecycle | undefined;
   if (deps.review) {
-    reviewLifecycle = new ReviewLifecycle(
+    // Local `const` (not the outer `let reviewLifecycle`): the onEscalate
+    // closure below captures this binding, and TS cannot narrow a `let`
+    // through a deferred closure — referencing the outer variable there would
+    // make `.setBlocked` possibly-undefined.
+    const lifecycle = new ReviewLifecycle(
       deps.review.registry,
       ownerEvents,
       deps.review.costFor,
       deps.review.resolveReport,
+      notifier,
     );
+    reviewLifecycle = lifecycle;
     const reviewBridge =
-      deps.review.bridge ?? new ReviewPermissionBridge({ daemon: deps.daemon });
+      deps.review.bridge ??
+      new ReviewPermissionBridge({
+        daemon: deps.daemon,
+        onEscalate: (sessionId, data) => {
+          void lifecycle.setBlocked(sessionId);
+          void notifier
+            ?.notify({ type: 'permission_request', data }, { sessionId })
+            .catch(() => {});
+        },
+        onResume: (sessionId) => {
+          void lifecycle.setRunning(sessionId);
+        },
+      });
     const reviewDeps = {
       daemon: deps.daemon,
       registry: deps.review.registry,

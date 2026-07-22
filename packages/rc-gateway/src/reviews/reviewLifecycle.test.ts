@@ -51,6 +51,44 @@ describe('ReviewLifecycle', () => {
     expect(reg.get(rec.reviewId)?.status).toBe('completed');
   });
 
+  it('notifies the notifier sink on review_completed with the sessionId', async () => {
+    const { reg, bus } = await fixture();
+    const rec = await reg.register({
+      sessionId: 's3',
+      target: { kind: 'local' },
+      comment: false,
+      autofix: false,
+      approvalLeg: 'auto',
+      triggeredByTokenId: 'x',
+    });
+    const notified: Array<{
+      event: { type: string; data: unknown };
+      ctx: { sessionId: string; sessionName?: string };
+    }> = [];
+    const fakeNotifier = {
+      notify: async (
+        event: { type: string; data: unknown },
+        ctx: { sessionId: string; sessionName?: string },
+      ) => {
+        notified.push({ event, ctx });
+      },
+    };
+    const lc = new ReviewLifecycle(
+      reg,
+      bus,
+      undefined,
+      undefined,
+      fakeNotifier,
+    );
+    await lc.onPromptSettled(rec.reviewId, 'completed');
+    expect(notified).toHaveLength(1);
+    expect(notified[0]!.event.type).toBe('review_completed');
+    expect(notified[0]!.ctx.sessionId).toBe('s3');
+    expect((notified[0]!.event.data as { reviewId?: string }).reviewId).toBe(
+      rec.reviewId,
+    );
+  });
+
   it('session_died → failed + review_failed', async () => {
     const { reg, bus, seen } = await fixture();
     const rec = await reg.register({

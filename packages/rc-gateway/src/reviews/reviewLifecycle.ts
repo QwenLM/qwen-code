@@ -12,10 +12,24 @@ import type {
 import type { ReviewRegistry, ReviewRecord } from './reviewRegistry.js';
 
 /**
+ * The notification sink the lifecycle hands frames to. Structurally satisfied
+ * by PushNotifier.notify (webpush/notifier.ts) — kept structural so tests can
+ * pass a collector and so the lifecycle never imports webpush (mirrors
+ * `AgentNotifySink` in agentLifecycle.ts).
+ */
+export interface ReviewNotifySink {
+  notify(
+    event: { type: string; data: unknown },
+    ctx: { sessionId: string; sessionName?: string },
+  ): Promise<void>;
+}
+
+/**
  * Drives review status transitions off the gateway's own event plumbing and
  * emits `review_*` lifecycle frames (design: "reviewLifecycle.ts", mirrors
- * `agentLifecycle.ts`) — OWNER STREAM ONLY. A review has no parent session
- * (unlike an agent), so there is no second fan-out surface here.
+ * `agentLifecycle.ts`) — TWO surfaces: the owner events stream and the
+ * notification pipeline. A review has no parent session (unlike an agent), so
+ * there is no third (parent-stream) fan-out surface here.
  *
  *  - `session_died` on the review's session        → `failed`   + review_failed
  *  - terminal prompt completion (onPromptSettled)   → `completed`/`failed` +
@@ -37,6 +51,7 @@ export class ReviewLifecycle {
       reportPath: string | null;
       summary: ReviewRecord['summary'];
     }>,
+    private readonly notifier?: ReviewNotifySink,
   ) {}
 
   /** Build the wire payload for a record. */
@@ -51,9 +66,17 @@ export class ReviewLifecycle {
     };
   }
 
-  /** Emit one lifecycle frame on the owner events stream. */
+  /**
+   * Emit one lifecycle frame on both surfaces: the owner events stream and
+   * (best-effort) the notification pipeline. A throwing notifier must never
+   * break the caller — the void + catch keeps rejections contained.
+   */
   emit(type: ReviewLifecycleEventType, record: ReviewRecord): void {
-    this.ownerEvents.publish({ type, review: this.payloadFor(record) });
+    const payload = this.payloadFor(record);
+    this.ownerEvents.publish({ type, review: payload });
+    void this.notifier
+      ?.notify({ type, data: payload }, { sessionId: record.sessionId })
+      .catch(() => {});
   }
 
   /**
