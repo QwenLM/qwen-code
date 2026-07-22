@@ -36,11 +36,13 @@ POST /workspaces/:workspace/notify
 }
 ```
 
-The daemon normalizes the public target at its trust boundary to the internal worker request `{ deliveryId, channelName, target: { type, id }, text }`. Text must be non-empty and is bounded to 100,000 UTF-16 code units before IPC.
+The daemon normalizes the public target at its trust boundary to the internal worker request `{ deliveryId, channelName, target: { type, id }, text }`. Text sent to a worker must be non-empty and is bounded to 100,000 UTF-16 code units before IPC. Prompt and scheduled reverse control may carry an empty string only to report a successful turn with no deliverable final answer as `skipped`; that path never reaches worker IPC.
 
 ## Execution boundaries
 
-Scheduled tasks and Prompt own their final-answer semantics. A Session captures final text only when the current invocation carries delivery metadata. It submits one reverse control request only after a successful `end_turn` with non-empty text. Cancellation, Agent failure, and token-limit termination do not send. Empty successful output emits a skipped result. The delivered text is the full turn's assistant prose (all non-thought text parts), not only the terminal message block; inter-tool narration is included.
+Scheduled tasks and Prompt own their final-answer semantics. A Session captures text only when the current invocation carries delivery metadata. Each model send owns one response block: non-thought stream chunks are joined within that block, non-continuation retry or model fallback discards superseded chunks, and any block that requests a tool is intermediate and cannot become the delivery payload. A later automatic continuation replaces the earlier terminal candidate. After the complete turn reaches a successful `end_turn`, the Session submits exactly one reverse control request containing only the last tool-free assistant response block. Inter-tool narration and all earlier response blocks are excluded.
+
+Successful `end_turn` always submits the reverse control request, including when the final block is empty or whitespace-only. The daemon consumes the pinned authorization first, returns `skipped` without resolving a worker, and publishes a `channel_delivery_result` event. Cancellation, Agent failure, and token-limit termination submit nothing. Empty output is therefore distinguishable from a turn that was never eligible for delivery.
 
 Prompt admission remains `202`; Agent completion remains `turn_complete` or `turn_error`. Channel completion is a later `channel_delivery_result` event and never converts Agent success into `turn_error`.
 
@@ -50,7 +52,7 @@ Webhook remains an independent asynchronous path with its own secret and `202` w
 
 ## Workspace ownership
 
-The daemon binds the workspace when constructing each ACP bridge. Prompt admission records the daemon-issued delivery ID and pinned target, while scheduled delivery is authorized from the persisted task. The child callback must match that authorization and cannot choose `workspaceCwd` or replace the target. The host callback closes over the canonical workspace and routes only to that workspace's worker group. Missing, bootstrapping, draining, stopped, or removed owners return `channel_worker_unavailable`; there is no fallback to the primary runtime and no lazy worker startup.
+The daemon binds the workspace when constructing each ACP bridge. Prompt admission records the daemon-issued delivery ID and pinned target, while scheduled delivery is authorized from the persisted task. The child callback must match that authorization and cannot choose `workspaceCwd` or replace the target. The host callback consumes the authorization before deciding between `skipped` and worker delivery, so empty finals cannot forge events or leave one-shot/monotonic authorization state unchanged. Non-empty text routes only to the canonical workspace's worker group. Missing, bootstrapping, draining, stopped, or removed owners return `channel_worker_unavailable`; there is no fallback to the primary runtime and no lazy worker startup.
 
 ## Reliability and privacy
 
