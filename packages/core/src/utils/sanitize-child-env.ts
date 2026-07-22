@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { PRIVATE_ACP_CAPABILITY_ENV } from './invocation-context.js';
+
 /**
  * Env vars that carry Qwen-internal credentials or private parent
  * capabilities. These must never be inherited by a child process the agent
@@ -27,7 +29,7 @@
 export const INTERNAL_SECRET_ENV_VARS: readonly string[] = [
   'QWEN_SERVER_TOKEN',
   'QWEN_DAEMON_TOKEN',
-  'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
+  PRIVATE_ACP_CAPABILITY_ENV,
 ];
 
 /**
