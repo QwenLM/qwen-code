@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { rmSync } from 'node:fs';
+import { readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, it, expect } from 'vitest';
@@ -127,6 +127,43 @@ describe('TipHistory', () => {
     it('exposes sessionCount from data', () => {
       const history = createHistory(42);
       expect(history.sessionCount).toBe(42);
+    });
+  });
+
+  describe('markVersionSeen', () => {
+    it('persists a version when it has not been shown before', () => {
+      const filePath = tmpPath();
+      const history = new TipHistory({ sessionCount: 1, tips: {} }, filePath);
+
+      expect(history.hasSeenVersion('0.20.1')).toBe(false);
+      expect(history.markVersionSeen('0.20.1')).toBe(true);
+      expect(history.hasSeenVersion('0.20.1')).toBe(true);
+      expect(JSON.parse(readFileSync(filePath, 'utf8'))).toMatchObject({
+        lastSeenVersion: '0.20.1',
+      });
+    });
+
+    it('does not show an already-seen version again', () => {
+      const history = new TipHistory(
+        { sessionCount: 1, tips: {}, lastSeenVersion: '0.20.1' },
+        tmpPath(),
+      );
+
+      expect(history.hasSeenVersion('0.20.1')).toBe(true);
+      expect(history.markVersionSeen('0.20.1')).toBe(false);
+    });
+
+    it('shows and persists an upgraded version', () => {
+      const filePath = tmpPath();
+      const history = new TipHistory(
+        { sessionCount: 1, tips: {}, lastSeenVersion: '0.20.0' },
+        filePath,
+      );
+
+      expect(history.markVersionSeen('0.20.1')).toBe(true);
+      expect(JSON.parse(readFileSync(filePath, 'utf8'))).toMatchObject({
+        lastSeenVersion: '0.20.1',
+      });
     });
   });
 });
