@@ -40,6 +40,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -827,5 +828,32 @@ describe('AgentCore.prepareTools', () => {
     const deniedNames = deniedTools.map((t) => t.name);
     expect(deniedNames).not.toContain(ToolNames.AGENT);
     expect(deniedNames).toContain('read_file');
+  });
+});
+
+describe('AgentCore STREAM_TEXT batching (#2928)', () => {
+  it('batches thought and response text separately per chunk', () => {
+    const emitter = new AgentEventEmitter();
+    const events: Array<{ text: string; thought: boolean }> = [];
+    emitter.on(AgentEventType.STREAM_TEXT, (e) => {
+      events.push({ text: e.text, thought: e.thought ?? false });
+    });
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'test',
+      round: 1,
+      text: 'reasoning',
+      thought: true,
+      timestamp: Date.now(),
+    });
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'test',
+      round: 1,
+      text: 'output',
+      thought: false,
+      timestamp: Date.now(),
+    });
+    expect(events).toHaveLength(2);
+    expect(events[0].thought).toBe(true);
+    expect(events[1].thought).toBe(false);
   });
 });

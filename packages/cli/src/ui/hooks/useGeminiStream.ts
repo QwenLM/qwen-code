@@ -315,7 +315,7 @@ const EDIT_TOOL_NAMES = new Set([
   ToolNames.WRITE_FILE,
   ToolNames.NOTEBOOK_EDIT,
 ]);
-const STREAM_UPDATE_THROTTLE_MS = 60;
+const STREAM_UPDATE_THROTTLE_MS = 100;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
 // Rows kept in reserve below the commit budget so the incremental commit fires
 // BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the

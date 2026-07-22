@@ -1119,6 +1119,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
   const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
+  const refreshStaticRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshStatic = useCallback(() => {
     // While the transcript (alt-screen) owns the whole screen, suppress static
     // refreshes (e.g. resize-settle repaints) so they don't write into / reorder
@@ -1129,10 +1130,16 @@ export const AppContainer = (props: AppContainerProps) => {
     if (isTranscriptOpenRef.current) {
       return;
     }
-    if (!useTerminalBuffer) {
-      stdout.write(ansiEscapes.clearTerminal);
+    if (refreshStaticRef.current) {
+      clearTimeout(refreshStaticRef.current);
     }
-    remountStaticHistory();
+    refreshStaticRef.current = setTimeout(() => {
+      refreshStaticRef.current = null;
+      if (!useTerminalBuffer) {
+        stdout.write(ansiEscapes.clearTerminal);
+      }
+      remountStaticHistory();
+    }, 0);
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
   // Repaint the normal buffer once when the transcript (alt-screen) closes.

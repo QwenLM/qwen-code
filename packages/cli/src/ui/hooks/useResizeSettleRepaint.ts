@@ -7,7 +7,7 @@
 import { useEffect, useRef } from 'react';
 
 // Trailing-edge debounce for resize-triggered static repaints (#4891).
-export const RESIZE_REPAINT_SETTLE_MS = 200;
+export const RESIZE_REPAINT_SETTLE_MS = 400;
 
 /**
  * Repaint the static history once the terminal width settles (#4891).
