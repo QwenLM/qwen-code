@@ -2546,6 +2546,28 @@ describe('qwen-autofix workflow', () => {
     expect(skill).toContain('drop one silently');
   });
 
+  it('requires the address path to run verification and record it as evidence', () => {
+    // Observed: #7408 committed a fix with a TS error the gate then rejected,
+    // while its summary claimed "verified all 3 commits". A soft "run the
+    // checks" instruction let a bare assertion stand in for actually running
+    // them. The contract now demands the real commands AND their results in a
+    // Verification section, so a claim the gate contradicts is visible.
+    // Prose wraps at ~78 cols, so match across the wrap with \s+.
+    const flat = readAutofixSkill().replace(/\s+/g, ' ');
+    // Actually run — not assert from the diff — the deterministic checks.
+    expect(flat).toContain('actually run them, do not assert them');
+    expect(flat).toContain('touched-package test fails, DO NOT commit');
+    // The summary must carry a Verification section listing commands + results,
+    // and a bare "verified" is explicitly rejected.
+    expect(flat).toContain('## Verification');
+    expect(flat).toContain('command you ran and its result');
+    expect(flat).toContain('a bare "verified" is not acceptable');
+    // The rationale is structural, not etiquette: the gate re-runs the same
+    // commands, so skipping them only moves the rejection later. Pin that
+    // framing so the requirement is not softened back into "please verify".
+    expect(flat).toMatch(/gate re-runs these (?:same|exact) commands/);
+  });
+
   it('requires bilingual bodies for files posted verbatim as PR comments', () => {
     const skill = readAutofixSkill();
     // Comment bodies mirror the repository's PR-body convention: English
