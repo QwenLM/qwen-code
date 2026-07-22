@@ -56,6 +56,8 @@ export type TurnOutputOpenRequest =
       turnId: string;
       changes: readonly TurnOutputFileChange[];
       selectedPath?: string;
+      workspaceActions?: DaemonWorkspaceActions;
+      workspaceCwd?: string;
     }
   | {
       id: string;
@@ -122,6 +124,7 @@ function TurnOutputsComponent({
         title: t('turnOutputs.review'),
         turnId,
         changes,
+        ...(workspaceCwd ? { workspaceCwd } : {}),
         ...(selectedPath ? { selectedPath } : {}),
       });
       return;
@@ -456,16 +459,43 @@ export function getArtifactPreviewContent(
   changes: readonly TurnOutputFileChange[],
   workspaceCwd?: string,
 ) {
-  if (artifact.kind !== 'html' || !artifact.workspacePath) return undefined;
+  if (!isRenderedArtifact(artifact) || !artifact.workspacePath) {
+    return undefined;
+  }
   const change = changes.find((item) =>
     isSamePath(item.path, artifact.workspacePath, workspaceCwd),
   );
   if (!change) return undefined;
+  return getFileChangePreviewContent(change);
+}
+
+export function getFileChangePreviewContent(change: TurnOutputFileChange) {
   for (let index = change.diffs.length - 1; index >= 0; index--) {
     const diff = change.diffs[index];
     if (diff?.fullContent) return diff.newText;
   }
   return undefined;
+}
+
+function isRenderedArtifact(artifact: DaemonSessionArtifact) {
+  const path = artifact.workspacePath?.toLowerCase() ?? '';
+  const mimeType = artifact.mimeType?.toLowerCase() ?? '';
+  return (
+    artifact.kind === 'html' ||
+    isRenderedFilePath(path) ||
+    mimeType === 'text/html' ||
+    mimeType === 'text/markdown'
+  );
+}
+
+export function isRenderedFilePath(value: string) {
+  const path = value.toLowerCase();
+  return (
+    path.endsWith('.html') ||
+    path.endsWith('.htm') ||
+    path.endsWith('.md') ||
+    path.endsWith('.markdown')
+  );
 }
 
 export function displayPath(path: string, workspaceCwd?: string) {

@@ -90,7 +90,11 @@ import type {
   TurnOutputOpenRequest,
   TurnOutputScheduledTask,
 } from './components/artifacts/TurnOutputs';
-import { TURN_OUTPUT_KINDS } from './components/artifacts/TurnOutputs';
+import {
+  displayPath,
+  getFileChangePreviewContent,
+  TURN_OUTPUT_KINDS,
+} from './components/artifacts/TurnOutputs';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -1816,15 +1820,22 @@ export function App({
     [artifactPanelArtifacts, getDefaultReviewPanelWidth],
   );
   const openReviewPanel = useCallback(
-    (changes: readonly TurnOutputFileChange[], selectedPath?: string) => {
+    (
+      changes: readonly TurnOutputFileChange[],
+      selectedPath?: string,
+      workspaceActions?: DaemonWorkspaceActions,
+      reviewWorkspaceCwd?: string,
+    ) => {
       const reviewTab: ArtifactPanelTab = {
         id: 'review',
         kind: 'review',
         title: t('turnOutputs.review'),
+        ...(workspaceActions ? { workspaceActions } : {}),
+        ...(reviewWorkspaceCwd ? { workspaceCwd: reviewWorkspaceCwd } : {}),
       };
       setArtifactPanelTabs((tabs) =>
         tabs.some((item) => item.id === reviewTab.id)
-          ? tabs
+          ? tabs.map((item) => (item.id === reviewTab.id ? reviewTab : item))
           : [reviewTab, ...tabs],
       );
       setActiveArtifactPanelTabId(reviewTab.id);
@@ -1871,7 +1882,12 @@ export function App({
         return;
       }
       if (request.kind === 'review') {
-        openReviewPanel(request.changes, request.selectedPath);
+        openReviewPanel(
+          request.changes,
+          request.selectedPath,
+          request.workspaceActions,
+          request.workspaceCwd,
+        );
         return;
       }
       if (request.kind === 'scheduled_task') {
@@ -1921,6 +1937,30 @@ export function App({
       openReviewPanel,
       openScheduledTaskPanel,
     ],
+  );
+  const openFilePreview = useCallback(
+    (
+      change: TurnOutputFileChange,
+      workspaceActions: DaemonWorkspaceActions,
+      previewWorkspaceCwd?: string,
+    ) => {
+      const previewContent = getFileChangePreviewContent(change);
+      const tab: ArtifactPanelTab = {
+        id: `file:${previewWorkspaceCwd ?? ''}:${change.path}`,
+        kind: 'file',
+        title: displayPath(change.path, previewWorkspaceCwd),
+        workspacePath: change.path,
+        workspaceActions,
+        ...(previewContent !== undefined ? { previewContent } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+    },
+    [],
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
@@ -7900,6 +7940,7 @@ export function App({
                   error={artifactsError}
                   onSelectTab={setActiveArtifactPanelTabId}
                   onCloseTab={closeArtifactPanelTab}
+                  onOpenFilePreview={openFilePreview}
                   onClose={closeArtifactPanel}
                 />
               </>
