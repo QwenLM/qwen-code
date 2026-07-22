@@ -55,6 +55,8 @@ type CompactedSlot =
       lastEventId: number;
       lastMeta: unknown;
       lastEnvelopeMeta?: Record<string, unknown>;
+      lastPromptId?: string;
+      lastOriginatorClientId?: string;
     }
   | { kind: 'tool'; toolCallId: string; event: BridgeEvent }
   | { kind: 'misc'; event: BridgeEvent }
@@ -338,6 +340,9 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         if (event.id !== undefined) slot.lastEventId = event.id;
         slot.lastMeta = meta ?? slot.lastMeta;
         slot.lastEnvelopeMeta = event._meta ?? slot.lastEnvelopeMeta;
+        slot.lastPromptId = event.promptId ?? slot.lastPromptId;
+        slot.lastOriginatorClientId =
+          event.originatorClientId ?? slot.lastOriginatorClientId;
       } else {
         entries.push({ sourceRecordIds, index: this.slots.length });
         this.textSlotIndex[kind].set(parentToolCallId, entries);
@@ -349,6 +354,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           lastEventId: event.id ?? 0,
           lastMeta: meta,
           lastEnvelopeMeta: event._meta,
+          lastPromptId: event.promptId,
+          lastOriginatorClientId: event.originatorClientId,
         });
       }
     } else {
@@ -366,6 +373,9 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
         if (event.id !== undefined) lastSlot.lastEventId = event.id;
         lastSlot.lastMeta = meta ?? lastSlot.lastMeta;
         lastSlot.lastEnvelopeMeta = event._meta ?? lastSlot.lastEnvelopeMeta;
+        lastSlot.lastPromptId = event.promptId ?? lastSlot.lastPromptId;
+        lastSlot.lastOriginatorClientId =
+          event.originatorClientId ?? lastSlot.lastOriginatorClientId;
       } else {
         this.slots.push({
           kind,
@@ -375,6 +385,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           lastEventId: event.id ?? 0,
           lastMeta: meta,
           lastEnvelopeMeta: event._meta,
+          lastPromptId: event.promptId,
+          lastOriginatorClientId: event.originatorClientId,
         });
       }
     }
@@ -396,6 +408,8 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
               slot.lastEventId,
               slot.lastMeta,
               slot.lastEnvelopeMeta,
+              slot.lastPromptId,
+              slot.lastOriginatorClientId,
             ),
           );
           break;
@@ -530,12 +544,19 @@ function makeMergedSessionUpdateEvent(
   eventId: number,
   meta: unknown,
   envelopeMeta: Record<string, unknown> | undefined,
+  promptId: string | undefined,
+  originatorClientId: string | undefined,
 ): BridgeEvent {
   return {
     id: eventId || undefined,
     v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
     ...(envelopeMeta !== undefined ? { _meta: envelopeMeta } : {}),
+    // Merging must not strip the envelope attribution the source chunks
+    // carried — replay consumers key echo suppression and transcript
+    // grouping on these fields just like live subscribers do.
+    ...(promptId !== undefined ? { promptId } : {}),
+    ...(originatorClientId !== undefined ? { originatorClientId } : {}),
     data: {
       update: {
         sessionUpdate,
@@ -626,12 +647,19 @@ function mergeToolCallEvent(
     existing._meta || incoming._meta
       ? { ...(existing._meta ?? {}), ...(incoming._meta ?? {}) }
       : undefined;
+  // Keep envelope attribution through the merge (latest wins, mirroring
+  // the id): replay consumers use it for echo suppression and grouping.
+  const promptId = incoming.promptId ?? existing.promptId;
+  const originatorClientId =
+    incoming.originatorClientId ?? existing.originatorClientId;
 
   return {
     id: incoming.id ?? existing.id,
     v: EVENT_SCHEMA_VERSION,
     type: 'session_update',
     ...(mergedMeta ? { _meta: mergedMeta } : {}),
+    ...(promptId !== undefined ? { promptId } : {}),
+    ...(originatorClientId !== undefined ? { originatorClientId } : {}),
     data: {
       ...existingData,
       ...incomingData,
