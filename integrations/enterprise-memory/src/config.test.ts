@@ -23,7 +23,7 @@ function stubRuntimeEnvironment(): void {
     MEMORY_LEDGER_TOKEN: 'ledger-token',
     MEMORY_CONTENT_PROTECTOR_URL: 'https://keys.example.test',
     MEMORY_CONTENT_PROTECTOR_TOKEN: 'key-token',
-    MEM0_API_KEY: 'mem0-token',
+    MEMORY_SEMANTIC_INDEX_API_KEY: 'semantic-index-token',
     MEMORY_RUNTIME_DATABASE_URL:
       'postgresql://runtime@db.example.test/memory?sslmode=verify-full',
     MEMORY_CAPABILITY_ISSUER: 'https://broker.example.test',

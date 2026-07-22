@@ -156,20 +156,17 @@ export class HttpContentProtector implements ContentProtector {
     path: string,
     init: RequestInit,
   ): Promise<T> {
-    const response = await this.fetchImplementation(
-      new URL(path, this.options.baseUrl),
-      {
-        ...init,
-        headers: {
-          authorization: `Bearer ${this.options.bearerToken}`,
-          'content-type': 'application/json',
-        },
-        redirect: 'error',
-        signal:
-          init.signal ??
-          AbortSignal.timeout(this.options.requestTimeoutMs ?? 3_000),
+    const response = await this.fetchImplementation(this.endpoint(path), {
+      ...init,
+      headers: {
+        authorization: `Bearer ${this.options.bearerToken}`,
+        'content-type': 'application/json',
       },
-    );
+      redirect: 'error',
+      signal:
+        init.signal ??
+        AbortSignal.timeout(this.options.requestTimeoutMs ?? 3_000),
+    });
     if (!response.ok) {
       throw new Error(
         `Content-protection service failed with ${response.status}`,
@@ -179,5 +176,13 @@ export class HttpContentProtector implements ContentProtector {
       return undefined as T;
     }
     return readBoundedJson<T>(response, 512 * 1024);
+  }
+
+  private endpoint(path: string): URL {
+    const baseUrl = new URL(this.options.baseUrl);
+    if (!baseUrl.pathname.endsWith('/')) {
+      baseUrl.pathname += '/';
+    }
+    return new URL(path.replace(/^\/+/, ''), baseUrl);
   }
 }

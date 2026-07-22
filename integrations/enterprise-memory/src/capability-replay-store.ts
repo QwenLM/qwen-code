@@ -76,8 +76,9 @@ export class PostgresCapabilityReplayStore implements CapabilityReplayStore {
       }>(
         `SELECT principal_id, capability_fingerprint, request_binding, expires_at
            FROM runtime_capability_replays
-          WHERE capability_id = $1`,
-        [identity.capabilityId],
+          WHERE tenant_id = $1
+            AND capability_id = $2`,
+        [identity.tenantId, identity.capabilityId],
       );
       const existing = result.rows[0];
       if (
@@ -91,7 +92,11 @@ export class PostgresCapabilityReplayStore implements CapabilityReplayStore {
       }
       await client.query('COMMIT');
     } catch (error) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the operation failure that caused the rollback.
+      }
       throw error;
     } finally {
       client.release();

@@ -42,10 +42,21 @@ export function computeRequestHmac(
 }
 
 export function requestHmacMatches(expected: string, actual: string): boolean {
-  const expectedBytes = Buffer.from(expected, 'base64url');
-  const actualBytes = Buffer.from(actual, 'base64url');
+  const expectedBytes = decodeSha256Base64Url(expected);
+  const actualBytes = decodeSha256Base64Url(actual);
   return (
-    expectedBytes.length === actualBytes.length &&
+    expectedBytes !== undefined &&
+    actualBytes !== undefined &&
     timingSafeEqual(expectedBytes, actualBytes)
   );
+}
+
+function decodeSha256Base64Url(value: string): Buffer | undefined {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    return undefined;
+  }
+  const bytes = Buffer.from(value, 'base64url');
+  return bytes.length === 32 && bytes.toString('base64url') === value
+    ? bytes
+    : undefined;
 }

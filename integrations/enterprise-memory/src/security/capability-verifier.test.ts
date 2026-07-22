@@ -7,7 +7,10 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import { generateKeyPair, SignJWT } from 'jose';
 import { beforeAll, describe, expect, it } from 'vitest';
-import { CapabilityVerifier } from './capability-verifier.js';
+import {
+  CapabilityVerificationError,
+  CapabilityVerifier,
+} from './capability-verifier.js';
 import { computeRequestHmac, sha256Base64Url } from './request-binding.js';
 
 describe('CapabilityVerifier', () => {
@@ -65,6 +68,15 @@ describe('CapabilityVerifier', () => {
     overrides: Record<string, unknown> = {},
     requestOverrides: Partial<typeof request> = {},
     includeJti = true,
+    options: {
+      alg?: string;
+      typ?: string;
+      issuer?: string;
+      audience?: string;
+      issuedAt?: number;
+      expiresAt?: number;
+      signingKey?: CryptoKey | Uint8Array;
+    } = {},
   ): Promise<string> {
     const boundRequest = { ...request, ...requestOverrides };
     const signer = new SignJWT({
@@ -84,18 +96,18 @@ describe('CapabilityVerifier', () => {
       ...overrides,
     })
       .setProtectedHeader({
-        alg: 'ES256',
-        typ: 'qwen-memory-runtime+jwt',
+        alg: options.alg ?? 'ES256',
+        typ: options.typ ?? 'qwen-memory-runtime+jwt',
       })
-      .setIssuer(issuer)
-      .setAudience(audience)
+      .setIssuer(options.issuer ?? issuer)
+      .setAudience(options.audience ?? audience)
       .setSubject('principal-a')
-      .setIssuedAt(nowSeconds)
-      .setExpirationTime(nowSeconds + 60);
+      .setIssuedAt(options.issuedAt ?? nowSeconds)
+      .setExpirationTime(options.expiresAt ?? nowSeconds + 60);
     if (includeJti) {
       signer.setJti(randomUUID());
     }
-    return signer.sign(privateKey);
+    return signer.sign(options.signingKey ?? privateKey);
   }
 
   it('accepts an exact sender-constrained request', async () => {
@@ -126,60 +138,118 @@ describe('CapabilityVerifier', () => {
   });
 
   it.each([
-    ['body', { body: Buffer.from('{"query":"other"}') }],
-    ['route', { route: '/v1/runtime/proposals' }],
-    ['operation', { operationId: randomUUID() }],
-    ['certificate', { peerCertificateThumbprint: sha256Base64Url('other') }],
-  ])('rejects a mismatched %s binding', async (_name, mismatch) => {
-    await expect(
-      verifier.verify({
-        ...request,
-        ...mismatch,
-        token: await token(),
-      }),
-    ).rejects.toThrow();
-  });
+    [
+      'body',
+      { body: Buffer.from('{"query":"other"}') },
+      'Exact request binding mismatch',
+    ],
+    [
+      'route',
+      { route: '/v1/runtime/proposals' },
+      'Exact request binding mismatch',
+    ],
+    [
+      'operation',
+      { operationId: randomUUID() },
+      'Exact request binding mismatch',
+    ],
+    [
+      'certificate',
+      { peerCertificateThumbprint: sha256Base64Url('other') },
+      'mTLS sender constraint mismatch',
+    ],
+  ])(
+    'rejects a mismatched %s binding',
+    async (_name, mismatch, expectedError) => {
+      await expect(
+        verifier.verify({
+          ...request,
+          ...mismatch,
+          token: await token(),
+        }),
+      ).rejects.toThrow(expectedError);
+    },
+  );
 
-  it('rejects missing jti, excessive TTL, and an authorization lease shorter than the token', async () => {
+  it('rejects a missing capability ID', async () => {
     await expect(
       verifier.verify({
         ...request,
         token: await token({}, {}, false),
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('Missing or invalid jti');
+  });
 
-    const longLived = await new SignJWT({
-      tenant_id: 'tenant-a',
-      workspace_id: 'workspace-a',
-      repository_id: 'repository-a',
-      revocation_epoch: 7,
-      authz_exp: nowSeconds + 600,
-      capabilities: ['memory:read'],
-      cnf: { 'x5t#S256': certificateThumbprint },
-      req_hmac: computeRequestHmac(requestSecret, {
-        method: request.method,
-        route: request.route,
-        operationId: request.operationId,
-        bodyDigest: sha256Base64Url(request.body),
-      }),
-    })
-      .setProtectedHeader({ alg: 'ES256', typ: 'qwen-memory-runtime+jwt' })
-      .setIssuer(issuer)
-      .setAudience(audience)
-      .setSubject('principal-a')
-      .setJti(randomUUID())
-      .setIssuedAt(nowSeconds)
-      .setExpirationTime(nowSeconds + 600)
-      .sign(privateKey);
+  it('rejects a capability whose TTL exceeds policy', async () => {
     await expect(
-      verifier.verify({ ...request, token: longLived }),
-    ).rejects.toThrow();
+      verifier.verify({
+        ...request,
+        token: await token({ authz_exp: nowSeconds + 600 }, {}, true, {
+          expiresAt: nowSeconds + 600,
+        }),
+      }),
+    ).rejects.toThrow('Capability TTL exceeds policy');
+  });
 
+  it('rejects a capability that outlives its authorization lease', async () => {
     await expect(
       verifier.verify({
         ...request,
         token: await token({ authz_exp: nowSeconds + 30 }),
       }),
-    ).rejects.toThrow();
+    ).rejects.toThrow('Capability outlives authorization lease');
+  });
+
+  it.each([
+    ['type', { typ: 'JWT' }],
+    ['issuer', { issuer: 'https://other.example.test' }],
+    ['audience', { audience: 'other-audience' }],
+    ['expiration', { expiresAt: nowSeconds - 10 }],
+  ])('rejects an invalid token %s', async (_name, options) => {
+    await expect(
+      verifier.verify({
+        ...request,
+        token: await token({}, {}, true, options),
+      }),
+    ).rejects.toBeInstanceOf(CapabilityVerificationError);
+  });
+
+  it('rejects a disallowed signature algorithm', async () => {
+    await expect(
+      verifier.verify({
+        ...request,
+        token: await token({}, {}, true, {
+          alg: 'HS256',
+          signingKey: randomBytes(32),
+        }),
+      }),
+    ).rejects.toBeInstanceOf(CapabilityVerificationError);
+  });
+
+  it('rejects a missing required capability', async () => {
+    await expect(
+      verifier.verify({
+        ...request,
+        token: await token({ capabilities: ['events:write'] }),
+      }),
+    ).rejects.toThrow('Capability does not allow operation');
+  });
+
+  it('rejects an unknown runtime capability', async () => {
+    await expect(
+      verifier.verify({
+        ...request,
+        token: await token({ capabilities: ['memory:delete'] }),
+      }),
+    ).rejects.toThrow('Invalid runtime capability');
+  });
+
+  it('rejects a negative revocation epoch', async () => {
+    await expect(
+      verifier.verify({
+        ...request,
+        token: await token({ revocation_epoch: -1 }),
+      }),
+    ).rejects.toThrow('Invalid revocation epoch');
   });
 });

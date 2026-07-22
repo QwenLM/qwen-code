@@ -97,7 +97,7 @@ export interface MemoryBackendConfig {
   ledgerToken: string;
   contentProtectorUrl: string;
   contentProtectorToken: string;
-  mem0ApiKey: string;
+  semanticIndexApiKey: string;
 }
 
 export interface RuntimeGatewayConfig extends MemoryBackendConfig {
@@ -186,6 +186,6 @@ function loadMemoryBackendConfig(): MemoryBackendConfig {
     ledgerToken: required('MEMORY_LEDGER_TOKEN'),
     contentProtectorUrl: httpsUrl('MEMORY_CONTENT_PROTECTOR_URL'),
     contentProtectorToken: required('MEMORY_CONTENT_PROTECTOR_TOKEN'),
-    mem0ApiKey: required('MEM0_API_KEY'),
+    semanticIndexApiKey: required('MEMORY_SEMANTIC_INDEX_API_KEY'),
   };
 }

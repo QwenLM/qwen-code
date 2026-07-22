@@ -55,10 +55,10 @@ export class EntityIdMapper {
     scopeId: string,
   ): string {
     const tenantKey = createHmac('sha256', this.secret)
-      .update(JSON.stringify(['mem0-tenant-key-v1', tenantId]))
+      .update(JSON.stringify(['semantic-index-tenant-key-v1', tenantId]))
       .digest();
     const digest = createHmac('sha256', tenantKey)
-      .update(JSON.stringify(['mem0-entity-v1', scope, scopeId]))
+      .update(JSON.stringify(['semantic-index-entity-v1', scope, scopeId]))
       .digest('base64url');
     return `em_${this.keyVersion}_${digest}`;
   }

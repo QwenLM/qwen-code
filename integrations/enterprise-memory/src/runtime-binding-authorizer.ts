@@ -57,7 +57,11 @@ export class PostgresRuntimeBindingAuthorizer
       }
       await client.query('COMMIT');
     } catch (error) {
-      await client.query('ROLLBACK');
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // Preserve the authorization failure that caused the rollback.
+      }
       throw error;
     } finally {
       client.release();
