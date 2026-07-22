@@ -127,6 +127,43 @@ describe('isDestructiveCommand — git patterns', () => {
     expect(result!.blocked).toBe(true);
   });
 
+  it('blocks the force flag wherever it appears in git clean', () => {
+    for (const cmd of [
+      // Long spelling of -f.
+      'git clean --force',
+      'git clean --force -d',
+      // Force flag after another flag, rather than as the first token.
+      'git clean -d --force',
+      'git clean -d -f',
+      'git clean -n -f',
+      'git clean --quiet -fd',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'remove files');
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    }
+  });
+
+  it('does not pull a -f from a later command segment into git clean', () => {
+    // `git clean` alone is harmless; the -f belongs to the second command.
+    for (const cmd of [
+      'git clean; grep -f patterns.txt file',
+      'git clean && tail -f log.txt',
+      'git clean | xargs -f',
+    ]) {
+      const result = isDestructiveCommand(cmd, 'look at logs');
+      expect(result).toBeNull();
+    }
+  });
+
+  it('blocks git checkout . (same discard as the -- . form)', () => {
+    for (const cmd of ['git checkout .', 'git checkout . && npm test']) {
+      const result = isDestructiveCommand(cmd, 'fix the bug');
+      expect(result).not.toBeNull();
+      expect(result!.blocked).toBe(true);
+    }
+  });
+
   it('blocks git stash drop', () => {
     const result = isDestructiveCommand('git stash drop', 'remove stash');
     expect(result).not.toBeNull();
@@ -171,6 +208,13 @@ describe('isDestructiveCommand — git patterns', () => {
       'git stash',
       'git stash pop',
       'git stash list',
+      // A leading-dot pathspec is a single file, not the whole worktree, so
+      // it must not be caught by the `git checkout .` pattern.
+      'git checkout .gitignore',
+      'git checkout .github/workflows/ci.yml',
+      // `--force` only counts on `git clean`; these are unrelated commands.
+      'git push --force-with-lease',
+      'git fetch --force',
     ];
     for (const cmd of safeCommands) {
       const result = isDestructiveCommand(cmd, 'do stuff');

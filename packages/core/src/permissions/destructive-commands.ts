@@ -24,7 +24,16 @@ import { execSync } from 'node:child_process';
 const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   /\bgit\s+reset\s+--hard\b/,
   /\bgit\s+checkout\s+--\s+\./,
-  /\bgit\s+clean\s+-[a-zA-Z]*f/,
+  // `git checkout .` discards the same tracked changes as the `-- .` form
+  // above. The lookahead keeps `git checkout .gitignore` (a single file, not
+  // the whole tree) and branch names out of this pattern.
+  /\bgit\s+checkout\s+\.(?=\s|$)/,
+  // The force flag must be matched wherever it appears in the argument list,
+  // not only as the first token: `git clean -d -f` and `git clean -d --force`
+  // delete exactly what `git clean -fd` does. `--force` is the long spelling
+  // of `-f`, so it blocks identically. The scan stops at a command separator
+  // so a later segment cannot pull an unrelated `-f` into this match.
+  /\bgit\s+clean\b[^;&|\n]*?(?:\s-[a-zA-Z]*f|\s--force\b)/,
   /\bgit\s+stash\s+drop\b/,
 ]);
 
