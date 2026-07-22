@@ -41,6 +41,7 @@ import type {
   CreateSubSessionHandler,
 } from './bridgeOptions.js';
 import {
+  CHANNEL_DELIVERY_ERROR_CODES,
   MAX_SUB_SESSION_NAME_CHARS,
   MAX_SUB_SESSION_PROMPT_CHARS,
 } from './bridgeOptions.js';
@@ -69,15 +70,6 @@ const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
 const MAX_CHANNEL_DELIVERY_TEXT_CHARS = 100_000;
 const MAX_CHANNEL_DELIVERY_FIELD_CHARS = 2048;
 const MAX_CHANNEL_DELIVERY_ERROR_CHARS = 500;
-// Keep in sync with ChannelDeliveryErrorCode in bridgeOptions.ts; cli channel-delivery-ipc.ts and sdk-typescript events.ts carry the same set.
-const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
-  'channel_worker_unavailable',
-  'channel_delivery_timeout',
-  'channel_delivery_invalid',
-  'channel_delivery_rejected',
-  'channel_delivery_queue_full',
-  'channel_delivery_failed',
-]);
 
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.

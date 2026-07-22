@@ -1259,7 +1259,9 @@ describe('CronScheduler', () => {
           id: 'user-1',
         },
       };
-      await writeCronTasks(tmpDir, [{ ...diskTask('disktask'), delivery }]);
+      await writeCronTasks(tmpDir, [
+        { ...diskTask('disktask'), sessionId: 'session-1', delivery },
+      ]);
       await scheduler.enableDurable('session-1');
 
       const fired: CronJob[] = [];
@@ -1271,6 +1273,34 @@ describe('CronScheduler', () => {
       expect(fired[0]!.delivery).toEqual(delivery);
 
       // The disk write from tick() is fire-and-forget — wait for it.
+      const minuteMs = new Date(2025, 0, 15, 10, 30, 0).getTime();
+      await vi.waitFor(async () => {
+        const task = (await readCronTasks(tmpDir))[0];
+        expect(task?.lastFiredAt).toBe(minuteMs);
+        expect(task?.delivery).toEqual(delivery);
+      });
+    });
+
+    it('does not propagate delivery to the fired job for unbound tasks', async () => {
+      const delivery = {
+        kind: 'channel' as const,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      };
+      await writeCronTasks(tmpDir, [{ ...diskTask('unbound'), delivery }]);
+      await scheduler.enableDurable('session-1');
+
+      const fired: CronJob[] = [];
+      scheduler.start((job) => fired.push(job));
+      scheduler.tick(new Date(2025, 0, 15, 10, 30, 59));
+
+      expect(fired).toHaveLength(1);
+      expect(fired[0]!.delivery).toBeUndefined();
+
+      // The delivery field is preserved on disk for a future session binding.
       const minuteMs = new Date(2025, 0, 15, 10, 30, 0).getTime();
       await vi.waitFor(async () => {
         const task = (await readCronTasks(tmpDir))[0];

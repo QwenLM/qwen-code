@@ -1602,7 +1602,7 @@ function durableTaskToJob(
     jitterMs,
     durable: true,
     ...(task.sessionId ? { boundSessionId: task.sessionId } : {}),
-    ...(task.delivery ? { delivery: task.delivery } : {}),
+    ...(task.delivery && task.sessionId ? { delivery: task.delivery } : {}),
   };
 }
 

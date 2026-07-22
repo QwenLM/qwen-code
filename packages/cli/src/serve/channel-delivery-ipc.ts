@@ -6,23 +6,12 @@
 
 import { randomUUID } from 'node:crypto';
 
-// Keep in sync with acp-bridge bridgeOptions.ts / bridgeClient.ts and sdk-typescript events.ts.
-export type ChannelDeliveryErrorCode =
-  | 'channel_worker_unavailable'
-  | 'channel_delivery_timeout'
-  | 'channel_delivery_invalid'
-  | 'channel_delivery_rejected'
-  | 'channel_delivery_queue_full'
-  | 'channel_delivery_failed';
+import {
+  CHANNEL_DELIVERY_ERROR_CODES,
+  type ChannelDeliveryErrorCode,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 
-const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
-  'channel_worker_unavailable',
-  'channel_delivery_timeout',
-  'channel_delivery_invalid',
-  'channel_delivery_rejected',
-  'channel_delivery_queue_full',
-  'channel_delivery_failed',
-]);
+export { CHANNEL_DELIVERY_ERROR_CODES, type ChannelDeliveryErrorCode };
 
 export class ChannelDeliveryError extends Error {
   constructor(

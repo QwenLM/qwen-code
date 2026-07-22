@@ -111,6 +111,54 @@ describe('daemon event schema', () => {
     ).toBeUndefined();
   });
 
+  it('accepts every canonical channel delivery error code', () => {
+    // Canonical set from acp-bridge bridgeOptions.ts — the SDK carries an
+    // independent copy, so this test catches drift.
+    const canonicalCodes = [
+      'channel_worker_unavailable',
+      'channel_delivery_timeout',
+      'channel_delivery_invalid',
+      'channel_delivery_rejected',
+      'channel_delivery_queue_full',
+      'channel_delivery_failed',
+    ];
+    for (const code of canonicalCodes) {
+      const event: DaemonEvent = {
+        id: 1,
+        v: 1,
+        type: 'channel_delivery_result',
+        data: {
+          sessionId: 'session-1',
+          deliveryId: 'task-1:123',
+          source: 'scheduled',
+          status: 'failed',
+          taskId: 'task-1',
+          firedAt: 123,
+          code,
+          error: 'Something went wrong.',
+        },
+      };
+      expect(asKnownDaemonEvent(event), `code ${code} rejected`).toBe(event);
+    }
+    // A code outside the canonical set is rejected.
+    const unknown: DaemonEvent = {
+      id: 2,
+      v: 1,
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:123',
+        source: 'scheduled',
+        status: 'failed',
+        taskId: 'task-1',
+        firedAt: 123,
+        code: 'channel_delivery_exploded',
+        error: 'Not a real code.',
+      },
+    };
+    expect(asKnownDaemonEvent(unknown)).toBeUndefined();
+  });
+
   it('recognizes pending prompt queue events', () => {
     const added: DaemonEvent = {
       id: 10,

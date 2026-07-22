@@ -3712,6 +3712,9 @@ export class Session implements SessionContext {
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
+    // Best-effort: the unref'd timer means delivery is silently dropped
+    // if the process exits before the next tick — consistent with the
+    // no-retry delivery contract.
     const timer = setTimeout(() => {
       void this.client
         .extMethod(SERVE_CONTROL_EXT_METHODS.channelDelivery, params)

@@ -519,7 +519,8 @@ export type CreateSubSessionHandler = (
   info: CreateSubSessionInfo,
 ) => Promise<CreateSubSessionResult>;
 
-// Keep in sync with cli channel-delivery-ipc.ts, bridgeClient.ts, and sdk-typescript events.ts.
+// Canonical set — cli channel-delivery-ipc.ts and bridgeClient.ts import this;
+// sdk-typescript events.ts carries an independent copy with a cross-check test.
 export type ChannelDeliveryErrorCode =
   | 'channel_worker_unavailable'
   | 'channel_delivery_timeout'
@@ -527,6 +528,15 @@ export type ChannelDeliveryErrorCode =
   | 'channel_delivery_rejected'
   | 'channel_delivery_queue_full'
   | 'channel_delivery_failed';
+
+export const CHANNEL_DELIVERY_ERROR_CODES: ReadonlySet<string> = new Set([
+  'channel_worker_unavailable',
+  'channel_delivery_timeout',
+  'channel_delivery_invalid',
+  'channel_delivery_rejected',
+  'channel_delivery_queue_full',
+  'channel_delivery_failed',
+]);
 
 export interface ChannelDeliveryInfo {
   sessionId: string;
