@@ -1,0 +1,228 @@
+/**
+ * @license
+ * Copyright 2026 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { Readable, Writable } from 'node:stream';
+import { describe, expect, it } from 'vitest';
+import {
+  bridgeAgentViewTerminal,
+  type AgentViewTerminalBytes,
+  type AgentViewTerminalDisposable,
+  type AgentViewTerminalPty,
+  type AgentViewTerminalSize,
+} from './terminal-bridge.js';
+
+describe('bridgeAgentViewTerminal', () => {
+  it('writes AsyncIterable stdin bytes into the PTY', async () => {
+    const pty = new FakeTerminalPty();
+    const stdout = new MemoryWritable();
+
+    await expect(
+      bridgeAgentViewTerminal({
+        stdin: bytes(['hello ', Buffer.from('world')]),
+        stdout,
+        pty,
+      }),
+    ).resolves.toEqual({ reason: 'stdin-ended' });
+
+    expect(pty.input()).toBe('hello world');
+  });
+
+  it('writes Readable stdin bytes into the PTY', async () => {
+    const pty = new FakeTerminalPty();
+
+    await bridgeAgentViewTerminal({
+      stdin: Readable.from([Buffer.from('abc'), Buffer.from('123')]),
+      stdout: new MemoryWritable(),
+      pty,
+    });
+
+    expect(pty.input()).toBe('abc123');
+  });
+
+  it('writes PTY output bytes to stdout', async () => {
+    const pty = new FakeTerminalPty();
+    const stdout = new MemoryWritable();
+    const done = bridgeAgentViewTerminal({
+      stdin: bytes(['input']),
+      stdout,
+      pty,
+    });
+
+    pty.emitData('output ');
+    pty.emitData(Buffer.from('bytes'));
+
+    await done;
+    expect(stdout.output()).toBe('output bytes');
+  });
+
+  it('detaches when stdout write fails after output closes', async () => {
+    const pty = new FakeTerminalPty();
+    let releaseInput: (() => void) | undefined;
+    const done = bridgeAgentViewTerminal({
+      stdin: delayedInput((release) => {
+        releaseInput = release;
+      }),
+      stdout: new FailingWritable(),
+      pty,
+    });
+
+    pty.emitData('output');
+
+    await expect(done).resolves.toEqual({ reason: 'detached' });
+    releaseInput?.();
+  });
+
+  it('forwards resize events to the PTY', async () => {
+    const pty = new FakeTerminalPty();
+    let resize: ((size: AgentViewTerminalSize) => void) | undefined;
+    let releaseInput: (() => void) | undefined;
+    const done = bridgeAgentViewTerminal({
+      stdin: delayedInput((release) => {
+        releaseInput = release;
+      }),
+      stdout: new MemoryWritable(),
+      pty,
+      onResize: (callback) => {
+        resize = callback;
+      },
+    });
+
+    resize?.({ columns: 120, rows: 40 });
+    releaseInput?.();
+    await done;
+
+    expect(pty.resizes).toEqual([{ columns: 120, rows: 40 }]);
+  });
+
+  it('disposes listeners and resolves when detached', async () => {
+    const pty = new FakeTerminalPty();
+    const stdout = new MemoryWritable();
+    const controller = new AbortController();
+    let releaseInput: (() => void) | undefined;
+    const done = bridgeAgentViewTerminal({
+      stdin: delayedInput((release) => {
+        releaseInput = release;
+      }),
+      stdout,
+      pty,
+      detachSignal: controller.signal,
+    });
+
+    pty.emitData('before');
+    controller.abort();
+    pty.emitData('after');
+    releaseInput?.();
+
+    await expect(done).resolves.toEqual({ reason: 'detached' });
+    expect(stdout.output()).toBe('before');
+    expect(pty.listenerCount).toBe(0);
+  });
+
+  it('does not destroy Readable stdin when detached', async () => {
+    const pty = new FakeTerminalPty();
+    const stdin = new Readable({
+      read() {},
+    });
+    const controller = new AbortController();
+    const done = bridgeAgentViewTerminal({
+      stdin,
+      stdout: new MemoryWritable(),
+      pty,
+      detachSignal: controller.signal,
+    });
+
+    controller.abort();
+
+    await expect(done).resolves.toEqual({ reason: 'detached' });
+    expect(stdin.destroyed).toBe(false);
+    stdin.destroy();
+  });
+});
+
+async function* bytes(
+  chunks: AgentViewTerminalBytes[],
+): AsyncIterable<AgentViewTerminalBytes> {
+  for (const chunk of chunks) {
+    yield chunk;
+  }
+}
+
+async function* delayedInput(
+  registerRelease: (release: () => void) => void,
+): AsyncIterable<AgentViewTerminalBytes> {
+  await new Promise<void>((resolve) => {
+    registerRelease(resolve);
+  });
+  yield 'late';
+}
+
+class FakeTerminalPty implements AgentViewTerminalPty {
+  private readonly inputChunks: Buffer[] = [];
+  private dataCallbacks: Array<(data: AgentViewTerminalBytes) => void> = [];
+  readonly resizes: AgentViewTerminalSize[] = [];
+
+  get listenerCount(): number {
+    return this.dataCallbacks.length;
+  }
+
+  write(data: Buffer): void {
+    this.inputChunks.push(Buffer.from(data));
+  }
+
+  onData(
+    callback: (data: AgentViewTerminalBytes) => void,
+  ): AgentViewTerminalDisposable {
+    this.dataCallbacks.push(callback);
+    return {
+      dispose: () => {
+        this.dataCallbacks = this.dataCallbacks.filter(
+          (item) => item !== callback,
+        );
+      },
+    };
+  }
+
+  resize(size: AgentViewTerminalSize): void {
+    this.resizes.push(size);
+  }
+
+  emitData(data: AgentViewTerminalBytes): void {
+    for (const callback of this.dataCallbacks) {
+      callback(data);
+    }
+  }
+
+  input(): string {
+    return Buffer.concat(this.inputChunks).toString('utf8');
+  }
+}
+
+class MemoryWritable extends Writable {
+  private readonly chunks: Buffer[] = [];
+
+  override _write(
+    chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    this.chunks.push(Buffer.from(chunk));
+    callback();
+  }
+
+  output(): string {
+    return Buffer.concat(this.chunks).toString('utf8');
+  }
+}
+
+class FailingWritable extends Writable {
+  override _write(
+    _chunk: Buffer,
+    _encoding: BufferEncoding,
+    callback: (error?: Error | null) => void,
+  ): void {
+    callback(new Error('stdout closed'));
+  }
+}
