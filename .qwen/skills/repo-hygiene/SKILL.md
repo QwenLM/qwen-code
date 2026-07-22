@@ -88,19 +88,104 @@ that cannot point at file:line with a quote is not a finding.
 
 ### Nine partitions (one subagent each)
 
-The scope line is a starting boundary, not a reading list. The subagent
-finds the package's own entry points, schemas, registries, and contracts
-and builds its own map of what "correct" means inside the partition.
+Each partition below names its package, what it does, its key subdirectories,
+and what "correct" looks like inside it. The scope line is a starting
+boundary, not a reading list — the subagent finds the package's own entry
+points, schemas, registries, and contracts and builds its own map.
 
-- **cli/config**: `packages/cli/src/config/` — settings schema, settings.ts, config loader, migration.
-- **cli/runtime**: `packages/cli/src/commands/` + `packages/cli/src/services/` — subcommand entry points, argv parsers, help text, daemon services, workers, background tasks.
-- **cli/ui**: `packages/cli/src/ui/` — Ink components, views, TUI state.
-- **core**: `packages/core/src/` — exported types, protocol definitions, daemon protocol.
-- **extensions**: `packages/{vscode-ide-companion,chrome-extension,zed-extension}/` — host IDE integrations, manifest, host API surface.
-- **sdk-typescript**: `packages/sdk-typescript/` — ACP / streamable-http client for TypeScript consumers.
-- **sdk-python-java**: `packages/sdk-python/` + `packages/sdk-java/` + `packages/acp-bridge/` — non-TS SDKs and the ACP bridge.
-- **ui-apps**: `packages/{desktop,web-shell,webui}/` — Electron app, web shell, web UI.
-- **docs**: `docs/`, `README.md`, each package's root docs. Cross-reference against the source files the prose points at.
+- **cli/config** — config subsystem of the Qwen CLI (`packages/cli/src/config/`).
+  - Defines the settings schema (`settingsSchema.ts`, `settings.ts`), the
+    multi-scope settings loader (user / project / extension / bundled), and
+    the migration logic.
+  - The vscode IDE companion's `schemas/settings.schema.json` is a generated
+    artifact of this partition; edits to the schema source must regenerate it.
+  - Correct: every schema field has a loader, every loader has a default,
+    every migration is reversible, and generated artifacts match their source.
+
+- **cli/runtime** — command entry points plus the daemon HTTP server
+  (`packages/cli/src/commands/`, `packages/cli/src/serve/`,
+  `packages/cli/src/acp-integration/`, `packages/cli/src/services/`,
+  `packages/cli/src/remoteInput/`, `packages/cli/src/dualOutput/`,
+  `packages/cli/src/startup/`, `packages/cli/src/i18n/`, `packages/cli/src/utils/`,
+  `packages/cli/src/core/`, `packages/cli/src/export/`, `packages/cli/src/validate*`).
+  - `commands/` registers subcommand entries, argv parsers, and help text.
+  - `serve/` is the daemon: Express HTTP routes, channel worker manager,
+    channel worker group/supervisor, ACP streamable-http, CDP tunnel,
+    workspace registry, workspace service, and the daemon lifecycle.
+  - `acp-integration/` hosts the ACP Agent, session tracker, and subagent
+    tracker consumed by serve routes and channel workers.
+  - Correct: every registered command has a parser and help, every route
+    maps to a workspace-scoped runtime, every worker lifecycle has cleanup.
+
+- **cli/ui** — the Ink TUI (`packages/cli/src/ui/`).
+  - `App.tsx` / `AppContainer.tsx` are the root containers.
+  - `DialogManager.tsx` is the global dialog router driven by `uiState`.
+  - Domain subpackages: `agent-view/` (chat), `arena/` (multi-model compare),
+    `extensions/` (install wizard + tabs), `mcp/` (server approval),
+    `hooks/`, `subagents/{create,manage}/`, `background-view/`.
+  - Shared primitives: `shared/` (`ScrollableList`, `TextInput`, `ErrorBoundary`,
+    `text-buffer`, `vim-buffer-actions`), `messages/` (history item renderers).
+  - Global layers: `contexts/`, `themes/`, `state/`, `layouts/`, `hooks/`, `voice/`,
+    `selection/`, `editors/`, `daemon/`, `models/`, `noninteractive/`.
+  - Correct: portals go through `useWebShellPortalRoot` where applicable,
+    themes flow through semantic tokens, dialogs never double-mount.
+
+- **core** — the shared runtime package (`packages/core/src/`).
+  - Consumed by every CLI frontend; does not depend on business-layer code.
+  - Key subdirs: `agents/` (agent abstractions), `models/` (provider adapters),
+    `providers/` (model provider implementations), `tools/` (tool definitions),
+    `services/`, `prompts/`, `utils/` (LruCache, retry, filesearch, git,
+    shell, terminal, request-tokenizer), `hooks/`, `memory/`, `skills/`,
+    `subagents/`, `permissions/`, `confirmation-bus/`, `mcp/`, `lsp/`, `ide/`,
+    `goals/`, `resources/`, `followup/`, `extension/`, `config/`, `telemetry/`,
+    `output/`, `qwen/`.
+  - Cross-package contracts live here: exported types, protocol definitions,
+    daemon protocol. Anything that breaks a contract here breaks every
+    consumer.
+  - Correct: every export has a consumer, every protocol field matches its
+    wire form, every retry classifies its errors.
+
+- **extensions** — IDE host integrations (`packages/vscode-ide-companion/`,
+  `packages/chrome-extension/`, `packages/zed-extension/`).
+  - `vscode-ide-companion`: VS Code extension entry, host API surface,
+    `schemas/settings.schema.json` (generated from cli/config).
+  - `chrome-extension`: Chrome extension with manifest + background/content
+    scripts.
+  - `zed-extension`: Zed extension with its host API.
+  - Correct: each extension uses its host's API surface correctly, manifest
+    versions match host requirements, generated artifacts are not stale.
+
+- **sdk-typescript** — the TypeScript SDK (`packages/sdk-typescript/`).
+  - ACP / streamable-http client for TS consumers; public surface is its
+    exported types and client classes.
+  - Correct: protocol fields match the wire, retry/abort semantics are
+    honored, breaking changes bump the version.
+
+- **sdk-python-java** — non-TS SDKs and the ACP bridge
+  (`packages/sdk-python/`, `packages/sdk-java/`, `packages/acp-bridge/`).
+  - Python and Java SDKs ship ACP clients; `acp-bridge` is the bridge that
+    lets non-TS code speak ACP to the daemon.
+  - Correct: multi-SDK behavior is consistent, protocol fields match the
+    TS SDK, bridge error mapping preserves the original error class.
+
+- **ui-apps** — the three UI apps (`packages/desktop/`,
+  `packages/web-shell/`, `packages/webui/`).
+  - `desktop/apps/electron`: Electron main process (window management, IPC,
+    CDP, voice trust) + `desktop/apps/viewer`: React renderer.
+  - `web-shell`: a client React app (`client/`), a Vite build, and a
+    daemon proxy; ships as an embeddable component.
+  - `webui`: a lightweight web client consuming daemon REST endpoints.
+  - Correct: IPC message shapes match both ends, routes resolve, state
+    cleans up on unmount, portal roots are scoped.
+
+- **docs** — documentation (`docs/`, `README.md`, each package's root docs).
+  - `docs/design/` design docs, `docs/developers/` developer guides,
+    `docs/users/` user-facing docs, `docs/plans/` implementation plans.
+  - Cross-reference against the source files the prose points at; every
+    claim about a setting, command, or API must point at the source line
+    that backs it.
+  - Correct: prose never misleads a user into a wrong action, example code
+    runs, every API reference matches the real parser or schema.
 
 A partition is a starting boundary, not a fence. A subagent may follow a
 call chain, import graph, or contract reference into another partition to
