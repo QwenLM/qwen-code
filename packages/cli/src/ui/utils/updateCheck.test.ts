@@ -21,11 +21,6 @@ vi.mock('../../utils/package.js', () => ({
   getPackageJson,
 }));
 
-const updateNotifier = vi.hoisted(() => vi.fn());
-vi.mock('update-notifier', () => ({
-  default: updateNotifier,
-}));
-
 describe('checkForUpdates', () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -46,15 +41,11 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi
-        .fn()
-        .mockResolvedValue({ current: '1.0.0', latest: '1.1.0' }),
-    });
-    const result = await checkForUpdates();
+    const fetchGlobalNpm = vi.fn();
+    const result = await checkForUpdates(fetchGlobalNpm);
     expect(result).toBeNull();
     expect(getPackageJson).not.toHaveBeenCalled();
-    expect(updateNotifier).not.toHaveBeenCalled();
+    expect(fetchGlobalNpm).not.toHaveBeenCalled();
   });
 
   it('should return null if package.json is missing', async () => {
@@ -68,10 +59,13 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi.fn().mockResolvedValue(null),
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.0.0',
+      latest: '1.0.0',
+      type: 'latest',
+      name: 'test-package',
     });
-    const result = await checkForUpdates();
+    const result = await checkForUpdates(fetchGlobalNpm);
     expect(result).toBeNull();
   });
 
@@ -80,15 +74,21 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi
-        .fn()
-        .mockResolvedValue({ current: '1.0.0', latest: '1.1.0' }),
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.0.0',
+      latest: '1.1.0',
+      type: 'latest',
+      name: 'test-package',
     });
 
-    const result = await checkForUpdates();
+    const result = await checkForUpdates(fetchGlobalNpm);
     expect(result?.message).toContain('1.0.0 → 1.1.0');
-    expect(result?.update).toEqual({ current: '1.0.0', latest: '1.1.0' });
+    expect(result?.update).toEqual({
+      current: '1.0.0',
+      latest: '1.1.0',
+      type: 'latest',
+      name: 'test-package',
+    });
   });
 
   it('should return null if the latest version is the same as the current version', async () => {
@@ -96,12 +96,13 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi
-        .fn()
-        .mockResolvedValue({ current: '1.0.0', latest: '1.0.0' }),
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.0.0',
+      latest: '1.0.0',
+      type: 'latest',
+      name: 'test-package',
     });
-    const result = await checkForUpdates();
+    const result = await checkForUpdates(fetchGlobalNpm);
     expect(result).toBeNull();
   });
 
@@ -110,12 +111,13 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.1.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi
-        .fn()
-        .mockResolvedValue({ current: '1.1.0', latest: '1.0.0' }),
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.1.0',
+      latest: '1.0.0',
+      type: 'latest',
+      name: 'test-package',
     });
-    const result = await checkForUpdates();
+    const result = await checkForUpdates(fetchGlobalNpm);
     expect(result).toBeNull();
   });
 
@@ -124,11 +126,9 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi.fn().mockRejectedValue(new Error('Timeout')),
-    });
+    const fetchGlobalNpm = vi.fn().mockRejectedValue(new Error('Timeout'));
 
-    const result = await checkForUpdates();
+    const result = await checkForUpdates(fetchGlobalNpm);
     expect(result).toBeNull();
   });
 
@@ -139,7 +139,6 @@ describe('checkForUpdates', () => {
 
     expect(result).toEqual({ status: 'skipped', reason: 'development mode' });
     expect(getPackageJson).not.toHaveBeenCalled();
-    expect(updateNotifier).not.toHaveBeenCalled();
   });
 
   it('should return a detailed skipped result if package metadata is missing', async () => {
@@ -158,11 +157,14 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi.fn().mockResolvedValue(null),
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.0.0',
+      latest: '1.0.0',
+      type: 'latest',
+      name: 'test-package',
     });
 
-    const result = await checkForUpdatesDetailed();
+    const result = await checkForUpdatesDetailed(fetchGlobalNpm);
 
     expect(result).toEqual({ status: 'up-to-date', currentVersion: '1.0.0' });
   });
@@ -173,11 +175,9 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi.fn().mockRejectedValue(error),
-    });
+    const fetchGlobalNpm = vi.fn().mockRejectedValue(error);
 
-    const result = await checkForUpdatesDetailed();
+    const result = await checkForUpdatesDetailed(fetchGlobalNpm);
 
     expect(result).toEqual({
       status: 'error',
@@ -191,19 +191,25 @@ describe('checkForUpdates', () => {
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi
-        .fn()
-        .mockResolvedValue({ current: '1.0.0', latest: '1.1.0' }),
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.0.0',
+      latest: '1.1.0',
+      type: 'latest',
+      name: 'test-package',
     });
 
-    const result = await checkForUpdatesDetailed();
+    const result = await checkForUpdatesDetailed(fetchGlobalNpm);
 
     expect(result).toEqual({
       status: 'update',
       info: {
         message: 'Qwen Code update available! 1.0.0 → 1.1.0',
-        update: { current: '1.0.0', latest: '1.1.0' },
+        update: {
+          current: '1.0.0',
+          latest: '1.1.0',
+          type: 'latest',
+          name: 'test-package',
+        },
       },
     });
   });
@@ -240,31 +246,34 @@ describe('checkForUpdates', () => {
     );
   });
 
-  it('selects the global npm registry for global npm installs', async () => {
+  it('always resolves the update check via npm view, regardless of installation type (#7515)', async () => {
+    // update-notifier's fetchInfo() requests the abbreviated npm metadata
+    // format, which registry.npmjs.org now rejects with an empty HTTP 406
+    // for every install type, not just global ones. The check must always
+    // go through fetchGlobalNpm (npm view), never fall back to update-notifier.
     getPackageJson.mockResolvedValue({
       name: '@qwen-code/qwen-code',
       version: '1.0.0',
     });
-    const detectGlobalNpm = vi.fn().mockResolvedValue(true);
     const fetchGlobalNpm = vi.fn().mockResolvedValue({
       current: '1.0.0',
       latest: '1.1.0',
+      type: 'latest',
+      name: '@qwen-code/qwen-code',
     });
 
     await expect(
-      checkForUpdatesDetailed(detectGlobalNpm, fetchGlobalNpm),
+      checkForUpdatesDetailed(fetchGlobalNpm),
     ).resolves.toMatchObject({
       status: 'update',
       info: { update: { current: '1.0.0', latest: '1.1.0' } },
     });
 
-    expect(detectGlobalNpm).toHaveBeenCalledOnce();
     expect(fetchGlobalNpm).toHaveBeenCalledWith(
       '@qwen-code/qwen-code',
       '1.0.0',
       'latest',
     );
-    expect(updateNotifier).not.toHaveBeenCalled();
   });
 
   it('does not treat pnpm installs as global npm installs', async () => {
@@ -464,21 +473,24 @@ describe('checkForUpdates', () => {
     ).resolves.toMatchObject({ current: '1.0.0', latest: '1.0.0' });
   });
 
-  it('should pass a non-optional package version to update-notifier', async () => {
+  it('should pass the exact package name and version to fetchGlobalNpm', async () => {
     getPackageJson.mockResolvedValue({
       name: 'test-package',
       version: '1.0.0',
     });
-    updateNotifier.mockReturnValue({
-      fetchInfo: vi.fn().mockResolvedValue(null),
+    const fetchGlobalNpm = vi.fn().mockResolvedValue({
+      current: '1.0.0',
+      latest: '1.0.0',
+      type: 'latest',
+      name: 'test-package',
     });
 
-    await checkForUpdatesDetailed();
+    await checkForUpdatesDetailed(fetchGlobalNpm);
 
-    expect(updateNotifier).toHaveBeenCalledWith(
-      expect.objectContaining({
-        pkg: { name: 'test-package', version: '1.0.0' },
-      }),
+    expect(fetchGlobalNpm).toHaveBeenCalledWith(
+      'test-package',
+      '1.0.0',
+      'latest',
     );
   });
 
@@ -495,27 +507,22 @@ describe('checkForUpdates', () => {
         version: '1.2.3-nightly.1',
       });
 
-      const fetchInfoMock = vi.fn().mockImplementation(({ distTag }) => {
-        if (distTag === 'nightly') {
-          return Promise.resolve({
-            latest: '1.2.3-nightly.2',
-            current: '1.2.3-nightly.1',
-          });
-        }
-        if (distTag === 'latest') {
-          return Promise.resolve({
-            latest: '1.2.3',
-            current: '1.2.3-nightly.1',
-          });
-        }
-        return Promise.resolve(null);
-      });
+      const fetchGlobalNpm = vi
+        .fn()
+        .mockImplementation(
+          async (
+            name: string,
+            current: string,
+            distTag: 'latest' | 'nightly',
+          ) => ({
+            latest: distTag === 'nightly' ? '1.2.3-nightly.2' : '1.2.3',
+            current,
+            type: 'latest' as const,
+            name,
+          }),
+        );
 
-      updateNotifier.mockImplementation(({ pkg, distTag }) => ({
-        fetchInfo: () => fetchInfoMock({ pkg, distTag }),
-      }));
-
-      const result = await checkForUpdates();
+      const result = await checkForUpdates(fetchGlobalNpm);
       expect(result?.message).toContain('1.2.3-nightly.1 → 1.2.3-nightly.2');
       expect(result?.update.latest).toBe('1.2.3-nightly.2');
     });
@@ -523,25 +530,17 @@ describe('checkForUpdates', () => {
 
   describe('fetchInfo timeout (#6857)', () => {
     it('returns a detailed error when fetchInfo does not resolve within FETCH_TIMEOUT_MS', async () => {
-      // update-notifier's fetchInfo() takes no timeout option, so an
-      // unreachable registry (proxy, offline, corporate mirror without
-      // scoped .npmrc auth) would hang the check. We race it against a
-      // bounded timer instead — this asserts the timer actually fires and
-      // surfaces a real error rather than silently reporting "up to date".
+      // npm view is bounded by its own execFile timeout (see runGlobalNpm),
+      // but we still race it here as a second, independent bound — this
+      // asserts the timer actually fires and surfaces a real error rather
+      // than silently reporting "up to date".
       getPackageJson.mockResolvedValue({
         name: 'test-package',
         version: '1.0.0',
       });
-      updateNotifier.mockReturnValue({
-        // never resolves
-        fetchInfo: vi.fn().mockReturnValue(new Promise(() => {})),
-      });
+      const fetchGlobalNpm = vi.fn().mockReturnValue(new Promise(() => {})); // never resolves
 
-      // Stub the global-npm probe: the real isGlobalNpmInstallation runs a
-      // real realpath() I/O before the timeout is armed, which races with the
-      // fake-timer advance below and makes this test hang non-deterministically
-      // on slow/loaded runners.
-      const resultPromise = checkForUpdatesDetailed(async () => false);
+      const resultPromise = checkForUpdatesDetailed(fetchGlobalNpm);
       await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
       const result = await resultPromise;
 
@@ -563,13 +562,14 @@ describe('checkForUpdates', () => {
         name: 'test-package',
         version: '1.0.0',
       });
-      updateNotifier.mockReturnValue({
-        fetchInfo: vi
-          .fn()
-          .mockResolvedValue({ current: '1.0.0', latest: '1.1.0' }),
+      const fetchGlobalNpm = vi.fn().mockResolvedValue({
+        current: '1.0.0',
+        latest: '1.1.0',
+        type: 'latest',
+        name: 'test-package',
       });
 
-      const result = await checkForUpdatesDetailed(async () => false);
+      const result = await checkForUpdatesDetailed(fetchGlobalNpm);
 
       expect(result.status).toBe('update');
       if (result.status === 'update') {
@@ -588,17 +588,20 @@ describe('checkForUpdates', () => {
         name: 'test-package',
         version: '1.0.0-nightly.1',
       });
-      updateNotifier.mockImplementation(({ distTag }) => ({
-        fetchInfo: () =>
-          distTag === 'nightly'
-            ? new Promise(() => {}) // never resolves
-            : Promise.resolve({
-                current: '1.0.0-nightly.1',
-                latest: '1.0.0',
-              }),
-      }));
+      const fetchGlobalNpm = vi
+        .fn()
+        .mockImplementation(
+          async (
+            name: string,
+            current: string,
+            distTag: 'latest' | 'nightly',
+          ) =>
+            distTag === 'nightly'
+              ? new Promise(() => {}) // never resolves
+              : { current, latest: '1.0.0', type: 'latest' as const, name },
+        );
 
-      const resultPromise = checkForUpdatesDetailed(async () => false);
+      const resultPromise = checkForUpdatesDetailed(fetchGlobalNpm);
       await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
       const result = await resultPromise;
 
@@ -619,11 +622,9 @@ describe('checkForUpdates', () => {
         name: 'test-package',
         version: '1.0.0-nightly.1',
       });
-      updateNotifier.mockImplementation(() => ({
-        fetchInfo: () => new Promise(() => {}),
-      }));
+      const fetchGlobalNpm = vi.fn().mockReturnValue(new Promise(() => {}));
 
-      const resultPromise = checkForUpdatesDetailed(async () => false);
+      const resultPromise = checkForUpdatesDetailed(fetchGlobalNpm);
       await vi.advanceTimersByTimeAsync(FETCH_TIMEOUT_MS + 1);
       const result = await resultPromise;
 
