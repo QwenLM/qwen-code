@@ -172,4 +172,20 @@ describe('getSelectedText', () => {
   it('returns empty string for a null frame', () => {
     expect(getSelectedText(null, { sx: 0, sy: 0, ex: 1, ey: 0 })).toBe('');
   });
+
+  it('does not duplicate whitespace across a separator carrier row', () => {
+    // Simulates wrapping 'hello \tworld' at width 5: the separator carrier
+    // row (non-selectable spaces) must use a joiner limited to the source
+    // bytes the carrier actually consumed — not the full \s+ run.
+    const frame = frameFromLines(['hello', '   ', 'world']);
+    for (let x = 0; x < 3; x++) {
+      (frame.cells[1][x] as FrameCell).selectable = false;
+    }
+    setBoundary(frame, 0, 'soft', ' ');
+    setBoundary(frame, 1, 'soft', '');
+
+    expect(getSelectedText(frame, { sx: 0, sy: 0, ex: 4, ey: 2 })).toBe(
+      'hello world',
+    );
+  });
 });

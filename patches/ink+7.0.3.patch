@@ -1,25 +1,3 @@
-diff --git a/node_modules/ink/package.json b/node_modules/ink/package.json
---- a/node_modules/ink/package.json
-+++ b/node_modules/ink/package.json
-@@ -11,8 +11,16 @@
- 	},
- 	"type": "module",
- 	"exports": {
--		"types": "./build/index.d.ts",
--		"default": "./build/index.js"
-+		".": {
-+			"types": "./build/index.d.ts",
-+			"default": "./build/index.js"
-+		},
-+		"./dom": {
-+			"default": "./build/dom.js"
-+		},
-+		"./components/CursorContext": {
-+			"default": "./build/components/CursorContext.js"
-+		}
- 	},
- 	"engines": {
- 		"node": ">=22"
 diff --git a/node_modules/ink/build/components/Text.d.ts b/node_modules/ink/build/components/Text.d.ts
 index 1d7bf6b..29401a6 100644
 --- a/node_modules/ink/build/components/Text.d.ts
@@ -52,13 +30,14 @@ index 2e4b9ff..1ec2ae6 100644
      const { isScreenReaderEnabled } = useContext(accessibilityContext);
      const inheritedBackgroundColor = useContext(backgroundContext);
      const childrenOrAriaLabel = isScreenReaderEnabled && ariaLabel ? ariaLabel : children;
-@@ -45,5 +45,5 @@ export default function Text({ color, backgroundColor, dimColor = false, bold =
+@@ -45,6 +45,6 @@ export default function Text({ color, backgroundColor, dimColor = false, bold =
      if (isScreenReaderEnabled && ariaHidden) {
          return null;
      }
 -    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform }, childrenOrAriaLabel));
 +    return (React.createElement("ink-text", { style: { flexGrow: 0, flexShrink: 1, flexDirection: 'row', textWrap: wrap }, internal_transform: transform, selectable: selectable, selectionFlow: selectionFlow, selectionBreakAfter: selectionBreakAfter, selectionJoiner: selectionJoiner }, childrenOrAriaLabel));
  }
+ //# sourceMappingURL=Text.js.map
 diff --git a/node_modules/ink/build/frame-controller.d.ts b/node_modules/ink/build/frame-controller.d.ts
 new file mode 100644
 index 0000000..c294036
@@ -233,7 +212,7 @@ index ef659f3..c3fad13 100644
          }
      }
 diff --git a/node_modules/ink/build/output.d.ts b/node_modules/ink/build/output.d.ts
-index 0f4523f..477cd3d 100644
+index 0f4523f..a3ef634 100644
 --- a/node_modules/ink/build/output.d.ts
 +++ b/node_modules/ink/build/output.d.ts
 @@ -1,4 +1,6 @@
@@ -267,7 +246,7 @@ index 0f4523f..477cd3d 100644
  }
  export {};
 diff --git a/node_modules/ink/build/output.js b/node_modules/ink/build/output.js
-index c763b77..c94da37 100644
+index c763b77..ac81f2e 100644
 --- a/node_modules/ink/build/output.js
 +++ b/node_modules/ink/build/output.js
 @@ -1,6 +1,26 @@
@@ -495,7 +474,7 @@ index 127c620..6d5a005 100644
  }) => void;
  export default renderNodeToOutput;
 diff --git a/node_modules/ink/build/render-node-to-output.js b/node_modules/ink/build/render-node-to-output.js
-index f00a278..2e474c0 100644
+index f00a278..07a98d0 100644
 --- a/node_modules/ink/build/render-node-to-output.js
 +++ b/node_modules/ink/build/render-node-to-output.js
 @@ -1,7 +1,6 @@
@@ -601,7 +580,7 @@ index f00a278..2e474c0 100644
              }
              return;
          }
-@@ -135,6 +175,8 @@ const renderNodeToOutput = (node, output, options) => {
+@@ -135,6 +173,8 @@ const renderNodeToOutput = (node, output, options) => {
                      offsetY: y,
                      transformers: newTransformers,
                      skipStaticElements,
@@ -691,7 +670,7 @@ index 935cfb8..3dddced 100644
 +};
  export default wrapText;
 diff --git a/node_modules/ink/build/wrap-text.js b/node_modules/ink/build/wrap-text.js
-index 51f696c..ec8525d 100644
+index 51f696c..d96d438 100644
 --- a/node_modules/ink/build/wrap-text.js
 +++ b/node_modules/ink/build/wrap-text.js
 @@ -1,5 +1,6 @@
@@ -701,7 +680,7 @@ index 51f696c..ec8525d 100644
  const cache = {};
  const wrapText = (text, maxWidth, wrapType) => {
      const cacheKey = text + String(maxWidth) + String(wrapType);
-@@ -34,4 +35,50 @@ const wrapText = (text, maxWidth, wrapType) => {
+@@ -34,5 +35,51 @@ const wrapText = (text, maxWidth, wrapType) => {
      cache[cacheKey] = wrappedText;
      return wrappedText;
  };
@@ -723,7 +702,7 @@ index 51f696c..ec8525d 100644
 +                /^\s+$/u.test(visibleLine) &&
 +                /\S/u.test(visibleSource.slice(sourceOffset));
 +            const sourceSeparator = separatorRow
-+                ? /^\s+/u.exec(visibleSource.slice(sourceOffset))?.[0] ?? ''
++                ? (/^\s+/u.exec(visibleSource.slice(sourceOffset))?.[0] ?? '').slice(0, visibleLine.length)
 +                : '';
 +            const lineOffset = separatorRow
 +                ? sourceOffset
@@ -752,3 +731,4 @@ index 51f696c..ec8525d 100644
 +    return { text: lines.join('\n'), boundaries, selectableRows };
 +};
  export default wrapText;
+ //# sourceMappingURL=wrap-text.js.map
