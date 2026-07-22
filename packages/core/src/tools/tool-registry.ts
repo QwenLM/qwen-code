@@ -25,6 +25,7 @@ import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type { EventEmitter } from 'node:events';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
+import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type { ReadResourceResult } from '@modelcontextprotocol/sdk/types.js';
 import { normalizeMcpToolName } from '../utils/tool-name-utils.js';
 
@@ -64,8 +65,11 @@ class DiscoveredToolInvocation extends BaseToolInvocation<
     const callCommand = this.config.getToolCallCommand()!;
     // The user-configured tool-call command is a child process launched on the
     // agent's behalf, so it must not inherit Qwen-internal daemon secrets.
+    // Passing `env` explicitly loses the native inheritance that resolved
+    // Windows' case-insensitive PATH keys, so normalize as the shell and MCP
+    // spawn sites do (a no-op off win32).
     const child = spawn(callCommand, [this.toolName], {
-      env: sanitizeChildEnv(process.env),
+      env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
     });
     child.stdin.write(JSON.stringify(this.params));
     child.stdin.end();
@@ -598,9 +602,10 @@ export class ToolRegistry {
         );
       }
       // Same as the tool-call command above: the discovery command is
-      // agent-launched and must not inherit Qwen-internal daemon secrets.
+      // agent-launched, must not inherit Qwen-internal daemon secrets, and
+      // needs the Windows PATH normalization that comes with an explicit env.
       const proc = spawn(cmdParts[0] as string, cmdParts.slice(1) as string[], {
-        env: sanitizeChildEnv(process.env),
+        env: normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       });
       let stdout = '';
       const stdoutDecoder = new StringDecoder('utf8');
