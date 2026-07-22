@@ -57,10 +57,16 @@ export function isSyntheticHistoryItem(
     case 'stop_hook_system_message':
       return true;
 
+    // Steer messages (mid-turn user injections) are typed 'user' but
+    // carry sentToModel === false; treat them as synthetic so the
+    // cancel handler can still do a full rewind when only a steer
+    // follows the real prompt.
+    case 'user':
+      return item.sentToModel === false;
+
     // Meaningful: user input, model text, tool runs, slash-command
     // results the user explicitly asked for. Auto-restore must bail
     // when any of these appear after the candidate user prompt.
-    case 'user':
     case 'user_shell':
     case 'gemini':
     case 'gemini_content':
