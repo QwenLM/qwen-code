@@ -570,6 +570,8 @@ export interface WebShellProps {
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
   renderWelcomeHeader?: WelcomeHeaderRenderer;
+  /** Show the worktree-isolation action in the empty welcome state. Defaults to false. */
+  showWorktreeToggle?: boolean;
   /** Custom renderer shown below the chat composer in the empty welcome state. */
   renderWelcomeFooter?: WelcomeFooterRenderer;
   /**
@@ -1058,6 +1060,7 @@ export function App({
   composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
+  showWorktreeToggle = false,
   renderWelcomeFooter,
   mobileWelcomeFooterMiddle = false,
   parseUserMessageContent,
@@ -6369,7 +6372,8 @@ export function App({
   // session would land in is trusted and is a git repository — the daemon
   // rejects worktree creation otherwise. Mirrors the sidebar entry's gating.
   const worktreeToggleEligible = Boolean(
-    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
+    showWorktreeToggle &&
+      workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted &&
       selectedWorkspaceGitStatus?.branch,
   );
   const worktreeToggleRef = useRef<HTMLButtonElement>(null);
@@ -6385,6 +6389,11 @@ export function App({
     setWorktreePending(false);
     worktreeFocusTarget.current = 'toggle';
   }, []);
+  useEffect(() => {
+    if (showWorktreeToggle) return;
+    pendingWorktreeRef.current = undefined;
+    setWorktreePending(false);
+  }, [showWorktreeToggle]);
   useEffect(() => {
     if (!worktreeFocusTarget.current) return;
     const target = worktreeFocusTarget.current;
@@ -6403,7 +6412,7 @@ export function App({
         ) : (
           <WelcomeHeader {...welcomeHeaderProps} />
         )}
-        {worktreePending ? (
+        {showWorktreeToggle && worktreePending ? (
           <div className={styles.worktreeWelcomeBadge}>
             <span className={styles.worktreeBadgeIcon}>
               <GitForkIcon size={18} strokeWidth={1.8} />
@@ -6454,6 +6463,7 @@ export function App({
     ),
     [
       renderWelcomeHeader,
+      showWorktreeToggle,
       welcomeHeaderProps,
       worktreePending,
       worktreeToggleEligible,
@@ -8032,6 +8042,7 @@ export function App({
                     error={artifactsError}
                     onSelectTab={setActiveArtifactPanelTabId}
                     onCloseTab={closeArtifactPanelTab}
+                    onOpenFilePreview={openFilePreview}
                     onClose={closeArtifactPanel}
                     variant="drawer"
                   />

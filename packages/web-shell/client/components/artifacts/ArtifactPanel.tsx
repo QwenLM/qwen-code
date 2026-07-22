@@ -138,7 +138,9 @@ export function ArtifactPanel({
   const activeTab = tabs.find((tab) => tab.id === activeTabId) ?? tabs[0];
   const defaultWorkspaceActions = useWorkspaceActions();
   const activeWorkspaceActions =
-    activeTab?.workspaceActions ?? defaultWorkspaceActions;
+    activeTab && 'workspaceActions' in activeTab
+      ? (activeTab.workspaceActions ?? defaultWorkspaceActions)
+      : defaultWorkspaceActions;
 
   return (
     <aside
