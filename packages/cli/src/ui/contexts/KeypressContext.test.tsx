@@ -98,6 +98,37 @@ describe('KeypressContext - Kitty Protocol', () => {
   });
 
   describe('Enter key handling', () => {
+    it('ignores pure focus event sequences without dropping real keypresses', () => {
+      const keyHandler = vi.fn();
+
+      const { result } = renderHook(() => useKeypressContext(), {
+        wrapper,
+      });
+
+      act(() => {
+        result.current.subscribe(keyHandler);
+      });
+
+      act(() => {
+        stdin.pressKey({ sequence: '\x1b[I\x1b[O' });
+      });
+      act(() => {
+        stdin.pressKey({
+          name: 'a',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+          sequence: 'a\x1b[I',
+        });
+      });
+
+      expect(keyHandler).toHaveBeenCalledTimes(1);
+      expect(keyHandler).toHaveBeenCalledWith(
+        expect.objectContaining({ sequence: 'a\x1b[I' }),
+      );
+    });
+
     it('preserves typed µ as printable text', () => {
       const keyHandler = vi.fn();
 

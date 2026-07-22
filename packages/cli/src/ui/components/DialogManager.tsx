@@ -523,6 +523,7 @@ export const DialogManager = ({
         onCancel={uiActions.closeResumeDialog}
         initialSessions={uiState.resumeMatchedSessions}
         enablePreview
+        includeAgentViewSessions={uiState.resumeMatchedSessions === undefined}
       />
     );
   }

@@ -4,11 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { useEffect, useMemo, useState } from 'react';
 import { Box, Text } from 'ink';
-import type {
-  SessionListItem as SessionData,
-  SessionService,
-} from '@qwen-code/qwen-code-core';
+import type { SessionService } from '@qwen-code/qwen-code-core';
 import { theme } from '../semantic-colors.js';
 import { useSessionPicker } from '../hooks/useSessionPicker.js';
 import { formatRelativeTime } from '../utils/formatters.js';
@@ -19,10 +17,19 @@ import {
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { t } from '../../i18n/index.js';
 import { SessionPreview } from './SessionPreview.js';
+import { useKeypress } from '../hooks/useKeypress.js';
+import {
+  listAgentViewProjectResumeSessions,
+  listManagedAgentViewResumeSessions,
+  type AgentViewResumeSessionListItem,
+} from '../../startup/agent-view-resume-sessions.js';
+import { MANAGED_AGENT_VIEW_RESUME_MESSAGE } from '../../startup/agent-view-resume-guard.js';
+
+type SessionData = AgentViewResumeSessionListItem;
 
 export interface SessionPickerProps {
   sessionService: SessionService | null;
-  onSelect: (sessionId: string) => void;
+  onSelect: (sessionId: string, session?: SessionData) => void;
   onCancel: () => void;
   currentBranch?: string;
 
@@ -42,6 +49,9 @@ export interface SessionPickerProps {
    * When provided, skips initial load and disables pagination.
    */
   initialSessions?: SessionData[];
+  excludeSessionIds?: readonly string[];
+  includeAgentViewSessions?: boolean;
+  allowManagedAgentViewSelection?: boolean;
 
   /**
    * Enable Space-to-preview. Off by default — preview's Enter shortcut
@@ -130,6 +140,10 @@ function SessionListItemView({
     typeof session.messageCount === 'number'
       ? formatMessageCount(session.messageCount)
       : undefined;
+  const agentViewMeta =
+    session.agentViewManaged && session.agentViewLastResult
+      ? truncateText(session.agentViewLastResult, maxPromptWidth)
+      : undefined;
 
   const showUpIndicator = isFirst && showScrollUp;
   const showDownIndicator = isLast && showScrollDown;
@@ -204,7 +218,9 @@ function SessionListItemView({
       </Box>
       <Box paddingLeft={2}>
         <Text color={theme.text.secondary}>
+          {agentViewMeta ? `${agentViewMeta} · ` : ''}
           {timeAgo}
+          {session.agentViewManaged && ' · bg'}
           {messageText !== undefined && ` · ${messageText}`}
           {session.gitBranch && ` · ${session.gitBranch}`}
           {isDisabled && disabledHint ? ` · ${disabledHint}` : ''}
@@ -223,13 +239,55 @@ export function SessionPicker(props: SessionPickerProps) {
     title,
     centerSelection = true,
     initialSessions,
+    excludeSessionIds,
     enablePreview = false,
     enableMultiSelect = false,
     onConfirmMulti,
     disabledIds,
+    includeAgentViewSessions = false,
+    allowManagedAgentViewSelection = false,
   } = props;
+  const [agentViewSessions, setAgentViewSessions] = useState<SessionData[]>([]);
+  const [managedPreviewSessionId, setManagedPreviewSessionId] = useState<
+    string | undefined
+  >();
+  const managedSessionIds = useMemo(
+    () =>
+      new Set([
+        ...agentViewSessions
+          .filter((session) => session.agentViewManaged)
+          .map((session) => session.sessionId),
+      ]),
+    [agentViewSessions],
+  );
+
+  useEffect(() => {
+    if (!includeAgentViewSessions) {
+      setAgentViewSessions([]);
+      return;
+    }
+    let disposed = false;
+    void Promise.all([
+      listAgentViewProjectResumeSessions().catch(() => []),
+      listManagedAgentViewResumeSessions().catch(() => []),
+    ]).then(([projectSessions, managedSessions]) => {
+      if (!disposed) {
+        setAgentViewSessions([...projectSessions, ...managedSessions]);
+      }
+    });
+    return () => {
+      disposed = true;
+    };
+  }, [includeAgentViewSessions]);
 
   const { columns: width, rows: height } = useTerminalSize();
+  const handleSelect = (sessionId: string, session?: SessionData) => {
+    if (!allowManagedAgentViewSelection && managedSessionIds.has(sessionId)) {
+      setManagedPreviewSessionId(sessionId);
+      return;
+    }
+    onSelect(sessionId, session);
+  };
 
   // Calculate box width (marginX={2})
   const boxWidth = width - 4;
@@ -249,7 +307,7 @@ export function SessionPicker(props: SessionPickerProps) {
   const picker = useSessionPicker({
     sessionService,
     currentBranch,
-    onSelect,
+    onSelect: handleSelect,
     onCancel,
     maxVisibleItems,
     centerSelection,
@@ -259,7 +317,23 @@ export function SessionPicker(props: SessionPickerProps) {
     enableMultiSelect,
     onConfirmMulti,
     disabledIds,
+    extraSessions: agentViewSessions,
+    excludeSessionIds,
   });
+
+  if (managedPreviewSessionId) {
+    const session = picker.filteredSessions.find(
+      (item) => item.sessionId === managedPreviewSessionId,
+    );
+    if (isAgentViewManagedSession(session)) {
+      return (
+        <ManagedAgentViewSessionPreview
+          session={session}
+          onExit={() => setManagedPreviewSessionId(undefined)}
+        />
+      );
+    }
+  }
 
   if (
     enablePreview &&
@@ -270,6 +344,14 @@ export function SessionPicker(props: SessionPickerProps) {
     const previewed = picker.filteredSessions.find(
       (s) => s.sessionId === picker.previewSessionId,
     );
+    if (isAgentViewManagedSession(previewed)) {
+      return (
+        <ManagedAgentViewSessionPreview
+          session={previewed}
+          onExit={picker.exitPreview}
+        />
+      );
+    }
     return (
       <SessionPreview
         sessionService={sessionService}
@@ -474,4 +556,49 @@ export function SessionPicker(props: SessionPickerProps) {
       </Box>
     </Box>
   );
+}
+
+function ManagedAgentViewSessionPreview({
+  session,
+  onExit,
+}: {
+  session: SessionData;
+  onExit: () => void;
+}): React.JSX.Element {
+  useKeypress(
+    (key) => {
+      if (
+        key.name === 'escape' ||
+        key.name === 'return' ||
+        (key.ctrl && key.name === 'c')
+      ) {
+        onExit();
+      }
+    },
+    { isActive: true },
+  );
+
+  return (
+    <Box
+      flexDirection="column"
+      borderStyle="round"
+      borderColor={theme.border.default}
+      paddingX={1}
+    >
+      <Text bold>{session.customTitle ?? session.prompt}</Text>
+      {session.agentViewLastResult ? (
+        <Text color={theme.text.secondary}>{session.agentViewLastResult}</Text>
+      ) : null}
+      <Text color={theme.text.secondary}>
+        {MANAGED_AGENT_VIEW_RESUME_MESSAGE}
+      </Text>
+      <Text color={theme.text.secondary}>Esc to return</Text>
+    </Box>
+  );
+}
+
+function isAgentViewManagedSession(
+  session: SessionData | undefined,
+): session is SessionData {
+  return Boolean(session?.agentViewManaged);
 }
