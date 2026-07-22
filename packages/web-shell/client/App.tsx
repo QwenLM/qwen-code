@@ -3216,6 +3216,9 @@ export function App({
   // git-status effect targets (computed once above), so the chip and the
   // dialog always target the same repo.
   const gitDiffWorkspaceCwd = activeWorkspaceCwd;
+  const gitModeEligible =
+    !connection.sessionId &&
+    workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted;
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -7774,8 +7777,8 @@ export function App({
                                     undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
-                          gitModeIntent={connection.sessionId || !workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted ? undefined : gitModeIntent}
-                          onGitModeIntentChange={connection.sessionId || !workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted ? undefined : setGitModeIntent}
+                          gitModeIntent={gitModeEligible ? gitModeIntent : undefined}
+                          onGitModeIntentChange={gitModeEligible ? setGitModeIntent : undefined}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd && !sessionWorktree
