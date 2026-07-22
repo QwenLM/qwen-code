@@ -114,7 +114,9 @@ export type AuditAction =
   | 'hook_ingest_rejected'
   | 'workflow_started'
   | 'workflow_cancelled'
-  | 'session_rewound';
+  | 'session_rewound'
+  | 'review_started'
+  | 'review_cancelled';
 
 /** Runtime list of valid actions (for validating query params). */
 export const AUDIT_ACTIONS: readonly AuditAction[] = [
@@ -182,6 +184,8 @@ export const AUDIT_ACTIONS: readonly AuditAction[] = [
   'workflow_started',
   'workflow_cancelled',
   'session_rewound',
+  'review_started',
+  'review_cancelled',
 ];
 
 export interface AuditEntry {

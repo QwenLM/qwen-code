@@ -62,6 +62,10 @@ import {
   createAgentMessageRoute,
   createAgentCancelRoute,
 } from './routes/agents.js';
+import type { ReviewRegistry, ReviewRecord } from './reviews/reviewRegistry.js';
+import { ReviewLifecycle } from './reviews/reviewLifecycle.js';
+import { ReviewPermissionBridge } from './reviews/reviewPermissionBridge.js';
+import { createTriggerReviewRoute } from './routes/review.js';
 import { createUsageRoute, type UsageReader } from './routes/usage.js';
 import { createCapabilityRoute } from './routes/capabilities.js';
 import { createClientsManifestRoute } from './routes/clientsManifest.js';
@@ -302,6 +306,26 @@ export interface GatewayDeps {
     runsDir?: string;
     resolveNamed?: (name: string) => Promise<string | undefined>;
   };
+  /**
+   * Remote review control plane (add-remote-review). Routes mount only when
+   * set. The lifecycle is constructed here (it needs the app-internal
+   * `ownerEvents` bus); the permission bridge is default-constructed from the
+   * daemon unless an explicit `bridge` is injected (tests inject a spy).
+   */
+  review?: {
+    registry: ReviewRegistry;
+    /** Injected permission bridge; default-constructed from the daemon when omitted. */
+    bridge?: ReviewPermissionBridge;
+    /** Read-time cost rollup keyed by sessionId (UsageStore.sessionTotals). */
+    costFor?: (sessionId: string) => number | undefined;
+    /** Resolves the saved report + PR summary for a completed review. */
+    resolveReport?: (rec: ReviewRecord) => Promise<{
+      reportPath: string | null;
+      summary: ReviewRecord['summary'];
+    }>;
+    /** Trigger accept window override (tests). */
+    promptAcceptWindowMs?: number;
+  };
 }
 
 export interface GatewayApp {
@@ -334,6 +358,8 @@ export interface GatewayApp {
   promptEvents: PromptEventBroadcaster;
   /** Present only when deps.agents is supplied. */
   agentLifecycle?: AgentLifecycle;
+  /** Present only when deps.review is supplied. */
+  reviewLifecycle?: ReviewLifecycle;
   /** Present only when both deps.workflows AND deps.agents are supplied. */
   workflowRuns?: WorkflowRunRegistry;
 }
@@ -1104,6 +1130,39 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     );
   }
 
+  // Remote review control plane (add-remote-review). The trigger saga
+  // (POST /rc/reviews) enforces the owner-scope gate + pre-flight skill guard
+  // and wires the per-review permission bridge. List/detail/cancel mounts are
+  // added by D.3. WRITE at the mount; the in-handler OWNER gate escalates for
+  // privileged flags (comment/autofix/autoApprove).
+  let reviewLifecycle: ReviewLifecycle | undefined;
+  if (deps.review) {
+    reviewLifecycle = new ReviewLifecycle(
+      deps.review.registry,
+      ownerEvents,
+      deps.review.costFor,
+      deps.review.resolveReport,
+    );
+    const reviewBridge =
+      deps.review.bridge ?? new ReviewPermissionBridge({ daemon: deps.daemon });
+    const reviewDeps = {
+      daemon: deps.daemon,
+      registry: deps.review.registry,
+      lifecycle: reviewLifecycle,
+      bridge: reviewBridge,
+      audit,
+      costFor: deps.review.costFor,
+      promptAcceptWindowMs: deps.review.promptAcceptWindowMs,
+      promptQueue,
+    };
+    app.post(
+      '/rc/reviews',
+      requireScope(WRITE, audit),
+      recordActivity(workingDevice),
+      createTriggerReviewRoute(reviewDeps),
+    );
+  }
+
   // Workflow orchestration control plane (add-workflow-orchestration). Requires
   // the agent registry (each workflow agent is a real session).
   let workflowRuns: WorkflowRunRegistry | undefined;
@@ -1152,6 +1211,7 @@ export function createGatewayApp(deps: GatewayDeps): GatewayApp {
     bridgeRegistry,
     promptEvents: promptEventBroadcaster,
     agentLifecycle,
+    reviewLifecycle,
     workflowRuns,
   };
 }
