@@ -7,7 +7,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { writeFileSync } from 'node:fs';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { isMainModule, parseArgs } from './release-script-utils.js';
 
 const GENERATED_ENTRY_RE =
@@ -286,13 +286,21 @@ function parseModelJson(value) {
 export async function generateAiContent(
   entries,
   complete,
-  { batchSize = 12 } = {},
+  { batchSize = 12, maxConsecutiveBatchFailures = 3 } = {},
 ) {
   const summaries = new Map();
   const warnings = [];
+  let consecutiveBatchFailures = 0;
+  let circuitOpen = false;
 
   for (let index = 0; index < entries.length; index += batchSize) {
     const batch = entries.slice(index, index + batchSize);
+    if (circuitOpen) {
+      for (const entry of batch) {
+        summaries.set(entry.number, entry.title);
+      }
+      continue;
+    }
     try {
       const response = parseModelJson(
         await complete({
@@ -318,29 +326,45 @@ export async function generateAiContent(
           summaries.set(entry.number, entry.title);
         }
       }
+      consecutiveBatchFailures = 0;
     } catch (error) {
+      consecutiveBatchFailures += 1;
       warnings.push(`Summary batch fallback: ${error.message}`);
       for (const entry of batch) {
         summaries.set(entry.number, entry.title);
+      }
+      if (consecutiveBatchFailures >= maxConsecutiveBatchFailures) {
+        // The model side is down, not slow: stop paying 60s per remaining
+        // batch and fall back wholesale instead of pretending otherwise.
+        circuitOpen = true;
+        warnings.push(
+          `Summary batches stopped after ${consecutiveBatchFailures} consecutive failures; remaining entries use pull-request titles.`,
+        );
       }
     }
   }
 
   let highlights = [];
-  try {
-    const response = parseModelJson(
-      await complete({
-        kind: 'highlights',
-        entries: entries.map((entry) => ({
-          number: entry.number,
-          category: classifyChange(entry),
-          summary: summaries.get(entry.number),
-        })),
-      }),
+  if (circuitOpen) {
+    warnings.push(
+      'Highlights fallback: skipped because summary batches were failing consecutively.',
     );
-    highlights = validateHighlights(entries, response);
-  } catch (error) {
-    warnings.push(`Highlights fallback: ${error.message}`);
+  } else {
+    try {
+      const response = parseModelJson(
+        await complete({
+          kind: 'highlights',
+          entries: entries.map((entry) => ({
+            number: entry.number,
+            category: classifyChange(entry),
+            summary: summaries.get(entry.number),
+          })),
+        }),
+      );
+      highlights = validateHighlights(entries, response);
+    } catch (error) {
+      warnings.push(`Highlights fallback: ${error.message}`);
+    }
   }
 
   return { summaries, highlights, warnings };
@@ -393,43 +417,72 @@ function promptFor(request) {
   };
 }
 
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+function isRetryableModelError(error) {
+  // AbortSignal.timeout raises TimeoutError; older paths may surface AbortError.
+  if (error?.name === 'TimeoutError' || error?.name === 'AbortError') {
+    return true;
+  }
+  const match = /HTTP (\d{3})/.exec(error?.message ?? '');
+  if (!match) {
+    // Network-level failure (DNS, reset, TLS): worth another attempt.
+    return true;
+  }
+  const status = Number(match[1]);
+  return status === 429 || status >= 500;
+}
+
 export function createOpenAiCompleter({
   apiKey,
   baseUrl,
   model,
   fetchImpl = fetch,
   timeoutMs = 60_000,
+  maxRetries = 2,
+  baseDelayMs = 2_000,
 }) {
   const endpoint = `${baseUrl.replace(/\/$/, '')}/chat/completions`;
   return async (request) => {
     const prompt = promptFor(request);
-    const response = await fetchImpl(endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      signal: AbortSignal.timeout(timeoutMs),
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: prompt.system },
-          { role: 'user', content: prompt.user },
-        ],
-        response_format: { type: 'json_object' },
-        temperature: 0.2,
-        max_tokens: 4096,
-      }),
-    });
-    if (!response.ok) {
-      throw new Error(`Model request failed with HTTP ${response.status}.`);
+    let attempt = 0;
+    for (;;) {
+      try {
+        const response = await fetchImpl(endpoint, {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${apiKey}`,
+            'Content-Type': 'application/json',
+          },
+          signal: AbortSignal.timeout(timeoutMs),
+          body: JSON.stringify({
+            model,
+            messages: [
+              { role: 'system', content: prompt.system },
+              { role: 'user', content: prompt.user },
+            ],
+            response_format: { type: 'json_object' },
+            temperature: 0.2,
+            max_tokens: 4096,
+          }),
+        });
+        if (!response.ok) {
+          throw new Error(`Model request failed with HTTP ${response.status}.`);
+        }
+        const data = await response.json();
+        const content = data?.choices?.[0]?.message?.content;
+        if (typeof content !== 'string' || !content.trim()) {
+          throw new Error('Model response did not contain message content.');
+        }
+        return content;
+      } catch (error) {
+        attempt += 1;
+        if (attempt > maxRetries || !isRetryableModelError(error)) {
+          throw error;
+        }
+        await sleep(baseDelayMs * 2 ** (attempt - 1) * (0.5 + Math.random()));
+      }
     }
-    const data = await response.json();
-    const content = data?.choices?.[0]?.message?.content;
-    if (typeof content !== 'string' || !content.trim()) {
-      throw new Error('Model response did not contain message content.');
-    }
-    return content;
   };
 }
 
@@ -681,8 +734,11 @@ async function main() {
     repo,
   });
   for (const warning of result.warnings) {
-    console.error(`WARNING: ${warning}`);
+    // Workflow-command form renders as a run annotation in GitHub Actions;
+    // plain stderr text was invisible there even though the run stayed green.
+    console.error(`::warning::${warning}`);
   }
+  appendDegradedStepSummary(result);
 
   if (args['dry-run']) {
     process.stdout.write(result.markdown);
@@ -693,6 +749,25 @@ async function main() {
       `Wrote ${baseEntries.length} pull requests to ${output}${result.usedAi ? ' with AI summaries' : ''}.`,
     );
   }
+}
+
+export function appendDegradedStepSummary(
+  result,
+  summaryPath = process.env.GITHUB_STEP_SUMMARY,
+) {
+  if (!summaryPath || result.warnings.length === 0) return;
+  const lines = [
+    '',
+    '## Release notes: AI generation degraded',
+    '',
+    result.usedAi
+      ? 'Some model batches fell back to pull-request titles; see the warnings on this run.'
+      : 'No AI summaries or highlights were produced; the notes use pull-request titles only.',
+    '',
+    ...result.warnings.map((warning) => `- ${warning}`),
+    '',
+  ];
+  appendFileSync(summaryPath, `${lines.join('\n')}\n`);
 }
 
 if (isMainModule(import.meta.url)) {
