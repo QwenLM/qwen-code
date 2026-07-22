@@ -31,7 +31,7 @@ jobs:
       - name: 'Resolve version'
         id: 'version'
         env:
-          INPUT_VERSION: '${{ inputs.version }}'
+          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
         run: |-
           set -euo pipefail
           specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
