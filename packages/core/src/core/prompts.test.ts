@@ -364,18 +364,25 @@ describe('Core System Prompt (prompts.ts)', () => {
   });
 
   describe('QWEN_SYSTEM_IDENTITY_MD environment variable', () => {
-    const defaultIdentity =
-      'You are Qwen Code, an interactive CLI agent developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.';
     const customIdentity =
       'You are Acme Code, an interactive CLI agent for Acme Corp.';
 
+    /** Sample the default identity from the live prompt to avoid drift. */
+    const sampleDefaultIdentity = (): string => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+      vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+      return getCoreSystemPrompt().split('\n\n', 1)[0];
+    };
+
     it('should keep default prompt byte-identical when identity env is unset', () => {
+      const defaultIdentity = sampleDefaultIdentity();
       const prompt = getCoreSystemPrompt();
       expect(prompt.startsWith(defaultIdentity)).toBe(true);
       expect(fs.readFileSync).not.toHaveBeenCalled();
     });
 
     it('should replace only the identity sentence when identity env points to a file', () => {
+      const defaultIdentity = sampleDefaultIdentity();
       const identityPath = path.resolve('/custom/identity.md');
       vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
       vi.mocked(fs.existsSync).mockImplementation(
@@ -383,7 +390,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       );
       vi.mocked(fs.readFileSync).mockImplementation((p) => {
         if (path.resolve(String(p)) === identityPath) {
-          return customIdentity;
+          return `${customIdentity}  \n\n`;
         }
         throw new Error(`unexpected read: ${String(p)}`);
       });
@@ -394,6 +401,7 @@ describe('Core System Prompt (prompts.ts)', () => {
 
       expect(withOverride.startsWith(customIdentity)).toBe(true);
       expect(withOverride).not.toContain('You are Qwen Code');
+      // trimEnd() strips trailing spaces/newlines from the identity file.
       expect(withOverride.slice(customIdentity.length)).toBe(
         baseline.slice(defaultIdentity.length),
       );
@@ -458,9 +466,21 @@ describe('Core System Prompt (prompts.ts)', () => {
       );
     });
 
+    it('should throw when a ~/ identity path cannot resolve the home directory', () => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', '~/identity.md');
+      vi.spyOn(os, 'homedir').mockImplementation(() => {
+        throw new Error('homedir unavailable');
+      });
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `failed to resolve system identity path '~/identity.md'`,
+      );
+    });
+
     it.each(['0', 'false', '1', 'true'] as const)(
       'should not override identity when env is switch value %s',
       (switchValue) => {
+        const defaultIdentity = sampleDefaultIdentity();
         vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', switchValue);
         const prompt = getCoreSystemPrompt();
         expect(prompt.startsWith(defaultIdentity)).toBe(true);
