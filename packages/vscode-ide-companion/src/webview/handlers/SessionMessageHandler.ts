@@ -89,6 +89,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
                 value: string;
                 startLine?: number;
                 endLine?: number;
+                isImage?: boolean;
               }>
             | undefined,
           data?.fileContext as
@@ -113,6 +114,7 @@ export class SessionMessageHandler extends BaseMessageHandler {
                 value: string;
                 startLine?: number;
                 endLine?: number;
+                isImage?: boolean;
               }>
             | undefined,
           data?.fileContext as

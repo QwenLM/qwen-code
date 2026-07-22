@@ -274,7 +274,7 @@ describe('SessionMessageHandler', () => {
         type: 'resource_link',
         name: 'screen shot.png',
         mimeType: 'image/png',
-        uri: 'file:///workspace/screen shot.png',
+        uri: 'file:///workspace/screen%20shot.png',
       },
     ]);
   });

@@ -194,7 +194,7 @@ export function buildPromptBlocks(
 }
 
 function toFileUrlPath(imagePath: string): string {
-  if (/^[a-zA-Z]:[\\/]/.test(imagePath)) {
+  if (process.platform !== 'win32' && /^[a-zA-Z]:[\\/]/.test(imagePath)) {
     return `/${imagePath.replace(/\\/g, '/')}`;
   }
   return imagePath;
