@@ -11,7 +11,11 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
+  checkAcpImportBoundary,
+  checkSdkImplProtocolBoundary,
   checkServeFastPathBundle,
+  findAcpImportBoundaryOffenders,
+  findSdkImplProtocolOffenders,
   findServeFastPathBundleOffenders,
   formatServeFastPathBundleOffenders,
   normalizeMetafilePath,
@@ -32,6 +36,12 @@ function makeMetafile(outputs) {
       }),
       'dist/chunks/run-qwen-serve.js': output({
         inputs: ['packages/cli/src/serve/run-qwen-serve.ts'],
+      }),
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+      }),
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
       }),
       ...outputs,
     },
@@ -411,6 +421,217 @@ describe('serve fast-path bundle check', () => {
           stdio: 'pipe',
         }),
       ).toThrow(/Missing esbuild metafile/);
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('ACP import boundary check', () => {
+  it('reports TUI packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [staticImport('dist/chunks/tui.js')],
+      }),
+      'dist/chunks/tui.js': output({
+        bytes: 250_000,
+        inputs: [
+          'node_modules/ink/build/index.js',
+          'node_modules/react/index.js',
+          'node_modules/react-reconciler/index.js',
+          'node_modules/yoga-layout/dist/src/index.js',
+        ],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'Ink TUI runtime' }),
+        expect.objectContaining({ label: 'React runtime' }),
+        expect.objectContaining({ label: 'React reconciler runtime' }),
+        expect.objectContaining({ label: 'Yoga layout runtime' }),
+      ]),
+    );
+  });
+
+  it('allows TUI packages behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/acp-agent.js': output({
+        inputs: ['packages/cli/src/acp-integration/acpAgent.ts'],
+        imports: [dynamicImport('dist/chunks/tui.js')],
+      }),
+      'dist/chunks/tui.js': output({
+        inputs: ['node_modules/ink/build/index.js'],
+      }),
+    });
+
+    expect(findAcpImportBoundaryOffenders(metafile)).toEqual([]);
+  });
+
+  it('reads a metafile path and returns ACP boundary offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'acp-import-boundary-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/acp-agent.js': output({
+            inputs: [
+              'packages/cli/src/acp-integration/acpAgent.ts',
+              'node_modules/ink/build/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(checkAcpImportBoundary({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'Ink TUI runtime',
+            matchedInput: 'node_modules/ink/build/index.js',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('telemetry sdk-impl protocol boundary check', () => {
+  it('reports gRPC cluster packages reached through static imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
+        imports: [staticImport('dist/chunks/grpc-chain.js')],
+      }),
+      'dist/chunks/grpc-chain.js': output({
+        inputs: [
+          'node_modules/@grpc/grpc-js/build/src/index.js',
+          'node_modules/protobufjs/index.js',
+          'node_modules/@opentelemetry/exporter-trace-otlp-grpc/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ label: 'gRPC runtime' }),
+        expect.objectContaining({ label: 'protobufjs runtime' }),
+        expect.objectContaining({ label: 'OTLP gRPC trace exporter' }),
+      ]),
+    );
+  });
+
+  it('reports the shared OTLP serialization layer reached statically', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: [
+          'packages/core/src/telemetry/sdk-impl.ts',
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual([
+      expect.objectContaining({
+        label: 'OTLP transformer',
+        matchedInput:
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+      }),
+    ]);
+  });
+
+  it('allows protocol chains behind dynamic imports', () => {
+    const metafile = makeMetafile({
+      'dist/chunks/sdk-impl.js': output({
+        inputs: ['packages/core/src/telemetry/sdk-impl.ts'],
+        imports: [
+          dynamicImport('dist/chunks/grpc-chain.js'),
+          dynamicImport('dist/chunks/http-chain.js'),
+        ],
+      }),
+      'dist/chunks/grpc-chain.js': output({
+        inputs: ['node_modules/@grpc/grpc-js/build/src/index.js'],
+      }),
+      'dist/chunks/http-chain.js': output({
+        inputs: [
+          'node_modules/@opentelemetry/otlp-transformer/build/esm/index.js',
+        ],
+      }),
+    });
+
+    expect(findSdkImplProtocolOffenders(metafile)).toEqual([]);
+  });
+
+  it('throws when the sdk-impl chunk is missing', () => {
+    const metafile = {
+      outputs: {
+        'dist/chunks/unrelated.js': output({
+          inputs: ['packages/cli/src/unrelated.ts'],
+        }),
+      },
+    };
+
+    expect(() => findSdkImplProtocolOffenders(metafile)).toThrow(
+      /Could not find bundled output for telemetry sdk-impl/,
+    );
+  });
+
+  it('reads a metafile path and returns sdk-impl boundary offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'sdk-impl-boundary-'));
+    try {
+      const metafilePath = writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/sdk-impl.js': output({
+            inputs: [
+              'packages/core/src/telemetry/sdk-impl.ts',
+              'node_modules/@grpc/grpc-js/build/src/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(checkSdkImplProtocolBoundary({ metafilePath })).toEqual({
+        ok: false,
+        offenders: [
+          expect.objectContaining({
+            label: 'gRPC runtime',
+            matchedInput: 'node_modules/@grpc/grpc-js/build/src/index.js',
+          }),
+        ],
+      });
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  it('exits non-zero with CLI diagnostics for sdk-impl offenders', () => {
+    const tempDir = mkdtempSync(join(tmpdir(), 'sdk-impl-boundary-'));
+    try {
+      writeMetafile(
+        tempDir,
+        makeMetafile({
+          'dist/chunks/sdk-impl.js': output({
+            inputs: [
+              'packages/core/src/telemetry/sdk-impl.ts',
+              'node_modules/@grpc/grpc-js/build/src/index.js',
+            ],
+          }),
+        }),
+      );
+
+      expect(() =>
+        execFileSync(process.execPath, [checkScriptPath], {
+          cwd: tempDir,
+          encoding: 'utf8',
+          stdio: 'pipe',
+        }),
+      ).toThrow(
+        /Telemetry sdk-impl static closure includes OTLP protocol chain modules/,
+      );
     } finally {
       rmSync(tempDir, { recursive: true, force: true });
     }

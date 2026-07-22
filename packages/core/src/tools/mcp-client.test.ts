@@ -2372,6 +2372,27 @@ describe('mcp-client', () => {
       });
     });
 
+    it('strips Qwen-internal daemon secrets from the stdio child env (#6601)', async () => {
+      process.env = {
+        ...ORIGINAL_ENV,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+      };
+      const mockedTransport = vi
+        .spyOn(SdkClientStdioLib, 'StdioClientTransport')
+        .mockReturnValue({} as SdkClientStdioLib.StdioClientTransport);
+
+      await createTransport('test-server', { command: 'test-command' }, false);
+
+      const transportEnv = mockedTransport.mock.calls[0]?.[0]?.env ?? {};
+      // Internal daemon secrets must never reach an agent-launched stdio server.
+      expect(transportEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(transportEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Third-party credentials the server may legitimately need are preserved.
+      expect(transportEnv['GH_TOKEN']).toBe('gh-abc');
+    });
+
     it('should normalize PATH-like env keys on Windows for stdio transport', async () => {
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       process.env = {

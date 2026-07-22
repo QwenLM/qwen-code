@@ -7,6 +7,8 @@ import { describe, expect, it } from 'vitest';
 import { AlertDialogContent, AlertDialogOverlay } from './alert-dialog';
 import { Button } from './button';
 import { DialogContent, DialogOverlay } from './dialog';
+import { DrawerContent, DrawerOverlay } from './drawer';
+import { DropdownMenuSubTrigger, DropdownMenuTrigger } from './dropdown-menu';
 import { Input } from './input';
 import { PopoverAnchor, PopoverContent, PopoverTrigger } from './popover';
 import { SelectTrigger } from './select';
@@ -22,10 +24,14 @@ describe('React 18 ref compatibility', () => {
     ['Button', Button],
     ['DialogContent', DialogContent],
     ['DialogOverlay', DialogOverlay],
+    ['DrawerContent', DrawerContent],
+    ['DrawerOverlay', DrawerOverlay],
     ['Input', Input],
     ['PopoverAnchor', PopoverAnchor],
     ['PopoverContent', PopoverContent],
     ['PopoverTrigger', PopoverTrigger],
+    ['DropdownMenuTrigger', DropdownMenuTrigger],
+    ['DropdownMenuSubTrigger', DropdownMenuSubTrigger],
     ['SelectTrigger', SelectTrigger],
   ])('%s forwards refs', (_name, Component) => {
     expect(Component).toHaveProperty('$$typeof', FORWARD_REF_TYPE);

@@ -93,7 +93,7 @@ describe('relaunchOnExitCode', () => {
       relaunchOnExitCode(runner, { onUpdateRelaunch }),
     ).rejects.toThrow('PROCESS_EXIT_CALLED');
 
-    expect(onUpdateRelaunch).toHaveBeenCalledTimes(1);
+    expect(onUpdateRelaunch).toHaveBeenCalledWith(true);
     expect(runner).toHaveBeenCalledTimes(1);
     expect(processExitSpy).toHaveBeenCalledWith(0);
   });
@@ -354,7 +354,7 @@ describe('relaunchAppInChildProcess', () => {
       mockChild.emit('close', 0);
       await expect(promise).rejects.toThrow('PROCESS_EXIT_CALLED');
 
-      expect(onUpdateRelaunch).toHaveBeenCalledTimes(1);
+      expect(onUpdateRelaunch).toHaveBeenCalledWith(false);
       expect(processExitSpy).toHaveBeenCalledWith(44);
     });
 

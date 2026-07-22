@@ -24,6 +24,7 @@ import {
   isTodoWriteToolName,
 } from '../../utils/todos';
 import { useSharedNow } from '../../hooks/useSharedNow';
+import { useSubagentDetails } from '../../subagentDetailsContext';
 import { TodoEventSummary, TodoFullList } from './TodoView';
 import { Markdown } from './Markdown';
 import {
@@ -52,6 +53,7 @@ import {
   toolContainsCallId,
 } from './toolFormatting';
 import { useI18n } from '../../i18n';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 import { CompactModeContext, TodoTimelineContext } from '../../App';
 import {
   type ToolHeaderExtraRenderInfo,
@@ -1042,7 +1044,10 @@ function areSubToolsEqual(
  * Keeps the rendering pipeline plain-text-compatible for all other tools. */
 const SESSION_LINK_RE = /\[([^\]]+)\]\(qwen-session:\/\/([^)]+)\)/g;
 
-function renderWithSessionLinks(text: string): ReactNode {
+function renderWithSessionLinks(
+  text: string,
+  renderMode: 'interactive' | 'readonly',
+): ReactNode {
   if (!text || !text.includes('qwen-session://')) return text;
   const parts: ReactNode[] = [];
   let lastIndex = 0;
@@ -1054,21 +1059,27 @@ function renderWithSessionLinks(text: string): ReactNode {
     }
     const sessionId = match[2];
     parts.push(
-      <a
-        key={match.index}
-        href="#"
-        role="button"
-        style={{ textDecoration: 'underline', cursor: 'pointer' }}
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          window.dispatchEvent(
-            new CustomEvent('qwen:open-session', { detail: sessionId }),
-          );
-        }}
-      >
-        {match[1]}
-      </a>,
+      renderMode === 'readonly' ? (
+        <span key={match.index} style={{ textDecoration: 'underline' }}>
+          {match[1]}
+        </span>
+      ) : (
+        <a
+          key={match.index}
+          href="#"
+          role="button"
+          style={{ textDecoration: 'underline', cursor: 'pointer' }}
+          onClick={(e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            window.dispatchEvent(
+              new CustomEvent('qwen:open-session', { detail: sessionId }),
+            );
+          }}
+        >
+          {match[1]}
+        </a>
+      ),
     );
     lastIndex = match.index + match[0].length;
   }
@@ -1087,7 +1098,9 @@ export const ToolLine = memo(function ToolLine({
   hideCollapsedOutput = false,
 }: ToolLineProps) {
   const { t } = useI18n();
+  const transcriptRenderMode = useTranscriptRenderMode();
   const compactMode = useContext(CompactModeContext);
+  const subagentDetails = useSubagentDetails();
   const [expanded, setExpanded] = useState(
     () => forceExpanded || (!compactMode && shouldAutoExpand(tool)),
   );
@@ -1158,6 +1171,34 @@ export const ToolLine = memo(function ToolLine({
     const panel = (
       <SubAgentPanel tool={tool} hideHeader defaultExpanded inline />
     );
+    if (subagentDetails && !hideHeader) {
+      return (
+        <div className={styles.line}>
+          <button
+            type="button"
+            className={`${styles.lineMain} ${styles.lineExpandable} ${styles.lineButton}`}
+            onClick={() => subagentDetails.onOpen(tool)}
+          >
+            <AgentIcon />
+            <StatusIcon status={isComplete ? info.status : tool.status} />
+            <span className={styles.lineName}>{displayName}</span>
+            <ToolHeaderExtra
+              info={{
+                kind: 'agent',
+                tool,
+                displayName,
+                description: info.description
+                  ? truncateText(info.description, 60)
+                  : '',
+                elapsed: isComplete ? completeMeta : runningMeta,
+                workspaceCwd,
+              }}
+            />
+            <span className={styles.lineChevronRight} aria-hidden="true" />
+          </button>
+        </div>
+      );
+    }
     return (
       <div className={styles.line}>
         {!hideHeader && (
@@ -1165,6 +1206,7 @@ export const ToolLine = memo(function ToolLine({
             className={`${styles.lineMain} ${styles.lineExpandable}`}
             onClick={() => setExpanded(!expanded)}
           >
+            <AgentIcon />
             <StatusIcon status={isComplete ? info.status : tool.status} />
             <span className={styles.lineName}>{displayName}</span>
             <ToolHeaderExtra
@@ -1323,7 +1365,7 @@ export const ToolLine = memo(function ToolLine({
           fall back to the raw result summary so the row isn't blank. */}
       {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
         <div className={styles.lineOutput}>
-          {renderWithSessionLinks(result)}
+          {renderWithSessionLinks(result, transcriptRenderMode)}
         </div>
       )}
       {showExpandedSummaryPanel && (
@@ -1332,7 +1374,7 @@ export const ToolLine = memo(function ToolLine({
             <div
               className={`${styles.lineOutput} ${styles.expandedLineOutput}`}
             >
-              {renderWithSessionLinks(result)}
+              {renderWithSessionLinks(result, transcriptRenderMode)}
             </div>
           )}
         </ToolExpandedCard>
@@ -1350,7 +1392,7 @@ export const ToolLine = memo(function ToolLine({
                 : styles.lineOutput
             }
           >
-            {renderWithSessionLinks(result)}
+            {renderWithSessionLinks(result, transcriptRenderMode)}
           </div>
         )}
       {!isTodo && expanded && detailView && (

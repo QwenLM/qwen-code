@@ -174,6 +174,20 @@ describe('<Footer />', () => {
     expect(lastFrame()).toContain('Enter to steer · Ctrl+Q to queue');
   });
 
+  it('shows mode indicator alongside steering hint during streaming', () => {
+    const { lastFrame } = renderWithWidth(
+      120,
+      createMockUIState({
+        streamingState: StreamingState.Responding,
+        showAutoAcceptIndicator: ApprovalMode.YOLO,
+      }),
+    );
+
+    const frame = lastFrame()!;
+    expect(frame).toContain('Enter to steer · Ctrl+Q to queue');
+    expect(frame).toContain('YOLO mode');
+  });
+
   it('shows deferred IDE connection progress', () => {
     const { lastFrame } = renderWithWidth(
       120,

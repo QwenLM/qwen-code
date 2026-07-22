@@ -29,10 +29,15 @@ export interface DaemonCapabilitiesLimits {
 export interface DaemonWorkspaceCapability {
   id: string;
   cwd: string;
+  displayName?: string;
   primary: boolean;
   trusted: boolean;
   /** Whether this runtime can be removed without restarting the daemon. */
   removable?: boolean;
+}
+
+export interface DaemonWorkspaceUpdate {
+  displayName: string | null;
 }
 
 export interface DaemonWorkspaceRemovalActivity {
@@ -157,6 +162,61 @@ export interface DaemonWorkspaceGitDiffHunks {
   truncated?: boolean;
 }
 
+/** A single commit entry in the log list. */
+export interface DaemonGitLogEntry {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Unix timestamp in seconds. */
+  authorDate: number;
+  subject: string;
+  /** Ref decorations, e.g. `"HEAD -> main, origin/main, v1.2.0"`. */
+  refs?: string;
+  /** Parent SHAs (length > 1 ⇒ merge commit). */
+  parents: string[];
+}
+
+/** Response from `GET /workspace/git/log`. */
+export interface DaemonGitLog {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when git is not available for this workspace. */
+  available: boolean;
+  entries: DaemonGitLogEntry[];
+  hasMore: boolean;
+}
+
+/** Per-file numstat entry within a commit detail. */
+export interface DaemonGitCommitFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+/** Response from `GET /workspace/git/log/commit?sha=`. */
+export interface DaemonGitCommitDetail {
+  v: 1;
+  workspaceCwd: string;
+  /** `false` when the commit was not found or git is unavailable. */
+  available: boolean;
+  sha?: string;
+  shortSha?: string;
+  authorName?: string;
+  authorEmail?: string;
+  authorDate?: number;
+  subject?: string;
+  body?: string;
+  refs?: string;
+  parents?: string[];
+  files?: DaemonGitCommitFileStat[];
+  filesCount?: number;
+  linesAdded?: number;
+  linesRemoved?: number;
+  hiddenCount?: number;
+}
+
 /** Capabilities envelope returned from `GET /capabilities`. */
 export interface DaemonCapabilities {
   v: 1;
@@ -274,6 +334,16 @@ export type DaemonStatusReportDetail = 'summary' | 'full';
 
 /** Overall health rollup of a daemon status report. */
 export type DaemonStatusReportLevel = 'ok' | 'warning' | 'error';
+
+export type DaemonLogMode = 'stable' | 'fallback' | 'stderr-only';
+export type DaemonLogHealth = 'ok' | 'degraded';
+export type DaemonLogIssue =
+  | 'init_failed'
+  | 'rotation_failed'
+  | 'retention_failed'
+  | 'queue_overflow'
+  | 'write_failed'
+  | 'lease_compromised';
 
 /** One triage finding surfaced by the daemon status rollup. */
 export interface DaemonStatusReportIssue {
@@ -417,8 +487,17 @@ export interface DaemonStatusReport {
     };
     qwenCodeVersion?: string;
     daemonId?: string;
+    runId?: string;
+    logMode?: DaemonLogMode;
+    logHealth?: DaemonLogHealth;
     /** Present only in `detail=full` responses. */
     logPath?: string;
+    /** Present only in `detail=full` responses. */
+    logIssues?: readonly DaemonLogIssue[];
+    /** Present only in `detail=full` responses. */
+    logDroppedRecords?: number;
+    /** Present only in `detail=full` responses. */
+    logDroppedBytes?: number;
   };
   security: {
     tokenConfigured: boolean;
@@ -536,6 +615,13 @@ export interface DaemonStatusReport {
   };
 }
 
+/** Worktree metadata returned when a session is created with worktree isolation. */
+export interface DaemonWorktreeInfo {
+  slug: string;
+  path: string;
+  branch: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;
@@ -557,6 +643,8 @@ export interface DaemonSession {
   sourceId?: string;
   /** True iff supplied source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: DaemonWorktreeInfo;
 }
 
 /**
@@ -700,6 +788,8 @@ export interface DaemonSessionSummary {
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: DaemonSessionGroupPresetColor | null;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: DaemonWorktreeInfo;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -729,6 +819,18 @@ export interface DaemonSessionTranscriptPage {
   lastUpdated?: string;
   partial?: true;
   replayError?: string;
+}
+
+export interface DaemonSubagentSessionResolution {
+  sessionId: string;
+  taskId: string;
+  title: string;
+  status: string;
+  durationMs?: number;
+  totalTokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
+  cachedTokens?: number;
 }
 
 export type DaemonSessionArchiveState = 'active' | 'archived';
@@ -1846,6 +1948,8 @@ export interface DaemonSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /**
    * `id` of the agent task that spawned this one. Absent for agents
    * launched by the top-level session. Sub-agents may spawn sub-agents

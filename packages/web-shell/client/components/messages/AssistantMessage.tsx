@@ -32,6 +32,41 @@ interface AssistantMessageProps {
   customFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
 }
 
+const STREAMING_MARKDOWN_UPDATE_MS = 80;
+
+function useStreamingMarkdownContent(content: string, isStreaming?: boolean) {
+  const [streamingContent, setStreamingContent] = useState(content);
+  const latestContentRef = useRef(content);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  latestContentRef.current = content;
+
+  useEffect(() => {
+    if (!isStreaming) {
+      if (timerRef.current !== undefined) {
+        clearTimeout(timerRef.current);
+        timerRef.current = undefined;
+      }
+      if (streamingContent !== content) setStreamingContent(content);
+      return;
+    }
+    if (timerRef.current !== undefined || streamingContent === content) return;
+    timerRef.current = setTimeout(() => {
+      timerRef.current = undefined;
+      setStreamingContent(latestContentRef.current);
+    }, STREAMING_MARKDOWN_UPDATE_MS);
+  }, [content, isStreaming, streamingContent]);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== undefined) clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  if (!isStreaming) return content;
+  return content.startsWith(streamingContent) ? streamingContent : content;
+}
+
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   isStreaming,
@@ -44,6 +79,7 @@ export const AssistantMessage = memo(function AssistantMessage({
 }: AssistantMessageProps) {
   const { t } = useI18n();
   const { renderAssistantTurnFooter } = useWebShellCustomization();
+  const markdownContent = useStreamingMarkdownContent(content, isStreaming);
   const [copied, setCopied] = useState(false);
   const showFooter = !!content && !isStreaming && showFooterActions;
   const customFooter = useMemo(
@@ -75,7 +111,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         >
           <div className={styles.contentBody}>
             <Markdown
-              content={content}
+              content={markdownContent}
               source="assistant"
               isStreaming={isStreaming}
             />
@@ -524,23 +560,19 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                 aria-hidden="true"
               />
             </div>
-            <div
-              className={
-                thinkingExpanded
-                  ? styles.thinkingExpandedClip
-                  : `${styles.thinkingExpandedClip} ${styles.thinkingExpandedCollapsed}`
-              }
-            >
-              <div className={styles.thinkingExpandedInner}>
-                <div className={styles.thinkingExpandedWrap}>
-                  <Markdown
-                    content={content}
-                    source="thinking"
-                    isStreaming={isStreaming}
-                  />
+            {thinkingExpanded && (
+              <div className={styles.thinkingExpandedClip}>
+                <div className={styles.thinkingExpandedInner}>
+                  <div className={styles.thinkingExpandedWrap}>
+                    <Markdown
+                      content={content}
+                      source="thinking"
+                      isStreaming={isStreaming}
+                    />
+                  </div>
                 </div>
               </div>
-            </div>
+            )}
           </div>
         </div>
       )}

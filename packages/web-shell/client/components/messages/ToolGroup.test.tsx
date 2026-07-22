@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import type { ACPToolCall } from '../../adapters/types';
 import { I18nProvider } from '../../i18n';
 import { WebShellCustomizationProvider } from '../../customization';
+import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
+import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 
 vi.mock('../../App', async () => {
   const { createContext } = await import('react');
@@ -363,6 +365,63 @@ describe('tool group summary logic', () => {
   });
 });
 
+describe('tool output session links', () => {
+  function renderSessionLinkTool(readonly: boolean): HTMLElement {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const toolLine = (
+      <ToolLine
+        tool={makeTool({
+          toolName: 'custom_tool',
+          rawOutput: '[child](qwen-session://child-session)',
+        })}
+        forceExpanded
+      />
+    );
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          {readonly ? (
+            <TranscriptRenderModeProvider value="readonly">
+              {toolLine}
+            </TranscriptRenderModeProvider>
+          ) : (
+            toolLine
+          )}
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+    return container;
+  }
+
+  it('keeps interactive tool session links clickable by default', () => {
+    const handler = vi.fn();
+    window.addEventListener('qwen:open-session', handler);
+    const container = renderSessionLinkTool(false);
+    const link = container.querySelector('a[role="button"]');
+    expect(link?.textContent).toBe('child');
+    act(() => {
+      link?.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    expect(handler).toHaveBeenCalledOnce();
+    window.removeEventListener('qwen:open-session', handler);
+  });
+
+  it('renders tool session links as inert text in readonly mode', () => {
+    const handler = vi.fn();
+    window.addEventListener('qwen:open-session', handler);
+    const container = renderSessionLinkTool(true);
+    expect(container.querySelector('a[role="button"]')).toBeNull();
+    expect(container.textContent).toContain('child');
+    expect(handler).not.toHaveBeenCalled();
+    window.removeEventListener('qwen:open-session', handler);
+  });
+});
+
 describe('tool expandability', () => {
   it('only marks tools with actual detail views as expandable by output', () => {
     expect(
@@ -497,6 +556,62 @@ describe('tool row rendering', () => {
     expect(card).not.toBeNull();
     expect(card?.textContent).toContain('working through the issue');
     expect(container.querySelector('[class*="expandedCardHeader"]')).toBeNull();
+  });
+
+  it('opens on-demand agent details without mounting inline content', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+      subContent: 'large hidden result',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.textContent).not.toContain('large hidden result');
+    expect(container.querySelector('[class*="lineExpandable"]')?.tagName).toBe(
+      'BUTTON',
+    );
+    act(() => {
+      (
+        container.querySelector('[class*="lineExpandable"]') as HTMLElement
+      ).click();
+    });
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
+  it('respects hideHeader for agent tools inside SubagentDetailsProvider', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolLine tool={tool} hideHeader forceExpanded />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    expect(container.querySelector('button[class*="lineButton"]')).toBeNull();
   });
 
   it('keeps glob details visible in the header after expanding', () => {

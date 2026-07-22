@@ -37,7 +37,10 @@ import {
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  canonicalizeWorkspace,
+  translateAndCheckAbsoluteWorkspacePath,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   AuthType,
   ProviderSetupInputs,
@@ -89,6 +92,12 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import {
+  isManagedScratchChild,
+  prepareManagedScratchRoot,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from './managed-scratch-workspace.js';
 import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
@@ -142,6 +151,10 @@ import { sanitizeLogText } from '@qwen-code/channel-base';
 import { isBrowserAutomationMcpAvailable } from './cdp-mcp-command.js';
 import { WorkspaceVoiceCoordinator } from './voice/workspace-voice-coordinator.js';
 import {
+  ACCESS_LOG_CONTROLLER_LOCAL,
+  type AccessLogAppLocals,
+} from './server/access-log.js';
+import {
   setDeferredRuntimeRequestTiming,
   type DeferredRuntimeRequestTiming,
 } from './server/request-helpers.js';
@@ -154,6 +167,33 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+
+async function flushDaemonLogBounded(
+  daemonLog: DaemonLogger,
+  budgetMs: number,
+): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      daemonLog.flush().catch(() => {}),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, budgetMs);
+        timer.unref();
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function writeDaemonLifecycleBestEffort(write: () => void): void {
+  try {
+    write();
+  } catch {
+    // Best-effort lifecycle diagnostics must not make shutdown throw.
+  }
+}
 
 function daemonPipeDirection(
   direction: NdJsonMessageObservation['direction'],
@@ -1297,12 +1337,22 @@ function createBootstrapServeApp(input: {
           severity: 'warning',
           message: 'Daemon runtime is still starting.',
         };
+    const daemonLogStatus = daemonLog.getStatus();
+    const issues: DaemonStatusIssue[] = [issue];
+    if (daemonLogStatus.health === 'degraded') {
+      issues.push({
+        code: 'daemon_log_degraded',
+        severity: 'warning',
+        message:
+          'Daemon file logging is degraded; inspect full status for details.',
+      });
+    }
     const response: DaemonStatusResponse = {
       v: 1,
       detail: detail.detail,
       generatedAt: new Date().toISOString(),
       status: runtimeFailed ? 'error' : 'warning',
-      issues: [issue],
+      issues,
       daemon: {
         pid: process.pid,
         uptimeMs: Math.round(process.uptime() * 1000),
@@ -1316,8 +1366,18 @@ function createBootstrapServeApp(input: {
         ...(daemonLog.getDaemonId()
           ? { daemonId: daemonLog.getDaemonId() }
           : {}),
+        runId: daemonLogStatus.runId,
+        logMode: daemonLogStatus.mode,
+        logHealth: daemonLogStatus.health,
         ...(detail.detail === 'full' && daemonLog.getLogPath()
           ? { logPath: daemonLog.getLogPath() }
+          : {}),
+        ...(detail.detail === 'full'
+          ? {
+              logIssues: daemonLogStatus.issues,
+              logDroppedRecords: daemonLogStatus.droppedRecords,
+              logDroppedBytes: daemonLogStatus.droppedBytes,
+            }
           : {}),
       },
       security: {
@@ -1638,9 +1698,103 @@ function runSynchronousRequestGate(
  * Boot refuses to start when bound beyond loopback without a token; this is a
  * hard rule, not a warning, per the threat model in the design issue.
  */
+interface DaemonLoggerLifecycleCallbacks {
+  initialized(logger: DaemonLogger): void;
+  published(): void;
+  signalOwned(): void;
+}
+
+/**
+ * Validates and canonicalizes a `--workspace` boot argument. Extracted to
+ * module scope (from the runQwenServe closure) so the #7139 sandbox path
+ * translation ahead of the absolute-path guard is testable — this is the
+ * primary reproduction path of that issue.
+ */
+export function validateAndCanonicalizeWorkspaceInput(
+  rawWorkspace: string,
+): string {
+  // #7139: inside a Linux container sandbox a Windows host forwards
+  // `--workspace C:\…` in host shape; translate to the bind-mount
+  // location BEFORE the absolute-path guard, which would otherwise
+  // reject it (`path.isAbsolute('C:\…')` is false on POSIX).
+  const workspace = translateAndCheckAbsoluteWorkspacePath(rawWorkspace);
+  if (workspace === null) {
+    throw new Error(
+      `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
+    );
+  }
+  try {
+    const stats = fs.statSync(workspace);
+    if (!stats.isDirectory()) {
+      throw new Error(
+        `Invalid --workspace "${workspace}": exists but is not a directory.`,
+      );
+    }
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err) {
+      const code = (err as { code?: unknown }).code;
+      if (code === 'ENOENT') {
+        throw new Error(
+          `Invalid --workspace "${workspace}": directory does not exist.`,
+        );
+      }
+      // EACCES / EPERM: the path exists but the current user can't
+      // stat it (typical for SIP-protected paths on macOS, root-owned
+      // dirs the daemon's user can't traverse, etc.). The raw Node
+      // SystemError has the path AND the syscall but no operator-
+      // facing breadcrumb that this came from `--workspace`. Wrap
+      // both codes so the boot failure points at the flag the
+      // operator actually set.
+      if (code === 'EACCES' || code === 'EPERM') {
+        throw new Error(
+          `Invalid --workspace "${workspace}": permission denied ` +
+            `(${String(code)}). The path exists but cannot be stat'd ` +
+            `by the current user.`,
+        );
+      }
+    }
+    throw err;
+  }
+  return canonicalizeWorkspace(workspace);
+}
+
 export async function runQwenServe(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
+): Promise<RunHandle> {
+  let daemonLog: DaemonLogger | undefined;
+  let owner: 'startup' | 'handle' | 'signal' = 'startup';
+  try {
+    return await runQwenServeImpl(optsIn, deps, {
+      initialized: (logger) => {
+        daemonLog = logger;
+      },
+      published: () => {
+        if (owner === 'startup') owner = 'handle';
+      },
+      signalOwned: () => {
+        if (owner === 'startup') owner = 'signal';
+      },
+    });
+  } catch (error) {
+    if (daemonLog && owner === 'startup') {
+      const startupLog = daemonLog;
+      writeDaemonLifecycleBestEffort(() =>
+        startupLog.error(
+          'daemon startup failed',
+          error instanceof Error ? error : new Error(String(error)),
+        ),
+      );
+      await startupLog.close();
+    }
+    throw error;
+  }
+}
+
+async function runQwenServeImpl(
+  optsIn: RunQwenServeOptions,
+  deps: RunQwenServeDeps,
+  loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
   const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
@@ -1962,46 +2116,8 @@ export async function runQwenServe(
     );
   }
 
-  const validateAndCanonicalizeWorkspace = (workspace: string): string => {
-    if (!path.isAbsolute(workspace)) {
-      throw new Error(
-        `Invalid --workspace "${workspace}": must be an absolute path.`,
-      );
-    }
-    try {
-      const stats = fs.statSync(workspace);
-      if (!stats.isDirectory()) {
-        throw new Error(
-          `Invalid --workspace "${workspace}": exists but is not a directory.`,
-        );
-      }
-    } catch (err) {
-      if (err && typeof err === 'object' && 'code' in err) {
-        const code = (err as { code?: unknown }).code;
-        if (code === 'ENOENT') {
-          throw new Error(
-            `Invalid --workspace "${workspace}": directory does not exist.`,
-          );
-        }
-        // EACCES / EPERM: the path exists but the current user can't
-        // stat it (typical for SIP-protected paths on macOS, root-owned
-        // dirs the daemon's user can't traverse, etc.). The raw Node
-        // SystemError has the path AND the syscall but no operator-
-        // facing breadcrumb that this came from `--workspace`. Wrap
-        // both codes so the boot failure points at the flag the
-        // operator actually set.
-        if (code === 'EACCES' || code === 'EPERM') {
-          throw new Error(
-            `Invalid --workspace "${workspace}": permission denied ` +
-              `(${String(code)}). The path exists but cannot be stat'd ` +
-              `by the current user.`,
-          );
-        }
-      }
-      throw err;
-    }
-    return canonicalizeWorkspace(workspace);
-  };
+  const validateAndCanonicalizeWorkspace =
+    validateAndCanonicalizeWorkspaceInput;
 
   // Resolve the bound workspace list. The first explicit workspace remains the
   // primary workspace for legacy APIs; later workspaces are isolated secondary
@@ -2009,6 +2125,7 @@ export async function runQwenServe(
   const workspaceInputs = rawWorkspaces.map((workspace) => ({
     raw: workspace,
     cwd: validateAndCanonicalizeWorkspace(workspace),
+    displayName: undefined as string | undefined,
     removable: false,
     registrationIds: [] as string[],
   }));
@@ -2075,6 +2192,7 @@ export async function runQwenServe(
       const stored = await workspaceRegistrationStore.read();
       for (const storedWorkspace of stored.workspaces) {
         const registrationId = workspaceRegistrationId(storedWorkspace);
+        const displayName = stored.displayNames?.[registrationId];
         let cwd: string;
         try {
           cwd = validateAndCanonicalizeWorkspace(storedWorkspace);
@@ -2091,6 +2209,7 @@ export async function runQwenServe(
         );
         if (existingInput) {
           existingInput.registrationIds.push(registrationId);
+          existingInput.displayName ??= displayName;
           continue;
         }
         const nested = workspaceInputs.some(
@@ -2117,6 +2236,7 @@ export async function runQwenServe(
         workspaceInputs.push({
           raw: storedWorkspace,
           cwd,
+          displayName,
           removable: true,
           registrationIds: [registrationId],
         });
@@ -2185,10 +2305,13 @@ export async function runQwenServe(
     bootSettings,
     boundWorkspace,
   });
-  const daemonLog: DaemonLogger = initDaemonLogger({
+  const daemonLog: DaemonLogger = await initDaemonLogger({
     boundWorkspace,
     baseDir: daemonLogBaseDir,
   });
+  loggerLifecycle.initialized(daemonLog);
+  let loggerPublished = false;
+  let loggerSignalOwned = false;
   writeStderrLine(
     `qwen serve: daemon log → ${daemonLog.getLogPath() || '(disabled)'}`,
   );
@@ -2298,6 +2421,14 @@ export async function runQwenServe(
         `Invalid sessionIdleTimeoutMs: ${opts.sessionIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
       );
     }
+  }
+  if (opts.initializeTimeoutMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.initializeTimeoutMs)) {
+      throw new TypeError(
+        `Invalid initializeTimeoutMs: ${opts.initializeTimeoutMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
+    assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
@@ -2725,6 +2856,21 @@ export async function runQwenServe(
         cliVersionPromise,
       ]);
     cliVersion = resolvedCliVersion;
+    let managedScratchRoot: ManagedScratchRoot | undefined;
+    try {
+      // Root acceptance is fail-closed and happens only after every startup
+      // workspace (including restored registrations) has been resolved.
+      managedScratchRoot = prepareManagedScratchRoot(
+        path.join(core.Storage.getGlobalQwenDir(), 'scratch-workspaces'),
+        workspaceInputs.map((workspace) => workspace.cwd),
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: managed scratch workspaces are unavailable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -2828,7 +2974,10 @@ export async function runQwenServe(
       }
       throw err;
     }
-    core.initializeTelemetry(
+    // Must settle before initializeDaemonMetrics(): metrics.getMeter() caches
+    // a noop meter permanently if called before the SDK registers the global
+    // MeterProvider. This runs in the deferred runtime load, off the fast path.
+    await core.initializeTelemetry(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
@@ -3245,6 +3394,9 @@ export async function runQwenServe(
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
+          : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3378,6 +3530,9 @@ export async function runQwenServe(
       {
         workspaceId: daemonWorkspaceHash,
         workspaceCwd: boundWorkspace,
+        ...(workspaceInputs[0]?.displayName
+          ? { displayName: workspaceInputs[0].displayName }
+          : {}),
         primary: true,
         trusted: trustedWorkspace,
         removable: false,
@@ -3554,6 +3709,9 @@ export async function runQwenServe(
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
+          : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3672,6 +3830,9 @@ export async function runQwenServe(
       workspaceRuntimes.push({
         workspaceId: secondaryWorkspaceHash,
         workspaceCwd: workspaceInput.cwd,
+        ...(workspaceInput.displayName
+          ? { displayName: workspaceInput.displayName }
+          : {}),
         primary: false,
         trusted: secondaryTrusted,
         removable: workspaceInput.removable,
@@ -3848,7 +4009,19 @@ export async function runQwenServe(
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     const createDynamicWorkspaceRuntime = async (
       cwd: string,
+      options: { provenance: WorkspaceRuntimeProvenance },
     ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      // HTTP clients cannot choose provenance. This second boundary prevents a
+      // future caller from granting managed trust to an arbitrary directory.
+      if (
+        options.provenance === 'managed-scratch' &&
+        (!managedScratchRoot ||
+          !isManagedScratchChild(cwd, managedScratchRoot.canonicalRoot))
+      ) {
+        throw new Error(
+          'Managed scratch runtime must use an accepted direct child directory',
+        );
+      }
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd);
@@ -3861,12 +4034,14 @@ export async function runQwenServe(
             `falling back to defaults.`,
         );
       }
-      const trusted = wsSettings
-        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-            wsSettings.merged,
-            cwd,
-          ).effective.state === 'trusted'
-        : false;
+      const trusted =
+        options.provenance === 'managed-scratch' ||
+        (wsSettings
+          ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+              wsSettings.merged,
+              cwd,
+            ).effective.state === 'trusted'
+          : false);
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
       const wsHash = core.hashDaemonWorkspace(cwd);
       const wsFsFactory = runtime.resolveBridgeFsFactory({
@@ -3921,6 +4096,9 @@ export async function runQwenServe(
             : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+            : {}),
+          ...(opts.initializeTimeoutMs !== undefined
+            ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -4222,6 +4400,7 @@ export async function runQwenServe(
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
+      managedScratchRoot,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       voiceCoordinator: workspaceVoiceCoordinator,
@@ -5081,25 +5260,33 @@ export async function runQwenServe(
               err instanceof Error ? err : null,
             );
           }
-          await daemonLog.flush().catch(() => {});
+          await flushDaemonLogBounded(
+            daemonLog,
+            DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
+          );
           process.exit(1);
           return;
+        }
+        if (!loggerPublished) {
+          loggerSignalOwned = true;
+          loggerLifecycle.signalOwned();
         }
         daemonLog.warn(`received ${signal}, draining`);
         try {
           await handle.close();
-          await daemonLog.flush();
           process.exit(runtimeStartupError === undefined ? 0 : 1);
         } catch (err) {
           daemonLog.error('shutdown error', err instanceof Error ? err : null);
-          await daemonLog.flush().catch(() => {});
           if (channelWorkerManager?.state().enabled) {
             daemonLog.error(
               'refusing to exit while a channel worker or service lease remains; signal again to retry after the child exits (another signal during that retry forces exit)',
             );
-            await daemonLog.flush().catch(() => {});
             return;
           }
+          await flushDaemonLogBounded(
+            daemonLog,
+            DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
+          );
           process.exit(1);
         }
       };
@@ -5178,6 +5365,12 @@ export async function runQwenServe(
             const finish = (err?: Error | null) => {
               if (settled) return;
               settled = true;
+              const accessLogController = (
+                (runtimeApp ?? runtimeAppForCleanup)?.locals as
+                  | AccessLogAppLocals
+                  | undefined
+              )?.[ACCESS_LOG_CONTROLLER_LOCAL];
+              accessLogController?.sealAndFlushSuppressed();
               const preserveSignalHandlers =
                 channelWorkerShutdownError !== undefined &&
                 channelWorkerManager?.state().enabled === true;
@@ -5203,26 +5396,34 @@ export async function runQwenServe(
                     }`,
                   );
                 })
-                .finally(() => daemonLog.flush().catch(() => {}))
-                .finally(() => {
+                .finally(async () => {
                   // Server.close error takes precedence (operator-visible
                   // listener problem); fall back to the bridge error
                   // captured during shutdown if any.
                   const finalErr =
                     err ?? bridgeShutdownError ?? channelWorkerShutdownError;
-                  if (finalErr) {
-                    if (
-                      channelWorkerShutdownError &&
-                      channelWorkerManager?.state().enabled
-                    ) {
-                      closePromise = undefined;
-                      shuttingDown = false;
-                      channelControlDraining = false;
-                    }
+                  const retryableChannelClose =
+                    channelWorkerShutdownError !== undefined &&
+                    channelWorkerManager?.state().enabled === true;
+                  if (retryableChannelClose) {
+                    await flushDaemonLogBounded(
+                      daemonLog,
+                      DAEMON_LOG_FORCED_FLUSH_BUDGET_MS,
+                    );
+                    closePromise = undefined;
+                    shuttingDown = false;
+                    channelControlDraining = false;
                     rej(finalErr);
-                  } else {
-                    res();
+                    return;
                   }
+                  if (loggerPublished || loggerSignalOwned) {
+                    writeDaemonLifecycleBestEffort(() =>
+                      daemonLog.info('daemon stopped'),
+                    );
+                    await daemonLog.close();
+                  }
+                  if (finalErr) rej(finalErr);
+                  else res();
                 });
             };
 
@@ -5409,23 +5610,33 @@ export async function runQwenServe(
       }
 
       if (deps.resolveOnListen) {
+        loggerPublished = true;
+        loggerLifecycle.published();
         resolve(handle);
       } else {
         void runtimeReady.then(
-          () => resolve(handle),
+          () => {
+            loggerPublished = true;
+            loggerLifecycle.published();
+            resolve(handle);
+          },
           (err) => {
             void handle.close().then(
               () => {
                 reject(err instanceof Error ? err : new Error(String(err)));
               },
               (closeErr) => {
-                daemonLog.error(
-                  'shutdown after runtime startup error failed',
-                  closeErr instanceof Error ? closeErr : null,
+                writeDaemonLifecycleBestEffort(() =>
+                  daemonLog.error(
+                    'shutdown after runtime startup error failed',
+                    closeErr instanceof Error ? closeErr : null,
+                  ),
                 );
                 if (channelWorkerManager?.state().enabled) {
-                  daemonLog.error(
-                    'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
+                  writeDaemonLifecycleBestEffort(() =>
+                    daemonLog.error(
+                      'runtime startup failed, but qwen serve remains alive to retain the channel service lease until worker exit is confirmed',
+                    ),
                   );
                   return;
                 }

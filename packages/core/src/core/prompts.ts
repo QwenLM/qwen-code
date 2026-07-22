@@ -842,6 +842,82 @@ To help you check their settings, I can read their contents. Which one would you
 </example>
 `.trim();
 
+const gemma4ToolCallExamples = `
+# Examples (Illustrating Tone and Workflow)
+<example>
+user: 1 + 2
+model: 3
+</example>
+
+<example>
+user: is 13 a prime number?
+model: true
+</example>
+
+<example>
+user: start the server implemented in server.js
+model: <|tool_call>call:${ToolNames.SHELL}{command:<|"|>node server.js<|"|>,is_background:true}<tool_call|>
+</example>
+
+<example>
+user: Refactor the auth logic in src/auth.py to use the requests library instead of urllib.
+model: Okay, I can refactor 'src/auth.py'.
+First, I'll analyze the code and check for a test safety net before planning any changes.
+<|tool_call>call:${ToolNames.GLOB}{pattern:<|"|>tests/test_auth.py<|"|>}<tool_call|>
+<|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/tests/test_auth.py<|"|>,offset:0,limit:10}<tool_call|>
+(After analysis)
+Great, 'tests/test_auth.py' exists and covers the core authentication logic. With this safety net in place, I can safely plan the refactoring.
+I'll also confirm 'requests' is a dependency.
+<|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/requirements.txt<|"|>}<tool_call|>
+(After analysis)
+Looks good, 'requests' is available.
+
+Here's the plan:
+1.  Replace the 'urllib' calls with 'requests'.
+2.  Add proper 'try...except' error handling for the new network calls.
+3.  Remove the old 'urllib' import.
+4.  Run the project's linter and tests to verify the changes.
+
+<|tool_call>call:${ToolNames.EDIT}{file_path:<|"|>/path/to/src/auth.py<|"|>,old_string:<|"|>(old code content)<|"|>,new_string:<|"|>(new code content)<|"|>}<tool_call|>
+Refactoring complete. Running verification...
+<|tool_call>call:${ToolNames.SHELL}{command:<|"|>ruff check src/auth.py && pytest<|"|>}<tool_call|>
+(After verification passes)
+All checks passed. This is a stable checkpoint.
+Would you like me to write a commit message and commit these changes?
+</example>
+
+<example>
+user: Delete the temp directory.
+model: I can run \`rm -rf /path/to/project/temp\`. This will permanently delete the directory and all its contents.
+</example>
+
+<example>
+user: Write tests for someFile.ts
+model:
+Okay, I can write those tests. First, I'll read someFile.ts to understand its functionality.
+<|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/someFile.ts<|"|>}<tool_call|>
+Now I'll look for existing or related test files to understand current testing conventions and dependencies.
+<|tool_call>call:${ToolNames.READ_FILE}{file_path:<|"|>/path/to/existingTest.test.ts<|"|>}<tool_call|>
+(After reviewing existing tests and the file content)
+<|tool_call>call:${ToolNames.WRITE_FILE}{file_path:<|"|>/path/to/someFile.test.ts<|"|>,content:<|"|>(test code content)<|"|>}<tool_call|>
+I've written the tests. Now I'll run the project's test command to verify them.
+<|tool_call>call:${ToolNames.SHELL}{command:<|"|>npm run test<|"|>}<tool_call|>
+(After verification passes)
+All checks passed. This is a stable checkpoint.
+</example>
+
+<example>
+user: Where are all the 'app.config' files in this project? I need to check their settings.
+model:
+<|tool_call>call:${ToolNames.GLOB}{pattern:<|"|>./**/app.config<|"|>}<tool_call|>
+(Assuming GlobTool returns a list of paths like ['/path/to/moduleA/app.config', '/path/to/moduleB/app.config'])
+I found the following 'app.config' files:
+- /path/to/moduleA/app.config
+- /path/to/moduleB/app.config
+To help you check their settings, I can read their contents. Which one would you like to start with, or should I read all of them?
+</example>
+`.trim();
+
 function getToolCallExamples(model?: string): string {
   // Check for environment variable override first
   const toolCallStyle = process.env['QWEN_CODE_TOOL_CALL_STYLE'];
@@ -851,6 +927,8 @@ function getToolCallExamples(model?: string): string {
         return qwenCoderToolCallExamples;
       case 'qwen-vl':
         return qwenVlToolCallExamples;
+      case 'gemma4':
+        return gemma4ToolCallExamples;
       case 'general':
         return generalToolCallExamples;
       default:
@@ -874,6 +952,9 @@ function getToolCallExamples(model?: string): string {
     // Match coder-model pattern (same as qwen3-coder)
     if (/coder-model/i.test(model)) {
       return qwenCoderToolCallExamples;
+    }
+    if (/gemma[-_]?4/i.test(model)) {
+      return gemma4ToolCallExamples;
     }
   }
 
@@ -904,7 +985,7 @@ function getToolCallExamples(model?: string): string {
  */
 export function getPlanModeSystemReminder(planOnly = false): string {
   return `<system-reminder>
-Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run any non-readonly tools (including changing configs or making commits), or otherwise make any changes to the system. This supersedes any other instructions you have received (for example, to make edits).
+Plan mode is active. The user indicated that they do not want you to execute yet -- you MUST NOT make any edits, run tools classified as state-modifying (including changing configs or making commits), or otherwise make changes to the system. A shell command whose safety cannot be determined may run only after the user explicitly approves that exact invocation once, and only when it is necessary for the investigation. This supersedes any other instructions you have received (for example, to make edits).
 
 ## Iterative Planning Workflow
 
@@ -940,9 +1021,12 @@ Start by quickly scanning a few key files to form an initial understanding of th
 
 If a non-read-only tool is blocked:
 - Do NOT retry the blocked tool or repeatedly attempt similar non-read-only tools
+- Do NOT use wrappers, quoting tricks, aliases, or obfuscation to make a blocked write look unknown
 - Do NOT immediately call exit_plan_mode just to unblock it — continue gathering context with read-only tools first
 - Pivot to read-only tools (read_file, grep_search, glob, list_directory, agents) to gather the information the blocked tool would have provided
 - Once you have enough context to form a complete plan, call exit_plan_mode
+
+An exact one-off approval for an unknown shell command approves only that invocation. It does not approve the plan, authorize related commands, or exit Plan mode.
 
 ### When to Converge
 

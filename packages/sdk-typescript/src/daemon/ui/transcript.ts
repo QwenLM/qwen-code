@@ -28,6 +28,10 @@ const TRIMMED_PERMISSION_BLOCK_ID = '__trimmed_permission_block__';
 const MAX_TEXT_BLOCK_LENGTH = 100_000;
 const TEXT_TRUNCATED_SUFFIX = '\n[truncated]\n';
 const MAX_CLONE_DEPTH = 16;
+const truncationCallbacks = new WeakMap<
+  DaemonTranscriptState,
+  NonNullable<DaemonTranscriptReducerOptions['onTruncation']>
+>();
 type TimestampFormatOptions = {
   locale?: string;
   timeZone?: string;
@@ -39,22 +43,25 @@ const timestampFormatterCache = new Map<string, Intl.DateTimeFormat>();
 export function createDaemonTranscriptState(
   opts: DaemonTranscriptReducerOptions = {},
 ): DaemonTranscriptState {
-  return {
+  const state: DaemonTranscriptState = {
     blocks: [],
-    blockIndexById: {},
-    toolBlockByCallId: {},
-    trimmedToolNotificationByCallId: {},
-    permissionBlockByRequestId: {},
-    activeAssistantBlockByParent: {},
-    activeThoughtBlockByParent: {},
+    blockIndexById: createIndex(),
+    toolBlockByCallId: createIndex(),
+    trimmedToolNotificationByCallId: createIndex(),
+    permissionBlockByRequestId: createIndex(),
+    activeAssistantBlockByParent: createIndex(),
+    activeThoughtBlockByParent: createIndex(),
     // PR-E sidechannel: track current tool / approval mode / progress
-    toolProgress: {},
+    toolProgress: createIndex(),
     awaitingResync: false,
     resyncRequiredCount: 0,
     nextOrdinal: 1,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? DEFAULT_MAX_BLOCKS,
+    retainSubagentBlocks: opts.retainSubagentBlocks ?? true,
   };
+  if (opts.onTruncation) truncationCallbacks.set(state, opts.onTruncation);
+  return state;
 }
 
 /**
@@ -155,10 +162,20 @@ export function reduceDaemonTranscriptEvents(
   return result;
 }
 
+export function finalizeOfflineDaemonTranscriptState(
+  state: DaemonTranscriptState,
+): DaemonTranscriptState {
+  const next = cloneTranscriptState(state, { now: 0 });
+  finishAssistant(next);
+  next.activeUserBlockId = undefined;
+  Object.freeze(next.blocks);
+  return next;
+}
+
 export function rebuildDaemonTranscriptBlockIndex(
   blocks: readonly DaemonTranscriptBlock[],
 ): Record<string, number> {
-  const blockIndexById: Record<string, number> = {};
+  const blockIndexById = createIndex<number>();
   blocks.forEach((block, index) => {
     blockIndexById[block.id] = index;
   });
@@ -211,11 +228,25 @@ function applyDaemonTranscriptEvent(
       appendTextDelta(next, 'user', 'activeUserBlockId', event.text, event);
       break;
     case 'user.image.delta': {
-      if (!next.activeUserBlockId) {
+      const activeUserIndex = next.activeUserBlockId
+        ? next.blockIndexById[next.activeUserBlockId]
+        : undefined;
+      const activeUser =
+        activeUserIndex !== undefined
+          ? next.blocks[activeUserIndex]
+          : undefined;
+      if (
+        activeUser?.kind !== 'user' ||
+        !stringArraysEqual(activeUser.sourceRecordIds, event.sourceRecordIds)
+      ) {
         const block = createTextBlock(
           next,
           'user',
           '',
+          event.eventId,
+          event.serverTimestamp,
+          undefined,
+          event.sourceRecordIds,
         ) as DaemonTextTranscriptBlock;
         block.images = [{ data: event.data, mimeType: event.mimeType }];
         appendBlock(next, block);
@@ -236,6 +267,7 @@ function applyDaemonTranscriptEvent(
       break;
     }
     case 'assistant.text.delta':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
         next,
         'assistant',
@@ -264,9 +296,14 @@ function applyDaemonTranscriptEvent(
       }
       break;
     case 'assistant.usage':
-      applyAssistantUsage(next, event);
+      if (event.parentToolCallId && !next.retainSubagentBlocks) {
+        applySubagentUsageToParentTool(next, event);
+      } else {
+        applyAssistantUsage(next, event);
+      }
       break;
     case 'thought.text.delta':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) break;
       appendTextDelta(
         next,
         'thought',
@@ -276,6 +313,10 @@ function applyDaemonTranscriptEvent(
       );
       break;
     case 'tool.update':
+      if (event.parentToolCallId && !next.retainSubagentBlocks) {
+        discardToolBlock(next, event.toolCallId);
+        break;
+      }
       upsertToolBlock(next, event);
       break;
     case 'shell.output':
@@ -471,17 +512,9 @@ function clearActiveAssistant(
 }
 
 /**
- * Fold a round's token usage onto the active top-level assistant block. The
- * daemon emits usage right after that round's assistant text, so the active
- * block is the one it belongs to; multiple rounds accumulate, and renderers sum
- * a turn's blocks for the total.
- *
- * Sub-agent rounds (which arrive with a parentToolCallId) are folded in too:
- * their tokens are part of the spawning turn's real cost, and the parent is
- * blocked on the Task call while they run, so the top-level active block is
- * still that turn's. Excluding them made the turn under-count badly against
- * /stats. The sub-agent's own *text* still lives on its parent-keyed block; only
- * the usage counter rides the top-level block.
+ * Fold a round's token usage onto the active top-level assistant block.
+ * Subagent usage stays part of the spawning turn's total for compatibility.
+ * Summary projections route it to the parent tool before calling this helper.
  *
  * No active block (a rare usage frame with no preceding top-level assistant
  * text) drops the count rather than minting a stray empty block.
@@ -499,6 +532,44 @@ function applyAssistantUsage(
     cachedTokens: (prev?.cachedTokens ?? 0) + (event.usage.cachedTokens ?? 0),
   };
   block.updatedAt = state.now;
+}
+
+function applySubagentUsageToParentTool(
+  state: DaemonTranscriptState,
+  event: Extract<DaemonUiEvent, { type: 'assistant.usage' }>,
+): void {
+  if (!event.parentToolCallId) return;
+  const block = getWritableBlockById(
+    state,
+    state.toolBlockByCallId[event.parentToolCallId],
+  );
+  if (block?.kind !== 'tool') return;
+  const current = isRecord(block.rawOutput) ? block.rawOutput : undefined;
+  const currentSummary = isRecord(current?.['executionSummary'])
+    ? current['executionSummary']
+    : undefined;
+  const inputTokens =
+    finiteNumber(currentSummary?.['inputTokens']) + event.usage.inputTokens;
+  const outputTokens =
+    finiteNumber(currentSummary?.['outputTokens']) + event.usage.outputTokens;
+  const cachedTokens =
+    finiteNumber(currentSummary?.['cachedTokens']) +
+    (event.usage.cachedTokens ?? 0);
+  block.rawOutput = {
+    ...(current ?? { type: 'task_execution', status: 'running' }),
+    executionSummary: {
+      ...(currentSummary ?? {}),
+      inputTokens,
+      outputTokens,
+      cachedTokens,
+      totalTokens: inputTokens + outputTokens,
+    },
+  };
+  block.updatedAt = state.now;
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === 'number' && Number.isFinite(value) ? value : 0;
 }
 
 function clearActiveThought(
@@ -571,7 +642,7 @@ function appendTextDelta(
     existing.kind === kind &&
     canMergeTextDelta(existing, event)
   ) {
-    existing.text = appendBoundedText(existing.text, text);
+    existing.text = appendBoundedText(state, existing, text);
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.serverTimestamp !== undefined) {
@@ -580,8 +651,12 @@ function appendTextDelta(
     if ('meta' in event && event.meta) {
       existing.meta = { ...existing.meta, ...event.meta };
     }
-    if (kind === 'assistant' || kind === 'thought') existing.streaming = true;
+    if (kind !== 'user') existing.streaming = true;
     return;
+  }
+  if (existing?.kind === kind && kind !== 'user') {
+    existing.streaming = false;
+    existing.updatedAt = state.now;
   }
 
   const block = createTextBlock(
@@ -591,8 +666,9 @@ function appendTextDelta(
     event.eventId,
     event.serverTimestamp,
     'meta' in event ? event.meta : undefined,
+    event.sourceRecordIds,
   );
-  if (kind === 'assistant' || kind === 'thought') block.streaming = true;
+  if (kind !== 'user') block.streaming = true;
   if (kind === 'thought') block.collapsed = true;
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
@@ -631,6 +707,9 @@ function canMergeTextDelta(
     return false;
   }
   if (existing.meta?.qwenDiscreteMessage === true) return false;
+  if (!stringArraysEqual(existing.sourceRecordIds, event.sourceRecordIds)) {
+    return false;
+  }
   return !('meta' in event) || event.meta?.qwenDiscreteMessage !== true;
 }
 
@@ -653,6 +732,14 @@ function upsertToolBlock(
   state: DaemonTranscriptState,
   event: Extract<DaemonUiEvent, { type: 'tool.update' }>,
 ): void {
+  const compactTaskOutput =
+    !state.retainSubagentBlocks &&
+    isRecord(event.rawOutput) &&
+    event.rawOutput['type'] === 'task_execution';
+  let rawOutput = compactTaskExecutionOutput(
+    event.rawOutput,
+    state.retainSubagentBlocks,
+  );
   const existingId = state.toolBlockByCallId[event.toolCallId];
   if (existingId === TRIMMED_TOOL_BLOCK_ID) {
     if (shouldRecreateTrimmedToolBlock(event)) {
@@ -686,10 +773,61 @@ function upsertToolBlock(
     existing.updatedAt = state.now;
     if (event.eventId !== undefined) existing.eventId = event.eventId;
     if (event.details) existing.details = event.details;
-    if (event.content !== undefined) existing.content = event.content;
+    if (compactTaskOutput) delete existing.content;
+    else if (event.content !== undefined) existing.content = event.content;
     if (event.locations !== undefined) existing.locations = event.locations;
     if (event.rawInput !== undefined) existing.rawInput = event.rawInput;
-    if (event.rawOutput !== undefined) existing.rawOutput = event.rawOutput;
+    if (rawOutput !== undefined) {
+      if (
+        compactTaskOutput &&
+        isRecord(rawOutput) &&
+        isRecord(existing.rawOutput)
+      ) {
+        const prevSummary = isRecord(existing.rawOutput['executionSummary'])
+          ? existing.rawOutput['executionSummary']
+          : undefined;
+        const nextSummary = isRecord(rawOutput['executionSummary'])
+          ? rawOutput['executionSummary']
+          : undefined;
+        if (prevSummary && nextSummary) {
+          const inputTokens = Math.max(
+            finiteNumber(prevSummary['inputTokens']),
+            finiteNumber(nextSummary['inputTokens']),
+          );
+          const outputTokens = Math.max(
+            finiteNumber(prevSummary['outputTokens']),
+            finiteNumber(nextSummary['outputTokens']),
+          );
+          rawOutput = {
+            ...rawOutput,
+            executionSummary: {
+              ...nextSummary,
+              inputTokens,
+              outputTokens,
+              cachedTokens: Math.max(
+                finiteNumber(prevSummary['cachedTokens']),
+                finiteNumber(nextSummary['cachedTokens']),
+              ),
+              totalTokens: Math.max(
+                finiteNumber(prevSummary['totalTokens']),
+                finiteNumber(nextSummary['totalTokens']),
+                inputTokens + outputTokens,
+              ),
+            },
+          };
+        } else if (prevSummary) {
+          rawOutput = {
+            ...rawOutput,
+            executionSummary: { ...prevSummary },
+          };
+        }
+      }
+      existing.rawOutput = rawOutput;
+    }
+    existing.sourceRecordIds = unionStrings(
+      existing.sourceRecordIds,
+      event.sourceRecordIds,
+    );
     if (event.toolName) existing.toolName = event.toolName;
     if (event.toolKind) existing.toolKind = event.toolKind;
     // PR-K subagent nesting — daemon may stamp parent context on later
@@ -744,11 +882,16 @@ function upsertToolBlock(
     ...(event.serverTimestamp !== undefined
       ? { serverTimestamp: event.serverTimestamp }
       : {}),
+    ...(event.sourceRecordIds
+      ? { sourceRecordIds: [...event.sourceRecordIds] }
+      : {}),
     ...(event.details ? { details: event.details } : {}),
-    ...(event.content !== undefined ? { content: event.content } : {}),
+    ...(!compactTaskOutput && event.content !== undefined
+      ? { content: event.content }
+      : {}),
     ...(event.locations !== undefined ? { locations: event.locations } : {}),
     ...(event.rawInput !== undefined ? { rawInput: event.rawInput } : {}),
-    ...(event.rawOutput !== undefined ? { rawOutput: event.rawOutput } : {}),
+    ...(rawOutput !== undefined ? { rawOutput } : {}),
     ...(event.toolName ? { toolName: event.toolName } : {}),
     ...(event.toolKind ? { toolKind: event.toolKind } : {}),
     ...(event.parentToolCallId
@@ -784,6 +927,48 @@ function upsertToolBlock(
   // with what was actually written to the block.
   updateCurrentToolPointer(state, event.toolCallId, event.status ?? 'pending');
   clearActiveText(state, event.parentToolCallId);
+}
+
+function discardToolBlock(
+  state: DaemonTranscriptState,
+  toolCallId: string,
+): void {
+  const blockId = state.toolBlockByCallId[toolCallId];
+  if (!blockId || blockId === TRIMMED_TOOL_BLOCK_ID) return;
+  takeBlocksOwnership(state);
+  state.blocks = state.blocks.filter((block) => block.id !== blockId);
+  state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
+  delete state.toolBlockByCallId[toolCallId];
+  delete state.toolProgress[toolCallId];
+  if (state.currentToolCallId === toolCallId) {
+    state.currentToolCallId = undefined;
+  }
+}
+
+function compactTaskExecutionOutput(
+  rawOutput: unknown,
+  retainSubagentBlocks: boolean,
+): unknown {
+  if (
+    retainSubagentBlocks ||
+    !isRecord(rawOutput) ||
+    rawOutput['type'] !== 'task_execution'
+  ) {
+    return rawOutput;
+  }
+  const compact: Record<string, unknown> = { type: 'task_execution' };
+  for (const key of [
+    'subagentName',
+    'subagentColor',
+    'taskDescription',
+    'status',
+    'terminateReason',
+    'tokenCount',
+    'executionSummary',
+  ]) {
+    if (rawOutput[key] !== undefined) compact[key] = rawOutput[key];
+  }
+  return compact;
 }
 
 /**
@@ -857,17 +1042,18 @@ function appendShellBlock(
   if (last?.kind === 'shell' && last.stream === event.stream) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'shell') {
-      writable.text = appendBoundedText(writable.text, event.text);
+      writable.text = appendBoundedText(state, writable, event.text);
       writable.updatedAt = state.now;
       if (event.eventId !== undefined) writable.eventId = event.eventId;
     }
     return;
   }
 
+  const blockId = allocateBlockId(state, 'shell');
   const block: DaemonShellTranscriptBlock = {
-    id: allocateBlockId(state, 'shell'),
+    id: blockId,
     kind: 'shell',
-    text: truncateText(event.text),
+    text: truncateText(state, blockId, undefined, event.text),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -894,7 +1080,7 @@ function appendUserShellBlock(
   ) {
     const writable = getWritableBlockById(state, last.id);
     if (writable?.kind === 'user_shell') {
-      writable.text = appendBoundedText(writable.text, event.text);
+      writable.text = appendBoundedText(state, writable, event.text);
       writable.updatedAt = state.now;
       if (event.eventId !== undefined) writable.eventId = event.eventId;
     }
@@ -903,10 +1089,11 @@ function appendUserShellBlock(
 
   const pending = state.pendingUserShellCommand;
   const previous = last?.kind === 'user_shell' ? last : undefined;
+  const blockId = allocateBlockId(state, 'user-shell');
   const block: DaemonUserShellTranscriptBlock = {
-    id: allocateBlockId(state, 'user-shell'),
+    id: blockId,
     kind: 'user_shell',
-    text: truncateText(event.text),
+    text: truncateText(state, blockId, undefined, event.text),
     command: pending?.command ?? previous?.command ?? '',
     ...(pending?.cwd || previous?.cwd
       ? { cwd: pending?.cwd ?? previous?.cwd }
@@ -1027,10 +1214,11 @@ function appendStatusBlock(
   event?: DaemonUiEvent,
   opts: { clearActiveText?: boolean } = {},
 ): void {
+  const blockId = allocateBlockId(state, kind);
   const block: DaemonStatusTranscriptBlock = {
-    id: allocateBlockId(state, kind),
+    id: blockId,
     kind,
-    text: truncateText(text),
+    text: truncateText(state, blockId, undefined, text),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
@@ -1097,16 +1285,19 @@ function createTextBlock(
   eventId?: number,
   serverTimestamp?: number,
   meta?: Record<string, unknown>,
+  sourceRecordIds?: readonly string[],
 ): DaemonTextTranscriptBlock {
+  const blockId = allocateBlockId(state, kind);
   return {
-    id: allocateBlockId(state, kind),
+    id: blockId,
     kind,
-    text: truncateText(text),
+    text: truncateText(state, blockId, sourceRecordIds, text),
     clientReceivedAt: state.now,
     createdAt: state.now,
     updatedAt: state.now,
     ...(eventId !== undefined ? { eventId } : {}),
     ...(serverTimestamp !== undefined ? { serverTimestamp } : {}),
+    ...(sourceRecordIds ? { sourceRecordIds: [...sourceRecordIds] } : {}),
     ...(meta ? { meta: { ...meta } } : {}),
   };
 }
@@ -1115,10 +1306,12 @@ function cloneTranscriptState(
   state: DaemonTranscriptState,
   opts: DaemonTranscriptReducerOptions,
 ): DaemonTranscriptState {
-  return {
+  const next: DaemonTranscriptState = {
     ...state,
     now: opts.now ?? Date.now(),
     maxBlocks: opts.maxBlocks ?? state.maxBlocks,
+    retainSubagentBlocks:
+      opts.retainSubagentBlocks ?? state.retainSubagentBlocks,
     // Lazy copy-on-write for
     // `blocks` + `blockIndexById`. Eager `[...state.blocks]` defeated the
     // `sortedBlocksCache` / `childrenIndexCache` WeakMaps — every dispatch
@@ -1131,21 +1324,25 @@ function cloneTranscriptState(
     // consumers + the WeakMap caches want.
     blocks: state.blocks,
     blockIndexById: state.blockIndexById,
-    toolBlockByCallId: { ...state.toolBlockByCallId },
-    activeAssistantBlockByParent: { ...state.activeAssistantBlockByParent },
-    activeThoughtBlockByParent: { ...state.activeThoughtBlockByParent },
-    trimmedToolNotificationByCallId: {
-      ...state.trimmedToolNotificationByCallId,
-    },
-    permissionBlockByRequestId: { ...state.permissionBlockByRequestId },
+    toolBlockByCallId: createIndex(state.toolBlockByCallId),
+    activeAssistantBlockByParent: createIndex(
+      state.activeAssistantBlockByParent,
+    ),
+    activeThoughtBlockByParent: createIndex(state.activeThoughtBlockByParent),
+    trimmedToolNotificationByCallId: createIndex(
+      state.trimmedToolNotificationByCallId,
+    ),
+    permissionBlockByRequestId: createIndex(state.permissionBlockByRequestId),
     // Deep-clone the inner progress records.
     // The outer spread alone shares `{ ratio?, step? }` references between
     // snapshots — once `tool.progress` event handlers start mutating in
     // place, the prior snapshot leaks. Pre-empt that here; cost is bounded
     // by `Object.keys(state.toolProgress).length` which is small (only
     // in-flight tools).
-    toolProgress: Object.fromEntries(
-      Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
+    toolProgress: createIndex(
+      Object.fromEntries(
+        Object.entries(state.toolProgress).map(([k, v]) => [k, { ...v }]),
+      ),
     ),
     lastResyncRequired:
       state.lastResyncRequired !== undefined
@@ -1158,12 +1355,16 @@ function cloneTranscriptState(
     // that don't touch the suggestion.
     lastFollowupSuggestion: state.lastFollowupSuggestion,
   };
+  const onTruncation = opts.onTruncation ?? truncationCallbacks.get(state);
+  if (onTruncation) truncationCallbacks.set(next, onTruncation);
+  return next;
 }
 
 function trimTranscriptState(
   state: DaemonTranscriptState,
 ): DaemonTranscriptState {
   if (state.blocks.length <= state.maxBlocks) return state;
+  truncationCallbacks.get(state)?.({ kind: 'blocks' });
   const blocks = state.blocks.slice(-state.maxBlocks);
   const keptIds = new Set(blocks.map((block) => block.id));
   state.blocks = blocks;
@@ -1267,7 +1468,7 @@ const ownedBlocks = new WeakMap<
 function takeBlocksOwnership(state: DaemonTranscriptState): void {
   if (ownedBlocks.get(state) === state.blocks) return;
   state.blocks = [...state.blocks];
-  state.blockIndexById = { ...state.blockIndexById };
+  state.blockIndexById = createIndex(state.blockIndexById);
   ownedBlocks.set(state, state.blocks);
 }
 
@@ -1308,14 +1509,14 @@ function truncateTranscriptBeforeBlock(
 
 function rebuildTranscriptIndexes(state: DaemonTranscriptState): void {
   state.blockIndexById = rebuildDaemonTranscriptBlockIndex(state.blocks);
-  state.toolBlockByCallId = {};
-  state.permissionBlockByRequestId = {};
-  state.trimmedToolNotificationByCallId = {};
+  state.toolBlockByCallId = createIndex();
+  state.permissionBlockByRequestId = createIndex();
+  state.trimmedToolNotificationByCallId = createIndex();
   state.activeUserBlockId = undefined;
   state.activeAssistantBlockId = undefined;
   state.activeThoughtBlockId = undefined;
-  state.activeAssistantBlockByParent = {};
-  state.activeThoughtBlockByParent = {};
+  state.activeAssistantBlockByParent = createIndex();
+  state.activeThoughtBlockByParent = createIndex();
   state.currentToolCallId = undefined;
   state.pendingUserShellCommand = undefined;
   state.lastFollowupSuggestion = undefined;
@@ -1406,18 +1607,67 @@ function clearActiveText(
   }
 }
 
-function appendBoundedText(existing: string, text: string): string {
-  if (existing.length >= MAX_TEXT_BLOCK_LENGTH) return existing;
-  return truncateText(existing + text);
+function appendBoundedText(
+  state: DaemonTranscriptState,
+  block: DaemonTranscriptBlock,
+  text: string,
+): string {
+  const existing = 'text' in block ? block.text : '';
+  if (existing.length >= MAX_TEXT_BLOCK_LENGTH) {
+    if (text) reportTextTruncation(state, block.id, block.sourceRecordIds);
+    return existing;
+  }
+  return truncateText(state, block.id, block.sourceRecordIds, existing + text);
 }
 
-function truncateText(text: string): string {
+function truncateText(
+  state: DaemonTranscriptState,
+  blockId: string,
+  sourceRecordIds: readonly string[] | undefined,
+  text: string,
+): string {
   if (text.length <= MAX_TEXT_BLOCK_LENGTH) return text;
+  reportTextTruncation(state, blockId, sourceRecordIds);
   const keepLength = Math.max(
     0,
     MAX_TEXT_BLOCK_LENGTH - TEXT_TRUNCATED_SUFFIX.length,
   );
   return `${text.slice(0, keepLength)}${TEXT_TRUNCATED_SUFFIX}`;
+}
+
+function reportTextTruncation(
+  state: DaemonTranscriptState,
+  blockId: string,
+  sourceRecordIds?: readonly string[],
+): void {
+  truncationCallbacks.get(state)?.({
+    kind: 'text',
+    blockId,
+    sourceRecordIds,
+  });
+}
+
+function createIndex<T>(
+  source?: Readonly<Record<string, T>>,
+): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, source);
+}
+
+function stringArraysEqual(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): boolean {
+  if (left === right) return true;
+  if (!left || !right || left.length !== right.length) return false;
+  return left.every((value, index) => value === right[index]);
+}
+
+function unionStrings(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (!left && !right) return undefined;
+  return [...new Set([...(left ?? []), ...(right ?? [])])];
 }
 
 function pruneTrimmedToolIndexes(state: DaemonTranscriptState): void {

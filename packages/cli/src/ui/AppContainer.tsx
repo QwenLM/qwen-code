@@ -118,6 +118,7 @@ const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
+import { useWakeRepaint } from './hooks/use-wake-repaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -217,6 +218,7 @@ import {
 import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
 import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../utils/chat-recording-failure.js';
+import { buildPermissionSuggestions } from '../utils/permission-suggestions.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -657,8 +659,10 @@ export const AppContainer = (props: AppContainerProps) => {
     seedPromptCount,
   } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
-  const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
+  const branchName = useGitBranchName(
+    worktreeSession?.worktreePath ?? config.getTargetDir(),
+  );
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
   // P7-trigger: true while the current turn was steered toward the Workflow
   // tool by the `workflow` keyword (drives the Footer indicator). Set in
@@ -2075,6 +2079,8 @@ export const AppContainer = (props: AppContainerProps) => {
           tc.request.name,
           tc.request.callId,
           tc.request.args,
+          null,
+          buildPermissionSuggestions(tc.confirmationDetails),
         );
       }
     }
@@ -2465,11 +2471,10 @@ export const AppContainer = (props: AppContainerProps) => {
         buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
       }
 
-      // Auto-restore-on-cancel: if the user hit ESC immediately after submit
-      // (nothing meaningful was produced), pull the just-submitted prompt back
-      // into the input box and rewind the transcript so it doesn't show a
-      // stranded "user prompt + Request cancelled." pair. Mirrors claude-code
-      // (REPL.tsx auto-restore branch).
+      // Restore-on-cancel: pull the just-submitted prompt back into the input
+      // box when it is safe to do so. If nothing meaningful was produced,
+      // also rewind the stranded "user prompt + Request cancelled." pair. If
+      // output exists, keep the transcript and restore only the editable text.
       //
       // Guards (all required):
       //   - Buffer was empty before the queue drain (don't clobber typed-during-
@@ -2499,12 +2504,25 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
-      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
+
+      // The cancelled turn must have added a `user` history item itself —
+      // Cron / Notification / slash submit_prompt / Retry paths submit
+      // without pushing a user item, so they have no prompt to restore.
+      const cancelledTurnUserItem = info?.lastTurnUserItem;
+      if (cancelledTurnUserItem == null) {
         debugLogger.debug(
-          'auto-restore bail: pending stream item has meaningful content',
+          'auto-restore bail: cancelled turn did not add a user history item',
         );
         return;
       }
+
+      if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
+        debugLogger.debug(
+          'auto-restore bail: tool execution is pending or committed',
+        );
+        return;
+      }
+
       // Synchronous "did the turn produce any content event" flag from
       // useGeminiStream. Catches the race where the pre-cancel flush
       // committed gemini_content via addItem and a later thought event
@@ -2514,20 +2532,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // otherwise pass and we'd wrongly truncate the committed content.
       if (info?.turnProducedMeaningfulContent) {
         debugLogger.debug(
-          'auto-restore bail: turn produced meaningful content during stream/flush',
+          'auto-restore: preserving streamed output and restoring prompt text',
         );
+        buffer.setText(cancelledTurnUserItem.text);
         return;
       }
-
-      // The cancelled turn must have added a `user` history item itself —
-      // Cron / Notification / slash submit_prompt / Retry paths submit
-      // without pushing a user item, so an older user item that happens
-      // to be followed only by synthetic content must NOT be wrongly
-      // auto-restored on top of those turns.
-      const cancelledTurnUserItem = info?.lastTurnUserItem;
-      if (cancelledTurnUserItem == null) {
+      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
         debugLogger.debug(
-          'auto-restore bail: cancelled turn did not add a user history item',
+          'auto-restore bail: pending stream item has meaningful content',
         );
         return;
       }
@@ -2540,8 +2552,9 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) {
         debugLogger.debug(
-          'auto-restore bail: meaningful content committed after last user item',
+          'auto-restore: preserving committed output and restoring prompt text',
         );
+        buffer.setText(cancelledTurnUserItem.text);
         return;
       }
 
@@ -3031,10 +3044,13 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
-    // Composer height also shifts with these; without them the footer isn't
-    // re-measured during a streaming turn and the VP viewport bottom clips.
+    // Composer and update notification height also shift with these; without
+    // them the footer isn't re-measured during a streaming turn and the VP
+    // viewport bottom clips.
     // (elapsedTime/currentLoadingPhrase excluded: they tick without changing rows.)
     streamingState,
+    updateInfo,
+    agentViewState.activeView,
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
@@ -3087,6 +3103,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Repaint static history on the trailing edge of a resize burst (#4891).
   useResizeSettleRepaint(terminalWidth, refreshStatic);
+
+  // Repaint after the process resumes from OS sleep / suspend (lid close,
+  // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but
+  // Ink's frame-diff state still reflects the pre-sleep output, so the next
+  // render strands border characters on screen.
+  useWakeRepaint(refreshStatic);
 
   useEffect(() => {
     if (ideNeedsRestart) {

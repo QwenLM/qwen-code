@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-wecom",
-  "version": "0.19.11",
+  "version": "0.20.1",
   "description": "WeCom channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

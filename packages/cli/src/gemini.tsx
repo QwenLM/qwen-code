@@ -400,7 +400,7 @@ export async function main() {
       ? getNodeMemoryArgs(isDebugMode)
       : [];
     const updateProjectRoot = process.cwd();
-    const onUpdateRelaunch = async () => {
+    const onUpdateRelaunch = async (relaunchOnFailure: boolean) => {
       await initializeI18n(
         resolveLanguageSetting(settings.merged.general?.language as string),
       );
@@ -410,6 +410,7 @@ export async function main() {
       const shouldRelaunch = await updateBeforeRelaunch(
         settings,
         updateProjectRoot,
+        relaunchOnFailure,
       );
       return shouldRelaunch ? UPDATE_COMPLETE_EXIT_CODE : 0;
     };
@@ -715,7 +716,9 @@ export async function main() {
     markAcpStartup('configConstructionStart');
     const config = await loadCliConfig(
       settings.merged,
-      argv,
+      argv.acp || argv.experimentalAcp
+        ? { ...argv, chatRecording: false }
+        : argv,
       process.cwd(),
       argv.extensions,
       // Pass separated hooks for proper source attribution

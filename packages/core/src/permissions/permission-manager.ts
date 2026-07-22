@@ -265,8 +265,16 @@ export class PermissionManager {
    *      to match equivalent shell commands (e.g. `cat` → Read, `curl` → WebFetch).
    */
   private evaluateSingle(ctx: PermissionCheckContext): PermissionDecision {
-    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
-      ctx;
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
     // Build path context for resolving relative path patterns
     const pathCtx: PathMatchContext | undefined =
@@ -285,6 +293,7 @@ export class PermissionManager {
       pathCtx,
       specifier,
       toolParams,
+      toolAliases,
     ] as const;
 
     // Compute the base decision from explicit Bash/file/domain rules.
@@ -487,14 +496,6 @@ export class PermissionManager {
   private async resolveDefaultPermission(
     command: string,
   ): Promise<'allow' | 'ask'> {
-    // AST-based read-only detection. Commands containing command
-    // substitution are never read-only — `evaluateStatementReadOnly`
-    // (shellAstParser.ts) guards on `containsCommandSubstitutionAST` at
-    // the top so every node type inherits the check, including
-    // `variable_assignment` (`FOO=$(curl ...)`) and `redirected_statement`
-    // (`cat < $(curl ...)`) where earlier versions had blind spots. See
-    // PR #4386 round 4. So substitution-bearing commands fall through
-    // to 'ask' on the line below.
     try {
       const isReadOnly = await isShellCommandReadOnlyAST(command);
       if (isReadOnly) {
@@ -561,6 +562,7 @@ export class PermissionManager {
     'list_directory',
     'read_mcp_resource',
     'web_fetch',
+    'web_search',
     'todo_write',
     'save_memory',
     'lsp',
@@ -623,8 +625,16 @@ export class PermissionManager {
    */
   findMatchingDenyRule(ctx: PermissionCheckContext): string | undefined {
     ctx = this.normalizePermissionContext(ctx);
-    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
-      ctx;
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -642,6 +652,7 @@ export class PermissionManager {
       pathCtx,
       specifier,
       toolParams,
+      toolAliases,
     ] as const;
 
     for (const rule of [
@@ -703,8 +714,16 @@ export class PermissionManager {
    */
   hasRelevantRules(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
-      ctx;
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -753,7 +772,13 @@ export class PermissionManager {
           ] as const;
           return (
             restrictiveRules.some((rule) =>
-              matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+              matchesRule(
+                rule,
+                ...opMatchArgs,
+                undefined,
+                undefined,
+                'canonical',
+              ),
             ) ||
             allowRules.some((rule) =>
               matchesRule(rule, ...opMatchArgs, undefined),
@@ -782,6 +807,7 @@ export class PermissionManager {
       pathCtx,
       specifier,
       toolParams,
+      toolAliases,
     ] as const;
 
     return (
@@ -802,8 +828,16 @@ export class PermissionManager {
    */
   hasMatchingAskRule(ctx: PermissionCheckContext): boolean {
     ctx = this.normalizePermissionContext(ctx);
-    const { toolName, command, cwd, filePath, domain, specifier, toolParams } =
-      ctx;
+    const {
+      toolName,
+      toolAliases,
+      command,
+      cwd,
+      filePath,
+      domain,
+      specifier,
+      toolParams,
+    } = ctx;
 
     const pathCtx: PathMatchContext | undefined =
       this.config.getProjectRoot && this.config.getCwd
@@ -840,7 +874,13 @@ export class PermissionManager {
             undefined,
           ] as const;
           return askRules.some((rule) =>
-            matchesRule(rule, ...opMatchArgs, undefined, 'canonical'),
+            matchesRule(
+              rule,
+              ...opMatchArgs,
+              undefined,
+              undefined,
+              'canonical',
+            ),
           );
         })
       ) {
@@ -865,6 +905,7 @@ export class PermissionManager {
       pathCtx,
       specifier,
       toolParams,
+      toolAliases,
     ] as const;
 
     return askRules.some((rule) =>

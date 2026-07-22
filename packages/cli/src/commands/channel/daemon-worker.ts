@@ -3,8 +3,10 @@ import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import {
   addChannelMemoryEntries,
   clearChannelMemory,
+  getChannelMemoryRevision,
   listChannelMemoryEntries,
   readChannelMemory,
+  recordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries,
   updateChannelMemoryEntry,
 } from '@qwen-code/qwen-code-core';
@@ -56,6 +58,7 @@ import {
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
+  registerBackgroundResponseRelay,
   registerPermissionRelay,
   registerSessionCleanup,
   registerToolCallDispatch,
@@ -493,6 +496,7 @@ export async function runChannelDaemonWorker(
             router: createdRouter,
             channelMemory: {
               readChannelMemory,
+              getChannelMemoryRevision,
               listChannelMemoryEntries,
               addChannelMemoryEntries,
               updateChannelMemoryEntry,
@@ -503,6 +507,7 @@ export async function runChannelDaemonWorker(
               bridgeFacade,
               config.cwd,
             ),
+            channelMemoryRecallObserver: recordChannelMemoryRecallMetrics,
             observedContacts: {
               observe: (channelName, observation) => {
                 observedContacts.observe(channelName, observation);
@@ -514,6 +519,7 @@ export async function runChannelDaemonWorker(
       );
     }
     registerToolCallDispatch(bridgeFacade, createdRouter, channels);
+    registerBackgroundResponseRelay(bridgeFacade, createdRouter, channels);
     registerPermissionRelay(bridgeFacade, createdRouter, channels);
     registerSessionCleanup(bridgeFacade, createdRouter, channels);
 

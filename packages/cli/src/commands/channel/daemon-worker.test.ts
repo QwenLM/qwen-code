@@ -6,12 +6,15 @@ const mockLoadChannelsFromExtensions = vi.hoisted(() => vi.fn());
 const mockParseConfiguredChannels = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockGetChannelMemoryRevision = vi.hoisted(() => vi.fn());
 const mockListChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockAddChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockUpdateChannelMemoryEntry = vi.hoisted(() => vi.fn());
 const mockRemoveChannelMemoryEntries = vi.hoisted(() => vi.fn());
 const mockClearChannelMemory = vi.hoisted(() => vi.fn());
+const mockRecordChannelMemoryRecallMetrics = vi.hoisted(() => vi.fn());
 const mockRegisterToolCallDispatch = vi.hoisted(() => vi.fn());
+const mockRegisterBackgroundResponseRelay = vi.hoisted(() => vi.fn());
 const mockRegisterPermissionRelay = vi.hoisted(() => vi.fn());
 const mockRegisterSessionCleanup = vi.hoisted(() => vi.fn());
 const mockSessionsPath = vi.hoisted(() => vi.fn(() => '/tmp/sessions.json'));
@@ -146,8 +149,10 @@ vi.mock('@qwen-code/acp-bridge/workspacePaths', () => ({
 vi.mock('@qwen-code/qwen-code-core', () => ({
   addChannelMemoryEntries: mockAddChannelMemoryEntries,
   clearChannelMemory: mockClearChannelMemory,
+  getChannelMemoryRevision: mockGetChannelMemoryRevision,
   listChannelMemoryEntries: mockListChannelMemoryEntries,
   readChannelMemory: mockReadChannelMemory,
+  recordChannelMemoryRecallMetrics: mockRecordChannelMemoryRecallMetrics,
   removeChannelMemoryEntries: mockRemoveChannelMemoryEntries,
   updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
 }));
@@ -172,6 +177,7 @@ vi.mock('./runtime.js', () => ({
   loadChannelsConfig: mockLoadChannelsConfig,
   loadChannelsFromExtensions: mockLoadChannelsFromExtensions,
   parseConfiguredChannels: mockParseConfiguredChannels,
+  registerBackgroundResponseRelay: mockRegisterBackgroundResponseRelay,
   registerPermissionRelay: mockRegisterPermissionRelay,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
@@ -696,6 +702,7 @@ describe('runChannelDaemonWorker', () => {
         router: mockSessionRouter.mock.results[0]!.value,
         channelMemory: {
           readChannelMemory: mockReadChannelMemory,
+          getChannelMemoryRevision: mockGetChannelMemoryRevision,
           listChannelMemoryEntries: mockListChannelMemoryEntries,
           addChannelMemoryEntries: mockAddChannelMemoryEntries,
           updateChannelMemoryEntry: mockUpdateChannelMemoryEntry,
@@ -705,6 +712,7 @@ describe('runChannelDaemonWorker', () => {
         memoryIntentClassifier: expect.objectContaining({
           classifyChannelMemoryIntent: expect.any(Function),
         }),
+        channelMemoryRecallObserver: mockRecordChannelMemoryRecallMetrics,
         observedContacts: {
           observe: expect.any(Function),
         },
@@ -726,6 +734,11 @@ describe('runChannelDaemonWorker', () => {
     channelOptions.observedContacts.observe('telegram', observation);
     expect(mockObserveContact).toHaveBeenCalledWith('telegram', observation);
     expect(mockRegisterPermissionRelay).toHaveBeenCalledWith(
+      bridgeFacade,
+      mockSessionRouter.mock.results[0]!.value,
+      expect.any(Map),
+    );
+    expect(mockRegisterBackgroundResponseRelay).toHaveBeenCalledWith(
       bridgeFacade,
       mockSessionRouter.mock.results[0]!.value,
       expect.any(Map),

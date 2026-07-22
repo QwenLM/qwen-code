@@ -5,6 +5,7 @@
  */
 
 import fs from 'node:fs';
+import { persistUsageBeforeTranscriptDeletion } from './usageHistoryService.js';
 import path from 'node:path';
 import { Readable } from 'node:stream';
 import {
@@ -38,6 +39,9 @@ import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 
+vi.mock('./usageHistoryService.js', () => ({
+  persistUsageBeforeTranscriptDeletion: vi.fn().mockResolvedValue(true),
+}));
 vi.mock('node:path');
 vi.mock('../utils/paths.js');
 vi.mock('../utils/runtimeStatus.js');
@@ -1439,6 +1443,15 @@ describe('SessionService', () => {
 
       expect(result).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalled();
+      // #7384: the usage salvage must see the transcript BEFORE it is
+      // unlinked, or the summary is unrecoverable.
+      const salvage = vi.mocked(persistUsageBeforeTranscriptDeletion);
+      expect(salvage).toHaveBeenCalledWith(
+        expect.stringContaining(`${sessionIdA}.jsonl`),
+      );
+      expect(salvage.mock.invocationCallOrder[0]!).toBeLessThan(
+        unlinkSyncSpy.mock.invocationCallOrder[0]!,
+      );
       expect(rmSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`file-history/${sessionIdA}`),
         { recursive: true, force: true },
@@ -3893,6 +3906,56 @@ describe('SessionService', () => {
 
       const titles = await service.findSessionTitlesByPrefix('anything');
       expect(titles).toEqual([]);
+    });
+  });
+
+  describe('listSessions worktree membership', () => {
+    const worktreeSessionId = '7ca8c920-e29b-41d4-a716-446655440001';
+
+    it('includes a session whose transcript cwd is a worktree under this project', async () => {
+      (path as unknown as Record<string, unknown>)['sep'] = '/';
+      readdirSyncSpy.mockReturnValue([
+        `${worktreeSessionId}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          sessionId: worktreeSessionId,
+          cwd: '/test/project/root/.qwen/worktrees/my-task',
+        },
+      ]);
+      // The full worktree cwd hashes differently from the repo root,
+      // so the first getProjectHash(recordCwd) check fails and the
+      // marker-based inference branch is exercised.
+      vi.mocked(getProjectHash).mockImplementation((p: string) =>
+        p === '/test/project/root' ? 'test-project-hash' : 'worktree-hash',
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(1);
+      expect(result.items[0].sessionId).toBe(worktreeSessionId);
+    });
+
+    it('excludes a session whose worktree belongs to a different project', async () => {
+      (path as unknown as Record<string, unknown>)['sep'] = '/';
+      readdirSyncSpy.mockReturnValue([
+        `${worktreeSessionId}.jsonl`,
+      ] as unknown as Array<fs.Dirent<Buffer>>);
+      vi.mocked(jsonl.readLines).mockResolvedValue([
+        {
+          ...recordA1,
+          sessionId: worktreeSessionId,
+          cwd: '/other/repo/.qwen/worktrees/my-task',
+        },
+      ]);
+      vi.mocked(getProjectHash).mockImplementation((p: string) =>
+        p.startsWith('/other/repo') ? 'other-hash' : 'test-project-hash',
+      );
+
+      const result = await sessionService.listSessions();
+
+      expect(result.items).toHaveLength(0);
     });
   });
 
