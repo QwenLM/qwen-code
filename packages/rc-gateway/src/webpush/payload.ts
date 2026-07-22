@@ -63,6 +63,17 @@ export const WORKFLOW_EVENT_KINDS: Record<string, string> = {
 };
 
 /**
+ * Review lifecycle SSE event type → notification kind. ONLY the two
+ * terminal-of-note events map; started/cancelled are stream-only (mirrors
+ * the workflow design: two kinds, no notification noise for non-terminal or
+ * user-initiated-cancel transitions).
+ */
+export const REVIEW_EVENT_KINDS: Record<string, string> = {
+  review_completed: 'review.completed',
+  review_failed: 'review.failed',
+};
+
+/**
  * Map a daemon event to a metadata-only push payload, or null if the event is
  * not notifiable this cycle. `data` is read defensively with optional chaining;
  * only whitelisted, non-sensitive fields ever reach the payload.
@@ -107,6 +118,33 @@ export function buildPayload(
       sessionId: ctx.sessionId,
       ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
       summary: truncate(`Workflow ${status}: ${name}`),
+      url: sessionUrl(ctx.sessionId),
+    };
+  }
+
+  // Review lifecycle events (add-remote-review). Metadata only: no findings,
+  // no report content, and — unlike agent/workflow — NO target descriptor
+  // beyond a PR number (a `path` target is a filesystem path and, per the
+  // PushPayload contract above, must never reach a push payload).
+  const reviewKind = REVIEW_EVENT_KINDS[event.type];
+  if (reviewKind !== undefined) {
+    const status =
+      typeof data.status === 'string' ? data.status : event.type.slice(7);
+    const target = data.target as
+      | { kind?: unknown; number?: unknown }
+      | undefined;
+    const targetLabel =
+      target?.kind === 'pr' && typeof target.number === 'number'
+        ? `PR #${target.number}`
+        : undefined;
+    return {
+      v: 1,
+      kind: reviewKind,
+      sessionId: ctx.sessionId,
+      ...(ctx.sessionName ? { sessionName: ctx.sessionName } : {}),
+      summary: truncate(
+        targetLabel ? `Review ${status}: ${targetLabel}` : `Review ${status}`,
+      ),
       url: sessionUrl(ctx.sessionId),
     };
   }

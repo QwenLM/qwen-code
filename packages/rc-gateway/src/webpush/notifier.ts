@@ -66,6 +66,8 @@ export const KIND_SCOPE: Record<string, RcScope> = {
   'workflow.completed': SESSION_READ,
   'workflow.failed': SESSION_READ,
   'session.rewound': SESSION_READ,
+  'review.completed': SESSION_READ,
+  'review.failed': SESSION_READ,
 };
 
 /**

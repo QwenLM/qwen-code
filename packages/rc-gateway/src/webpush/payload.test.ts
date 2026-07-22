@@ -244,6 +244,114 @@ describe('agent lifecycle payloads', () => {
   });
 });
 
+describe('review lifecycle push payloads', () => {
+  it('maps review_completed to kind review.completed with a metadata-only summary', () => {
+    const p = buildPayload(
+      {
+        type: 'review_completed',
+        data: {
+          reviewId: 'r',
+          sessionId: 's',
+          target: { kind: 'local' },
+          status: 'completed',
+        },
+      },
+      { sessionId: 's' },
+    );
+    expect(p).not.toBeNull();
+    expect(p!.kind).toBe('review.completed');
+    expect(p!.sessionId).toBe('s');
+    expect(p!.summary.length).toBeGreaterThan(0);
+    expect(p!.url).toBe('/ui/?session=s');
+  });
+
+  it('maps review_failed to kind review.failed', () => {
+    const p = buildPayload(
+      {
+        type: 'review_failed',
+        data: {
+          reviewId: 'r',
+          sessionId: 's',
+          target: { kind: 'local' },
+          status: 'failed',
+        },
+      },
+      { sessionId: 's' },
+    );
+    expect(p).not.toBeNull();
+    expect(p!.kind).toBe('review.failed');
+  });
+
+  it('does NOT map review_started/review_cancelled (stream-only, not notification kinds)', () => {
+    const started = buildPayload(
+      {
+        type: 'review_started',
+        data: {
+          reviewId: 'r',
+          sessionId: 's',
+          target: { kind: 'local' },
+          status: 'running',
+        },
+      },
+      { sessionId: 's' },
+    );
+    expect(started).toBeNull();
+
+    const cancelled = buildPayload(
+      {
+        type: 'review_cancelled',
+        data: {
+          reviewId: 'r',
+          sessionId: 's',
+          target: { kind: 'local' },
+          status: 'cancelled',
+        },
+      },
+      { sessionId: 's' },
+    );
+    expect(cancelled).toBeNull();
+  });
+
+  it('notes a PR number in the summary for a pr target, but NEVER a filesystem path for a path target', () => {
+    const prPayload = buildPayload(
+      {
+        type: 'review_completed',
+        data: {
+          reviewId: 'r',
+          sessionId: 's',
+          target: { kind: 'pr', number: 42 },
+          status: 'completed',
+        },
+      },
+      { sessionId: 's' },
+    );
+    expect(prPayload!.summary).toContain('42');
+
+    const SECRET_PATH = '/Users/alice/secret-project/src/creds.ts';
+    const pathPayload = buildPayload(
+      {
+        type: 'review_completed',
+        data: {
+          reviewId: 'r',
+          sessionId: 's',
+          target: { kind: 'path', path: SECRET_PATH },
+          status: 'completed',
+        },
+      },
+      { sessionId: 's' },
+    );
+    expect(JSON.stringify(pathPayload)).not.toContain(SECRET_PATH);
+    expect(JSON.stringify(pathPayload)).not.toContain('secret-project');
+  });
+
+  it('scope-gates review.completed/review.failed at session:read and does NOT bypass snooze', () => {
+    expect(KIND_SCOPE['review.completed']).toBe(SESSION_READ);
+    expect(KIND_SCOPE['review.failed']).toBe(SESSION_READ);
+    expect(SNOOZE_BYPASS_KINDS.has('review.completed')).toBe(false);
+    expect(SNOOZE_BYPASS_KINDS.has('review.failed')).toBe(false);
+  });
+});
+
 describe('session_rewound push payload', () => {
   it('maps to kind session.rewound with a turn-number summary, no content', () => {
     const payload = buildPayload(
