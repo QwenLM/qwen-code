@@ -815,5 +815,13 @@ describe('useResumeCommand', () => {
       }),
       expect.any(Number),
     );
+    // The rollback reloads the old session's still-on-disk background agents
+    // so `list_agents` is not left empty after core is restored. The forward
+    // path never reached its own load (initialize threw first), so this call
+    // is the rollback reload, scoped to the old session.
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledTimes(1);
+    expect(config.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      'old-session-id',
+    );
   });
 });

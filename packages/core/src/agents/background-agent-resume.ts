@@ -726,20 +726,32 @@ export class BackgroundAgentResumeService {
     const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
     if (!revived) {
       const failedEntry = registry.get(agentId);
+      // `??` only falls back on null/undefined, so a failed revive that left
+      // the entry with an *empty* array would clobber the pre-revive snapshot
+      // (e.g. the UI Progress section would render empty instead of the
+      // retained activities). Prefer the failed entry's state only when it
+      // actually carries items; otherwise fall back to the completed snapshot.
+      const preferNonEmpty = <T>(
+        next: readonly T[] | undefined,
+        fallback: readonly T[],
+      ): T[] => (next && next.length > 0 ? [...next] : [...fallback]);
       this.restoreCompletedEntry({
         ...completedEntry,
         resumeBlockedReason:
           failedEntry?.resumeBlockedReason ??
           completedEntry.resumeBlockedReason,
-        pendingMessages: [
-          ...(failedEntry?.pendingMessages ?? completedEntry.pendingMessages),
-        ],
-        recentActivities: [
-          ...(failedEntry?.recentActivities ?? completedEntry.recentActivities),
-        ],
-        pendingApprovals: [
-          ...(failedEntry?.pendingApprovals ?? completedEntry.pendingApprovals),
-        ],
+        pendingMessages: preferNonEmpty(
+          failedEntry?.pendingMessages,
+          completedEntry.pendingMessages,
+        ),
+        recentActivities: preferNonEmpty(
+          failedEntry?.recentActivities,
+          completedEntry.recentActivities,
+        ),
+        pendingApprovals: preferNonEmpty(
+          failedEntry?.pendingApprovals,
+          completedEntry.pendingApprovals,
+        ),
       });
     }
     return revived;

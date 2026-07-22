@@ -9,7 +9,10 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { Config } from '../config/config.js';
-import { BackgroundTaskRegistry } from './background-tasks.js';
+import {
+  BackgroundTaskRegistry,
+  MAX_RETAINED_TERMINAL_AGENTS,
+} from './background-tasks.js';
 import { BackgroundAgentResumeService } from './background-agent-resume.js';
 import {
   getAgentJsonlPath,
@@ -2961,6 +2964,127 @@ describe('BackgroundAgentResumeService', () => {
     expect(revived).toBeUndefined();
     expect(registry.get(agentId)?.status).toBe('completed');
     expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
+
+  it('preserves pre-revive activity state when a completed revive fails', async () => {
+    const sessionId = 'session-revive-rollback-state';
+    const agentId = 'agent-revive-rollback-state';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Finished research',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'completed',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'default',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Finished research' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Finished research',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      outputFile,
+      metaPath,
+    });
+    registry.complete(agentId, 'All done');
+    // Populate the pre-revive UI state that must survive a failed revive.
+    const activities = [
+      { name: 'Read', description: 'read src/index.ts', at: 1 },
+      { name: 'Bash', description: 'npm test', at: 2 },
+    ];
+    registry.get(agentId)!.recentActivities = activities;
+
+    const { service, subagentManager } = createService();
+    // Force the revive to fail after the entry has been transitioned to paused
+    // (which resets `recentActivities` to []), exercising the rollback path.
+    subagentManager.createAgentHeadless.mockRejectedValue(
+      new Error('setup failed'),
+    );
+
+    await expect(
+      service.reviveCompletedBackgroundAgent(agentId, 'keep going'),
+    ).resolves.toBeUndefined();
+
+    const restored = registry.get(agentId);
+    expect(restored?.status).toBe('completed');
+    // Regression guard: a `??` fallback would keep the paused entry's empty
+    // `recentActivities`, silently dropping the retained activities. The
+    // completed snapshot must be restored instead.
+    expect(restored?.recentActivities).toEqual(activities);
+  });
+
+  it('does not restore more completed agents than the terminal-agent cap', async () => {
+    const sessionId = 'session-terminal-cap';
+    const extra = 3;
+    const total = MAX_RETAINED_TERMINAL_AGENTS + extra;
+    const ids: string[] = [];
+    for (let i = 0; i < total; i++) {
+      const agentId = `cap-agent-${String(i).padStart(3, '0')}`;
+      ids.push(agentId);
+      // Higher index → newer recovery timestamp, so the newest `cap` entries
+      // (by `lastUpdatedAt`) are the ones that must survive the cap.
+      const lastUpdatedAt = `2026-04-20T00:00:${String(i).padStart(2, '0')}.000Z`;
+      writeAgentMeta(getAgentMetaPath(tempDir, sessionId, agentId), {
+        agentId,
+        agentType: 'researcher',
+        description: agentId,
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'completed',
+        isBackgrounded: true,
+        lastUpdatedAt,
+        subagentName: 'researcher',
+      });
+      fs.writeFileSync(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        JSON.stringify({
+          uuid: `u-${agentId}`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: agentId }] },
+        }) + '\n',
+        'utf8',
+      );
+    }
+
+    const { service } = createService();
+    const recovered = await service.loadPausedBackgroundAgents(sessionId);
+
+    // Only the cap's worth of completed agents are admitted...
+    expect(recovered).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+    expect(registry.getAll()).toHaveLength(MAX_RETAINED_TERMINAL_AGENTS);
+    // ...and they are the most recent by recovery timestamp; the oldest
+    // `extra` sidecars are dropped rather than admitted over the cap.
+    for (const id of ids.slice(extra)) {
+      expect(registry.get(id)?.status).toBe('completed');
+    }
+    for (const id of ids.slice(0, extra)) {
+      expect(registry.get(id)).toBeUndefined();
+    }
   });
 });
 
