@@ -1434,11 +1434,15 @@ export const ToolGroup = memo(function ToolGroup({
 }: ToolGroupProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
+  const subagentDetails = useSubagentDetails();
   const [chatExpanded, setChatExpanded] = useState(false);
   const hasRunningTool = hasActiveTool(tools);
   const hasFailedTool = tools.some((tool) => tool.status === 'failed');
   const activeTool = tools.length > 0 ? getActiveTool(tools) : undefined;
   const singleTool = tools.length === 1 ? tools[0] : undefined;
+  const singleSubagent =
+    singleTool && isSubAgentToolCall(singleTool) ? singleTool : undefined;
+  const opensSubagentDetails = Boolean(singleSubagent && subagentDetails);
   const summaryIconTool = tools[0] ?? activeTool;
   const liveStartedAtRef = useRef(Date.now());
   const summaryNow = useSharedNow(hasRunningTool);
@@ -1471,9 +1475,21 @@ export const ToolGroup = memo(function ToolGroup({
         <button
           type="button"
           className={styles.chatSummary}
-          onClick={() => setChatExpanded((value) => !value)}
-          aria-expanded={chatExpanded}
-          title={chatExpanded ? t('tool.collapseHint') : t('tool.expand')}
+          onClick={() => {
+            if (singleSubagent && subagentDetails) {
+              subagentDetails.onOpen(singleSubagent);
+              return;
+            }
+            setChatExpanded((value) => !value);
+          }}
+          aria-expanded={opensSubagentDetails ? undefined : chatExpanded}
+          title={
+            opensSubagentDetails
+              ? undefined
+              : chatExpanded
+                ? t('tool.collapseHint')
+                : t('tool.expand')
+          }
         >
           <span className={styles.chatSummaryIcon} aria-hidden="true">
             {summaryIconTool ? (
