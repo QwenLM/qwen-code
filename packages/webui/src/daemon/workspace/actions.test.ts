@@ -13,6 +13,29 @@ describe('workspace actions', () => {
     vi.useRealTimers();
   });
 
+  it('forwards workspace updates to the daemon client', async () => {
+    const workspace = {
+      id: 'secondary',
+      cwd: '/ws/secondary',
+      displayName: 'Payments',
+      primary: false,
+      trusted: true,
+    };
+    const updateWorkspace = vi.fn().mockResolvedValue(workspace);
+    const actions = createDaemonWorkspaceActions({
+      getClient: () => ({ updateWorkspace }) as unknown as DaemonClient,
+      getWorkspaceCwd: () => '/ws',
+      baseUrl: '',
+    });
+
+    await expect(
+      actions.updateWorkspace('secondary', { displayName: 'Payments' }),
+    ).resolves.toEqual(workspace);
+    expect(updateWorkspace).toHaveBeenCalledWith('secondary', {
+      displayName: 'Payments',
+    });
+  });
+
   it('applies the action timeout to workspace removal', async () => {
     vi.useFakeTimers();
     const remove = vi.fn(() => new Promise<never>(() => {}));

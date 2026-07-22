@@ -12,13 +12,17 @@ import {
   computeModelListVersion,
   findExistingProviderModels,
   findProviderByCredentials,
-  getAllProviderBaseUrls,
   getDefaultModelIds,
   resolveBaseUrl,
   shouldShowStep,
   providerMatchesCredentials,
   type ProviderConfig,
 } from '@qwen-code/qwen-code-core';
+import {
+  TOKEN_PLAN_CHINA_BASE_URL,
+  TOKEN_PLAN_ENV_KEY,
+  TOKEN_PLAN_GLOBAL_BASE_URL,
+} from '../presets/alibaba-token-plan.js';
 
 function makeConfig(overrides: Partial<ProviderConfig> = {}): ProviderConfig {
   return {
@@ -621,27 +625,46 @@ describe('findProviderByCredentials', () => {
     expect(china?.id).toBe('coding-plan');
     expect(intl?.id).toBe('coding-plan');
   });
+
+  it('matches Token Plan credentials against both registered region URLs', () => {
+    const china = findProviderByCredentialsSrc(
+      TOKEN_PLAN_CHINA_BASE_URL,
+      TOKEN_PLAN_ENV_KEY,
+    );
+    const intl = findProviderByCredentialsSrc(
+      TOKEN_PLAN_GLOBAL_BASE_URL,
+      TOKEN_PLAN_ENV_KEY,
+    );
+    expect(china?.id).toBe('token-plan');
+    expect(intl?.id).toBe('token-plan');
+  });
 });
 
 describe('getAllProviderBaseUrls', () => {
   it('returns a non-empty list including known preset URLs', () => {
-    const urls = getAllProviderBaseUrls();
+    const urls = getAllProviderBaseUrlsSrc();
     expect(urls.length).toBeGreaterThan(0);
     expect(urls).toContain('https://api.deepseek.com');
     expect(urls).toContain('https://openrouter.ai/api/v1');
   });
 
   it('expands BaseUrlOption[] presets into each option URL', () => {
-    const urls = getAllProviderBaseUrls();
+    const urls = getAllProviderBaseUrlsSrc();
     // coding-plan has China + Singapore options
     expect(urls).toContain('https://coding.dashscope.aliyuncs.com/v1');
     expect(urls).toContain('https://coding-intl.dashscope.aliyuncs.com/v1');
+    expect(urls).toContain(TOKEN_PLAN_CHINA_BASE_URL);
+    expect(urls).toContain(TOKEN_PLAN_GLOBAL_BASE_URL);
   });
 });
 
 // The package-name imports above resolve to dist/, which lags the source on a
 // branch that hasn't been built yet. Re-import via the relative source path so
 // these new edge-case tests exercise the in-tree implementation.
+import {
+  findProviderByCredentials as findProviderByCredentialsSrc,
+  getAllProviderBaseUrls as getAllProviderBaseUrlsSrc,
+} from '../all-providers.js';
 import {
   resolveBaseUrl as resolveBaseUrlSrc,
   providerMatchesCredentials as providerMatchesCredentialsSrc,

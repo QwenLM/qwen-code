@@ -13,6 +13,7 @@ import {
   useLayoutEffect,
 } from 'react';
 import {
+  runOutsideAgentContext,
   type Config,
   type EditorType,
   type GeminiClient,
@@ -24,6 +25,7 @@ import {
   type ServerGeminiStreamEvent as GeminiEvent,
   type ThoughtSummary,
   type ToolCallRequestInfo,
+  type ToolCallResponseInfo,
   type GeminiErrorEventValue,
   type ActiveGoal,
   type SteerInput,
@@ -68,6 +70,7 @@ import {
   findRepeatedDuplicateProviderToolCall,
   AutonomousLoopTickResolver,
   refreshMemoryAfterManagedWrite,
+  finalizeToolResponses,
 } from '@qwen-code/qwen-code-core';
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
@@ -119,6 +122,7 @@ import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 import { GOAL_COMMAND_RE } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
+import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
 
@@ -157,7 +161,11 @@ const MID_TURN_AT_COMMAND_RESOLVE_TIMEOUT_MESSAGE =
 interface PendingDuplicateToolResponses {
   executableCallIds: Set<string>;
   promptId: string | undefined;
-  responseParts: Part[];
+  callOrder: string[];
+  duplicateResponses: Array<{
+    request: ToolCallRequestInfo;
+    response: ToolCallResponseInfo;
+  }>;
 }
 
 interface ResolvedSteerMessages {
@@ -526,7 +534,10 @@ export const useGeminiStream = (
   >([]);
   const immediateDuplicateToolResponsesRef = useRef<{
     promptId: string | undefined;
-    responseParts: Part[];
+    responses: Array<{
+      request: ToolCallRequestInfo;
+      response: ToolCallResponseInfo;
+    }>;
   } | null>(null);
   // --- Real-time token display ---
   // Accumulates output character count across the whole turn (not per API call).
@@ -2073,7 +2084,7 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
-              break;
+              return StreamProcessingStatus.UserCancelled;
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp);
@@ -2232,8 +2243,8 @@ export const useGeminiStream = (
         commitPendingThought(userMessageTimestamp);
         discardBufferedStreamEvents();
         flushBufferedStreamEventsRef.current.delete(flushBufferedStreamEvents);
+        dualOutput?.finalizeAssistantMessage();
       }
-      dualOutput?.finalizeAssistantMessage();
       // When a loop was detected, halt without scheduling the calls collected
       // before the guard fired. The core splice/clear only touches
       // turn.pendingToolCalls, which the TUI does not execute from — without
@@ -2247,7 +2258,10 @@ export const useGeminiStream = (
         !loopDetectedRef.current
       ) {
         const executableToolCallRequests: ToolCallRequestInfo[] = [];
-        const duplicateResponseParts: Part[] = [];
+        const duplicateResponses: Array<{
+          request: ToolCallRequestInfo;
+          response: ToolCallResponseInfo;
+        }> = [];
         let duplicatePromptId: string | undefined;
         const historyCallIdsWithResponse: Set<string> = geminiClient
           ? geminiClient.getHistoryFunctionResponseIds()
@@ -2291,7 +2305,7 @@ export const useGeminiStream = (
               `[processGeminiStreamEvents] Suppressing duplicate provider tool-call id: ${providerCallId} (tool: ${request.name})`,
             );
             dualOutput?.emitToolResult(request, response);
-            duplicateResponseParts.push(...response.responseParts);
+            duplicateResponses.push({ request, response });
             duplicatePromptId ??= request.prompt_id;
             continue;
           }
@@ -2300,7 +2314,7 @@ export const useGeminiStream = (
           executableToolCallRequests.push(request);
         }
 
-        if (duplicateResponseParts.length > 0) {
+        if (duplicateResponses.length > 0) {
           if (executableToolCallRequests.length > 0) {
             pendingDuplicateToolResponsesRef.current.push({
               executableCallIds: new Set(
@@ -2308,12 +2322,13 @@ export const useGeminiStream = (
               ),
               promptId:
                 duplicatePromptId ?? executableToolCallRequests[0]?.prompt_id,
-              responseParts: duplicateResponseParts,
+              callOrder: toolCallRequests.map((request) => request.callId),
+              duplicateResponses,
             });
           } else {
             immediateDuplicateToolResponsesRef.current = {
               promptId: duplicatePromptId,
-              responseParts: duplicateResponseParts,
+              responses: duplicateResponses,
             };
           }
         }
@@ -2828,6 +2843,7 @@ export const useGeminiStream = (
           streamingResponseLengthRef.current = 0;
         }
 
+        let cleanupReviewLease = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
@@ -2867,6 +2883,7 @@ export const useGeminiStream = (
           );
 
           if (processingStatus === StreamProcessingStatus.UserCancelled) {
+            cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
             isSubmittingQueryRef.current = false;
             metadata?.onDeliveryFailed?.();
@@ -2882,8 +2899,35 @@ export const useGeminiStream = (
             immediateDuplicateToolResponsesRef.current;
           if (immediateDuplicateToolResponses) {
             immediateDuplicateToolResponsesRef.current = null;
+            const finalized = await finalizeToolResponses(
+              config,
+              immediateDuplicateToolResponses.responses.map(
+                ({ request, response }) => ({
+                  callId: request.callId,
+                  toolName: request.name,
+                  responseParts: response.responseParts,
+                  persistedOutputFiles: response.persistedOutputFiles,
+                }),
+              ),
+            );
+            const responseParts = finalized.flatMap(
+              (entry) => entry.responseParts,
+            );
+            immediateDuplicateToolResponses.responses.forEach(
+              ({ request, response }, index) => {
+                config
+                  .getChatRecordingService?.()
+                  ?.recordToolResult?.(finalized[index].responseParts, {
+                    callId: request.callId,
+                    status: response.error ? 'error' : 'success',
+                    resultDisplay: response.resultDisplay,
+                    error: response.error,
+                    errorType: response.errorType,
+                  });
+              },
+            );
             await submitQuery(
-              immediateDuplicateToolResponses.responseParts,
+              responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
             );
@@ -2897,6 +2941,7 @@ export const useGeminiStream = (
           }
           const loopDetected = loopDetectedRef.current;
           if (loopDetected) {
+            cleanupReviewLease = true;
             loopDetectedRef.current = false;
             handleLoopDetectedEvent();
           }
@@ -2938,6 +2983,7 @@ export const useGeminiStream = (
             }
           }
         } catch (error: unknown) {
+          cleanupReviewLease = true;
           metadata?.onDeliveryFailed?.();
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
@@ -2955,6 +3001,13 @@ export const useGeminiStream = (
             });
           }
         } finally {
+          if (cleanupReviewLease) {
+            cleanupReviewWorktreeLeases({
+              sessionId: config.getSessionId(),
+              promptId: prompt_id!,
+              repositoryRoot: config.getProjectRoot(),
+            });
+          }
           submitPromptOnCompleteRef.current = null;
           activeModelStreamsRef.current = Math.max(
             0,
@@ -3257,8 +3310,8 @@ export const useGeminiStream = (
           }
           return !isReady;
         });
-      const pendingDuplicateResponseParts = readyDuplicateBatches.flatMap(
-        (batch) => batch.responseParts,
+      const pendingDuplicateResponses = readyDuplicateBatches.flatMap(
+        (batch) => batch.duplicateResponses,
       );
       const pendingDuplicatePromptId = readyDuplicateBatches[0]?.promptId;
 
@@ -3269,12 +3322,76 @@ export const useGeminiStream = (
         );
       }
 
-      if (
-        geminiTools.length === 0 &&
-        pendingDuplicateResponseParts.length === 0
-      ) {
+      if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {
         return;
       }
+
+      type ReadyToolResponse = {
+        request: ToolCallRequestInfo;
+        response: ToolCallResponseInfo;
+        status: 'success' | 'error' | 'cancelled';
+      };
+      const executableQueues = new Map<string, ReadyToolResponse[]>();
+      for (const toolCall of geminiTools) {
+        const queue = executableQueues.get(toolCall.request.callId) ?? [];
+        queue.push({
+          request: toolCall.request,
+          response: toolCall.response,
+          status: toolCall.status,
+        });
+        executableQueues.set(toolCall.request.callId, queue);
+      }
+      const duplicateQueues = new Map<string, ReadyToolResponse[]>();
+      for (const duplicate of pendingDuplicateResponses) {
+        const queue = duplicateQueues.get(duplicate.request.callId) ?? [];
+        queue.push({
+          ...duplicate,
+          status: duplicate.response.error ? 'error' : 'success',
+        });
+        duplicateQueues.set(duplicate.request.callId, queue);
+      }
+      const orderedResponses: ReadyToolResponse[] = [];
+      for (const batch of readyDuplicateBatches) {
+        for (const callId of batch.callOrder) {
+          const executable = executableQueues.get(callId)?.shift();
+          if (executable) {
+            orderedResponses.push(executable);
+            continue;
+          }
+          const duplicate = duplicateQueues.get(callId)?.shift();
+          if (duplicate) orderedResponses.push(duplicate);
+        }
+      }
+      for (const queue of executableQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+      for (const queue of duplicateQueues.values()) {
+        orderedResponses.push(...queue);
+      }
+
+      const finalizedResponses = await finalizeToolResponses(
+        config,
+        orderedResponses.map(({ request, response }) => ({
+          callId: request.callId,
+          toolName: request.name,
+          responseParts: response.responseParts,
+          persistedOutputFiles: response.persistedOutputFiles,
+        })),
+      );
+      const responsesToSend = finalizedResponses.flatMap(
+        (entry) => entry.responseParts,
+      );
+      orderedResponses.forEach(({ request, response, status }, index) => {
+        config
+          .getChatRecordingService?.()
+          ?.recordToolResult?.(finalizedResponses[index].responseParts, {
+            callId: request.callId,
+            status,
+            resultDisplay: response.resultDisplay,
+            error: response.error,
+            errorType: response.errorType,
+          });
+      });
 
       if (
         turnCancelledRef.current ||
@@ -3291,16 +3408,13 @@ export const useGeminiStream = (
         (tc) => tc.status === 'cancelled',
       );
 
-      if (allToolsCancelled && pendingDuplicateResponseParts.length === 0) {
+      if (allToolsCancelled && pendingDuplicateResponses.length === 0) {
         if (geminiClient) {
           // We need to manually add the function responses to the history
           // so the model knows the tools were cancelled.
-          const combinedParts = geminiTools.flatMap(
-            (toolCall) => toolCall.response.responseParts,
-          );
           geminiClient.addHistory({
             role: 'user',
-            parts: combinedParts,
+            parts: responsesToSend,
           });
 
           // Report cancellation to arena (safety net — cancelOngoingRequest
@@ -3314,10 +3428,6 @@ export const useGeminiStream = (
         return;
       }
 
-      const responsesToSend: Part[] = geminiTools.flatMap(
-        (toolCall) => toolCall.response.responseParts,
-      );
-      responsesToSend.push(...pendingDuplicateResponseParts);
       const callIdsToMarkAsSubmitted = geminiTools.map(
         (toolCall) => toolCall.request.callId,
       );
@@ -3811,45 +3921,59 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       notificationQueueRef.current.length > 0
     ) {
-      const queue = notificationQueueRef.current;
-      const targetType = queue[0]!.sendMessageType;
+      // Consumer-side guard for #7156: this effect can run on a render pass
+      // that React batched together with progress setState calls issued from
+      // INSIDE a subagent's AsyncLocalStorage frame, in which case the whole
+      // synchronous effect stack — and every async continuation submitQuery
+      // starts — inherits the subagent's runtime view, and the notification
+      // turn resolves Config.getModel() to the SUBAGENT's model. Exiting the
+      // frame here guarantees the drained turn always runs on the main
+      // session's configuration, regardless of which producer's setState
+      // triggered the commit.
+      runOutsideAgentContext(() => {
+        const queue = notificationQueueRef.current;
+        const targetType = queue[0]!.sendMessageType;
 
-      // Cron prompts must run as individual turns — each needs its own
-      // slash/shell/@ preprocessing and approval cycle. Only batch
-      // Notification items (which pass through without preprocessing).
-      if (targetType === SendMessageType.Cron) {
-        const item = queue.shift()!;
-        addItem(
-          { type: 'notification' as const, text: item.displayText },
-          Date.now(),
-        );
-        submitQuery(item.modelText, item.sendMessageType, undefined, {
-          notificationDisplayText: item.displayText,
-          onDelivered: item.onDelivered,
-          onDeliveryFailed: item.onDeliveryFailed,
+        // Cron prompts must run as individual turns — each needs its own
+        // slash/shell/@ preprocessing and approval cycle. Only batch
+        // Notification items (which pass through without preprocessing).
+        if (targetType === SendMessageType.Cron) {
+          const item = queue.shift()!;
+          addItem(
+            { type: 'notification' as const, text: item.displayText },
+            Date.now(),
+          );
+          submitQuery(item.modelText, item.sendMessageType, undefined, {
+            notificationDisplayText: item.displayText,
+            onDelivered: item.onDelivered,
+            onDeliveryFailed: item.onDeliveryFailed,
+          });
+          return;
+        }
+
+        // Drain contiguous leading Notification items into one batch.
+        let splitIdx = 0;
+        while (
+          splitIdx < queue.length &&
+          queue[splitIdx]!.sendMessageType === targetType
+        ) {
+          splitIdx++;
+        }
+        const batch = queue.splice(0, splitIdx);
+
+        const now = Date.now();
+        for (const item of batch) {
+          addItem(
+            { type: 'notification' as const, text: item.displayText },
+            now,
+          );
+        }
+
+        const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
+        const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
+        submitQuery(combinedModelText, targetType, undefined, {
+          notificationDisplayText: combinedDisplayText,
         });
-        return;
-      }
-
-      // Drain contiguous leading Notification items into one batch.
-      let splitIdx = 0;
-      while (
-        splitIdx < queue.length &&
-        queue[splitIdx]!.sendMessageType === targetType
-      ) {
-        splitIdx++;
-      }
-      const batch = queue.splice(0, splitIdx);
-
-      const now = Date.now();
-      for (const item of batch) {
-        addItem({ type: 'notification' as const, text: item.displayText }, now);
-      }
-
-      const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
-      const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
-      submitQuery(combinedModelText, targetType, undefined, {
-        notificationDisplayText: combinedDisplayText,
       });
     }
   }, [streamingState, submitQuery, notificationTrigger, addItem]);

@@ -87,6 +87,13 @@ describe('AnthropicContentGenerator', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    // The generator's constructor builds undici-backed fetch options
+    // synchronously; production code preloads undici in
+    // createContentGenerator, and resetModules() clears that state.
+    const { preloadRuntimeFetchModule } = await import(
+      '../../utils/runtimeFetchOptions.js'
+    );
+    await preloadRuntimeFetchModule();
     savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
     delete process.env[MAX_OUTPUT_TOKENS_ENV];
 

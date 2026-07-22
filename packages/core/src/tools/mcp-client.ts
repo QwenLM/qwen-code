@@ -59,6 +59,7 @@ import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -2148,7 +2149,7 @@ export async function createTransport(
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
     const env = {
-      ...normalizePathEnvForWindows({ ...process.env }),
+      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       ...(mcpServerConfig.env || {}),
     };
 
