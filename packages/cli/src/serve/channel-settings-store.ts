@@ -73,6 +73,15 @@ function invalidConfig(message: string): ChannelSettingsError {
 
 const UNSAFE_OBJECT_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
 
+function assertSafeChannelName(name: string): void {
+  if (UNSAFE_OBJECT_KEYS.has(name)) {
+    throw new ChannelSettingsError(
+      'channel_settings_invalid_name',
+      `Channel name ${JSON.stringify(name)} is not allowed.`,
+    );
+  }
+}
+
 function isAllStartupName(name: string): boolean {
   return name.trim() === 'all';
 }
@@ -290,12 +299,11 @@ function workspaceValues(workspaceCwd: string): {
 } {
   const settings = loadSettings(workspaceCwd, { skipLoadEnvironment: true })
     .workspace.settings;
-  const channels =
-    typeof settings.channels === 'object' &&
-    settings.channels !== null &&
-    !Array.isArray(settings.channels)
-      ? (settings.channels as Record<string, Record<string, unknown>>)
-      : {};
+  const rawChannels = isRecord(settings.channels) ? settings.channels : {};
+  const channels: Record<string, Record<string, unknown>> = {};
+  for (const [name, config] of Object.entries(rawChannels)) {
+    if (isRecord(config)) channels[name] = config;
+  }
   const startupNames = Array.isArray(settings.serve?.channels)
     ? settings.serve.channels.filter(
         (name): name is string => typeof name === 'string',
@@ -320,6 +328,7 @@ export class WorkspaceChannelSettingsStore {
     name: string,
     options: ChannelSettingsUpsertOptions,
   ): Promise<ChannelSettingsSnapshot> {
+    assertSafeChannelName(name);
     const secretUpdates: unknown =
       options.secrets === undefined ? {} : options.secrets;
     assertValidChannelSecretUpdates(secretUpdates);
@@ -376,6 +385,7 @@ export class WorkspaceChannelSettingsStore {
     name: string,
     options: ChannelSettingsMutationOptions,
   ): Promise<ChannelSettingsSnapshot> {
+    assertSafeChannelName(name);
     const current = this.assertRevision(options.expectedRevision);
     const channels = { ...current.channels };
     delete channels[name];

@@ -467,6 +467,44 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(store.snapshot().startupNames).toEqual([]);
   });
 
+  it('ignores invalid stored channel values in snapshots', () => {
+    writeWorkspaceSettings(`{
+  "channels": {
+    "valid": { "type": "management-validation-test" },
+    "null": null,
+    "scalar": 42,
+    "array": []
+  }
+}\n`);
+
+    expect(
+      new WorkspaceChannelSettingsStore(workspace).snapshot().channels,
+    ).toEqual({
+      valid: { type: 'management-validation-test' },
+    });
+  });
+
+  it('rejects unsafe channel names without writing', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    for (const name of ['__proto__', 'constructor', 'prototype']) {
+      await expect(
+        store.upsert(name, {
+          expectedRevision: store.snapshot().revision,
+          config: {
+            type: 'management-validation-test',
+            clientId: 'client-id',
+          },
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_name' });
+      await expect(
+        store.remove(name, { expectedRevision: store.snapshot().revision }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_name' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    }
+  });
+
   it('writes startup names separately while preserving settings and formatting', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
 
