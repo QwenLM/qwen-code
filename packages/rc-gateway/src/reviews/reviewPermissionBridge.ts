@@ -53,7 +53,7 @@ export interface ReviewBridgeDaemon {
   subscribeEvents(
     sessionId: string,
     opts?: { lastEventId?: number; signal?: AbortSignal },
-  ): AsyncIterable<{ type: string; data: unknown }>;
+  ): AsyncIterable<{ id?: number; type: string; data: unknown }>;
   respondToSessionPermission(
     sessionId: string,
     requestId: string,
@@ -71,6 +71,17 @@ export interface ReviewBridgeDeps {
   onEscalate?: (sessionId: string, data: PermissionRequestData) => void;
   /** Called when tool output flows again (unblock). */
   onResume?: (sessionId: string) => void;
+  /**
+   * Observability hook for a swallowed error — a per-frame handler throw (e.g.
+   * `respondToSessionPermission` rejecting on a daemon non-2xx) or a mid-stream
+   * subscription throw before reconnect. Best-effort; a throwing `onError` is
+   * itself ignored. The loop NEVER dies on either error class.
+   */
+  onError?: (sessionId: string, err: unknown) => void;
+  /** Backoff between subscription reconnect attempts. Default 1000ms. */
+  reconnectMs?: number;
+  /** Injectable sleep so tests don't wait real backoff. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 export interface PermissionRequestData {
@@ -85,7 +96,12 @@ export class ReviewPermissionBridge {
     string,
     { abort: AbortController; done: Promise<void> }
   >();
-  constructor(private readonly deps: ReviewBridgeDeps) {}
+  private readonly reconnectMs: number;
+  private readonly sleep: (ms: number) => Promise<void>;
+  constructor(private readonly deps: ReviewBridgeDeps) {
+    this.reconnectMs = deps.reconnectMs ?? 1000;
+    this.sleep = deps.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  }
 
   async open(sessionId: string, policy: ReviewPolicy): Promise<void> {
     if (this.loops.has(sessionId)) return;
@@ -94,27 +110,79 @@ export class ReviewPermissionBridge {
     this.loops.set(sessionId, { abort, done });
   }
 
+  /**
+   * The dedicated per-review subscription loop. Its entire reason to exist is
+   * RELIABLE escalation delivery (the owner is told a call is pending even when
+   * not attached), so it must SELF-HEAL rather than die on the first hiccup:
+   *
+   *  - Per-frame isolation: a `handlePermission` throw (a vote HTTP rejecting on
+   *    a daemon non-2xx/restart, etc.) is caught PER FRAME and logged — the loop
+   *    continues, so a failed vote never silences a LATER frame's escalation.
+   *  - Reconnect: a mid-stream throw from the subscription iterator itself
+   *    (network blip / daemon restart) is caught and, after a bounded backoff,
+   *    re-subscribed — resuming from the last-seen event id so already-processed
+   *    frames are not re-delivered (no duplicate escalation notifications).
+   *
+   * Both loops terminate ONLY on `signal.aborted` (via `close()`/`closeAll()`) or
+   * a clean end of the stream (session over). Modeled on
+   * `packages/rc-gateway/src/webpush/pump.ts`'s `runLoop`.
+   */
   private async run(
     sessionId: string,
     policy: ReviewPolicy,
     signal: AbortSignal,
   ): Promise<void> {
-    const it = this.deps.daemon.subscribeEvents(sessionId, {
-      lastEventId: 0,
-      signal,
-    });
-    for await (const ev of it) {
-      if (signal.aborted) return;
-      if (ev.type === 'permission_request') {
-        await this.handlePermission(
-          sessionId,
-          policy,
-          ev.data as PermissionRequestData,
-        );
-      } else {
-        // Any tool-output / session_update frame → the tool proceeded.
-        this.deps.onResume?.(sessionId);
+    // 1-based event ids; seed 0 forces a FULL ring replay on the first subscribe
+    // (closes the poll-latency gap). On reconnect we resume from the last id we
+    // actually processed so we never re-deliver — and never re-notify — a frame.
+    let lastSeenId = 0;
+    while (!signal.aborted) {
+      try {
+        const it = this.deps.daemon.subscribeEvents(sessionId, {
+          lastEventId: lastSeenId,
+          signal,
+        });
+        for await (const ev of it) {
+          if (signal.aborted) return;
+          // Advance the resume cursor BEFORE handling, so a reconnect mid-handle
+          // never re-processes this frame.
+          if (typeof ev.id === 'number') lastSeenId = ev.id;
+          if (ev.type === 'permission_request') {
+            try {
+              await this.handlePermission(
+                sessionId,
+                policy,
+                ev.data as PermissionRequestData,
+              );
+            } catch (err) {
+              // A vote/escalate handler throw must NEVER kill the loop: a later
+              // frame that should escalate still must. Log and continue.
+              this.reportError(sessionId, err);
+            }
+          } else {
+            // Any tool-output / session_update frame → the tool proceeded.
+            this.deps.onResume?.(sessionId);
+          }
+        }
+        // Stream ended cleanly (session over / server closed the SSE). Done — we
+        // only reconnect on an ERROR, never busy-loop a resubscribe on a clean
+        // end.
+        return;
+      } catch (err) {
+        if (signal.aborted) return;
+        // Mid-stream subscription throw → backoff and reconnect from lastSeenId.
+        this.reportError(sessionId, err);
       }
+      if (signal.aborted) return;
+      await this.sleep(this.reconnectMs);
+    }
+  }
+
+  private reportError(sessionId: string, err: unknown): void {
+    try {
+      this.deps.onError?.(sessionId, err);
+    } catch {
+      // A throwing observability hook must never break the loop.
     }
   }
 

@@ -147,6 +147,137 @@ describe('ReviewPermissionBridge — baseline vote / escalate', () => {
   });
 });
 
+describe('ReviewPermissionBridge — reliability (error isolation + reconnect)', () => {
+  const votePolicy: ReviewPolicy = {
+    autoApprove: true,
+    autofix: false,
+    comment: false,
+    worktreeRoot: null,
+  };
+
+  it('survives a per-frame vote throw: a LATER frame still escalates', async () => {
+    // Frame 1 (read) auto-approves → vote, but respondToSessionPermission
+    // rejects (routine daemon non-2xx / restart). Frame 2 (edit, autofix off)
+    // must STILL escalate — the loop must not die on the failed vote.
+    const frames = [
+      {
+        type: 'permission_request',
+        data: {
+          requestId: 'q1',
+          sessionId: 's',
+          toolCall: { kind: 'read', rawInput: {} },
+          options: allowOnce,
+        },
+      },
+      {
+        type: 'permission_request',
+        data: {
+          requestId: 'q2',
+          sessionId: 's',
+          toolCall: { kind: 'edit', rawInput: {} },
+          options: allowOnce,
+        },
+      },
+    ];
+    const daemon: ReviewBridgeDaemon = {
+      async *subscribeEvents() {
+        for (const f of frames) yield f;
+      },
+      async respondToSessionPermission() {
+        throw new Error('daemon non-2xx');
+      },
+    };
+    const escalated: string[] = [];
+    const errors: unknown[] = [];
+    const bridge = new ReviewPermissionBridge({
+      daemon,
+      onEscalate: (sid) => escalated.push(sid),
+      onError: (_sid, err) => errors.push(err),
+      sleep: async () => {},
+    });
+    await bridge.open('s', votePolicy);
+    await bridge.drain('s');
+    expect(escalated).toEqual(['s']); // q2 escalated → loop survived q1's throw
+    expect(errors.length).toBe(1); // the failed vote was logged, not fatal
+  });
+
+  it('reconnects after a mid-stream subscription throw, resuming from lastEventId', async () => {
+    let call = 0;
+    const seenLastEventIds: Array<number | undefined> = [];
+    const votesRef: Array<{ requestId: string; outcome: unknown }> = [];
+    const daemon: ReviewBridgeDaemon = {
+      async *subscribeEvents(_sid, opts) {
+        call++;
+        seenLastEventIds.push(opts?.lastEventId);
+        if (call === 1) {
+          yield {
+            id: 1,
+            type: 'permission_request',
+            data: {
+              requestId: 'q1',
+              sessionId: 's',
+              toolCall: { kind: 'read', rawInput: {} },
+              options: allowOnce,
+            },
+          };
+          throw new Error('stream dropped');
+        }
+        yield {
+          id: 2,
+          type: 'permission_request',
+          data: {
+            requestId: 'q2',
+            sessionId: 's',
+            toolCall: { kind: 'read', rawInput: {} },
+            options: allowOnce,
+          },
+        };
+      },
+      async respondToSessionPermission(_sid, requestId, response) {
+        votesRef.push({ requestId, outcome: response.outcome });
+        return true;
+      },
+    };
+    const bridge = new ReviewPermissionBridge({
+      daemon,
+      sleep: async () => {},
+    });
+    await bridge.open('s', votePolicy);
+    await bridge.drain('s');
+    expect(votesRef.map((v) => v.requestId)).toEqual(['q1', 'q2']);
+    expect(call).toBe(2); // reconnected once
+    // First subscribe seeds 0 (full replay); reconnect resumes from id 1 so q1
+    // is not re-delivered.
+    expect(seenLastEventIds).toEqual([0, 1]);
+  });
+
+  it('close() stops the reconnect loop (no infinite reconnect)', async () => {
+    let subCount = 0;
+    const daemon: ReviewBridgeDaemon = {
+      // eslint-disable-next-line require-yield
+      async *subscribeEvents() {
+        subCount++;
+        throw new Error('always down');
+      },
+      async respondToSessionPermission() {
+        return true;
+      },
+    };
+    const bridge: ReviewPermissionBridge = new ReviewPermissionBridge({
+      daemon,
+      reconnectMs: 0,
+      sleep: async () => {
+        // After a few reconnect attempts, close the session; the loop must then
+        // terminate rather than resubscribe forever.
+        if (subCount >= 3) bridge.close('s');
+      },
+    });
+    await bridge.open('s', votePolicy);
+    await bridge.drain('s'); // resolves iff the loop actually stopped
+    expect(subCount).toBe(3);
+  });
+});
+
 describe('ReviewPermissionBridge — Guard 2 realpath edit confinement', () => {
   let root: string;
   let outside: string;
