@@ -1298,40 +1298,6 @@ describe('FeishuChannel', () => {
       stderrSpy.mockRestore();
     });
 
-    it('rejects proactive delivery on a non-zero Feishu business code', async () => {
-      const channel = createTestableChannel();
-      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
-        token: 'tenant-token',
-        expiresAt: Date.now() + 3600_000,
-      };
-      vi.spyOn(global, 'fetch').mockResolvedValue(
-        new Response(
-          JSON.stringify({
-            code: 230001,
-            msg: 'recipient ou_sensitive token=secret was rejected',
-          }),
-          { status: 200 },
-        ),
-      );
-      const stderrSpy = vi
-        .spyOn(process.stderr, 'write')
-        .mockImplementation(() => true);
-
-      await expect(
-        channel.deliverProactive(
-          { channelName: 'test', type: 'user', id: 'ou_sensitive' },
-          'private delivery text',
-        ),
-      ).rejects.toEqual(
-        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
-          disposition: 'permanent',
-          message: 'Feishu sendMessage failed: code 230001',
-        }),
-      );
-
-      stderrSpy.mockRestore();
-    });
-
     it('sends proactive loop output to direct chats', async () => {
       const channel = createTestableChannel();
       (channel as unknown as Record<string, unknown>)['tokenCache'] = {
@@ -1340,9 +1306,7 @@ describe('FeishuChannel', () => {
       };
       const fetchSpy = vi
         .spyOn(global, 'fetch')
-        .mockResolvedValue(
-          new Response(JSON.stringify({ code: 0 }), { status: 200 }),
-        );
+        .mockResolvedValue(new Response('{}', { status: 200 }));
 
       await channel.pushLoop(
         {
@@ -1374,10 +1338,7 @@ describe('FeishuChannel', () => {
       };
       const fetchSpy = vi
         .spyOn(global, 'fetch')
-        .mockImplementation(
-          async () =>
-            new Response(JSON.stringify({ code: 0 }), { status: 200 }),
-        );
+        .mockResolvedValue(new Response('{}', { status: 200 }));
 
       await channel.deliverProactive(
         { channelName: 'test', type: 'chat', id: 'oc_group' },

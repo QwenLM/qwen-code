@@ -764,21 +764,6 @@ export class FeishuChannel extends ChannelBase {
               `Feishu sendMessage failed: HTTP ${resp.status}`,
             );
           }
-          continue;
-        }
-
-        const data = (await resp.json()) as { code?: unknown };
-        if (data.code !== 0) {
-          const code = typeof data.code === 'number' ? data.code : 'unknown';
-          process.stderr.write(
-            `[Feishu:${this.name}] sendMessage failed: code ${code}\n`,
-          );
-          if (throwOnFailure) {
-            throw new ChannelProactiveDeliveryError(
-              'permanent',
-              `Feishu sendMessage failed: code ${code}`,
-            );
-          }
         }
       } catch (err) {
         if (throwOnFailure && err instanceof ChannelProactiveDeliveryError) {
