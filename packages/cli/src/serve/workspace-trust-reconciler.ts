@@ -245,6 +245,13 @@ export function createWorkspaceTrustReconciler(
     const planned: PlannedReplacement[] = [];
     for (const entry of options.registry.listEntries()) {
       const current = entry.current;
+      if (
+        entry.state === 'active' &&
+        current?.runtime.provenance === 'managed-scratch'
+      ) {
+        options.registry.advancePolicyRevision(entry, snapshot.revision);
+        continue;
+      }
       if (entry.state === 'blocked') {
         const decision = evaluateDaemonWorkspaceTrust(
           snapshot,
