@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   CHANNEL_DELIVERY_IPC_TIMEOUT_MS,
+  MAX_CHANNEL_DELIVERY_TEXT_LENGTH,
   ChannelDeliveryError,
   createChannelDeliveryMessage,
   isChannelDeliveryError,
@@ -54,6 +55,15 @@ describe('channel delivery IPC', () => {
       request: {
         ...request,
         target: { ...request.target, threadId: 'thread-1' },
+      },
+    },
+    {
+      type: 'channel_delivery',
+      id: 'ipc-1',
+      expiresAt: 1,
+      request: {
+        ...request,
+        text: 'x'.repeat(MAX_CHANNEL_DELIVERY_TEXT_LENGTH + 1),
       },
     },
   ])('rejects malformed request messages %#', (message) => {

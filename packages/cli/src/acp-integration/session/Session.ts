@@ -1156,6 +1156,9 @@ export class Session implements SessionContext {
     apiTimeMs: 0,
   };
   private readonly runtimeBaseDir: string;
+  // Invariant: only one turn (prompt or cron) streams at a time, so a single
+  // field is safe. Both paths capture a local reference and null the field
+  // in a finally block with an identity check.
   private channelDeliveryCollector: string[] | null = null;
 
   // Cron scheduling state

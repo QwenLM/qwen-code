@@ -81,6 +81,7 @@ export interface ChannelDeliveryAccepted {
 }
 
 export const CHANNEL_DELIVERY_IPC_TIMEOUT_MS = 30_000;
+export const MAX_CHANNEL_DELIVERY_TEXT_LENGTH = 100_000;
 
 export function createChannelDeliveryMessage(
   request: ChannelDeliveryRequest,
@@ -118,7 +119,8 @@ function isChannelDeliveryRequest(
     isNonEmptyString(request['deliveryId']) &&
     isNonEmptyString(request['channelName']) &&
     isChannelDeliveryTarget(request['target']) &&
-    isNonEmptyString(request['text'])
+    isNonEmptyString(request['text']) &&
+    request['text'].length <= MAX_CHANNEL_DELIVERY_TEXT_LENGTH
   );
 }
 

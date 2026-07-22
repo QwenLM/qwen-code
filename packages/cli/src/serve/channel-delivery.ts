@@ -10,14 +10,15 @@ import {
 } from '@qwen-code/qwen-code-core';
 import {
   ChannelDeliveryError,
+  MAX_CHANNEL_DELIVERY_TEXT_LENGTH,
   type ChannelDeliveryRequest,
 } from './channel-delivery-ipc.js';
 
 export {
   MAX_CHANNEL_DELIVERY_NAME_LENGTH,
   MAX_CHANNEL_DELIVERY_TARGET_ID_LENGTH,
+  MAX_CHANNEL_DELIVERY_TEXT_LENGTH,
 };
-export const MAX_CHANNEL_DELIVERY_TEXT_LENGTH = 100_000;
 
 const TRUNCATED_TEXT_SUFFIX =
   '\n\n[Channel delivery truncated because the result exceeded the delivery size limit.]';
