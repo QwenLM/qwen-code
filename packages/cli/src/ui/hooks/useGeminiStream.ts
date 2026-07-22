@@ -87,6 +87,7 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
+import { findLastUserItemIndex } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -751,10 +752,7 @@ export const useGeminiStream = (
       config.getApprovalMode() === ApprovalMode.YOLO &&
       streamingState === StreamingState.Idle
     ) {
-      const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) =>
-          item.type === MessageType.USER && item.sentToModel !== false,
-      );
+      const lastUserMessageIndex = findLastUserItemIndex(history);
 
       const turnCount =
         lastUserMessageIndex === -1 ? 0 : history.length - lastUserMessageIndex;

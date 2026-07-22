@@ -9653,6 +9653,57 @@ Other open files:
         expect(accept).not.toHaveBeenCalled();
         expect(restore).toHaveBeenCalledOnce();
       });
+
+      it('forwards steerInput through the Steer continuation for early settling', async () => {
+        let pushCount = 0;
+        client.getChat().getUserContentPushCount = vi.fn(() => pushCount);
+
+        let turnCall = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          turnCall++;
+          pushCount = turnCall;
+          return (async function* () {
+            yield {
+              type: GeminiEventType.Content,
+              value: `response ${turnCall}`,
+            };
+          })();
+        });
+
+        const accept = vi.fn();
+        const restore = vi.fn();
+        const getSteerInput = vi
+          .fn<() => Promise<SteerInput | undefined>>()
+          .mockResolvedValueOnce({
+            parts: [{ text: 'steer text' }],
+            accept,
+            restore,
+          })
+          .mockResolvedValue(undefined);
+
+        const stream = client.sendMessageStream(
+          [{ text: 'initial query' }],
+          new AbortController().signal,
+          'prompt-steer-forward-early',
+          { type: SendMessageType.UserQuery, getSteerInput },
+        );
+
+        const iter = stream[Symbol.asyncIterator]();
+
+        // First turn's content event — steer not yet taken
+        const first = await iter.next();
+        expect(first.done).toBe(false);
+        expect(accept).not.toHaveBeenCalled();
+
+        // Next event comes from the recursive Steer continuation.
+        // steerInput must be forwarded so it settles on this first event.
+        const second = await iter.next();
+        expect(second.done).toBe(false);
+        expect(accept).toHaveBeenCalledOnce();
+        expect(restore).not.toHaveBeenCalled();
+
+        await iter.return(undefined as never);
+      });
     });
 
     describe('attribution snapshot persistence', () => {
