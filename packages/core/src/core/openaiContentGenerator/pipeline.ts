@@ -897,7 +897,7 @@ export class ContentGenerationPipeline {
       if ('reasoning' in typed) {
         delete typed['reasoning'];
       }
-      if ('reasoning_effort' in typed) {
+      if ('reasoning_effort' in typed && typed['reasoning_effort'] !== 'none') {
         delete typed['reasoning_effort'];
       }
       // DeepSeek V4+ defaults `thinking.type` to `'enabled'`, so removing
