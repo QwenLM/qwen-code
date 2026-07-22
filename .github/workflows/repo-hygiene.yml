@@ -1,0 +1,423 @@
+name: 'Repo Hygiene Patrol'
+
+# Weekly consolidated hygiene PR (see issue #7383): the agent scans for small,
+# certain docs/test/code hygiene issues and commits fixes on ONE branch; the
+# workflow owns credentials, dedup, the independent verification gate, the
+# push, and PR creation. The agent never holds GitHub credentials.
+
+on:
+  schedule:
+    - cron: '0 3 * * 1' # Monday 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Scan, fix, and verify, but do not push or open a PR'
+        required: false
+        type: 'boolean'
+        default: false
+
+defaults:
+  run:
+    shell: 'bash'
+
+permissions:
+  contents: 'read'
+
+concurrency:
+  group: 'repo-hygiene'
+  cancel-in-progress: false
+
+env:
+  # The hygiene PR is authored by this bot, same identity as Qwen Autofix.
+  AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+  HYGIENE_LABEL: 'autofix/repo-hygiene'
+  MAX_FIXES: '8'
+  MAX_TOTAL_DIFF_LINES: '150'
+  WORKDIR: '/tmp/hygiene'
+
+jobs:
+  patrol:
+    name: 'Scan and fix'
+    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 150
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}"
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Reset hygiene workspace'
+        run: |-
+          rm -rf "${WORKDIR}"
+          mkdir -p "${WORKDIR}"
+
+      # The verify gate always runs the trusted checkout's copy of the schema
+      # gate and package resolver, never a working-tree copy.
+      - name: 'Stage trusted gates'
+        run: |-
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+
+      - name: 'Check bot credentials'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::CI_DEV_BOT_PAT is required to run the repo-hygiene job.'
+            exit 1
+          fi
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
+      # One open hygiene PR at a time: last week's batch must be reviewed (or
+      # closed) before a new one is created, so review load stays bounded.
+      - name: 'Skip when a hygiene PR is already open'
+        id: 'dedup'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --label "${HYGIENE_LABEL}" --json number --jq 'map(.number) | join(", ")')"
+          if [[ -n "${OPEN_PRS}" ]]; then
+            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still carry ${HYGIENE_LABEL}; skipping this run."
+            echo 'open_prs_present=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'open_prs_present=false' >> "${GITHUB_OUTPUT}"
+          fi
+
+      - name: 'Check runner environment'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        run: |-
+          case "${RUNNER_ENVIRONMENT}" in
+            github-hosted) ;;
+            *)
+              echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
+              exit 1
+              ;;
+          esac
+
+      - name: 'Set up Node.js'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install dependencies and build'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+          git config core.hooksPath .husky
+          npm run build
+          npm run bundle
+
+      - name: 'Prepare Qwen Code CLI'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        run: |-
+          qwen_version="$(node -p "require('./package.json').version")"
+          echo "Using checked-out Qwen Code bundle ${qwen_version}"
+          qwen_bin="${RUNNER_TEMP}/qwen-bin"
+          mkdir -p "${qwen_bin}"
+          cat > "${qwen_bin}/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          EOF
+          chmod +x "${qwen_bin}/qwen"
+          echo "${qwen_bin}" >> "${GITHUB_PATH}"
+          PATH="${qwen_bin}:${PATH}"
+          qwen --version
+
+      - name: 'Resolve branch name'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        id: 'branch'
+        run: |-
+          echo "name=hygiene/$(date -u +%Y%m%d-%H%M)" >> "${GITHUB_OUTPUT}"
+
+      # The agent scans, selects, fixes, commits, and writes outputs. It holds
+      # no GitHub token — all network writes happen in the publish step below.
+      - name: 'Run hygiene agent'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        id: 'agent'
+        env:
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
+          QWEN_HOME: '${{ runner.temp }}/qwen-hygiene-home'
+          SETTINGS_JSON: |-
+            {
+              "maxSessionTurns": 400,
+              "coreTools": [
+                "read_file",
+                "read_many_files",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "run_shell_command(cat)",
+                "run_shell_command(rg)",
+                "run_shell_command(git add)",
+                "run_shell_command(git checkout)",
+                "run_shell_command(git commit)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git status)",
+                "run_shell_command(git switch)",
+                "run_shell_command(ls)",
+                "run_shell_command(mkdir)",
+                "run_shell_command(npm run build)",
+                "run_shell_command(npm run typecheck)",
+                "run_shell_command(npm run lint)",
+                "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
+                "run_shell_command(pwd)"
+              ],
+              "tools": {
+                "sandbox": "docker"
+              }
+            }
+        run: |-
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for the repo-hygiene agent.'
+            exit 1
+          fi
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          rm -f "${WORKDIR}/failure.md"
+          node .qwen/skills/repo-hygiene/scripts/run-agent.mjs \
+            --mode scan-and-fix \
+            --workdir "${WORKDIR}" \
+            --branch "${{ steps.branch.outputs.name }}"
+
+      # Structural gate: decide what the agent produced and enforce limits
+      # before any verification or publishing happens. failure.md or a
+      # contract violation fails the run; no branch/diff is a quiet skip.
+      - name: 'Gate on agent outcome'
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
+        id: 'gate'
+        run: |-
+          BRANCH="${{ steps.branch.outputs.name }}"
+
+          if [[ -f "${WORKDIR}/failure.md" ]]; then
+            echo '🛑 Agent aborted intentionally:'
+            cat "${WORKDIR}/failure.md"
+            exit 1
+          fi
+
+          if ! git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
+            echo 'No branch produced — no accepted fixes this run.'
+            echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+          git config core.hooksPath /dev/null
+          git checkout "${BRANCH}"
+
+          if git diff --quiet origin/main..."${BRANCH}"; then
+            echo 'Branch has no changes against main — no accepted fixes this run.'
+            echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ -n "$(git status --porcelain)" ]]; then
+            echo '❌ Working tree is dirty after the agent run; uncommitted leftovers would contaminate verification:'
+            git status --short
+            exit 1
+          fi
+
+          for f in pr-title.txt pr-body.md; do
+            if [[ ! -s "${WORKDIR}/${f}" ]]; then
+              echo "❌ Branch has commits but ${f} is missing from ${WORKDIR}"
+              exit 1
+            fi
+          done
+
+          # Report-only paths must never appear in the diff (skill scope
+          # limits). A hit means the agent broke contract: fail the run.
+          if git diff --name-only origin/main..."${BRANCH}" | grep -E '^packages/core/src/|^packages/[^/]+/src/(auth|providers|models|config|tools|services)/'; then
+            echo '❌ Branch touches report-only paths; refusing to publish.'
+            exit 1
+          fi
+
+          COMMITS="$(git rev-list --count origin/main.."${BRANCH}")"
+          echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
+          if [[ "${COMMITS}" -gt "${MAX_FIXES}" ]]; then
+            echo "❌ Branch has ${COMMITS} commits; cap is ${MAX_FIXES}."
+            exit 1
+          fi
+
+          TOTAL="$(git diff --numstat origin/main..."${BRANCH}" | awk '{a+=$1; d+=$2} END {print a+d+0}')"
+          echo "total_diff_lines=${TOTAL}" >> "${GITHUB_OUTPUT}"
+          if [[ "${TOTAL}" -gt "${MAX_TOTAL_DIFF_LINES}" ]]; then
+            echo "❌ Total diff is ${TOTAL} lines; cap is ${MAX_TOTAL_DIFF_LINES}."
+            exit 1
+          fi
+
+          echo 'result=fixes' >> "${GITHUB_OUTPUT}"
+
+      # Deterministic re-verification, independent of the agent. Full
+      # regression is covered by regular CI on the PR after the push.
+      - name: 'Independent verification'
+        if: "${{ steps.gate.outputs.result == 'fixes' }}"
+        id: 'verify'
+        run: |-
+          npm run build
+          npm run typecheck
+          npm run lint
+
+          bash "${RUNNER_TEMP}/check-settings-schema.sh"
+
+          CHANGED_PKGS="$(git diff --name-only origin/main...HEAD \
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
+          if [[ -z "${CHANGED_PKGS}" ]]; then
+            echo 'No package changes detected; skipping package tests.'
+          else
+            for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
+              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
+              if [[ "${test_script}" != *vitest* ]]; then
+                echo "Skipping ${p}: test script is not Vitest."
+                continue
+              fi
+              echo "🧪 Testing ${p} (changed files only)..."
+              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+            done
+          fi
+
+      - name: 'Push and open PR'
+        if: "${{ steps.gate.outputs.result == 'fixes' && env.DRY_RUN != 'true' }}"
+        id: 'publish'
+        env:
+          # CI_DEV_BOT_PAT opens the PR as the hygiene bot: the default
+          # GITHUB_TOKEN is blocked from creating PRs, and PRs it does create
+          # do not trigger CI.
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+        run: |-
+          MODEL_DISPLAY="${MODEL:-default}"
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the hygiene bot.'
+            exit 1
+          fi
+          api_error_file="$(mktemp)"
+          if ! publish_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          echo "CI_DEV_BOT_PAT authenticates as ${publish_actor}"
+          if [[ "${publish_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${publish_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
+          gh label create "${HYGIENE_LABEL}" --repo "${REPO}" \
+            --description 'Automated weekly repo-hygiene batch PR' \
+            --color '1d76db' 2>/dev/null || true
+
+          BRANCH="${{ steps.branch.outputs.name }}"
+          git config --local --unset-all http.https://github.com/.extraheader || true
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
+          git config core.hooksPath /dev/null
+          git push --no-verify origin "${BRANCH}"
+
+          PR_URL="$(gh pr create --repo "${REPO}" \
+            --base main --head "${BRANCH}" \
+            --title "$(cat "${WORKDIR}/pr-title.txt")" \
+            --body-file "${WORKDIR}/pr-body.md" \
+            --label "${HYGIENE_LABEL}")"
+          echo "🚀 Opened ${PR_URL}"
+
+          # Report-only findings (high-risk paths the agent must not touch)
+          # ride along as a PR comment so maintainers still see them.
+          if [[ -s "${WORKDIR}/report-only.md" ]]; then
+            {
+              echo
+              echo "---"
+              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+            } >> "${WORKDIR}/report-only.md"
+            gh pr comment "${PR_URL}" --body-file "${WORKDIR}/report-only.md"
+          fi
+
+      - name: 'Collect run artifacts'
+        if: 'always()'
+        run: |-
+          BRANCH="${{ steps.branch.outputs.name }}"
+          if [[ -n "${BRANCH}" ]] && git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
+            git diff "origin/main...${BRANCH}" > "${WORKDIR}/fix.diff" || true
+          fi
+          for f in findings.json pr-title.txt pr-body.md report-only.md failure.md fix.diff; do
+            if [[ -f "${WORKDIR}/${f}" ]]; then
+              echo "=============== ${f} ==============="
+              cat "${WORKDIR}/${f}"
+              echo
+            fi
+          done
+
+      - name: 'Upload run artifacts'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'repo-hygiene-artifacts'
+          path: '${{ env.WORKDIR }}'
+          if-no-files-found: 'ignore'
+          retention-days: 14
+
+      - name: 'Write run summary'
+        if: 'always()'
+        run: |-
+          RESULT="${{ steps.gate.outputs.result }}"
+          if [[ "${{ steps.dedup.outputs.open_prs_present }}" == 'true' ]]; then
+            RESULT='skipped (open hygiene PR exists)'
+          elif [[ -z "${RESULT}" ]]; then
+            RESULT='unknown (run ended before the gate)'
+          fi
+          SUFFIX=''
+          [[ "${DRY_RUN}" == 'true' ]] && SUFFIX=' (dry-run, nothing pushed)'
+          {
+            echo "### Repo hygiene patrol — ${RESULT}${SUFFIX}"
+            echo
+            for f in findings.json pr-title.txt pr-body.md report-only.md failure.md fix.diff; do
+              if [[ -s "${WORKDIR}/${f}" ]]; then
+                echo "**${f}:**"
+                echo '```'
+                cat "${WORKDIR}/${f}"
+                echo '```'
+                echo
+              fi
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
