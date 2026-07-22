@@ -1,6 +1,6 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
@@ -13,6 +13,7 @@ import type {
 } from '@google/genai';
 
 export type FinishReason = GenAiFinishReason;
+// Keep runtime values limited to the subset used outside provider adapters.
 export const FinishReason = {
   STOP: 'STOP' as GenAiFinishReason,
   MAX_TOKENS: 'MAX_TOKENS' as GenAiFinishReason,
