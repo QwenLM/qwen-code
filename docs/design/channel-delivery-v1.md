@@ -40,7 +40,7 @@ The daemon normalizes the public target at its trust boundary to the internal wo
 
 ## Execution boundaries
 
-Scheduled tasks and Prompt own their final-answer semantics. A Session captures final text only when the current invocation carries delivery metadata. It submits one reverse control request only after a successful `end_turn` with non-empty text. Cancellation, Agent failure, and token-limit termination do not send. Empty successful output emits a skipped result.
+Scheduled tasks and Prompt own their final-answer semantics. A Session captures final text only when the current invocation carries delivery metadata. It submits one reverse control request only after a successful `end_turn` with non-empty text. Cancellation, Agent failure, and token-limit termination do not send. Empty successful output emits a skipped result. The delivered text is the full turn's assistant prose (all non-thought text parts), not only the terminal message block; inter-tool narration is included.
 
 Prompt admission remains `202`; Agent completion remains `turn_complete` or `turn_error`. Channel completion is a later `channel_delivery_result` event and never converts Agent success into `turn_error`.
 
@@ -53,6 +53,8 @@ Webhook remains an independent asynchronous path with its own secret and `202` w
 The daemon binds the workspace when constructing each ACP bridge. Prompt admission records the daemon-issued delivery ID and pinned target, while scheduled delivery is authorized from the persisted task. The child callback must match that authorization and cannot choose `workspaceCwd` or replace the target. The host callback closes over the canonical workspace and routes only to that workspace's worker group. Missing, bootstrapping, draining, stopped, or removed owners return `channel_worker_unavailable`; there is no fallback to the primary runtime and no lazy worker startup.
 
 ## Reliability and privacy
+
+Authorization is consumed before worker availability is checked, so a transient worker blip after consume drops that single delivery permanently; this is consistent with the immediate, best-effort, no-retry contract.
 
 This V1 has no persistence, startup replay, historical scan, retry, or idempotency guarantee. Existing tasks without delivery never send. Existing scheduler catch-up behavior is unchanged. Normal executions carry delivery only when the task already contains it; the synthetic historical missed-one-shot batch explicitly clears delivery so enabling Channel later cannot create a burst of old alerts.
 

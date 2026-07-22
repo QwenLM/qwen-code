@@ -943,6 +943,8 @@ export class DaemonClient {
    * Send text directly through the primary workspace's channel worker.
    * This does not create or prompt an Agent session. Pre-flight the
    * `channel_delivery` capability before calling across mixed daemon versions.
+   * A successful capability check does not guarantee worker liveness; callers
+   * must treat 503 `channel_worker_unavailable` as an expected outcome.
    */
   async notify(
     req: DaemonChannelNotifyRequest,
@@ -4222,7 +4224,11 @@ export class WorkspaceDaemonClient {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
   }
 
-  /** Send text directly through this exact workspace's channel worker. */
+  /**
+   * Send text directly through this exact workspace's channel worker.
+   * A successful capability pre-flight does not guarantee worker liveness;
+   * callers must treat 503 `channel_worker_unavailable` as an expected outcome.
+   */
   notify(
     req: DaemonChannelNotifyRequest,
     opts?: { timeoutMs?: number },
