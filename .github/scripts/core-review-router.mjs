@@ -12,6 +12,7 @@
  *   { "reviewers": ["login1", ...], "reason": "..." }
  */
 import { parseArgs } from 'node:util';
+import { pathToFileURL } from 'node:url';
 
 const MAINTAINERS = ['wenshao', 'tanzhenxin', 'yiliang114', 'LaZzyMan'];
 
@@ -74,6 +75,8 @@ export function classify(files, author, prNumber = 0) {
   }
 
   const domainExpert = pickDomainExpert(coreProd);
+  // When no domain matched, domainExpert is null — the rotated
+  // pool below covers the selection via round-robin.
   const pool = MAINTAINERS.filter(
     (m) => m !== author && m !== domainExpert,
   );
@@ -82,18 +85,20 @@ export function classify(files, author, prNumber = 0) {
   const offset = prNumber % pool.length;
   const rotated = [...pool.slice(offset), ...pool.slice(0, offset)];
 
+  const n = coreProd.length;
+  const plural = n === 1 ? 'file' : 'files';
   let count;
   let reason;
 
-  if (coreProd.length === 1 && coreProd.length / totalFiles < 0.3) {
+  if (n === 1 && n / totalFiles < 0.3) {
     count = 1;
-    reason = `incidental core touch (1 prod file, ${((coreProd.length / totalFiles) * 100).toFixed(0)}% of ${totalFiles} files)`;
-  } else if (coreProd.length <= 2) {
+    reason = `incidental core touch (1 prod file, ${((n / totalFiles) * 100).toFixed(0)}% of ${totalFiles} files)`;
+  } else if (n <= 2) {
     count = 1;
-    reason = `small core change (${coreProd.length} prod files)`;
+    reason = `small core change (${n} prod ${plural})`;
   } else {
     count = 2;
-    reason = `significant core change (${coreProd.length} prod files)`;
+    reason = `significant core change (${n} prod ${plural})`;
   }
 
   const reviewers = [];
@@ -118,7 +123,9 @@ function pickDomainExpert(coreProdFiles) {
       }
     }
   }
-  if (scores.size === 0) return MAINTAINERS[0];
+  // null means no domain matched — classify() falls back to the
+  // round-robin rotated pool instead of a fixed default.
+  if (scores.size === 0) return null;
   let best = null;
   let bestScore = -1;
   for (const [owner, score] of scores) {
@@ -133,8 +140,7 @@ function pickDomainExpert(coreProdFiles) {
 // --- CLI entry point ---
 const isMain =
   process.argv[1] &&
-  (process.argv[1].endsWith('core-review-router.mjs') ||
-    process.argv[1].endsWith('core-review-router'));
+  import.meta.url === pathToFileURL(process.argv[1]).href;
 
 if (isMain) {
   const { values } = parseArgs({

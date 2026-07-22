@@ -61,19 +61,34 @@ jobs:
           api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/requested_reviewers"
           maintainers='["wenshao","tanzhenxin","yiliang114","LaZzyMan"]'
 
-          # Remove stale maintainer requests (only the four we manage).
+          # Compute desired and current managed sets.
+          if [ -n "$REVIEWERS" ]; then
+            desired="$(echo "$REVIEWERS" | tr ',' '\n' | jq -R . | jq -sc 'sort')"
+          else
+            desired="[]"
+          fi
           current="$(gh api "$api" --jq '[.users[].login]')"
-          stale="$(echo "$current" | jq -c --argjson m "$maintainers" '[.[] | select(. as $l | $m | index($l))]')"
-          if [ "$stale" != "[]" ]; then
-            echo "$stale" | jq '{reviewers: .}' \
-              | gh api --method DELETE "$api" --input - > /dev/null 2>&1 || true
+          managed="$(echo "$current" | jq -c --argjson m "$maintainers" '[.[] | select(. as $l | $m | index($l))] | sort')"
+
+          # Diff guard: skip API calls when the set is unchanged
+          # (avoids re-notifying reviewers on every synchronize push).
+          if [ "$managed" = "$desired" ]; then
+            echo "Reviewer set unchanged ($REVIEWERS) — skipping ($REASON)"
+            exit 0
           fi
 
-          # Add the new set.
-          if [ -n "$REVIEWERS" ]; then
-            echo "$REVIEWERS" | tr ',' '\n' | jq -R . | jq -sc '{reviewers: .}' \
-              | gh api --method POST "$api" --input - > /dev/null
-            echo "Requested: $REVIEWERS ($REASON)"
-          else
-            echo "No core reviewers needed ($REASON)"
+          # Remove maintainers that should no longer be requested.
+          to_remove="$(jq -cn --argjson a "$managed" --argjson b "$desired" '$a - $b')"
+          if [ "$to_remove" != "[]" ]; then
+            echo "$to_remove" | jq '{reviewers: .}' \
+              | gh api --method DELETE "$api" --input - > /dev/null || true
           fi
+
+          # Add maintainers that should be newly requested.
+          to_add="$(jq -cn --argjson a "$desired" --argjson b "$managed" '$a - $b')"
+          if [ "$to_add" != "[]" ]; then
+            echo "$to_add" | jq '{reviewers: .}' \
+              | gh api --method POST "$api" --input - > /dev/null
+          fi
+
+          echo "Applied: $REVIEWERS ($REASON)"

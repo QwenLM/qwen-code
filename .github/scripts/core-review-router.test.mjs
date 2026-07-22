@@ -145,4 +145,51 @@ describe('classify', () => {
     }
     assert.ok(seconds.size >= 2, `expected rotation, got: ${[...seconds]}`);
   });
+
+  it('uses round-robin fallback for unmapped core dirs (not fixed wenshao)', () => {
+    const files = ['packages/core/src/telemetry/loggers.ts'];
+    const first = new Set();
+    for (let pr = 0; pr < 8; pr++) {
+      const { reviewers } = classify(files, 'someone', pr);
+      assert.equal(reviewers.length, 1);
+      first.add(reviewers[0]);
+    }
+    assert.ok(
+      first.size >= 2,
+      `unmapped dir should rotate, got: ${[...first]}`,
+    );
+  });
+
+  it('fills reviewers from rotated pool when domain expert is the author', () => {
+    const result = classify(
+      ['packages/core/src/tools/grep.ts'],
+      'tanzhenxin',
+    );
+    assert.equal(result.reviewers.length, 1);
+    assert.ok(!result.reviewers.includes('tanzhenxin'));
+  });
+
+  it('returns domain expert first and a distinct second for count=2', () => {
+    const files = [
+      'packages/core/src/permissions/permission-manager.ts',
+      'packages/core/src/permissions/permission-flow.ts',
+      'packages/core/src/core/client.ts',
+    ];
+    const result = classify(files, 'someone', 0);
+    assert.equal(result.reviewers.length, 2);
+    assert.equal(result.reviewers[0], 'LaZzyMan');
+    assert.notEqual(result.reviewers[0], result.reviewers[1]);
+  });
+
+  it('singularizes "prod file" for 1-file changes', () => {
+    const result = classify(
+      [
+        'packages/core/src/tools/grep.ts',
+        'packages/core/src/tools/grep.test.ts',
+      ],
+      'someone',
+    );
+    assert.match(result.reason, /1 prod file\b/);
+    assert.doesNotMatch(result.reason, /1 prod files/);
+  });
 });
