@@ -102,9 +102,13 @@ and builds its own map of what "correct" means inside the partition.
 - **ui-apps**: `packages/{desktop,web-shell,webui}/` — Electron app, web shell, web UI.
 - **docs**: `docs/`, `README.md`, each package's root docs. Cross-reference against the source files the prose points at.
 
-A subagent must stay inside its partition. If a finding needs context from
-another partition to prove, record it as `crossPartition: true` with the
-other partition's name so the main agent can merge or drop it.
+A partition is a starting boundary, not a fence. A subagent may follow a
+call chain, import graph, or contract reference into another partition to
+build evidence. When a finding's evidence lands in a report-only path —
+`packages/core/src/**`, any `packages/*/src/auth/**`, `providers/**`,
+`models/**`, `config/**`, `tools/**`, `services/**`, or any cross-package
+contract — record it under `reportOnly`, never under `fixes`, regardless
+of how small or certain the fix would be.
 
 ### Six angles (applied inside each partition)
 
@@ -153,8 +157,6 @@ prove it fails or misaligns before the fix; how to verify after the fix.
   cross-package contract. Findings there go to `report-only.md` with full
   evidence — never into the diff. There is no "tiny but certain" exemption in
   headless mode.
-- Do not batch multiple unrelated trivial docs/typo fixes to reach quota, and
-  do not manufacture findings to fill the run.
 
 ## Mode: scan-and-fix
 
