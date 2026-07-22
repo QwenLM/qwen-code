@@ -98,7 +98,20 @@ jobs:
           echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
           echo "Using web-shell Playwright port ${port}"
 
+      # continue-on-error: a single failing/timing-out scenario must NOT discard
+      # the whole preview. Playwright writes each PNG/webm as its test passes, so
+      # the captures from the scenarios that DID pass are already on disk; the
+      # steps below (compose/upload) then publish those instead of the job dying
+      # here and the passing shots never being uploaded. The real result is read
+      # from `steps.after_capture.outcome` (which continue-on-error does NOT mask,
+      # unlike `.conclusion`) and shipped to the publisher as render-status.txt,
+      # so the comment says "render incomplete" rather than a misleading
+      # "no changes" when a scenario broke. The job stays green because the
+      # publish workflow only runs on a `success` conclusion; the broken scenario
+      # is surfaced in the comment, not by sinking every other PR author's preview.
       - name: 'Capture screenshots and flow recordings (after / PR head)'
+        id: 'after_capture'
+        continue-on-error: true
         env:
           WEB_SHELL_VISUALS_OUTPUT_DIR: '${{ runner.temp }}/web-shell-visuals'
         run: 'npm run test:e2e:visuals --workspace=packages/web-shell'
@@ -227,6 +240,12 @@ jobs:
         env:
           OUT_DIR: '${{ runner.temp }}/web-shell-visuals'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
+          # The TRUE after-render result. `.outcome` is the pre-continue-on-error
+          # value ('failure' when >=1 scenario failed), unlike `.conclusion` which
+          # the continue-on-error masks to 'success'. The publisher reads this to
+          # decide whether an empty/partial preview means "no visual change" or
+          # "a scenario failed to render" — the two must not look alike.
+          AFTER_OUTCOME: '${{ steps.after_capture.outcome }}'
         run: |-
           set -euo pipefail
           # Ensure both dirs exist so the counts below are robust even when an
@@ -257,8 +276,15 @@ jobs:
           # publish job binds to the authenticated github.event.workflow_run
           # .head_sha, and an artifact-sourced SHA would be untrusted.
           printf '%s\n' "${PR_NUMBER}" > "${OUT_DIR}/pr.txt"
+          # Render status for the publisher: 'failure' when >=1 scenario failed
+          # (default to 'failure' if the step somehow reported nothing, so an
+          # unknown state fails safe toward "incomplete" rather than a false
+          # all-clear). Anything other than the literal 'success' is treated as
+          # incomplete on the publish side.
+          printf '%s\n' "${AFTER_OUTCOME:-failure}" > "${OUT_DIR}/render-status.txt"
           echo "Screenshots: $(find "${OUT_DIR}/screenshots" -name '*.png' | wc -l | tr -d ' ')"
           echo "GIFs: $(find "${OUT_DIR}/gifs" -name '*.gif' | wc -l | tr -d ' ')"
+          echo "After-render outcome: ${AFTER_OUTCOME:-unknown}"
 
       # The privileged publish workflow downloads THIS artifact, so keep the raw
       # videos out of it: an untrusted PR could drop a multi-GB file under
@@ -272,6 +298,7 @@ jobs:
             ${{ runner.temp }}/web-shell-visuals/screenshots
             ${{ runner.temp }}/web-shell-visuals/gifs
             ${{ runner.temp }}/web-shell-visuals/pr.txt
+            ${{ runner.temp }}/web-shell-visuals/render-status.txt
           if-no-files-found: 'warn'
           retention-days: 7
 
