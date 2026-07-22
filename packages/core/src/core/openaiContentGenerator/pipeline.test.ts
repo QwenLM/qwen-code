@@ -904,6 +904,56 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
+    it('handles the retry error when required-thinking retry fails', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl:
+          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+        model: 'qwen3.8-max-preview',
+        extra_body: { enable_thinking: true },
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        enable_thinking: true,
+      }));
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'What is 2+2?' },
+      ]);
+
+      const requiredThinkingError = Object.assign(
+        new Error(
+          'The value of the enable_thinking parameter is restricted to True.',
+        ),
+        { status: 400 },
+      );
+      const retryError = new Error('retry failed');
+      (mockClient.chat.completions.create as Mock)
+        .mockRejectedValueOnce(requiredThinkingError)
+        .mockRejectedValueOnce(retryError);
+
+      const request: GenerateContentParameters = {
+        model: 'qwen3.8-max-preview',
+        contents: [{ parts: [{ text: 'What is 2+2?' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      await expect(pipeline.execute(request, 'forked_query')).rejects.toBe(
+        retryError,
+      );
+      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(2);
+      expect(mockErrorHandler.handle).toHaveBeenCalledWith(
+        retryError,
+        expect.any(Object),
+        request,
+      );
+    });
+
     it('does not retry an unrelated 400 error', async () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
