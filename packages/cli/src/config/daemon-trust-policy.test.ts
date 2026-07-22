@@ -97,12 +97,15 @@ describe('daemon trust policy', () => {
     });
   });
 
-  it('falls back to user folder trust when system does not define it', async () => {
+  it('uses user folder trust over system defaults', async () => {
     installFiles({
       '/config/user.json': JSON.stringify({
         security: { folderTrust: { enabled: true } },
       }),
       '/config/system.json': '{}',
+      '/config/system-defaults.json': JSON.stringify({
+        security: { folderTrust: { enabled: false } },
+      }),
       '/config/trusted.json': JSON.stringify({
         '/work': TrustLevel.TRUST_FOLDER,
       }),
@@ -119,7 +122,7 @@ describe('daemon trust policy', () => {
     });
   });
 
-  it('does not use system defaults for the initial trust gate', async () => {
+  it('falls back to system defaults for folder trust', async () => {
     installFiles({
       '/config/user.json': '{}',
       '/config/system.json': '{}',
@@ -132,13 +135,18 @@ describe('daemon trust policy', () => {
     });
 
     const snapshot = await readDaemonTrustPolicySnapshot();
-    expect(snapshot.folderTrustEnabled).toBe(false);
+    expect(snapshot.folderTrustEnabled).toBe(true);
     expect(
       evaluateDaemonWorkspaceTrust(snapshot, '/work/project'),
     ).toMatchObject({
       state: 'trusted',
       targetTrusted: true,
-      source: 'disabled',
+      source: 'file',
+    });
+    expect(evaluateDaemonWorkspaceTrust(snapshot, '/outside')).toMatchObject({
+      state: 'unknown',
+      targetTrusted: false,
+      source: 'none',
     });
   });
 
