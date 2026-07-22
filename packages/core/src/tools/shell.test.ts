@@ -2725,6 +2725,32 @@ describe('ShellTool', () => {
       expect(result.error?.type).toBe(ToolErrorType.SHELL_EXECUTE_ERROR);
     });
 
+    it('retains shell truncation without an artifact and records the persistence decision', async () => {
+      const originalOutput = 'A'.repeat(30_001);
+      const shortenedContent =
+        'Tool output was too large and has been truncated.\n[mocked truncated body]\n[Note: Could not save full output to file]';
+      const truncationModule = await import('../utils/truncation.js');
+      const spy = vi
+        .spyOn(truncationModule, 'truncateToolOutput')
+        .mockResolvedValue({ content: shortenedContent });
+
+      try {
+        const invocation = shellTool.build({
+          command: 'large-output-cmd',
+          is_background: false,
+        });
+        const promise = invocation.execute(mockAbortSignal);
+        resolveShellExecution({ output: originalOutput, exitCode: 0 });
+        const result = await promise;
+
+        expect(result.llmContent).toContain(shortenedContent);
+        expect(result.llmContent).not.toContain(originalOutput);
+        expect(result.persistedOutputFiles).toEqual([]);
+      } finally {
+        spy.mockRestore();
+      }
+    });
+
     describe('long-running foreground hint', () => {
       // Auto-bg advisory. Threshold = effectiveTimeout / 2 — for the
       // default 120s timeout that's 60_000ms, which the tests below

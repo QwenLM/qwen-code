@@ -2149,6 +2149,27 @@ bad`);
         expect(mockCreateContentGenerator).not.toHaveBeenCalled();
       });
 
+      it('should snapshot the launch provider when inherit receives a concrete model override', async () => {
+        const config = { ...agentConfig, model: 'inherit' };
+
+        await manager.createAgentHeadless(config, mockConfig, {
+          modelConfigOverrides: { model: 'launch-model' },
+          runtimeAuthOverrides: {
+            authType: AuthType.USE_ANTHROPIC,
+            baseUrl: 'https://launch-provider.example.com',
+          },
+        });
+
+        expect(mockCreateContentGenerator).toHaveBeenCalledWith(
+          expect.objectContaining({
+            model: 'launch-model',
+            authType: AuthType.USE_ANTHROPIC,
+            baseUrl: 'https://launch-provider.example.com',
+          }),
+          mockConfig,
+        );
+      });
+
       it('should NOT create a new ContentGenerator when model is omitted', async () => {
         await manager.createAgentHeadless(agentConfig, mockConfig);
 

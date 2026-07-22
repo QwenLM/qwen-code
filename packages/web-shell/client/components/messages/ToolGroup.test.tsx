@@ -558,6 +558,38 @@ describe('tool row rendering', () => {
     expect(container.querySelector('[class*="expandedCardHeader"]')).toBeNull();
   });
 
+  it('opens a single foreground agent from the tool summary', () => {
+    const onOpen = vi.fn();
+    const tool = makeTool({
+      toolName: 'agent',
+      status: 'completed',
+      args: {
+        subagent_type: 'Explore',
+        run_in_background: false,
+      },
+      subContent: 'investigation complete',
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <SubagentDetailsProvider onOpen={onOpen}>
+            <ToolGroup tools={[tool]} />
+          </SubagentDetailsProvider>
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const summary = container.querySelector('button') as HTMLButtonElement;
+    expect(summary.hasAttribute('aria-expanded')).toBe(false);
+    act(() => summary.click());
+
+    expect(onOpen).toHaveBeenCalledWith(tool);
+  });
+
   it('opens on-demand agent details without mounting inline content', () => {
     const onOpen = vi.fn();
     const tool = makeTool({
