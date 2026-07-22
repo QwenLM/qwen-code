@@ -44,6 +44,7 @@ import { MessageType } from '../types.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import {
   CommandKind,
+  type AgentViewIdleGateState,
   type CommandContext,
   type SlashCommand,
 } from '../commands/types.js';
@@ -159,6 +160,7 @@ export interface SlashCommandProcessorActions {
   openRewindSelector: () => void;
   openDiffDialog: () => void;
   openHelpDialog: () => void;
+  detachAgentViewSession?: () => Promise<void>;
 }
 
 /**
@@ -184,6 +186,7 @@ export const useSlashCommandProcessor = (
   updateItem: UseHistoryManagerReturn['updateItem'],
   setSessionName?: (name: string | null) => void,
   extensionRefreshState?: ExtensionRefreshState,
+  agentViewIdleGateStateRef?: MutableRefObject<AgentViewIdleGateState>,
 ) => {
   const fallbackExtensionRefreshStateRef = useRef<ExtensionRefreshState | null>(
     null,
@@ -490,6 +493,7 @@ export const useSlashCommandProcessor = (
         cancelBtw,
         btwAbortControllerRef,
         isIdleRef,
+        agentViewIdleGateStateRef,
         toggleVimEnabled,
         setGeminiMdFileCount,
         reloadCommands,
@@ -529,6 +533,7 @@ export const useSlashCommandProcessor = (
       setSessionName,
       extensionsUpdateState,
       isIdleRef,
+      agentViewIdleGateStateRef,
       activeExtensionRefreshState,
     ],
   );
@@ -1044,6 +1049,14 @@ export const useSlashCommandProcessor = (
                     toolName: result.toolName,
                     toolArgs: result.toolArgs,
                   };
+                case 'agent_view_detach':
+                  if (!actions.detachAgentViewSession) {
+                    throw new Error(
+                      'Agent View detach action is not available.',
+                    );
+                  }
+                  await actions.detachAgentViewSession();
+                  return { type: 'handled' };
                 case 'message':
                   if (result.messageType === 'info') {
                     addMessage({

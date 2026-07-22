@@ -69,6 +69,16 @@ import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
 import { updateCommand } from '../commands/update.js';
+import { agentsCommand } from '../commands/agents.js';
+import { agentDaemonCommand } from '../commands/agent-daemon.js';
+import {
+  attachCommand,
+  killCommand,
+  logsCommand,
+  respawnCommand,
+  rmCommand,
+  stopCommand,
+} from '../commands/agent-session.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -223,6 +233,7 @@ export interface CliArgs {
   jsonFile?: string | undefined;
   jsonSchema?: string | undefined;
   inputFile?: string | undefined;
+  background?: boolean | undefined;
 }
 
 /**
@@ -680,6 +691,11 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Execute the provided prompt and continue in interactive mode',
         })
+        .option('background', {
+          alias: 'bg',
+          type: 'boolean',
+          description: 'Start a new Agent View background session',
+        })
         .option('system-prompt', {
           type: 'string',
           description:
@@ -975,6 +991,28 @@ export async function parseArguments(): Promise<CliArgs> {
             ? query.length > 0
             : !!query;
 
+          if (argv['background'] && !hasPositionalQuery) {
+            return 'Cannot use --bg/--background without a positional prompt';
+          }
+          if (argv['background'] && argv['prompt']) {
+            return 'Cannot use --bg/--background with --prompt (-p)';
+          }
+          if (argv['background'] && argv['promptInteractive']) {
+            return 'Cannot use --bg/--background with --prompt-interactive (-i)';
+          }
+          if (argv['background'] && (argv['acp'] || argv['experimentalAcp'])) {
+            return 'Cannot use --bg/--background with ACP mode';
+          }
+          if (argv['background'] && argv['inputFormat'] === 'stream-json') {
+            return 'Cannot use --bg/--background with --input-format stream-json';
+          }
+          if (
+            argv['background'] &&
+            (argv['outputFormat'] === OutputFormat.JSON ||
+              argv['outputFormat'] === OutputFormat.STREAM_JSON)
+          ) {
+            return 'Cannot use --bg/--background with JSON output';
+          }
           if (argv['prompt'] && hasPositionalQuery) {
             return 'Cannot use both a positional prompt and the --prompt (-p) flag together';
           }
@@ -1086,6 +1124,15 @@ export async function parseArguments(): Promise<CliArgs> {
     .command(serveCommand)
     // Register sessions subcommands
     .command(sessionsCommand)
+    // Register Agent View Phase 1 command surface
+    .command(agentsCommand)
+    .command(agentDaemonCommand)
+    .command(attachCommand)
+    .command(logsCommand)
+    .command(stopCommand)
+    .command(killCommand)
+    .command(respawnCommand)
+    .command(rmCommand)
     // Register update command
     .command(updateCommand);
 
@@ -1113,6 +1160,14 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
       result._[0] === 'sessions' ||
+      result._[0] === 'agents' ||
+      result._[0] === 'daemon' ||
+      result._[0] === 'attach' ||
+      result._[0] === 'logs' ||
+      result._[0] === 'stop' ||
+      result._[0] === 'kill' ||
+      result._[0] === 'respawn' ||
+      result._[0] === 'rm' ||
       result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
@@ -1132,7 +1187,7 @@ export async function parseArguments(): Promise<CliArgs> {
     : queryArg;
 
   // Route positional args: explicit -i flag -> interactive; else -> one-shot (even for @commands)
-  if (q && !result['prompt']) {
+  if (q && !result['prompt'] && !result['background']) {
     const hasExplicitInteractive =
       result['promptInteractive'] === '' || !!result['promptInteractive'];
     if (hasExplicitInteractive) {
