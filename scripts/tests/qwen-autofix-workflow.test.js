@@ -2556,7 +2556,7 @@ describe('qwen-autofix workflow', () => {
     const flat = readAutofixSkill().replace(/\s+/g, ' ');
     // Actually run — not assert from the diff — the deterministic checks.
     expect(flat).toContain('actually run them, do not assert them');
-    expect(flat).toContain('touched-package test fails, DO NOT commit');
+    expect(flat).toContain('any of these commands fails, DO NOT commit');
     // The summary must carry a Verification section listing commands + results,
     // and a bare "verified" is explicitly rejected.
     expect(flat).toContain('## Verification');
@@ -2566,6 +2566,11 @@ describe('qwen-autofix workflow', () => {
     // commands, so skipping them only moves the rejection later. Pin that
     // framing so the requirement is not softened back into "please verify".
     expect(flat).toMatch(/gate re-runs these (?:same|exact) commands/);
+    // The develop-issue mode must also require a Verification section in its
+    // e2e-report, not just address-review — same regression, different mode.
+    expect(flat).toContain(
+      'section that lists each command you ran and its result (see Shared Rules)',
+    );
   });
 
   it('requires bilingual bodies for files posted verbatim as PR comments', () => {
