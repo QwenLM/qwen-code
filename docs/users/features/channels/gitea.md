@@ -1,5 +1,3 @@
----
-
 # Gitea
 
 This guide covers setting up a Qwen Code channel on Gitea. The Gitea channel polls your notifications and responds to issues and pull requests as comments.
@@ -29,7 +27,7 @@ Add the channel to `~/.qwen/settings.json`:
       "token": "$GITEA_TOKEN",
       "baseUrl": "https://gitea.example.com",
       "groupPolicy": "open",
-      "sessionScope": "thread",
+      "sessionScope": "chat_thread",
       "cwd": "/path/to/your/repo",
       "senderPolicy": "allowlist",
       "allowedUsers": ["your-gitea-username"],
@@ -74,7 +72,7 @@ Unlike the messaging-platform channels that receive messages in real time, the G
 - **`chatId`** — the repository path (e.g., `owner/repo`)
 - **`threadId`** — the issue or pull request (e.g., `issue:42`, `pr:17`)
 
-With `sessionScope: thread`, each issue or pull request gets its own isolated session. The agent's responses are posted as comments on the corresponding issue or pull request.
+With `sessionScope: chat_thread`, each issue or pull request gets its own isolated session. The agent's responses are posted as comments on the corresponding issue or pull request.
 
 The adapter resolves the sender from the latest comment when available, falling back to the issue or PR author.
 
@@ -94,7 +92,7 @@ The Gitea adapter detects `@mentions` by scanning comment text for `@<your-usern
 
 ## Tips
 
-- **Use `sessionScope: "thread"`** — this gives each issue or pull request its own session, so conversations stay focused.
+- **Use `sessionScope: "chat_thread"`** — this gives each issue or pull request its own session, so conversations stay focused.
 - **Restrict access** — use `senderPolicy: "allowlist"` with your Gitea username. The channel processes all your notifications, so you want to control who can trigger the agent.
 - **Lower `pollInterval` for faster response** — the default 60 seconds is conservative. Set it to `30000` or lower if you want quicker responses and don't mind the extra API calls.
 - **Point `cwd` at the repository** — the agent works best when its working directory is the repository the notifications are about, so it can read code and understand context.

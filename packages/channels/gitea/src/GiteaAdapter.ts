@@ -9,6 +9,7 @@ import {
   loadPollCursor,
   savePollCursor,
   stripBotMention,
+  escapeRegex,
   abortableSleep,
 } from '@qwen-code/channel-base';
 import type {
@@ -37,7 +38,7 @@ export class GiteaChannel extends ChannelBase {
   ) {
     super(name, config, bridge, options);
     const cursor = loadPollCursor(name);
-    this.lastProcessedAt = cursor.timestamp;
+    this.lastProcessedAt = cursor.timestamp || new Date().toISOString();
     this.processedIdsAtCursor = cursor.processedIds;
     const baseUrl = (config['baseUrl'] as string) || 'https://gitea.com';
     this.client = giteaApi(baseUrl, { token: this.config.token });
@@ -323,7 +324,7 @@ export class GiteaChannel extends ChannelBase {
         : (body ?? '');
     const isMentioned = this.botUsername
       ? new RegExp(
-          `(?<=\\s|^|[([{"<])@${this.botUsername.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?=[^a-zA-Z0-9_/-]|$)`,
+          `(?<=\\s|^|[([{"<])@${escapeRegex(this.botUsername)}(?=[^a-zA-Z0-9_/-]|$)`,
         ).test(body)
       : false;
 

@@ -74,6 +74,7 @@ describe('GitlabChannel', () => {
     mockIssuesCreate.mockClear();
     mockShowCurrentUser.mockClear();
     mockShowCurrentUser.mockResolvedValue({ username: 'bot' });
+    savePollCursor('test', '2025-01-01T00:00:00Z');
   });
 
   afterEach(() => {
@@ -456,24 +457,24 @@ describe('GitlabChannel', () => {
     expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
   });
 
-  it('fetches all pages of todos', async () => {
-    const page1 = Array.from({ length: 100 }, (_, i) => ({
-      id: i + 1,
-      action_name: 'mentioned',
-      target_type: 'Issue',
-      target: { title: `Issue ${i}`, iid: i },
-      target_url: `https://gitlab.com/owner/repo/-/issues/${i}`,
-      body: '',
-      state: 'pending',
-      created_at: '2026-01-01T00:00:00Z',
-      updated_at: '2026-01-01T00:00:00Z',
-      project: {
-        name: 'repo',
-        path_with_namespace: 'owner/repo',
-      },
-      author: { name: 'Alice', username: 'alice' },
-    }));
-    const page2 = [
+  it('fetches all todos via auto-pagination', async () => {
+    const allTodos = [
+      ...Array.from({ length: 100 }, (_, i) => ({
+        id: i + 1,
+        action_name: 'mentioned',
+        target_type: 'Issue',
+        target: { title: `Issue ${i}`, iid: i },
+        target_url: `https://gitlab.com/owner/repo/-/issues/${i}`,
+        body: '',
+        state: 'pending',
+        created_at: '2026-01-01T00:00:00Z',
+        updated_at: '2026-01-01T00:00:00Z',
+        project: {
+          name: 'repo',
+          path_with_namespace: 'owner/repo',
+        },
+        author: { name: 'Alice', username: 'alice' },
+      })),
       {
         id: 101,
         action_name: 'mentioned',
@@ -491,7 +492,7 @@ describe('GitlabChannel', () => {
         author: { name: 'Alice', username: 'alice' },
       },
     ];
-    mockTodosAll.mockResolvedValueOnce(page1).mockResolvedValueOnce(page2);
+    mockTodosAll.mockResolvedValueOnce(allTodos);
     mockTodoDone.mockResolvedValue({});
 
     const bridge = mockBridge();
@@ -503,10 +504,10 @@ describe('GitlabChannel', () => {
     );
     channel.disconnect();
 
-    expect(mockTodosAll).toHaveBeenCalledTimes(2);
-    expect(mockTodosAll).toHaveBeenLastCalledWith({
+    expect(mockTodosAll).toHaveBeenCalledTimes(1);
+    expect(mockTodosAll).toHaveBeenCalledWith({
       perPage: 100,
-      page: 2,
+      updated_after: '2024-12-31T23:59:59.000Z',
     });
     expect(mockTodoDone).toHaveBeenCalledWith({ todoId: 101 });
   });

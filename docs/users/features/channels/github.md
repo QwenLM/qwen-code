@@ -1,5 +1,3 @@
----
-
 # GitHub
 
 This guide covers setting up a Qwen Code channel on GitHub. The GitHub channel polls your notifications and responds to issues and pull requests as comments.
@@ -29,7 +27,7 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "github",
       "token": "$GITHUB_TOKEN",
       "groupPolicy": "open",
-      "sessionScope": "thread",
+      "sessionScope": "chat_thread",
       "cwd": "/path/to/your/repo",
       "senderPolicy": "allowlist",
       "allowedUsers": ["your-github-username"],
@@ -74,7 +72,7 @@ Unlike the messaging-platform channels that receive messages in real time, the G
 - **`chatId`** — the repository path (e.g., `octocat/hello-world`)
 - **`threadId`** — the issue or pull request (e.g., `issue:42`, `pr:17`)
 
-With `sessionScope: thread`, each issue or pull request gets its own isolated session. The agent's responses are posted as comments on the corresponding issue or pull request.
+With `sessionScope: chat_thread`, each issue or pull request gets its own isolated session. The agent's responses are posted as comments on the corresponding issue or pull request.
 
 The adapter responds to: issue comments, pull request review comments, new issues, and new pull requests where you are mentioned.
 
@@ -90,7 +88,7 @@ The agent can proactively create issues or post comments without an inbound noti
 
 ## Tips
 
-- **Use `sessionScope: "thread"`** — this gives each issue or pull request its own session, so conversations stay focused.
+- **Use `sessionScope: "chat_thread"`** — this gives each issue or pull request its own session, so conversations stay focused.
 - **Restrict access** — use `senderPolicy: "allowlist"` with your GitHub username. The channel processes all your notifications, so you want to control who can trigger the agent.
 - **Lower `pollInterval` for faster response** — the default 60 seconds is conservative. Set it to `30000` or lower if you want quicker responses and don't mind the extra API calls.
 - **Point `cwd` at the repository** — the agent works best when its working directory is the repository the notifications are about, so it can read code and understand context.

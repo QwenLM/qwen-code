@@ -10406,7 +10406,7 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toBe('agent response');
     });
 
-    it('sendResponseMessage skips and logs when session target is gone', async () => {
+    it('sendResponseMessage delivers even when session target is gone', async () => {
       const router = {
         getTarget: vi.fn().mockReturnValue(undefined),
         handleSessionDied: vi.fn(),
@@ -10424,9 +10424,10 @@ describe('ChannelBase', () => {
         .join('');
       writeSpy.mockRestore();
 
-      expect(ch.sent).toEqual([]);
+      expect(ch.sent).toHaveLength(1);
+      expect(ch.sent[0]!.text).toBe('hello');
       expect(logged).toContain('gone-session');
-      expect(logged).toContain('not found');
+      expect(logged).toContain('target gone');
     });
 
     it('sendResponseMessage passes router target threadId to sendThreadMessage', async () => {

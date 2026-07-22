@@ -1,5 +1,3 @@
----
-
 # GitLab
 
 This guide covers setting up a Qwen Code channel on GitLab. The GitLab channel polls your Todo list and responds to issues and merge requests as notes (comments).
@@ -28,7 +26,7 @@ Add the channel to `~/.qwen/settings.json`:
       "type": "gitlab",
       "token": "$GITLAB_TOKEN",
       "groupPolicy": "open",
-      "sessionScope": "thread",
+      "sessionScope": "chat_thread",
       "cwd": "/path/to/your/repo",
       "senderPolicy": "allowlist",
       "allowedUsers": ["your-gitlab-username"],
@@ -73,7 +71,7 @@ Unlike the messaging-platform channels that receive messages in real time, the G
 - **`chatId`** — the project path (e.g., `group/subgroup/project`)
 - **`threadId`** — the issue or merge request (e.g., `issue:42`, `mr:17`)
 
-With `sessionScope: thread`, each issue or merge request gets its own isolated session. The agent's responses are posted as notes on the corresponding issue or merge request.
+With `sessionScope: chat_thread`, each issue or merge request gets its own isolated session. The agent's responses are posted as notes on the corresponding issue or merge request.
 
 The adapter only processes `Issue` and `MergeRequest` todo target types. Todos for commits, pipelines, design management, and other types are skipped.
 
@@ -85,7 +83,7 @@ The agent can proactively create issues or post notes without an inbound todo. W
 
 ## Tips
 
-- **Use `sessionScope: "thread"`** — this gives each issue or merge request its own session, so conversations stay focused.
+- **Use `sessionScope: "chat_thread"`** — this gives each issue or merge request its own session, so conversations stay focused.
 - **Restrict access** — use `senderPolicy: "allowlist"` with your GitLab username. The channel processes all your todos, so you want to control who can trigger the agent.
 - **Lower `pollInterval` for faster response** — the default 60 seconds is conservative. Set it to `30000` or lower if you want quicker responses and don't mind the extra API calls.
 - **Point `cwd` at the repository** — the agent works best when its working directory is the repository the todos are about, so it can read code and understand context.

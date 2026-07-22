@@ -224,8 +224,8 @@ describe('SessionRouter', () => {
       expect(s1).toBe(s2);
     });
 
-    it('thread scope: different chatIds with same threadId get different sessions', async () => {
-      const router = new SessionRouter(bridge, '/tmp', 'thread');
+    it('chat_thread scope: different chatIds with same threadId get different sessions', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'chat_thread');
       const s1 = await router.resolve('ch', 'alice', 'repo-a', 'issue:42');
       const s2 = await router.resolve('ch', 'alice', 'repo-b', 'issue:42');
       expect(s1).not.toBe(s2);
@@ -280,6 +280,28 @@ describe('SessionRouter', () => {
       const u1 = await router.resolve('ch-user', 'alice', 'c1');
       const u2 = await router.resolve('ch-user', 'alice', 'c2');
       expect(u1).not.toBe(u2);
+    });
+
+    it('chat_thread scope isolates by chatId and threadId', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'chat_thread');
+
+      // same chat + thread = same session
+      const ct1 = await router.resolve('ch', 'alice', 'repo-a', 'issue:1');
+      const ct2 = await router.resolve('ch', 'bob', 'repo-a', 'issue:1');
+      expect(ct1).toBe(ct2);
+
+      // different chat + same thread = different sessions (prevents cross-repo collision)
+      const ct3 = await router.resolve('ch', 'alice', 'repo-b', 'issue:1');
+      expect(ct1).not.toBe(ct3);
+
+      // same chat + different thread = different sessions
+      const ct4 = await router.resolve('ch', 'alice', 'repo-a', 'issue:2');
+      expect(ct1).not.toBe(ct4);
+
+      // no threadId falls back to chatId only
+      const ct5 = await router.resolve('ch', 'alice', 'repo-a');
+      const ct6 = await router.resolve('ch', 'bob', 'repo-a');
+      expect(ct5).toBe(ct6);
     });
   });
 

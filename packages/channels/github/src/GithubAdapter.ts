@@ -38,7 +38,7 @@ export class GithubChannel extends ChannelBase {
   ) {
     super(name, config, bridge, options);
     const cursor = loadPollCursor(name);
-    this.lastProcessedAt = cursor.timestamp;
+    this.lastProcessedAt = cursor.timestamp || new Date().toISOString();
     this.processedIdsAtCursor = cursor.processedIds;
     this.octokit = new Octokit({
       auth: this.config.token,

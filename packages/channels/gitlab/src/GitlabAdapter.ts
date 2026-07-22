@@ -47,7 +47,7 @@ export class GitlabChannel extends ChannelBase {
   ) {
     super(name, config, bridge, options);
     const cursor = loadPollCursor(name);
-    this.lastProcessedAt = cursor.timestamp;
+    this.lastProcessedAt = cursor.timestamp || new Date().toISOString();
     this.processedIdsAtCursor = cursor.processedIds;
     this.gitlab = new Gitlab({
       host: (config['baseUrl'] as string) || 'https://gitlab.com',
@@ -162,29 +162,20 @@ export class GitlabChannel extends ChannelBase {
   }
 
   private async pollTodos(): Promise<void> {
-    const todos: TodoSchema[] = [];
-    let page = 1;
-    const perPage = 100;
-    while (true) {
-      let apiSince: string | undefined;
-      if (this.lastProcessedAt) {
-        const parsed = new Date(this.lastProcessedAt).getTime();
-        if (Number.isNaN(parsed)) {
-          this.lastProcessedAt = '';
-        } else {
-          apiSince = new Date(parsed - 1000).toISOString();
-        }
+    let apiSince: string | undefined;
+    if (this.lastProcessedAt) {
+      const parsed = new Date(this.lastProcessedAt).getTime();
+      if (Number.isNaN(parsed)) {
+        this.lastProcessedAt = '';
+      } else {
+        apiSince = new Date(parsed - 1000).toISOString();
       }
-      const response = await this.gitlab.TodoLists.all({
-        perPage,
-        page,
-        ...(apiSince ? { updated_after: apiSince } : {}),
-      });
-      const batch = response as TodoSchema[];
-      todos.push(...batch);
-      if (batch.length < perPage) break;
-      page++;
     }
+    const response = await this.gitlab.TodoLists.all({
+      perPage: 100,
+      ...(apiSince ? { updated_after: apiSince } : {}),
+    });
+    const todos = response as TodoSchema[];
     todos.sort((a, b) =>
       (a.updated_at ?? '').localeCompare(b.updated_at ?? ''),
     );

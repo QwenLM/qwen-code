@@ -89,6 +89,7 @@ describe('GiteaChannel', () => {
     mockRepoGetPullRequest.mockClear();
     mockUserGetCurrent.mockClear();
     mockUserGetCurrent.mockResolvedValue({ data: { login: 'bot' } });
+    savePollCursor('test', '2025-01-01T00:00:00Z');
   });
 
   afterEach(() => {

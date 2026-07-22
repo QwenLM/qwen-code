@@ -81,6 +81,7 @@ export {
   savePollCursor,
   stripMentions,
   stripBotMention,
+  escapeRegex,
   abortableSleep,
 } from './polling-helpers.js';
 export type {

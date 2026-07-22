@@ -1885,14 +1885,13 @@ export abstract class ChannelBase {
     sessionId: string,
   ): Promise<void> {
     const target = this.router.getTarget(sessionId);
+    const active = this.activePrompts.get(sessionId);
+    const threadId = active?.threadId ?? target?.threadId;
     if (!target) {
       process.stderr.write(
-        `[${this.name}] session ${sessionId} not found — skipping response delivery\n`,
+        `[${this.name}] session ${sessionId} target gone — delivering without router target\n`,
       );
-      return;
     }
-    const active = this.activePrompts.get(sessionId);
-    const threadId = active?.threadId ?? target.threadId;
     await this.sendThreadMessage(chatId, threadId, text);
   }
 
@@ -3901,7 +3900,9 @@ export abstract class ChannelBase {
   private isSharedSessionTarget(target: { isGroup?: boolean }): boolean {
     return (
       this.config.sessionScope === 'single' ||
-      (target.isGroup === true && this.config.sessionScope === 'thread')
+      (target.isGroup === true &&
+        (this.config.sessionScope === 'thread' ||
+          this.config.sessionScope === 'chat_thread'))
     );
   }
 
