@@ -4122,6 +4122,36 @@ export class DaemonClient {
     );
   }
 
+  /** Requests a process-local workspace in a daemon-managed empty directory. */
+  async addScratchWorkspace(): Promise<{
+    id: string;
+    cwd: string;
+    primary: boolean;
+    trusted: boolean;
+    persisted: false;
+  }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspaces`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ kind: 'scratch' }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspaces');
+        }
+        return (await res.json()) as {
+          id: string;
+          cwd: string;
+          primary: boolean;
+          trusted: boolean;
+          persisted: false;
+        };
+      },
+    );
+  }
+
   // -- Lifecycle / disposal ------------------------------------------------
 
   /**

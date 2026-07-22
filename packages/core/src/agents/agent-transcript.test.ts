@@ -453,7 +453,7 @@ describe('agent-transcript', () => {
       });
     });
 
-    it('writes TOOL_RESULT events as tool_result records with toolCallResult metadata', () => {
+    it('does not persist provisional TOOL_RESULT response parts', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
 
@@ -463,7 +463,44 @@ describe('agent-transcript', () => {
         callId: 'c1',
         name: 'read_file',
         success: true,
-        durationMs: 7,
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'c1',
+              name: 'read_file',
+              response: { output: 'unfinalized' },
+            },
+          },
+        ],
+        timestamp: Date.now(),
+      });
+      cleanup();
+
+      expect(fs.existsSync(jsonlPath)).toBe(false);
+    });
+
+    it('writes finalized tool responses with toolCallResult metadata', () => {
+      const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
+      const { emitter, cleanup } = makeWriter(jsonlPath);
+
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+        subagentId: 'agent-x',
+        round: 1,
+        responses: [
+          {
+            callId: 'c1',
+            durationMs: 7,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
         timestamp: Date.now(),
       });
       cleanup();
@@ -477,7 +514,7 @@ describe('agent-transcript', () => {
       });
     });
 
-    it('preserves real responseParts from TOOL_RESULT when present', () => {
+    it('preserves finalized responseParts', () => {
       const jsonlPath = path.join(tempDir, 's', 'agent-x.jsonl');
       const { emitter, cleanup } = makeWriter(jsonlPath);
 
@@ -490,13 +527,10 @@ describe('agent-transcript', () => {
           },
         },
       ];
-      emitter.emit(AgentEventType.TOOL_RESULT, {
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
         subagentId: 'agent-x',
         round: 1,
-        callId: 'c1',
-        name: 'read_file',
-        success: true,
-        responseParts,
+        responses: [{ callId: 'c1', responseParts }],
         timestamp: Date.now(),
       });
       cleanup();
@@ -525,12 +559,23 @@ describe('agent-transcript', () => {
         description: '',
         timestamp: 2,
       });
-      emitter.emit(AgentEventType.TOOL_RESULT, {
+      emitter.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
         subagentId: 'agent-x',
         round: 1,
-        callId: 'c1',
-        name: 'read_file',
-        success: true,
+        responses: [
+          {
+            callId: 'c1',
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'c1',
+                  name: 'read_file',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        ],
         timestamp: 3,
       });
       cleanup();

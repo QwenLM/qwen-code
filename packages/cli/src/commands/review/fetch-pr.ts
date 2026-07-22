@@ -18,9 +18,10 @@
 //      `.qwen/tmp/review-pr-<n>` so subsequent steps can run in isolation.
 //   5. Capture the review diff to `.qwen/tmp/qwen-review-pr-<n>-diff.txt` and
 //      partition it into chunks. Review agents `read_file` a chunk's line
-//      range instead of running `git diff` themselves: shell output is capped
-//      at 30 000 chars (head 1/5 + tail 4/5), which on a large PR hides most
-//      of the diff from every agent at once. See `lib/diff-plan.ts`.
+//      range instead of running `git diff` themselves: Shell keeps a 30 000
+//      character persistence trigger but returns an approximately 4 000
+//      character head-and-tail model preview, which hides most of a large diff
+//      from every agent at once. See `lib/diff-plan.ts`.
 //   6. Emit a single JSON report describing the resulting state, which the
 //      LLM reads to drive the rest of Step 1.
 

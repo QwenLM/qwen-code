@@ -53,6 +53,10 @@ import type {
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
+import {
+  finalizeToolResponses,
+  type ToolResponseBudgetEntry,
+} from '../../utils/tool-response-finalizer.js';
 import { FinishReason } from '@google/genai';
 import type {
   Content,
@@ -1361,8 +1365,24 @@ export class AgentCore {
     messages: Content[];
     repeatedDuplicateProviderToolCall: boolean;
   }> {
-    const toolResponseParts: Part[] = [];
+    const responseByCallId = new Map<
+      string,
+      {
+        toolName: string;
+        responseParts: Part[];
+        persistedOutputFiles?: string[];
+        durationMs?: number;
+      }
+    >();
     const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
+    const generatedCallIdBase = randomUUID();
+    const callIdByFunctionCall = new Map(
+      uniqueFunctionCalls.map((functionCall, index) => [
+        functionCall,
+        functionCall.id ??
+          `${functionCall.name ?? 'tool'}-${generatedCallIdBase}-${index}`,
+      ]),
+    );
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
@@ -1391,7 +1411,7 @@ export class AgentCore {
     const authorizedCalls: FunctionCall[] = [];
     let duplicateEventIndex = 0;
     for (const fc of uniqueFunctionCalls) {
-      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const callId = callIdByFunctionCall.get(fc)!;
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
@@ -1420,7 +1440,11 @@ export class AgentCore {
           currentRound,
         });
 
-        toolResponseParts.push(functionResponsePart);
+        responseByCallId.set(callId, {
+          toolName,
+          responseParts: [functionResponsePart],
+          durationMs: 0,
+        });
         continue;
       }
 
@@ -1463,7 +1487,12 @@ export class AgentCore {
             currentRound,
           });
 
-          toolResponseParts.push(...response.responseParts);
+          responseByCallId.set(callId, {
+            toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+            durationMs: 0,
+          });
           continue;
         }
         handledProviderToolCallIds.add(providerCallId);
@@ -1542,18 +1571,12 @@ export class AgentCore {
             timestamp: Date.now(),
           });
 
-          // Append response parts
-          const respParts = call.response.responseParts;
-          if (respParts) {
-            const parts = Array.isArray(respParts) ? respParts : [respParts];
-            for (const part of parts) {
-              if (typeof part === 'string') {
-                toolResponseParts.push({ text: part });
-              } else if (part) {
-                toolResponseParts.push(part);
-              }
-            }
-          }
+          responseByCallId.set(call.request.callId, {
+            toolName,
+            responseParts: call.response.responseParts,
+            persistedOutputFiles: call.response.persistedOutputFiles,
+            durationMs: duration,
+          });
         }
         // Signal that this batch is complete (all tools terminal)
         resolveBatch?.();
@@ -1665,7 +1688,7 @@ export class AgentCore {
     // Prepare requests and emit TOOL_CALL events
     const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
       const toolName = String(fc.name || 'unknown');
-      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const callId = callIdByFunctionCall.get(fc)!;
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const args = (fc.args ?? {}) as Record<string, unknown>;
       const request: ToolCallRequestInfo = {
@@ -1722,6 +1745,15 @@ export class AgentCore {
           emittedCallIds.add(req.callId);
 
           const errorMessage = 'Tool call cancelled by user abort.';
+          const responseParts: Part[] = [
+            {
+              functionResponse: {
+                id: req.callId,
+                name: req.name,
+                response: { error: errorMessage },
+              },
+            },
+          ];
           this.recordToolCallStats(req.name, false, 0, errorMessage);
 
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
@@ -1731,19 +1763,16 @@ export class AgentCore {
             name: req.name,
             success: false,
             error: errorMessage,
-            responseParts: [
-              {
-                functionResponse: {
-                  id: req.callId,
-                  name: req.name,
-                  response: { error: errorMessage },
-                },
-              },
-            ],
+            responseParts,
             resultDisplay: errorMessage,
             durationMs: 0,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
+          responseByCallId.set(req.callId, {
+            toolName: req.name,
+            responseParts,
+            durationMs: 0,
+          });
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
@@ -1766,12 +1795,54 @@ export class AgentCore {
       }
     }
 
-    // If all tool calls failed, inform the model so it can re-evaluate.
-    if (functionCalls.length > 0 && toolResponseParts.length === 0) {
-      toolResponseParts.push({
-        text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+    const orderedResponses: ToolResponseBudgetEntry[] =
+      uniqueFunctionCalls.flatMap((fc) => {
+        const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+        const response = responseByCallId.get(callId);
+        if (!response) return [];
+        return [
+          {
+            callId,
+            toolName: response.toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+          },
+        ];
+      });
+    if (functionCalls.length > 0 && orderedResponses.length === 0) {
+      orderedResponses.push({
+        callId: 'tool-call-batch',
+        toolName: 'tool-call-batch',
+        responseParts: [
+          {
+            text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+          },
+        ],
+        persistedOutputFiles: [],
       });
     }
+    const finalizedResponses = await finalizeToolResponses(
+      this.runtimeContext,
+      orderedResponses,
+    );
+    const toolResponseParts = finalizedResponses.flatMap(
+      (response) => response.responseParts,
+    );
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+      subagentId: this.subagentId,
+      round: currentRound,
+      responses: finalizedResponses.map((response) => {
+        const collected = responseByCallId.get(response.callId);
+        return {
+          callId: response.callId,
+          responseParts: response.responseParts,
+          ...(collected?.durationMs !== undefined
+            ? { durationMs: collected.durationMs }
+            : {}),
+        };
+      }),
+      timestamp: Date.now(),
+    });
 
     return {
       messages: [{ role: 'user', parts: toolResponseParts }],

@@ -139,6 +139,11 @@ export type {
   WebShellSidebarFooterItem,
   WebShellSidebarFooterOptions,
   WebShellSidebarLockedWorkspace,
+  WebShellSidebarPrimaryNavOptions,
+  WebShellSidebarPrimaryNavItem,
+  WebShellSidebarSessionActionsOptions,
+  WebShellSidebarSessionActionItem,
+  WebShellSidebarSessionInlineActionItem,
 } from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
 export type { WebShellTheme } from './themeContext';

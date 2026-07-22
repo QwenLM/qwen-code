@@ -31,6 +31,7 @@ import type { RequestContext, StreamingTextDeltaState } from './types.js';
 import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
   convertSchema,
+  relaxSchemaForFunctionCalling,
   type SchemaComplianceMode,
 } from '../../utils/schemaConverter.js';
 import {
@@ -364,6 +365,13 @@ export async function convertGeminiToolsToOpenAI(
 
           if (parameters) {
             parameters = convertSchema(parameters, schemaCompliance);
+            // #7315: gateways enforcing OpenAI's structured-output contract
+            // promote every property to required when an object level has
+            // `additionalProperties: false` — forcing the model to emit
+            // mutually exclusive optional fields (Agent working_dir vs
+            // isolation). Relax the wire schema; client-side
+            // validateToolParams still enforces the source schema.
+            parameters = relaxSchemaForFunctionCalling(parameters);
           }
 
           openAITools.push({

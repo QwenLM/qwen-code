@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -122,6 +123,53 @@ describe('qwen-triage tmux workflow', () => {
       'RESPONSE="${{ steps.triage.outputs.summary }}"',
     );
     expect(checkStep).toContain('if [[ -z "${RESPONSE}"');
+  });
+
+  it('tells an action crash apart from a silent agent, and replays both', () => {
+    const checkStep = step('Check triage response');
+    // The outcome must arrive through env like RESPONSE does — inlining the
+    // expression into the script would be the injection shape this step
+    // already avoids for RESPONSE.
+    expect(checkStep).toContain(
+      "TRIAGE_OUTCOME: '${{ steps.triage.outcome }}'",
+    );
+    expect(checkStep).not.toContain('TRIAGE_OUTCOME="${{');
+
+    const body = checkStep.match(/run: \|-\n([\s\S]*)$/)?.[1];
+    expect(body).toBeTruthy();
+    const script = body.replace(/^ {10}/gm, '');
+    const run = (env) => {
+      const proc = spawnSync('bash', ['-c', script], {
+        env: {
+          ...process.env,
+          RESPONSE: '',
+          TRIAGE_OUTCOME: 'success',
+          ...env,
+        },
+        encoding: 'utf8',
+      });
+      return { status: proc.status, out: `${proc.stdout}${proc.stderr}` };
+    };
+
+    // A crashed action: no model call happened, so nothing about the PR can
+    // explain it and the guidance must say "re-run", not "read the log" —
+    // the install runs under `npm --silent`, so there is no log to read.
+    const crashed = run({ TRIAGE_OUTCOME: 'failure' });
+    expect(crashed.status).not.toBe(0);
+    expect(crashed.out).toContain('Triage did not start');
+    expect(crashed.out).toContain('re-run the failed job');
+    expect(crashed.out).not.toContain('Triage silent failure');
+
+    // A completed action with no summary IS worth reading the step output for.
+    const silent = run({ TRIAGE_OUTCOME: 'success' });
+    expect(silent.status).not.toBe(0);
+    expect(silent.out).toContain('Triage silent failure');
+    expect(silent.out).toContain('model or prompt problem');
+    expect(silent.out).not.toContain('Triage did not start');
+
+    // A real response still passes, and 'null' still counts as no response.
+    expect(run({ RESPONSE: 'triaged' }).status).toBe(0);
+    expect(run({ RESPONSE: 'null' }).status).not.toBe(0);
   });
 
   it('notifies the author when a manual triage re-run posts no review', () => {
