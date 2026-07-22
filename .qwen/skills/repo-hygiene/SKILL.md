@@ -93,18 +93,43 @@ points at a wrong API or design, ships example code that cannot run, or
 provably contradicts current behavior. Plain typos and harmless wording stay
 untouched.
 
-### B. Judgment scans (read code; parallelize with subagents when useful)
+### B. Judgment scans (read code; parallelize with subagents)
 
-- Test-coverage truthfulness: a test name, `describe` block, wrapper argument,
-  mock input shape, env var, feature flag, or version gate claims to cover a
-  path it never actually triggers; or an assertion is so strict it flakes
-  (e.g. demanding one exact tool call when text output is equally valid).
-- Implementation/contract mismatch: constant name vs value, JSDoc vs
+Use subagents to scan the six angles below in parallel. A subagent reports
+**candidates only** — it does not modify the working tree, does not commit,
+and does not run verification. The main agent collects, deduplicates, then
+decides which candidates to accept as findings.
+
+For each angle, grep/code-reference evidence is required; a candidate that
+cannot point at file:line with a quote is not a finding.
+
+- **Test-coverage truthfulness**: a test name, `describe` block, wrapper
+  argument, mock input shape, env var, feature flag, or version gate claims
+  to cover a path it never actually triggers; or an assertion is so strict
+  it flakes (e.g. demanding one exact tool call when text output is equally
+  valid). Show the gap between the claim and what actually executes.
+- **Implementation/contract mismatch**: constant name vs value, JSDoc vs
   implementation, default value vs every caller, unit conversion, fallback
-  behavior.
-- Real boundary conditions: falsy values, empty strings, dotfiles, path
-  suffixes, case sensitivity, negative/zero values, duplicates, ordering/LRU
-  semantics, cleanup/abort/finally, listener removal, timeout clearing.
+  behavior. Show every caller or every read site that contradicts the
+  declared contract.
+- **Resource lifecycle**: `AbortController` that is never aborted on a
+  fallback path, `finally` that silently swallows, iterator without a
+  `return` handler, stream that is not cleaned up, event listener that is
+  never removed, `setTimeout`/`setInterval` that is not cleared on
+  teardown, file/socket handles that leak across async boundaries. Show the
+  allocation and the missing release.
+- **Real boundary conditions**: falsy values, empty strings, dotfiles,
+  path suffixes, case sensitivity, negative/zero values, duplicates,
+  ordering/LRU semantics. Show the branch that handles (or fails to
+  handle) the boundary.
+- **User-visible configuration/API**: config field names, command options,
+  error messages, and example code against the real parser or schema.
+  Show the parser/schema line and the prose or example that disagrees.
+- **Docs as secondary scan only**: docs findings are accepted only when
+  the prose would mislead a user into a wrong action, points at a wrong
+  API or design, ships example code that cannot run, or provably
+  contradicts current behavior. Plain typos and harmless wording stay
+  untouched.
 
 Do NOT scan GitHub issues as a source. Every finding must be provable from the
 repository itself.
