@@ -285,7 +285,10 @@ export async function readDaemonTrustPolicySnapshot(): Promise<DaemonTrustPolicy
     systemDefaults.error ??
     defaultsFolderTrust.error;
   const folderTrustEnabled =
-    systemFolderTrust.value ?? userFolderTrust.value ?? false;
+    systemFolderTrust.value ??
+    userFolderTrust.value ??
+    defaultsFolderTrust.value ??
+    false;
   const trustedFoldersFile = await readJsonObject(
     getTrustedFoldersPath(),
     MAX_TRUSTED_FOLDERS_BYTES,
