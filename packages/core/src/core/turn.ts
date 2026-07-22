@@ -139,6 +139,7 @@ export interface ToolCallResponseInfo {
   error: Error | undefined;
   errorType: ToolErrorType | undefined;
   contentLength?: number;
+  persistedOutputFiles?: string[];
   modelOverride?: string;
   artifacts?: ToolArtifact[];
 }

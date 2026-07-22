@@ -69,6 +69,8 @@ export function createDaemonTranscriptStore(
     reset(nextSeed: Partial<DaemonTranscriptState> = {}) {
       state = createState({
         maxBlocks: nextSeed.maxBlocks ?? state.maxBlocks,
+        retainSubagentBlocks:
+          nextSeed.retainSubagentBlocks ?? state.retainSubagentBlocks,
         ...nextSeed,
       });
       scheduleNotify();

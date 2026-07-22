@@ -5,6 +5,7 @@
  */
 
 import { Buffer } from 'node:buffer';
+import { randomUUID } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -104,6 +105,7 @@ import {
   getStopHookContinuationReason,
   formatStopHookBlockingCapWarning,
   applyAutoModeDecision,
+  decorateClassifierUnavailableConfirmation,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
   isApproveOutcome,
@@ -114,11 +116,13 @@ import {
   recordFallbackApprove,
   shouldFallback,
   shouldClassifyAllShellForAutoMode,
+  finalizeToolResponses,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
   extractDaemonTraceContext,
   withInteractionSpan,
+  SessionWriterError,
   startToolSpan,
   endToolSpan,
   runInToolSpanContext,
@@ -331,6 +335,13 @@ type AutoCompressionSendResult =
   | { responseStream: AsyncGenerator<StreamEvent>; stopReason?: never }
   | { responseStream: null; stopReason: PromptResponse['stopReason'] };
 
+function getAbortAwareEndTurnStopReason(
+  signal: AbortSignal,
+): PromptResponse['stopReason'] {
+  // Parent cancellation wins over a simultaneous terminal path.
+  return signal.aborted ? 'cancelled' : 'end_turn';
+}
+
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
@@ -376,6 +387,23 @@ type BeforeModelSendDecision =
 type BeforeModelSendContext = {
   compressionFailed: boolean;
 };
+
+type PendingToolResultRecord = {
+  ordinal: number;
+  sequence: number;
+  callId: string;
+  toolName: string;
+  responseParts: Part[];
+  persistedOutputFiles?: string[];
+  metadata: Partial<ToolCallResponseInfo> & {
+    status: 'success' | 'error' | 'cancelled';
+  };
+};
+
+type QueueToolResultRecord = (
+  fc: FunctionCall,
+  record: Omit<PendingToolResultRecord, 'ordinal' | 'sequence'>,
+) => void;
 
 type DaemonToolLoopState = {
   totalToolCalls: number;
@@ -1074,6 +1102,7 @@ export class Session implements SessionContext {
    * process termination is slow.
    */
   private pendingPromptCompletion: Promise<void> | null = null;
+  private automaticDrainRetry: Promise<void> | null = null;
   /**
    * Per-turn AbortController for the fire-and-forget follow-up suggestion
    * generation. Aborted on the top of the next `prompt()` and on
@@ -1139,6 +1168,9 @@ export class Session implements SessionContext {
   // or session reload), which would otherwise execute orphaned cron prompts
   // on a session whose registries are already unregistered.
   private disposed = false;
+  private closing = false;
+  private closeGateCompletion: Promise<void> | null = null;
+  private resolveCloseGate: (() => void) | null = null;
   private unsubscribeChatRecordingFailure?: () => void;
 
   // Modular components
@@ -1175,7 +1207,7 @@ export class Session implements SessionContext {
     private readonly settings: LoadedSettings,
   ) {
     this.sessionId = id;
-    this.runtimeBaseDir = Storage.getRuntimeBaseDir();
+    this.runtimeBaseDir = config.storage.getRuntimeBaseDir();
     const todoStopGuardEnabled =
       this.settings.merged.experimental?.todoStopGuard === true &&
       !this.config.getBareMode() &&
@@ -1491,7 +1523,7 @@ export class Session implements SessionContext {
    */
   startCronScheduler(): void {
     // Best-effort: a cron startup failure must not break session creation.
-    this.#startCronSchedulerIfNeeded().catch((error) => {
+    this.#startCronSchedulerInRuntime().catch((error) => {
       debugLogger.warn(
         `Cron scheduler startup failed [session ${this.sessionId}]: ${error}`,
       );
@@ -1502,15 +1534,110 @@ export class Session implements SessionContext {
     return this.config;
   }
 
+  async assertCanStartTurn(): Promise<void> {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    try {
+      await this.config.assertCanStartTurn();
+    } catch (error) {
+      if (error instanceof SessionWriterError) {
+        throw new RequestError(error.rpcCode, error.message, {
+          errorKind: error.errorKind,
+        });
+      }
+      throw error;
+    }
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+  }
+
   isIdle(): boolean {
-    return (
-      !this.pendingPrompt &&
-      !this.pendingPromptCompletion &&
-      !this.cronProcessing &&
-      !this.cronAbortController &&
-      !this.notificationProcessing &&
-      !this.notificationAbortController
+    return !this.closing && !this.#hasActiveTurn();
+  }
+
+  #hasActiveTurn(): boolean {
+    return Boolean(
+      this.pendingPrompt ||
+        this.pendingPromptCompletion ||
+        this.cronProcessing ||
+        this.cronAbortController ||
+        this.cronCompletion ||
+        this.notificationProcessing ||
+        this.notificationAbortController ||
+        this.notificationCompletion,
     );
+  }
+
+  beginClose(): () => void {
+    if (this.closing) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Session close is already in progress',
+      );
+    }
+    this.closing = true;
+    let resolveGate!: () => void;
+    const completion = new Promise<void>((resolve) => {
+      resolveGate = resolve;
+    });
+    this.closeGateCompletion = completion;
+    this.resolveCloseGate = resolveGate;
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      if (this.closeGateCompletion === completion) {
+        this.closeGateCompletion = null;
+        this.resolveCloseGate = null;
+      }
+      resolveGate();
+      if (this.disposed) return;
+      this.closing = false;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    };
+  }
+
+  beginCloseIfAvailable(): (() => void) | null {
+    if (this.disposed) {
+      throw RequestError.invalidParams(undefined, 'Session has been disposed');
+    }
+    return this.closing ? null : this.beginClose();
+  }
+
+  waitForCloseGateToRelease(): Promise<void> {
+    return this.closeGateCompletion ?? Promise.resolve();
+  }
+
+  async waitForActiveTurnsToSettle(): Promise<void> {
+    const pending = [
+      this.pendingPromptCompletion,
+      this.cronCompletion,
+      this.notificationCompletion,
+    ].filter((completion): completion is Promise<void> => completion !== null);
+    await Promise.allSettled(pending);
+  }
+
+  #deferAutomaticQueueDrainUntilTurnsSettle(): boolean {
+    const completions = [
+      this.pendingPromptCompletion,
+      this.cronCompletion,
+      this.notificationCompletion,
+    ].filter((completion): completion is Promise<void> => completion !== null);
+    if (completions.length === 0) return false;
+    if (this.automaticDrainRetry) return true;
+
+    const retry = Promise.allSettled(completions).then(() => {
+      if (this.automaticDrainRetry !== retry) return;
+      this.automaticDrainRetry = null;
+      if (this.disposed) return;
+      void this.#drainCronQueue();
+      void this.#drainNotificationQueue();
+    });
+    this.automaticDrainRetry = retry;
+    return true;
   }
 
   getTurnCount(): number {
@@ -1523,6 +1650,10 @@ export class Session implements SessionContext {
 
   dispose(): void {
     this.disposed = true;
+    this.closing = true;
+    this.resolveCloseGate?.();
+    this.resolveCloseGate = null;
+    this.closeGateCompletion = null;
     this.todoStopGuardQueuedPromptPriority = false;
     this.todoStopGuardDrainAutomaticQueuesWhenIdle = false;
     this.todoStopGuard.clearTrust();
@@ -1545,9 +1676,10 @@ export class Session implements SessionContext {
     // one-shots from disk without executing them) and the held lock
     // would block another session from taking over.
     if (this.config.isCronEnabled()) {
-      this.config.getCronScheduler().stop();
+      this.#stopCronSchedulerInRuntime();
     }
 
+    this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
@@ -1649,13 +1781,7 @@ export class Session implements SessionContext {
       );
     }
 
-    if (
-      this.pendingPrompt ||
-      this.cronProcessing ||
-      this.cronAbortController ||
-      this.notificationProcessing ||
-      this.notificationAbortController
-    ) {
+    if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot rewind while a prompt is running',
@@ -1732,13 +1858,7 @@ export class Session implements SessionContext {
   }
 
   restoreHistory(history: Content[]): void {
-    if (
-      this.pendingPrompt ||
-      this.cronProcessing ||
-      this.cronAbortController ||
-      this.notificationProcessing ||
-      this.notificationAbortController
-    ) {
+    if (this.closing || this.#hasActiveTurn()) {
       throw RequestError.invalidParams(
         undefined,
         'Cannot restore history while a prompt is running',
@@ -1850,7 +1970,7 @@ export class Session implements SessionContext {
       : null;
     if (scheduler) {
       const summary = scheduler.getExitSummary();
-      scheduler.stop();
+      this.#stopCronSchedulerInRuntime();
       if (summary) {
         await this.messageEmitter.emitAgentMessage(summary);
       }
@@ -1858,10 +1978,15 @@ export class Session implements SessionContext {
   }
 
   async prompt(params: PromptRequest): Promise<PromptResponse> {
+    if (this.closing) {
+      throw RequestError.invalidParams(undefined, 'Session is closing');
+    }
+    await this.assertCanStartTurn();
     const todoStopGuardPreparation =
       this.#prepareTodoStopGuardForPrompt(params);
-    // Install this prompt's AbortController before awaiting the previous
-    // prompt, so that a session/cancel during the wait targets us.
+    // After writer admission, install this prompt's AbortController before
+    // awaiting the previous prompt so a session/cancel during that wait
+    // targets us. A cancel during admission cannot target this pending prompt.
     this.pendingPrompt?.abort();
     const pendingSend = new AbortController();
     this.pendingPrompt = pendingSend;
@@ -1944,6 +2069,13 @@ export class Session implements SessionContext {
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
       return result;
+    } catch (error) {
+      if (error instanceof SessionWriterError) {
+        throw new RequestError(error.rpcCode, error.message, {
+          errorKind: error.errorKind,
+        });
+      }
+      throw error;
     } finally {
       this.pendingPrompt = null;
       const shouldDrainAutomaticQueues =
@@ -1962,7 +2094,7 @@ export class Session implements SessionContext {
       // hasPendingWork/disposed/disabled, so it only starts when a wakeup (or
       // cron job) is actually pending — otherwise the loop dies silently on
       // any post-arm error.
-      void this.#startCronSchedulerIfNeeded();
+      void this.#startCronSchedulerInRuntime();
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
@@ -2147,6 +2279,10 @@ export class Session implements SessionContext {
       this.runtimeBaseDir,
       this.config.getWorkingDir(),
       async () => {
+        await this.assertCanStartTurn();
+        if (pendingSend.signal.aborted) {
+          return { stopReason: 'cancelled' };
+        }
         // Increment turn counter for each user prompt
         this.turn += 1;
 
@@ -2649,7 +2785,11 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return { stopReason: 'end_turn' };
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
                   }
                   const nextAfterTools =
                     await this.#buildNextMessageAfterToolRun(
@@ -2664,7 +2804,11 @@ export class Session implements SessionContext {
                       toolRun,
                       pendingSend.signal,
                     );
-                    return { stopReason: 'end_turn' };
+                    return {
+                      stopReason: getAbortAwareEndTurnStopReason(
+                        pendingSend.signal,
+                      ),
+                    };
                   }
                 }
               }
@@ -2724,7 +2868,7 @@ export class Session implements SessionContext {
     while (true) {
       if (pendingSend.signal.aborted) {
         this.todoStopGuard.suspend();
-        return { stopReason: 'end_turn' };
+        return { stopReason: 'cancelled' };
       }
 
       if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
@@ -3316,7 +3460,7 @@ export class Session implements SessionContext {
           await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
           return {
             kind: 'terminal',
-            stopReason: 'end_turn',
+            stopReason: getAbortAwareEndTurnStopReason(pendingSend.signal),
             ...(supersededAutomaticContinuation
               ? { supersededAutomaticContinuation: true }
               : {}),
@@ -3661,6 +3805,15 @@ export class Session implements SessionContext {
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
+    // Leave host-queued input in place, but preserve messages already removed
+    // by a prior timed-out drain before returning the cancellation response.
+    const midTurnParts = abortSignal.aborted
+      ? await this.#buildMidTurnParts(
+          this.#takeRecoveredMidTurnMessages(),
+          abortSignal,
+          { preserveFallbackOnAbort: true },
+        )
+      : await this.#drainMidTurnUserMessages(abortSignal);
     this.#preserveUnsentMessageHistory(
       {
         role: 'user',
@@ -3669,7 +3822,7 @@ export class Session implements SessionContext {
           ...(toolRun.loopDetected
             ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
             : []),
-          ...(await this.#drainMidTurnUserMessages(abortSignal)),
+          ...midTurnParts,
         ],
       },
       true,
@@ -3837,11 +3990,7 @@ export class Session implements SessionContext {
 
     if (this.midTurnDrainUnavailable) {
       return {
-        parts: await this.#buildMidTurnParts(
-          recovered,
-          abortSignal,
-          options.onFullTurnModel,
-        ),
+        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
       };
     }
@@ -3872,7 +4021,7 @@ export class Session implements SessionContext {
         parts: await this.#buildMidTurnParts(
           [...recovered, ...parseMidTurnDrainResponse(response)],
           abortSignal,
-          options.onFullTurnModel,
+          options,
         ),
         hasQueuedPrompt:
           isRecord(response) && response['hasQueuedPrompt'] === true,
@@ -3927,11 +4076,7 @@ export class Session implements SessionContext {
       // Even on a failed/timed-out drain, still inject anything recovered from
       // an EARLIER timeout so a transient stall never strands those messages.
       return {
-        parts: await this.#buildMidTurnParts(
-          recovered,
-          abortSignal,
-          options.onFullTurnModel,
-        ),
+        parts: await this.#buildMidTurnParts(recovered, abortSignal, options),
         hasQueuedPrompt: false,
       };
     }
@@ -3999,7 +4144,10 @@ export class Session implements SessionContext {
   async #buildMidTurnParts(
     messages: DrainedMidTurnMessage[],
     abortSignal: AbortSignal,
-    onFullTurnModel?: (model: string) => boolean,
+    options: {
+      onFullTurnModel?: (model: string) => boolean;
+      preserveFallbackOnAbort?: boolean;
+    } = {},
   ): Promise<Part[]> {
     const parts: Part[] = [];
     for (const message of messages) {
@@ -4015,13 +4163,19 @@ export class Session implements SessionContext {
                 MID_TURN_QUEUE_RESOLVE_TIMEOUT_MS,
                 (signal) =>
                   this.#resolvePrompt(message.content, signal, {
-                    onFullTurnModel,
+                    onFullTurnModel: options.onFullTurnModel,
                   }),
               );
       } catch (messageError) {
-        if (abortSignal.aborted) return parts;
-        const errorMessage = this.#formatError(messageError);
-        debugLogger.warn(`Failed to resolve mid-turn message: ${errorMessage}`);
+        if (abortSignal.aborted && !options.preserveFallbackOnAbort) {
+          return parts;
+        }
+        if (!abortSignal.aborted) {
+          const errorMessage = this.#formatError(messageError);
+          debugLogger.warn(
+            `Failed to resolve mid-turn message: ${errorMessage}`,
+          );
+        }
         rawParts = [{ text: displayText }];
         if (
           message.kind === 'structured' &&
@@ -4084,6 +4238,22 @@ export class Session implements SessionContext {
     });
   }
 
+  #startCronSchedulerInRuntime(): Promise<void> {
+    return Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      () => this.#startCronSchedulerIfNeeded(),
+    );
+  }
+
+  #stopCronSchedulerInRuntime(): void {
+    Storage.runWithRuntimeBaseDir(
+      this.runtimeBaseDir,
+      this.config.getWorkingDir(),
+      () => this.config.getCronScheduler().stop(),
+    );
+  }
+
   #enqueueCronPrompt(item: CronQueueItem): void {
     if (
       (this.todoStopGuard.blocksUnrelatedAutomaticTurns ||
@@ -4125,12 +4295,33 @@ export class Session implements SessionContext {
    */
   async #drainCronQueue(): Promise<void> {
     if (this.disposed) return;
+    if (this.closing) return;
     if (this.cronProcessing) return;
     // Don't process cron while a user prompt is active — the queue will be
     // drained after the prompt completes (see end of prompt()).
     if (this.pendingPrompt) return;
     if (this.notificationProcessing) return;
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.#nextCronQueueIndex() < 0) return;
+    try {
+      await this.assertCanStartTurn();
+    } catch (error) {
+      debugLogger.warn(
+        `Cron turn rejected [session ${this.sessionId}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (
+      this.disposed ||
+      this.closing ||
+      this.cronProcessing ||
+      this.pendingPrompt ||
+      this.notificationProcessing ||
+      this.#nextCronQueueIndex() < 0
+    ) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     this.cronProcessing = true;
 
     let resolveCompletion!: () => void;
@@ -4160,7 +4351,7 @@ export class Session implements SessionContext {
       if (this.config.isCronEnabled()) {
         const scheduler = this.config.getCronScheduler();
         if (!scheduler.hasPendingWork) {
-          scheduler.stop();
+          this.#stopCronSchedulerInRuntime();
         }
       }
     }
@@ -4237,6 +4428,8 @@ export class Session implements SessionContext {
           async () => {
             let turnCount = 0;
             try {
+              await this.assertCanStartTurn();
+              if (ac.signal.aborted) return;
               // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
               // fire time into the loop.md task block — full on the first or a
               // changed fire, a short reminder when unchanged. Non-sentinel
@@ -4710,12 +4903,35 @@ export class Session implements SessionContext {
 
   async #drainNotificationQueue(): Promise<void> {
     if (this.disposed) return;
+    if (this.closing) return;
     if (this.notificationProcessing) return;
     if (this.pendingPrompt || this.cronProcessing || this.cronAbortController) {
       return;
     }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
     if (this.notificationQueue.length === 0) return;
     if (this.#nextNotificationQueueIndex() < 0) return;
+
+    try {
+      await this.assertCanStartTurn();
+    } catch (error) {
+      debugLogger.warn(
+        `Notification turn rejected [session ${this.sessionId}]: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (
+      this.disposed ||
+      this.closing ||
+      this.notificationProcessing ||
+      this.pendingPrompt ||
+      this.cronProcessing ||
+      this.cronAbortController ||
+      this.#nextNotificationQueueIndex() < 0
+    ) {
+      return;
+    }
+    if (this.#deferAutomaticQueueDrainUntilTurnsSettle()) return;
 
     this.notificationProcessing = true;
     let resolveCompletion!: () => void;
@@ -4786,6 +5002,8 @@ export class Session implements SessionContext {
         const promptId =
           this.config.getSessionId() + '########notification' + Date.now();
         try {
+          await this.assertCanStartTurn();
+          if (ac.signal.aborted) return;
           await this.#emitBackgroundNotificationDisplay(item);
 
           const notificationParts: Part[] = [{ text: item.modelText }];
@@ -4945,7 +5163,9 @@ export class Session implements SessionContext {
               if (toolRun.stopAfterPermissionCancel) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                await this.#emitBackgroundNotificationEndTurn(
+                  getAbortAwareEndTurnStopReason(ac.signal),
+                );
                 return;
               }
               const nextAfterTools = await this.#buildNextMessageAfterToolRun(
@@ -4956,7 +5176,9 @@ export class Session implements SessionContext {
               if (toolRun.loopDetected) {
                 this.todoStopGuard.suspend();
                 await this.#preserveStoppedToolRun(toolRun, ac.signal);
-                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                await this.#emitBackgroundNotificationEndTurn(
+                  getAbortAwareEndTurnStopReason(ac.signal),
+                );
                 return;
               }
             }
@@ -4978,7 +5200,9 @@ export class Session implements SessionContext {
               )
             ).stopReason;
           }
-          await this.#emitBackgroundNotificationEndTurn(stopReason);
+          await this.#emitBackgroundNotificationEndTurn(
+            ac.signal.aborted ? 'cancelled' : stopReason,
+          );
         } catch (error) {
           if (ac.signal.aborted) {
             this.todoStopGuard.suspend();
@@ -5371,6 +5595,50 @@ export class Session implements SessionContext {
     toolLoopState?: DaemonToolLoopState,
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
+    const generatedCallIdBase = randomUUID();
+    const executionCallIds = new Map(
+      dedupedFunctionCalls.map((functionCall, index) => [
+        functionCall,
+        functionCall.id ??
+          `${functionCall.name ?? 'tool'}-${generatedCallIdBase}-${index}`,
+      ]),
+    );
+    const pendingToolResultRecords: PendingToolResultRecord[] = [];
+    let toolResultRecordSequence = 0;
+    const queueToolResultRecord: QueueToolResultRecord = (fc, record) => {
+      pendingToolResultRecords.push({
+        ...record,
+        ordinal: dedupedFunctionCalls.indexOf(fc),
+        sequence: toolResultRecordSequence++,
+      });
+    };
+    const finalizeRunToolResult = async (
+      result: RunToolResult,
+    ): Promise<RunToolResult> => {
+      if (pendingToolResultRecords.length === 0) return result;
+      const orderedRecords = [...pendingToolResultRecords].sort(
+        (left, right) =>
+          left.ordinal - right.ordinal || left.sequence - right.sequence,
+      );
+      const finalized = await finalizeToolResponses(
+        this.config,
+        orderedRecords.map((record) => ({
+          callId: record.callId,
+          toolName: record.toolName,
+          responseParts: record.responseParts,
+          persistedOutputFiles: record.persistedOutputFiles,
+        })),
+      );
+      orderedRecords.forEach((record, index) => {
+        this.config
+          .getChatRecordingService()
+          ?.recordToolResult(finalized[index].responseParts, record.metadata);
+      });
+      return {
+        ...result,
+        parts: finalized.flatMap((entry) => entry.responseParts),
+      };
+    };
     let skippedToolCallCounter = 0;
     const recordSkippedToolCall = async (
       fc: FunctionCall,
@@ -5389,12 +5657,17 @@ export class Session implements SessionContext {
       };
       const error = new Error(message);
       try {
-        this.config.getChatRecordingService()?.recordToolResult([part], {
+        queueToolResultRecord(fc, {
           callId,
-          status: 'error',
-          resultDisplay: undefined,
-          error,
-          errorType,
+          toolName,
+          responseParts: [part],
+          metadata: {
+            callId,
+            status: 'error',
+            resultDisplay: undefined,
+            error,
+            errorType,
+          },
         });
         if (emitStart) {
           await this.toolCallEmitter.emitStart({
@@ -5419,7 +5692,7 @@ export class Session implements SessionContext {
         dedupedFunctionCalls.length,
       )
     ) {
-      return {
+      return await finalizeRunToolResult({
         parts: await Promise.all(
           dedupedFunctionCalls.map((fc) =>
             recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false),
@@ -5427,7 +5700,7 @@ export class Session implements SessionContext {
         ),
         stopAfterPermissionCancel: false,
         loopDetected: true,
-      };
+      });
     }
 
     type ExecutableBatch = {
@@ -5437,6 +5710,7 @@ export class Session implements SessionContext {
     };
     type DuplicateBatch = {
       kind: 'duplicate';
+      fc: FunctionCall;
       request: ToolCallRequestInfo;
       response: ToolCallResponseInfo;
     };
@@ -5459,14 +5733,17 @@ export class Session implements SessionContext {
         `[Session.runToolCalls] Dropping batch after repeated duplicate provider tool-call id: ` +
           `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'})`,
       );
-      return {
+      return await finalizeRunToolResult({
         parts: [],
         stopAfterPermissionCancel: false,
         repeatedDuplicateProviderToolCall: true,
-      };
+      });
     }
 
-    const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+    const pushDuplicateBatch = (
+      fc: FunctionCall,
+      request: ToolCallRequestInfo,
+    ): void => {
       const providerCallId = request.providerCallId ?? request.callId;
       markDuplicateProviderToolCallResponseSent(
         providerCallId,
@@ -5478,7 +5755,7 @@ export class Session implements SessionContext {
         `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
           `${providerCallId} (tool: ${request.name})`,
       );
-      batches.push({ kind: 'duplicate', request, response });
+      batches.push({ kind: 'duplicate', fc, request, response });
     };
 
     const emitDuplicateBatch = async (batch: DuplicateBatch): Promise<void> => {
@@ -5516,23 +5793,27 @@ export class Session implements SessionContext {
           success: false,
         });
       }
-      this.config
-        .getChatRecordingService()
-        ?.recordToolResult(response.responseParts, {
+      queueToolResultRecord(batch.fc, {
+        callId: response.callId,
+        toolName: request.name,
+        responseParts: response.responseParts,
+        persistedOutputFiles: response.persistedOutputFiles,
+        metadata: {
           callId: response.callId,
           status: 'error',
           resultDisplay: response.resultDisplay,
           error: response.error,
           errorType: response.errorType,
-        });
+        },
+      });
     };
 
     for (const fc of dedupedFunctionCalls) {
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       if (providerCallId) {
         if (handledProviderToolCallIds.has(providerCallId)) {
-          const callId = fc.id ?? `${fc.name}-${Date.now()}`;
-          pushDuplicateBatch({
+          const callId = executionCallIds.get(fc)!;
+          pushDuplicateBatch(fc, {
             callId,
             providerCallId,
             name: fc.name ?? 'unknown_tool',
@@ -5651,6 +5932,8 @@ export class Session implements SessionContext {
             onStopAfterPermissionCancel,
             toolLoopState,
             recordSkippedToolCall,
+            queueToolResultRecord,
+            executionCallIds.get(calls[i]),
           );
           results[i] = r;
           if (r.loopDetected) {
@@ -5683,6 +5966,8 @@ export class Session implements SessionContext {
           onStopAfterPermissionCancel,
           toolLoopState,
           recordSkippedToolCall,
+          queueToolResultRecord,
+          executionCallIds.get(calls[idx]),
         )
           .then((r) => {
             results[idx] = r;
@@ -5785,24 +6070,24 @@ export class Session implements SessionContext {
               batch.calls[batch.calls.length - 1],
               LOOP_DETECTED_SKIP_MESSAGE,
             );
-            return {
+            return await finalizeRunToolResult({
               parts,
               stopAfterPermissionCancel: false,
               loopDetected: true,
               memoryWriteCandidates,
-            };
+            });
           }
           if (shouldStop) {
             await appendSkippedAfter(
               parts,
               batch.calls[batch.calls.length - 1],
             );
-            return {
+            return await finalizeRunToolResult({
               parts,
               stopAfterPermissionCancel: true,
               repeatedDuplicateProviderToolCall: false,
               memoryWriteCandidates,
-            };
+            });
           }
         } else {
           for (const fc of batch.calls) {
@@ -5813,36 +6098,38 @@ export class Session implements SessionContext {
               undefined,
               toolLoopState,
               recordSkippedToolCall,
+              queueToolResultRecord,
+              executionCallIds.get(fc),
             );
             parts.push(...r.parts);
             collectMemoryWriteCandidates(r);
             if (r.loopDetected) {
               await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
-              return {
+              return await finalizeRunToolResult({
                 parts,
                 stopAfterPermissionCancel: false,
                 loopDetected: true,
                 memoryWriteCandidates,
-              };
+              });
             }
             if (r.stopAfterPermissionCancel) {
               await appendSkippedAfter(parts, fc);
-              return {
+              return await finalizeRunToolResult({
                 parts,
                 stopAfterPermissionCancel: true,
                 repeatedDuplicateProviderToolCall: false,
                 memoryWriteCandidates,
-              };
+              });
             }
           }
         }
       }
-      return {
+      return await finalizeRunToolResult({
         parts,
         stopAfterPermissionCancel: false,
         repeatedDuplicateProviderToolCall: false,
         memoryWriteCandidates,
-      };
+      });
     } finally {
       await refreshMemoryIfNeeded();
     }
@@ -5894,8 +6181,10 @@ export class Session implements SessionContext {
       message?: string,
       emitStart?: boolean,
     ) => Promise<Part>,
+    queueToolResultRecord?: QueueToolResultRecord,
+    generatedCallId?: string,
   ): Promise<RunToolResult> {
-    const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+    const callId = fc.id ?? generatedCallId ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
     if (toolLoopState?.loopDetected) {
       return {
@@ -5975,12 +6264,17 @@ export class Session implements SessionContext {
       }
 
       const errorParts = errorResponse(error);
-      this.config.getChatRecordingService()?.recordToolResult(errorParts, {
+      queueToolResultRecord?.(fc, {
         callId,
-        status: 'error',
-        resultDisplay: undefined,
-        error,
-        errorType: undefined,
+        toolName,
+        responseParts: errorParts,
+        metadata: {
+          callId,
+          status: 'error',
+          resultDisplay: undefined,
+          error,
+          errorType: undefined,
+        },
       });
       const loopDetected =
         opts?.recordInvalidToolParams === true &&
@@ -6217,8 +6511,8 @@ export class Session implements SessionContext {
 
           // Explicit allow (user rule matched, or tool's L3 default is 'allow')
           // is authoritative for ordinary calls. In AUTO, protected
-          // self-modification writes must still reach the classifier/fail-closed
-          // path so allow rules cannot bypass AUTO mode's safety boundary.
+          // self-modification writes must still reach the classifier/manual
+          // fallback path so allow rules cannot bypass AUTO mode review.
           // Also resets the denialTracking streak so a following
           // classifier-eligible call doesn't surprise the user with a manual
           // prompt right after an allow-rule call just worked.
@@ -6244,7 +6538,8 @@ export class Session implements SessionContext {
               recordAllow(this.config.getAutoModeDenialState()),
             );
           }
-          let wasAutoModeDenialFallback = false;
+          let wasAutoModeManualFallback = false;
+          let autoModeFallbackMessage: string | undefined;
 
           // ── L5: AUTO mode three-layer filter (duplicated from
           // coreToolScheduler.ts; ACP routes through this Session path).
@@ -6313,10 +6608,11 @@ export class Session implements SessionContext {
                 );
               case 'fallback':
                 // Drop through to the manual-approval flow below.
-                wasAutoModeDenialFallback = isDenialFallbackReason(
-                  outcome.reason,
-                );
-                if (wasAutoModeDenialFallback) {
+                wasAutoModeManualFallback =
+                  isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable';
+                autoModeFallbackMessage = outcome.message;
+                if (wasAutoModeManualFallback) {
                   debugLogger.warn(
                     `Auto mode fallback to manual approval (${outcome.reason}): ` +
                       formatDenialStateLog(denialState),
@@ -6335,12 +6631,12 @@ export class Session implements SessionContext {
           const recordAutoModeFallbackResolution = (
             outcome: ToolConfirmationOutcome,
           ) => {
-            // Reset AUTO-mode fallback counters when approval resolves a prompt
-            // raised because denialTracking forced fallback. This covers both ACP
-            // requestPermission and PermissionRequest hook approvals.
+            // Reset AUTO-mode fallback counters when approval resolves a
+            // recovery prompt. This covers both ACP requestPermission and
+            // PermissionRequest hook approvals.
             if (
               approvalMode === ApprovalMode.AUTO &&
-              wasAutoModeDenialFallback &&
+              wasAutoModeManualFallback &&
               isApproveOutcome(outcome)
             ) {
               const before = this.config.getAutoModeDenialState();
@@ -6372,6 +6668,13 @@ export class Session implements SessionContext {
             confirmationDetails = await invocation.getConfirmationDetails(
               activeToolAbortSignal,
             );
+
+            if (autoModeFallbackMessage) {
+              confirmationDetails = decorateClassifierUnavailableConfirmation(
+                confirmationDetails,
+                autoModeFallbackMessage,
+              );
+            }
 
             if (planShellDecision.classification !== 'not-applicable') {
               const preDisplayPlanShellError =
@@ -6662,6 +6965,12 @@ export class Session implements SessionContext {
                 outcome = approval.outcome;
                 confirmationPayload = approval.payload;
               }
+              const shouldSwitchToDefault =
+                outcome ===
+                ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault;
+              if (shouldSwitchToDefault) {
+                outcome = ToolConfirmationOutcome.ProceedOnce;
+              }
               recordAutoModeFallbackResolution(outcome);
 
               try {
@@ -6678,6 +6987,11 @@ export class Session implements SessionContext {
                   error,
                 );
                 return stopAfterPermissionCancel();
+              }
+
+              if (shouldSwitchToDefault) {
+                this.config.setApprovalMode(ApprovalMode.DEFAULT);
+                await this.sendCurrentModeUpdateNotification();
               }
 
               // Persist permission rules when user explicitly chose "Always Allow".
@@ -6707,6 +7021,10 @@ export class Session implements SessionContext {
               }
 
               switch (outcome) {
+                case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
+                  throw new Error(
+                    'Switch-to-Default outcome must be normalized before execution.',
+                  );
                 case ToolConfirmationOutcome.Cancel:
                   // Route through earlyErrorResponse so spanError carries the
                   // cancellation reason (plain errorResponse leaves it unset,
@@ -7046,10 +7364,12 @@ export class Session implements SessionContext {
                 : 'native',
           });
 
-          // Record tool result for session management
-          this.config
-            .getChatRecordingService()
-            ?.recordToolResult(responseParts, {
+          queueToolResultRecord?.(fc, {
+            callId,
+            toolName,
+            responseParts,
+            persistedOutputFiles: toolResult.persistedOutputFiles,
+            metadata: {
               callId,
               status,
               resultDisplay: toolResult.returnDisplay,
@@ -7057,7 +7377,8 @@ export class Session implements SessionContext {
                 ? new Error(toolResult.error.message)
                 : undefined,
               errorType: toolResult.error?.type,
-            });
+            },
+          });
 
           spanSuccess = succeeded;
           if (toolResult.error) {
@@ -7121,26 +7442,6 @@ export class Session implements SessionContext {
           // Use ToolCallEmitter for error handling
           await this.toolCallEmitter.emitError(callId, toolName, error);
 
-          // Record tool error for session management
-          const errorParts = [
-            {
-              functionResponse: {
-                id: callId,
-                name: toolName,
-                response: { error: error.message },
-              },
-            },
-          ];
-          this.config.getChatRecordingService()?.recordToolResult(errorParts, {
-            callId,
-            // A throw caused by abort (e.g. AbortError) is a cancellation, not
-            // a genuine tool error — keep it consistent with the success path.
-            status: activeToolAbortSignal.aborted ? 'cancelled' : 'error',
-            resultDisplay: undefined,
-            error,
-            errorType: undefined,
-          });
-
           const loopDetected =
             !activeToolAbortSignal.aborted &&
             !toolBuildSucceeded &&
@@ -7153,6 +7454,18 @@ export class Session implements SessionContext {
             );
 
           const responseParts = errorResponse(error);
+          queueToolResultRecord?.(fc, {
+            callId,
+            toolName,
+            responseParts,
+            metadata: {
+              callId,
+              status: activeToolAbortSignal.aborted ? 'cancelled' : 'error',
+              resultDisplay: undefined,
+              error,
+              errorType: undefined,
+            },
+          });
           return {
             parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,

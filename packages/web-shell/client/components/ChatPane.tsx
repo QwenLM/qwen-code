@@ -19,7 +19,10 @@ import {
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type { ACPToolCall } from '../adapters/types';
+import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
+import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from '../constants/sessions';
 import { useMessages } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
@@ -34,8 +37,13 @@ import { isAskUserPermission } from '../utils/askUserPermission';
 import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
+import { invokeSlashCommandHandler } from '../utils/slash-command-action';
+import type { WebShellSlashCommandHandler } from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
-import { hasMultipleWorkspaces, workspaceBasename } from '../utils/workspace';
+import {
+  hasMultipleWorkspaces,
+  workspaceLabelForCwd,
+} from '../utils/workspace';
 import { workspaceAccentColor } from '../utils/workspaceColor';
 import {
   getLocalCommands,
@@ -91,6 +99,8 @@ export interface ChatPaneProps {
   /** Whether this pane is currently the maximized (solo) one. */
   isMaximized?: boolean;
   onError?: (error: unknown, fallback: string) => void;
+  /** Host slash-command callback shared with the main chat composer. */
+  onSlashCommand?: WebShellSlashCommandHandler;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
@@ -116,6 +126,7 @@ export function ChatPane({
   onToggleMaximize,
   isMaximized = false,
   onError,
+  onSlashCommand,
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
@@ -132,6 +143,38 @@ export function ChatPane({
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
   const { artifacts } = useSessionArtifacts();
+  const openSubagentDetails = useCallback(
+    (tool: ACPToolCall) => {
+      if (!connection.sessionId || !onRightPanelOpen) return;
+      const rawOutput =
+        tool.rawOutput && typeof tool.rawOutput === 'object'
+          ? (tool.rawOutput as Record<string, unknown>)
+          : undefined;
+      const subagentType =
+        (typeof tool.args?.subagent_type === 'string'
+          ? tool.args.subagent_type
+          : undefined) ??
+        (typeof rawOutput?.['subagentName'] === 'string'
+          ? rawOutput['subagentName']
+          : undefined);
+      onRightPanelOpen({
+        id: `subagent:${connection.sessionId}:${tool.callId}`,
+        kind: 'subagent',
+        title: tool.title || subagentType || t('agent.label'),
+        turnId: tool.callId,
+        tool,
+        sessionId: connection.sessionId,
+        workspaceCwd: connection.workspaceCwd ?? workspaceCwd,
+      });
+    },
+    [
+      connection.sessionId,
+      connection.workspaceCwd,
+      onRightPanelOpen,
+      t,
+      workspaceCwd,
+    ],
+  );
   useEffect(() => {
     const sessionId = connection.sessionId;
     if (!sessionId) return;
@@ -147,6 +190,17 @@ export function ChatPane({
   ]);
   const streamingStateRef = useRef(streamingState);
   streamingStateRef.current = streamingState;
+  const reloadTranscript = useCallback(
+    async (signal: AbortSignal) => {
+      if (!connection.sessionId) return;
+      await actions.reloadSession(signal);
+    },
+    [actions, connection.sessionId],
+  );
+  const transcriptReloadSupported =
+    connection.capabilities?.features.includes(
+      SESSION_TRANSCRIPT_PAGINATION_FEATURE,
+    ) === true;
   const editorRef = useRef<EditorHandle | null>(null);
   const {
     followupState,
@@ -166,6 +220,8 @@ export function ChatPane({
     },
     [onError],
   );
+  const onSlashCommandRef = useRef(onSlashCommand);
+  onSlashCommandRef.current = onSlashCommand;
   const notifySuccess = useCallback(
     (message: string) => store.dispatch([{ type: 'status', text: message }]),
     [store],
@@ -254,6 +310,11 @@ export function ChatPane({
       const trimmed = text.trim();
       if (!trimmed) return false;
       if (
+        invokeSlashCommandHandler(text, onSlashCommandRef.current, reportError)
+      ) {
+        return true;
+      }
+      if (
         shouldBlockComposerSubmit({
           connectionStatus: connection.status,
           hasSession: Boolean(connection.sessionId),
@@ -315,11 +376,11 @@ export function ChatPane({
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
-      if (request.kind === 'artifact' || request.kind === 'scheduled_task') {
-        onRightPanelOpen({ ...request, workspaceActions });
+      if (request.kind === 'subagent') {
+        onRightPanelOpen(request);
         return;
       }
-      onRightPanelOpen(request);
+      onRightPanelOpen({ ...request, workspaceActions });
     },
     [onRightPanelOpen, workspaceActions],
   );
@@ -430,7 +491,10 @@ export function ChatPane({
   // and keeps them distinguishable even when the header name ellipsizes.
   const workspaceLabel =
     showWorkspaceChip && paneWorkspaceCwd
-      ? workspaceBasename(paneWorkspaceCwd)
+      ? workspaceLabelForCwd(
+          paneWorkspaceCwd,
+          workspace.capabilities?.workspaces,
+        )
       : undefined;
   const workspaceAccent = showWorkspaceChip
     ? workspaceAccentColor(paneWorkspaceCwd, workspace.capabilities)
@@ -517,36 +581,45 @@ export function ChatPane({
       )}
 
       <div className={styles.body}>
-        <MessageList
-          messages={messages}
-          pendingApproval={pendingToolApproval}
-          loadingTranscript={connection.loadingTranscript}
-          catchingUp={connection.catchingUp}
-          hasOlderHistory={transcriptHistory.hasMore}
-          loadingOlderHistory={transcriptHistory.loading}
-          historyCapacityReached={transcriptHistory.capacityReached}
-          onLoadOlderHistory={transcriptHistory.loadMore}
-          isResponding={isResponding}
-          workspaceCwd={connection.workspaceCwd || ''}
-          hideSessionTimeline
-          turnFileChanges={
-            visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
-          }
-          turnArtifacts={
-            visibleTurnOutputKinds.has('artifact') ? artifactsByTurn : undefined
-          }
-          turnScheduledTasks={
-            visibleTurnOutputKinds.has('scheduled_task')
-              ? scheduledTasksByTurn
-              : undefined
-          }
-          onTurnOutputOpen={handleRightPanelOpen}
-          generateContent={
-            connection.capabilities?.features.includes('session_generation')
-              ? actions.generateSessionContent
-              : undefined
-          }
-        />
+        <SubagentDetailsProvider onOpen={openSubagentDetails}>
+          <MessageList
+            messages={messages}
+            pendingApproval={pendingToolApproval}
+            loadingTranscript={connection.loadingTranscript}
+            catchingUp={connection.catchingUp}
+            hasOlderHistory={transcriptHistory.hasMore}
+            loadingOlderHistory={transcriptHistory.loading}
+            historyCapacityReached={transcriptHistory.capacityReached}
+            onLoadOlderHistory={transcriptHistory.loadMore}
+            transcriptBlockCount={blocks.length}
+            transcriptActivity={store}
+            onReloadTranscript={
+              transcriptReloadSupported ? reloadTranscript : undefined
+            }
+            isResponding={isResponding}
+            workspaceCwd={connection.workspaceCwd || ''}
+            hideSessionTimeline
+            turnFileChanges={
+              visibleTurnOutputKinds.has('file') ? fileChangesByTurn : undefined
+            }
+            turnArtifacts={
+              visibleTurnOutputKinds.has('artifact')
+                ? artifactsByTurn
+                : undefined
+            }
+            turnScheduledTasks={
+              visibleTurnOutputKinds.has('scheduled_task')
+                ? scheduledTasksByTurn
+                : undefined
+            }
+            onTurnOutputOpen={handleRightPanelOpen}
+            generateContent={
+              connection.capabilities?.features.includes('session_generation')
+                ? actions.generateSessionContent
+                : undefined
+            }
+          />
+        </SubagentDetailsProvider>
       </div>
 
       <div className={styles.footer}>
@@ -594,11 +667,7 @@ export function ChatPane({
           onPopQueuedMessages={editLastQueuedPrompt}
           onClearQueuedMessages={clearQueuedPrompts}
           visibleToolbarActions={paneToolbarActions}
-          workspaceName={
-            showWorkspaceChip && paneWorkspaceCwd
-              ? workspaceBasename(paneWorkspaceCwd)
-              : undefined
-          }
+          workspaceName={showWorkspaceChip ? workspaceLabel : undefined}
           workspaceTitle={paneWorkspaceCwd}
           workspaceColor={workspaceAccent}
           currentMode={connection.currentMode ?? 'default'}

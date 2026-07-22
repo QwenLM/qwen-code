@@ -11,6 +11,27 @@ let cachedDaemonToken: string | undefined;
 const DAEMON_TOKEN_STORAGE_KEY = 'qwen-code-daemon-token';
 const DAEMON_AUTH_MESSAGE_TYPE = 'qwen-daemon-auth';
 const DEFAULT_TOKEN_MESSAGE_TIMEOUT_MS = 2500;
+const DAEMON_TOKEN_STORAGE_KEY = 'qwen-daemon-token';
+
+// sessionStorage access can throw (privacy modes, storage-disabled
+// embeds); the token flow must degrade to the pre-persistence behavior
+// rather than break page load.
+function readStoredDaemonToken(): string | undefined {
+  try {
+    return window.sessionStorage.getItem(DAEMON_TOKEN_STORAGE_KEY) || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function persistDaemonToken(token: string): void {
+  try {
+    window.sessionStorage.setItem(DAEMON_TOKEN_STORAGE_KEY, token);
+  } catch {
+    // Storage unavailable — the token still works for this load via the
+    // in-memory cache; a refresh will lose it, matching the old behavior.
+  }
+}
 
 export function getDaemonToken(): string | undefined {
   if (cachedDaemonToken) return cachedDaemonToken;
