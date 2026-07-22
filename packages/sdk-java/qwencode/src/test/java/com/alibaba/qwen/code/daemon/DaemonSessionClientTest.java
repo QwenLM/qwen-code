@@ -1536,14 +1536,24 @@ class DaemonSessionClientTest {
         CountDownLatch releaseAdmission = new CountDownLatch(1);
         CountDownLatch continuationEntered = new CountDownLatch(1);
         CountDownLatch releaseContinuation = new CountDownLatch(1);
+        CountDownLatch eventsOpened = new CountDownLatch(1);
+        CountDownLatch releaseEvents = new CountDownLatch(1);
         server.createContext("/session/session-1/prompt", exchange -> {
             admissionStarted.countDown();
             await(releaseAdmission);
             sendJson(exchange, 202,
                     "{\"promptId\":\"prompt-1\",\"lastEventId\":0}");
         });
-        server.createContext("/session/session-1/events", exchange ->
-                sendSse(exchange, terminalEvent(1)));
+        server.createContext("/session/session-1/events", exchange -> {
+            exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+            exchange.sendResponseHeaders(200, 0);
+            exchange.getResponseBody().write(
+                    "retry: 0\n\n".getBytes(StandardCharsets.UTF_8));
+            exchange.getResponseBody().flush();
+            eventsOpened.countDown();
+            await(releaseEvents);
+            exchange.close();
+        });
         server.createContext("/session/session-1/detach", noContent());
 
         try (DaemonClient daemon = newClient()) {
@@ -1558,11 +1568,13 @@ class DaemonSessionClientTest {
                     });
             releaseAdmission.countDown();
             assertTrue(continuationEntered.await(1, TimeUnit.SECONDS));
+            assertTrue(eventsOpened.await(1, TimeUnit.SECONDS));
             CompletableFuture<Void> close = CompletableFuture.runAsync(session::close);
             try {
                 close.get(1, TimeUnit.SECONDS);
             } finally {
                 releaseContinuation.countDown();
+                releaseEvents.countDown();
             }
             continuation.get(1, TimeUnit.SECONDS);
             CompletionException failure = assertThrows(CompletionException.class,
@@ -1572,6 +1584,7 @@ class DaemonSessionClientTest {
         } finally {
             releaseAdmission.countDown();
             releaseContinuation.countDown();
+            releaseEvents.countDown();
         }
     }
 
