@@ -283,6 +283,13 @@ export function registerWorkspaceQualifiedTrustRoutes(
         res,
       );
       if (!runtime) return;
+      if (runtime.provenance === 'managed-scratch') {
+        res.status(409).json({
+          error: 'Managed scratch workspace trust cannot be changed',
+          code: 'managed_scratch_trust_fixed',
+        });
+        return;
+      }
       const body = safeBody(req);
       const desiredState = body['desiredState'];
       if (desiredState !== 'trusted' && desiredState !== 'untrusted') {

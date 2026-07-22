@@ -10,6 +10,7 @@ import {
 } from './acp-session-bridge.js';
 import type { ClientMcpSenderRegistry } from './acp-http/client-mcp-sender-registry.js';
 import type { WorkspaceFileSystemFactory } from './fs/index.js';
+import type { WorkspaceRuntimeProvenance } from './managed-scratch-workspace.js';
 import type { DaemonWorkspaceService } from './workspace-service/types.js';
 
 export interface WorkspaceRuntimeEnvMetadata {
@@ -32,6 +33,8 @@ export interface WorkspaceRuntime {
   displayName?: string;
   readonly primary: boolean;
   readonly trusted: boolean;
+  /** Managed scratch trust is granted by daemon-owned path provenance. */
+  readonly provenance?: WorkspaceRuntimeProvenance;
   /** Whether this runtime may be removed without restarting the daemon. */
   readonly removable?: boolean;
   /** Persistent registration ids that restore this runtime on daemon startup. */
