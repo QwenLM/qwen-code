@@ -3637,6 +3637,33 @@ describe('Settings Loading and Merging', () => {
       );
     });
 
+    it('does not mutate in-memory state when assertCanCommit throws in setValue', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH) {
+            return JSON.stringify({
+              [SETTINGS_VERSION_KEY]: SETTINGS_VERSION,
+              theme: 'default',
+            });
+          }
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.user.settings.theme).toBe('default');
+
+      expect(() =>
+        settings.setValue(SettingScope.User, 'theme', 'dark', () => {
+          throw new Error('generation closed');
+        }),
+      ).toThrow('generation closed');
+
+      expect(settings.user.settings.theme).toBe('default');
+      expect(settings.merged.theme).toBe('default');
+    });
+
     it('re-syncs uncommitted scopes from disk when setValues persistence fails', () => {
       (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
         [USER_SETTINGS_PATH, MOCK_WORKSPACE_SETTINGS_PATH].includes(
