@@ -715,6 +715,9 @@ describe('CoreToolScheduler', () => {
     truncateToolOutputThreshold?: number;
     truncateToolOutputLines?: number;
     chatRecordingService?: ChatRecordingService;
+    visionBridge?: boolean;
+    visionAgent?: boolean;
+    onToolResultFullTurnModel?: (model: string) => boolean;
   }) {
     const ensureTool = vi.fn(
       async (name: string) =>
@@ -751,6 +754,15 @@ describe('CoreToolScheduler', () => {
           model: 'test-model',
           authType: 'gemini',
         }),
+        getEffectiveInputModalities: () =>
+          options.visionBridge || options.visionAgent ? {} : { image: true },
+        getDefaultVisionBridgeModel: () =>
+          options.visionBridge || options.visionAgent
+            ? {
+                id: 'qwen3-vl-plus',
+                ...(options.visionAgent ? { agentCapable: true as const } : {}),
+              }
+            : undefined,
         getModel: () => 'test-model',
         getShellExecutionConfig: () => ({
           terminalWidth: 90,
@@ -802,6 +814,7 @@ describe('CoreToolScheduler', () => {
       getPreferredEditor: () => 'vscode',
       onEditorClose: vi.fn(),
       chatRecordingService: options.chatRecordingService,
+      onToolResultFullTurnModel: options.onToolResultFullTurnModel,
     });
 
     return {
@@ -3272,6 +3285,274 @@ describe('CoreToolScheduler', () => {
         }
       ).callIdToPostToolBatchSignal.size,
     ).toBe(0);
+  });
+
+  it('bridges image tool results before completing the tool call', async () => {
+    runSideQueryMock.mockResolvedValue({ text: 'Screen says READY' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'captured screen' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+            displayName: 'screen.png',
+          },
+        },
+      ],
+      returnDisplay: 'captured screen',
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'screenshot_tool',
+            new MockTool({
+              name: 'screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-screen',
+          name: 'screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.id).toBe('call-screen');
+    expect(functionResponse?.name).toBe('screenshot_tool');
+    expect(functionResponse?.response?.['output']).toContain('captured screen');
+    expect(functionResponse?.response?.['output']).toContain(
+      'Screen says READY',
+    );
+    expect(completed.response.contentLength).toBe(
+      String(functionResponse?.response?.['output']).length,
+    );
+    expect(functionResponse).not.toHaveProperty('parts');
+    expect(runSideQueryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purpose: 'vision-bridge' }),
+    );
+    expect(
+      JSON.stringify(runSideQueryMock.mock.calls[0][1].contents),
+    ).toContain('screenshot_tool');
+  });
+
+  it('marks an image tool result for full-turn vision takeover', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'captured screen' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+      returnDisplay: 'captured screen',
+    });
+    const onToolResultFullTurnModel = vi.fn().mockReturnValue(true);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'screenshot_tool',
+            new MockTool({
+              name: 'screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionAgent: true,
+        onToolResultFullTurnModel,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-screen-agent',
+          name: 'screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-screen-agent',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'success') {
+      throw new Error(`Expected success, received ${completed.status}`);
+    }
+    expect(onToolResultFullTurnModel).toHaveBeenCalledWith('qwen3-vl-plus\0');
+    expect(completed.response.modelOverride).toBe('qwen3-vl-plus\0');
+    expect(completed.response.responseParts[0].functionResponse?.parts).toEqual(
+      [
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+    );
+    expect(runSideQueryMock).not.toHaveBeenCalled();
+  });
+
+  it('bridges images returned with a tool error', async () => {
+    runSideQueryMock.mockResolvedValue({ text: 'Dialog says access denied' });
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: [
+        { text: 'capture failure context' },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'aW1hZ2U=',
+          },
+        },
+      ],
+      returnDisplay: 'capture failed',
+      error: {
+        message: 'capture failed',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'failed_screenshot_tool',
+            new MockTool({
+              name: 'failed_screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+        visionBridge: true,
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-failed-screen',
+          name: 'failed_screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'error') {
+      throw new Error(`Expected error, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.id).toBe('call-failed-screen');
+    expect(functionResponse?.response?.['error']).toContain('capture failed');
+    expect(functionResponse?.response?.['error']).toContain(
+      'Dialog says access denied',
+    );
+    expect(completed.response.contentLength).toBe(
+      String(functionResponse?.response?.['error']).length,
+    );
+    expect(functionResponse).not.toHaveProperty('parts');
+    expect(runSideQueryMock).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ purpose: 'vision-bridge' }),
+    );
+  });
+
+  it('preserves error images for an image-capable primary model', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+      returnDisplay: 'capture failed',
+      error: {
+        message: 'capture failed',
+        type: ToolErrorType.EXECUTION_FAILED,
+      },
+    });
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({
+        toolsByName: new Map([
+          [
+            'failed_screenshot_tool',
+            new MockTool({
+              name: 'failed_screenshot_tool',
+              kind: Kind.Read,
+              execute,
+            }),
+          ],
+        ]),
+      });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-failed-screen',
+          name: 'failed_screenshot_tool',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-failed-screen',
+        },
+      ],
+      new AbortController().signal,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    const [completed] = onAllToolCallsComplete.mock.calls[0][0] as ToolCall[];
+    if (completed.status !== 'error') {
+      throw new Error(`Expected error, received ${completed.status}`);
+    }
+    const functionResponse =
+      completed.response.responseParts[0].functionResponse;
+    expect(functionResponse?.response?.['error']).toBe('capture failed');
+    expect(functionResponse?.parts).toEqual([
+      {
+        inlineData: {
+          mimeType: 'image/png',
+          data: 'aW1hZ2U=',
+        },
+      },
+    ]);
+    expect(runSideQueryMock).not.toHaveBeenCalled();
   });
 
   it('includes failed tool responses in PostToolBatch payloads', async () => {

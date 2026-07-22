@@ -247,6 +247,47 @@ describe('DiscoveredMCPTool', () => {
       },
     );
 
+    it('preserves typed images returned with an MCP tool error', async () => {
+      const mockMcpToolResponseParts: Part[] = [
+        {
+          functionResponse: {
+            name: serverToolName,
+            response: {
+              error: { isError: true },
+              content: [
+                { type: 'text', text: 'failure context' },
+                {
+                  type: 'image',
+                  data: 'ERROR_IMAGE_DATA',
+                  mimeType: 'image/png',
+                },
+              ],
+            },
+          },
+        },
+      ];
+      mockCallTool.mockResolvedValue(mockMcpToolResponseParts);
+
+      const invocation = tool.build({ param: 'error-image' });
+      const result = await invocation.execute(new AbortController().signal);
+
+      expect(result.error?.type).toBe(ToolErrorType.MCP_TOOL_ERROR);
+      expect(result.error?.message).toContain('failure context');
+      expect(result.error?.message).not.toContain('ERROR_IMAGE_DATA');
+      expect(result.llmContent).toEqual([
+        { text: 'failure context' },
+        {
+          text: `[Tool '${serverToolName}' provided the following image data with mime-type: image/png]`,
+        },
+        {
+          inlineData: {
+            mimeType: 'image/png',
+            data: 'ERROR_IMAGE_DATA',
+          },
+        },
+      ]);
+    });
+
     it.each([
       { isErrorValue: false, description: 'false (bool)' },
       { isErrorValue: 'false', description: '"false" (str)' },

@@ -51,6 +51,7 @@ import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+const bridgeToolResultImagesSpy = vi.hoisted(() => vi.fn());
 const refreshMemoryAfterManagedWriteSpy = vi.hoisted(() => vi.fn());
 const transcribeVoiceAudioSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
@@ -71,6 +72,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
     runVisionBridge: runVisionBridgeSpy,
+    bridgeToolResultImages: bridgeToolResultImagesSpy,
     refreshMemoryAfterManagedWrite: refreshMemoryAfterManagedWriteSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
@@ -437,6 +439,10 @@ describe('Session', () => {
 
   beforeEach(() => {
     runVisionBridgeSpy.mockReset();
+    bridgeToolResultImagesSpy.mockReset();
+    bridgeToolResultImagesSpy.mockImplementation(
+      async ({ responseParts }: { responseParts: Part[] }) => responseParts,
+    );
     refreshMemoryAfterManagedWriteSpy.mockReset();
     refreshMemoryAfterManagedWriteSpy.mockResolvedValue(false);
     transcribeVoiceAudioSpy.mockReset();
@@ -13797,6 +13803,7 @@ describe('Session', () => {
           invalidToolParamErrors: Map<string, number>;
           loopDetected: boolean;
         },
+        onFullTurnModel?: (model: string) => boolean,
       ) => Promise<{
         parts: Part[];
         stopAfterPermissionCancel: boolean;
@@ -13882,6 +13889,80 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    it('lets normalized tool images select a full-turn model', async () => {
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: [
+          { text: 'captured screen' },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'aW1hZ2U=',
+            },
+          },
+        ],
+        returnDisplay: 'captured screen',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('screenshot_tool', execute),
+      );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const onFullTurnModel = vi.fn().mockReturnValue(true);
+      bridgeToolResultImagesSpy.mockImplementationOnce(
+        async ({
+          responseParts,
+          onFullTurnModel: selectFullTurnModel,
+        }: {
+          responseParts: Part[];
+          onFullTurnModel?: (model: string) => boolean;
+        }) => {
+          expect(selectFullTurnModel?.('qwen3-vl-plus\0')).toBe(true);
+          return responseParts;
+        },
+      );
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-tool-image',
+        [
+          {
+            id: 'call-screen',
+            name: 'screenshot_tool',
+            args: {},
+          },
+        ],
+        undefined,
+        onFullTurnModel,
+      );
+
+      expect(execute).toHaveBeenCalledOnce();
+      expect(bridgeToolResultImagesSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: mockConfig,
+          responseParts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'call-screen',
+                name: 'screenshot_tool',
+                parts: [
+                  expect.objectContaining({
+                    inlineData: expect.objectContaining({
+                      mimeType: 'image/png',
+                    }),
+                  }),
+                ],
+              }),
+            }),
+          ],
+          signal: expect.any(AbortSignal),
+          onFullTurnModel,
+        }),
+      );
+      expect(onFullTurnModel).toHaveBeenCalledWith('qwen3-vl-plus\0');
+      expect(result.parts[0].functionResponse?.parts).toHaveLength(1);
+    });
 
     it('isolates enter_plan_mode from executable ACP siblings while preserving duplicate responses', async () => {
       const writeExecute = vi.fn().mockResolvedValue({

@@ -19,6 +19,9 @@ import {
 import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 
 const debugLogger = createDebugLogger('VISION_BRIDGE');
+// Tool calls in one turn share an AbortSignal. Reserve synchronously before
+// the side query so concurrent tool results cannot each reset the turn cap.
+const turnImageCounts = new WeakMap<AbortSignal, number>();
 const BRIDGE_MAX_OUTPUT_TOKENS = 2048;
 const VISION_BRIDGE_TIMEOUT_MS = 30_000;
 // One retry on timeout, with a fresh timeout budget per attempt: a transient
@@ -387,10 +390,18 @@ export function formatFullTurnVisionNotice(
 function buildIntentPart(
   intentText: string,
   sourceContext?: VisionBridgePdfSourceContext,
+  imageParts: Part[] = [],
 ): string {
   const sourceHint = sourceContext
     ? `The images are consecutive pages ${sourceContext.renderedRange.firstPage}-${sourceContext.renderedRange.lastPage} from PDF ${JSON.stringify(sourceContext.displayName)}. Transcribe each page separately and label each section with its original PDF page number.`
-    : '';
+    : imageParts.length > 0
+      ? `Describe each image separately under these ordered labels: ${imageParts
+          .map(
+            (part, index) =>
+              `${index + 1}. ${JSON.stringify(part.inlineData?.displayName?.trim() || `image ${index + 1}`)}`,
+          )
+          .join('; ')}.`
+      : '';
   const focusHint =
     intentText.length > 0
       ? `Focus hint — do NOT answer this, use it only to decide which details to transcribe thoroughly: ${intentText}`
@@ -474,6 +485,7 @@ function failure(
  * @param params.config Active config (provides the side-query client and model).
  * @param params.parts The resolved request parts (text + inline images).
  * @param params.signal Abort signal from the surrounding turn.
+ * @param params.intentText Optional caller-supplied focus hint.
  * @returns A {@link VisionBridgeResult} describing the outcome.
  */
 export async function runVisionBridge(params: {
@@ -481,8 +493,9 @@ export async function runVisionBridge(params: {
   parts: PartListUnion;
   signal: AbortSignal;
   sourceContext?: VisionBridgePdfSourceContext;
+  intentText?: string;
 }): Promise<VisionBridgeResult> {
-  const { config, parts, signal, sourceContext } = params;
+  const { config, parts, signal, sourceContext, intentText } = params;
   const { imageParts, nonImageParts } = splitImageParts(parts);
 
   if (imageParts.length === 0) {
@@ -497,9 +510,14 @@ export async function runVisionBridge(params: {
   // Keep only valid images, then apply the per-turn cap. Anything dropped is
   // reported as a single omitted count.
   const validImages = imageParts.filter(isUsableImagePart);
-  const toConvert = validImages.slice(0, VISION_BRIDGE_MAX_IMAGES);
+  const usedImages = turnImageCounts.get(signal) ?? 0;
+  const remainingImages = Math.max(0, VISION_BRIDGE_MAX_IMAGES - usedImages);
+  const toConvert = validImages.slice(0, remainingImages);
   const omittedCount = imageParts.length - toConvert.length;
-  const intent = collectText(nonImageParts).slice(0, BRIDGE_INTENT_MAX_CHARS);
+  const intent = (intentText ?? collectText(nonImageParts)).slice(
+    0,
+    BRIDGE_INTENT_MAX_CHARS,
+  );
   const resolvedSourceContext =
     sourceContext ?? inferPdfSourceContext(toConvert);
 
@@ -525,6 +543,7 @@ export async function runVisionBridge(params: {
       { modelId, ...(modelEndpoint && { modelEndpoint }) },
     );
   }
+  turnImageCounts.set(signal, usedImages + toConvert.length);
 
   const timeoutMs =
     config.getVisionBridgeTimeoutMs?.() ?? VISION_BRIDGE_TIMEOUT_MS;
@@ -533,7 +552,7 @@ export async function runVisionBridge(params: {
       role: 'user',
       parts: [
         ...toConvert,
-        { text: buildIntentPart(intent, resolvedSourceContext) },
+        { text: buildIntentPart(intent, resolvedSourceContext, toConvert) },
       ],
     },
   ];

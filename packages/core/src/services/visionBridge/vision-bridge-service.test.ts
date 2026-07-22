@@ -28,8 +28,12 @@ const config = {
   getDefaultVisionBridgeModel: () => ({ id: 'qwen3-vl-plus' }),
 } as unknown as Config;
 
-const image = (data = 'aGVsbG8='): Part => ({
-  inlineData: { mimeType: 'image/png', data },
+const image = (data = 'aGVsbG8=', displayName?: string): Part => ({
+  inlineData: {
+    mimeType: 'image/png',
+    data,
+    ...(displayName && { displayName }),
+  },
 });
 const signal = () => new AbortController().signal;
 const textOf = (parts: unknown): string =>
@@ -112,6 +116,22 @@ describe('runVisionBridge', () => {
     expect(JSON.stringify(callOptions.contents)).toContain('PAYLOAD64');
   });
 
+  it('uses an explicit tool-result intent instead of unrelated part text', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    await runVisionBridge({
+      config,
+      parts: ['unrelated top-level text', image()],
+      signal: signal(),
+      intentText: 'Describe the screenshot returned by computer_use.',
+    });
+
+    const contents = JSON.stringify(mockSideQuery.mock.calls[0][1].contents);
+    expect(contents).toContain(
+      'Describe the screenshot returned by computer_use.',
+    );
+    expect(contents).not.toContain('unrelated top-level text');
+  });
+
   it('tells the bridge model to describe, not answer the user request', async () => {
     mockSideQuery.mockResolvedValue({ text: 'desc' });
     await runVisionBridge({
@@ -141,6 +161,44 @@ describe('runVisionBridge', () => {
     const sent = JSON.stringify(mockSideQuery.mock.calls[0][1].contents);
     expect(sent).toContain('x'.repeat(2000)); // the question still reaches it
     expect(sent).not.toContain('x'.repeat(2001)); // but capped at 2000 chars
+  });
+
+  it('shares the four-image budget across bridge calls in one turn', async () => {
+    mockSideQuery.mockResolvedValue({ text: 'desc' });
+    const turnSignal = signal();
+
+    const first = await runVisionBridge({
+      config,
+      parts: [image('ONE'), image('TWO'), image('THREE')],
+      signal: turnSignal,
+    });
+    const second = await runVisionBridge({
+      config,
+      parts: [image('FOUR', 'four.png'), image('FIVE', 'five.png')],
+      signal: turnSignal,
+    });
+    const exhausted = await runVisionBridge({
+      config,
+      parts: [image('SIX')],
+      signal: turnSignal,
+    });
+
+    expect(first).toMatchObject({ convertedCount: 3, omittedCount: 0 });
+    expect(second).toMatchObject({ convertedCount: 1, omittedCount: 1 });
+    expect(exhausted).toMatchObject({
+      status: 'failed',
+      convertedCount: 0,
+      omittedCount: 1,
+    });
+    expect(textOf(exhausted.parts)).toMatch(/budget was exhausted/i);
+    expect(mockSideQuery).toHaveBeenCalledTimes(2);
+    const secondRequest = JSON.stringify(
+      mockSideQuery.mock.calls[1][1].contents,
+    );
+    expect(secondRequest).toContain('FOUR');
+    expect(secondRequest).not.toContain('FIVE');
+    expect(secondRequest).toContain('four.png');
+    expect(secondRequest).not.toContain('five.png');
   });
 
   it('reports the bridge model endpoint host for cross-provider egress clarity', async () => {

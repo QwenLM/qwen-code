@@ -870,7 +870,7 @@ describe('ReadFileTool', () => {
         );
       });
 
-      it('does not send ordinary images to the read_file bridge path', async () => {
+      it('preserves ordinary images for the shared tool-result bridge', async () => {
         const imagePath = path.join(tempRootDir, 'image.png');
         await fsp.writeFile(
           imagePath,
@@ -882,8 +882,12 @@ describe('ReadFileTool', () => {
 
         const result = await invocation.execute(abortSignal);
 
-        expect(result.llmContent).toContain('Unsupported image file');
-        expect(JSON.stringify(result.llmContent)).not.toContain('inlineData');
+        expect(result.llmContent).toMatchObject({
+          inlineData: {
+            mimeType: 'image/png',
+            displayName: 'image.png',
+          },
+        });
         expect(visionBridgeMocks.runVisionBridge).not.toHaveBeenCalled();
       });
     });
