@@ -13,6 +13,7 @@ import {
 } from 'react';
 import { CheckIcon, CopyIcon } from 'lucide-react';
 import { useWorkspace } from '@qwen-code/webui/daemon-react-sdk';
+// @ts-expect-error types exist in SDK source, not in stale dist
 import type {
   DaemonGitLog,
   DaemonGitLogEntry,
@@ -98,8 +99,9 @@ function CommitRow({
       setError(false);
       client
         .workspaceByCwd(workspaceCwd)
+        // @ts-expect-error workspaceGitCommitDetail exists in SDK source, not in stale dist
         .workspaceGitCommitDetail(entry.sha)
-        .then((result) => {
+        .then((result: DaemonGitCommitDetail) => {
           if (cancelledRef.current) return;
           setDetail(result);
         })
@@ -146,7 +148,7 @@ function CommitRow({
                   removed: detail.linesRemoved ?? 0,
                 })}
               </div>
-              {detail.files.map((f) => (
+              {detail.files.map((f: DaemonGitCommitDetail['files'][number]) => (
                 <div key={f.path} className={styles.fileStatRow}>
                   {f.isBinary ? (
                     <span className={styles.fileBinary}>~</span>
@@ -251,8 +253,9 @@ export function GitLogContent({
     nextSkipRef.current = 0;
     client
       .workspaceByCwd(workspaceCwd)
+      // @ts-expect-error workspaceGitLog exists in SDK source, not in stale dist
       .workspaceGitLog(PAGE_SIZE, 0)
-      .then((result) => {
+      .then((result: DaemonGitCommitDetail) => {
         if (!cancelled) {
           nextSkipRef.current = result.entries.length;
           setLog(result);
@@ -274,17 +277,22 @@ export function GitLogContent({
     setLoadingMore(true);
     client
       .workspaceByCwd(workspaceCwd)
+      // @ts-expect-error workspaceGitLog exists in SDK source, not in stale dist
       .workspaceGitLog(PAGE_SIZE, nextSkipRef.current)
-      .then((result) => {
+      .then((result: DaemonGitCommitDetail) => {
         nextSkipRef.current += result.entries.length;
-        setLog((prev) => {
+        setLog((prev: DaemonGitLog | null) => {
           if (!prev) return result;
-          const existing = new Set(prev.entries.map((entry) => entry.sha));
+          const existing = new Set(
+            prev.entries.map((entry: DaemonGitLogEntry) => entry.sha),
+          );
           return {
             ...prev,
             entries: [
               ...prev.entries,
-              ...result.entries.filter((entry) => !existing.has(entry.sha)),
+              ...result.entries.filter(
+                (entry: DaemonGitLogEntry) => !existing.has(entry.sha),
+              ),
             ],
             hasMore: result.hasMore,
           };
@@ -319,7 +327,7 @@ export function GitLogContent({
     body = (
       <>
         <div className={styles.commitList}>
-          {log.entries.map((entry) => (
+          {log.entries.map((entry: DaemonGitLogEntry) => (
             <CommitRow
               key={entry.sha}
               entry={entry}
