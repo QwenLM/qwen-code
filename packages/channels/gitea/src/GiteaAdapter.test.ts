@@ -224,7 +224,11 @@ describe('GiteaChannel', () => {
       ],
     });
     mockRepoGetPullRequest.mockResolvedValueOnce({
-      data: { head: { ref: 'feature-branch' }, body: 'PR body @reviewer' },
+      data: {
+        head: { ref: 'feature-branch' },
+        body: 'PR body @reviewer',
+        user: { login: 'pr-author' },
+      },
     });
     mockNotifyReadThread.mockResolvedValueOnce({});
 
@@ -251,11 +255,18 @@ describe('GiteaChannel', () => {
     channel.disconnect();
 
     expect(mockRepoGetPullRequest).toHaveBeenCalledWith('owner', 'repo', 5);
-    const env = envelopes[0] as { text: string; metadata?: string };
+    const env = envelopes[0] as {
+      text: string;
+      metadata?: string;
+      senderId: string;
+      senderName: string;
+    };
     expect(env.text).toContain('PR body');
     expect(env.text).toContain('@reviewer');
     expect(env.metadata).toContain('URL: https://gitea.com/owner/repo/pulls/5');
     expect(env.metadata).toContain('Branch: feature-branch');
+    expect(env.senderId).toBe('pr-author');
+    expect(env.senderName).toBe('pr-author');
   });
 
   it('includes metadata for slash command comments', async () => {
@@ -535,7 +546,7 @@ describe('GiteaChannel', () => {
 
     const channel = new GiteaChannel(
       'test',
-      { ...baseConfig, pollInterval: 50 },
+      { ...baseConfig, pollInterval: 5000 },
       bridge,
     );
     (
@@ -650,7 +661,7 @@ describe('GiteaChannel', () => {
       'test',
       {
         ...baseConfig,
-        pollInterval: 50,
+        pollInterval: 5000,
       } as ChannelConfig,
       bridge,
     );
@@ -679,7 +690,7 @@ describe('GiteaChannel', () => {
 
     const channel = new GiteaChannel(
       'test',
-      { ...baseConfig, pollInterval: 50 },
+      { ...baseConfig, pollInterval: 5000 },
       mockBridge(),
     );
     await channel.connect();

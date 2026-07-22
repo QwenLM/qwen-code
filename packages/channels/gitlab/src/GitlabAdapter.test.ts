@@ -190,7 +190,7 @@ describe('GitlabChannel', () => {
 
     const channel = new GitlabChannel(
       'test',
-      { ...baseConfig, pollInterval: 50 },
+      { ...baseConfig, pollInterval: 5000 },
       bridge,
     );
     await channel.connect();
@@ -439,7 +439,7 @@ describe('GitlabChannel', () => {
 
     const channel = new GitlabChannel(
       'test',
-      { ...baseConfig, pollInterval: 50 },
+      { ...baseConfig, pollInterval: 5000 },
       bridge,
     );
     await channel.connect();
@@ -616,7 +616,7 @@ describe('GitlabChannel', () => {
 
     const channel = new GitlabChannel(
       'test',
-      { ...baseConfig, pollInterval: 50 },
+      { ...baseConfig, pollInterval: 5000 },
       mockBridge(),
     );
     await channel.connect();

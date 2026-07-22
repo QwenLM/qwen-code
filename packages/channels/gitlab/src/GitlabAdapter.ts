@@ -54,7 +54,8 @@ export class GitlabChannel extends ChannelBase {
       token: this.config.token,
     });
     this.pollIntervalMs =
-      typeof config['pollInterval'] === 'number'
+      typeof config['pollInterval'] === 'number' &&
+      config['pollInterval'] >= 5_000
         ? config['pollInterval']
         : DEFAULT_POLL_INTERVAL_MS;
   }
@@ -279,6 +280,7 @@ export class GitlabChannel extends ChannelBase {
       chatId: projectPath,
       threadId:
         targetIid !== undefined ? `${typePrefix}:${targetIid}` : undefined,
+      messageId: String(todo.id),
       text: content,
       metadata,
       isGroup: true,

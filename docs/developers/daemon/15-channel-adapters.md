@@ -2,7 +2,7 @@
 
 ## Overview
 
-`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into an agent prompt and send the agent response back to the chat platform. Six IM channels and three polling-based code-hosting channels ship today: DingTalk, WeChat (Weixin), Telegram, Feishu, WeCom, QQ Bot (IM), and GitHub, GitLab, Gitea (polling). They share a base layer (`packages/channels/base/`) and an adapter-facing `ChannelAgentBridge` contract.
+`packages/channels/` contains the **IM channel adapters** that turn a chat platform's incoming message into an agent prompt and send the agent response back to the chat platform. Four IM channels and three polling-based code-hosting channels ship today: DingTalk, WeChat (Weixin), Telegram, Feishu (IM), and GitHub, GitLab, Gitea (polling). They share a base layer (`packages/channels/base/`) and an adapter-facing `ChannelAgentBridge` contract.
 
 There are two current host modes:
 
@@ -194,14 +194,14 @@ Adapter `connect()` failures are reported separately from worker lifecycle error
 
 `ChannelConfig` (from `packages/channels/base/src/types.ts`):
 
-| Knob                                     | Effect                                                                                                    |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), or `'single'` (one shared session per channel). |
-| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                         |
-| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                       |
-| `denylist?: string[]`                    | Sender ids denied.                                                                                        |
-| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                        |
-| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                               |
+| Knob                                     | Effect                                                                                                                                                                    |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), `'chat_thread'` (chat + thread, prevents cross-repo collision), or `'single'` (one shared session per channel). |
+| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                                                                                         |
+| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                                                                                       |
+| `denylist?: string[]`                    | Sender ids denied.                                                                                                                                                        |
+| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                                                                                        |
+| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                                                                                               |
 
 Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `clientId` (appId), `clientSecret` (appSecret), `verificationToken`, `encryptKey` (webhook mode); GitHub/GitLab/Gitea: `token`, `baseUrl`, `pollInterval`).
 

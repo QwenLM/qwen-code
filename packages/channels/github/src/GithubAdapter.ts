@@ -45,7 +45,8 @@ export class GithubChannel extends ChannelBase {
       baseUrl: (config['baseUrl'] as string) || undefined,
     });
     this.pollIntervalMs =
-      typeof config['pollInterval'] === 'number'
+      typeof config['pollInterval'] === 'number' &&
+      config['pollInterval'] >= 5_000
         ? config['pollInterval']
         : DEFAULT_POLL_INTERVAL_MS;
   }
@@ -361,8 +362,7 @@ export class GithubChannel extends ChannelBase {
       metadata,
       isGroup: true,
       isMentioned: MENTION_REASONS.has(notification.reason),
-      isReplyToBot:
-        this.botUsername !== null && notification.reason === 'author',
+      isReplyToBot: false,
     };
   }
 }

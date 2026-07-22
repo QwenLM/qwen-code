@@ -657,7 +657,7 @@ describe('GithubChannel', () => {
 
     const channel = new GithubChannel(
       'test',
-      { ...baseConfig, pollInterval: 50 },
+      { ...baseConfig, pollInterval: 5000 },
       bridge,
     );
     (
@@ -715,7 +715,7 @@ describe('GithubChannel', () => {
       'test',
       {
         ...baseConfig,
-        pollInterval: 50,
+        pollInterval: 5000,
       } as ChannelConfig,
       bridge,
     );
@@ -735,7 +735,7 @@ describe('GithubChannel', () => {
 
     const channel = new GithubChannel(
       'test',
-      { ...baseConfig, pollInterval: 50 },
+      { ...baseConfig, pollInterval: 5000 },
       mockBridge(),
     );
     await channel.connect();

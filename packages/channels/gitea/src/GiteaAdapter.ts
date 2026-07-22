@@ -43,7 +43,8 @@ export class GiteaChannel extends ChannelBase {
     const baseUrl = (config['baseUrl'] as string) || 'https://gitea.com';
     this.client = giteaApi(baseUrl, { token: this.config.token });
     this.pollIntervalMs =
-      typeof config['pollInterval'] === 'number'
+      typeof config['pollInterval'] === 'number' &&
+      config['pollInterval'] >= 5_000
         ? config['pollInterval']
         : DEFAULT_POLL_INTERVAL_MS;
   }
