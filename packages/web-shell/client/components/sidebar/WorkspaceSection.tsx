@@ -15,12 +15,6 @@ import type {
 } from '@qwen-code/sdk/daemon';
 import { FolderClosedIcon, FolderOpenIcon } from 'lucide-react';
 import { GitBranchIndicator } from '../GitBranchIndicator';
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from '../ui/dropdown-menu';
 import { SESSION_LIST_PAGE_SIZE } from '../../constants/sessions';
 import { useI18n } from '../../i18n';
 import {

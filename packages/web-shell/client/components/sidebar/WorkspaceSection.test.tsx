@@ -1,10 +1,4 @@
 // @vitest-environment jsdom
-/**
- * @license
- * Copyright 2026 Qwen Team
- * SPDX-License-Identifier: Apache-2.0
- */
-
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
@@ -14,7 +8,6 @@ import type {
   DaemonSessionSummary,
   DaemonWorkspaceCapability,
   DaemonWorkspaceGitStatus,
-  DaemonWorkspaceTrustStatusV2,
 } from '@qwen-code/sdk/daemon';
 import gitStyles from '../ChatEditor.module.css';
 
@@ -89,8 +82,6 @@ function renderSection(
           untrustedLabel="Untrusted"
           readOnlyLabel="Read-only"
           trustToOpenLabel="Trust to open"
-          trustApplyingLabel="Applying"
-          trustFailedLabel="Failed"
           noSessionsLabel="No sessions"
           loadErrorLabel="Load failed"
           organizationEnabled={false}
@@ -127,7 +118,6 @@ afterEach(() => {
   act(() => root.unmount());
   container.remove();
   vi.restoreAllMocks();
-  vi.useRealTimers();
 });
 
 describe('WorkspaceSection label', () => {
@@ -167,26 +157,13 @@ describe('WorkspaceSection git chip', () => {
     expect(chip?.className).toContain(gitStyles.gitBranchChipCompact);
     expect(chip?.getAttribute('aria-label')).toContain('main');
 
-    // The chip itself is a read-only OUTPUT; the wrapping trigger opens a
-    // dropdown with the Changes action. Click the trigger then the menu item
-    // to prove the onClick handler is actually wired.
-    const trigger = chip?.closest('[role="button"]');
-    expect(trigger).not.toBeNull();
+    // The chip itself is a read-only OUTPUT; the wrapping button is what opens
+    // the Changes view. Click it to prove the onClick handler is actually wired
+    // — a miswire (e.g. a deleted onClick) would otherwise go undetected.
+    const button = chip?.closest('button');
+    expect(button).not.toBeNull();
     act(() => {
-      trigger?.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true }),
-      );
-      trigger?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-      trigger?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-    });
-    const menuItem = document.querySelector<HTMLElement>('[role="menuitem"]');
-    expect(menuItem).not.toBeNull();
-    act(() => {
-      menuItem?.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true }),
-      );
-      menuItem?.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }));
-      menuItem?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      button?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenGitDiff).toHaveBeenCalledWith('/tmp/project');
   });
@@ -291,79 +268,5 @@ describe('WorkspaceSection git chip', () => {
     await flush();
 
     expect(gitChip()).toBeNull();
-  });
-});
-
-function trustStatus(trusted: boolean): DaemonWorkspaceTrustStatusV2 {
-  return {
-    v: 2,
-    workspaceCwd: '/workspace',
-    folderTrustEnabled: true,
-    configured: {
-      state: trusted ? 'trusted' : 'untrusted',
-      source: 'file',
-      explicitTrustLevel: trusted ? 'TRUST_FOLDER' : 'DO_NOT_TRUST',
-    },
-    effective: trusted
-      ? { state: 'trusted', trusted: true }
-      : { state: 'untrusted', trusted: false },
-    reconciliation: {
-      state: 'stable',
-      revision: trusted ? 'trusted-revision' : 'untrusted-revision',
-      appliedRevision: trusted ? 'trusted-revision' : 'untrusted-revision',
-    },
-    requiresDaemonRestartForChanges: false,
-  };
-}
-
-describe('WorkspaceSection trust polling', () => {
-  it('keeps polling after a stable response and applies later trust changes', async () => {
-    vi.useFakeTimers();
-    const workspaceTrust = vi
-      .fn()
-      .mockResolvedValueOnce(trustStatus(true))
-      .mockResolvedValueOnce(trustStatus(false));
-    const client = { workspaceTrust } as unknown as DaemonClient;
-
-    await act(async () => {
-      root.render(
-        <I18nProvider language="en">
-          <WorkspaceSection
-            workspace={{
-              id: 'workspace-id',
-              cwd: '/workspace',
-              primary: true,
-              trusted: true,
-            }}
-            client={client}
-            reloadToken={0}
-            untrustedLabel="Untrusted"
-            readOnlyLabel="Read only"
-            trustToOpenLabel="Trust to open"
-            trustApplyingLabel="Applying"
-            trustFailedLabel="Failed"
-            noSessionsLabel="No sessions"
-            loadErrorLabel="Load failed"
-            organizationEnabled={false}
-            ungroupedLabel="Ungrouped"
-            formatTime={(value) => value}
-            renderSessions={false}
-            renderSession={() => null}
-          />
-        </I18nProvider>,
-      );
-      await Promise.resolve();
-    });
-
-    expect(workspaceTrust).toHaveBeenCalledTimes(1);
-    expect(container.textContent).not.toContain('Untrusted');
-
-    await act(async () => {
-      await vi.advanceTimersByTimeAsync(10_000);
-    });
-
-    expect(workspaceTrust).toHaveBeenCalledTimes(2);
-    expect(container.textContent).toContain('Untrusted');
-    expect(container.querySelector('button')?.disabled).toBe(true);
   });
 });

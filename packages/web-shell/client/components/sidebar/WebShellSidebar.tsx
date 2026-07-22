@@ -3721,10 +3721,6 @@ export function WebShellSidebar({
                             untrustedLabel={t('sidebar.workspaceUntrusted')}
                             readOnlyLabel={t('sidebar.workspaceReadOnly')}
                             trustToOpenLabel={t('sidebar.workspaceTrustToOpen')}
-                            trustApplyingLabel={t(
-                              'sidebar.workspaceTrustApplying',
-                            )}
-                            trustFailedLabel={t('sidebar.workspaceTrustFailed')}
                             noSessionsLabel={t('sidebar.noSessions')}
                             loadErrorLabel={t('sidebar.loadFailed')}
                             organizationEnabled={organizationEnabled}

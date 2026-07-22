@@ -124,7 +124,7 @@ existing event; otherwise it returns a retryable 503.
 
 ## Non-goals
 
-- Direct remote/Web Shell trust approval.
+- Direct remote trust approval.
 - Zero-downtime dual runtimes or session migration.
 - Public generation identifiers.
 - Parallel runtime rebuilds.
