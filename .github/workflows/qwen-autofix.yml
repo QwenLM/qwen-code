@@ -516,7 +516,19 @@ jobs:
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
                 [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true
                 if [[ "${label_is_trigger}" != 'true' ]]; then
-                  echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  # A non-trigger label (e.g. scope/*, priority/*) may arrive
+                  # after the trigger labels and cancel their runs via per-issue
+                  # concurrency. If the issue already carries both required
+                  # labels, proceed anyway — trust was established when the
+                  # trigger labels were applied (both require triage+).
+                  _late_ready="$(jq -r --arg l "${READY_FOR_AGENT_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  _late_approved="$(jq -r --arg l "${AUTOFIX_APPROVED_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  if [[ "${ISSUE_STATE}" == 'open' && "${_late_ready}" == 'true' && "${_late_approved}" == 'true' ]]; then
+                    echo "🧭 non-trigger label '${ISSUE_LABEL:-n/a}' but issue #${ISSUE_NUMBER} already approved+ready → issue phase"
+                    DO_ISSUE=true
+                  else
+                    echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  fi
                 else
                   issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                   issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
