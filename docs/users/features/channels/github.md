@@ -76,6 +76,14 @@ With `sessionScope: chat_thread`, each issue or pull request gets its own isolat
 
 The adapter responds to: issue comments, pull request review comments, new issues, and new pull requests where you are mentioned.
 
+### Mention Detection
+
+The adapter determines whether the bot was mentioned by scanning the **comment body** for `@<bot-username>`. It does **not** rely on the notification `reason` field — GitHub's notification reason is a sticky thread-level value that can remain `mention` for all subsequent comments in a thread even after the original mention, so it is not a reliable signal.
+
+The bot's username is resolved from the API at startup. If the username is unavailable, `isMentioned` defaults to `false`.
+
+With the default `requireMention: true` (inherited from `groupPolicy` group config), the bot only responds when the comment body contains `@<bot-username>`. Set `groups: { "*": { "requireMention": false } }` to respond to all notifications regardless of mention.
+
 ### Known Limitation (MVP)
 
 The adapter fetches only the `latest_comment_url` from each notification thread. If multiple comments arrive on the same issue or PR between two poll cycles, only the latest comment is processed — intermediate comments are silently dropped. This is acceptable for the current MVP scope where you mention the bot and no new mentions arrive before the agent replies. A future upgrade will treat notifications as wake-up signals and enumerate all new comments per thread.
@@ -100,7 +108,7 @@ The agent can proactively post comments on existing issues or pull requests. A `
 - Check that the token is correct and the environment variable is set
 - Verify your username is in `allowedUsers` if using `senderPolicy: "allowlist"`
 - Make sure `groupPolicy` is set to `"open"` or `"allowlist"` — the default is `"disabled"`, which drops all notifications because each repository is treated as a group chat
-- Make sure the notification's `reason` is `mention` or `team_mention` — other reasons (like `assign`, `subscribed`) are received but `isMentioned` is only set for direct mentions
+- Make sure the comment body contains `@<bot-username>` — the adapter detects mentions by scanning the comment text, not the notification reason. With the default `requireMention: true`, comments without an explicit `@mention` are ignored
 - Check the terminal output for errors
 
 ### "could not resolve sender" warning

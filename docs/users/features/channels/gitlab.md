@@ -75,6 +75,12 @@ With `sessionScope: chat_thread`, each issue or merge request gets its own isola
 
 The adapter only processes `Issue` and `MergeRequest` todo target types. Todos for commits, pipelines, design management, and other types are skipped.
 
+### Mention Detection
+
+The adapter determines whether the bot was mentioned by checking the todo's `action_name` field. Only `mentioned` and `directly_addressed` actions set `isMentioned` to `true`. Other actions like `assigned`, `review_requested`, or `commented` are received but do not trigger the bot.
+
+With the default `requireMention: true` (inherited from `groupPolicy` group config), the bot only responds to todos with a mention-type action. Set `groups: { "*": { "requireMention": false } }` to respond to all todos regardless of action type.
+
 ## Proactive Sends
 
 The agent can proactively post notes on existing issues or merge requests. A `threadId` is required — if it is missing, the adapter logs an error and the message is not sent.
@@ -95,7 +101,7 @@ The agent can proactively post notes on existing issues or merge requests. A `th
 - Check that the token is correct and the environment variable is set
 - Verify your username is in `allowedUsers` if using `senderPolicy: "allowlist"`
 - Make sure `groupPolicy` is set to `"open"` or `"allowlist"` — the default is `"disabled"`, which drops all notifications because each project is treated as a group chat
-- Make sure the todo's `action_name` is `mentioned` or `directly_addressed` — other actions are received but `isMentioned` is only set for direct mentions
+- Make sure the todo's `action_name` is `mentioned` or `directly_addressed` — other actions (like `assigned`, `commented`) are received but do not trigger the bot. With the default `requireMention: true`, only mention-type todos are processed
 - Check the terminal output for errors
 
 ### "unsupported target_type" warning

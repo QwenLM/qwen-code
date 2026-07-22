@@ -86,7 +86,9 @@ The agent can proactively post comments on existing issues or pull requests. A `
 
 ## Mention Detection
 
-The Gitea adapter detects `@mentions` by scanning comment text for `@<your-username>` patterns. It resolves the bot's username from the API at startup. If the username is unavailable, `isMentioned` defaults to `false`.
+Unlike GitHub's Notifications API, Gitea's notification threads do **not** include a `reason` field — there is no way to tell from the notification itself whether it was triggered by a mention, an assignment, a review request, or something else. The adapter works around this by scanning the **comment body** for `@<bot-username>` patterns instead. It resolves the bot's username from the API at startup. If the username is unavailable, `isMentioned` defaults to `false`.
+
+With the default `requireMention: true` (inherited from `groupPolicy` group config), the bot only responds when the comment body contains `@<bot-username>`. Set `groups: { "*": { "requireMention": false } }` to respond to all notifications regardless of mention.
 
 > ⚠️ **Security:** On a **public** repository with `senderPolicy: "open"`, any Gitea user who mentions the bot can submit a prompt that drives the agent in your `cwd` — reading code, spending tokens, posting comments, and running tools (subject to the daemon's permission policy). Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
 
