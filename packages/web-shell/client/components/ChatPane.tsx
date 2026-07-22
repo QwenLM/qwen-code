@@ -376,6 +376,10 @@ export function ChatPane({
   const handleRightPanelOpen = useCallback(
     (request: TurnOutputOpenRequest) => {
       if (!onRightPanelOpen) return;
+      if (request.kind === 'subagent') {
+        onRightPanelOpen(request);
+        return;
+      }
       onRightPanelOpen({ ...request, workspaceActions });
     },
     [onRightPanelOpen, workspaceActions],
