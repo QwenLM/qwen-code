@@ -1284,6 +1284,11 @@ export interface DaemonWorkspaceMcpInitializeResult {
   accepted: boolean;
 }
 
+export interface DaemonWorkspaceMcpReloadOptions {
+  forceReconnectAll?: boolean;
+  forceReconnectWhich?: string[];
+}
+
 export interface DaemonWorkspaceMcpToolStatus {
   name: string;
   serverToolName?: string;

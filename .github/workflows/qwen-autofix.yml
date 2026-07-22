@@ -161,6 +161,17 @@ env:
   # explicitly delegated work; removing the label restores the strict cap,
   # and re-engaging opens a fresh counting window (see REARM_KEY below).
   TAKEOVER_MAX_ROUNDS: '100'
+  # Consecutive-failure sub-cap, distinct from the total round cap above. The
+  # total cap bounds how many PRODUCTIVE rounds a PR may take; this bounds how
+  # many rounds may fail IN A ROW with nothing pushed. Under takeover a PR gets
+  # up to 100 rounds, but a PR that fails to push this many times running is not
+  # iterating, it is stuck — a too-large / fast-conflicting PR whose fix keeps
+  # timing out or failing the gate. Retrying at the same budget will not fix
+  # that; a human has to rebase or split it. Any pushed round OR a legitimate
+  # "no changes needed" no-op resets the streak, so this only ever fires on an
+  # unbroken run of failures. Observed on #6723: 7 straight failed rounds (3
+  # timeouts, 4 gate rejections) over 8 hours, heading for 100.
+  CONSECUTIVE_FAILURE_CAP: '5'
   # Do not claim more issues when too many existing autofix PRs are still open.
   MAX_OPEN_AUTOFIX_PRS: '5'
 
@@ -3375,6 +3386,57 @@ jobs:
               # max-round guard would ignore.
               MARK_ROUND="${MAX_ROUNDS}"
               HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
+            fi
+
+            # Consecutive-failure circuit breaker, distinct from the round cap.
+            # Reaching this step at all means this round did NOT push (the push
+            # and no-op paths report from "Push and report"), so this round is a
+            # failure. Count how many failures precede it WITHOUT a break: walk
+            # the bot's prior eval markers in API order (oldest-first, pinned
+            # by sort_by so a stray reorder cannot corrupt the streak) and
+            # reset the streak at each push ("Addressed the latest review
+            # feedback") or deliberate no-op ("no changes needed"). After the
+            # full walk, CONSEC_FAIL holds failures since the last progress
+            # point plus one for this round. If the unbroken
+            # streak (this round included) reaches the cap, stop retrying even
+            # under takeover: a PR that fails this many times running is stuck
+            # on something a re-run at the same budget will not fix (observed on
+            # #6723: 7 straight failures, 3 timeouts + 4 gate rejections). Only
+            # overrides a would-be RETRY — a round already terminal for another
+            # reason keeps its own headline.
+            # Transient model errors (429/5xx) are exempt: the CAUSE_MAX logic
+            # above deliberately gives them the full round budget because they
+            # self-heal once the provider recovers. Letting the breaker override
+            # that would mark every in-flight PR terminal at once during a
+            # provider outage — the failures are not the PR's fault and DO
+            # self-heal. Auth errors are NOT exempt (they never self-heal).
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+              CONSEC_FAIL=1
+              if [[ -f "${WORKDIR}/ic.json" ]]; then
+                COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
+              else
+                COMMENTS_JSON="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null || true)"
+              fi
+              PRIOR_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                [.[] | select((.user.login // "") == $ab)
+                     | select((.body // "") | contains("<!-- autofix-eval "))
+                     | select(
+                         ((.body // "") | contains("win=" + $win + " -->"))
+                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                | sort_by(.created_at) | .[]
+                | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
+              while IFS= read -r H; do
+                [[ -n "${H}" ]] || continue
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* ]]; then
+                  CONSEC_FAIL=1
+                else
+                  CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))
+                fi
+              done <<< "${PRIOR_HEADS}"
+              if [[ "${CONSEC_FAIL}" -ge "${CONSECUTIVE_FAILURE_CAP}" ]]; then
+                MARK_ROUND="${MAX_ROUNDS}"
+                HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that failed to push anything (timeouts and/or gate rejections). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+              fi
             fi
             {
               echo "${HEADLINE}"
