@@ -26,7 +26,8 @@ owns the model-driven decisions, code changes, and pre-commit verification.
 - Run required verification commands before committing. Use only these trusted
   project commands: `npm run build`, `npm run typecheck`, `npm run lint`,
   focused Vitest runs for touched packages, integration tests after
-  `npm run bundle` when relevant, and
+  `npm run bundle` when the touched behavior is only exercised through the
+  bundled CLI or integration harness, and
   `npm run generate:settings-schema` when a settings source changed (see the
   generated-artifact rule below). If a command fails, fix the cause and rerun
   it. Do not commit while a required runnable check is failing.
@@ -100,9 +101,9 @@ approved issue from the scheduled pool. Prefer forced tier-0 issues, then the
 highest confidence approved issue. It is valid to pick none.
 
 Choose only work that is coherent in this codebase and likely small enough for
-a focused autonomous fix. CI-, Docker-, or platform-specific issues remain
-eligible when logs and code inspection support a focused regression test or
-surrogate. Reject candidates with
+a focused autonomous fix. CI-, Docker-, platform-, timing-, or
+environment-specific issues remain eligible when logs and code inspection
+support a focused regression test or surrogate. Reject candidates with
 `existingAutofixPr` because those must continue through PR review handling, not
 a new issue fix. Also reject real OAuth/IDE/manual-visual flows, architecture
 redesigns, product decisions, or fixes likely over roughly 300 changed lines.
@@ -132,17 +133,18 @@ Implement the selected issue in the checked-out repository:
 2. In the current checkout, create branch `autofix/issue-<issue>` from current
    HEAD. Do not create a separate worktree.
 3. Establish baseline behavior by focused code inspection and, when practical,
-   a targeted existing test. For CI- or environment-specific failures, inspect
-   the exact error, its source, callers, and relevant history even when the
-   original environment cannot run locally; then construct the closest focused
-   regression test or surrogate.
+   a targeted existing test. For CI-, Docker-, platform-, timing-, or
+   environment-specific failures, inspect the exact error, its source, callers,
+   and relevant history even when the original environment cannot run locally;
+   then construct the closest focused regression test or surrogate.
 4. Make the minimal root-cause change and add/update focused Vitest coverage
    for the behavior.
 5. For TypeScript changes, read the relevant type definitions and preserve
    strict nullability; do not assume optional fields are present.
 6. Run `npm run build`, `npm run typecheck`, `npm run lint`, focused Vitest
    tests for touched packages, and integration tests after `npm run bundle`
-   when relevant. If the change touched a settings source, also run
+   when the touched behavior is only exercised through the bundled CLI or
+   integration harness. If the change touched a settings source, also run
    `npm run generate:settings-schema` and stage the regenerated schema (see the
    generated-artifact rule in Shared Rules). Keep fixing and rerunning runnable
    checks until they pass. If a required runnable check remains failing, write
@@ -192,9 +194,10 @@ Finish with exactly one outcome:
 
 - Made a change: re-read the full diff as a skeptical reviewer, run
   `npm run build`, `npm run typecheck`, `npm run lint`, focused Vitest tests for
-  touched packages, and integration tests after `npm run bundle` when relevant
-  (plus `npm run generate:settings-schema`, staging the regenerated schema, if a
-  settings source changed), commit once only after they pass, then write
+  touched packages, and integration tests after `npm run bundle` when the
+  touched behavior is only exercised through the bundled CLI or integration
+  harness (plus `npm run generate:settings-schema`, staging the regenerated
+  schema, if a settings source changed), commit once only after they pass, then write
   `<workdir>/address-summary.md` with each feedback point,
   decision, changes, conflict notes, and verification results (bilingual per
   Shared Rules). Also write `<workdir>/resolved-comments.txt`: one inline
