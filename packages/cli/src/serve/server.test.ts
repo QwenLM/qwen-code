@@ -19010,7 +19010,7 @@ describe('runQwenServe', () => {
       'https://anywhere.example.com',
     );
     expect(res.headers.get('access-control-expose-headers')).toBe(
-      'Retry-After',
+      'Retry-After, X-Qwen-Event-Epoch',
     );
   });
 
@@ -20932,7 +20932,9 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
       /Authorization/,
     );
     expect(res.headers['access-control-max-age']).toBe('86400');
-    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
+    expect(res.headers['access-control-expose-headers']).toBe(
+      'Retry-After, X-Qwen-Event-Epoch',
+    );
   });
 
   it('OPTIONS preflight returns 204 + CORS headers with no body', async () => {
@@ -20950,7 +20952,9 @@ describe('--allow-origin CORS allowlist (T2.4 #4514)', () => {
       'http://localhost:5173',
     );
     expect(res.headers['access-control-allow-methods']).toMatch(/POST/);
-    expect(res.headers['access-control-expose-headers']).toBe('Retry-After');
+    expect(res.headers['access-control-expose-headers']).toBe(
+      'Retry-After, X-Qwen-Event-Epoch',
+    );
     expect(res.text).toBe('');
   });
 
