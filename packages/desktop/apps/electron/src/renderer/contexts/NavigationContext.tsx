@@ -70,6 +70,7 @@ import type {
 } from '../../shared/types'
 import {
   isSessionsNavigation,
+  isGoalsNavigation,
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
@@ -111,6 +112,7 @@ export type { Route }
 export type { NavigationState, SessionFilter }
 export {
   isSessionsNavigation,
+  isGoalsNavigation,
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,

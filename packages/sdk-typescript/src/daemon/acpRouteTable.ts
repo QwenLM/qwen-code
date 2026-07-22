@@ -132,6 +132,33 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       notification: true,
     },
   },
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/goal$/,
+    mapping: {
+      method: '_qwen/session/goal',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/goal$/,
+    mapping: {
+      method: '_qwen/session/goal/control',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        request: bodyRecord(body),
+      }),
+    },
+  },
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/goal\/clear$/,
+    mapping: {
+      method: '_qwen/session/goal/clear',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
   // DELETE /session/:id → session/close
   {
     httpMethod: 'DELETE',

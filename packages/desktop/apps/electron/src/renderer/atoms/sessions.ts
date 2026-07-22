@@ -11,7 +11,7 @@
 import { atom } from 'jotai'
 import type { Getter, Setter } from 'jotai/vanilla'
 import { atomFamily } from 'jotai-family'
-import type { Session, Message } from '../../shared/types'
+import type { GoalSnapshotV2, Session, Message } from '../../shared/types'
 import { hasSessionContentHint, mergeSessionRefreshResult } from '../lib/session-load'
 
 /**
@@ -76,6 +76,8 @@ export interface SessionMeta {
   hidden?: boolean
   /** Whether this session is archived */
   isArchived?: boolean
+  /** Authoritative Goal snapshot projected from the session. */
+  goalState?: GoalSnapshotV2
   /** Timestamp when session was archived (for retention policy) */
   archivedAt?: number
 }

@@ -1064,6 +1064,8 @@ export const useSlashCommandProcessor = (
                     });
                   }
                   return { type: 'handled' };
+                case 'goal_control':
+                  return { type: 'handled' };
                 case 'dialog':
                   switch (result.dialog) {
                     case 'arena_start':

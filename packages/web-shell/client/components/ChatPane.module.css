@@ -135,6 +135,13 @@
   position: relative;
 }
 
+.footer
+  [data-web-shell-goal-status]
+  + [data-web-shell-composer]
+  [data-web-shell-composer-surface] {
+  border-radius: 0 0 12px 12px;
+}
+
 .approval {
   margin-bottom: 8px;
 }

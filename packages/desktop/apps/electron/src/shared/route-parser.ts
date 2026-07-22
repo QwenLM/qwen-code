@@ -41,6 +41,7 @@ export interface ParsedRoute {
 
 export type NavigatorType =
   | 'sessions'
+  | 'goals'
   | 'sources'
   | 'skills'
   | 'skillMarketplace'
@@ -72,6 +73,7 @@ export interface ParsedCompoundRoute {
  */
 const COMPOUND_ROUTE_PREFIXES = [
   'allSessions',
+  'goals',
   'flagged',
   'archived',
   'state',
@@ -113,6 +115,12 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
   if (segments.length === 0) return null
 
   const first = segments[0]
+
+  if (first === 'goals') {
+    return segments.length === 1
+      ? { navigator: 'goals', details: null }
+      : null
+  }
 
   // Settings navigator
   if (first === 'settings') {
@@ -305,6 +313,8 @@ export function parseCompoundRoute(route: string): ParsedCompoundRoute | null {
  * Build a compound route string from parsed state
  */
 export function buildCompoundRoute(parsed: ParsedCompoundRoute): string {
+  if (parsed.navigator === 'goals') return 'goals'
+
   if (parsed.navigator === 'settings') {
     const detailsType = parsed.details?.type || DEFAULT_SETTINGS_SUBPAGE
     return `settings/${detailsType}`
@@ -432,6 +442,10 @@ export function parseRoute(route: string): ParsedRoute | null {
 function convertCompoundToViewRoute(
   compound: ParsedCompoundRoute,
 ): ParsedRoute {
+  if (compound.navigator === 'goals') {
+    return { type: 'view', name: 'goals', params: {} }
+  }
+
   // Settings
   if (compound.navigator === 'settings') {
     const subpage = compound.details?.type || DEFAULT_SETTINGS_SUBPAGE
@@ -585,6 +599,8 @@ export function parseRouteToNavigationState(
 function convertCompoundToNavigationState(
   compound: ParsedCompoundRoute,
 ): NavigationState {
+  if (compound.navigator === 'goals') return { navigator: 'goals' }
+
   // Settings
   if (compound.navigator === 'settings') {
     const subpage = (compound.details?.type ||
@@ -673,6 +689,8 @@ function convertParsedRouteToNavigationState(
   }
 
   switch (parsed.name) {
+    case 'goals':
+      return { navigator: 'goals' }
     case 'settings':
       return { navigator: 'settings', subpage: DEFAULT_SETTINGS_SUBPAGE }
     case 'ai':
@@ -853,6 +871,10 @@ function convertParsedRouteToNavigationState(
 function navigationStateToCompoundRoute(
   state: NavigationState,
 ): ParsedCompoundRoute {
+  if (state.navigator === 'goals') {
+    return { navigator: 'goals', details: null }
+  }
+
   if (state.navigator === 'settings') {
     return {
       navigator: 'settings',

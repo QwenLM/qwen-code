@@ -48,6 +48,56 @@ export type BuiltInStatusId =
   | 'done'
   | 'cancelled'
 
+// ---------------------------------------------------------------------------
+// Goal protocol v2
+// ---------------------------------------------------------------------------
+
+export type GoalStatus =
+  | 'active'
+  | 'paused'
+  | 'blocked'
+  | 'usage_limited'
+  | 'complete'
+
+export type GoalActivity = 'idle' | 'running' | 'verifying'
+
+export interface GoalRecord {
+  goalId: string
+  revision: number
+  objective: string
+  status: GoalStatus
+  evidenceCursor: { recordId: string | null }
+  turnCount: number
+  activeTimeMs: number
+  createdAt: number
+  updatedAt: number
+  lastReason?: string
+}
+
+export interface GoalSnapshotV2 {
+  v: 2
+  goal: GoalRecord | null
+  activity: GoalActivity
+}
+
+export type GoalControlRequest =
+  | { action: 'create'; objective: string }
+  | {
+      action: 'replace' | 'edit'
+      objective: string
+      expectedGoalId: string
+      expectedRevision: number
+    }
+  | {
+      action: 'pause' | 'resume' | 'clear'
+      expectedGoalId: string
+      expectedRevision: number
+    }
+
+export interface GoalStateResponse {
+  snapshot: GoalSnapshotV2
+}
+
 /**
  * Electron-specific Session type (includes runtime state).
  * Extends core Session with messages array and processing state.
@@ -116,6 +166,8 @@ export interface Session {
   availableSkills?: string[]
   /** Provider-advertised skill metadata for the current session. Runtime-only. */
   availableSkillDetails?: AvailableSkillDetail[]
+  /** Authoritative Goal protocol v2 state for this live provider session. */
+  goalState?: GoalSnapshotV2
 }
 
 export interface CreateSessionOptions {
@@ -244,6 +296,11 @@ export type SessionEvent = (
       sessionId: string
       tokenUsage?: Session['tokenUsage']
       hasUnread?: boolean
+    }
+  | {
+      type: 'goal_state'
+      sessionId: string
+      snapshot: GoalSnapshotV2
     }
   | {
       type: 'interrupted'
@@ -434,6 +491,8 @@ export type SessionCommand =
   | { type: 'setSessionStatus'; state: SessionStatus }
   | { type: 'markRead' }
   | { type: 'markUnread' }
+  | { type: 'getGoalState' }
+  | { type: 'controlGoal'; request: GoalControlRequest }
   | { type: 'setActiveViewing'; workspaceId: string }
   | { type: 'setPermissionMode'; mode: PermissionMode }
   | { type: 'setThinkingLevel'; level: ThinkingLevel }

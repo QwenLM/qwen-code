@@ -27,7 +27,7 @@ import {
   type ToolCallRequestInfo,
   type ToolCallResponseInfo,
   type GeminiErrorEventValue,
-  type ActiveGoal,
+  type GoalTurnPermit,
   type SteerInput,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
@@ -61,10 +61,7 @@ import {
   clampInlineMediaPart,
   splitImageParts,
   generateToolUseSummary,
-  getActiveGoal,
-  activeGoalEquals,
-  setActiveGoal,
-  clearActiveGoal,
+  goalRequiresExactPermit,
   createDuplicateProviderToolCallResponse,
   markDuplicateProviderToolCallResponseSent,
   findRepeatedDuplicateProviderToolCall,
@@ -75,7 +72,6 @@ import {
 import { type Part, type PartListUnion, FinishReason } from '@google/genai';
 import type {
   HistoryItem,
-  HistoryItemGoalStatus,
   HistoryItemWithoutId,
   HistoryItemToolGroup,
   HistoryItemGemini,
@@ -117,10 +113,14 @@ import { useSessionStats } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
-import { recordGoalStatusItem } from '../utils/restoreGoal.js';
+import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
-import { GOAL_COMMAND_RE } from './useMessageQueue.js';
+import {
+  GOAL_COMMAND_RE,
+  type DirectUserAdmission,
+  type QueuedGoalTurn,
+} from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import { cleanupReviewWorktreeLeases } from '../../services/review-worktree-lease.js';
 
@@ -172,6 +172,37 @@ interface ResolvedSteerMessages {
   parts: Part[];
   accept: () => void;
   restoreMessages: string[];
+}
+
+interface GoalTurnBinding {
+  permit: GoalTurnPermit;
+  turnKey: string;
+  controller: AbortController;
+  origin: 'runtime' | 'user';
+}
+
+type GoalTurnAdmission = Omit<GoalTurnBinding, 'permit'>;
+
+function sameGoalPermit(left: GoalTurnPermit, right: GoalTurnPermit): boolean {
+  return (
+    left.goalId === right.goalId &&
+    left.revision === right.revision &&
+    left.turnId === right.turnId
+  );
+}
+
+function sharedGoalPermit(
+  contexts: Array<GoalTurnPermit | undefined>,
+): GoalTurnPermit | undefined {
+  const first = contexts[0];
+  if (contexts.every((context) => context === undefined)) return undefined;
+  if (
+    !first ||
+    contexts.some((context) => !context || !sameGoalPermit(first, context))
+  ) {
+    throw new Error('ToolResult batch has mixed Goal contexts');
+  }
+  return { ...first };
 }
 
 /**
@@ -309,6 +340,11 @@ enum StreamProcessingStatus {
   Error,
 }
 
+interface StreamProcessingResult {
+  status: StreamProcessingStatus;
+  scheduledToolContinuation: boolean;
+}
+
 const EDIT_TOOL_NAMES = new Set([
   ToolNames.EDIT,
   'replace', // legacy alias, may still arrive from older providers
@@ -420,7 +456,9 @@ export const useGeminiStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
-  midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
+  midTurnDrainRef?: React.RefObject<
+    ((includeDeferred?: boolean, goalTurnActive?: boolean) => string[]) | null
+  >,
   logger?: Logger | null,
   // Live content-area height (terminal minus composer/header). Used to bound the
   // pending item's rendered height so it commits to <Static> before it can grow
@@ -431,12 +469,143 @@ export const useGeminiStream = (
   // both dimensions consistently across a mid-stream resize.
   terminalWidthRef?: React.RefObject<number>,
   midTurnRestoreRef?: React.RefObject<((messages: string[]) => void) | null>,
+  goalQueueRef?: React.RefObject<{
+    peekNextUserBatchKey: () => string | undefined;
+    claimDirectUserAdmission?: () => DirectUserAdmission;
+    claimGoalTurn?: () => QueuedGoalTurn | undefined;
+    hasQueuedUserMessages?: () => boolean;
+    getPendingSubmissionCount?: () => number;
+    waitForReservationSettlement?: () => Promise<void>;
+    submissionInFlightRef?: React.RefObject<boolean>;
+    onSubmissionSettled?: () => void;
+  } | null>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const activeGoalTurnRef = useRef<GoalTurnBinding | null>(null);
+  const activeGoalAdmissionRef = useRef<GoalTurnAdmission | null>(null);
+  const goalTurnBindingsRef = useRef(new Map<string, GoalTurnBinding>());
+  const bindGoalTurn = useCallback(
+    (
+      permit: GoalTurnPermit,
+      turnKey: string,
+      origin: GoalTurnBinding['origin'],
+      controller = new AbortController(),
+    ): GoalTurnBinding => {
+      const existing = goalTurnBindingsRef.current.get(permit.turnId);
+      if (
+        existing &&
+        existing.turnKey === turnKey &&
+        sameGoalPermit(existing.permit, permit) &&
+        !existing.controller.signal.aborted
+      ) {
+        activeGoalTurnRef.current = existing;
+        activeGoalAdmissionRef.current = existing;
+        return existing;
+      }
+      const binding: GoalTurnBinding = {
+        permit: { ...permit },
+        turnKey,
+        controller,
+        origin,
+      };
+      goalTurnBindingsRef.current.set(permit.turnId, binding);
+      activeGoalTurnRef.current = binding;
+      activeGoalAdmissionRef.current = binding;
+      return binding;
+    },
+    [],
+  );
+  const releaseGoalTurn = useCallback((binding: GoalTurnBinding) => {
+    if (goalTurnBindingsRef.current.get(binding.permit.turnId) === binding) {
+      goalTurnBindingsRef.current.delete(binding.permit.turnId);
+    }
+    if (activeGoalTurnRef.current === binding) {
+      activeGoalTurnRef.current = null;
+    }
+    if (
+      activeGoalAdmissionRef.current?.controller === binding.controller &&
+      activeGoalAdmissionRef.current.turnKey === binding.turnKey
+    ) {
+      activeGoalAdmissionRef.current = null;
+    }
+  }, []);
+  const failClosedGoalTurn = useCallback(
+    async (binding: GoalTurnBinding, reason: string): Promise<void> => {
+      if (!binding.controller.signal.aborted) {
+        binding.controller.abort(reason);
+      }
+
+      try {
+        const runtime = await config.getGoalRuntimeReady();
+        const admittedPermit = runtime.permitForTurn(binding.turnKey);
+        if (
+          !admittedPermit ||
+          !sameGoalPermit(admittedPermit, binding.permit)
+        ) {
+          return;
+        }
+
+        if (runtime.getSnapshot().goal?.status === 'active') {
+          try {
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: binding.permit.goalId,
+              expectedRevision: binding.permit.revision,
+            });
+          } catch (error) {
+            debugLogger.warn('Failed to pause invalid Goal tool batch', error);
+          }
+        }
+
+        try {
+          await config.getChatRecordingService()?.flush();
+        } catch (error) {
+          debugLogger.warn('Failed to flush invalid Goal tool batch', error);
+        }
+
+        const currentPermit = runtime.permitForTurn(binding.turnKey);
+        if (currentPermit && sameGoalPermit(currentPermit, binding.permit)) {
+          await runtime.finishTurn(binding.permit);
+        }
+      } catch (error) {
+        debugLogger.warn('Failed to close invalid Goal tool batch', error);
+      } finally {
+        releaseGoalTurn(binding);
+      }
+    },
+    [config, releaseGoalTurn],
+  );
+  const releaseUndeliveredGoalTurn = useCallback(
+    async (turnKey: string | undefined): Promise<void> => {
+      if (!turnKey) return;
+      try {
+        const runtime = await config.getGoalRuntimeReady();
+        await runtime.releaseTurn(turnKey);
+      } catch (error) {
+        debugLogger.warn(
+          `Failed to release undelivered Goal turn ${turnKey}`,
+          error,
+        );
+      }
+    },
+    [config],
+  );
   const flushBufferedStreamEventsRef = useRef<Set<() => void>>(new Set());
   const turnCancelledRef = useRef(false);
   const isSubmittingQueryRef = useRef(false);
+  const setSubmissionInFlight = useCallback(
+    (inFlight: boolean) => {
+      const changed = isSubmittingQueryRef.current !== inFlight;
+      isSubmittingQueryRef.current = inFlight;
+      const sharedRef = goalQueueRef?.current?.submissionInFlightRef;
+      if (sharedRef) sharedRef.current = inFlight;
+      if (changed && !inFlight) {
+        goalQueueRef?.current?.onSubmissionSettled?.();
+      }
+    },
+    [goalQueueRef],
+  );
   const lastPromptRef = useRef<PartListUnion | null>(null);
   // Records the USER history item that THIS turn's prepareQueryForGemini
   // added (if any). Reset to null at the start of every turn (including
@@ -792,7 +961,6 @@ export const useGeminiStream = (
     // would race with stream chunks that haven't re-rendered yet.
     const pendingItemAtCancel = pendingHistoryItemRef.current;
     turnCancelledRef.current = true;
-    isSubmittingQueryRef.current = false;
     abortControllerRef.current?.abort();
     // Aborting a tick-in-flight ends any self-paced /loop: drop pending loop
     // wakeups so the loop doesn't resume after the cancelled tick. Only clears
@@ -1882,27 +2050,6 @@ export const useGeminiStream = (
         commitItem(pendingHistoryItemRef.current, userMessageTimestamp);
         setPendingHistoryItem(null);
       }
-      // When the active loop is driven by `/goal`, replace the generic
-      // "Ran N stop hooks" chip with a goal-aware `goal_status`
-      // `kind:'checking'` item. A not-met judge is the expected outcome of a
-      // continuation, not a hook failure.
-      const activeGoal = getActiveGoal(config.getSessionId());
-      if (activeGoal && activeGoal.condition) {
-        const item: HistoryItemGoalStatus = {
-          type: MessageType.GOAL_STATUS,
-          kind: 'checking',
-          condition: activeGoal.condition,
-          iterations: activeGoal.iterations,
-          // Carried so a transcript truncated past its `set` card can still
-          // restore the goal's original start time.
-          setAt: activeGoal.setAt,
-          lastReason:
-            activeGoal.lastReason ?? value.reasons[value.reasons.length - 1],
-        };
-        addItem(item, userMessageTimestamp);
-        recordGoalStatusItem(config, item);
-        return;
-      }
       addItem(
         {
           type: 'stop_hook_loop',
@@ -1913,26 +2060,7 @@ export const useGeminiStream = (
         userMessageTimestamp,
       );
     },
-    [addItem, commitItem, config, pendingHistoryItemRef, setPendingHistoryItem],
-  );
-
-  const handleActiveGoalEvent = useCallback(
-    (activeGoal: ActiveGoal | null) => {
-      const sessionId = config.getSessionId();
-      const currentActiveGoal = getActiveGoal(sessionId);
-      if (activeGoal) {
-        if (activeGoalEquals(currentActiveGoal, activeGoal)) {
-          return;
-        }
-        setActiveGoal(sessionId, activeGoal);
-        return;
-      }
-      if (!currentActiveGoal) {
-        return;
-      }
-      clearActiveGoal(sessionId);
-    },
-    [config],
+    [addItem, commitItem, pendingHistoryItemRef, setPendingHistoryItem],
   );
 
   const processGeminiStreamEvents = useCallback(
@@ -1940,9 +2068,11 @@ export const useGeminiStream = (
       stream: AsyncIterable<GeminiEvent>,
       userMessageTimestamp: number,
       signal: AbortSignal,
-    ): Promise<StreamProcessingStatus> => {
+      turnAdmission?: GoalTurnAdmission,
+    ): Promise<StreamProcessingResult> => {
       let geminiMessageBuffer = '';
       let thoughtBuffer = '';
+      let scheduledToolContinuation = false;
       const toolCallRequests: ToolCallRequestInfo[] = [];
       const bufferedEvents: BufferedStreamEvent[] = [];
       let flushTimer: ReturnType<typeof setTimeout> | null = null;
@@ -2071,6 +2201,14 @@ export const useGeminiStream = (
               commitPendingThought(userMessageTimestamp);
               thoughtBuffer = '';
               setThought((prev) => (prev ? null : prev));
+              if (event.value.goalContext && turnAdmission) {
+                bindGoalTurn(
+                  event.value.goalContext,
+                  turnAdmission.turnKey,
+                  turnAdmission.origin,
+                  turnAdmission.controller,
+                );
+              }
               toolCallRequests.push(event.value);
               // Count tool call args JSON toward token estimation.
               try {
@@ -2084,7 +2222,10 @@ export const useGeminiStream = (
               flushBufferedStreamEvents();
               toolCallRequests.length = 0;
               handleUserCancelledEvent(userMessageTimestamp);
-              return StreamProcessingStatus.UserCancelled;
+              return {
+                status: StreamProcessingStatus.UserCancelled,
+                scheduledToolContinuation: false,
+              };
             case ServerGeminiEventType.Error:
               flushBufferedStreamEvents();
               handleErrorEvent(event.value, userMessageTimestamp);
@@ -2229,7 +2370,18 @@ export const useGeminiStream = (
               handleStopHookLoopEvent(event.value, userMessageTimestamp);
               break;
             case ServerGeminiEventType.ActiveGoal:
-              handleActiveGoalEvent(event.value);
+              break;
+            case ServerGeminiEventType.GoalState:
+              if (event.cause && shouldDisplayGoalStateCause(event.cause)) {
+                addItem(
+                  {
+                    type: 'goal_state',
+                    snapshot: event.value,
+                    cause: event.cause,
+                  },
+                  userMessageTimestamp,
+                );
+              }
               break;
             default: {
               // enforces exhaustive switch-case
@@ -2281,7 +2433,10 @@ export const useGeminiStream = (
             `[processGeminiStreamEvents] Dropping batch after repeated duplicate provider tool-call id: ${repeatedDuplicateRequest.providerCallId} (tool: ${repeatedDuplicateRequest.name})`,
           );
           loopDetectedRef.current = true;
-          return StreamProcessingStatus.Completed;
+          return {
+            status: StreamProcessingStatus.Completed,
+            scheduledToolContinuation: false,
+          };
         }
 
         for (const request of toolCallRequests) {
@@ -2334,6 +2489,7 @@ export const useGeminiStream = (
         }
 
         if (executableToolCallRequests.length > 0) {
+          scheduledToolContinuation = true;
           scheduleToolCalls(
             executableToolCallRequests,
             signal,
@@ -2341,7 +2497,10 @@ export const useGeminiStream = (
           );
         }
       }
-      return StreamProcessingStatus.Completed;
+      return {
+        status: StreamProcessingStatus.Completed,
+        scheduledToolContinuation,
+      };
     },
     [
       handleContentEvent,
@@ -2364,7 +2523,7 @@ export const useGeminiStream = (
       setPendingHistoryItem,
       handleUserPromptSubmitBlockedEvent,
       handleStopHookLoopEvent,
-      handleActiveGoalEvent,
+      bindGoalTurn,
       addItem,
       commitItem,
       dualOutput,
@@ -2383,7 +2542,6 @@ export const useGeminiStream = (
         sideEffects: Array<() => void>;
       }> = [];
       const restoreMessages: string[] = [];
-      let pendingGoalSegmentIndex: number | undefined;
       const timestamp = Date.now();
 
       for (let index = 0; index < messages.length; index += 1) {
@@ -2394,23 +2552,7 @@ export const useGeminiStream = (
 
         const message = messages[index];
         if (GOAL_COMMAND_RE.test(message)) {
-          const activeGoalBeforeCommand = getActiveGoal(config.getSessionId());
-          const result = await handleSlashCommand(message);
-          const activeGoalAfterCommand = getActiveGoal(config.getSessionId());
-          if (result && result.type === 'submit_prompt') {
-            if (pendingGoalSegmentIndex !== undefined) {
-              resolvedSegments[pendingGoalSegmentIndex] = [];
-            }
-            pendingGoalSegmentIndex = resolvedSegments.length;
-            resolvedSegments.push(normalizePartList(result.content));
-          } else if (
-            activeGoalBeforeCommand?.hookId !== activeGoalAfterCommand?.hookId
-          ) {
-            if (pendingGoalSegmentIndex !== undefined) {
-              resolvedSegments[pendingGoalSegmentIndex] = [];
-              pendingGoalSegmentIndex = undefined;
-            }
-          }
+          await handleSlashCommand(message);
           continue;
         }
 
@@ -2545,9 +2687,13 @@ export const useGeminiStream = (
         accept: () => {
           for (const { message, parts, sideEffects } of resolvedForRecording) {
             for (const sideEffect of sideEffects) sideEffect();
-            config
-              .getChatRecordingService?.()
-              ?.recordMidTurnUserMessage(parts, message);
+            const recorder = config.getChatRecordingService?.();
+            const goalPermit = activeGoalTurnRef.current?.permit;
+            if (goalPermit) {
+              recorder?.recordMidTurnUserMessage(parts, message, goalPermit);
+            } else {
+              recorder?.recordMidTurnUserMessage(parts, message);
+            }
             addItem(
               { type: MessageType.NOTIFICATION, text: message },
               Date.now(),
@@ -2608,7 +2754,11 @@ export const useGeminiStream = (
 
   const drainSteerAtBoundary = useCallback(
     async (signal: AbortSignal): Promise<SteerInput | undefined> => {
-      const messages = midTurnDrainRef?.current?.() ?? [];
+      const messages =
+        midTurnDrainRef?.current?.(
+          false,
+          Boolean(activeGoalAdmissionRef.current),
+        ) ?? [];
       if (messages.length === 0) return undefined;
       return resolveDrainedSteerMessages(messages, signal);
     },
@@ -2624,14 +2774,32 @@ export const useGeminiStream = (
         notificationDisplayText?: string;
         onDelivered?: () => void;
         onDeliveryFailed?: () => void;
+        onAdmissionFailed?: () => void;
+        onGoalClaimDeferred?: () => void;
         steerInput?: SteerInput;
+        goal?: QueuedGoalTurn;
+        claimGoalTurn?: () => QueuedGoalTurn | undefined;
+        userAdmission?: DirectUserAdmission;
+        goalBinding?: GoalTurnBinding;
       },
     ) => {
       const allowConcurrentBtwDuringResponse =
         submitType === SendMessageType.UserQuery &&
         streamingState === StreamingState.Responding &&
         typeof query === 'string' &&
-        isBtwCommand(query);
+        isBtwCommand(query) &&
+        !activeGoalAdmissionRef.current;
+      let ownsSubmissionLease = false;
+      const acquireSubmissionLease = () => {
+        if (isSubmittingQueryRef.current) return;
+        ownsSubmissionLease = true;
+        setSubmissionInFlight(true);
+      };
+      const releaseSubmissionLease = () => {
+        if (!ownsSubmissionLease) return;
+        ownsSubmissionLease = false;
+        setSubmissionInFlight(false);
+      };
       const isTurnContinuation =
         submitType === SendMessageType.ToolResult ||
         submitType === SendMessageType.Steer;
@@ -2643,6 +2811,8 @@ export const useGeminiStream = (
         !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
+        await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+        metadata?.onAdmissionFailed?.();
         metadata?.onDeliveryFailed?.();
         return;
       }
@@ -2653,12 +2823,14 @@ export const useGeminiStream = (
         !isTurnContinuation &&
         !allowConcurrentBtwDuringResponse
       ) {
+        await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+        metadata?.onAdmissionFailed?.();
         metadata?.onDeliveryFailed?.();
         return;
       }
 
       // Set the flag to indicate we're now executing
-      isSubmittingQueryRef.current = true;
+      acquireSubmissionLease();
 
       // loopDetectedRef now gates tool-call scheduling (see processGeminiStream
       // events), so it must reflect only this turn's state. Reset it
@@ -2701,6 +2873,7 @@ export const useGeminiStream = (
       if (
         !isTurnContinuation &&
         submitType !== SendMessageType.Notification &&
+        submitType !== SendMessageType.Goal &&
         !allowConcurrentBtwDuringResponse
       ) {
         setModelSwitchedFromQuotaError(false);
@@ -2762,21 +2935,122 @@ export const useGeminiStream = (
       }
 
       return promptIdContext.run(prompt_id, async () => {
-        const { queryToSend, shouldProceed } =
-          submitType === SendMessageType.Retry
-            ? { queryToSend: query, shouldProceed: true }
-            : await prepareQueryForGemini(
-                query,
-                userMessageTimestamp,
-                abortSignal,
-                prompt_id!,
-                submitType,
-              );
+        let queuedGoal = metadata?.goal;
+        let preparedQuery: {
+          queryToSend: PartListUnion | null;
+          shouldProceed: boolean;
+        };
+        try {
+          preparedQuery =
+            submitType === SendMessageType.Goal
+              ? queuedGoal
+                ? {
+                    queryToSend: [
+                      'Continue working on the active Goal.',
+                      'Use get_goal for the authoritative objective and evidence state.',
+                      "Follow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.",
+                      'If completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.',
+                      `Runtime continuation context: ${queuedGoal.continuationContext}`,
+                      ...(queuedGoal.verifierFeedback
+                        ? [`Verifier feedback: ${queuedGoal.verifierFeedback}`]
+                        : []),
+                    ].join('\n'),
+                    shouldProceed: true,
+                  }
+                : { queryToSend: null, shouldProceed: false }
+              : submitType === SendMessageType.Retry
+                ? { queryToSend: query, shouldProceed: true }
+                : await prepareQueryForGemini(
+                    query,
+                    userMessageTimestamp,
+                    abortSignal,
+                    prompt_id!,
+                    submitType,
+                  );
+        } catch (error) {
+          await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          releaseSubmissionLease();
+          metadata?.onAdmissionFailed?.();
+          throw error;
+        }
+        const { queryToSend, shouldProceed } = preparedQuery;
 
         if (!shouldProceed || queryToSend === null) {
-          isSubmittingQueryRef.current = false;
+          await releaseUndeliveredGoalTurn(metadata?.userAdmission?.turnKey);
+          releaseSubmissionLease();
           metadata?.onDeliveryFailed?.();
           return;
+        }
+
+        await goalQueueRef?.current?.waitForReservationSettlement?.();
+
+        if (!queuedGoal && metadata?.claimGoalTurn) {
+          queuedGoal = metadata.claimGoalTurn();
+          if (!queuedGoal) {
+            releaseSubmissionLease();
+            metadata.onGoalClaimDeferred?.();
+            return;
+          }
+        }
+
+        let userAdmission: DirectUserAdmission | undefined;
+        if (submitType === SendMessageType.UserQuery) {
+          if (metadata?.userAdmission) {
+            const goal =
+              metadata.userAdmission.goal ??
+              goalQueueRef?.current?.claimGoalTurn?.();
+            userAdmission = {
+              turnKey: metadata.userAdmission.turnKey,
+              ...(goal ? { goal } : {}),
+            };
+          } else {
+            userAdmission =
+              goalQueueRef?.current?.claimDirectUserAdmission?.() ?? {
+                turnKey: prompt_id!,
+              };
+          }
+        }
+        const goal = queuedGoal ?? userAdmission?.goal;
+        let goalBinding =
+          metadata?.goalBinding ??
+          (goal
+            ? bindGoalTurn(
+                goal.permit,
+                goal.turnKey,
+                submitType === SendMessageType.UserQuery ? 'user' : 'runtime',
+              )
+            : undefined);
+        const turnKey = goalBinding?.turnKey ?? userAdmission?.turnKey;
+        const turnController =
+          goalBinding?.controller ??
+          (turnKey ? new AbortController() : undefined);
+        const processingSignal = turnController
+          ? AbortSignal.any([abortSignal, turnController.signal])
+          : abortSignal;
+        const turnAdmission =
+          turnKey && turnController
+            ? {
+                turnKey,
+                controller: turnController,
+                origin: goalBinding?.origin ?? ('user' as const),
+              }
+            : undefined;
+        if (
+          turnAdmission &&
+          !goalBinding &&
+          submitType === SendMessageType.UserQuery &&
+          !allowConcurrentBtwDuringResponse &&
+          !activeGoalAdmissionRef.current
+        ) {
+          try {
+            if (
+              config.getGoalRuntime().getSnapshot().goal?.status === 'active'
+            ) {
+              activeGoalAdmissionRef.current = turnAdmission;
+            }
+          } catch {
+            // Goal runtime is optional during early initialization.
+          }
         }
 
         // Check image format support for non-continuations
@@ -2798,8 +3072,10 @@ export const useGeminiStream = (
         }
 
         const finalQueryToSend = queryToSend;
-        lastPromptRef.current = finalQueryToSend;
-        lastPromptErroredRef.current = false;
+        if (submitType !== SendMessageType.Goal) {
+          lastPromptRef.current = finalQueryToSend;
+          lastPromptErroredRef.current = false;
+        }
 
         if (
           submitType === SendMessageType.UserQuery ||
@@ -2844,11 +3120,16 @@ export const useGeminiStream = (
         }
 
         let cleanupReviewLease = false;
+        let keepGoalBinding = false;
         try {
           // Emit user message to dual output sidecar (if enabled).
           // Skip for tool-result submissions — those are emitted separately
           // when the tool completes.
-          if (dualOutput && submitType !== SendMessageType.ToolResult) {
+          if (
+            dualOutput &&
+            submitType !== SendMessageType.ToolResult &&
+            submitType !== SendMessageType.Goal
+          ) {
             const rawParts =
               typeof finalQueryToSend === 'string'
                 ? [finalQueryToSend]
@@ -2870,22 +3151,52 @@ export const useGeminiStream = (
               notificationDisplayText: metadata?.notificationDisplayText,
               modelOverride: modelOverrideRef.current,
               steerInput: metadata?.steerInput,
+              ...(goalBinding
+                ? {
+                    goalPermit: goalBinding.permit,
+                    goalTurnKey: goalBinding.turnKey,
+                    goalSignal: goalBinding.controller.signal,
+                    goalOrigin: goalBinding.origin,
+                    getQueuedGoalTurnKey: () =>
+                      goalQueueRef?.current?.peekNextUserBatchKey(),
+                  }
+                : userAdmission
+                  ? {
+                      goalTurnKey: userAdmission.turnKey,
+                      goalSignal: turnController!.signal,
+                      goalOrigin: 'user' as const,
+                      getQueuedGoalTurnKey: () =>
+                        goalQueueRef?.current?.peekNextUserBatchKey(),
+                    }
+                  : {}),
               ...(!allowConcurrentBtwDuringResponse && midTurnDrainRef
                 ? { getSteerInput: drainSteerAtBoundary }
                 : {}),
             },
           );
 
-          const processingStatus = await processGeminiStreamEvents(
+          const processingResult = await processGeminiStreamEvents(
             stream,
             userMessageTimestamp,
-            abortSignal,
+            processingSignal,
+            turnAdmission,
           );
+          if (
+            !goalBinding &&
+            turnAdmission &&
+            activeGoalTurnRef.current?.controller ===
+              turnAdmission.controller &&
+            activeGoalTurnRef.current.turnKey === turnAdmission.turnKey
+          ) {
+            goalBinding = activeGoalTurnRef.current;
+          }
+          keepGoalBinding = processingResult.scheduledToolContinuation;
 
-          if (processingStatus === StreamProcessingStatus.UserCancelled) {
+          if (
+            processingResult.status === StreamProcessingStatus.UserCancelled
+          ) {
             cleanupReviewLease = true;
             submitPromptOnCompleteRef.current = null;
-            isSubmittingQueryRef.current = false;
             metadata?.onDeliveryFailed?.();
             return;
           }
@@ -2930,7 +3241,18 @@ export const useGeminiStream = (
               responseParts,
               SendMessageType.ToolResult,
               immediateDuplicateToolResponses.promptId,
+              { goalBinding },
             );
+            if (
+              goalBinding &&
+              !turnCancelledRef.current &&
+              !abortControllerRef.current?.signal.aborted &&
+              goalTurnBindingsRef.current.get(goalBinding.permit.turnId) ===
+                goalBinding &&
+              !goalBinding.controller.signal.aborted
+            ) {
+              keepGoalBinding = true;
+            }
           }
           // Only clear auto-retry countdown errors (those with an active timer).
           // Do NOT clear static error+hint from handleErrorEvent — those should
@@ -2988,7 +3310,9 @@ export const useGeminiStream = (
           if (error instanceof UnauthorizedError) {
             onAuthError('Session expired or is unauthorized.');
           } else if (!isNodeError(error) || error.name !== 'AbortError') {
-            lastPromptErroredRef.current = true;
+            if (submitType !== SendMessageType.Goal) {
+              lastPromptErroredRef.current = true;
+            }
             const retryHint = t('Press Ctrl+Y to retry');
             // Store error with hint as a pending item (same as handleErrorEvent)
             setPendingRetryErrorItem({
@@ -3016,7 +3340,38 @@ export const useGeminiStream = (
           if (activeModelStreamsRef.current === 0) {
             setIsResponding(false);
           }
-          isSubmittingQueryRef.current = false;
+          if (goalBinding) {
+            let retainGoalBinding =
+              keepGoalBinding && !goalBinding.controller.signal.aborted;
+            if (retainGoalBinding) {
+              try {
+                const currentPermit = config
+                  .getGoalRuntime()
+                  .permitForTurn(goalBinding.turnKey);
+                retainGoalBinding =
+                  currentPermit !== undefined &&
+                  sameGoalPermit(currentPermit, goalBinding.permit);
+              } catch {
+                // Tests and early initialization may not expose a ready runtime.
+              }
+            }
+            if (!retainGoalBinding) {
+              await failClosedGoalTurn(
+                goalBinding,
+                'Goal turn ended without a valid continuation',
+              );
+            }
+          }
+          if (
+            turnAdmission &&
+            !goalBinding &&
+            activeGoalAdmissionRef.current?.controller ===
+              turnAdmission.controller &&
+            activeGoalAdmissionRef.current.turnKey === turnAdmission.turnKey
+          ) {
+            activeGoalAdmissionRef.current = null;
+          }
+          releaseSubmissionLease();
         }
       });
     },
@@ -3044,6 +3399,11 @@ export const useGeminiStream = (
       dualOutput,
       drainSteerAtBoundary,
       midTurnDrainRef,
+      goalQueueRef,
+      bindGoalTurn,
+      failClosedGoalTurn,
+      releaseUndeliveredGoalTurn,
+      setSubmissionInFlight,
     ],
   );
 
@@ -3100,6 +3460,12 @@ export const useGeminiStream = (
 
     await submitQuery(lastPrompt, SendMessageType.Retry);
   }, [streamingState, addItem, clearRetryCountdown, submitQuery]);
+
+  const preemptGoalTurn = useCallback((reason: string) => {
+    const active = activeGoalAdmissionRef.current;
+    if (!active || active.controller.signal.aborted) return;
+    active.controller.abort(reason);
+  }, []);
 
   const handleApprovalModeChange = useCallback(
     async (newApprovalMode: ApprovalMode) => {
@@ -3272,6 +3638,102 @@ export const useGeminiStream = (
           !t.request.isClientInitiated &&
           !historyCallIdsWithResponse.has(t.request.callId),
       );
+      let toolGoalPermit: GoalTurnPermit | undefined;
+      const toolGoalContexts = completedAndReadyToSubmitTools
+        .filter((toolCall) => !toolCall.request.isClientInitiated)
+        .map((toolCall) => toolCall.request.goalContext);
+      try {
+        toolGoalPermit = sharedGoalPermit(toolGoalContexts);
+      } catch (error) {
+        const callIds = geminiTools.map((toolCall) => toolCall.request.callId);
+        markToolsAsSubmitted(callIds);
+        const reason = getErrorMessage(error);
+        const bindings = new Map<string, GoalTurnBinding>();
+        const active = activeGoalTurnRef.current;
+        if (active) {
+          bindings.set(active.turnKey, active);
+        }
+        for (const permit of toolGoalContexts) {
+          if (!permit) continue;
+          const existing = goalTurnBindingsRef.current.get(permit.turnId);
+          const binding =
+            existing ??
+            ({
+              permit: { ...permit },
+              turnKey: `goal-runtime:${permit.turnId}`,
+              controller: new AbortController(),
+              origin: 'runtime',
+            } satisfies GoalTurnBinding);
+          bindings.set(binding.turnKey, binding);
+        }
+        for (const binding of bindings.values()) {
+          await failClosedGoalTurn(binding, reason);
+        }
+        addItem(
+          {
+            type: MessageType.ERROR,
+            text: reason,
+          },
+          Date.now(),
+        );
+        return;
+      }
+      if (!toolGoalPermit && toolGoalContexts.length > 0) {
+        const active = activeGoalTurnRef.current;
+        let missingActiveGoalContext = false;
+        if (active) {
+          try {
+            const runtime = config.getGoalRuntime();
+            const currentPermit = runtime.permitForTurn(active.turnKey);
+            missingActiveGoalContext =
+              currentPermit !== undefined &&
+              sameGoalPermit(currentPermit, active.permit);
+          } catch {
+            // A missing runtime means this is an ordinary non-Goal batch.
+          }
+        }
+        if (active && missingActiveGoalContext) {
+          markToolsAsSubmitted(
+            geminiTools.map((toolCall) => toolCall.request.callId),
+          );
+          const reason = 'ToolResult batch is missing the active Goal context';
+          await failClosedGoalTurn(active, reason);
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: reason,
+            },
+            Date.now(),
+          );
+          return;
+        }
+      }
+      let toolGoalBinding: GoalTurnBinding | undefined;
+      if (toolGoalPermit) {
+        const existing = goalTurnBindingsRef.current.get(toolGoalPermit.turnId);
+        if (existing && !sameGoalPermit(existing.permit, toolGoalPermit)) {
+          markToolsAsSubmitted(
+            geminiTools.map((toolCall) => toolCall.request.callId),
+          );
+          const reason = 'ToolResult batch has a stale Goal context';
+          await failClosedGoalTurn(existing, reason);
+          addItem(
+            {
+              type: MessageType.ERROR,
+              text: reason,
+            },
+            Date.now(),
+          );
+          return;
+        }
+        toolGoalBinding =
+          existing ??
+          bindGoalTurn(
+            toolGoalPermit,
+            `goal-runtime:${toolGoalPermit.turnId}`,
+            'runtime',
+          );
+      }
       const didRefreshManagedMemory = await refreshMemoryAfterManagedWrite(
         config,
         completedAndReadyToSubmitTools.map((toolCall) => ({
@@ -3323,6 +3785,12 @@ export const useGeminiStream = (
       }
 
       if (geminiTools.length === 0 && pendingDuplicateResponses.length === 0) {
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation ended without a result',
+          );
+        }
         return;
       }
 
@@ -3400,6 +3868,12 @@ export const useGeminiStream = (
         markToolsAsSubmitted(
           geminiTools.map((toolCall) => toolCall.request.callId),
         );
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation was cancelled',
+          );
+        }
         return;
       }
 
@@ -3425,6 +3899,12 @@ export const useGeminiStream = (
           (toolCall) => toolCall.request.callId,
         );
         markToolsAsSubmitted(callIdsToMarkAsSubmitted);
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation was cancelled',
+          );
+        }
         return;
       }
 
@@ -3478,6 +3958,27 @@ export const useGeminiStream = (
 
       markToolsAsSubmitted(callIdsToMarkAsSubmitted);
 
+      const terminatesGoalTurn = geminiTools.some(
+        (toolCall) => toolCall.response.terminateTurn === true,
+      );
+      if (terminatesGoalTurn && toolGoalBinding) {
+        geminiClient.addHistory({ role: 'user', parts: responsesToSend });
+        try {
+          await config.getChatRecordingService()?.flush();
+          const runtime = await config.getGoalRuntimeReady();
+          const currentPermit = runtime.permitForTurn(toolGoalBinding.turnKey);
+          if (
+            currentPermit &&
+            sameGoalPermit(currentPermit, toolGoalBinding.permit)
+          ) {
+            await runtime.finishTurn(toolGoalBinding.permit);
+          }
+        } finally {
+          releaseGoalTurn(toolGoalBinding);
+        }
+        return;
+      }
+
       // Fire tool-use summary generation in parallel with the next API call.
       // The fast-model latency is hidden behind the main-model streaming.
       // Fire-and-forget: failures are silent and never block the turn.
@@ -3490,8 +3991,13 @@ export const useGeminiStream = (
         // fast model happily synthesizes "Attempted to read files" from a
         // batch that was mostly failures). cleanSummary can reject output
         // prefixes but not prevent this kind of polluted-input hallucination.
+        // Goal tools already render authoritative lifecycle copy, which a
+        // generated summary can contradict while verification is pending.
         const successfulTools = geminiTools.filter(
-          (tc) => tc.status === 'success',
+          (tc) =>
+            tc.status === 'success' &&
+            tc.request.name !== ToolNames.GET_GOAL &&
+            tc.request.name !== ToolNames.UPDATE_GOAL,
         );
         if (successfulTools.length > 0) {
           const toolInfoForSummary = successfulTools.map((tc) => ({
@@ -3570,6 +4076,12 @@ export const useGeminiStream = (
 
       // Don't continue if model was switched due to quota error
       if (modelSwitchedFromQuotaError) {
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation stopped after a model switch',
+          );
+        }
         return;
       }
 
@@ -3579,7 +4091,10 @@ export const useGeminiStream = (
       const drained =
         turnCancelledRef.current || abortControllerRef.current?.signal.aborted
           ? []
-          : (midTurnDrainRef?.current?.() ?? []);
+          : (midTurnDrainRef?.current?.(
+              false,
+              Boolean(activeGoalAdmissionRef.current),
+            ) ?? []);
       let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
         const midTurnAbort =
@@ -3609,6 +4124,20 @@ export const useGeminiStream = (
         abortControllerRef.current?.signal.aborted
       ) {
         drainedSteer?.restore();
+        if (toolGoalBinding) {
+          await failClosedGoalTurn(
+            toolGoalBinding,
+            'Goal tool continuation was cancelled',
+          );
+        }
+        return;
+      }
+      if (toolGoalBinding?.controller.signal.aborted) {
+        drainedSteer?.restore();
+        await failClosedGoalTurn(
+          toolGoalBinding,
+          'Goal tool continuation was preempted',
+        );
         return;
       }
 
@@ -3616,6 +4145,7 @@ export const useGeminiStream = (
         steerInput: drainedSteer,
         onDelivered: drainedSteer?.accept,
         onDeliveryFailed: drainedSteer?.restore,
+        goalBinding: toolGoalBinding,
       });
     },
     [
@@ -3629,6 +4159,9 @@ export const useGeminiStream = (
       addItem,
       dualOutput,
       resolveDrainedSteerMessages,
+      bindGoalTurn,
+      failClosedGoalTurn,
+      releaseGoalTurn,
     ],
   );
 
@@ -3744,9 +4277,39 @@ export const useGeminiStream = (
       sendMessageType: SendMessageType;
       onDelivered?: () => void;
       onDeliveryFailed?: () => void;
+      displayed?: boolean;
     }>
   >([]);
   const [notificationTrigger, setNotificationTrigger] = useState(0);
+  const goalQueuePendingCount =
+    goalQueueRef?.current?.getPendingSubmissionCount?.() ?? 0;
+  const claimSystemGoalTurn = useCallback((): {
+    ready: boolean;
+    claimGoalTurn?: () => QueuedGoalTurn | undefined;
+  } => {
+    if (goalQueueRef?.current?.hasQueuedUserMessages?.()) {
+      return { ready: false };
+    }
+    let goalOwnsTurn = false;
+    try {
+      goalOwnsTurn = goalRequiresExactPermit(
+        config.getGoalRuntime().getSnapshot(),
+      );
+    } catch {
+      goalOwnsTurn = false;
+    }
+    if (!goalOwnsTurn) return { ready: true };
+    if ((goalQueueRef?.current?.getPendingSubmissionCount?.() ?? 0) === 0) {
+      return { ready: false };
+    }
+    return {
+      ready: true,
+      claimGoalTurn: () => {
+        if (goalQueueRef?.current?.hasQueuedUserMessages?.()) return undefined;
+        return goalQueueRef?.current?.claimGoalTurn?.();
+      },
+    };
+  }, [config, goalQueueRef]);
 
   const getAutonomousLoopTickResolver = useCallback(() => {
     autonomousLoopTickResolverRef.current ??= new AutonomousLoopTickResolver();
@@ -3931,6 +4494,8 @@ export const useGeminiStream = (
       // session's configuration, regardless of which producer's setState
       // triggered the commit.
       runOutsideAgentContext(() => {
+        const admission = claimSystemGoalTurn();
+        if (!admission.ready) return;
         const queue = notificationQueueRef.current;
         const targetType = queue[0]!.sendMessageType;
 
@@ -3939,14 +4504,27 @@ export const useGeminiStream = (
         // Notification items (which pass through without preprocessing).
         if (targetType === SendMessageType.Cron) {
           const item = queue.shift()!;
-          addItem(
-            { type: 'notification' as const, text: item.displayText },
-            Date.now(),
-          );
-          submitQuery(item.modelText, item.sendMessageType, undefined, {
+          if (!item.displayed) {
+            addItem(
+              { type: 'notification' as const, text: item.displayText },
+              Date.now(),
+            );
+            item.displayed = true;
+          }
+          void submitQuery(item.modelText, item.sendMessageType, undefined, {
             notificationDisplayText: item.displayText,
             onDelivered: item.onDelivered,
             onDeliveryFailed: item.onDeliveryFailed,
+            onAdmissionFailed: () => {
+              queue.unshift(item);
+            },
+            claimGoalTurn: admission.claimGoalTurn,
+            onGoalClaimDeferred: () => {
+              queue.unshift(item);
+              setNotificationTrigger((n) => n + 1);
+            },
+          }).catch((error) => {
+            debugLogger.warn('Failed to admit cron notification', error);
           });
           return;
         }
@@ -3963,20 +4541,40 @@ export const useGeminiStream = (
 
         const now = Date.now();
         for (const item of batch) {
-          addItem(
-            { type: 'notification' as const, text: item.displayText },
-            now,
-          );
+          if (!item.displayed) {
+            addItem(
+              { type: 'notification' as const, text: item.displayText },
+              now,
+            );
+            item.displayed = true;
+          }
         }
 
         const combinedModelText = batch.map((e) => e.modelText).join('\n\n');
         const combinedDisplayText = batch.map((e) => e.displayText).join('; ');
-        submitQuery(combinedModelText, targetType, undefined, {
+        void submitQuery(combinedModelText, targetType, undefined, {
           notificationDisplayText: combinedDisplayText,
+          onAdmissionFailed: () => {
+            queue.unshift(...batch);
+          },
+          claimGoalTurn: admission.claimGoalTurn,
+          onGoalClaimDeferred: () => {
+            queue.unshift(...batch);
+            setNotificationTrigger((n) => n + 1);
+          },
+        }).catch((error) => {
+          debugLogger.warn('Failed to admit background notification', error);
         });
       });
     }
-  }, [streamingState, submitQuery, notificationTrigger, addItem]);
+  }, [
+    streamingState,
+    submitQuery,
+    notificationTrigger,
+    addItem,
+    claimSystemGoalTurn,
+    goalQueuePendingCount,
+  ]);
 
   // ─── Teammate message integration ─────────────────────────
   // Each entry carries the full nonce-tagged envelope (`modelText`,
@@ -3985,7 +4583,7 @@ export const useGeminiStream = (
   // notification queue uses, so teammate reports no longer dump the
   // whole raw envelope into the conversation as a user bubble.
   const teammateQueueRef = useRef<
-    Array<{ modelText: string; display: string }>
+    Array<{ modelText: string; display: string; displayed?: boolean }>
   >([]);
   const [teammateTrigger, setTeammateTrigger] = useState(0);
 
@@ -4050,23 +4648,45 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       teammateQueueRef.current.length > 0
     ) {
+      const admission = claimSystemGoalTurn();
+      if (!admission.ready) return;
       const batch = teammateQueueRef.current.splice(0);
       // Render one compact `● …` line per teammate report; the full
       // envelope goes only to the model (the USER bubble is suppressed
       // for SendMessageType.Teammate in prepareQueryForGemini).
       for (const entry of batch) {
-        addItem(
-          { type: 'notification' as const, text: entry.display },
-          Date.now(),
-        );
+        if (!entry.displayed) {
+          addItem(
+            { type: 'notification' as const, text: entry.display },
+            Date.now(),
+          );
+          entry.displayed = true;
+        }
       }
       const modelText = batch.map((e) => e.modelText).join('\n\n');
       const display = batch.map((e) => e.display).join('; ');
-      submitQuery(modelText, SendMessageType.Teammate, undefined, {
+      void submitQuery(modelText, SendMessageType.Teammate, undefined, {
         notificationDisplayText: display,
+        onAdmissionFailed: () => {
+          teammateQueueRef.current.unshift(...batch);
+        },
+        claimGoalTurn: admission.claimGoalTurn,
+        onGoalClaimDeferred: () => {
+          teammateQueueRef.current.unshift(...batch);
+          setTeammateTrigger((n) => n + 1);
+        },
+      }).catch((error) => {
+        debugLogger.warn('Failed to admit teammate notification', error);
       });
     }
-  }, [streamingState, submitQuery, teammateTrigger, addItem]);
+  }, [
+    streamingState,
+    submitQuery,
+    teammateTrigger,
+    addItem,
+    claimSystemGoalTurn,
+    goalQueuePendingCount,
+  ]);
 
   return {
     streamingState,
@@ -4075,6 +4695,7 @@ export const useGeminiStream = (
     pendingHistoryItems,
     thought,
     cancelOngoingRequest,
+    preemptGoalTurn,
     retryLastPrompt,
     pendingToolCalls: toolCalls,
     handleApprovalModeChange,

@@ -15,6 +15,7 @@ import type {
   DaemonTranscriptBlock,
   DaemonTranscriptStore,
   DaemonUiSessionActions,
+  GoalStateResponse,
   PromptResult,
 } from '@qwen-code/sdk/daemon';
 import {
@@ -68,6 +69,7 @@ interface MockSession {
   setModel: (modelId: string) => Promise<{ modelId: string }>;
   heartbeat: () => Promise<{ ok: boolean }>;
   shellCommand: (command: string, signal?: AbortSignal) => Promise<unknown>;
+  goal: () => Promise<GoalStateResponse>;
   context: () => Promise<{
     v: 1;
     sessionId: string;
@@ -1388,6 +1390,21 @@ describe('DaemonSessionProvider', () => {
               sessionUpdate: 'agent_message_chunk',
               content: { type: 'text', text: '' },
               _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'running',
+                  goal: {
+                    goalId: 'goal-sync',
+                    revision: 1,
+                    objective: 'ship goal sync',
+                    status: 'active',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 0,
+                    activeTimeMs: 0,
+                    createdAt: 1234,
+                    updatedAt: 1234,
+                  },
+                },
                 goalStatus: {
                   kind: 'set',
                   condition: 'ship goal sync',
@@ -1401,9 +1418,11 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(session);
     let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
 
     function Harness() {
       blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
       return null;
     }
 
@@ -1427,6 +1446,82 @@ describe('DaemonSessionProvider', () => {
         },
       }),
     ]);
+    expect(connection?.goalState).toMatchObject({
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-sync',
+        revision: 1,
+        objective: 'ship goal sync',
+      },
+    });
+  });
+
+  it('keeps a paused Goal non-terminal in the transcript', async () => {
+    const session = createMockSession({
+      events: async function* pausedGoalStatusEvents() {
+        yield {
+          id: 12,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text: '' },
+              _meta: {
+                goalState: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'goal-paused',
+                    revision: 1,
+                    objective: 'ship goal sync',
+                    status: 'paused',
+                    evidenceCursor: { recordId: 'goal-record' },
+                    turnCount: 2,
+                    activeTimeMs: 14_000,
+                    createdAt: 1234,
+                    updatedAt: 2234,
+                  },
+                },
+                goalStatus: {
+                  kind: 'paused',
+                  condition: 'ship goal sync',
+                  iterations: 2,
+                  durationMs: 14_000,
+                },
+              },
+            },
+          },
+        };
+      },
+    });
+    sdkMocks.sessions.push(session);
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      autoReconnect: false,
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toEqual([
+      expect.objectContaining({
+        kind: 'status',
+        source: 'goal',
+        data: expect.objectContaining({ kind: 'paused' }),
+      }),
+    ]);
+    expect(connection?.goalState?.goal?.status).toBe('paused');
   });
 
   it('routes mid_turn_message_injected frames to the sidechannel and transcript', async () => {
@@ -9494,6 +9589,11 @@ function createMockSession(opts: Partial<MockSession> = {}): MockSession {
       })),
     heartbeat: opts.heartbeat ?? vi.fn(async () => ({ ok: true })),
     shellCommand: opts.shellCommand ?? vi.fn(async () => undefined),
+    goal:
+      opts.goal ??
+      vi.fn(async () => ({
+        snapshot: { v: 2 as const, goal: null, activity: 'idle' as const },
+      })),
     context:
       opts.context ??
       vi.fn(async () => ({

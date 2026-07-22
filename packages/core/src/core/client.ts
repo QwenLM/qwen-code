@@ -29,15 +29,15 @@ import {
 } from '../services/microcompaction/microcompact.js';
 import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import {
-  activeGoalEquals,
-  getActiveGoal,
-  type ActiveGoal,
-} from '../goals/activeGoalStore.js';
+  goalRequiresExactPermit,
+  PAUSED_GOAL_SYSTEM_REMINDER,
+  type GoalSnapshotV2,
+  type GoalTurnPermit,
+} from '../goals/goal-protocol.js';
 import {
-  abortGoalForStopHookCap,
-  getStopHookContinuationReason,
-  GOAL_HOOK_ID_OUTPUT_KEY,
-} from '../goals/goalHook.js';
+  GoalPersistenceUnavailableError,
+  type GoalRuntime,
+} from '../goals/goal-runtime.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
@@ -170,6 +170,8 @@ export enum SendMessageType {
    * recorded as a user message.
    */
   Teammate = 'teammate',
+  /** Runtime-owned continuation for an active Goal. */
+  Goal = 'goal',
 }
 
 export interface SendMessageOptions {
@@ -187,6 +189,16 @@ export interface SendMessageOptions {
   notificationDisplayText?: string;
   /** Model override from skill execution. When present, overrides the session model for this turn. */
   modelOverride?: string;
+  /** Exact runtime permit authorizing this Goal-bound turn. */
+  goalPermit?: GoalTurnPermit;
+  /** Stable key used by the runtime to bind recursive segments to one permit. */
+  goalTurnKey?: string;
+  /** Permit-owned cancellation signal, combined with the caller signal. */
+  goalSignal?: AbortSignal;
+  /** Whether this permit belongs to runtime work or a real-user turn. */
+  goalOrigin?: 'runtime' | 'user';
+  /** Peeks a queued real-user key immediately before a Goal true Stop. */
+  getQueuedGoalTurnKey?: () => string | undefined;
 }
 
 export interface SteerInput {
@@ -206,6 +218,53 @@ const EMPTY_RELEVANT_AUTO_MEMORY_RESULT: RelevantAutoMemoryPromptResult = {
 function wrapIdeContext(contextText: string): string {
   const safeContextText = escapeSystemReminderTags(contextText);
   return `<system-reminder>\n${safeContextText}\n</system-reminder>`;
+}
+
+function sameGoalPermit(
+  left: GoalTurnPermit | undefined,
+  right: GoalTurnPermit | undefined,
+): boolean {
+  if (!left || !right) return false;
+  return (
+    left.goalId === right.goalId &&
+    left.revision === right.revision &&
+    left.turnId === right.turnId
+  );
+}
+
+type ActiveGoalEventValue = Exclude<
+  Extract<
+    ServerGeminiStreamEvent,
+    { type: GeminiEventType.ActiveGoal }
+  >['value'],
+  null
+>;
+
+type GoalStateStreamEvent = Extract<
+  ServerGeminiStreamEvent,
+  { type: GeminiEventType.GoalState }
+>;
+
+function projectActiveGoal(
+  snapshot: GoalSnapshotV2 | undefined,
+): ActiveGoalEventValue | undefined {
+  const goal = snapshot?.goal;
+  if (goal?.status !== 'active') return undefined;
+  return {
+    condition: goal.objective,
+    iterations: goal.turnCount,
+    setAt: goal.createdAt,
+    tokensAtStart: 0,
+    hookId: `goal-v2:${goal.goalId}:${goal.revision}`,
+    ...(goal.lastReason === undefined ? {} : { lastReason: goal.lastReason }),
+  };
+}
+
+function sameActiveGoalProjection(
+  left: ActiveGoalEventValue | undefined,
+  right: ActiveGoalEventValue | undefined,
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 /**
@@ -333,7 +392,7 @@ export class GeminiClient {
    * so the idle check is skipped until the first API call completes.
    */
   private lastApiCompletionTimestamp: number | null = null;
-  /** Cleanup checkpoint for long-running Hook continuations such as /goal. */
+  /** Cleanup checkpoint for long-running Hook continuations. */
   private lastHookMicrocompactionTimestamp: number | null = null;
 
   constructor(private readonly config: Config) {
@@ -1899,7 +1958,7 @@ export class GeminiClient {
 
   async *sendMessageStream(
     request: PartListUnion,
-    signal: AbortSignal,
+    callerSignal: AbortSignal,
     prompt_id: string,
     options?: SendMessageOptions,
     turns: number = MAX_TURNS,
@@ -1913,6 +1972,140 @@ export class GeminiClient {
     ) {
       await this.config.assertCanStartTurn();
     }
+    const signal = options?.goalSignal
+      ? AbortSignal.any([callerSignal, options.goalSignal])
+      : callerSignal;
+    let goalPermit = options?.goalPermit
+      ? { ...options.goalPermit }
+      : undefined;
+    let goalTurnKey = options?.goalTurnKey;
+    let goalOrigin = options?.goalOrigin;
+    let goalRuntime: GoalRuntime | undefined;
+    let goalPermitReleased = false;
+    let unsubscribeGoalState: (() => void) | undefined;
+    const pendingGoalStateEvents: GoalStateStreamEvent[] = [];
+    let hasEmittedActiveGoalProjection = false;
+    let lastEmittedActiveGoal: ActiveGoalEventValue | undefined;
+    const closeGoalStateEvents = () => {
+      const unsubscribe = unsubscribeGoalState;
+      unsubscribeGoalState = undefined;
+      unsubscribe?.();
+    };
+    const bindGoalStateEvents = (runtime: GoalRuntime) => {
+      if (unsubscribeGoalState) return;
+      unsubscribeGoalState = runtime.subscribe((value, cause) => {
+        pendingGoalStateEvents.push({
+          type: GeminiEventType.GoalState,
+          value,
+          ...(cause !== undefined ? { cause } : {}),
+        });
+      });
+      pendingGoalStateEvents.push({
+        type: GeminiEventType.GoalState,
+        value: runtime.getSnapshot(),
+      });
+    };
+    const takePendingGoalEvents = (): ServerGeminiStreamEvent[] => {
+      const events: ServerGeminiStreamEvent[] = [];
+      for (const stateEvent of pendingGoalStateEvents.splice(
+        0,
+        pendingGoalStateEvents.length,
+      )) {
+        events.push(stateEvent);
+        const nextActiveGoal = projectActiveGoal(stateEvent.value);
+        if (!hasEmittedActiveGoalProjection) {
+          hasEmittedActiveGoalProjection = true;
+          lastEmittedActiveGoal = nextActiveGoal;
+          if (nextActiveGoal) {
+            events.push({
+              type: GeminiEventType.ActiveGoal,
+              value: nextActiveGoal,
+            });
+          }
+        } else if (
+          !sameActiveGoalProjection(lastEmittedActiveGoal, nextActiveGoal)
+        ) {
+          lastEmittedActiveGoal = nextActiveGoal;
+          events.push({
+            type: GeminiEventType.ActiveGoal,
+            value: nextActiveGoal ?? null,
+          });
+        }
+      }
+      return events;
+    };
+    const loadGoalRuntime = async (
+      required: boolean,
+    ): Promise<GoalRuntime | undefined> => {
+      if (goalRuntime) return goalRuntime;
+      try {
+        const getReady = this.config.getGoalRuntimeReady;
+        if (typeof getReady === 'function') {
+          goalRuntime = await getReady.call(this.config);
+        } else {
+          const getRuntime = this.config.getGoalRuntime;
+          if (typeof getRuntime === 'function') {
+            goalRuntime = getRuntime.call(this.config);
+          }
+        }
+      } catch (error) {
+        if (!(error instanceof GoalPersistenceUnavailableError) || required) {
+          throw error;
+        }
+      }
+      return goalRuntime;
+    };
+    const releaseGoalPermitOnInterruptedExit = async () => {
+      if (
+        goalPermitReleased ||
+        !goalPermit ||
+        !goalTurnKey ||
+        options?.goalSignal?.aborted
+      ) {
+        return;
+      }
+
+      try {
+        const runtime = goalRuntime ?? (await loadGoalRuntime(true));
+        if (runtime) bindGoalStateEvents(runtime);
+        if (
+          !runtime ||
+          !sameGoalPermit(runtime.permitForTurn(goalTurnKey), goalPermit)
+        ) {
+          return;
+        }
+
+        if (runtime.getSnapshot().goal?.status === 'active') {
+          try {
+            await runtime.dispatch({
+              action: 'pause',
+              expectedGoalId: goalPermit.goalId,
+              expectedRevision: goalPermit.revision,
+            });
+          } catch (error) {
+            debugLogger.warn('Failed to pause interrupted Goal turn', error);
+          }
+        }
+
+        try {
+          await this.config.getChatRecordingService()?.flush();
+        } catch (error) {
+          debugLogger.warn('Failed to flush interrupted Goal turn', error);
+        }
+
+        if (sameGoalPermit(runtime.permitForTurn(goalTurnKey), goalPermit)) {
+          await runtime.finishTurn(goalPermit);
+        }
+        goalPermitReleased = true;
+      } catch (error) {
+        debugLogger.warn('Failed to release interrupted Goal turn', error);
+      }
+    };
+    const finalizeInterruptedGoalTurn = async () => {
+      await releaseGoalPermitOnInterruptedExit();
+      closeGoalStateEvents();
+      return takePendingGoalEvents();
+    };
     let strippedRetryEntries: Content[] = [];
     // Snapshot of GeminiChat's user-content push counter, taken right after the
     // strip. The Retry's re-submitted content is the first thing the send
@@ -1985,106 +2178,214 @@ export class GeminiClient {
     }
 
     // Fire UserPromptSubmit hook through MessageBus (only if hooks are enabled)
-    const hooksEnabled = !this.config.getDisableAllHooks();
-    const messageBus = this.config.getMessageBus();
-    if (
-      messageType !== SendMessageType.Retry &&
-      messageType !== SendMessageType.Steer &&
-      messageType !== SendMessageType.Cron &&
-      messageType !== SendMessageType.Notification &&
-      // Teammate envelopes are machine-driven re-entries like Cron /
-      // Notification, not user prompts: user-authored UserPromptSubmit
-      // hooks must not fire on (or be able to block) internal team
-      // coordination traffic.
-      messageType !== SendMessageType.Teammate &&
-      hooksEnabled &&
-      messageBus &&
-      this.config.hasHooksForEvent('UserPromptSubmit')
-    ) {
-      const promptText = partToString(request);
-      const response = await messageBus.request<
-        HookExecutionRequest,
-        HookExecutionResponse
-      >(
-        {
-          type: MessageBusType.HOOK_EXECUTION_REQUEST,
-          eventName: 'UserPromptSubmit',
-          input: {
-            prompt: promptText,
-          },
-        },
-        MessageBusType.HOOK_EXECUTION_RESPONSE,
-      );
-      const hookOutput = response.output
-        ? createHookOutput('UserPromptSubmit', response.output)
-        : undefined;
-
+    let hooksEnabled: boolean;
+    let messageBus: ReturnType<Config['getMessageBus']>;
+    try {
+      hooksEnabled = !this.config.getDisableAllHooks();
+      messageBus = this.config.getMessageBus();
       if (
-        hookOutput?.isBlockingDecision() ||
-        hookOutput?.shouldStopExecution()
+        messageType !== SendMessageType.Retry &&
+        messageType !== SendMessageType.Steer &&
+        messageType !== SendMessageType.Cron &&
+        messageType !== SendMessageType.Notification &&
+        // Teammate envelopes are machine-driven re-entries like Cron /
+        // Notification, not user prompts: user-authored UserPromptSubmit
+        // hooks must not fire on (or be able to block) internal team
+        // coordination traffic.
+        messageType !== SendMessageType.Teammate &&
+        messageType !== SendMessageType.Goal &&
+        hooksEnabled &&
+        messageBus &&
+        this.config.hasHooksForEvent('UserPromptSubmit')
       ) {
-        yield {
-          type: GeminiEventType.UserPromptSubmitBlocked,
-          value: {
-            reason: hookOutput.getEffectiveReason(),
-            originalPrompt: promptText,
+        const promptText = partToString(request);
+        const response = await messageBus.request<
+          HookExecutionRequest,
+          HookExecutionResponse
+        >(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'UserPromptSubmit',
+            input: {
+              prompt: promptText,
+            },
           },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+        );
+        const hookOutput = response.output
+          ? createHookOutput('UserPromptSubmit', response.output)
+          : undefined;
+
+        if (
+          hookOutput?.isBlockingDecision() ||
+          hookOutput?.shouldStopExecution()
+        ) {
+          if (goalPermit) {
+            const runtime = await loadGoalRuntime(true);
+            if (!runtime || !goalTurnKey) {
+              throw new Error('Goal turn admission is unavailable');
+            }
+            bindGoalStateEvents(runtime);
+            const admitted = runtime.permitForTurn(goalTurnKey);
+            if (!sameGoalPermit(admitted, goalPermit)) {
+              throw new Error('Goal turn permit is no longer valid');
+            }
+            await this.config.getChatRecordingService()?.flush();
+            await runtime.finishTurn(goalPermit);
+            goalPermitReleased = true;
+            closeGoalStateEvents();
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
+          }
+          yield {
+            type: GeminiEventType.UserPromptSubmitBlocked,
+            value: {
+              reason: hookOutput.getEffectiveReason(),
+              originalPrompt: promptText,
+            },
+          };
+          settleSteerInput(attachedSteerInput, attachedSteerPushCount);
+          return new Turn(this.getChat(), prompt_id);
+        }
+
+        // Add additional context from hooks to the request
+        const additionalContext = hookOutput?.getAdditionalContext();
+        if (additionalContext) {
+          const requestArray = Array.isArray(request) ? request : [request];
+          request = [...requestArray, { text: additionalContext }];
+        }
+      }
+    } catch (error) {
+      for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+        yield goalEvent;
+      }
+      throw error;
+    }
+
+    try {
+      goalRuntime = await loadGoalRuntime(
+        messageType === SendMessageType.Goal || Boolean(goalPermit),
+      );
+
+      if (messageType === SendMessageType.Goal) {
+        if (!goalPermit) {
+          throw new Error('An automatic Goal turn requires an exact permit');
+        }
+        goalTurnKey ??= `goal-runtime:${goalPermit.turnId}`;
+        goalOrigin = 'runtime';
+      } else if (messageType === SendMessageType.UserQuery) {
+        goalOrigin = 'user';
+      }
+
+      const goalRequiresPermit = goalRuntime
+        ? goalRequiresExactPermit(goalRuntime.getSnapshot())
+        : false;
+      if (goalPermit) {
+        if (!goalRuntime || !goalTurnKey) {
+          throw new Error('Goal turn admission is unavailable');
+        }
+        const admitted = goalRuntime.permitForTurn(goalTurnKey);
+        if (!sameGoalPermit(admitted, goalPermit)) {
+          throw new Error('Goal turn permit is no longer valid');
+        }
+      } else if (
+        messageType === SendMessageType.UserQuery &&
+        goalRuntime &&
+        goalRequiresPermit
+      ) {
+        goalTurnKey ??= prompt_id;
+        goalPermit =
+          goalRuntime.permitForTurn(goalTurnKey) ??
+          goalRuntime.beginTurn(goalTurnKey);
+        if (!goalPermit) {
+          throw new Error('Goal turn is already owned by another permit');
+        }
+      } else if (goalRequiresPermit) {
+        throw new Error('An active Goal requires an exact turn permit');
+      }
+
+      if (goalPermit) {
+        goalOrigin ??= 'runtime';
+        options = {
+          ...(options ?? { type: messageType }),
+          type: messageType,
+          goalPermit,
+          goalTurnKey,
+          goalOrigin,
+          ...(messageType === SendMessageType.Goal
+            ? { stopHookState: undefined }
+            : {}),
         };
-        settleSteerInput(attachedSteerInput, attachedSteerPushCount);
-        return new Turn(this.getChat(), prompt_id);
       }
-
-      // Add additional context from hooks to the request
-      const additionalContext = hookOutput?.getAdditionalContext();
-      if (additionalContext) {
-        const requestArray = Array.isArray(request) ? request : [request];
-        request = [...requestArray, { text: additionalContext }];
+      if (goalRuntime) bindGoalStateEvents(goalRuntime);
+    } catch (error) {
+      for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+        yield goalEvent;
       }
+      throw error;
     }
+    const isGoalRuntimeTurn = goalOrigin === 'runtime';
 
-    if (
-      messageType === SendMessageType.Notification ||
-      messageType === SendMessageType.Teammate
-    ) {
-      // Teammate envelopes record like notifications: the UI rendered
-      // them as a compact `●` line (the displayText) and the envelope
-      // is the model-bound payload, so a resumed session restores the
-      // same info item. Without this they were the one top-level
-      // interaction missing from chat recording entirely.
-      this.config
-        .getChatRecordingService()
-        ?.recordNotification(request, options?.notificationDisplayText);
-    }
-
-    // Notifications start a fresh Turn with a new prompt_id, so the loop
-    // detector must reset — otherwise a prior turn's count can trip
-    // LoopDetected early on the notification turn.
     const isTopLevelInteraction =
       messageType === SendMessageType.UserQuery ||
       messageType === SendMessageType.Cron ||
       messageType === SendMessageType.Notification ||
       messageType === SendMessageType.Teammate;
-    if (isTopLevelInteraction) {
-      this.loopDetector.reset(prompt_id);
-      this.lastPromptId = prompt_id;
-      startInteractionSpan(this.config, {
-        promptId: prompt_id,
-        model: options?.modelOverride ?? this.config.getModel(),
-        messageType,
-      });
-      const interactionSpan = getActiveInteractionSpan();
+    try {
       if (
-        interactionSpan &&
-        this.config.getTelemetryIncludeSensitiveSpanAttributes?.()
+        messageType === SendMessageType.Notification ||
+        messageType === SendMessageType.Teammate
       ) {
-        // Guard partToString — addUserPromptAttributes would early-return
-        // anyway, but the argument is evaluated unconditionally otherwise.
-        addUserPromptAttributes(
-          this.config,
-          interactionSpan,
-          partToString(request),
-        );
+        // Teammate envelopes record like notifications: the UI rendered
+        // them as a compact `●` line (the displayText) and the envelope
+        // is the model-bound payload, so a resumed session restores the
+        // same info item. Without this they were the one top-level
+        // interaction missing from chat recording entirely.
+        this.config
+          .getChatRecordingService()
+          ?.recordNotification(
+            request,
+            options?.notificationDisplayText,
+            goalPermit,
+          );
       }
+
+      // Notifications start a fresh Turn with a new prompt_id, so the loop
+      // detector must reset — otherwise a prior turn's count can trip
+      // LoopDetected early on the notification turn.
+      if (messageType === SendMessageType.Goal) {
+        this.loopDetector.reset(prompt_id);
+        this.lastPromptId = prompt_id;
+      }
+      if (isTopLevelInteraction) {
+        this.loopDetector.reset(prompt_id);
+        this.lastPromptId = prompt_id;
+        startInteractionSpan(this.config, {
+          promptId: prompt_id,
+          model: options?.modelOverride ?? this.config.getModel(),
+          messageType,
+        });
+        const interactionSpan = getActiveInteractionSpan();
+        if (
+          interactionSpan &&
+          this.config.getTelemetryIncludeSensitiveSpanAttributes?.()
+        ) {
+          // Guard partToString — addUserPromptAttributes would early-return
+          // anyway, but the argument is evaluated unconditionally otherwise.
+          addUserPromptAttributes(
+            this.config,
+            interactionSpan,
+            partToString(request),
+          );
+        }
+      }
+    } catch (error) {
+      await releaseGoalPermitOnInterruptedExit();
+      for (const goalEvent of takePendingGoalEvents()) {
+        yield goalEvent;
+      }
+      throw error;
     }
 
     // Tracks whether the generator reached its natural end (the bottom-of-try
@@ -2099,7 +2400,11 @@ export class GeminiClient {
     // right before the turn's streaming loop below.
     let messageDisplay: MessageDisplayDispatcher | null = null;
     try {
-      if (
+      if (messageType === SendMessageType.Goal) {
+        this.config
+          .getChatRecordingService()
+          ?.recordGoalRuntimeMessage(request, goalPermit!);
+      } else if (
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
@@ -2196,9 +2501,15 @@ export class GeminiClient {
         if (messageType === SendMessageType.Cron) {
           this.config
             .getChatRecordingService()
-            ?.recordCronPrompt(request, options?.notificationDisplayText);
+            ?.recordCronPrompt(
+              request,
+              options?.notificationDisplayText,
+              goalPermit,
+            );
         } else {
-          this.config.getChatRecordingService()?.recordUserMessage(request);
+          this.config
+            .getChatRecordingService()
+            ?.recordUserMessage(request, goalPermit);
         }
       }
 
@@ -2216,7 +2527,7 @@ export class GeminiClient {
         if (messageType === SendMessageType.UserQuery || compacted) {
           this.lastHookMicrocompactionTimestamp = Date.now();
         }
-      } else if (messageType === SendMessageType.Hook) {
+      } else if (messageType === SendMessageType.Hook && !isGoalRuntimeTurn) {
         this.lastHookMicrocompactionTimestamp ??=
           this.lastApiCompletionTimestamp ?? Date.now();
         const checkpoint = this.lastHookMicrocompactionTimestamp;
@@ -2225,7 +2536,7 @@ export class GeminiClient {
         }
       }
 
-      if (messageType !== SendMessageType.Retry) {
+      if (messageType !== SendMessageType.Retry && !isGoalRuntimeTurn) {
         // Attribution snapshots are recorded on every non-retry turn. File
         // history snapshots are created only at UserQuery boundaries; later
         // tool edits update that latest snapshot through trackEdit().
@@ -2263,6 +2574,9 @@ export class GeminiClient {
           this.sessionTurnCount > this.config.getMaxSessionTurns()
         ) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+          for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            yield goalEvent;
+          }
           yield { type: GeminiEventType.MaxSessionTurns };
           if (isTopLevelInteraction)
             endInteractionSpan('error', {
@@ -2273,11 +2587,17 @@ export class GeminiClient {
       }
 
       // Ensure turns never exceeds MAX_TURNS to prevent infinite loops
-      const boundedTurns = Math.min(turns, MAX_TURNS);
+      const boundedTurns =
+        messageType === SendMessageType.Goal
+          ? MAX_TURNS
+          : Math.min(turns, MAX_TURNS);
       if (!boundedTurns) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
         if (isTopLevelInteraction)
           endInteractionSpan('error', { errorMessage: 'max turns exhausted' });
+        for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+          yield goalEvent;
+        }
         return new Turn(this.getChat(), prompt_id);
       }
 
@@ -2293,7 +2613,11 @@ export class GeminiClient {
           return undefined;
         }
         const maxSessionTurns = this.config.getMaxSessionTurns();
-        if (maxSessionTurns > 0 && this.sessionTurnCount >= maxSessionTurns) {
+        if (
+          !isGoalRuntimeTurn &&
+          maxSessionTurns > 0 &&
+          this.sessionTurnCount >= maxSessionTurns
+        ) {
           return undefined;
         }
         const steerInput = await options.getSteerInput(signal);
@@ -2312,11 +2636,14 @@ export class GeminiClient {
       // still calls tryCompressChat directly for the full reset (env refresh +
       // forceFullIdeContext flip).
       const sessionTokenLimit = this.config.getSessionTokenLimit();
-      if (sessionTokenLimit > 0) {
+      if (!isGoalRuntimeTurn && sessionTokenLimit > 0) {
         const lastPromptTokenCount =
           uiTelemetryService.getLastPromptTokenCount();
         if (lastPromptTokenCount > sessionTokenLimit) {
           this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+          for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            yield goalEvent;
+          }
           yield {
             type: GeminiEventType.SessionTokenLimitExceeded,
             value: {
@@ -2377,6 +2704,9 @@ export class GeminiClient {
           await arenaAgentClient.reportCancelled();
           this.cancelPendingMemoryPrefetch('abort');
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
+          for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            yield goalEvent;
+          }
           return new Turn(this.getChat(), prompt_id);
         }
       }
@@ -2403,7 +2733,7 @@ export class GeminiClient {
         }
       }
 
-      const turn = new Turn(this.getChat(), prompt_id);
+      const turn = new Turn(this.getChat(), prompt_id, goalPermit);
 
       // Determine the model to use for this turn
       const model = options?.modelOverride ?? this.config.getModel();
@@ -2423,6 +2753,14 @@ export class GeminiClient {
         messageType === SendMessageType.Cron
       ) {
         const systemReminders = [];
+
+        if (
+          messageType === SendMessageType.UserQuery &&
+          !goalPermit &&
+          goalRuntime?.getSnapshot().goal?.status === 'paused'
+        ) {
+          systemReminders.push(PAUSED_GOAL_SYSTEM_REMINDER);
+        }
 
         // Inject fresh date on UserQuery turns only; Cron and ToolResult turns
         // reuse the same session and the startup-context date is still current.
@@ -2504,28 +2842,9 @@ export class GeminiClient {
         });
       }
 
-      const activeGoalAtTurnStart = getActiveGoal(this.config.getSessionId());
-      if (activeGoalAtTurnStart) {
-        yield {
-          type: GeminiEventType.ActiveGoal,
-          value: activeGoalAtTurnStart,
-        };
+      for (const goalEvent of takePendingGoalEvents()) {
+        yield goalEvent;
       }
-      let lastEmittedActiveGoal: ActiveGoal | undefined = activeGoalAtTurnStart;
-      // Tracks the last emitted goal value to suppress duplicate events.
-      // Mutates `lastEmittedActiveGoal` when an event is returned.
-      const maybeEmitActiveGoalChange = (
-        nextActiveGoal: ActiveGoal | undefined,
-      ): ServerGeminiStreamEvent | undefined => {
-        if (activeGoalEquals(lastEmittedActiveGoal, nextActiveGoal)) {
-          return undefined;
-        }
-        lastEmittedActiveGoal = nextActiveGoal;
-        return {
-          type: GeminiEventType.ActiveGoal,
-          value: nextActiveGoal ?? null,
-        };
-      };
 
       // MessageDisplay hook: fires repeatedly as this turn's reply streams
       // (before Stop, which fires once at the end). One dispatcher — one
@@ -2586,6 +2905,9 @@ export class GeminiClient {
             // the non-interactive runner) build their own list from the yielded
             // ToolCallRequest events and stop on LoopDetected.
             turn.pendingToolCalls.length = 0;
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: GeminiEventType.LoopDetected,
@@ -2615,6 +2937,9 @@ export class GeminiClient {
             !skipLoopDetection &&
             this.loopDetector.addAndCheckHeuristicLoops(event);
           if (heuristicLoop) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
             const loopType = this.loopDetector.getLastLoopType();
             yield {
               type: GeminiEventType.LoopDetected,
@@ -2673,6 +2998,17 @@ export class GeminiClient {
               });
           }
 
+          for (const goalEvent of takePendingGoalEvents()) {
+            yield goalEvent;
+          }
+          if (
+            (event.type === GeminiEventType.UserCancelled && signal.aborted) ||
+            event.type === GeminiEventType.Error
+          ) {
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
+            }
+          }
           yield event;
           if (event.type === GeminiEventType.Error) {
             this.forceFullIdeContext = true;
@@ -2706,6 +3042,11 @@ export class GeminiClient {
         // belt-and-suspenders call in the outer finally further down is then
         // a no-op.
         await messageDisplay?.finish();
+      }
+      for (const goalEvent of signal.aborted
+        ? await finalizeInterruptedGoalTurn()
+        : takePendingGoalEvents()) {
+        yield goalEvent;
       }
 
       // Track API completion time for thinking block idle cleanup
@@ -2775,19 +3116,12 @@ export class GeminiClient {
           MessageBusType.HOOK_EXECUTION_RESPONSE,
         );
 
-        // Stop hook callbacks can mutate active goal state during request().
-        // Capture it before cancellation returns so clear events are not lost.
-        const activeGoalAfterStopHook = getActiveGoal(
-          this.config.getSessionId(),
-        );
-
-        // Check if aborted after hook execution
+        for (const goalEvent of takePendingGoalEvents()) {
+          yield goalEvent;
+        }
         if (signal.aborted) {
-          const activeGoalEvent = maybeEmitActiveGoalChange(
-            activeGoalAfterStopHook,
-          );
-          if (activeGoalEvent) {
-            yield activeGoalEvent;
+          for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+            yield goalEvent;
           }
           if (isTopLevelInteraction) endInteractionSpan('cancelled');
           return turn;
@@ -2812,21 +3146,15 @@ export class GeminiClient {
           stopOutput?.isBlockingDecision() ||
           stopOutput?.shouldStopExecution()
         ) {
-          // Check if aborted before continuing
           if (signal.aborted) {
-            const activeGoalEvent = maybeEmitActiveGoalChange(
-              activeGoalAfterStopHook,
-            );
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
+            for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+              yield goalEvent;
             }
             if (isTopLevelInteraction) endInteractionSpan('cancelled');
             return turn;
           }
 
-          const continueReason = getStopHookContinuationReason(stopOutput);
-
-          // Track stop hook iterations
+          const continueReason = stopOutput.getEffectiveReason();
           const currentIterationCount =
             (options?.stopHookState?.iterationCount ?? 0) + 1;
           const currentReasons = [
@@ -2834,154 +3162,98 @@ export class GeminiClient {
             continueReason,
           ];
 
-          // Emit StopHookLoop starting with the first blocking decision so
-          // /goal and configured Stop hooks both surface their reason before
-          // the follow-up turn is generated. The cap check stays before the
-          // yield because a cap of 1 means no follow-up turn should run.
           const stopHookBlockingCap = this.config.getStopHookBlockingCap();
           if (currentIterationCount >= stopHookBlockingCap) {
             const warning = formatStopHookBlockingCapWarning(
               'Stop',
               stopHookBlockingCap,
             );
-            abortGoalForStopHookCap(
-              this.config,
-              this.config.getSessionId(),
-              warning,
-            );
-            const activeGoalAfterCap = getActiveGoal(
-              this.config.getSessionId(),
-            );
-            const activeGoalEvent =
-              maybeEmitActiveGoalChange(activeGoalAfterCap);
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
-            }
             yield {
               type: GeminiEventType.HookSystemMessage,
               value: warning,
             };
             debugLogger.warn(warning);
-            if (isTopLevelInteraction) endInteractionSpan('ok');
-            return turn;
-          }
-
-          const activeGoalEvent = maybeEmitActiveGoalChange(
-            activeGoalAfterStopHook,
-          );
-          if (activeGoalEvent) {
-            yield activeGoalEvent;
-          }
-
-          yield {
-            type: GeminiEventType.StopHookLoop,
-            value: {
-              iterationCount: currentIterationCount,
-              reasons: currentReasons,
-              stopHookCount: response.stopHookCount ?? 1,
-            },
-          };
-
-          // A blocking Stop hook (e.g. /goal) feeds a fresh user-role prompt
-          // back to the model, starting a new logical turn — reset per-turn
-          // loop accounting so each continuation gets its own tool-call
-          // budget. Without this, a goal chain accumulates every iteration's
-          // tool calls into one "turn" and trips TURN_TOOL_CALL_CAP after a
-          // handful of healthy iterations. The ACP daemon path already has
-          // these semantics (fresh DaemonToolLoopState per continuation).
-          // Runaway protection is preserved: the cap still bounds each
-          // iteration, and the chain itself is bounded by
-          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
-          this.loopDetector.reset(prompt_id);
-
-          const activeGoal = getActiveGoal(this.config.getSessionId());
-          const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;
-          const pendingSteer = await takeSteerInput(hookTurnBudget);
-          const activeGoalAfterSteer = getActiveGoal(
-            this.config.getSessionId(),
-          );
-          const activeGoalChanged =
-            activeGoal !== undefined &&
-            activeGoalAfterSteer?.hookId !== activeGoal.hookId;
-          const goalContinuationChanged =
-            activeGoalChanged &&
-            stopOutput.hookSpecificOutput?.[GOAL_HOOK_ID_OUTPUT_KEY] ===
-              activeGoal.hookId;
-          if (activeGoalChanged) {
-            const activeGoalEvent =
-              maybeEmitActiveGoalChange(activeGoalAfterSteer);
-            if (activeGoalEvent) {
-              yield activeGoalEvent;
+          } else {
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
             }
-          }
-          const discardGoalContinuation =
-            goalContinuationChanged &&
-            response.hasNonGoalBlockingStopHook === false;
-          const continuationReasonAfterSteer = discardGoalContinuation
-            ? undefined
-            : goalContinuationChanged &&
-                response.hasNonGoalBlockingStopHook === true
-              ? response.nonGoalBlockingStopReason || 'No reason provided'
-              : continueReason;
-          if (!continuationReasonAfterSteer && !pendingSteer) {
-            if (isTopLevelInteraction) endInteractionSpan('ok');
-            normalCompletion = true;
-            return turn;
-          }
-          const continueRequest: Part[] = continuationReasonAfterSteer
-            ? [{ text: continuationReasonAfterSteer }]
-            : [];
-          if (pendingSteer) {
-            if (continueRequest.length > 0) {
-              continueRequest.push({ text: '\n\n' });
-            }
-            continueRequest.push(...pendingSteer.parts);
-          }
-          const pushCountBefore = currentPushCount();
-          let hookTurn: Turn;
-          try {
-            hookTurn = yield* this.sendMessageStream(
-              continueRequest,
-              signal,
-              prompt_id,
-              {
-                type: SendMessageType.Hook,
-                modelOverride: options?.modelOverride,
-                getSteerInput: options?.getSteerInput,
-                stopHookState: discardGoalContinuation
-                  ? undefined
-                  : {
-                      iterationCount: currentIterationCount,
-                      reasons:
-                        continuationReasonAfterSteer &&
-                        continuationReasonAfterSteer !== continueReason
-                          ? [
-                              ...currentReasons.slice(0, -1),
-                              continuationReasonAfterSteer,
-                            ]
-                          : currentReasons,
-                    },
+            yield {
+              type: GeminiEventType.StopHookLoop,
+              value: {
+                iterationCount: currentIterationCount,
+                reasons: currentReasons,
+                stopHookCount: response.stopHookCount ?? 1,
               },
-              hookTurnBudget,
-            );
-          } finally {
-            settleSteerInput(pendingSteer, pushCountBefore);
-          }
-          if (isTopLevelInteraction)
-            endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
-          // Preserve the pending prefetch: the inner Hook turn we just
-          // yielded may have produced tool calls, and the caller's next
-          // ToolResult turn still needs to consume the recall result.
-          normalCompletion = true;
-          return hookTurn;
-        }
+            };
 
-        const activeGoalEvent = maybeEmitActiveGoalChange(
-          activeGoalAfterStopHook,
-        );
-        if (activeGoalEvent) {
-          yield activeGoalEvent;
+            if (!isGoalRuntimeTurn) {
+              this.loopDetector.reset(prompt_id);
+            }
+            const hookTurnBudget = boundedTurns - 1;
+            const pendingSteer = await takeSteerInput(hookTurnBudget);
+            for (const goalEvent of takePendingGoalEvents()) {
+              yield goalEvent;
+            }
+            if (signal.aborted) {
+              for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+                yield goalEvent;
+              }
+              if (isTopLevelInteraction) endInteractionSpan('cancelled');
+              return turn;
+            }
+            const continueRequest: Part[] = [{ text: continueReason }];
+            if (pendingSteer) {
+              continueRequest.push({ text: '\n\n' }, ...pendingSteer.parts);
+            }
+            const pushCountBefore = currentPushCount();
+            let hookTurn: Turn;
+            try {
+              hookTurn = yield* this.sendMessageStream(
+                continueRequest,
+                signal,
+                prompt_id,
+                {
+                  ...options,
+                  type: SendMessageType.Hook,
+                  steerInput: undefined,
+                  stopHookState: {
+                    iterationCount: currentIterationCount,
+                    reasons: currentReasons,
+                  },
+                },
+                hookTurnBudget,
+              );
+            } finally {
+              settleSteerInput(pendingSteer, pushCountBefore);
+            }
+            if (isTopLevelInteraction) {
+              endInteractionSpan(signal.aborted ? 'cancelled' : 'ok');
+            }
+            normalCompletion = true;
+            return hookTurn;
+          }
         }
+        for (const goalEvent of takePendingGoalEvents()) {
+          yield goalEvent;
+        }
+      }
+
+      if (
+        goalPermit &&
+        goalRuntime &&
+        !turn.pendingToolCalls.length &&
+        !signal.aborted
+      ) {
+        await this.config.getChatRecordingService()?.flush();
+        const queuedGoalTurnKey = options?.getQueuedGoalTurnKey?.();
+        if (queuedGoalTurnKey) {
+          goalRuntime.beginTurn(queuedGoalTurnKey);
+        }
+        await goalRuntime.finishTurn(goalPermit);
+        goalPermitReleased = true;
+        for (const goalEvent of takePendingGoalEvents()) yield goalEvent;
+        normalCompletion = true;
+        return turn;
       }
 
       if (!turn.pendingToolCalls.length && signal && !signal.aborted) {
@@ -3009,7 +3281,9 @@ export class GeminiClient {
         }
 
         if (this.config.getSkipNextSpeakerCheck()) {
-          this.runManagedAutoMemoryBackgroundTasks(messageType);
+          if (!isGoalRuntimeTurn) {
+            this.runManagedAutoMemoryBackgroundTasks(messageType);
+          }
           if (arenaAgentClient) {
             await arenaAgentClient.reportCompleted();
           }
@@ -3066,7 +3340,9 @@ export class GeminiClient {
           return continueTurn;
         }
 
-        this.runManagedAutoMemoryBackgroundTasks(messageType);
+        if (!isGoalRuntimeTurn) {
+          this.runManagedAutoMemoryBackgroundTasks(messageType);
+        }
 
         if (arenaAgentClient) {
           // No continuation needed — agent completed its task
@@ -3090,9 +3366,21 @@ export class GeminiClient {
       if (!hasToolCalls) {
         this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
       }
+      for (const goalEvent of takePendingGoalEvents()) {
+        yield goalEvent;
+      }
       normalCompletion = true;
       return turn;
+    } catch (error) {
+      for (const goalEvent of await finalizeInterruptedGoalTurn()) {
+        yield goalEvent;
+      }
+      throw error;
     } finally {
+      if (!goalPermitReleased && (callerSignal.aborted || !normalCompletion)) {
+        await releaseGoalPermitOnInterruptedExit();
+      }
+      closeGoalStateEvents();
       settleSteerInput(attachedSteerInput, attachedSteerPushCount);
       restoreStrippedRetryEntries();
       // Belt-and-suspenders: close out the MessageDisplay dispatcher on any

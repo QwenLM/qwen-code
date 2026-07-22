@@ -19,11 +19,48 @@ import type { SessionContext } from './types.js';
 import type {
   Config,
   ChatRecord,
+  GoalRecord,
+  GoalStateCause,
   HistoryGap,
   ToolRegistry,
   ToolResultDisplay,
   TodoResultDisplay,
 } from '@qwen-code/qwen-code-core';
+
+const GOAL_V2: GoalRecord = {
+  goalId: 'goal-v2',
+  revision: 2,
+  objective: 'ship v2 goal replay',
+  status: 'active',
+  evidenceCursor: { recordId: 'goal-parent' },
+  turnCount: 3,
+  activeTimeMs: 1200,
+  createdAt: 100,
+  updatedAt: 200,
+  lastReason: 'continuing',
+};
+
+function createGoalStateRecord(
+  uuid: string,
+  cause: GoalStateCause,
+  goal: GoalRecord | null,
+): ChatRecord {
+  return {
+    uuid,
+    parentUuid: null,
+    sessionId: 'test-session',
+    timestamp: '2026-07-21T00:00:00.000Z',
+    type: 'system',
+    subtype: 'goal_state',
+    cwd: '/test',
+    version: '1.0.0',
+    systemPayload: {
+      v: 2,
+      cause,
+      snapshot: { v: 2, activity: 'idle', goal },
+    },
+  };
+}
 
 describe('HistoryReplayer', () => {
   let mockContext: SessionContext;
@@ -1117,6 +1154,32 @@ describe('HistoryReplayer', () => {
       ]);
     });
 
+    it('replays legacy Goal cards without consulting live Goal policy', async () => {
+      const ctx = {
+        ...mockContext,
+        config: new Proxy(
+          { getToolRegistry: () => ({ getTool: () => null }) },
+          {
+            get(target: Record<string, unknown>, prop: string | symbol) {
+              if (prop in target) return target[prop as string];
+              if (typeof prop === 'symbol') return undefined;
+              throw new Error(`config does not implement ${String(prop)}`);
+            },
+          },
+        ) as unknown as Config,
+      } as unknown as SessionContext;
+
+      await new HistoryReplayer(ctx).replay([
+        goalRecord({
+          type: 'goal_status',
+          kind: 'set',
+          condition: 'ship it',
+        }),
+      ]);
+
+      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+    });
+
     it('re-emits terminal goal cards', async () => {
       await replayer.replay([
         goalRecord({
@@ -1163,8 +1226,6 @@ describe('HistoryReplayer', () => {
     it('refuses to replay a goal card whose condition is empty', async () => {
       // A transcript is a file: a corrupted or hand-edited condition would
       // otherwise ride out to every client inside `_meta.goalStatus`.
-      // `restoreGoalFromHistory` refuses the same card, so neither the card nor
-      // the hook survives — they stay consistent.
       await replayer.replay([
         goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
       ]);
@@ -1272,154 +1333,79 @@ describe('HistoryReplayer', () => {
     });
   });
 
-  describe('an active goal that cannot be restored is superseded', () => {
-    // The client reads "a goal is running" off the newest goal card it saw. If
-    // restore is going to refuse the goal, replaying the `set` card alone
-    // leaves the UI claiming a live loop that nothing drives.
-    const goalRecord = (
-      ...outputHistoryItems: Array<Record<string, unknown>>
-    ): ChatRecord =>
-      ({
-        uuid: 'goal-uuid',
-        parentUuid: null,
-        sessionId: 'test-session',
-        timestamp: new Date().toISOString(),
-        type: 'system',
-        subtype: 'slash_command',
-        cwd: '/test',
-        version: '1.0.0',
-        systemPayload: {
-          phase: 'result',
-          rawCommand: '/goal',
-          outputHistoryItems,
-        },
-      }) as unknown as ChatRecord;
-
-    const goalStatuses = () =>
-      sentUpdates()
-        .map((u) => u['_meta'] as Record<string, unknown> | undefined)
-        .map((meta) => meta?.['goalStatus'] as Record<string, unknown>)
-        .filter(Boolean);
-
-    const replayWithConfig = async (
-      config: Partial<Record<string, unknown>>,
-      records: ChatRecord[],
-    ) => {
-      const ctx = {
-        ...mockContext,
-        config: {
-          getToolRegistry: () => ({ getTool: () => null }),
-          isTrustedFolder: () => true,
-          getDisableAllHooks: () => false,
-          getHookSystem: () => ({}),
-          ...config,
-        } as unknown as Config,
-      } as unknown as SessionContext;
-      await new HistoryReplayer(ctx, {
-        supersedeUnrestorableGoal: true,
-      }).replay(records);
-    };
-
-    it.each([
-      [
-        'the folder is no longer trusted',
-        { isTrustedFolder: () => false },
-        'not trusted',
-      ],
-      [
-        'hooks are disabled by policy',
-        { getDisableAllHooks: () => true },
-        'hooks are disabled',
-      ],
-      [
-        'the hook system is unavailable',
-        { getHookSystem: () => undefined },
-        'hook system is unavailable',
-      ],
-    ])('emits a trailing cleared card when %s', async (_l, cfg, reason) => {
-      await replayWithConfig(cfg, [
-        goalRecord({
-          type: 'goal_status',
-          kind: 'set',
-          condition: 'ship it',
-          setAt: 1234,
-        }),
+  describe('goal_state v2 replay', () => {
+    it('emits v2 first and preserves the source record UUID', async () => {
+      await replayer.replay([
+        createGoalStateRecord('goal-create', 'create', GOAL_V2),
       ]);
 
-      const statuses = goalStatuses();
-      expect(statuses).toHaveLength(2);
-      expect(statuses[0]).toMatchObject({ kind: 'set' });
-      // Ordering is the whole point: `loadSession` batches replay updates into
-      // its response, so a card emitted after replay would reach the client
-      // first and lose to the `set` card.
-      expect(statuses[1]).toMatchObject({
-        kind: 'cleared',
-        condition: 'ship it',
-        setAt: 1234,
+      const update = sentUpdates()[0];
+      const meta = update['_meta'] as Record<string, unknown>;
+      expect(Object.keys(meta).slice(0, 3)).toEqual([
+        'goalState',
+        'goalStatus',
+        'qwen.session.recordId',
+      ]);
+      expect(meta).toMatchObject({
+        goalState: { v: 2, goal: GOAL_V2, activity: 'idle' },
+        goalStatus: { kind: 'set', condition: GOAL_V2.objective },
+        'qwen.session.recordId': 'goal-create',
       });
-      expect(statuses[1]['lastReason']).toContain(reason);
-    });
-
-    it('leaves a restorable goal alone', async () => {
-      await replayWithConfig({}, [
-        goalRecord({ type: 'goal_status', kind: 'set', condition: 'ship it' }),
+      expect(sentUpdateContexts).toEqual([
+        {
+          activeRecordId: 'goal-create',
+          activeRecordTimestamp: '2026-07-21T00:00:00.000Z',
+        },
       ]);
-      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
     });
 
-    it('says nothing when the transcript has no active goal', async () => {
-      await replayWithConfig({ isTrustedFolder: () => false }, [
-        goalRecord({
-          type: 'goal_status',
-          kind: 'achieved',
-          condition: 'ship it',
-          iterations: 1,
-          durationMs: 5,
+    it('projects clear with the previous objective and terminal states', async () => {
+      await replayer.replay([
+        createGoalStateRecord('goal-create', 'create', GOAL_V2),
+        createGoalStateRecord('goal-clear', 'clear', null),
+        createGoalStateRecord('goal-complete', 'complete', {
+          ...GOAL_V2,
+          status: 'complete',
         }),
       ]);
-      expect(goalStatuses()).toHaveLength(1);
-      expect(goalStatuses()[0]).toMatchObject({ kind: 'achieved' });
-    });
 
-    it('says nothing when the active card was already dropped as invalid', async () => {
-      // The empty-condition card never reached the client, so there is no
-      // phantom "running" state to correct — a `cleared` card would name a goal
-      // the user never saw.
-      await replayWithConfig({ isTrustedFolder: () => false }, [
-        goalRecord({ type: 'goal_status', kind: 'set', condition: '' }),
+      const metas = sentUpdates().map(
+        (update) => update['_meta'] as Record<string, unknown>,
+      );
+      expect(metas[1]).toMatchObject({
+        goalState: { v: 2, goal: null, activity: 'idle' },
+        goalStatus: { kind: 'cleared', condition: GOAL_V2.objective },
+      });
+      expect(Object.keys(metas[2]).slice(0, 3)).toEqual([
+        'goalState',
+        'goalStatus',
+        'goalTerminal',
       ]);
-      expect(goalStatuses()).toEqual([]);
+      expect(metas[2]['goalTerminal']).toMatchObject({
+        kind: 'achieved',
+        condition: GOAL_V2.objective,
+      });
     });
 
-    it('stays off by default, and never touches config when it is off', async () => {
-      // Export replays a transcript through this class with a config stub that
-      // throws on any method it does not implement. A replay that only renders
-      // history must not ask about trust or hook policy — or editorialize.
-      const ctx = {
-        ...mockContext,
-        config: new Proxy(
-          { getToolRegistry: () => ({ getTool: () => null }) },
-          {
-            get(target: Record<string, unknown>, prop: string | symbol) {
-              if (prop in target) return target[prop as string];
-              if (typeof prop === 'symbol') return undefined;
-              throw new Error(`config does not implement ${String(prop)}`);
-            },
-          },
-        ) as unknown as Config,
-      } as unknown as SessionContext;
+    it('skips malformed v2 records without abandoning later history', async () => {
+      const malformed = createGoalStateRecord(
+        'goal-malformed',
+        'create',
+        GOAL_V2,
+      );
+      (
+        malformed.systemPayload as unknown as {
+          snapshot: Record<string, unknown>;
+        }
+      ).snapshot['activity'] = 'running';
 
-      await expect(
-        new HistoryReplayer(ctx).replay([
-          goalRecord({
-            type: 'goal_status',
-            kind: 'set',
-            condition: 'ship it',
-          }),
-        ]),
-      ).resolves.toBeUndefined();
+      await replayer.replay([malformed, createUserRecord('still here')]);
 
-      expect(goalStatuses()).toEqual([{ kind: 'set', condition: 'ship it' }]);
+      expect(sentUpdates()).toHaveLength(1);
+      expect(sentUpdates()[0]).toMatchObject({
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'still here' },
+      });
     });
   });
 

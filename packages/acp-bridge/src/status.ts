@@ -120,6 +120,9 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspaceResource: 'qwen/status/workspace/resource',
 } as const;
 
+export const QWEN_GOAL_CONTROL_METHOD =
+  'qwen/control/session/goal/control' as const;
+
 /**
  * Control-plane (mutation) ACP extMethods introduced in Mutation control.
  * Distinct from `SERVE_STATUS_EXT_METHODS` so reviewers can grep mutation
@@ -156,12 +159,12 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
+  sessionGoalControl: QWEN_GOAL_CONTROL_METHOD,
   sessionGoalClear: 'qwen/control/session/goal/clear',
   /**
-   * Read a live session's `/goal` state. The active goal lives only in the
-   * child's in-memory store, so this is the sole authoritative source for the
-   * condition, its running turn count and the judge's last verdict. Params:
-   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   * Read a live session's Goal state from the child runtime. Params:
+   * `{ sessionId }`; result: `{ active, goalState? }`, where `goalState` is
+   * optional for rolling compatibility with older children.
    */
   sessionGoalGet: 'qwen/control/session/goal/get',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',

@@ -43,7 +43,9 @@ import {
   mergeStartupWarnings,
   shouldAutoOpenSkillReview,
   shouldDrainMessageQueue,
+  useQueuedSubmissionDrain,
 } from './AppContainer.js';
+import { renderHook } from '@testing-library/react';
 import {
   formatSessionWindowTitle,
   writeTerminalTitle,
@@ -51,9 +53,11 @@ import {
 import ansiEscapes from 'ansi-escapes';
 import {
   type Config,
+  type GoalTurnHost,
   makeFakeConfig,
   type GeminiClient,
   type SubagentManager,
+  SendMessageType,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -131,6 +135,13 @@ vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
     dismissProviderUpdate: vi.fn(),
+  })),
+}));
+vi.mock('./hooks/useCommandMigration.js', () => ({
+  useCommandMigration: vi.fn(() => ({
+    showMigrationNudge: false,
+    tomlFiles: [],
+    setShowMigrationNudge: vi.fn(),
   })),
 }));
 vi.mock('./contexts/VimModeContext.js');
@@ -311,6 +322,7 @@ describe('AppContainer State Management', () => {
       pendingHistoryItems: [],
       thought: null,
       cancelOngoingRequest: vi.fn(),
+      preemptGoalTurn: vi.fn(),
       retryLastPrompt: vi.fn(),
       streamingResponseLengthRef: { current: 0 },
       isReceivingContent: false,
@@ -327,7 +339,13 @@ describe('AppContainer State Management', () => {
     });
     mockedUseMessageQueue.mockReturnValue({
       messageQueue: [],
+      pendingSubmissionCount: 0,
       addMessage: vi.fn(),
+      enqueueGoalTurn: vi.fn(),
+      peekNextUserBatchKey: vi.fn(),
+      claimDirectUserAdmission: vi.fn(),
+      removeGoalTurns: vi.fn().mockReturnValue(0),
+      popNextSubmission: vi.fn().mockReturnValue(null),
       clearQueue: vi.fn(),
       getQueuedMessagesText: vi.fn().mockReturnValue(''),
       popAllMessages: vi.fn().mockReturnValue(null),
@@ -1023,6 +1041,307 @@ describe('AppContainer State Management', () => {
       ).toBe(true);
     });
 
+    it('binds one Goal host that enqueues, preempts safely, and cleans up', async () => {
+      const enqueueGoalTurn = vi.fn();
+      const removeGoalTurns = vi.fn().mockReturnValue(1);
+      const preemptGoalTurn = vi.fn();
+      const submitQuery = vi.fn();
+      const unbind = vi.fn();
+      let host: GoalTurnHost | undefined;
+      vi.spyOn(mockConfig, 'bindGoalTurnHost').mockImplementation(
+        (nextHost) => {
+          host = nextHost;
+          return unbind;
+        },
+      );
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        pendingSubmissionCount: 0,
+        addMessage: vi.fn(),
+        enqueueGoalTurn,
+        peekNextUserBatchKey: vi.fn(),
+        claimDirectUserAdmission: vi.fn(),
+        removeGoalTurns,
+        popNextSubmission: vi.fn().mockReturnValue(null),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        restoreMessages: vi.fn(),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        preemptGoalTurn,
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(mockConfig.bindGoalTurnHost).toHaveBeenCalledTimes(1);
+      expect(host).toBeDefined();
+      await act(async () => {
+        await host!.startGoalTurn({
+          permit: { goalId: 'goal-1', revision: 2, turnId: 'turn-1' },
+          continuationContext: 'continue automatically',
+          verifierFeedback: 'collect evidence',
+        });
+      });
+      expect(enqueueGoalTurn).toHaveBeenCalledWith({
+        permit: { goalId: 'goal-1', revision: 2, turnId: 'turn-1' },
+        continuationContext: 'continue automatically',
+        verifierFeedback: 'collect evidence',
+      });
+      expect(submitQuery).not.toHaveBeenCalled();
+
+      act(() => {
+        host!.preemptGoalTurn('goal edited');
+      });
+      expect(removeGoalTurns).toHaveBeenCalledTimes(1);
+      expect(preemptGoalTurn).toHaveBeenCalledWith('goal edited');
+
+      expect(mockConfig.bindGoalTurnHost).toHaveBeenCalledTimes(1);
+
+      view.unmount();
+      expect(unbind).toHaveBeenCalledTimes(1);
+    });
+
+    it('drains a held user turn after direct /goal resume', async () => {
+      let goalStatus: 'blocked' | 'active' = 'blocked';
+      let goalListener: (() => void) | undefined;
+      const unsubscribe = vi.fn();
+      const goalRuntime = {
+        getSnapshot: vi.fn(() => ({
+          v: 2 as const,
+          activity: 'idle' as const,
+          goal: {
+            goalId: 'goal-held-user',
+            revision: 1,
+            objective: 'ship',
+            status: goalStatus,
+            evidenceCursor: { recordId: 'goal-record' },
+            turnCount: 1,
+            activeTimeMs: 1,
+            createdAt: 1,
+            updatedAt: 2,
+          },
+        })),
+        subscribe: vi.fn((listener: () => void) => {
+          goalListener = listener;
+          return unsubscribe;
+        }),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      let userPopped = false;
+      const popNextSubmission = vi.fn((holdUser = false) => {
+        if (holdUser || userPopped) return null;
+        userPopped = true;
+        return {
+          kind: 'user' as const,
+          text: 'held user work',
+          turnKey: 'message-queue:held-user',
+        };
+      });
+      const enqueueGoalTurn = vi.fn();
+      const restoreMessages = vi.fn();
+      const submissionInFlightRef = { current: false };
+      const view = renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          isTranscriptOpen: false,
+          pendingSubmissionCount: 1,
+          getPendingSubmissionCount: () => 1,
+          popNextSubmission,
+          enqueueGoalTurn,
+          restoreMessages,
+          submitQuery,
+          submissionInFlightRef,
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(goalRuntime.subscribe).toHaveBeenCalledTimes(1);
+        expect(popNextSubmission).toHaveBeenCalledWith(true);
+      });
+
+      await submitQuery('/goal resume');
+      expect(submitQuery).toHaveBeenCalledWith('/goal resume');
+
+      goalStatus = 'active';
+      await act(async () => {
+        goalListener?.();
+      });
+      view.rerender(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await vi.waitFor(() => {
+        expect(submitQuery).toHaveBeenCalledWith(
+          'held user work',
+          SendMessageType.UserQuery,
+          undefined,
+          expect.objectContaining({
+            userAdmission: { turnKey: 'message-queue:held-user' },
+          }),
+        );
+      });
+      expect(popNextSubmission).toHaveBeenCalledWith(false);
+      view.unmount();
+      expect(unsubscribe).toHaveBeenCalledOnce();
+    });
+
+    it('does not hot-loop a queued submission whose admission keeps failing', async () => {
+      const goalRuntime = {
+        getSnapshot: () => ({ goal: { status: 'active' } }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+      let synchronousPendingCount = 3;
+      const popNextSubmission = vi.fn(() => {
+        synchronousPendingCount = 0;
+        return {
+          kind: 'user' as const,
+          text: 'persistent failure batch',
+          turnKey: 'message-queue:persistent',
+        };
+      });
+      const restoreMessages = vi.fn(() => {
+        synchronousPendingCount = 1;
+      });
+      const submitQuery = vi.fn(async (...args: unknown[]) => {
+        const metadata = args[3] as
+          | { onAdmissionFailed?: () => void }
+          | undefined;
+        metadata?.onAdmissionFailed?.();
+        throw new Error('persistent prepare failure');
+      }) as unknown as ReturnType<typeof useGeminiStream>['submitQuery'];
+      const submissionInFlightRef = { current: false };
+      const { rerender } = renderHook(
+        ({ pendingSubmissionCount, submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            isTranscriptOpen: false,
+            pendingSubmissionCount,
+            getPendingSubmissionCount: () => synchronousPendingCount,
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages,
+            submitQuery,
+            submissionInFlightRef,
+            submissionSettledRevision,
+          }),
+        {
+          initialProps: {
+            pendingSubmissionCount: 3,
+            submissionSettledRevision: 0,
+          },
+        },
+      );
+
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledOnce());
+      expect(restoreMessages).toHaveBeenCalledOnce();
+
+      rerender({
+        pendingSubmissionCount: 1,
+        submissionSettledRevision: 1,
+      });
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+      expect(submitQuery).toHaveBeenCalledOnce();
+
+      synchronousPendingCount = 2;
+      rerender({
+        pendingSubmissionCount: 2,
+        submissionSettledRevision: 1,
+      });
+      await vi.waitFor(() => expect(submitQuery).toHaveBeenCalledTimes(2));
+    });
+
+    it('drains a queued user when preprocessing settlement releases the shared lock', async () => {
+      const goalRuntime = {
+        getSnapshot: () => ({ goal: { status: 'active' } }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+      let popped = false;
+      const popNextSubmission = vi.fn(() => {
+        if (popped) return null;
+        popped = true;
+        return {
+          kind: 'user' as const,
+          text: 'queued during preprocessing',
+          turnKey: 'message-queue:during-preprocessing',
+        };
+      });
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      const submissionInFlightRef = { current: true };
+      const { rerender } = renderHook(
+        ({ submissionSettledRevision }) =>
+          useQueuedSubmissionDrain({
+            config: mockConfig,
+            isConfigInitialized: true,
+            streamingState: StreamingState.Idle,
+            isProcessing: false,
+            dialogsVisible: false,
+            isTranscriptOpen: false,
+            pendingSubmissionCount: 1,
+            getPendingSubmissionCount: () => (popped ? 0 : 1),
+            popNextSubmission,
+            enqueueGoalTurn: vi.fn(),
+            restoreMessages: vi.fn(),
+            submitQuery,
+            submissionInFlightRef,
+            submissionSettledRevision,
+          }),
+        { initialProps: { submissionSettledRevision: 0 } },
+      );
+
+      expect(popNextSubmission).not.toHaveBeenCalled();
+      submissionInFlightRef.current = false;
+      rerender({ submissionSettledRevision: 1 });
+
+      await vi.waitFor(() => {
+        expect(submitQuery).toHaveBeenCalledWith(
+          'queued during preprocessing',
+          SendMessageType.UserQuery,
+          undefined,
+          expect.objectContaining({
+            userAdmission: {
+              turnKey: 'message-queue:during-preprocessing',
+            },
+          }),
+        );
+      });
+    });
+
     it('marks Ctrl+Q submissions to wait for the idle boundary', () => {
       const mockQueueMessage = vi.fn();
       const mockSubmitQuery = vi.fn();
@@ -1101,8 +1420,62 @@ describe('AppContainer State Management', () => {
 
       capturedUIActions.handleFinalSubmit('/btw quick side question');
 
-      expect(mockSubmitQuery).toHaveBeenCalledWith('/btw quick side question');
+      expect(mockSubmitQuery).toHaveBeenCalledWith(
+        '/btw quick side question',
+        undefined,
+        undefined,
+        expect.objectContaining({ onAdmissionFailed: expect.any(Function) }),
+      );
       expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('queues /btw when the active Goal admission rejects concurrency', () => {
+      const mockQueueMessage = vi.fn();
+      const mockSubmitQuery = vi.fn(
+        (
+          _query: unknown,
+          _type: unknown,
+          _promptId: unknown,
+          metadata: { onAdmissionFailed?: () => void },
+        ) => {
+          metadata.onAdmissionFailed?.();
+          return Promise.resolve();
+        },
+      );
+
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: 'responding',
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextSegment: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      capturedUIActions.handleFinalSubmit('/btw queued behind goal');
+
+      expect(mockQueueMessage).toHaveBeenCalledWith('/btw queued behind goal');
     });
 
     it('submits slash commands immediately instead of queueing while idle', () => {
@@ -1143,6 +1516,59 @@ describe('AppContainer State Management', () => {
 
       expect(mockSubmitQuery).toHaveBeenCalledWith('/model');
       expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('queues an idle slash command while another submit is preprocessing', () => {
+      const mockSubmitQuery = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseGeminiStream.mockReturnValue({
+        streamingState: StreamingState.Idle,
+        submitQuery: mockSubmitQuery,
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        messageQueue: [],
+        pendingSubmissionCount: 0,
+        addMessage: mockQueueMessage,
+        enqueueGoalTurn: vi.fn(),
+        peekNextUserBatchKey: vi.fn(),
+        hasQueuedUserMessages: vi.fn(() => false),
+        getPendingSubmissionCount: vi.fn(() => 0),
+        claimGoalTurn: vi.fn(),
+        claimDirectUserAdmission: vi.fn(),
+        removeGoalTurns: vi.fn(() => 0),
+        popNextSubmission: vi.fn(() => null),
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn(() => ''),
+        popAllMessages: vi.fn(() => null),
+        restoreMessages: vi.fn(),
+        drainQueue: vi.fn(() => []),
+        popNextSegment: vi.fn(() => null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const goalQueueRef = mockedUseGeminiStream.mock.calls.at(-1)?.[24] as {
+        current: { submissionInFlightRef: { current: boolean } } | null;
+      };
+      goalQueueRef.current!.submissionInFlightRef.current = true;
+
+      capturedUIActions.handleFinalSubmit('/goal resume');
+
+      expect(mockSubmitQuery).not.toHaveBeenCalled();
+      expect(mockQueueMessage).toHaveBeenCalledWith('/goal resume');
     });
 
     it.each(['exit', 'quit', ':q', ':q!', ':wq', ':wq!'])(
@@ -3213,6 +3639,7 @@ describe('AppContainer State Management', () => {
         useSummarizedThinking: vi.fn(() => false),
       } as unknown as ReturnType<typeof mockConfig.getContentGenerator>);
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      const getGoalRuntimeReady = vi.spyOn(mockConfig, 'getGoalRuntimeReady');
       vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue(
         resumeSessionData as ReturnType<
           typeof mockConfig.getResumedSessionData
@@ -3260,6 +3687,7 @@ describe('AppContainer State Management', () => {
           .slice(0, -1)
           .every((item) => item.display?.suppressOnRestore === true),
       ).toBe(true);
+      expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
     });
 
     it('does not remeasure footer height for sticky todo status-only updates', async () => {

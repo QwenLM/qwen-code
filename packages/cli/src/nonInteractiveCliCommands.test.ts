@@ -10,8 +10,11 @@ import {
   handleSlashCommand,
 } from './nonInteractiveCliCommands.js';
 import {
-  __resetActiveGoalStoreForTests,
+  createGoalRuntime,
+  type ChatRecord,
   type Config,
+  type GoalJournal,
+  type GoalStateRecordPayloadV2,
   uiTelemetryService,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from './config/settings.js';
@@ -36,10 +39,31 @@ describe('handleSlashCommand', () => {
   let abortController: AbortController;
   let mockFireUserPromptExpansionEvent: ReturnType<typeof vi.fn>;
 
+  const createJournal = (): GoalJournal => ({
+    getTranscriptCursor: () => ({ recordId: null }),
+    async recordGoalState(
+      recordUuid: string,
+      payload: GoalStateRecordPayloadV2,
+    ): Promise<ChatRecord> {
+      return {
+        uuid: recordUuid,
+        parentUuid: null,
+        sessionId: 'test-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/test/project',
+        version: 'test',
+        systemPayload: structuredClone(payload),
+      };
+    },
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     uiTelemetryService.reset();
-    __resetActiveGoalStoreForTests();
+    const goalRuntime = createGoalRuntime({ journal: createJournal() });
     // getCommandsForMode applies real mode filtering on top of getCommands()
     mockGetCommandsForMode.mockImplementation((mode: ExecutionMode) =>
       filterCommandsForMode(mockGetCommands(), mode),
@@ -75,6 +99,8 @@ describe('handleSlashCommand', () => {
       setModelInvocableCommandsProvider: vi.fn(),
       setModelInvocableCommandsExecutor: vi.fn(),
       getDisabledSlashCommands: vi.fn().mockReturnValue([]),
+      getGoalRuntime: vi.fn(() => goalRuntime),
+      getGoalRuntimeReady: vi.fn(async () => goalRuntime),
       storage: {},
     } as unknown as Config;
 
@@ -90,7 +116,6 @@ describe('handleSlashCommand', () => {
 
   afterEach(() => {
     uiTelemetryService.reset();
-    __resetActiveGoalStoreForTests();
   });
 
   it('should return no_command for non-slash input', async () => {
@@ -221,7 +246,7 @@ describe('handleSlashCommand', () => {
     }
   });
 
-  it('should execute /goal in non-interactive mode as a submit_prompt command', async () => {
+  it('returns canonical goal_control for a non-interactive create', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     const result = await handleSlashCommand(
@@ -231,25 +256,26 @@ describe('handleSlashCommand', () => {
       mockSettings,
     );
 
-    expect(result.type).toBe('submit_prompt');
-    if (result.type === 'submit_prompt') {
-      expect(result.content).toEqual([
-        expect.objectContaining({
-          text: expect.stringContaining('write a hello world script'),
-        }),
-      ]);
-      expect(result.outputHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'goal_status',
-          kind: 'set',
-          condition: 'write a hello world script',
-          setAt: expect.any(Number),
-        }),
-      ]);
-    }
+    expect(result).toMatchObject({
+      type: 'goal_control',
+      operation: {
+        kind: 'set',
+        objective: 'write a hello world script',
+      },
+      response: {
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            objective: 'write a hello world script',
+            status: 'active',
+          },
+        },
+      },
+    });
   });
 
-  it('should report no active goal for empty non-interactive /goal', async () => {
+  it('returns canonical goal_control for empty non-interactive /goal status', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     const result = await handleSlashCommand(
@@ -260,13 +286,15 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'No goal set. Usage: `/goal <condition>` (or `/goal clear`).',
+      type: 'goal_control',
+      operation: { kind: 'status' },
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
   });
 
-  it('should report active goal status after setting a non-interactive /goal', async () => {
+  it('returns the active v2 snapshot for status after create', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     await handleSlashCommand(
@@ -283,18 +311,20 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
+      type: 'goal_control',
+      operation: { kind: 'status' },
+      response: {
+        snapshot: {
+          goal: {
+            objective: 'write a hello world script',
+            status: 'active',
+          },
+        },
+      },
     });
-    if (result.type === 'message') {
-      expect(result.content).toContain(
-        'Goal active: write a hello world script',
-      );
-      expect(result.content).toContain('not yet evaluated');
-    }
   });
 
-  it('should report cleared goal for non-interactive /goal clear', async () => {
+  it('returns the cleared v2 snapshot for non-interactive /goal clear', async () => {
     mockGetCommands.mockReturnValue([goalCommand]);
 
     await handleSlashCommand(
@@ -311,20 +341,12 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'Goal cleared: write a hello world script',
+      type: 'goal_control',
+      operation: { kind: 'clear' },
+      response: {
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
     });
-    if (result.type === 'message') {
-      expect(result.outputHistoryItems).toEqual([
-        expect.objectContaining({
-          type: 'goal_status',
-          kind: 'cleared',
-          condition: 'write a hello world script',
-          durationMs: expect.any(Number),
-        }),
-      ]);
-    }
   });
 
   it('should report cleared goal for ACP /goal clear', async () => {
@@ -345,9 +367,9 @@ describe('handleSlashCommand', () => {
     );
 
     expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'Goal cleared: write a hello world script',
+      type: 'goal_control',
+      operation: { kind: 'clear' },
+      response: { snapshot: { goal: null } },
     });
   });
 

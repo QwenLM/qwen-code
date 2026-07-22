@@ -211,6 +211,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'goal_state':
     case 'vision_notice':
       return 0;
     default:
@@ -503,6 +504,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           iterations={itemForDisplay.iterations}
           durationMs={itemForDisplay.durationMs}
           lastReason={itemForDisplay.lastReason}
+        />
+      )}
+      {itemForDisplay.type === 'goal_state' && (
+        <GoalStatusMessage
+          snapshot={itemForDisplay.snapshot}
+          cause={itemForDisplay.cause}
         />
       )}
     </Box>

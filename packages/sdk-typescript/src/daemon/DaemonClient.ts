@@ -172,6 +172,8 @@ import type {
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
   DaemonUnarchiveSessionsResult,
+  GoalControlRequest,
+  GoalStateResponse,
 } from './types.js';
 import { parseSseStream } from './sse.js';
 
@@ -2420,6 +2422,29 @@ export class DaemonClient {
     );
   }
 
+  async sessionGoal(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return await this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'GET /session/:id/goal',
+      { clientId },
+    );
+  }
+
+  async sessionGoalControl(
+    sessionId: string,
+    request: GoalControlRequest,
+    clientId?: string,
+  ): Promise<GoalStateResponse> {
+    return await this.jsonRequest<GoalStateResponse>(
+      `/session/${urlEncode(sessionId)}/goal`,
+      'POST /session/:id/goal',
+      { method: 'POST', body: request, clientId },
+    );
+  }
+
   async sessionStats(
     sessionId: string,
     clientId?: string,
@@ -2735,10 +2760,13 @@ export class DaemonClient {
   async removePendingPrompt(
     sessionId: string,
     promptId: string,
-    opts?: { clientId?: string },
+    opts?: { clientId?: string; ifState?: 'queued' | 'running' },
   ): Promise<DaemonRemovePendingPromptResult> {
+    const query = opts?.ifState
+      ? `?ifState=${encodeURIComponent(opts.ifState)}`
+      : '';
     return await this.fetchWithTimeout(
-      `${this.baseUrl}/session/${urlEncode(sessionId)}/pending-prompts/${urlEncode(promptId)}`,
+      `${this.baseUrl}/session/${urlEncode(sessionId)}/pending-prompts/${urlEncode(promptId)}${query}`,
       {
         method: 'DELETE',
         headers: this.headers({}, opts?.clientId),

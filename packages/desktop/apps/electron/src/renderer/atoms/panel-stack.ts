@@ -15,6 +15,7 @@ function generatePanelId(): string {
 
 export type PanelType =
   | 'session'
+  | 'goals'
   | 'source'
   | 'settings'
   | 'skills'
@@ -37,6 +38,7 @@ export const PANEL_LANE_POLICIES: Record<PanelLaneId, PanelLanePolicy> = {
     order: 0,
     allowedTypes: [
       'session',
+      'goals',
       'source',
       'settings',
       'skills',
@@ -82,6 +84,8 @@ export function getPanelTypeFromRoute(route: ViewRoute): PanelType {
   switch (navState.navigator) {
     case 'sessions':
       return 'session'
+    case 'goals':
+      return 'goals'
     case 'sources':
       return 'source'
     case 'settings':

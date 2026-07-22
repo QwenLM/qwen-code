@@ -15,7 +15,6 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
 } from '../utils/resumeHistoryUtils.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import { MessageType, type HistoryItemWithoutId } from '../types.js';
 import {
@@ -23,6 +22,7 @@ import {
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 export interface UseResumeCommandOptions {
   config: Config | null;
@@ -157,20 +157,7 @@ export function useResumeCommand(
         resetBackgroundStateForSessionSwitch(config);
         config.startNewSession(sessionId, sessionData);
         coreSwapped = true;
-
-        // Re-arm /goal: the in-memory activeGoalStore entry (if any) is stale
-        // after `config.startNewSession` rebuilds the hook system — its
-        // `setAt` was captured before /new, and its `hookId` points to a
-        // hook that no longer exists. The cold-boot path runs this same
-        // call in AppContainer; the runtime /resume path needs it too,
-        // otherwise the footer pill keeps ticking from the original setAt
-        // (visible as "几十秒" elapsed immediately after /new + /resume) and
-        // the Stop hook is silently dead until the user re-issues /goal.
-        try {
-          restoreGoalFromHistory(uiHistoryItems, config, addItem);
-        } catch {
-          // Best-effort — never block resume on goal restoration.
-        }
+        await waitForGoalRuntime(config);
         // Rebuild turn boundary tracking so rewind works within resumed sessions.
         config
           .getChatRecordingService()

@@ -534,6 +534,9 @@ export interface ToolResult {
    * turns within the same agentic loop.
    */
   modelOverride?: string;
+
+  /** End the current agent turn after recording this successful result. */
+  terminateTurn?: boolean;
 }
 
 /**

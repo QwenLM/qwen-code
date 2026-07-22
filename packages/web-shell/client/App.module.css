@@ -908,6 +908,13 @@
   margin-bottom: 8px;
 }
 
+.composer
+  [data-web-shell-goal-status]
+  + [data-web-shell-composer]
+  [data-web-shell-composer-surface] {
+  border-radius: 0 0 12px 12px;
+}
+
 .customFooter {
   flex-shrink: 0;
 }

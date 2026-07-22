@@ -4,34 +4,102 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { goalCommand } from './goalCommand.js';
-import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import type { Config } from '@qwen-code/qwen-code-core';
-import {
-  __resetActiveGoalStoreForTests,
-  clearActiveGoal,
-  getActiveGoal,
-  notifyGoalTerminal,
+import { describe, expect, it, vi } from 'vitest';
+import type {
+  Config,
+  GoalRuntime,
+  GoalSnapshotV2,
+  GoalStateResponse,
 } from '@qwen-code/qwen-code-core';
+import { goalCommand, parseGoalCommand } from './goalCommand.js';
+import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
-function makeConfig(overrides: Partial<Config> = {}): Config {
+function goalSnapshot(
+  overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+): GoalSnapshotV2 {
   return {
-    getSessionId: vi.fn().mockReturnValue('sess-1'),
-    isTrustedFolder: vi.fn().mockReturnValue(true),
-    getDisableAllHooks: vi.fn().mockReturnValue(false),
-    getHookSystem: vi.fn().mockReturnValue({
-      addFunctionHook: vi.fn().mockReturnValue('hook-1'),
-      removeFunctionHook: vi.fn().mockReturnValue(true),
-    }),
-    ...overrides,
-  } as unknown as Config;
+    v: 2,
+    activity: 'idle',
+    goal: {
+      goalId: 'goal-1',
+      revision: 4,
+      objective: 'Ship Goal v3',
+      status: 'active',
+      evidenceCursor: { recordId: 'cursor-1' },
+      turnCount: 3,
+      activeTimeMs: 1_000,
+      createdAt: 10,
+      updatedAt: 20,
+      ...overrides,
+    },
+  };
 }
 
-describe('goalCommand', () => {
-  beforeEach(() => __resetActiveGoalStoreForTests());
-  afterEach(() => __resetActiveGoalStoreForTests());
+function noGoalSnapshot(): GoalSnapshotV2 {
+  return { v: 2, goal: null, activity: 'idle' };
+}
 
+function makeRuntime(
+  snapshot: GoalSnapshotV2,
+  response: GoalStateResponse = { snapshot },
+) {
+  const getSnapshot = vi.fn(() => structuredClone(snapshot));
+  const dispatch = vi.fn().mockResolvedValue(structuredClone(response));
+  const runtime = { getSnapshot, dispatch } as unknown as GoalRuntime;
+  return { dispatch, getSnapshot, runtime };
+}
+
+function makeContext(runtime: GoalRuntime) {
+  const getGoalRuntimeReady = vi.fn().mockResolvedValue(runtime);
+  const config = { getGoalRuntimeReady } as unknown as Config;
+  const context = createMockCommandContext({ services: { config } });
+  return { context, getGoalRuntimeReady };
+}
+
+describe('parseGoalCommand', () => {
+  it.each([
+    ['', { kind: 'status' }],
+    ['   ', { kind: 'status' }],
+    ['ship Goal v3', { kind: 'set', objective: 'ship Goal v3' }],
+    ['set ship Goal v3', { kind: 'set', objective: 'ship Goal v3' }],
+    ['set pause', { kind: 'set', objective: 'pause' }],
+    ['edit ship it better', { kind: 'edit', objective: 'ship it better' }],
+    ['pause', { kind: 'pause' }],
+    ['resume', { kind: 'resume' }],
+    ['clear', { kind: 'clear' }],
+    ['pause after tests', { kind: 'set', objective: 'pause after tests' }],
+    ['/goal', { kind: 'status' }],
+    ['/goal ship it', { kind: 'set', objective: 'ship it' }],
+    ['/goal set ship it', { kind: 'set', objective: 'ship it' }],
+    ['/goal set pause', { kind: 'set', objective: 'pause' }],
+    ['/goal edit revised', { kind: 'edit', objective: 'revised' }],
+    ['/goal pause', { kind: 'pause' }],
+    ['/goal resume', { kind: 'resume' }],
+    ['/goal clear', { kind: 'clear' }],
+  ] as const)('parses %j', (args, expected) => {
+    expect(parseGoalCommand(args)).toEqual(expected);
+  });
+
+  it.each(['set', 'set   ', 'edit', ' edit\n\t'])(
+    'rejects an empty objective for %j',
+    (args) => {
+      expect(parseGoalCommand(args)).toMatchObject({
+        kind: 'error',
+        message: expect.stringMatching(/requires an objective/i),
+      });
+    },
+  );
+
+  it('does not impose an objective length cap', () => {
+    const objective = `${'x'.repeat(4_001)}-end`;
+    expect(parseGoalCommand(`set ${objective}`)).toEqual({
+      kind: 'set',
+      objective,
+    });
+  });
+});
+
+describe('goalCommand', () => {
   it('is available in interactive, non-interactive, and ACP modes', () => {
     expect(goalCommand.supportedModes).toEqual([
       'interactive',
@@ -40,349 +108,216 @@ describe('goalCommand', () => {
     ]);
   });
 
-  it('rejects when config is missing', async () => {
-    const ctx = createMockCommandContext();
-    const result = await goalCommand.action!(ctx, 'do x');
-    expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'error',
-    });
-  });
+  it('rejects invalid set and edit commands before runtime admission', async () => {
+    const { runtime } = makeRuntime(noGoalSnapshot());
+    const { context, getGoalRuntimeReady } = makeContext(runtime);
 
-  it('shows status (no goal) for empty args', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    const result = await goalCommand.action!(ctx, '');
-    expect(result).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-    });
-    expect((result as { content: string }).content).toMatch(/no goal set/i);
-  });
-
-  it('blocks /goal in untrusted folder', async () => {
-    const ctx = createMockCommandContext({
-      services: {
-        config: makeConfig({
-          isTrustedFolder: vi.fn().mockReturnValue(false),
-        } as unknown as Partial<Config>),
-      },
-    });
-    const result = await goalCommand.action!(ctx, 'do x');
-    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
-    expect((result as { content: string }).content).toMatch(/trusted/i);
-  });
-
-  it('blocks /goal when hooks are disabled by policy', async () => {
-    const ctx = createMockCommandContext({
-      services: {
-        config: makeConfig({
-          getDisableAllHooks: vi.fn().mockReturnValue(true),
-        } as unknown as Partial<Config>),
-      },
-    });
-    const result = await goalCommand.action!(ctx, 'do x');
-    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
-    expect((result as { content: string }).content).toMatch(/disabled/i);
-  });
-
-  it.each(['interactive', 'non_interactive', 'acp'] as const)(
-    'accepts conditions longer than 4,000 characters in %s mode',
-    async (executionMode) => {
-      const ctx = createMockCommandContext({
-        executionMode,
-        services: { config: makeConfig() as unknown as Config },
+    for (const args of ['set', 'edit   ']) {
+      const result = await goalCommand.action!(context, args);
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringMatching(/requires an objective/i),
       });
-      const condition = `${'x'.repeat(4_001)}-goal-condition-end`;
+    }
+    expect(getGoalRuntimeReady).not.toHaveBeenCalled();
+  });
 
-      const result = await goalCommand.action!(ctx, condition);
+  it('awaits runtime readiness and reads authoritative status without dispatch', async () => {
+    const snapshot = goalSnapshot({ status: 'paused' });
+    const { dispatch, getSnapshot, runtime } = makeRuntime(snapshot);
+    const { context, getGoalRuntimeReady } = makeContext(runtime);
 
-      expect(result).toMatchObject({ type: 'submit_prompt' });
-      const submit = result as { content: Array<{ text: string }> };
-      expect(submit.content[0].text).toContain(condition);
-      expect(getActiveGoal('sess-1')?.condition).toBe(condition);
-      expect(
-        (ctx.ui.addItem as ReturnType<typeof vi.fn>).mock.calls[0][0],
-      ).toMatchObject({
-        type: 'goal_status',
-        kind: 'set',
-        condition,
+    const result = await goalCommand.action!(context, '');
+
+    expect(result).toEqual({
+      type: 'goal_control',
+      operation: { kind: 'status' },
+      response: { snapshot },
+    });
+    expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+    expect(getSnapshot).toHaveBeenCalledTimes(1);
+    expect(getGoalRuntimeReady.mock.invocationCallOrder[0]).toBeLessThan(
+      getSnapshot.mock.invocationCallOrder[0]!,
+    );
+    expect(dispatch).not.toHaveBeenCalled();
+  });
+
+  it('maps a set operation to create when no Goal exists', async () => {
+    const before = noGoalSnapshot();
+    const after = goalSnapshot({ objective: 'Ship it', revision: 1 });
+    const { dispatch, runtime } = makeRuntime(before, { snapshot: after });
+    const { context } = makeContext(runtime);
+
+    const result = await goalCommand.action!(context, 'Ship it');
+
+    expect(dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'Ship it',
+    });
+    expect(result).toEqual({
+      type: 'goal_control',
+      operation: { kind: 'set', objective: 'Ship it' },
+      response: { snapshot: after },
+    });
+    expect(result).not.toHaveProperty('content');
+    expect(context.ui.addItem).not.toHaveBeenCalled();
+  });
+
+  it('maps set to a versioned replace when a Goal exists', async () => {
+    const before = goalSnapshot();
+    const after = goalSnapshot({
+      goalId: 'goal-2',
+      revision: 1,
+      objective: 'Replace it',
+    });
+    const { dispatch, runtime } = makeRuntime(before, { snapshot: after });
+    const { context } = makeContext(runtime);
+
+    const result = await goalCommand.action!(context, 'set Replace it');
+
+    expect(dispatch).toHaveBeenCalledWith({
+      action: 'replace',
+      objective: 'Replace it',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
+    });
+    expect(result).toEqual({
+      type: 'goal_control',
+      operation: { kind: 'set', objective: 'Replace it' },
+      response: { snapshot: after },
+    });
+  });
+
+  it('dispatches versioned edit, pause, resume, and clear requests', async () => {
+    const cases = [
+      [
+        'edit Better objective',
+        { kind: 'edit', objective: 'Better objective' },
+        {
+          action: 'edit',
+          objective: 'Better objective',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 4,
+        },
+      ],
+      [
+        'pause',
+        { kind: 'pause' },
+        {
+          action: 'pause',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 4,
+        },
+      ],
+      [
+        'resume',
+        { kind: 'resume' },
+        {
+          action: 'resume',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 4,
+        },
+      ],
+      [
+        'clear',
+        { kind: 'clear' },
+        {
+          action: 'clear',
+          expectedGoalId: 'goal-1',
+          expectedRevision: 4,
+        },
+      ],
+    ] as const;
+
+    for (const [args, operation, request] of cases) {
+      const snapshot = goalSnapshot();
+      const { dispatch, runtime } = makeRuntime(snapshot);
+      const { context } = makeContext(runtime);
+
+      const result = await goalCommand.action!(context, args);
+
+      expect(dispatch).toHaveBeenCalledWith(request);
+      expect(result).toEqual({
+        type: 'goal_control',
+        operation,
+        response: { snapshot },
       });
+      expect(result).not.toHaveProperty('content');
+    }
+  });
+
+  it.each(['edit new objective', 'pause', 'resume'])(
+    'rejects %j when no Goal exists',
+    async (args) => {
+      const { dispatch, runtime } = makeRuntime(noGoalSnapshot());
+      const { context } = makeContext(runtime);
+
+      const result = await goalCommand.action!(context, args);
+
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringMatching(/no goal/i),
+      });
+      expect(dispatch).not.toHaveBeenCalled();
     },
   );
 
-  it('clears existing goal on clear keyword and emits a cleared card', async () => {
-    const cfg = makeConfig();
-    const ctx = createMockCommandContext({
-      services: { config: cfg as unknown as Config },
+  it('treats clear with no Goal as an authoritative no-op status response', async () => {
+    const snapshot = noGoalSnapshot();
+    const { dispatch, runtime } = makeRuntime(snapshot);
+    const { context } = makeContext(runtime);
+
+    const result = await goalCommand.action!(context, 'clear');
+
+    expect(result).toEqual({
+      type: 'goal_control',
+      operation: { kind: 'clear' },
+      response: { snapshot },
     });
-    await goalCommand.action!(ctx, 'write hello');
-    const before = (ctx.ui.addItem as ReturnType<typeof vi.fn>).mock.calls
-      .length;
-    const result = await goalCommand.action!(ctx, 'clear');
-    expect(result).toBeUndefined();
-    const after = (ctx.ui.addItem as ReturnType<typeof vi.fn>).mock.calls
-      .length;
-    expect(after).toBe(before + 1);
-    const lastItem = (ctx.ui.addItem as ReturnType<typeof vi.fn>).mock.calls[
-      after - 1
-    ][0];
-    expect(lastItem).toMatchObject({
-      type: 'goal_status',
-      kind: 'cleared',
-      condition: 'write hello',
-    });
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
-  it('returns a clear message outside interactive mode', async () => {
-    const cfg = makeConfig();
-    const ctx = createMockCommandContext({
-      executionMode: 'acp',
-      services: { config: cfg as unknown as Config },
+  it('works with a bare config that exposes no trust or hook services', async () => {
+    const before = noGoalSnapshot();
+    const after = goalSnapshot({ objective: 'Bare Goal', revision: 1 });
+    const { dispatch, runtime } = makeRuntime(before, { snapshot: after });
+    const { context } = makeContext(runtime);
+
+    const result = await goalCommand.action!(context, 'set Bare Goal');
+
+    expect(dispatch).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'Bare Goal',
     });
-    await goalCommand.action!(ctx, 'write hello');
-    const result = await goalCommand.action!(ctx, 'clear');
-    expect(result).toMatchObject({
+    expect(result).toMatchObject({ type: 'goal_control' });
+  });
+
+  it('maps runtime errors to the existing error action without state', async () => {
+    const failure = new Error('Goal persistence is unavailable');
+    const getGoalRuntimeReady = vi.fn().mockRejectedValue(failure);
+    const config = { getGoalRuntimeReady } as unknown as Config;
+    const context = createMockCommandContext({ services: { config } });
+
+    const result = await goalCommand.action!(context, 'status objective');
+
+    expect(result).toEqual({
       type: 'message',
-      messageType: 'info',
-      content: 'Goal cleared: write hello',
+      messageType: 'error',
+      content: 'Goal persistence is unavailable',
     });
+    expect(result).not.toHaveProperty('response');
+    expect(context.ui.addItem).not.toHaveBeenCalled();
   });
 
-  it('returns info when clearing a non-existent goal', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    const result = await goalCommand.action!(ctx, 'cancel');
-    expect(result).toMatchObject({
+  it('rejects when config is missing', async () => {
+    const context = createMockCommandContext();
+    const result = await goalCommand.action!(context, 'Ship it');
+    expect(result).toEqual({
       type: 'message',
-      messageType: 'info',
-      content: 'No goal set.',
+      messageType: 'error',
+      content: 'Configuration is not available.',
     });
-  });
-
-  it('registers the hook and submits an instructional prompt on set', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    const result = await goalCommand.action!(ctx, 'write a hello world script');
-    expect(result).toMatchObject({ type: 'submit_prompt' });
-    const submit = result as { content: Array<{ text: string }> };
-    expect(submit.content[0].text).toMatch(/Stop hook is now active/i);
-    expect(submit.content[0].text).toMatch(/write a hello world script/);
-
-    const setCall = (ctx.ui.addItem as ReturnType<typeof vi.fn>).mock
-      .calls[0][0];
-    expect(setCall).toMatchObject({
-      type: 'goal_status',
-      kind: 'set',
-      condition: 'write a hello world script',
-    });
-  });
-
-  it('shows active goal status when re-invoked with empty args', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    await goalCommand.action!(ctx, 'do x');
-    const result = await goalCommand.action!(ctx, '');
-    expect((result as { content: string }).content).toMatch(
-      /Goal active: do x/,
-    );
-  });
-
-  it('forwards core terminal events into a goal_status history item', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    await goalCommand.action!(ctx, 'do x');
-    const addItem = ctx.ui.addItem as ReturnType<typeof vi.fn>;
-    const beforeCount = addItem.mock.calls.length;
-
-    notifyGoalTerminal('sess-1', {
-      kind: 'achieved',
-      condition: 'do x',
-      iterations: 3,
-      durationMs: 12_345,
-      lastReason: 'quoted evidence from transcript',
-    });
-
-    expect(addItem.mock.calls.length).toBe(beforeCount + 1);
-    const lastItem = addItem.mock.calls.at(-1)![0];
-    expect(lastItem).toMatchObject({
-      type: 'goal_status',
-      kind: 'achieved',
-      condition: 'do x',
-      iterations: 3,
-      durationMs: 12_345,
-      lastReason: 'quoted evidence from transcript',
-    });
-  });
-
-  it('records terminal events through the chat recording service', async () => {
-    const recordSlashCommand = vi.fn();
-    const ctx = createMockCommandContext({
-      services: {
-        config: makeConfig({
-          getChatRecordingService: vi.fn().mockReturnValue({
-            recordSlashCommand,
-          }),
-        } as unknown as Partial<Config>) as unknown as Config,
-      },
-    });
-
-    await goalCommand.action!(ctx, 'do x');
-
-    notifyGoalTerminal('sess-1', {
-      kind: 'achieved',
-      condition: 'do x',
-      iterations: 3,
-      durationMs: 12_345,
-      lastReason: 'quoted evidence from transcript',
-    });
-
-    expect(recordSlashCommand).toHaveBeenCalledWith({
-      phase: 'result',
-      rawCommand: '/goal',
-      outputHistoryItems: [
-        expect.objectContaining({
-          type: 'goal_status',
-          kind: 'achieved',
-          condition: 'do x',
-          iterations: 3,
-          durationMs: 12_345,
-          lastReason: 'quoted evidence from transcript',
-        }),
-      ],
-    });
-  });
-
-  it('after achievement, empty /goal shows the last completed summary', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    await goalCommand.action!(ctx, 'do x');
-    // Real flow: hook callback clears active goal BEFORE notifying.
-    clearActiveGoal('sess-1');
-    notifyGoalTerminal('sess-1', {
-      kind: 'achieved',
-      condition: 'do x',
-      iterations: 3,
-      durationMs: 24_000,
-      lastReason: 'transcript shows completion',
-    });
-    const result = await goalCommand.action!(ctx, '');
-    const content = (result as { content: string }).content;
-    expect(content).toMatch(/Goal achieved/);
-    expect(content).toMatch(/3 turns/);
-    expect(content).toMatch(/24s/);
-    expect(content).toMatch(/Goal: do x/);
-    // `Last check:` line is preserved on the achieved summary so the
-    // empty-`/goal` re-display matches the inline terminal history card.
-    expect(content).toMatch(/Last check: transcript shows completion/);
-  });
-
-  it('keeps the latest terminal summary when `/goal clear` has no active goal', async () => {
-    // A no-op clear should not write a dismissal sentinel or wipe the cache.
-    // Subsequent empty `/goal` still surfaces the previous achievement
-    // summary.
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    await goalCommand.action!(ctx, 'do x');
-    clearActiveGoal('sess-1');
-    notifyGoalTerminal('sess-1', {
-      kind: 'achieved',
-      condition: 'do x',
-      iterations: 3,
-      durationMs: 1_000,
-    });
-
-    const addItem = ctx.ui.addItem as ReturnType<typeof vi.fn>;
-    const beforeClearCount = addItem.mock.calls.length;
-
-    // /goal clear with no active goal: pure no-op informational message
-    const clearResult = await goalCommand.action!(ctx, 'clear');
-    expect(clearResult).toMatchObject({
-      type: 'message',
-      messageType: 'info',
-      content: 'No goal set.',
-    });
-    expect(addItem.mock.calls.length).toBe(beforeClearCount);
-
-    // Cache survives — empty /goal still shows the achievement card.
-    const afterClear = await goalCommand.action!(ctx, '');
-    expect((afterClear as { content: string }).content).toMatch(
-      /Goal achieved/,
-    );
-  });
-
-  it('after abort, empty /goal shows the aborted summary', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    await goalCommand.action!(ctx, 'do x');
-    clearActiveGoal('sess-1');
-    notifyGoalTerminal('sess-1', {
-      kind: 'aborted',
-      condition: 'do x',
-      iterations: 50,
-      durationMs: 60_000,
-      systemMessage: 'Goal max iterations reached',
-    });
-    const result = await goalCommand.action!(ctx, '');
-    const content = (result as { content: string }).content;
-    expect(content).toMatch(/Goal aborted/);
-    expect(content).toMatch(/Goal: do x/);
-    // No more `Last check:` line — the `systemMessage`/`lastReason` content
-    // lives on the goal_status history item (see test below) but is dropped
-    // from the empty-/goal summary.
-    expect(content).not.toMatch(/Last check/);
-  });
-
-  it('falls back to systemMessage as lastReason on aborted events', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    await goalCommand.action!(ctx, 'do x');
-    const addItem = ctx.ui.addItem as ReturnType<typeof vi.fn>;
-
-    notifyGoalTerminal('sess-1', {
-      kind: 'aborted',
-      condition: 'do x',
-      iterations: 50,
-      durationMs: 60_000,
-      systemMessage: 'Goal max iterations reached',
-    });
-
-    const lastItem = addItem.mock.calls.at(-1)![0];
-    expect(lastItem).toMatchObject({
-      kind: 'aborted',
-      lastReason: 'Goal max iterations reached',
-    });
-  });
-
-  it('after impossible failure, empty /goal shows the failed summary', async () => {
-    const ctx = createMockCommandContext({
-      services: { config: makeConfig() as unknown as Config },
-    });
-    await goalCommand.action!(ctx, 'do x');
-    clearActiveGoal('sess-1');
-    notifyGoalTerminal('sess-1', {
-      kind: 'failed',
-      condition: 'do x',
-      iterations: 2,
-      durationMs: 12_000,
-      lastReason: 'the required branch does not exist',
-    });
-
-    const result = await goalCommand.action!(ctx, '');
-    const content = (result as { content: string }).content;
-    expect(content).toMatch(/Goal could not be achieved/);
-    expect(content).toMatch(/2 turns/);
-    expect(content).toMatch(/12s/);
-    expect(content).toMatch(/Goal: do x/);
-    expect(content).toMatch(/Last check: the required branch does not exist/);
   });
 });

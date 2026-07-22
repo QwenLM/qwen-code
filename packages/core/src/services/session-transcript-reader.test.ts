@@ -329,6 +329,70 @@ describe('SessionTranscriptReader', () => {
     });
   });
 
+  it('seeds backward replay from the latest authoritative v2 Goal state', async () => {
+    const goalState: ChatRecord = {
+      ...record('goal-state', null, 'ignored'),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'create',
+        snapshot: {
+          v: 2,
+          activity: 'idle',
+          goal: {
+            goalId: 'goal-1',
+            revision: 1,
+            objective: 'ship backward replay',
+            status: 'active',
+            evidenceCursor: { recordId: null },
+            turnCount: 0,
+            activeTimeMs: 0,
+            createdAt: 1,
+            updatedAt: 1,
+          },
+        },
+      },
+    };
+    const clearState: ChatRecord = {
+      ...record('goal-clear', 'u1', 'ignored'),
+      type: 'system',
+      subtype: 'goal_state',
+      message: undefined,
+      systemPayload: {
+        v: 2,
+        cause: 'clear',
+        snapshot: { v: 2, activity: 'idle', goal: null },
+      },
+    };
+    await writeRecords([
+      goalState,
+      record('u1', 'goal-state', 'first prompt'),
+      clearState,
+      record('a1', 'goal-clear', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u2', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'goal-clear',
+      'a1',
+    ]);
+    expect(page.replay).toMatchObject({
+      goalState: {
+        v: 2,
+        activity: 'idle',
+        goal: { objective: 'ship backward replay' },
+      },
+    });
+  });
+
   it('keeps backward pages within a normal user turn boundary', async () => {
     const toolCall = record('a-tool', 'u1', 'call tool');
     const toolResult = {

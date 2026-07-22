@@ -48,7 +48,11 @@ import {
   extractToolFilePaths,
   isToolCallConcurrencySafe,
 } from './coreToolScheduler.js';
-import type { Part, PartListUnion } from '@google/genai';
+import type {
+  GenerateContentResponse,
+  Part,
+  PartListUnion,
+} from '@google/genai';
 import {
   MockModifiableTool,
   MockTool,
@@ -75,6 +79,10 @@ import { runWithTeammateIdentity } from '../agents/team/identity.js';
 import { normalizeToolNameForProvider } from '../utils/tool-name-utils.js';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE } from './plan-mode-entry-policy.js';
+import { GeminiEventType, Turn, type ToolCallRequestInfo } from './turn.js';
+import { GeminiChat, StreamEventType } from './geminiChat.js';
+import { goalTurnContext } from '../goals/goal-turn-context.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -1686,6 +1694,40 @@ describe('CoreToolScheduler', () => {
     expect(completedCalls.map((call) => call.request.callId)).toEqual([
       'dup_id_0001',
     ]);
+  });
+
+  it('propagates a tool turn-termination boundary to the host', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'proposal recorded',
+      returnDisplay: 'proposal recorded',
+      terminateTurn: true,
+    });
+    const toolsByName = new Map<string, MockTool>([
+      ['update_goal', new MockTool({ name: 'update_goal', execute })],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'goal-complete-1',
+          name: 'update_goal',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'prompt-goal',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    const completedCall = (
+      onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+    )[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.terminateTurn).toBe(true);
+    }
   });
 
   it('does not dedupe requests with empty callIds in one batch', async () => {
@@ -4616,6 +4658,715 @@ describe('CoreToolScheduler', () => {
         // Should NOT contain permission message
         expect(errorMessage).not.toContain('requires permission');
       }
+    });
+  });
+});
+
+describe('Goal turn context propagation', () => {
+  const permit: GoalTurnPermit = {
+    goalId: 'goal-context-id',
+    revision: 4,
+    turnId: 'goal-context-turn',
+  };
+
+  function createContextScheduler(
+    toolOrTools: AnyDeclarativeTool | AnyDeclarativeTool[],
+    options?: {
+      approvalMode?: ApprovalMode;
+      chatRecordingService?: ChatRecordingService;
+    },
+  ) {
+    const tools = Array.isArray(toolOrTools) ? toolOrTools : [toolOrTools];
+    const getTool = (name: string) =>
+      tools.find((candidate) => candidate.name === name);
+    const ensureTool = vi.fn(async (name: string) => getTool(name));
+    const toolRegistry = {
+      getTool,
+      ensureTool,
+      getFunctionDeclarations: () => [],
+      tools: new Map(tools.map((tool) => [tool.name, tool])),
+      discovery: {},
+      registerTool: () => {},
+      getToolByName: getTool,
+      getToolByDisplayName: getTool,
+      getTools: () => tools,
+      discoverTools: async () => {},
+      getAllTools: () => tools,
+      getToolsByServer: () => [],
+      getAllToolNames: () => tools.map((tool) => tool.name),
+    } as unknown as ToolRegistry;
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const config = {
+      getSessionId: () => 'goal-context-session',
+      getUsageStatisticsEnabled: () => true,
+      getDebugMode: () => false,
+      getApprovalMode: () => options?.approvalMode ?? ApprovalMode.YOLO,
+      setApprovalMode: vi.fn(),
+      getPermissionsAllow: () => [],
+      getPermissionsDeny: () => undefined,
+      getContentGeneratorConfig: () => ({
+        model: 'test-model',
+        authType: 'gemini',
+      }),
+      getModel: () => 'test-model',
+      getShellExecutionConfig: () => ({
+        terminalWidth: 90,
+        terminalHeight: 30,
+      }),
+      storage: {
+        getProjectTempDir: () => '/tmp',
+        getToolResultsDir: () => '/tmp/tool-results',
+      },
+      getToolResultBytesWritten: () => 0,
+      trackToolResultBytes: vi.fn(),
+      getTruncateToolOutputThreshold: () =>
+        DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD,
+      getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
+      getToolOutputBatchBudget: () => Number.POSITIVE_INFINITY,
+      getToolRegistry: () => toolRegistry,
+      getCwd: () => '/repo',
+      getUseModelRouter: () => false,
+      getGeminiClient: () => null,
+      getChatRecordingService: () => options?.chatRecordingService,
+      getMemoryPressureMonitor: () => undefined,
+      getMessageBus: vi.fn().mockReturnValue(undefined),
+      hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getHookSystem: vi.fn().mockReturnValue(undefined),
+      getDisableAllHooks: vi.fn().mockReturnValue(true),
+      getAutoModeDenialState: () => ({
+        consecutiveBlock: 0,
+        consecutiveUnavailable: 0,
+        totalBlock: 0,
+        totalUnavailable: 0,
+      }),
+      setAutoModeDenialState: vi.fn(),
+      getAutoModeSettings: () => ({}),
+      getWorkspaceContext: () => ({
+        isPathWithinWorkspace: () => false,
+      }),
+      isInteractive: () => true,
+      getInputFormat: () => undefined,
+      getExperimentalZedIntegration: () => false,
+      getIdeMode: () => false,
+    } as unknown as Config;
+    const scheduler = new CoreToolScheduler({
+      config,
+      chatRecordingService: options?.chatRecordingService,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      getPreferredEditor: () => 'vscode',
+      onEditorClose: vi.fn(),
+    });
+    return {
+      ensureTool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      scheduler,
+    };
+  }
+
+  it.each([
+    {
+      label: 'Goal-owned',
+      requestContext: permit as GoalTurnPermit | undefined,
+      ambientContext: {
+        goalId: 'stale-goal',
+        revision: 99,
+        turnId: 'stale-turn',
+      } satisfies GoalTurnPermit,
+      expectedContext: permit as GoalTurnPermit | undefined,
+    },
+    {
+      label: 'context-free',
+      requestContext: undefined,
+      ambientContext: permit,
+      expectedContext: undefined,
+    },
+  ])(
+    'uses the $label request context for unknown-tool Skill lookup',
+    async ({ requestContext, ambientContext, expectedContext }) => {
+      const { ensureTool, onAllToolCallsComplete, scheduler } =
+        createContextScheduler([]);
+      const observed = new Map<string, Array<GoalTurnPermit | undefined>>();
+      ensureTool.mockImplementation(async (name: string) => {
+        const contexts = observed.get(name) ?? [];
+        contexts.push(goalTurnContext.getStore());
+        observed.set(name, contexts);
+        return undefined;
+      });
+      const request: ToolCallRequestInfo = {
+        callId: `unknown-${requestContext ? 'goal' : 'plain'}`,
+        name: 'definitely_missing_tool',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'unknown-tool-context',
+        ...(requestContext ? { goalContext: { ...requestContext } } : {}),
+      };
+
+      await goalTurnContext.run(ambientContext, () =>
+        scheduler.schedule([request], new AbortController().signal),
+      );
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+      });
+
+      expect(observed.get('definitely_missing_tool')).toEqual([
+        expectedContext,
+      ]);
+      expect(observed.get(ToolNames.SKILL)).toEqual([expectedContext]);
+    },
+  );
+
+  it('Turn forwards a defensive permit and adds it to every tool request', async () => {
+    const inputPermit: GoalTurnPermit = { ...permit };
+    const sendMessageStream = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              { id: 'goal-tool-call', name: 'read_file', args: {} },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })(),
+    );
+    const turn = new Turn(
+      { sendMessageStream } as unknown as GeminiChat,
+      'goal-prompt',
+      inputPermit,
+    );
+    inputPermit.revision = 99;
+
+    const events = [];
+    for await (const event of turn.run(
+      'test-model',
+      [{ text: 'continue' }],
+      new AbortController().signal,
+    )) {
+      events.push(event);
+    }
+
+    expect(sendMessageStream).toHaveBeenCalledWith(
+      'test-model',
+      expect.any(Object),
+      'goal-prompt',
+      permit,
+    );
+    const toolRequest = events.find(
+      (event) => event.type === GeminiEventType.ToolCallRequest,
+    );
+    expect(toolRequest?.value).toMatchObject({
+      callId: 'goal-tool-call',
+      goalContext: permit,
+    });
+    expect(toolRequest?.value.goalContext).not.toBe(inputPermit);
+  });
+
+  it('GeminiChat attaches the permit to normal and deferred assistant attempts', async () => {
+    const recordAssistantTurn = vi.fn();
+    const chat = new GeminiChat(
+      {
+        getContentGeneratorConfig: () => ({ contextWindowSize: 4096 }),
+      } as unknown as Config,
+      {},
+      [],
+      { recordAssistantTurn } as unknown as ChatRecordingService,
+    );
+    const internal = chat as unknown as {
+      processStreamResponse: (
+        model: string,
+        stream: AsyncGenerator<GenerateContentResponse>,
+        goalContext?: GoalTurnPermit,
+      ) => AsyncGenerator<GenerateContentResponse>;
+      pendingPartialAssistantRecord:
+        | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
+        | null;
+    };
+    const normalStream = (async function* () {
+      yield {
+        candidates: [
+          {
+            content: { role: 'model', parts: [{ text: 'normal result' }] },
+            finishReason: 'STOP',
+          },
+        ],
+      } as GenerateContentResponse;
+    })();
+
+    for await (const _ of internal.processStreamResponse(
+      'test-model',
+      normalStream,
+      permit,
+    )) {
+      // Consume the persisted normal assistant attempt.
+    }
+    expect(recordAssistantTurn).toHaveBeenCalledWith(
+      expect.objectContaining({ goalContext: permit }),
+    );
+
+    const partialStream = (async function* () {
+      yield {
+        candidates: [
+          {
+            content: {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    id: 'partial-goal-call',
+                    name: 'read_file',
+                    args: {},
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      } as GenerateContentResponse;
+      throw new Error('partial stream failed');
+    })();
+    await expect(
+      (async () => {
+        for await (const _ of internal.processStreamResponse(
+          'test-model',
+          partialStream,
+          permit,
+        )) {
+          // Consume until the deferred partial attempt is staged.
+        }
+      })(),
+    ).rejects.toThrow('partial stream failed');
+    expect(internal.pendingPartialAssistantRecord).toMatchObject({
+      goalContext: permit,
+      message: [
+        expect.objectContaining({
+          functionCall: expect.objectContaining({ id: 'partial-goal-call' }),
+        }),
+      ],
+    });
+  });
+
+  it('isolates permission preparation by request across mixed Goal contexts', async () => {
+    const permitA: GoalTurnPermit = {
+      goalId: 'goal-a',
+      revision: 1,
+      turnId: 'turn-a',
+    };
+    const permitB: GoalTurnPermit = {
+      goalId: 'goal-b',
+      revision: 2,
+      turnId: 'turn-b',
+    };
+    const permissionContexts = new Map<
+      string,
+      Array<GoalTurnPermit | undefined>
+    >();
+    const confirmationContexts = new Map<
+      string,
+      Array<GoalTurnPermit | undefined>
+    >();
+    const makeTool = (name: string) => {
+      permissionContexts.set(name, []);
+      confirmationContexts.set(name, []);
+      return new MockTool({
+        name,
+        getDefaultPermission: async () => {
+          permissionContexts.get(name)?.push(goalTurnContext.getStore());
+          return 'ask';
+        },
+        getConfirmationDetails: async () => {
+          confirmationContexts.get(name)?.push(goalTurnContext.getStore());
+          return {
+            type: 'exec',
+            title: name,
+            command: name,
+            rootCommand: name,
+            onConfirm: async () => {},
+          };
+        },
+      });
+    };
+    const tools = [
+      makeTool('goal_a_tool'),
+      makeTool('goal_b_tool'),
+      makeTool('plain_tool'),
+    ];
+    const { onToolCallsUpdate, scheduler } = createContextScheduler(tools, {
+      approvalMode: ApprovalMode.DEFAULT,
+    });
+    const request = (
+      tool: AnyDeclarativeTool,
+      goalContext?: GoalTurnPermit,
+    ): ToolCallRequestInfo => ({
+      callId: `${tool.name}-call`,
+      name: tool.name,
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'mixed-context-prompt',
+      ...(goalContext ? { goalContext: { ...goalContext } } : {}),
+    });
+    const staleAmbient: GoalTurnPermit = {
+      goalId: 'stale',
+      revision: 99,
+      turnId: 'stale-turn',
+    };
+
+    await goalTurnContext.run(staleAmbient, () =>
+      scheduler.schedule(
+        [
+          request(tools[0], permitA),
+          request(tools[1], permitB),
+          request(tools[2]),
+        ],
+        new AbortController().signal,
+      ),
+    );
+    await vi.waitFor(() => {
+      const awaiting = onToolCallsUpdate.mock.calls
+        .at(-1)?.[0]
+        .filter((call: ToolCall) => call.status === 'awaiting_approval');
+      expect(awaiting).toHaveLength(3);
+    });
+
+    expect(permissionContexts.get('goal_a_tool')).toEqual([permitA]);
+    expect(permissionContexts.get('goal_b_tool')).toEqual([permitB]);
+    expect(permissionContexts.get('plain_tool')).toEqual([undefined]);
+    expect(confirmationContexts.get('goal_a_tool')).toEqual([permitA]);
+    expect(confirmationContexts.get('goal_b_tool')).toEqual([permitB]);
+    expect(confirmationContexts.get('plain_tool')).toEqual([undefined]);
+  });
+
+  it('uses request context for ensure, initial build, setArgs rebuild, and delayed execute', async () => {
+    const tool = new MockModifiableTool('goal_context_tool');
+    const buildContexts: Array<GoalTurnPermit | undefined> = [];
+    const permissionContexts: Array<GoalTurnPermit | undefined> = [];
+    const confirmationContexts: Array<GoalTurnPermit | undefined> = [];
+    const onConfirmContexts: Array<GoalTurnPermit | undefined> = [];
+    const executeContexts: Array<GoalTurnPermit | undefined> = [];
+    const originalBuild = tool.build.bind(tool);
+    vi.spyOn(tool, 'build').mockImplementation((args) => {
+      buildContexts.push(goalTurnContext.getStore());
+      const invocation = originalBuild(args);
+      if (invocation instanceof Error) return invocation;
+      const getDefaultPermission =
+        invocation.getDefaultPermission.bind(invocation);
+      vi.spyOn(invocation, 'getDefaultPermission').mockImplementation(
+        async () => {
+          permissionContexts.push(goalTurnContext.getStore());
+          return getDefaultPermission();
+        },
+      );
+      const getConfirmationDetails =
+        invocation.getConfirmationDetails.bind(invocation);
+      vi.spyOn(invocation, 'getConfirmationDetails').mockImplementation(
+        async (signal) => {
+          confirmationContexts.push(goalTurnContext.getStore());
+          const details = await getConfirmationDetails(signal);
+          const onConfirm = details.onConfirm;
+          return {
+            ...details,
+            onConfirm: async (...params) => {
+              onConfirmContexts.push(goalTurnContext.getStore());
+              await onConfirm(...params);
+            },
+          };
+        },
+      );
+      return invocation;
+    });
+    tool.executeFn = vi.fn(() => {
+      executeContexts.push(goalTurnContext.getStore());
+      return { llmContent: 'done', returnDisplay: 'done' };
+    });
+    const { ensureTool, onAllToolCallsComplete, onToolCallsUpdate, scheduler } =
+      createContextScheduler(tool, {
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+    const confirmationEntryContexts: Array<GoalTurnPermit | undefined> = [];
+    const handleConfirmationResponse =
+      scheduler.handleConfirmationResponse.bind(scheduler);
+    vi.spyOn(scheduler, 'handleConfirmationResponse').mockImplementation(
+      (...args) => {
+        confirmationEntryContexts.push(goalTurnContext.getStore());
+        return handleConfirmationResponse(...args);
+      },
+    );
+    const ensureContexts: Array<GoalTurnPermit | undefined> = [];
+    ensureTool.mockImplementation(async () => {
+      ensureContexts.push(goalTurnContext.getStore());
+      return tool;
+    });
+    const request: ToolCallRequestInfo = {
+      callId: 'goal-context-call',
+      name: tool.name,
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'goal-context-prompt',
+      goalContext: { ...permit },
+    };
+    const staleAmbient: GoalTurnPermit = {
+      goalId: 'stale',
+      revision: 1,
+      turnId: 'stale-turn',
+    };
+
+    await goalTurnContext.run(staleAmbient, () =>
+      scheduler.schedule([request], new AbortController().signal),
+    );
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    expect(goalTurnContext.getStore()).toBeUndefined();
+    await awaitingCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedOnce,
+      { newContent: 'updated' },
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    expect(ensureContexts).toEqual([permit]);
+    expect(buildContexts).toEqual([permit, permit]);
+    expect(permissionContexts).toEqual([permit]);
+    expect(confirmationContexts).toEqual([permit]);
+    expect(confirmationEntryContexts).toEqual([permit]);
+    expect(onConfirmContexts).toEqual([permit]);
+    expect(executeContexts).toEqual([permit]);
+  });
+
+  it('clears stale ambient Goal context throughout delayed context-free approval', async () => {
+    const observed: Array<GoalTurnPermit | undefined> = [];
+    const tool = new MockModifiableTool('context_free_tool');
+    const originalBuild = tool.build.bind(tool);
+    vi.spyOn(tool, 'build').mockImplementation((args) => {
+      observed.push(goalTurnContext.getStore());
+      const invocation = originalBuild(args);
+      if (invocation instanceof Error) return invocation;
+      const getDefaultPermission =
+        invocation.getDefaultPermission.bind(invocation);
+      vi.spyOn(invocation, 'getDefaultPermission').mockImplementation(
+        async () => {
+          observed.push(goalTurnContext.getStore());
+          return getDefaultPermission();
+        },
+      );
+      const getConfirmationDetails =
+        invocation.getConfirmationDetails.bind(invocation);
+      vi.spyOn(invocation, 'getConfirmationDetails').mockImplementation(
+        async (signal) => {
+          observed.push(goalTurnContext.getStore());
+          const details = await getConfirmationDetails(signal);
+          const onConfirm = details.onConfirm;
+          return {
+            ...details,
+            onConfirm: async (...params) => {
+              observed.push(goalTurnContext.getStore());
+              await onConfirm(...params);
+            },
+          };
+        },
+      );
+      return invocation;
+    });
+    tool.executeFn = vi.fn(() => {
+      observed.push(goalTurnContext.getStore());
+      return { llmContent: 'done', returnDisplay: 'done' };
+    });
+    const { onAllToolCallsComplete, onToolCallsUpdate, scheduler } =
+      createContextScheduler(tool, { approvalMode: ApprovalMode.DEFAULT });
+    const confirmationEntryContexts: Array<GoalTurnPermit | undefined> = [];
+    const handleConfirmationResponse =
+      scheduler.handleConfirmationResponse.bind(scheduler);
+    vi.spyOn(scheduler, 'handleConfirmationResponse').mockImplementation(
+      (...args) => {
+        confirmationEntryContexts.push(goalTurnContext.getStore());
+        return handleConfirmationResponse(...args);
+      },
+    );
+    const request: ToolCallRequestInfo = {
+      callId: 'context-free-call',
+      name: tool.name,
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'context-free-prompt',
+    };
+
+    await goalTurnContext.run(permit, () =>
+      scheduler.schedule([request], new AbortController().signal),
+    );
+    const awaitingCall = (await waitForStatus(
+      onToolCallsUpdate,
+      'awaiting_approval',
+    )) as WaitingToolCall;
+    await goalTurnContext.run(permit, () =>
+      awaitingCall.confirmationDetails.onConfirm(
+        ToolConfirmationOutcome.ProceedOnce,
+        { newContent: 'updated' },
+      ),
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+    expect(observed).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+    expect(confirmationEntryContexts).toEqual([undefined]);
+  });
+
+  it('uses each sibling request context during ProceedAlways auto-approval', async () => {
+    const permitA: GoalTurnPermit = {
+      goalId: 'goal-a',
+      revision: 1,
+      turnId: 'turn-a',
+    };
+    const permitB: GoalTurnPermit = {
+      goalId: 'goal-b',
+      revision: 1,
+      turnId: 'turn-b',
+    };
+    let alwaysAllowed = false;
+    const permissionContexts = new Map<
+      string,
+      Array<GoalTurnPermit | undefined>
+    >();
+    const onConfirmContexts: Array<GoalTurnPermit | undefined> = [];
+    const executeContexts = new Map<
+      string,
+      Array<GoalTurnPermit | undefined>
+    >();
+    const makeTool = (name: string, isTrigger = false) => {
+      permissionContexts.set(name, []);
+      executeContexts.set(name, []);
+      return new MockTool({
+        name,
+        getDefaultPermission: async () => {
+          permissionContexts.get(name)?.push(goalTurnContext.getStore());
+          return alwaysAllowed ? 'allow' : 'ask';
+        },
+        getConfirmationDetails: async () => ({
+          type: 'exec',
+          title: name,
+          command: name,
+          rootCommand: name,
+          onConfirm: async (outcome) => {
+            onConfirmContexts.push(goalTurnContext.getStore());
+            if (
+              isTrigger &&
+              outcome === ToolConfirmationOutcome.ProceedAlways
+            ) {
+              alwaysAllowed = true;
+            }
+          },
+        }),
+        execute: async () => {
+          executeContexts.get(name)?.push(goalTurnContext.getStore());
+          return { llmContent: 'done', returnDisplay: 'done' };
+        },
+      });
+    };
+    const trigger = makeTool('trigger_tool', true);
+    const sibling = makeTool('sibling_tool');
+    const { onAllToolCallsComplete, onToolCallsUpdate, scheduler } =
+      createContextScheduler([trigger, sibling], {
+        approvalMode: ApprovalMode.DEFAULT,
+      });
+    const request = (
+      tool: AnyDeclarativeTool,
+      goalContext: GoalTurnPermit,
+    ): ToolCallRequestInfo => ({
+      callId: `${tool.name}-call`,
+      name: tool.name,
+      args: {},
+      isClientInitiated: false,
+      prompt_id: 'sibling-context-prompt',
+      goalContext: { ...goalContext },
+    });
+
+    await scheduler.schedule(
+      [request(trigger, permitA), request(sibling, permitB)],
+      new AbortController().signal,
+    );
+    const triggerCall = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0])
+      .find(
+        (call: ToolCall) =>
+          call.status === 'awaiting_approval' &&
+          call.request.callId === 'trigger_tool-call',
+      ) as WaitingToolCall;
+    await triggerCall.confirmationDetails.onConfirm(
+      ToolConfirmationOutcome.ProceedAlways,
+    );
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalledOnce();
+    });
+
+    expect(permissionContexts.get('trigger_tool')).toEqual([permitA]);
+    expect(permissionContexts.get('sibling_tool')).toEqual([permitB, permitB]);
+    expect(onConfirmContexts).toEqual([permitA]);
+    expect(executeContexts.get('trigger_tool')).toEqual([permitA]);
+    expect(executeContexts.get('sibling_tool')).toEqual([permitB]);
+  });
+
+  it('records ordinary and Goal-tool results with distinct provenance', () => {
+    const recordToolResult = vi.fn();
+    const recorder = {
+      recordToolResult,
+    } as unknown as ChatRecordingService;
+    const ordinaryTool = new MockTool({ name: 'external_fact_tool' });
+    const { scheduler } = createContextScheduler(ordinaryTool, {
+      chatRecordingService: recorder,
+    });
+    const internal = scheduler as unknown as {
+      recordToolResults: (completedCalls: CompletedToolCall[]) => void;
+    };
+    const completedCall = (name: string, callId: string): CompletedToolCall =>
+      ({
+        status: 'success',
+        request: {
+          callId,
+          name,
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'recording-prompt',
+          goalContext: { ...permit },
+        },
+        response: {
+          callId,
+          responseParts: [
+            {
+              functionResponse: {
+                id: callId,
+                name,
+                response: { output: 'done' },
+              },
+            },
+          ],
+          resultDisplay: 'done',
+        },
+      }) as unknown as CompletedToolCall;
+
+    internal.recordToolResults([
+      completedCall('external_fact_tool', 'ordinary-call'),
+    ]);
+    internal.recordToolResults([
+      completedCall(ToolNames.GET_GOAL, 'goal-control-call'),
+    ]);
+
+    expect(recordToolResult).toHaveBeenCalledTimes(2);
+    expect(recordToolResult.mock.calls[0]?.[2]).toEqual({
+      goalContext: permit,
+    });
+    expect(recordToolResult.mock.calls[1]?.[2]).toEqual({
+      goalContext: permit,
+      provenance: 'goal_runtime',
     });
   });
 });

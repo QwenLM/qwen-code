@@ -1288,6 +1288,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 : current.sessionId === activeSession.sessionId
                   ? (current.tokenCount ?? 0)
                   : 0,
+            goalState:
+              current.sessionId === activeSession.sessionId
+                ? current.goalState
+                : undefined,
             loadingTranscript: undefined,
             catchingUp: replayInjected
               ? current.catchingUp
@@ -1319,19 +1323,25 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             : activeSession.workspaceCwd
               ? client.workspaceByCwd(activeSession.workspaceCwd).workspaceGit()
               : client.workspaceGit();
-          const [providerResult, commandResult, contextResult, gitResult] =
-            await Promise.allSettled([
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : client.workspaceProviders(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.supportedCommands(),
-              canReuseSessionMetadata
-                ? Promise.resolve(undefined)
-                : activeSession.context(),
-              gitPromise,
-            ]);
+          const [
+            providerResult,
+            commandResult,
+            contextResult,
+            gitResult,
+            goalResult,
+          ] = await Promise.allSettled([
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : client.workspaceProviders(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.supportedCommands(),
+            canReuseSessionMetadata
+              ? Promise.resolve(undefined)
+              : activeSession.context(),
+            gitPromise,
+            activeSession.goal(),
+          ]);
           const providers =
             providerResult?.status === 'fulfilled'
               ? providerResult.value
@@ -1347,6 +1357,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const gitBranch =
             gitResult?.status === 'fulfilled'
               ? (gitResult.value.branch ?? undefined)
+              : undefined;
+          const goalState =
+            goalResult.status === 'fulfilled'
+              ? goalResult.value.snapshot
               : undefined;
           const loadWarningTexts = [
             providerResult?.status === 'rejected'
@@ -1415,6 +1429,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               providers: providers ?? current.providers,
               supportedCommands: supportedCommands ?? current.supportedCommands,
               context: context ?? current.context,
+              goalState: goalState ?? current.goalState,
               gitBranch:
                 gitResult.status === 'fulfilled'
                   ? gitBranch
@@ -2991,7 +3006,8 @@ function normalizeGoalStatus(value: unknown): Record<string, unknown> | null {
     kind !== 'cleared' &&
     kind !== 'achieved' &&
     kind !== 'failed' &&
-    kind !== 'aborted'
+    kind !== 'aborted' &&
+    kind !== 'paused'
   ) {
     return null;
   }

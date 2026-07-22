@@ -28,6 +28,7 @@ import {
   Bot,
   Info,
   Store,
+  Target,
 } from 'lucide-react'
 // SessionStatusIcons no longer used - icons come from dynamic sessionStatuses
 import { TopBar } from './TopBar'
@@ -68,6 +69,7 @@ import {
 } from '@/components/ui/collapsible'
 import { SessionList, type ChatGroupingMode } from './SessionList'
 import { MainContentPanel } from './MainContentPanel'
+import { getGoalRows } from './GoalsPanel'
 import { PanelStackContainer } from './PanelStackContainer'
 import { BrowserDockPanel } from './BrowserDockPanel'
 import type { ChatDisplayHandle } from './ChatDisplay'
@@ -171,6 +173,7 @@ import {
   useNavigation,
   useNavigationState,
   isSessionsNavigation,
+  isGoalsNavigation,
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
@@ -1011,6 +1014,7 @@ function AppShellContent({
   const isAllSessionsNavigatorHidden =
     isSessionsNavigation(navState) &&
     sessionsContext?.filter.kind === 'allSessions'
+  const isGoalsNavigatorHidden = isGoalsNavigation(navState)
   const isSessionNavigatorCollapsed =
     !isAutoCompact &&
     isSessionsNavigation(navState) &&
@@ -1018,10 +1022,12 @@ function AppShellContent({
       !!sessionsContext?.sessionId ||
       shouldCollapseProjectDraftNavigator)
   const effectiveNavigatorWidth = isAutoCompact
-    ? isAllSessionsNavigatorHidden
+    ? isAllSessionsNavigatorHidden || isGoalsNavigatorHidden
       ? 0
       : sessionListWidth
-    : effectiveSidebarAndNavigatorHidden || isSessionNavigatorCollapsed
+    : effectiveSidebarAndNavigatorHidden ||
+        isSessionNavigatorCollapsed ||
+        isGoalsNavigatorHidden
       ? 0
       : sessionListWidth
   const isNavigatorResizeAvailable =
@@ -2370,9 +2376,9 @@ function AppShellContent({
   // workspaceSessionsAtom. sessionMetaMapAtom still carries live event updates.
   // For remote workspaces, sessions have the remote workspace ID (not the local one),
   // so we match live metadata against both the local and remote workspace IDs.
-  const workspaceSessionMetas = useMemo(() => {
+  const workspaceSessionMetasIncludingHidden = useMemo(() => {
     const liveMetas = Array.from(sessionMetaMap.values())
-    if (!activeWorkspaceId) return liveMetas.filter((s) => !s.hidden)
+    if (!activeWorkspaceId) return liveMetas
 
     const activeWorkspaceMetas = getWorkspaceSessionMetas(
       workspaceSessions,
@@ -2384,13 +2390,15 @@ function AppShellContent({
         (remoteWorkspaceId && s.workspaceId === remoteWorkspaceId),
     )
     if (liveWorkspaceMetas.length === 0 && activeWorkspaceMetas.length > 0) {
-      return activeWorkspaceMetas.filter((s) => !s.hidden)
+      return activeWorkspaceMetas
     }
-    return mergeStableSessionMetaList(
-      activeWorkspaceMetas,
-      liveWorkspaceMetas,
-    ).filter((s) => !s.hidden)
+    return mergeStableSessionMetaList(activeWorkspaceMetas, liveWorkspaceMetas)
   }, [sessionMetaMap, workspaceSessions, activeWorkspaceId, remoteWorkspaceId])
+
+  const workspaceSessionMetas = useMemo(
+    () => workspaceSessionMetasIncludingHidden.filter((s) => !s.hidden),
+    [workspaceSessionMetasIncludingHidden],
+  )
 
   const [
     workspaceSessionSnapshotRefreshTick,
@@ -3099,6 +3107,10 @@ function AppShellContent({
     navigate(routes.view.skills())
   }, [])
 
+  const handleGoalsClick = useCallback(() => {
+    navigate(routes.view.goals())
+  }, [])
+
   const handleSkillMarketplaceClick = useCallback(() => {
     navigate(routes.view.skillMarketplace())
   }, [])
@@ -3462,6 +3474,7 @@ function AppShellContent({
   const unifiedSidebarItems = React.useMemo((): SidebarItem[] => {
     const result: SidebarItem[] = []
 
+    result.push({ id: 'nav:goals', type: 'nav', action: handleGoalsClick })
     result.push({ id: 'nav:skills', type: 'nav', action: handleSkillsClick })
     result.push({
       id: 'nav:skill-marketplace',
@@ -3481,6 +3494,7 @@ function AppShellContent({
 
     return result
   }, [
+    handleGoalsClick,
     handleSkillsClick,
     handleSkillMarketplaceClick,
     handleMarketplaceSkillSelect,
@@ -3606,6 +3620,8 @@ function AppShellContent({
 
   // Get title based on navigation state
   const listTitle = React.useMemo(() => {
+    if (isGoalsNavigation(navState)) return t('sidebar.goals')
+
     // Sources navigator
     if (isSourcesNavigation(navState)) {
       return t('sidebar.sources')
@@ -3800,6 +3816,19 @@ function AppShellContent({
                       focusedItemId={focusedSidebarItemId}
                       links={[
                         {
+                          id: 'nav:goals',
+                          title: t('sidebar.goals'),
+                          label: String(
+                            getGoalRows(workspaceSessionMetasIncludingHidden)
+                              .length,
+                          ),
+                          icon: Target,
+                          variant: isGoalsNavigation(navState)
+                            ? 'default'
+                            : 'ghost',
+                          onClick: handleGoalsClick,
+                        },
+                        {
                           id: 'nav:skills',
                           title: t('sidebar.skills'),
                           label: skillsLoading
@@ -3945,7 +3974,8 @@ function AppShellContent({
           }
           navigatorSlot={
             isAllSessionsNavigatorHidden ||
-            isSessionNavigatorCollapsed ? null : (
+            isSessionNavigatorCollapsed ||
+            isGoalsNavigatorHidden ? null : (
               <div
                 style={{ width: isAutoCompact ? '100%' : sessionListWidth }}
                 className="h-full flex flex-col min-w-0 relative z-panel"

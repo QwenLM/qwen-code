@@ -16,7 +16,10 @@ import type {
   AtCommandRecordPayload,
   HistoryGap,
 } from '@qwen-code/qwen-code-core';
-import { getToolResponseDisplayText } from '@qwen-code/qwen-code-core';
+import {
+  getToolResponseDisplayText,
+  parseGoalStateRecordPayloadV2,
+} from '@qwen-code/qwen-code-core';
 import type {
   HistoryItem,
   HistoryItemInfo,
@@ -30,6 +33,7 @@ import {
   formatHistoryGapNotice,
   indexGapsByChild,
 } from './history-gap-notice.js';
+import { shouldDisplayGoalStateCause } from './goal-runtime.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -268,6 +272,21 @@ function convertToHistoryItems(
     }
 
     if (record.type === 'system') {
+      if (record.subtype === 'goal_state') {
+        const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+        if (payload && shouldDisplayGoalStateCause(payload.cause)) {
+          if (currentToolGroup.length > 0) {
+            items.push({ type: 'tool_group', tools: [...currentToolGroup] });
+            currentToolGroup = [];
+          }
+          items.push({
+            type: 'goal_state',
+            snapshot: payload.snapshot,
+            cause: payload.cause,
+          });
+        }
+        continue;
+      }
       if (record.subtype === 'slash_command') {
         // Flush any pending tool group to avoid mixing contexts.
         if (currentToolGroup.length > 0) {

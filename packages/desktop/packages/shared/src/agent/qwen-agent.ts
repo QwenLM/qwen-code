@@ -72,6 +72,9 @@ import {
   type LLMQueryResult,
 } from './llm-tool.ts';
 import type {
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   PermissionResponseOptions,
   PermissionRuleType,
   PermissionSettingsScope,
@@ -93,6 +96,7 @@ import type {
   QwenSkillSetEnabledRequest,
   QwenSkillSetEnabledResult,
 } from '../protocol/dto.ts';
+import { parseGoalSnapshotV2 } from '../protocol/goal.ts';
 import type {
   QwenMemoryPaths,
   QwenMemorySettings,
@@ -210,6 +214,14 @@ type SlashCommandInvocation = {
 };
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+export const QWEN_GOAL_GET_METHOD =
+  'qwen/control/session/goal/get' as const;
+export const QWEN_GOAL_CONTROL_METHOD =
+  'qwen/control/session/goal/control' as const;
+const QWEN_GOAL_UNSUPPORTED_MESSAGE =
+  'Qwen backend does not support Goal protocol v2';
+
+class QwenGoalProtocolUnsupportedError extends Error {}
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_INITIALIZE_TIMEOUT_MS = 120_000;
 const PERMISSION_REQUEST_TIMEOUT_MS = 5 * 60_000;
@@ -947,6 +959,8 @@ function isRecord(value: unknown): value is JsonRecord {
 function asString(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
+
+export const parseQwenGoalSnapshotV2 = parseGoalSnapshotV2;
 
 export function extractQwenParentToolUseId(
   update: Record<string, unknown>,
@@ -2555,6 +2569,138 @@ export class QwenAgent extends BaseAgent {
     return result.success !== false;
   }
 
+  private async applyGoalState(
+    snapshot: GoalSnapshotV2,
+    notify = true,
+  ): Promise<void> {
+    if (notify) {
+      await this.onGoalStateChange?.(structuredClone(snapshot));
+    }
+  }
+
+  private async readGoalStateFromAcp(
+    sessionId: string,
+  ): Promise<GoalSnapshotV2> {
+    const response = toRecord(
+      await this.callAcp(
+        QWEN_GOAL_GET_METHOD,
+        (connection) =>
+          connection.extMethod(QWEN_GOAL_GET_METHOD, { sessionId }),
+        30_000,
+      ),
+    );
+    const snapshot = parseQwenGoalSnapshotV2(response.goalState);
+    if (!snapshot) {
+      throw new QwenGoalProtocolUnsupportedError(
+        'Qwen ACP returned an invalid Goal v2 snapshot',
+      );
+    }
+    return snapshot;
+  }
+
+  private async refreshGoalState(
+    sessionId: string,
+    options: { notify?: boolean; cwd?: string } = {},
+  ): Promise<GoalSnapshotV2 | undefined> {
+    try {
+      const snapshot = await this.readGoalStateFromAcp(sessionId);
+      const isCurrentSession =
+        sessionId === this.qwenSessionId ||
+        sessionId === this.persistedQwenSessionId ||
+        sessionId === this.config.session?.sdkSessionId;
+      if (isCurrentSession) {
+        await this.applyGoalState(snapshot, options.notify !== false);
+      }
+      return snapshot;
+    } catch (error) {
+      const message = getErrorMessage(error);
+      if (!/session not found/i.test(message)) {
+        this.debug(
+          `Qwen Goal state unavailable for ${sessionId}: ${message}`,
+        );
+        return undefined;
+      }
+
+      const cwd = options.cwd || this.resolvedCwd();
+      this.suppressedSessionUpdates.add(sessionId);
+      try {
+        await this.callAcp(
+          'session/load',
+          (connection) =>
+            connection.loadSession({
+              sessionId,
+              cwd,
+              mcpServers: this.buildAcpMcpServers(),
+            }),
+          60_000,
+        );
+        const snapshot = await this.readGoalStateFromAcp(sessionId);
+        const isCurrentSession =
+          sessionId === this.qwenSessionId ||
+          sessionId === this.persistedQwenSessionId ||
+          sessionId === this.config.session?.sdkSessionId;
+        if (isCurrentSession) {
+          await this.applyGoalState(snapshot, options.notify !== false);
+        }
+        return snapshot;
+      } catch (loadError) {
+        this.debug(
+          `Qwen Goal state unavailable after loading ${sessionId}: ${getErrorMessage(loadError)}`,
+        );
+        return undefined;
+      } finally {
+        this.suppressedSessionUpdates.delete(sessionId);
+      }
+    }
+  }
+
+  async getGoalState(): Promise<GoalSnapshotV2 | undefined> {
+    await this.ensureProcess();
+    await this.ensureQwenSession();
+    const sessionId = this.qwenSessionId;
+    if (!sessionId) return undefined;
+    try {
+      const snapshot = await this.readGoalStateFromAcp(sessionId);
+      await this.applyGoalState(snapshot);
+      return snapshot;
+    } catch (error) {
+      if (
+        error instanceof QwenGoalProtocolUnsupportedError ||
+        /method not found|not implemented|unsupported/i.test(
+          getErrorMessage(error),
+        )
+      ) {
+        throw new Error(QWEN_GOAL_UNSUPPORTED_MESSAGE, { cause: error });
+      }
+      throw error;
+    }
+  }
+
+  async controlGoal(request: GoalControlRequest): Promise<GoalStateResponse> {
+    await this.ensureProcess();
+    await this.ensureQwenSession();
+    const sessionId = this.qwenSessionId;
+    if (!sessionId) throw new Error('Qwen ACP session was not created');
+
+    const response = toRecord(
+      await this.callAcp(
+        QWEN_GOAL_CONTROL_METHOD,
+        (connection) =>
+          connection.extMethod(QWEN_GOAL_CONTROL_METHOD, {
+            sessionId,
+            request,
+          }),
+        30_000,
+      ),
+    );
+    const snapshot = parseQwenGoalSnapshotV2(response.snapshot);
+    if (!snapshot) {
+      throw new Error('Qwen ACP returned an invalid Goal control response');
+    }
+    await this.applyGoalState(snapshot);
+    return { snapshot: structuredClone(snapshot) };
+  }
+
   async loadSessionMessages(
     sessionId: string,
     options: { cwd?: string } = {},
@@ -2563,9 +2709,9 @@ export class QwenAgent extends BaseAgent {
     const cwd = this.resolveQwenPersistenceCwd(sessionId, requestedCwd);
     await this.ensureProcess();
 
-    const buildResultFromUpdates = (
+    const buildResultFromUpdates = async (
       updates: JsonRecord[],
-    ): BackendSessionMessagesResult => {
+    ): Promise<BackendSessionMessagesResult> => {
       const messages = this.buildHistoryMessages(sessionId, updates, cwd);
       const availableCommandsSnapshot =
         this.extractAvailableCommandsSnapshot(updates);
@@ -2586,10 +2732,15 @@ export class QwenAgent extends BaseAgent {
         sessionId,
         cwd,
       );
+      const goalState = await this.refreshGoalState(sessionId, {
+        cwd,
+        notify: false,
+      });
       return {
         messages: messagesWithTextElements,
         ...(availableCommandsSnapshot ?? {}),
         ...(tokenUsage ? { tokenUsage } : {}),
+        ...(goalState ? { goalState } : {}),
       };
     };
 
@@ -2609,7 +2760,7 @@ export class QwenAgent extends BaseAgent {
         ? response.updates.filter(isRecord)
         : undefined;
       if (updates) {
-        return buildResultFromUpdates(updates);
+        return await buildResultFromUpdates(updates);
       }
     } catch (error) {
       this.debug(
@@ -2632,7 +2783,7 @@ export class QwenAgent extends BaseAgent {
         60_000,
       );
 
-      return buildResultFromUpdates(collector.updates);
+      return await buildResultFromUpdates(collector.updates);
     } finally {
       this.historyCollectors.delete(sessionId);
     }
@@ -3088,6 +3239,7 @@ export class QwenAgent extends BaseAgent {
         this.config.onSdkSessionIdUpdate?.(existingSessionId);
         await this.applySessionSettings(existingSessionId);
         this.flushPendingAvailableCommandsUpdate(existingSessionId);
+        await this.refreshGoalState(existingSessionId);
         return;
       } finally {
         this.suppressedSessionUpdates.delete(existingSessionId);
@@ -3123,6 +3275,7 @@ export class QwenAgent extends BaseAgent {
     this.config.onSdkSessionIdUpdate?.(sessionId);
     await this.applySessionSettings(sessionId);
     this.flushPendingAvailableCommandsUpdate(sessionId);
+    await this.refreshGoalState(sessionId);
   }
 
   private async reloadCurrentSessionForAvailableCommands(): Promise<AvailableCommandsSnapshot | null> {
@@ -3758,6 +3911,20 @@ export class QwenAgent extends BaseAgent {
     }
 
     if (this.suppressedSessionUpdates.has(sessionId)) return;
+
+    const goalState = parseQwenGoalSnapshotV2(
+      toRecord(update._meta).goalState,
+    );
+    const isCurrentGoalSession =
+      sessionId === this.qwenSessionId ||
+      sessionId === this.persistedQwenSessionId ||
+      sessionId === this.config.session?.sdkSessionId;
+    if (goalState && isCurrentGoalSession) {
+      void this.applyGoalState(goalState).catch((error) => {
+        this.debug(`Failed to apply Qwen Goal state: ${getErrorMessage(error)}`);
+      });
+    }
+
     if (sessionId !== this.qwenSessionId || !this._isProcessing) return;
 
     this.captureUsage(update);

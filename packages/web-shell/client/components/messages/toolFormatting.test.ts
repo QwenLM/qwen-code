@@ -27,6 +27,10 @@ describe('toolFormatting', () => {
     expect(formatToolDisplayName('run_shell_command')).toBe('Shell');
   });
 
+  it('uses the concise Goal read display name', () => {
+    expect(formatToolDisplayName('get_goal')).toBe('Goal');
+  });
+
   describe('sanitizeControlChars', () => {
     it('escapes bare C0 controls (CR, BS, BEL, ESC, DEL) to visible text', () => {
       expect(sanitizeControlChars('a\rb')).toBe('a\\rb');

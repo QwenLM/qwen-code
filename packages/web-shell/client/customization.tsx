@@ -5,7 +5,10 @@ import {
   type ReactNode,
 } from 'react';
 import type { Components, Options } from 'react-markdown';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
@@ -367,7 +370,9 @@ export interface WebShellFooterRenderInfo {
   model: string;
   streamingState: DaemonStreamingState;
   contextUsageRatio: number;
+  /** @deprecated Use goalSnapshot, which includes lifecycle and activity. */
   activeGoal: { condition: string; setAt: number } | null;
+  goalSnapshot: GoalSnapshotV2 | null;
   tasks: readonly WebShellTaskInfo[];
   availableModes: readonly string[];
   availableModels: readonly WebShellModelInfo[];

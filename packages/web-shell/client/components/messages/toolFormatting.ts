@@ -52,6 +52,8 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   workflow: 'Workflow',
   artifact: 'Artifact',
   record_artifact: 'RecordArtifact',
+  get_goal: 'Goal',
+  update_goal: 'UpdateGoal',
   web_search: 'WebSearch',
   bash: 'Shell',
   shell: 'Shell Command',

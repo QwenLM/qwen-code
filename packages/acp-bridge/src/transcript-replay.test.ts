@@ -11,6 +11,23 @@ import {
   type TranscriptReplayStateV1,
 } from './transcript-replay.js';
 import type { TranscriptRecordInput } from '@qwen-code/qwen-code-core/transcriptRecords';
+import type {
+  GoalRecord,
+  GoalStateCause,
+} from '@qwen-code/qwen-code-core/goalWire';
+
+const GOAL: GoalRecord = {
+  goalId: 'goal-1',
+  revision: 3,
+  objective: 'ship it',
+  status: 'active',
+  evidenceCursor: { recordId: 'record-0' },
+  turnCount: 4,
+  activeTimeMs: 2000,
+  createdAt: 100,
+  updatedAt: 200,
+  lastReason: 'continuing',
+};
 
 function record(
   uuid: string,
@@ -34,7 +51,104 @@ function updates(
   return [...machine.project(item)].map((emission) => emission.update);
 }
 
+function goalStateRecord(
+  uuid: string,
+  cause: GoalStateCause,
+  goal: GoalRecord | null,
+): TranscriptRecordInput {
+  return record(uuid, 'system', {
+    subtype: 'goal_state',
+    systemPayload: {
+      v: 2,
+      cause,
+      snapshot: { v: 2, activity: 'idle', goal },
+    },
+  });
+}
+
 describe('createTranscriptReplayMachine', () => {
+  it('projects goal_state through v2-first metadata and preserves its UUID', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-create', 'create', GOAL),
+    );
+
+    expect(projected).toHaveLength(1);
+    const meta = projected[0]?._meta as Record<string, unknown>;
+    expect(Object.keys(meta).slice(0, 3)).toEqual([
+      'goalState',
+      'goalStatus',
+      'qwen.session.recordId',
+    ]);
+    expect(meta).toMatchObject({
+      goalState: { v: 2, goal: GOAL, activity: 'idle' },
+      goalStatus: { kind: 'set', condition: GOAL.objective },
+      'qwen.session.recordId': 'goal-create',
+    });
+  });
+
+  it('projects terminal metadata after v2 and legacy status', () => {
+    const projected = updates(
+      createTranscriptReplayMachine(),
+      goalStateRecord('goal-complete', 'complete', {
+        ...GOAL,
+        status: 'complete',
+      }),
+    );
+
+    const meta = projected[0]?._meta as Record<string, unknown>;
+    expect(Object.keys(meta).slice(0, 3)).toEqual([
+      'goalState',
+      'goalStatus',
+      'goalTerminal',
+    ]);
+    expect(meta['goalTerminal']).toMatchObject({
+      kind: 'achieved',
+      condition: GOAL.objective,
+    });
+  });
+
+  it('tracks the previous goal across pages so clear keeps its objective', () => {
+    const first = createTranscriptReplayMachine();
+    updates(first, goalStateRecord('goal-create', 'create', GOAL));
+    const second = createTranscriptReplayMachine({
+      initialState: first.snapshot(),
+    });
+
+    const projected = updates(
+      second,
+      goalStateRecord('goal-clear', 'clear', null),
+    );
+
+    expect(projected[0]?._meta).toMatchObject({
+      goalState: { v: 2, goal: null, activity: 'idle' },
+      goalStatus: { kind: 'cleared', condition: GOAL.objective },
+      'qwen.session.recordId': 'goal-clear',
+    });
+  });
+
+  it('reports and skips a malformed goal_state record', () => {
+    const onDiagnostic = vi.fn();
+    const machine = createTranscriptReplayMachine({ onDiagnostic });
+    const malformed = record('goal-malformed', 'system', {
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause: 'create',
+        snapshot: { v: 2, activity: 'running', goal: GOAL },
+      },
+    });
+
+    expect(updates(machine, malformed)).toEqual([]);
+    expect(onDiagnostic).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code: 'malformed_goal_state',
+        recordId: 'goal-malformed',
+        path: 'systemPayload',
+      }),
+    );
+  });
+
   it('projects ordered message parts with source metadata', () => {
     const machine = createTranscriptReplayMachine();
     const projected = updates(

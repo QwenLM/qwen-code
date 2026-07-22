@@ -49,6 +49,9 @@ export type {
 } from '../../config/llm-connections.ts';
 import type { AutomationSystem } from '../../automations/index.ts';
 import type {
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   PermissionResponseOptions,
   QwenSkillDeleteRequest,
   QwenSkillDeleteResult,
@@ -161,6 +164,7 @@ export interface BackendSessionMessagesResult
   extends Partial<AvailableCommandsSnapshot> {
   messages: Message[];
   tokenUsage?: SessionTokenUsage;
+  goalState?: GoalSnapshotV2;
 }
 
 export interface BackendRewindResult {
@@ -519,6 +523,12 @@ export interface AgentBackend {
     options?: { cwd?: string },
   ): Promise<Message[] | BackendSessionMessagesResult>;
 
+  /** Read the authoritative Goal protocol v2 snapshot for this session. */
+  getGoalState?(): Promise<GoalSnapshotV2 | undefined>;
+
+  /** Apply an optimistic-concurrency Goal control request. */
+  controlGoal?(request: GoalControlRequest): Promise<GoalStateResponse>;
+
   /** Refresh provider-advertised slash commands when supported. */
   refreshAvailableCommands?(): Promise<AvailableCommandsSnapshot | null>;
 
@@ -758,6 +768,11 @@ export interface AgentBackend {
    * The session layer wires this to surface auth warnings in the UI.
    */
   onBackendAuthRequired: ((reason: string) => void) | null;
+
+  /** Called when the provider publishes a new authoritative Goal snapshot. */
+  onGoalStateChange:
+    | ((snapshot: GoalSnapshotV2) => void | Promise<void>)
+    | null;
 
   /** Called when agent requests spawning a new session */
   onSpawnSession:

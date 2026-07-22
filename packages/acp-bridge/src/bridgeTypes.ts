@@ -6,6 +6,9 @@
 
 import type {
   ApprovalMode,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   SessionGroupPresetColor,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -427,19 +430,19 @@ export interface BridgeSessionSummary {
 /**
  * A session's live `/goal` state, as reported by the `qwen --acp` child.
  *
- * Only the active goal crosses the bridge. The child also caches the most
- * recent goal that ended on its own, but nothing on this side reads it, so it
- * is not part of the wire shape — add it back alongside the first consumer.
+ * `goalState` is optional while daemon and child versions roll independently.
+ * Callers must not synthesize v2 state from the legacy `active` projection.
  */
 export interface BridgeSessionGoal {
   active: {
     condition: string;
-    /** Judge turns completed so far; 0 before the first stop-hook evaluation. */
+    /** Goal-owned turns completed so far. */
     iterations: number;
     setAt: number;
-    /** The judge's verdict on the most recent turn, when it has run. */
+    /** The most recent lifecycle or verifier reason, when present. */
     lastReason?: string;
   } | null;
+  goalState?: GoalSnapshotV2;
 }
 
 export interface SessionMetadataUpdate {
@@ -460,6 +463,8 @@ export interface CloseSessionOpts {
 export interface BridgeClientRequestContext {
   /** Daemon-issued client id echoed through the HTTP transport header. */
   clientId?: string;
+  /** Apply a pending-prompt mutation only while its state still matches. */
+  ifState?: 'queued' | 'running';
   /**
    * `true` when the request arrived from a loopback peer (kernel-stamped
    * `req.socket.remoteAddress` ∈ {`127.0.0.1`, `::1`, `::ffff:127.0.0.1`}).
@@ -807,7 +812,10 @@ export interface AcpSessionBridge {
     sessionId: string,
     promptId: string,
     context?: BridgeClientRequestContext,
-  ): { removed: boolean };
+  ): {
+    removed: boolean;
+    currentState?: PendingPromptEntry['state'];
+  };
 
   /**
    * Cancel the in-flight prompt on the session. Throws
@@ -1082,15 +1090,22 @@ export interface AcpSessionBridge {
     taskKind: 'agent' | 'shell' | 'monitor',
   ): Promise<{ cancelled: boolean }>;
 
-  /** Clear an active goal in a live session without cancelling the running prompt. */
+  /** Compatibility wrapper that clears the current Goal in the child runtime. */
   clearSessionGoal(
     sessionId: string,
   ): Promise<{ cleared: boolean; condition?: string }>;
 
+  /** Atomically apply a typed Goal lifecycle control in a live session. */
+  controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+    context?: BridgeClientRequestContext,
+  ): Promise<GoalStateResponse>;
+
   /**
    * Read a live session's goal state. Throws `SessionNotFoundError` when the
-   * session is not resident — goals live in the child's memory, so a
-   * non-resident session has no goal to report.
+   * session is not resident because this method routes through its child
+   * runtime.
    */
   getSessionGoal(sessionId: string): Promise<BridgeSessionGoal>;
 

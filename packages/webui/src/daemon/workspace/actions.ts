@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { DaemonClient } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonClient,
+  GoalControlRequest,
+  GoalStateResponse,
+} from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
 import type {
   DaemonDirectoryListing,
@@ -660,6 +664,22 @@ export function createDaemonWorkspaceActions({
       };
     },
 
+    async getGoal(sessionId) {
+      requireClient(getClient, 'Load goal failed');
+      const path = `/session/${encodeURIComponent(sessionId)}/goal`;
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          headers: createDaemonHeaders(token),
+        }),
+        'Load goal timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      return (await res.json()) as GoalStateResponse;
+    },
+
     async clearGoal(sessionId) {
       requireClient(getClient, 'Clear goal failed');
       const url = createDaemonRequestUrl(
@@ -680,6 +700,24 @@ export function createDaemonWorkspaceActions({
         );
       }
       return (await res.json()) as { cleared: boolean };
+    },
+
+    async controlGoal(sessionId: string, request: GoalControlRequest) {
+      requireClient(getClient, 'Control goal failed');
+      const path = `/session/${encodeURIComponent(sessionId)}/goal`;
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify(request),
+        }),
+        'Control goal timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `POST ${path}`));
+      }
+      return (await res.json()) as GoalStateResponse;
     },
 
     async loadEnv() {

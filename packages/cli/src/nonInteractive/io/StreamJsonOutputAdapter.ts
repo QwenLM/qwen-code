@@ -126,6 +126,21 @@ export class StreamJsonOutputAdapter
   }
 
   override processEvent(event: ServerGeminiStreamEvent): void {
+    if (event.type === GeminiEventType.GoalState) {
+      const partial: CLIPartialAssistantMessage = {
+        type: 'stream_event',
+        uuid: randomUUID(),
+        session_id: this.getSessionId(),
+        parent_tool_use_id: null,
+        event: {
+          type: 'goal_state',
+          goal_state: event.value,
+        },
+      };
+      this.emitMessageImpl(partial);
+      return;
+    }
+
     // Active goal updates are session-level metadata, not message content.
     // They intentionally bypass the base finalized guard so late goal state
     // changes can still reach stream consumers.

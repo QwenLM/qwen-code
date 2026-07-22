@@ -16,6 +16,7 @@ import type {
   AnyDeclarativeTool,
   Config,
   ConversationRecord,
+  GoalSnapshotV2,
   ResumedSessionData,
 } from '@qwen-code/qwen-code-core';
 import type { Part } from '@google/genai';
@@ -42,6 +43,70 @@ describe('resumeHistoryUtils', () => {
       description: 'Replace text',
       build: vi.fn().mockReturnValue(mockInvocation),
     } as unknown as AnyDeclarativeTool;
+  });
+
+  it('restores lifecycle cards without per-turn Goal bookkeeping', () => {
+    const goal: NonNullable<GoalSnapshotV2['goal']> = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'ship the feature',
+      status: 'active' as const,
+      evidenceCursor: { recordId: 'goal-create' },
+      turnCount: 0,
+      activeTimeMs: 0,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const goalRecord = (
+      uuid: string,
+      cause: 'create' | 'turn_finished' | 'complete' | 'clear',
+      snapshotGoal: GoalSnapshotV2['goal'],
+    ) => ({
+      uuid,
+      type: 'system' as const,
+      subtype: 'goal_state',
+      systemPayload: {
+        v: 2,
+        cause,
+        snapshot: { v: 2, activity: 'idle', goal: snapshotGoal },
+      },
+    });
+    const completeGoal = {
+      ...goal,
+      status: 'complete' as const,
+      turnCount: 2,
+      lastReason: 'verified',
+    };
+    const conversation = {
+      messages: [
+        goalRecord('goal-create', 'create', goal),
+        goalRecord('goal-turn', 'turn_finished', { ...goal, turnCount: 1 }),
+        goalRecord('goal-complete', 'complete', completeGoal),
+        goalRecord('goal-clear', 'clear', null),
+      ],
+    } as unknown as ConversationRecord;
+
+    const items = buildResumedHistoryItems(
+      { conversation } as ResumedSessionData,
+      makeConfig({}),
+      100,
+    );
+
+    expect(items).toMatchObject([
+      { id: 101, type: 'goal_state', cause: 'create' },
+      {
+        id: 102,
+        type: 'goal_state',
+        cause: 'complete',
+        snapshot: { goal: { status: 'complete', lastReason: 'verified' } },
+      },
+      {
+        id: 103,
+        type: 'goal_state',
+        cause: 'clear',
+        snapshot: { goal: null },
+      },
+    ]);
   });
 
   it('inserts a history-gap divider before the gap child record', () => {

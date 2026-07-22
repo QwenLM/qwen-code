@@ -8,6 +8,7 @@ import type { MutableRefObject, ReactNode } from 'react';
 import type { Content, PartListUnion } from '@google/genai';
 import type {
   Config,
+  GoalStateResponse,
   Logger,
   SessionListItem,
 } from '@qwen-code/qwen-code-core';
@@ -139,6 +140,20 @@ export interface MessageActionReturn {
   content: string;
 }
 
+export type GoalCommandOperation =
+  | { kind: 'status' }
+  | { kind: 'set'; objective: string }
+  | { kind: 'edit'; objective: string }
+  | { kind: 'pause' }
+  | { kind: 'resume' }
+  | { kind: 'clear' };
+
+export interface GoalControlActionReturn {
+  type: 'goal_control';
+  operation: GoalCommandOperation;
+  response: GoalStateResponse;
+}
+
 /**
  * The return type for a command action that streams multiple messages.
  * Used for long-running operations that need to send progress updates.
@@ -262,6 +277,7 @@ export interface ConfirmActionReturn {
 export type SlashCommandActionReturn =
   | ToolActionReturn
   | MessageActionReturn
+  | GoalControlActionReturn
   | StreamMessagesActionReturn
   | QuitActionReturn
   | OpenDialogActionReturn

@@ -12,6 +12,7 @@ import type {
   DaemonSessionSupportedCommandsStatus,
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillsStatus,
+  GoalSnapshotV2,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -240,6 +241,10 @@ export function updateConnectionFromDaemonEvent(
         tokenCount: getTokenCountFromUsage(tokenUsage),
       }));
     }
+    const goalState = getGoalState(update);
+    if (goalState) {
+      setConnection((current) => ({ ...current, goalState }));
+    }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
       // An available_commands_update is the daemon's authoritative snapshot of
@@ -296,6 +301,69 @@ export function updateConnectionFromDaemonEvent(
     default:
       break;
   }
+}
+
+function getGoalState(
+  update: Record<string, unknown> | undefined,
+): GoalSnapshotV2 | undefined {
+  const raw = getRecord(getRecord(update?.['_meta'])?.['goalState']);
+  if (getNumber(raw, 'v') !== 2) return undefined;
+  const activity = getString(raw, 'activity');
+  if (
+    activity !== 'idle' &&
+    activity !== 'running' &&
+    activity !== 'verifying'
+  ) {
+    return undefined;
+  }
+  if (raw?.['goal'] === null) {
+    return { v: 2, goal: null, activity };
+  }
+  const source = getRecord(raw?.['goal']);
+  const goalId = getString(source, 'goalId');
+  const revision = getNumber(source, 'revision');
+  const objective = getString(source, 'objective');
+  const status = getString(source, 'status');
+  const evidenceCursor = getRecord(source?.['evidenceCursor']);
+  const recordId = evidenceCursor?.['recordId'];
+  const turnCount = getNumber(source, 'turnCount');
+  const activeTimeMs = getNumber(source, 'activeTimeMs');
+  const createdAt = getNumber(source, 'createdAt');
+  const updatedAt = getNumber(source, 'updatedAt');
+  if (
+    !goalId ||
+    revision === undefined ||
+    !objective ||
+    (status !== 'active' &&
+      status !== 'paused' &&
+      status !== 'blocked' &&
+      status !== 'usage_limited' &&
+      status !== 'complete') ||
+    (recordId !== null && typeof recordId !== 'string') ||
+    turnCount === undefined ||
+    activeTimeMs === undefined ||
+    createdAt === undefined ||
+    updatedAt === undefined
+  ) {
+    return undefined;
+  }
+  const lastReason = getString(source, 'lastReason');
+  return {
+    v: 2,
+    activity,
+    goal: {
+      goalId,
+      revision,
+      objective,
+      status,
+      evidenceCursor: { recordId },
+      turnCount,
+      activeTimeMs,
+      createdAt,
+      updatedAt,
+      ...(lastReason ? { lastReason } : {}),
+    },
+  };
 }
 
 export function getSessionDisplayName(

@@ -44,6 +44,11 @@ import {
   SessionWriterUnavailableError,
   type SessionWriterLease,
 } from './session-writer-lease.js';
+import type {
+  GoalStateRecordPayloadV2,
+  GoalTurnPermit,
+  TranscriptCursor,
+} from '../goals/goal-protocol.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -232,6 +237,32 @@ function autoTitleDisabledByEnv(): boolean {
  * - Tree reconstruction by following parentUuid chain
  * - Future conversation branching by forking from any historical record
  */
+export type ChatRecordProvenance =
+  | 'real_user'
+  | 'assistant_output'
+  | 'tool_result'
+  | 'goal_control'
+  | 'goal_runtime'
+  | 'system';
+
+export type RecordToolResultOptions =
+  | {
+      goalContext?: GoalTurnPermit;
+      provenance?: 'tool_result';
+    }
+  | {
+      goalContext: GoalTurnPermit;
+      provenance: 'goal_runtime';
+    };
+
+function copyGoalContext(goalContext: GoalTurnPermit): GoalTurnPermit {
+  return {
+    goalId: goalContext.goalId,
+    revision: goalContext.revision,
+    turnId: goalContext.turnId,
+  };
+}
+
 export interface ChatRecord {
   /** Unique identifier for this logical message */
   uuid: string;
@@ -266,7 +297,13 @@ export interface ChatRecord {
     | 'file_history_snapshot'
     | 'user_text_elements'
     | 'session_artifact_event'
-    | 'session_artifact_snapshot';
+    | 'session_artifact_snapshot'
+    | 'goal_state'
+    | 'goal_runtime';
+  /** Explicit source classification used by Goal evidence validation. */
+  provenance?: ChatRecordProvenance;
+  /** Goal identity and logical turn that owned this model-facing record. */
+  goalContext?: GoalTurnPermit;
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -318,7 +355,8 @@ export interface ChatRecord {
     | FileHistorySnapshotRecordPayload
     | UserTextElementsRecordPayload
     | SessionArtifactEventRecordPayload
-    | SessionArtifactSnapshotRecordPayload;
+    | SessionArtifactSnapshotRecordPayload
+    | GoalStateRecordPayloadV2;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -535,6 +573,8 @@ export type ChatRecordingFailureListener = (
 export class ChatRecordingService {
   /** UUID of the active logical tail, including records queued for writing. */
   private lastRecordUuid: string | null = null;
+  /** UUID of the last active-tail record confirmed written to disk. */
+  private lastPersistedRecordUuid: string | null = null;
   private readonly config: Config;
   /**
    * Tracks the `lastRecordUuid` value just before each user turn was recorded.
@@ -660,6 +700,7 @@ export class ChatRecordingService {
         resumed ? this.readPersistedTitleInfo() : undefined,
       );
     }
+    this.lastPersistedRecordUuid = this.lastRecordUuid;
   }
 
   private readPersistedTitleInfo():
@@ -808,6 +849,14 @@ export class ChatRecordingService {
       sessionId: this.getSessionId(),
       timestamp: new Date().toISOString(),
       type,
+      provenance:
+        type === 'user'
+          ? 'real_user'
+          : type === 'assistant'
+            ? 'assistant_output'
+            : type === 'tool_result'
+              ? 'tool_result'
+              : 'system',
       cwd,
       version: this.config.getCliVersion() || 'unknown',
       gitBranch: this.getCachedGitBranch(cwd),
@@ -842,6 +891,7 @@ export class ChatRecordingService {
     if (!this.writeFailure) {
       this.writeFailure = failure;
       debugLogger.error('Chat recording failure:', this.writeFailure);
+      this.lastRecordUuid = this.lastPersistedRecordUuid;
       try {
         const notification = this.onWriteFailure?.({
           sessionId,
@@ -865,6 +915,7 @@ export class ChatRecordingService {
   private enqueueRecordWrite(
     record: ChatRecord,
     legacyConversationFile?: string,
+    updateActiveTail = true,
   ): Promise<void> {
     const pendingWrite = this.operationTail.then(async () => {
       if (this.writeFailure) throw this.writeFailure;
@@ -876,6 +927,9 @@ export class ChatRecordingService {
           await jsonl.writeLine(legacyConversationFile, record);
         } else {
           throw new SessionWriterUnavailableError();
+        }
+        if (updateActiveTail) {
+          this.lastPersistedRecordUuid = record.uuid;
         }
       } catch (error) {
         throw this.enterWriteFailure(error, record.sessionId);
@@ -901,10 +955,11 @@ export class ChatRecordingService {
     const legacyConversationFile = this.writerLeaseRequired
       ? undefined
       : this.ensureConversationFile();
-    if (options?.updateActiveTail !== false) {
+    const updateActiveTail = options?.updateActiveTail !== false;
+    if (updateActiveTail) {
       this.lastRecordUuid = record.uuid;
     }
-    this.enqueueRecordWrite(record, legacyConversationFile);
+    this.enqueueRecordWrite(record, legacyConversationFile, updateActiveTail);
     this.updateTitleAnchorTracking(record);
   }
 
@@ -915,7 +970,6 @@ export class ChatRecordingService {
     if (this.writeFailure) throw this.writeFailure;
     if (this.state !== 'active') throw new SessionWriterUnavailableError();
 
-    const previousLastRecordUuid = this.lastRecordUuid;
     const updateActiveTail = options?.updateActiveTail !== false;
     const legacyConversationFile = this.writerLeaseRequired
       ? undefined
@@ -926,20 +980,14 @@ export class ChatRecordingService {
     const pendingWrite = this.enqueueRecordWrite(
       record,
       legacyConversationFile,
+      updateActiveTail,
     );
     // Keep anchor accounting in logical queue order, matching appendRecord.
     // Once accepted, a failed write permanently stops this recorder, so no
     // rollback of this bookkeeping is needed on rejection.
     this.updateTitleAnchorTracking(record);
 
-    try {
-      await pendingWrite;
-    } catch (error) {
-      if (updateActiveTail && this.lastRecordUuid === record.uuid) {
-        this.lastRecordUuid = previousLastRecordUuid;
-      }
-      throw error;
-    }
+    await pendingWrite;
   }
 
   /**
@@ -1116,6 +1164,43 @@ export class ChatRecordingService {
     return this.binding !== undefined;
   }
 
+  async readActiveTranscriptChain(): Promise<readonly ChatRecord[]> {
+    await this.flush();
+    const sessionId = this.getSessionId();
+    const session = await this.config
+      .getSessionService()
+      .loadSession(sessionId);
+    if (!session) {
+      throw new Error(
+        `Unable to load active transcript for session ${sessionId}`,
+      );
+    }
+    return session.conversation.messages;
+  }
+
+  getTranscriptCursor(): TranscriptCursor {
+    return { recordId: this.lastRecordUuid };
+  }
+
+  async recordGoalState(
+    recordUuid: string,
+    payload: GoalStateRecordPayloadV2,
+  ): Promise<ChatRecord> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      uuid: recordUuid,
+      type: 'system',
+      subtype: 'goal_state',
+      provenance: 'goal_control',
+      systemPayload: {
+        ...payload,
+        snapshot: { ...payload.snapshot, activity: 'idle' },
+      },
+    };
+    await this.appendRecordStrict(record);
+    return record;
+  }
+
   /**
    * Clears cached filesystem paths after Config swaps to a new working
    * directory. The recorder keeps session state, but future appends must
@@ -1135,16 +1220,39 @@ export class ChatRecordingService {
    *
    * @param message The raw PartListUnion object as used with the API
    */
-  recordUserMessage(message: PartListUnion): void {
+  recordUserMessage(
+    message: PartListUnion,
+    goalContext?: GoalTurnPermit,
+  ): void {
     try {
       this.turnParentUuids.push(this.lastRecordUuid);
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
+        ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
       };
       this.appendRecord(record);
     } catch (error) {
       debugLogger.error('Error saving user message:', error);
+    }
+  }
+
+  recordGoalRuntimeMessage(
+    message: PartListUnion,
+    goalContext: GoalTurnPermit,
+  ): void {
+    try {
+      this.turnParentUuids.push(this.lastRecordUuid);
+      const record: ChatRecord = {
+        ...this.createBaseRecord('user'),
+        subtype: 'goal_runtime',
+        provenance: 'goal_runtime',
+        goalContext: copyGoalContext(goalContext),
+        message: createUserContent(message),
+      };
+      this.appendRecord(record);
+    } catch (error) {
+      debugLogger.error('Error saving Goal runtime message:', error);
     }
   }
 
@@ -1155,11 +1263,16 @@ export class ChatRecordingService {
    * tool results. Keeping a distinct subtype lets resume reconstruct that shape
    * instead of replaying consecutive user-role entries.
    */
-  recordMidTurnUserMessage(message: PartListUnion, displayText?: string): void {
+  recordMidTurnUserMessage(
+    message: PartListUnion,
+    displayText?: string,
+    goalContext?: GoalTurnPermit,
+  ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         subtype: 'mid_turn_user_message',
+        ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         systemPayload: displayText
           ? ({ displayText } as NotificationRecordPayload)
@@ -1176,8 +1289,12 @@ export class ChatRecordingService {
    * Stored as a user-role message with subtype 'cron' so the UI
    * restores it as a notification item instead of a user turn.
    */
-  recordCronPrompt(message: PartListUnion, displayText?: string): void {
-    this.recordNotificationLike(message, 'cron', displayText);
+  recordCronPrompt(
+    message: PartListUnion,
+    displayText?: string,
+    goalContext?: GoalTurnPermit,
+  ): void {
+    this.recordNotificationLike(message, 'cron', displayText, goalContext);
   }
 
   /**
@@ -1185,19 +1302,31 @@ export class ChatRecordingService {
    * Stored as a user-role message with subtype 'notification' so the
    * UI restores it as an info item, not a user turn.
    */
-  recordNotification(message: PartListUnion, displayText?: string): void {
-    this.recordNotificationLike(message, 'notification', displayText);
+  recordNotification(
+    message: PartListUnion,
+    displayText?: string,
+    goalContext?: GoalTurnPermit,
+  ): void {
+    this.recordNotificationLike(
+      message,
+      'notification',
+      displayText,
+      goalContext,
+    );
   }
 
   private recordNotificationLike(
     message: PartListUnion,
     subtype: 'notification' | 'cron',
     displayText?: string,
+    goalContext?: GoalTurnPermit,
   ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('user'),
         subtype,
+        provenance: 'system',
+        ...(goalContext ? { goalContext: copyGoalContext(goalContext) } : {}),
         message: createUserContent(message),
         systemPayload: displayText
           ? ({ displayText } as NotificationRecordPayload)
@@ -1224,11 +1353,15 @@ export class ChatRecordingService {
     message?: PartListUnion;
     tokens?: GenerateContentResponseUsageMetadata;
     contextWindowSize?: number;
+    goalContext?: GoalTurnPermit;
   }): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('assistant'),
         model: data.model,
+        ...(data.goalContext
+          ? { goalContext: copyGoalContext(data.goalContext) }
+          : {}),
       };
 
       if (data.message !== undefined) {
@@ -1359,10 +1492,15 @@ export class ChatRecordingService {
   recordToolResult(
     message: PartListUnion,
     toolCallResult?: Partial<ToolCallResponseInfo> & { status: Status },
+    options?: RecordToolResultOptions,
   ): void {
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('tool_result'),
+        ...(options?.goalContext
+          ? { goalContext: copyGoalContext(options.goalContext) }
+          : {}),
+        ...(options?.provenance ? { provenance: options.provenance } : {}),
         message: createUserContent(message),
       };
 
@@ -1529,6 +1667,7 @@ export class ChatRecordingService {
     // Ensure lastRecordUuid points to the end of the reconstructed chain.
     if (messages.length > 0) {
       this.lastRecordUuid = messages[messages.length - 1].uuid;
+      this.lastPersistedRecordUuid = this.lastRecordUuid;
     }
   }
 

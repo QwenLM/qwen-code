@@ -13,6 +13,7 @@ import {
   goalArgOf,
   isGoalClearCommand,
   isGoalClearKeyword,
+  parseWebShellGoalCommand,
 } from './goalCondition';
 
 describe('goalArgOf', () => {
@@ -38,6 +39,36 @@ describe('goalArgOf', () => {
   });
 });
 
+describe('parseWebShellGoalCommand', () => {
+  it('parses every Goal v3 control operation', () => {
+    expect(parseWebShellGoalCommand('/goal')).toEqual({ kind: 'status' });
+    expect(parseWebShellGoalCommand('/goal set ship it')).toEqual({
+      kind: 'set',
+      objective: 'ship it',
+    });
+    expect(parseWebShellGoalCommand('/goal edit ship it safely')).toEqual({
+      kind: 'edit',
+      objective: 'ship it safely',
+    });
+    expect(parseWebShellGoalCommand('/goal pause')).toEqual({ kind: 'pause' });
+    expect(parseWebShellGoalCommand('/goal resume')).toEqual({
+      kind: 'resume',
+    });
+    expect(parseWebShellGoalCommand('/goal clear')).toEqual({ kind: 'clear' });
+  });
+
+  it('keeps multi-word commands as objectives and rejects missing objectives', () => {
+    expect(parseWebShellGoalCommand('/goal pause after release')).toEqual({
+      kind: 'set',
+      objective: 'pause after release',
+    });
+    expect(parseWebShellGoalCommand('/goal edit')).toEqual({
+      kind: 'error',
+      message: '/goal edit requires an objective.',
+    });
+  });
+});
+
 describe('isGoalClearKeyword', () => {
   it.each([...GOAL_CLEAR_KEYWORDS])('treats %s as a clear keyword', (word) => {
     expect(isGoalClearKeyword(word)).toBe(true);
@@ -45,7 +76,14 @@ describe('isGoalClearKeyword', () => {
 
   it('ignores surrounding whitespace and case', () => {
     expect(isGoalClearKeyword('  Clear ')).toBe(true);
-    expect(isGoalClearKeyword('CANCEL')).toBe(true);
+  });
+
+  it('keeps former aliases available as objectives', () => {
+    expect(isGoalClearKeyword('stop')).toBe(false);
+    expect(isGoalClearKeyword('off')).toBe(false);
+    expect(isGoalClearKeyword('reset')).toBe(false);
+    expect(isGoalClearKeyword('none')).toBe(false);
+    expect(isGoalClearKeyword('cancel')).toBe(false);
   });
 
   it('does not match a real condition that merely contains a keyword', () => {
@@ -61,7 +99,7 @@ describe('isGoalClearKeyword', () => {
 describe('isGoalClearCommand', () => {
   it('matches /goal <clear-keyword> in any case', () => {
     expect(isGoalClearCommand('/goal clear')).toBe(true);
-    expect(isGoalClearCommand('/goal  STOP ')).toBe(true);
+    expect(isGoalClearCommand('/goal  CLEAR ')).toBe(true);
   });
 
   it('does not match a bare /goal', () => {
@@ -100,18 +138,9 @@ describe('the CLI is the authority on the clear keywords', () => {
 
   it('agrees with goalCommand.ts on the clear keywords', () => {
     const source = read('packages/cli/src/ui/commands/goalCommand.ts');
-    const literal = /const CLEAR_KEYWORDS = new Set\(\[([^\]]*)\]\)/.exec(
-      source,
+    expect(source).toContain(
+      "if (keyword === 'clear') return { kind: 'clear' }",
     );
-    expect(
-      literal,
-      'CLEAR_KEYWORDS literal not found in goalCommand.ts',
-    ).not.toBeNull();
-    const cliKeywords = [...literal![1].matchAll(/'([^']+)'/g)].map(
-      (m) => m[1],
-    );
-
-    expect(cliKeywords.length).toBeGreaterThan(0);
-    expect([...cliKeywords].sort()).toEqual([...GOAL_CLEAR_KEYWORDS].sort());
+    expect([...GOAL_CLEAR_KEYWORDS]).toEqual(['clear']);
   });
 });

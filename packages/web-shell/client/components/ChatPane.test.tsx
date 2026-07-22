@@ -36,6 +36,12 @@ const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const getGoal = vi.fn(async () => ({
+  snapshot: { v: 2, goal: null, activity: 'idle' },
+}));
+const controlGoal = vi.fn(async () => ({
+  snapshot: { v: 2, goal: null, activity: 'idle' },
+}));
 const daemonActions = {
   sendPrompt,
   submitPermission,
@@ -43,6 +49,8 @@ const daemonActions = {
   setApprovalMode,
   setModel,
   loadArtifacts,
+  getGoal,
+  controlGoal,
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -135,7 +143,7 @@ vi.mock('./ChatEditor', () => ({
       insertText,
     }));
     return (
-      <div>
+      <div data-web-shell-composer>
         <button
           data-testid="pane-submit"
           onClick={() => props.onSubmit('hello there')}
@@ -188,7 +196,9 @@ vi.mock('./ChatEditor', () => ({
 }));
 vi.mock('./QueuedPromptDisplay', () => ({
   QueuedPromptDisplay: (props: any) => (
-    <div data-testid="pane-queue">{String(props.prompts.length)}</div>
+    <div data-testid="pane-queue" data-web-shell-queued-prompts>
+      {String(props.prompts.length)}
+    </div>
   ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
@@ -240,6 +250,14 @@ beforeEach(() => {
   sendPrompt.mockReset();
   loadArtifacts.mockReset();
   loadArtifacts.mockResolvedValue({ artifacts: [] });
+  getGoal.mockReset();
+  getGoal.mockResolvedValue({
+    snapshot: { v: 2, goal: null, activity: 'idle' },
+  });
+  controlGoal.mockReset();
+  controlGoal.mockResolvedValue({
+    snapshot: { v: 2, goal: null, activity: 'idle' },
+  });
   sendPrompt.mockImplementation(async (_text: string, options?: any) => {
     sendPromptAdmit = options?.onAdmitted;
     return {} as any;
@@ -437,6 +455,182 @@ describe('ChatPane', () => {
     });
   });
 
+  it('opens the shared Goals page for a bare /goal', () => {
+    const onOpenGoals = vi.fn();
+    render({ onOpenGoals });
+
+    act(() => {
+      latestOnSubmit!('/goal');
+    });
+
+    expect(onOpenGoals).toHaveBeenCalledWith({
+      sessionId: 'sess-1',
+      snapshot: undefined,
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(controlGoal).not.toHaveBeenCalled();
+  });
+
+  it('creates a Goal through v2 control without sending a pane prompt', async () => {
+    render();
+
+    await act(async () => {
+      latestOnSubmit!('/goal set ship it');
+      await Promise.resolve();
+    });
+
+    expect(controlGoal).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('treats clear as an idempotent no-op when the pane has no Goal', async () => {
+    connectionState.goalState = { v: 2, goal: null, activity: 'idle' };
+    const onError = vi.fn();
+    render({ onError });
+
+    await act(async () => {
+      latestOnSubmit!('/goal clear');
+      await Promise.resolve();
+    });
+
+    expect(controlGoal).not.toHaveBeenCalled();
+    expect(onError).not.toHaveBeenCalled();
+  });
+
+  it('renders and pauses the pane Goal with its exact version', async () => {
+    connectionState.goalState = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 6,
+        objective: 'ship split view',
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 2,
+        activeTimeMs: 1_000,
+        createdAt: Date.now() - 2_000,
+        updatedAt: Date.now() - 1_000,
+      },
+    };
+    render();
+
+    expect(testid('goal-status-strip')).not.toBeNull();
+    await act(async () => {
+      container
+        ?.querySelector<HTMLButtonElement>('[aria-label="Pause goal"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(controlGoal).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 6,
+    });
+  });
+
+  it('groups queued prompts and the Goal in one full-width composer status stack', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
+    connectionState.goalState = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 6,
+        objective: 'ship split view',
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 2,
+        activeTimeMs: 1_000,
+        createdAt: Date.now() - 2_000,
+        updatedAt: Date.now() - 1_000,
+      },
+    };
+
+    render();
+
+    const stack = testid('composer-status-stack');
+    expect(stack).not.toBeNull();
+    expect(
+      stack?.querySelector('[data-web-shell-queued-prompts]'),
+    ).not.toBeNull();
+    expect(stack?.querySelector('[data-web-shell-goal-status]')).not.toBeNull();
+    expect(
+      stack?.nextElementSibling?.hasAttribute('data-web-shell-composer'),
+    ).toBe(true);
+  });
+
+  it('clears the pane Goal without confirmation', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    connectionState.goalState = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 6,
+        objective: 'ship split view',
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 2,
+        activeTimeMs: 1_000,
+        createdAt: Date.now() - 2_000,
+        updatedAt: Date.now() - 1_000,
+      },
+    };
+    render();
+
+    await act(async () => {
+      container
+        ?.querySelector<HTMLButtonElement>('[aria-label="Clear goal"]')
+        ?.click();
+      await Promise.resolve();
+    });
+
+    expect(confirm).not.toHaveBeenCalled();
+    expect(controlGoal).toHaveBeenCalledWith({
+      action: 'clear',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 6,
+    });
+  });
+
+  it('refreshes the pane Goal after an OCC control error', async () => {
+    connectionState.goalState = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 6,
+        objective: 'ship split view',
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 2,
+        activeTimeMs: 1_000,
+        createdAt: Date.now() - 2_000,
+        updatedAt: Date.now() - 1_000,
+      },
+    };
+    const conflict = new Error('revision conflict');
+    controlGoal.mockRejectedValueOnce(conflict);
+    const onError = vi.fn();
+    render({ onError });
+
+    await act(async () => {
+      container
+        ?.querySelector<HTMLButtonElement>('[aria-label="Pause goal"]')
+        ?.click();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(getGoal).toHaveBeenCalledOnce();
+    expect(onError).toHaveBeenCalledWith(conflict, 'Failed to pause the goal');
+  });
+
   it('lets the host handle a slash command while the pane is disconnected', () => {
     connectionState.status = 'disconnected';
     const onSlashCommand = vi.fn(() => true);
@@ -543,6 +737,32 @@ describe('ChatPane', () => {
     });
     expect(returned).toBe(true);
     expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('keeps a prompt queued between turns while an active Goal owns the pane', () => {
+    connectionState.goalState = {
+      v: 2,
+      activity: 'idle',
+      goal: {
+        goalId: 'goal-1',
+        revision: 6,
+        objective: 'keep going',
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 2,
+        activeTimeMs: 1_000,
+        createdAt: Date.now() - 2_000,
+        updatedAt: Date.now() - 1_000,
+      },
+    };
+    render();
+
+    act(() => {
+      latestOnSubmit!('wait between turns');
+    });
+
+    expect(enqueuePrompt).toHaveBeenCalledWith('wait between turns', undefined);
     expect(sendPrompt).not.toHaveBeenCalled();
   });
 

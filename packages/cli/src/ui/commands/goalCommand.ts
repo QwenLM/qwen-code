@@ -4,223 +4,128 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {
+  GoalControlRequest,
+  GoalStateResponse,
+} from '@qwen-code/qwen-code-core';
 import {
   CommandKind,
   type CommandContext,
+  type GoalCommandOperation,
+  type GoalControlActionReturn,
   type MessageActionReturn,
   type SlashCommand,
   type SlashCommandActionReturn,
-  type SubmitPromptActionReturn,
 } from './types.js';
-import {
-  getActiveGoal,
-  getLastGoalTerminal,
-  registerGoalHook,
-  unregisterGoalHook,
-  type GoalTerminalEvent,
-} from '@qwen-code/qwen-code-core';
-import { MessageType, type HistoryItemGoalStatus } from '../types.js';
-import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
-import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
-// Mirrored by GOAL_CLEAR_KEYWORDS in
-// packages/web-shell/client/utils/goalCondition.ts, whose test reads this
-// literal and fails on drift. The Web Shell client bundles for the browser and
-// cannot import from core, so this is duplicated rather than shared.
-const CLEAR_KEYWORDS = new Set([
-  'clear',
-  'stop',
-  'off',
-  'reset',
-  'none',
-  'cancel',
-]);
+export type ParsedGoalCommand =
+  | GoalCommandOperation
+  | { kind: 'error'; message: string };
 
-// Keep the surrounding `"…"` quote structure intact: collapse newlines so the
-// condition stays on one line, and downgrade embedded double-quotes to single
-// quotes so they don't visually close the wrapping quote.
-function sanitizeConditionForPrompt(condition: string): string {
-  return condition.replace(/[\r\n]+/g, ' ').replace(/"/g, "'");
-}
-
-const goalInstructionPrompt = (condition: string): string =>
-  `A session-scoped Stop hook is now active with condition: "${sanitizeConditionForPrompt(condition)}". ` +
-  `Briefly acknowledge the goal, then immediately start (or continue) working ` +
-  `toward it — treat the condition itself as your directive and do not pause to ` +
-  `ask the user what to do. The hook will block stopping until the condition ` +
-  `holds. It auto-clears once the condition is met — do not tell the user to ` +
-  `run \`/goal clear\` after success; that's only for clearing a goal early.`;
-
-const formatTurns = (n: number) => `${n} ${n === 1 ? 'turn' : 'turns'}`;
-
-function assertNeverGoalKind(kind: never): never {
-  throw new Error(`Unexpected terminal goal kind: ${kind}`);
-}
-
-function terminalGoalTitle(kind: GoalTerminalEvent['kind']): string {
-  switch (kind) {
-    case 'achieved':
-      return 'Goal achieved';
-    case 'failed':
-      return 'Goal could not be achieved';
-    case 'aborted':
-      return 'Goal aborted';
-    default:
-      return assertNeverGoalKind(kind);
+export function parseGoalCommand(args: string): ParsedGoalCommand {
+  let input = args.trim();
+  if (/^\/goal(?:\s|$)/i.test(input)) {
+    input = input.slice('/goal'.length).trim();
   }
-}
+  if (!input) return { kind: 'status' };
 
-function formatTerminalSummary(event: GoalTerminalEvent): string {
-  // Mirrors GoalStatusMessage: empty-`/goal` after completion surfaces the
-  // most recent terminal event, including the judge's `lastReason` (when
-  // present) so this view matches the inline terminal
-  // history card.
-  const title = terminalGoalTitle(event.kind);
-  const stats: string[] = [];
-  if (event.iterations > 0) stats.push(formatTurns(event.iterations));
-  if (typeof event.durationMs === 'number')
-    stats.push(formatDuration(event.durationMs, { hideTrailingZeros: true }));
-  const subtitle = stats.length > 0 ? ` · ${stats.join(' · ')}` : '';
-  const reason = event.lastReason?.trim();
-  const reasonLine = reason ? `\nLast check: ${reason}` : '';
-  return `${title}${subtitle}\nGoal: ${event.condition}${reasonLine}`;
-}
+  const [head = '', ...tail] = input.split(/\s+/);
+  const keyword = head.toLowerCase();
+  const objective = tail.join(' ').trim();
 
-function infoMessage(content: string): MessageActionReturn {
-  return { type: 'message', messageType: 'info', content };
+  if (keyword === 'set') {
+    return objective
+      ? { kind: 'set', objective }
+      : { kind: 'error', message: '`/goal set` requires an objective.' };
+  }
+  if (keyword === 'edit') {
+    return objective
+      ? { kind: 'edit', objective }
+      : { kind: 'error', message: '`/goal edit` requires an objective.' };
+  }
+  if (tail.length === 0) {
+    if (keyword === 'pause') return { kind: 'pause' };
+    if (keyword === 'resume') return { kind: 'resume' };
+    if (keyword === 'clear') return { kind: 'clear' };
+  }
+  return { kind: 'set', objective: input };
 }
 
 function errorMessage(content: string): MessageActionReturn {
   return { type: 'message', messageType: 'error', content };
 }
 
+function goalControl(
+  operation: GoalCommandOperation,
+  response: GoalStateResponse,
+): GoalControlActionReturn {
+  return { type: 'goal_control', operation, response };
+}
+
 export const goalCommand: SlashCommand = {
   name: 'goal',
   get description() {
-    return t('Set a goal — keep working until the condition is met');
+    return t('Set or control a session goal');
   },
-  argumentHint: '[<condition> | clear]',
+  argumentHint:
+    '[<objective> | set <objective> | edit <objective> | pause | resume | clear]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   action: async (
     context: CommandContext,
     args: string,
-  ): Promise<SlashCommandActionReturn | void> => {
+  ): Promise<SlashCommandActionReturn> => {
     const { config } = context.services;
-    if (!config) {
-      return errorMessage('Configuration is not available.');
-    }
-    const sessionId = config.getSessionId();
-    const q = args.trim();
+    if (!config) return errorMessage('Configuration is not available.');
 
-    // ── Branch 1: empty arg → show current status ─────────────────────────
-    if (q === '') {
-      const active = getActiveGoal(sessionId);
-      if (active) {
-        const turns =
-          active.iterations === 0
-            ? 'not yet evaluated'
-            : formatTurns(active.iterations);
-        const lastReason = active.lastReason
-          ? `\nLast check: ${active.lastReason}`
-          : '';
-        return infoMessage(
-          `Goal active: ${active.condition} (${turns})${lastReason}`,
-        );
-      }
-      // No active goal — surface a summary of the most recent automatic
-      // terminal goal for this session. User-initiated `/goal clear` does not
-      // populate it.
-      const last = getLastGoalTerminal(sessionId);
-      if (last) {
-        return infoMessage(formatTerminalSummary(last));
-      }
-      return infoMessage(
-        'No goal set. Usage: `/goal <condition>` (or `/goal clear`).',
-      );
-    }
+    const operation = parseGoalCommand(args);
+    if (operation.kind === 'error') return errorMessage(operation.message);
 
-    // ── Branch 2: clear keyword ──────────────────────────────────────────
-    //
-    // When an active goal exists, drop the Stop hook and emit a `cleared`
-    // history sentinel. When no active goal exists, this is a no-op that just
-    // returns "No goal set." The cached terminal summary is left intact so a
-    // later empty `/goal` can still show the latest automatic terminal state.
-    if (CLEAR_KEYWORDS.has(q.toLowerCase())) {
-      const cleared = unregisterGoalHook(config, sessionId);
-      if (!cleared) {
-        return infoMessage('No goal set.');
-      }
-      const clearedItem: Omit<HistoryItemGoalStatus, 'id'> = {
-        type: MessageType.GOAL_STATUS,
-        kind: 'cleared',
-        condition: cleared.condition,
-        iterations: cleared.iterations,
-        durationMs: Date.now() - cleared.setAt,
-      };
-      context.ui.addItem(clearedItem, Date.now());
-      if (context.executionMode !== 'interactive') {
-        return infoMessage(`Goal cleared: ${cleared.condition}`);
-      }
-      return;
-    }
-
-    // ── Branch 3: gates ──────────────────────────────────────────────────
-    if (!config.isTrustedFolder()) {
-      return errorMessage(
-        '/goal is only available in trusted workspaces. Trust this folder via `/trust` and try again.',
-      );
-    }
-    if (config.getDisableAllHooks()) {
-      return errorMessage(
-        '/goal is disabled because hooks are turned off in this session (`disableAllHooks` or bare mode).',
-      );
-    }
-    if (!config.getHookSystem()) {
-      return errorMessage(
-        'Hook system is not initialized; cannot set a /goal in this session.',
-      );
-    }
-
-    // ── Branch 4: register hook + emit set card + kick off first turn ────
-    let registered;
     try {
-      registered = registerGoalHook({
-        config,
-        sessionId,
-        condition: q,
-        tokensAtStart: 0,
-      });
-    } catch (err) {
+      const runtime = await config.getGoalRuntimeReady();
+      const snapshot = runtime.getSnapshot();
+      if (operation.kind === 'status') {
+        return goalControl(operation, { snapshot });
+      }
+
+      const current = snapshot.goal;
+      if (operation.kind === 'set') {
+        const request: GoalControlRequest = current
+          ? {
+              action: 'replace',
+              objective: operation.objective,
+              expectedGoalId: current.goalId,
+              expectedRevision: current.revision,
+            }
+          : { action: 'create', objective: operation.objective };
+        return goalControl(operation, await runtime.dispatch(request));
+      }
+
+      if (!current) {
+        if (operation.kind === 'clear') {
+          return goalControl(operation, { snapshot });
+        }
+        return errorMessage(`Cannot ${operation.kind}: no Goal is active.`);
+      }
+
+      const version = {
+        expectedGoalId: current.goalId,
+        expectedRevision: current.revision,
+      };
+      const request: GoalControlRequest =
+        operation.kind === 'edit'
+          ? {
+              action: 'edit',
+              objective: operation.objective,
+              ...version,
+            }
+          : { action: operation.kind, ...version };
+      return goalControl(operation, await runtime.dispatch(request));
+    } catch (error) {
       return errorMessage(
-        `Failed to set goal: ${err instanceof Error ? err.message : String(err)}`,
+        error instanceof Error ? error.message : String(error),
       );
     }
-
-    const setItem: Omit<HistoryItemGoalStatus, 'id'> = {
-      type: MessageType.GOAL_STATUS,
-      kind: 'set',
-      condition: registered.condition,
-      setAt: registered.setAt,
-    };
-    context.ui.addItem(setItem, Date.now());
-
-    // Bridge core-side hook outcomes back into CLI history. The addItem ref
-    // is stable across turns (useCallback in useHistoryManager), so capturing
-    // it here is safe even though the observer fires from a later turn's
-    // Stop hook callback. The core side clears the observer on terminal /
-    // unregister so we don't accumulate stale closures across goals.
-    installGoalTerminalObserver({
-      sessionId,
-      config,
-      addItem: context.ui.addItem,
-    });
-
-    const result: SubmitPromptActionReturn = {
-      type: 'submit_prompt',
-      content: [{ text: goalInstructionPrompt(q) }],
-    };
-    return result;
   },
 };

@@ -12,6 +12,7 @@ export type GoalStatusKind =
   | 'cleared'
   | 'failed'
   | 'aborted'
+  | 'paused'
   | 'checking';
 
 export interface SerializedGoalStatusMessage {
@@ -38,6 +39,7 @@ const VALID_GOAL_KINDS = new Set<string>([
   'cleared',
   'failed',
   'aborted',
+  'paused',
   'checking',
 ]);
 
@@ -125,6 +127,11 @@ function getTitle(
     case 'aborted':
       return {
         title: t('goal.aborted'),
+        colorClass: styles.warning,
+      };
+    case 'paused':
+      return {
+        title: t('goal.status.paused'),
         colorClass: styles.warning,
       };
   }

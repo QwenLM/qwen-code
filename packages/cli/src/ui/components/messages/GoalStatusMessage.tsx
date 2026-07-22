@@ -6,17 +6,34 @@
 
 import React from 'react';
 import { Box, Text } from 'ink';
+import type { GoalSnapshotV2, GoalStateCause } from '@qwen-code/qwen-code-core';
 import { theme } from '../../semantic-colors.js';
 import { formatDuration } from '../../utils/formatters.js';
 import { isTerminalGoalStatusKind, type GoalStatusKind } from '../../types.js';
 
-interface GoalStatusMessageProps {
+interface LegacyGoalStatusMessageProps {
   kind: GoalStatusKind;
   condition: string;
   iterations?: number;
   durationMs?: number;
   lastReason?: string;
+  snapshot?: never;
+  cause?: never;
 }
+
+interface GoalStateMessageProps {
+  snapshot: GoalSnapshotV2;
+  cause?: GoalStateCause;
+  kind?: never;
+  condition?: never;
+  iterations?: never;
+  durationMs?: never;
+  lastReason?: never;
+}
+
+type GoalStatusMessageProps =
+  | LegacyGoalStatusMessageProps
+  | GoalStateMessageProps;
 
 const pluralTurns = (n: number) => (n === 1 ? 'turn' : 'turns');
 
@@ -24,13 +41,116 @@ function assertNeverGoalStatusKind(kind: never): never {
   throw new Error(`Unexpected goal status kind: ${kind}`);
 }
 
-const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
-  kind,
-  condition,
-  iterations,
-  durationMs,
-  lastReason,
+const GoalStateCard: React.FC<GoalStateMessageProps> = ({
+  snapshot,
+  cause,
 }) => {
+  const goal = snapshot.goal;
+  if (!goal) {
+    if (cause !== 'clear') return null;
+    return (
+      <Box flexDirection="row">
+        <Box width={2} flexShrink={0}>
+          <Text color={theme.text.secondary}>○</Text>
+        </Box>
+        <Text color={theme.text.secondary}>Goal cleared</Text>
+      </Box>
+    );
+  }
+
+  const lifecycle = (() => {
+    switch (goal.status) {
+      case 'active':
+        if (snapshot.activity === 'verifying') {
+          return {
+            prefix: '○',
+            color: theme.text.secondary,
+            title: 'Goal checking',
+          };
+        }
+        return {
+          prefix: '◎',
+          color: theme.text.accent,
+          title:
+            snapshot.activity === 'running' ? 'Goal running' : 'Goal active',
+        };
+      case 'paused':
+        return {
+          prefix: '!',
+          color: theme.status.warning,
+          title: 'Goal paused',
+        };
+      case 'blocked':
+        return {
+          prefix: '✖',
+          color: theme.status.error,
+          title: 'Goal blocked',
+        };
+      case 'usage_limited':
+        return {
+          prefix: '!',
+          color: theme.status.warning,
+          title: 'Goal usage limited',
+        };
+      case 'complete':
+        return {
+          prefix: '✓',
+          color: theme.status.success,
+          title: 'Goal complete',
+        };
+      default: {
+        const exhaustive: never = goal.status;
+        void exhaustive;
+        throw new Error('Unexpected Goal status');
+      }
+    }
+  })();
+  const stats: string[] = [];
+  if (goal.turnCount > 0) {
+    stats.push(`${goal.turnCount} ${pluralTurns(goal.turnCount)}`);
+  }
+  if (goal.activeTimeMs > 0) {
+    stats.push(formatDuration(goal.activeTimeMs, { hideTrailingZeros: true }));
+  }
+  const subtitle = stats.length > 0 ? stats.join(' · ') : null;
+  const reason =
+    goal.status !== 'active' || snapshot.activity === 'verifying'
+      ? goal.lastReason?.trim()
+      : undefined;
+
+  return (
+    <Box flexDirection="row">
+      <Box width={2} flexShrink={0}>
+        <Text color={lifecycle.color}>{lifecycle.prefix}</Text>
+      </Box>
+      <Box flexGrow={1} flexDirection="column">
+        <Text color={lifecycle.color}>
+          {lifecycle.title}
+          {subtitle ? (
+            <Text color={theme.text.secondary}> · {subtitle}</Text>
+          ) : null}
+        </Text>
+        <Box flexDirection="row">
+          <Box flexShrink={0} marginRight={1}>
+            <Text color={theme.text.secondary}>Goal:</Text>
+          </Box>
+          <Box flexGrow={1}>
+            <Text wrap="wrap">{goal.objective}</Text>
+          </Box>
+        </Box>
+        {reason ? (
+          <Text color={theme.text.secondary} wrap="wrap">
+            Reason: {reason}
+          </Text>
+        ) : null}
+      </Box>
+    </Box>
+  );
+};
+
+const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = (props) => {
+  if (props.snapshot) return <GoalStateCard {...props} />;
+  const { kind, condition, iterations, durationMs, lastReason } = props;
   // The "checking" kind is the per-iteration "judge said not met, continuing"
   // marker that replaces the generic `stop_hook_loop` rendering for /goal.
   // Show the active condition and latest judge reason on every iteration so
@@ -96,6 +216,12 @@ const GoalStatusMessageInternal: React.FC<GoalStatusMessageProps> = ({
           prefix: '!',
           prefixColor: theme.status.warning,
           title: 'Goal aborted',
+        };
+      case 'paused':
+        return {
+          prefix: '!',
+          prefixColor: theme.status.warning,
+          title: 'Goal paused',
         };
       default:
         return assertNeverGoalStatusKind(kind);

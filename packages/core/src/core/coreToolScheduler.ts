@@ -162,6 +162,7 @@ import {
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
+import { goalTurnContext } from '../goals/goal-turn-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -183,6 +184,15 @@ function dedupeRequestsByCallId(
     deduped.push(request);
   }
   return deduped;
+}
+
+function runInRequestGoalContext<T>(
+  request: ToolCallRequestInfo,
+  callback: () => T,
+): T {
+  return request.goalContext
+    ? goalTurnContext.run(request.goalContext, callback)
+    : goalTurnContext.exit(callback);
 }
 
 // Gap between the persistence gate and per-tool truncation thresholds.
@@ -1554,11 +1564,13 @@ export class CoreToolScheduler {
         return call;
       }
 
-      const invocationOrError = this.buildInvocation(
-        call.tool,
-        args as Record<string, unknown>,
-        targetCallId,
-        call.request.prompt_id,
+      const invocationOrError = runInRequestGoalContext(call.request, () =>
+        this.buildInvocation(
+          call.tool,
+          args as Record<string, unknown>,
+          targetCallId,
+          call.request.prompt_id,
+        ),
       );
       if (invocationOrError instanceof Error) {
         const response = createErrorResponse(
@@ -2182,10 +2194,14 @@ export class CoreToolScheduler {
           }
         }
 
-        const toolInstance = await this.toolRegistry.ensureTool(canonicalName);
+        const toolInstance = await runInRequestGoalContext(reqInfo, () =>
+          this.toolRegistry.ensureTool(canonicalName),
+        );
         if (!toolInstance) {
           // Tool is not in registry and not excluded - likely hallucinated or typo
-          const errorMessage = await this.getToolNotFoundMessage(reqInfo.name);
+          const errorMessage = await runInRequestGoalContext(reqInfo, () =>
+            this.getToolNotFoundMessage(reqInfo.name),
+          );
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -2225,11 +2241,13 @@ export class CoreToolScheduler {
           continue;
         }
 
-        const invocationOrError = this.buildInvocation(
-          toolInstance,
-          reqInfo.args,
-          reqInfo.callId,
-          reqInfo.prompt_id,
+        const invocationOrError = runInRequestGoalContext(reqInfo, () =>
+          this.buildInvocation(
+            toolInstance,
+            reqInfo.args,
+            reqInfo.callId,
+            reqInfo.prompt_id,
+          ),
         );
         if (invocationOrError instanceof Error) {
           const displayError = reqInfo.wasOutputTruncated
@@ -2302,673 +2320,34 @@ export class CoreToolScheduler {
           continue;
         }
 
-        const { request: reqInfo, invocation } = toolCall;
-        const canonicalName = canonicalToolName(reqInfo.name);
+        await runInRequestGoalContext(toolCall.request, async () => {
+          const { request: reqInfo, invocation } = toolCall;
+          const canonicalName = canonicalToolName(reqInfo.name);
 
-        // Open the tool span as soon as the call is validated. This covers
-        // validating → awaiting_approval → executing in one span (#3731
-        // Phase 2). Every cancel/error path below — and the existing
-        // success path in executeSingleToolCall — must call
-        // finalizeToolSpan(callId, ...) to avoid leaking spans.
-        // `tool.name` is set automatically by startToolSpan from the first
-        // arg; only namespaced extras go in attrs. `call_id` (non-namespaced)
-        // is dual-emitted for one release as a backwards-compat shim for
-        // pre-Phase-2 dashboards/alerts that grep the old key — drop after
-        // operators migrate (#4321 review). `tool_name` is dual-emitted on
-        // the same migration window (review-2 DeepSeek Suggestion) so
-        // pre-Phase-2 dashboards filtering on it don't silently stop
-        // matching during the rollout.
-        const toolSpan = startToolSpan(canonicalName, {
-          'tool.call_id': reqInfo.callId,
-          call_id: reqInfo.callId,
-          tool_name: canonicalName,
-        });
-        this.toolSpans.set(reqInfo.callId, toolSpan);
-        batchState.callIds.add(reqInfo.callId);
-        this.callIdToBatch.set(reqInfo.callId, batchState);
-        this.callIdToPostToolBatchSignal.set(reqInfo.callId, signal);
+          // Open the tool span as soon as the call is validated. This covers
+          // validating → awaiting_approval → executing in one span (#3731
+          // Phase 2). Every cancel/error path below — and the existing
+          // success path in executeSingleToolCall — must call
+          // finalizeToolSpan(callId, ...) to avoid leaking spans.
+          // `tool.name` is set automatically by startToolSpan from the first
+          // arg; only namespaced extras go in attrs. `call_id` (non-namespaced)
+          // is dual-emitted for one release as a backwards-compat shim for
+          // pre-Phase-2 dashboards/alerts that grep the old key — drop after
+          // operators migrate (#4321 review). `tool_name` is dual-emitted on
+          // the same migration window (review-2 DeepSeek Suggestion) so
+          // pre-Phase-2 dashboards filtering on it don't silently stop
+          // matching during the rollout.
+          const toolSpan = startToolSpan(canonicalName, {
+            'tool.call_id': reqInfo.callId,
+            call_id: reqInfo.callId,
+            tool_name: canonicalName,
+          });
+          this.toolSpans.set(reqInfo.callId, toolSpan);
+          batchState.callIds.add(reqInfo.callId);
+          this.callIdToBatch.set(reqInfo.callId, batchState);
+          this.callIdToPostToolBatchSignal.set(reqInfo.callId, signal);
 
-        try {
-          if (signal.aborted) {
-            this.setStatusInternal(
-              reqInfo.callId,
-              'cancelled',
-              'Tool call cancelled by user.',
-            );
-            setToolSpanCancelled(toolSpan);
-            this.finalizeToolSpan(reqInfo.callId);
-            continue;
-          }
-
-          // =================================================================
-          // L3→L4→L5 Permission Flow
-          // =================================================================
-
-          // ---- L3→L4: Shared permission flow ----
-          let toolParams = invocation.params as Record<string, unknown>;
-          const flowResult = await evaluatePermissionFlow(
-            this.config,
-            invocation,
-            canonicalName,
-            toolParams,
-          );
-          const {
-            defaultPermission,
-            finalPermission,
-            pmForcedAsk,
-            pmCtx,
-            denyMessage,
-            requiresUserInteraction,
-          } = flowResult;
-
-          // ---- L5: Final decision based on permission + ApprovalMode ----
-          const approvalMode = this.config.getApprovalMode();
-          const isPlanMode = approvalMode === ApprovalMode.PLAN;
-          const isPlanShellCall =
-            isPlanMode &&
-            (canonicalName === ToolNames.SHELL ||
-              canonicalName === ToolNames.MONITOR);
-          const isExitPlanModeTool = canonicalName === ToolNames.EXIT_PLAN_MODE;
-          const isEnterPlanModeTool =
-            canonicalName === ToolNames.ENTER_PLAN_MODE;
-
-          const forceAutoReviewForAllow =
-            approvalMode === ApprovalMode.AUTO &&
-            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-              shouldClassifyAllShellForAutoMode(canonicalName, this.config));
-          const confirmationPermission = getEffectivePermissionForConfirmation(
-            finalPermission,
-            forceAutoReviewForAllow,
-          );
-
-          if (finalPermission === 'allow' && forceAutoReviewForAllow) {
-            debugLogger.info(
-              `Auto mode: L4 allow overridden by protected-write guard for ${canonicalName}`,
-            );
-          }
-
-          if (
-            isPlanRequiredTeammateAwaitingApproval(this.config) &&
-            finalPermission !== 'deny'
-          ) {
-            const isExplicitPreApprovalTool =
-              isPlanRequiredTeammatePreApprovalAllowedTool(
-                canonicalName,
-                toolParams,
-              );
-            const canRunBeforeLeaderApproval =
-              isExplicitPreApprovalTool &&
-              (canonicalName === ToolNames.EXIT_PLAN_MODE ||
-                canonicalName === ToolNames.TASK_UPDATE ||
-                (defaultPermission === 'allow' &&
-                  finalPermission === 'allow' &&
-                  !forceAutoReviewForAllow));
-
-            if (canRunBeforeLeaderApproval) {
-              this.setToolCallOutcome(
-                reqInfo.callId,
-                ToolConfirmationOutcome.ProceedAlways,
-              );
-              this.setStatusInternal(reqInfo.callId, 'scheduled');
-              continue;
-            }
-
-            const message =
-              getPlanRequiredTeammatePreApprovalMessage(canonicalName);
-            this.setStatusInternal(
-              reqInfo.callId,
-              'error',
-              createErrorResponse(
-                reqInfo,
-                new Error(message),
-                ToolErrorType.EXECUTION_DENIED,
-              ),
-            );
-            setToolSpanFailure(
-              toolSpan,
-              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
-              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
-            );
-            this.finalizeToolSpan(reqInfo.callId);
-            continue;
-          }
-
-          if (finalPermission === 'deny') {
-            // Hard deny: security violation or PM explicit deny
-            this.setStatusInternal(
-              reqInfo.callId,
-              'error',
-              createErrorResponse(
-                reqInfo,
-                new Error(denyMessage ?? `Tool "${reqInfo.name}" is denied.`),
-                ToolErrorType.EXECUTION_DENIED,
-              ),
-            );
-            setToolSpanFailure(
-              toolSpan,
-              TOOL_FAILURE_KIND_PERMISSION_DENIED,
-              TOOL_SPAN_STATUS_PERMISSION_DENIED,
-            );
-            this.finalizeToolSpan(reqInfo.callId);
-            continue;
-          }
-
-          let planShellAmbientWorkingDirectory: string | undefined;
-          if (isPlanShellCall) {
-            const directory = toolParams['directory'];
-            planShellAmbientWorkingDirectory =
-              typeof directory === 'string' && directory.length > 0
-                ? undefined
-                : this.config.getTargetDir();
-            invocation.params = {
-              ...structuredClone(invocation.params),
-              directory:
-                typeof directory === 'string' && directory.length > 0
-                  ? directory
-                  : planShellAmbientWorkingDirectory,
-            };
-            toolParams = invocation.params as Record<string, unknown>;
-          }
-
-          const planShellDecision = isPlanShellCall
-            ? await evaluatePlanModeShellPolicy({
-                config: this.config,
-                toolName: canonicalName,
-                requestArgs: reqInfo.args,
-                invocationParams: toolParams,
-                permissionContext: pmCtx,
-                ambientWorkingDirectory: planShellAmbientWorkingDirectory,
-                signal,
-              })
-            : ({ classification: 'not-applicable' } as const);
-          const rejectPlanShell = (message: string) => {
-            this.setStatusInternal(reqInfo.callId, 'error', {
-              ...createErrorResponse(
-                reqInfo,
-                new Error(message),
-                ToolErrorType.EXECUTION_DENIED,
-              ),
-              resultDisplay: message,
-            });
-            setToolSpanFailure(
-              toolSpan,
-              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
-              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
-            );
-            this.finalizeToolSpan(reqInfo.callId);
-          };
-
-          if (planShellDecision.classification !== 'not-applicable') {
-            const initialPlanShellError = await validatePlanModeShellContext({
-              config: this.config,
-              decision: planShellDecision,
-              requestArgs: reqInfo.args,
-              invocationParams: invocation.params as Record<string, unknown>,
-              signal,
-            });
-            if (initialPlanShellError) {
-              rejectPlanShell(initialPlanShellError);
-              continue;
-            }
-          }
-          if (planShellDecision.classification === 'write') {
-            rejectPlanShell(planShellDecision.writeBlockMessage);
-            continue;
-          }
-          const planShellRequiresConfirmation =
-            planShellDecision.classification === 'unknown';
-
-          if (
-            finalPermission === 'allow' &&
-            !forceAutoReviewForAllow &&
-            !planShellRequiresConfirmation
-          ) {
-            // Auto-approve: tool is inherently safe (read-only) or PM allows.
-            // In AUTO mode, also reset denialTracking so an L4 allow-rule
-            // match counts as a successful call and clears any in-flight
-            // block streak. Without this, a session sitting at
-            // consecutiveBlock=3 would keep auto-approving the allow-ruled
-            // call (correct), but the very next call that needed the
-            // classifier would still see shouldFallback==='true' and force
-            // manual approval — confusing UX given the previous allow-rule
-            // call just worked silently.
-            if (approvalMode === ApprovalMode.AUTO) {
-              this.config.setAutoModeDenialState(
-                recordAllow(this.config.getAutoModeDenialState()),
-              );
-            }
-            this.setToolCallOutcome(
-              reqInfo.callId,
-              ToolConfirmationOutcome.ProceedAlways,
-            );
-            this.setStatusInternal(reqInfo.callId, 'scheduled');
-            continue;
-          }
-
-          // ── L5: AUTO mode three-layer filter ──────────────────────────
-          // Fast-paths run BEFORE the fallback check so safe tools (Read,
-          // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
-          // fallback state — otherwise every trivially safe tool would
-          // force manual approval until the user toggles modes.
-          let autoModeFallbackMessage: string | undefined;
-          if (
-            !requiresUserInteraction &&
-            shouldRunAutoModeForCall(approvalMode, canonicalName)
-          ) {
-            const denialState = this.config.getAutoModeDenialState();
-            const fallback = shouldFallback(denialState);
-            // `buildClassifierContents` retains only the most recent
-            // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
-            // exactly that tail rather than triggering a
-            // `structuredClone` of the whole session on every non-
-            // fast-path AUTO call.
-            const messages =
-              this.config
-                .getGeminiClient?.()
-                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
-            const decision = await evaluateAutoMode({
-              ctx: pmCtx,
-              pmForcedAsk,
-              toolParams,
-              messages,
-              config: this.config,
-              signal,
-              skipClassifierReason: fallback.fallback
-                ? fallback.reason
-                : undefined,
-            });
-
-            const outcome = applyAutoModeDecision(
-              decision,
-              this.config,
-              denialState,
-            );
-            if (
-              !this.config.getDisableAllHooks() &&
-              shouldFirePermissionDeniedForAutoMode(decision, outcome)
-            ) {
-              try {
-                await this.config
-                  .getHookSystem?.()
-                  ?.firePermissionDeniedEvent(
-                    canonicalName,
-                    toolParams,
-                    reqInfo.callId,
-                    getAutoModePermissionDeniedReason(decision),
-                    signal,
-                    reqInfo.callId,
-                  );
-              } catch (hookError) {
-                debugLogger.warn(
-                  `PermissionDenied hook failed for tool ${reqInfo.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
-                );
-              }
-            }
-            switch (outcome.kind) {
-              case 'approved':
-                this.setToolCallOutcome(
-                  reqInfo.callId,
-                  ToolConfirmationOutcome.ProceedAlways,
-                );
-                this.setStatusInternal(reqInfo.callId, 'scheduled');
-                continue;
-              case 'blocked':
-                debugLogger.warn(
-                  `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
-                    formatDenialStateLog(denialState),
-                );
-                this.setStatusInternal(
-                  reqInfo.callId,
-                  'error',
-                  createErrorResponse(
-                    reqInfo,
-                    new Error(outcome.errorMessage),
-                    ToolErrorType.EXECUTION_DENIED,
-                  ),
-                );
-                continue;
-              case 'fallback':
-                // Drop through to the manual-approval flow below. The
-                // pending dialog tells the user what's being asked;
-                // operators see recovery fallbacks in the debug log. A
-                // pmForcedAsk fallback isn't an audit-worthy event.
-                if (
-                  isDenialFallbackReason(outcome.reason) ||
-                  outcome.reason === 'classifier_unavailable'
-                ) {
-                  this.autoModeFallbackCallIds.add(reqInfo.callId);
-                  autoModeFallbackMessage = outcome.message;
-                  debugLogger.warn(
-                    `Auto mode fallback to manual approval (${outcome.reason}): ` +
-                      formatDenialStateLog(denialState),
-                  );
-                }
-                break;
-              default: {
-                const _exhaustive: never = outcome;
-                void _exhaustive;
-              }
-            }
-          }
-
-          // finalPermission === 'ask' (or 'default' from PM → treat as ask)
-          // apply ApprovalMode overrides.
-          // ask_user_question always needs confirmation so the user can answer;
-          // it must bypass both YOLO auto-approve and plan-mode blocking.
-          const isAskUserQuestionTool =
-            canonicalName === ToolNames.ASK_USER_QUESTION;
-          let confirmationDetails: ToolCallConfirmationDetails | undefined;
-
-          if (
-            !needsConfirmation(
-              planShellRequiresConfirmation ? 'ask' : confirmationPermission,
-              approvalMode,
-              canonicalName,
-              requiresUserInteraction,
-            )
-          ) {
-            this.setToolCallOutcome(
-              reqInfo.callId,
-              ToolConfirmationOutcome.ProceedAlways,
-            );
-            this.setStatusInternal(reqInfo.callId, 'scheduled');
-          } else {
-            confirmationDetails =
-              await invocation.getConfirmationDetails(signal);
-
-            if (autoModeFallbackMessage) {
-              confirmationDetails = decorateClassifierUnavailableConfirmation(
-                confirmationDetails,
-                autoModeFallbackMessage,
-              );
-            }
-
-            if (planShellDecision.classification !== 'not-applicable') {
-              const preDisplayPlanShellError =
-                await validatePlanModeShellContext({
-                  config: this.config,
-                  decision: planShellDecision,
-                  requestArgs: reqInfo.args,
-                  invocationParams: invocation.params as Record<
-                    string,
-                    unknown
-                  >,
-                  signal,
-                });
-              if (preDisplayPlanShellError) {
-                rejectPlanShell(preDisplayPlanShellError);
-                continue;
-              }
-            }
-
-            try {
-              confirmationDetails = decoratePlanModeShellConfirmation(
-                planShellDecision,
-                confirmationDetails,
-              );
-            } catch {
-              if (planShellDecision.classification === 'unknown') {
-                rejectPlanShell(planShellDecision.noApprovalMessage);
-                continue;
-              }
-              throw new Error('Unable to prepare shell confirmation.');
-            }
-
-            // ── Centralised rule injection ──────────────────────────────────
-            injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
-
-            if (
-              planShellDecision.classification === 'not-applicable' &&
-              isPlanModeBlocked(
-                isPlanMode,
-                isExitPlanModeTool,
-                isAskUserQuestionTool,
-                confirmationDetails,
-                isEnterPlanModeTool,
-              )
-            ) {
-              // SDK and ordinary subagent-like callers should return plans
-              // directly; they do not have exit_plan_mode available. Plan-required
-              // teammates have a dedicated exit_plan_mode approval path.
-              const isPlanRequiredTeammate =
-                !shouldUsePlanOnlyReminderInSubagentContext() &&
-                !this.config.getSdkMode();
-              const planModeError = new Error(
-                `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
-                  `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
-                  `web_fetch, etc.) are allowed in plan mode.` +
-                  ` Do NOT retry this tool. ` +
-                  (isPlanRequiredTeammate
-                    ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
-                    : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
-              );
-              this.setStatusInternal(reqInfo.callId, 'error', {
-                ...createErrorResponse(
-                  reqInfo,
-                  planModeError,
-                  ToolErrorType.EXECUTION_DENIED,
-                ),
-                resultDisplay: 'Plan mode blocked a non-read-only tool call.',
-              });
-              setToolSpanFailure(
-                toolSpan,
-                TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
-                TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
-              );
-              this.finalizeToolSpan(reqInfo.callId);
-              continue;
-            }
-
-            // AUTO_EDIT mode: auto-approve edit-like and info tools
-            if (
-              !requiresUserInteraction &&
-              isAutoEditApproved(approvalMode, confirmationDetails)
-            ) {
-              this.setToolCallOutcome(
-                reqInfo.callId,
-                ToolConfirmationOutcome.ProceedAlways,
-              );
-              this.setStatusInternal(reqInfo.callId, 'scheduled');
-              continue;
-            }
-
-            /**
-             * In non-interactive mode, automatically deny.
-             */
-            const isNonInteractiveDeny =
-              !this.config.isInteractive() &&
-              !this.config.getExperimentalZedIntegration() &&
-              this.config.getInputFormat() !== InputFormat.STREAM_JSON;
-
-            if (isNonInteractiveDeny) {
-              const errorMessage =
-                planShellDecision.classification === 'unknown'
-                  ? planShellDecision.noApprovalMessage
-                  : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
-              if (planShellDecision.classification === 'unknown') {
-                rejectPlanShell(errorMessage);
-                continue;
-              }
-              this.setStatusInternal(
-                reqInfo.callId,
-                'error',
-                createErrorResponse(
-                  reqInfo,
-                  new Error(errorMessage),
-                  ToolErrorType.EXECUTION_DENIED,
-                ),
-              );
-              setToolSpanFailure(
-                toolSpan,
-                TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,
-                TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED,
-              );
-              this.finalizeToolSpan(reqInfo.callId);
-              continue;
-            }
-
-            // Fire PermissionRequest hook before showing the permission dialog.
-            // Hooks run before the background-agent auto-deny so they can
-            // override the denial with policy-based decisions.
-            const messageBus = this.config.getMessageBus() as
-              | MessageBus
-              | undefined;
-            const hooksEnabled = !this.config.getDisableAllHooks();
-
-            if (hooksEnabled && messageBus) {
-              const permissionMode = String(this.config.getApprovalMode());
-              const hookResult = await firePermissionRequestHook(
-                messageBus,
-                canonicalName,
-                (reqInfo.args as Record<string, unknown>) || {},
-                permissionMode,
-                undefined,
-                signal,
-              );
-
-              if (
-                hookResult.hasDecision &&
-                (!hookResult.shouldAllow || !requiresUserInteraction)
-              ) {
-                if (hookResult.shouldAllow) {
-                  if (planShellDecision.classification !== 'not-applicable') {
-                    const approval = await validatePlanModeShellApproval({
-                      config: this.config,
-                      decision: planShellDecision,
-                      requestArgs: reqInfo.args,
-                      invocationParams: invocation.params as Record<
-                        string,
-                        unknown
-                      >,
-                      signal,
-                      outcome: ToolConfirmationOutcome.ProceedOnce,
-                      payload: hookResult.updatedInput
-                        ? { updatedInput: hookResult.updatedInput }
-                        : undefined,
-                    });
-                    if (approval.outcome === ToolConfirmationOutcome.Cancel) {
-                      await confirmationDetails.onConfirm(
-                        approval.outcome,
-                        approval.payload,
-                      );
-                      rejectPlanShell(
-                        approval.payload?.cancelMessage ??
-                          planShellDecision.noApprovalMessage,
-                      );
-                      continue;
-                    }
-                    await confirmationDetails.onConfirm(
-                      approval.outcome,
-                      approval.payload,
-                    );
-                    this.recordAutoModeFallbackResolution(
-                      reqInfo.callId,
-                      approval.outcome,
-                    );
-                    this.setToolCallOutcome(reqInfo.callId, approval.outcome);
-                    this.setStatusInternal(reqInfo.callId, 'scheduled');
-                    continue;
-                  }
-                  // Hook granted permission - apply updated input if provided and proceed
-                  if (
-                    hookResult.updatedInput &&
-                    typeof reqInfo.args === 'object'
-                  ) {
-                    this.setArgsInternal(
-                      reqInfo.callId,
-                      hookResult.updatedInput,
-                    );
-                  }
-                  await confirmationDetails.onConfirm(
-                    ToolConfirmationOutcome.ProceedOnce,
-                  );
-                  this.recordAutoModeFallbackResolution(
-                    reqInfo.callId,
-                    ToolConfirmationOutcome.ProceedOnce,
-                  );
-                  this.setToolCallOutcome(
-                    reqInfo.callId,
-                    ToolConfirmationOutcome.ProceedOnce,
-                  );
-                  this.setStatusInternal(reqInfo.callId, 'scheduled');
-                } else {
-                  // Hook denied permission - cancel with optional message
-                  const cancelPayload = hookResult.denyMessage
-                    ? { cancelMessage: hookResult.denyMessage }
-                    : undefined;
-                  await confirmationDetails.onConfirm(
-                    ToolConfirmationOutcome.Cancel,
-                    cancelPayload,
-                  );
-                  this.recordAutoModeFallbackResolution(
-                    reqInfo.callId,
-                    ToolConfirmationOutcome.Cancel,
-                  );
-                  this.setToolCallOutcome(
-                    reqInfo.callId,
-                    ToolConfirmationOutcome.Cancel,
-                  );
-                  this.setStatusInternal(
-                    reqInfo.callId,
-                    'error',
-                    createErrorResponse(
-                      reqInfo,
-                      new Error(
-                        hookResult.denyMessage ||
-                          `Permission denied by hook for "${reqInfo.name}"`,
-                      ),
-                      ToolErrorType.EXECUTION_DENIED,
-                    ),
-                  );
-                  setToolSpanFailure(
-                    toolSpan,
-                    TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED,
-                    TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED,
-                  );
-                  this.finalizeToolSpan(reqInfo.callId);
-                }
-                continue;
-              }
-            }
-
-            // Background agents can't show interactive prompts.
-            // Auto-deny after hooks have had a chance to decide.
-            if (this.config.getShouldAvoidPermissionPrompts?.()) {
-              const errorMessage =
-                planShellDecision.classification === 'unknown'
-                  ? planShellDecision.noApprovalMessage
-                  : `Tool "${reqInfo.name}" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
-              if (planShellDecision.classification === 'unknown') {
-                rejectPlanShell(errorMessage);
-                continue;
-              }
-              this.setStatusInternal(
-                reqInfo.callId,
-                'error',
-                createErrorResponse(
-                  reqInfo,
-                  new Error(errorMessage),
-                  ToolErrorType.EXECUTION_DENIED,
-                ),
-              );
-              setToolSpanFailure(
-                toolSpan,
-                TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED,
-                TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED,
-              );
-              this.finalizeToolSpan(reqInfo.callId);
-              continue;
-            }
-
-            // Re-check signal.aborted between the for-loop entry guard and
-            // here: `evaluatePermissionFlow`, `getConfirmationDetails`, and
-            // `firePermissionRequestHook` are all `await` points that can
-            // resolve normally even after the signal aborted. Without this
-            // re-check we'd open `awaiting_approval` + a blocked span on
-            // an already-aborted signal — drainSpansForBatch (deferred via
-            // setTimeout(0)) may have already fired by then, so the new
-            // entries would never be drained (#4321 review-3 wenshao
-            // Critical).
+          try {
             if (signal.aborted) {
               this.setStatusInternal(
                 reqInfo.callId,
@@ -2977,167 +2356,809 @@ export class CoreToolScheduler {
               );
               setToolSpanCancelled(toolSpan);
               this.finalizeToolSpan(reqInfo.callId);
-              continue;
+              return;
             }
 
-            if (planShellDecision.classification !== 'not-applicable') {
-              const finalPreDisplayPlanShellError =
-                await validatePlanModeShellContext({
-                  config: this.config,
-                  decision: planShellDecision,
-                  requestArgs: reqInfo.args,
-                  invocationParams: invocation.params as Record<
-                    string,
-                    unknown
-                  >,
-                  signal,
-                });
-              if (finalPreDisplayPlanShellError) {
-                rejectPlanShell(finalPreDisplayPlanShellError);
-                continue;
-              }
-            }
+            // =================================================================
+            // L3→L4→L5 Permission Flow
+            // =================================================================
 
-            // Allow IDE to resolve confirmation
-            if (
-              confirmationDetails.type !== 'edit' ||
-              !confirmationDetails.skipIdeDiff
-            ) {
-              this.openIdeDiffIfEnabled(
-                confirmationDetails,
-                reqInfo.callId,
-                signal,
+            // ---- L3→L4: Shared permission flow ----
+            let toolParams = invocation.params as Record<string, unknown>;
+            const flowResult = await evaluatePermissionFlow(
+              this.config,
+              invocation,
+              canonicalName,
+              toolParams,
+            );
+            const {
+              defaultPermission,
+              finalPermission,
+              pmForcedAsk,
+              pmCtx,
+              denyMessage,
+              requiresUserInteraction,
+            } = flowResult;
+
+            // ---- L5: Final decision based on permission + ApprovalMode ----
+            const approvalMode = this.config.getApprovalMode();
+            const isPlanMode = approvalMode === ApprovalMode.PLAN;
+            const isPlanShellCall =
+              isPlanMode &&
+              (canonicalName === ToolNames.SHELL ||
+                canonicalName === ToolNames.MONITOR);
+            const isExitPlanModeTool =
+              canonicalName === ToolNames.EXIT_PLAN_MODE;
+            const isEnterPlanModeTool =
+              canonicalName === ToolNames.ENTER_PLAN_MODE;
+
+            const forceAutoReviewForAllow =
+              approvalMode === ApprovalMode.AUTO &&
+              (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+                shouldClassifyAllShellForAutoMode(canonicalName, this.config));
+            const confirmationPermission =
+              getEffectivePermissionForConfirmation(
+                finalPermission,
+                forceAutoReviewForAllow,
+              );
+
+            if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+              debugLogger.info(
+                `Auto mode: L4 allow overridden by protected-write guard for ${canonicalName}`,
               );
             }
 
-            const originalOnConfirm = confirmationDetails.onConfirm;
-            let planShellResponseClaimed = false;
-            const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
-              ...confirmationDetails,
-              // When PM has an explicit 'ask' rule, 'always allow' would be
-              // ineffective because ask takes priority over allow.
-              // Hide the option so users aren't misled.
-              ...(pmForcedAsk || requiresUserInteraction
-                ? { hideAlwaysAllow: true }
-                : {}),
-              onConfirm: async (
-                outcome: ToolConfirmationOutcome,
-                payload?: ToolConfirmationPayload,
-              ) => {
-                if (planShellDecision.classification !== 'not-applicable') {
-                  if (planShellResponseClaimed) return;
-                  planShellResponseClaimed = true;
-                  const currentCall = this.toolCalls.find(
-                    (call) =>
-                      call.request.callId === reqInfo.callId &&
-                      call.status === 'awaiting_approval',
-                  ) as WaitingToolCall | undefined;
-                  if (!currentCall) return;
-                  const approval = await validatePlanModeShellApproval({
+            if (
+              isPlanRequiredTeammateAwaitingApproval(this.config) &&
+              finalPermission !== 'deny'
+            ) {
+              const isExplicitPreApprovalTool =
+                isPlanRequiredTeammatePreApprovalAllowedTool(
+                  canonicalName,
+                  toolParams,
+                );
+              const canRunBeforeLeaderApproval =
+                isExplicitPreApprovalTool &&
+                (canonicalName === ToolNames.EXIT_PLAN_MODE ||
+                  canonicalName === ToolNames.TASK_UPDATE ||
+                  (defaultPermission === 'allow' &&
+                    finalPermission === 'allow' &&
+                    !forceAutoReviewForAllow));
+
+              if (canRunBeforeLeaderApproval) {
+                this.setToolCallOutcome(
+                  reqInfo.callId,
+                  ToolConfirmationOutcome.ProceedAlways,
+                );
+                this.setStatusInternal(reqInfo.callId, 'scheduled');
+                return;
+              }
+
+              const message =
+                getPlanRequiredTeammatePreApprovalMessage(canonicalName);
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(message),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+                TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+              );
+              this.finalizeToolSpan(reqInfo.callId);
+              return;
+            }
+
+            if (finalPermission === 'deny') {
+              // Hard deny: security violation or PM explicit deny
+              this.setStatusInternal(
+                reqInfo.callId,
+                'error',
+                createErrorResponse(
+                  reqInfo,
+                  new Error(denyMessage ?? `Tool "${reqInfo.name}" is denied.`),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+              );
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                TOOL_SPAN_STATUS_PERMISSION_DENIED,
+              );
+              this.finalizeToolSpan(reqInfo.callId);
+              return;
+            }
+
+            let planShellAmbientWorkingDirectory: string | undefined;
+            if (isPlanShellCall) {
+              const directory = toolParams['directory'];
+              planShellAmbientWorkingDirectory =
+                typeof directory === 'string' && directory.length > 0
+                  ? undefined
+                  : this.config.getTargetDir();
+              invocation.params = {
+                ...structuredClone(invocation.params),
+                directory:
+                  typeof directory === 'string' && directory.length > 0
+                    ? directory
+                    : planShellAmbientWorkingDirectory,
+              };
+              toolParams = invocation.params as Record<string, unknown>;
+            }
+
+            const planShellDecision = isPlanShellCall
+              ? await evaluatePlanModeShellPolicy({
+                  config: this.config,
+                  toolName: canonicalName,
+                  requestArgs: reqInfo.args,
+                  invocationParams: toolParams,
+                  permissionContext: pmCtx,
+                  ambientWorkingDirectory: planShellAmbientWorkingDirectory,
+                  signal,
+                })
+              : ({ classification: 'not-applicable' } as const);
+            const rejectPlanShell = (message: string) => {
+              this.setStatusInternal(reqInfo.callId, 'error', {
+                ...createErrorResponse(
+                  reqInfo,
+                  new Error(message),
+                  ToolErrorType.EXECUTION_DENIED,
+                ),
+                resultDisplay: message,
+              });
+              setToolSpanFailure(
+                toolSpan,
+                TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+                TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+              );
+              this.finalizeToolSpan(reqInfo.callId);
+            };
+
+            if (planShellDecision.classification !== 'not-applicable') {
+              const initialPlanShellError = await validatePlanModeShellContext({
+                config: this.config,
+                decision: planShellDecision,
+                requestArgs: reqInfo.args,
+                invocationParams: invocation.params as Record<string, unknown>,
+                signal,
+              });
+              if (initialPlanShellError) {
+                rejectPlanShell(initialPlanShellError);
+                return;
+              }
+            }
+            if (planShellDecision.classification === 'write') {
+              rejectPlanShell(planShellDecision.writeBlockMessage);
+              return;
+            }
+            const planShellRequiresConfirmation =
+              planShellDecision.classification === 'unknown';
+
+            if (
+              finalPermission === 'allow' &&
+              !forceAutoReviewForAllow &&
+              !planShellRequiresConfirmation
+            ) {
+              // Auto-approve: tool is inherently safe (read-only) or PM allows.
+              // In AUTO mode, also reset denialTracking so an L4 allow-rule
+              // match counts as a successful call and clears any in-flight
+              // block streak. Without this, a session sitting at
+              // consecutiveBlock=3 would keep auto-approving the allow-ruled
+              // call (correct), but the very next call that needed the
+              // classifier would still see shouldFallback==='true' and force
+              // manual approval — confusing UX given the previous allow-rule
+              // call just worked silently.
+              if (approvalMode === ApprovalMode.AUTO) {
+                this.config.setAutoModeDenialState(
+                  recordAllow(this.config.getAutoModeDenialState()),
+                );
+              }
+              this.setToolCallOutcome(
+                reqInfo.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              return;
+            }
+
+            // ── L5: AUTO mode three-layer filter ──────────────────────────
+            // Fast-paths run BEFORE the fallback check so safe tools (Read,
+            // Grep, LS, in-cwd Edit, …) short-circuit even in a denial-streak
+            // fallback state — otherwise every trivially safe tool would
+            // force manual approval until the user toggles modes.
+            let autoModeFallbackMessage: string | undefined;
+            if (
+              !requiresUserInteraction &&
+              shouldRunAutoModeForCall(approvalMode, canonicalName)
+            ) {
+              const denialState = this.config.getAutoModeDenialState();
+              const fallback = shouldFallback(denialState);
+              // `buildClassifierContents` retains only the most recent
+              // MAX_TRANSCRIPT_MESSAGES messages; ask the chat client for
+              // exactly that tail rather than triggering a
+              // `structuredClone` of the whole session on every non-
+              // fast-path AUTO call.
+              const messages =
+                this.config
+                  .getGeminiClient?.()
+                  ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+              const decision = await evaluateAutoMode({
+                ctx: pmCtx,
+                pmForcedAsk,
+                toolParams,
+                messages,
+                config: this.config,
+                signal,
+                skipClassifierReason: fallback.fallback
+                  ? fallback.reason
+                  : undefined,
+              });
+
+              const outcome = applyAutoModeDecision(
+                decision,
+                this.config,
+                denialState,
+              );
+              if (
+                !this.config.getDisableAllHooks() &&
+                shouldFirePermissionDeniedForAutoMode(decision, outcome)
+              ) {
+                try {
+                  await this.config
+                    .getHookSystem?.()
+                    ?.firePermissionDeniedEvent(
+                      canonicalName,
+                      toolParams,
+                      reqInfo.callId,
+                      getAutoModePermissionDeniedReason(decision),
+                      signal,
+                      reqInfo.callId,
+                    );
+                } catch (hookError) {
+                  debugLogger.warn(
+                    `PermissionDenied hook failed for tool ${reqInfo.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
+                  );
+                }
+              }
+              switch (outcome.kind) {
+                case 'approved':
+                  this.setToolCallOutcome(
+                    reqInfo.callId,
+                    ToolConfirmationOutcome.ProceedAlways,
+                  );
+                  this.setStatusInternal(reqInfo.callId, 'scheduled');
+                  return;
+                case 'blocked':
+                  debugLogger.warn(
+                    `Auto mode blocked (${outcome.reason}): tool=${canonicalName}, ` +
+                      formatDenialStateLog(denialState),
+                  );
+                  this.setStatusInternal(
+                    reqInfo.callId,
+                    'error',
+                    createErrorResponse(
+                      reqInfo,
+                      new Error(outcome.errorMessage),
+                      ToolErrorType.EXECUTION_DENIED,
+                    ),
+                  );
+                  return;
+                case 'fallback':
+                  // Drop through to the manual-approval flow below. The
+                  // pending dialog tells the user what's being asked;
+                  // operators see recovery fallbacks in the debug log. A
+                  // pmForcedAsk fallback isn't an audit-worthy event.
+                  if (
+                    isDenialFallbackReason(outcome.reason) ||
+                    outcome.reason === 'classifier_unavailable'
+                  ) {
+                    this.autoModeFallbackCallIds.add(reqInfo.callId);
+                    autoModeFallbackMessage = outcome.message;
+                    debugLogger.warn(
+                      `Auto mode fallback to manual approval (${outcome.reason}): ` +
+                        formatDenialStateLog(denialState),
+                    );
+                  }
+                  break;
+                default: {
+                  const _exhaustive: never = outcome;
+                  void _exhaustive;
+                }
+              }
+            }
+
+            // finalPermission === 'ask' (or 'default' from PM → treat as ask)
+            // apply ApprovalMode overrides.
+            // ask_user_question always needs confirmation so the user can answer;
+            // it must bypass both YOLO auto-approve and plan-mode blocking.
+            const isAskUserQuestionTool =
+              canonicalName === ToolNames.ASK_USER_QUESTION;
+            let confirmationDetails: ToolCallConfirmationDetails | undefined;
+
+            if (
+              !needsConfirmation(
+                planShellRequiresConfirmation ? 'ask' : confirmationPermission,
+                approvalMode,
+                canonicalName,
+                requiresUserInteraction,
+              )
+            ) {
+              this.setToolCallOutcome(
+                reqInfo.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+            } else {
+              confirmationDetails =
+                await invocation.getConfirmationDetails(signal);
+
+              if (autoModeFallbackMessage) {
+                confirmationDetails = decorateClassifierUnavailableConfirmation(
+                  confirmationDetails,
+                  autoModeFallbackMessage,
+                );
+              }
+
+              if (planShellDecision.classification !== 'not-applicable') {
+                const preDisplayPlanShellError =
+                  await validatePlanModeShellContext({
                     config: this.config,
                     decision: planShellDecision,
-                    requestArgs: currentCall.request.args,
-                    invocationParams: currentCall.invocation.params as Record<
+                    requestArgs: reqInfo.args,
+                    invocationParams: invocation.params as Record<
                       string,
                       unknown
                     >,
                     signal,
-                    outcome,
-                    payload,
                   });
-                  await this.handleConfirmationResponse(
-                    reqInfo.callId,
-                    originalOnConfirm,
-                    approval.outcome,
-                    signal,
-                    approval.payload,
-                  );
+                if (preDisplayPlanShellError) {
+                  rejectPlanShell(preDisplayPlanShellError);
                   return;
                 }
-                await this.handleConfirmationResponse(
+              }
+
+              try {
+                confirmationDetails = decoratePlanModeShellConfirmation(
+                  planShellDecision,
+                  confirmationDetails,
+                );
+              } catch {
+                if (planShellDecision.classification === 'unknown') {
+                  rejectPlanShell(planShellDecision.noApprovalMessage);
+                  return;
+                }
+                throw new Error('Unable to prepare shell confirmation.');
+              }
+
+              // ── Centralised rule injection ──────────────────────────────────
+              injectPermissionRulesIfMissing(confirmationDetails, pmCtx);
+
+              if (
+                planShellDecision.classification === 'not-applicable' &&
+                isPlanModeBlocked(
+                  isPlanMode,
+                  isExitPlanModeTool,
+                  isAskUserQuestionTool,
+                  confirmationDetails,
+                  isEnterPlanModeTool,
+                )
+              ) {
+                // SDK and ordinary subagent-like callers should return plans
+                // directly; they do not have exit_plan_mode available. Plan-required
+                // teammates have a dedicated exit_plan_mode approval path.
+                const isPlanRequiredTeammate =
+                  !shouldUsePlanOnlyReminderInSubagentContext() &&
+                  !this.config.getSdkMode();
+                const planModeError = new Error(
+                  `Tool blocked by plan mode: "${reqInfo.name}" is not a read-only tool. ` +
+                    `Only read-only tools (read_file, grep_search, glob, list_directory, ` +
+                    `web_fetch, etc.) are allowed in plan mode.` +
+                    ` Do NOT retry this tool. ` +
+                    (isPlanRequiredTeammate
+                      ? `Pivot to read-only alternatives to gather the information you need, then call exit_plan_mode with a plan that covers this tool's purpose.`
+                      : `Pivot to read-only alternatives to gather equivalent information, then present your plan directly to the caller.`),
+                );
+                this.setStatusInternal(reqInfo.callId, 'error', {
+                  ...createErrorResponse(
+                    reqInfo,
+                    planModeError,
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
+                  resultDisplay: 'Plan mode blocked a non-read-only tool call.',
+                });
+                setToolSpanFailure(
+                  toolSpan,
+                  TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+                  TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+                );
+                this.finalizeToolSpan(reqInfo.callId);
+                return;
+              }
+
+              // AUTO_EDIT mode: auto-approve edit-like and info tools
+              if (
+                !requiresUserInteraction &&
+                isAutoEditApproved(approvalMode, confirmationDetails)
+              ) {
+                this.setToolCallOutcome(
                   reqInfo.callId,
-                  originalOnConfirm,
-                  outcome,
+                  ToolConfirmationOutcome.ProceedAlways,
+                );
+                this.setStatusInternal(reqInfo.callId, 'scheduled');
+                return;
+              }
+
+              /**
+               * In non-interactive mode, automatically deny.
+               */
+              const isNonInteractiveDeny =
+                !this.config.isInteractive() &&
+                !this.config.getExperimentalZedIntegration() &&
+                this.config.getInputFormat() !== InputFormat.STREAM_JSON;
+
+              if (isNonInteractiveDeny) {
+                const errorMessage =
+                  planShellDecision.classification === 'unknown'
+                    ? planShellDecision.noApprovalMessage
+                    : `Qwen Code requires permission to use "${reqInfo.name}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`;
+                if (planShellDecision.classification === 'unknown') {
+                  rejectPlanShell(errorMessage);
+                  return;
+                }
+                this.setStatusInternal(
+                  reqInfo.callId,
+                  'error',
+                  createErrorResponse(
+                    reqInfo,
+                    new Error(errorMessage),
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
+                );
+                setToolSpanFailure(
+                  toolSpan,
+                  TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED,
+                  TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED,
+                );
+                this.finalizeToolSpan(reqInfo.callId);
+                return;
+              }
+
+              // Fire PermissionRequest hook before showing the permission dialog.
+              // Hooks run before the background-agent auto-deny so they can
+              // override the denial with policy-based decisions.
+              const messageBus = this.config.getMessageBus() as
+                | MessageBus
+                | undefined;
+              const hooksEnabled = !this.config.getDisableAllHooks();
+
+              if (hooksEnabled && messageBus) {
+                const permissionMode = String(this.config.getApprovalMode());
+                const hookResult = await firePermissionRequestHook(
+                  messageBus,
+                  canonicalName,
+                  (reqInfo.args as Record<string, unknown>) || {},
+                  permissionMode,
+                  undefined,
                   signal,
-                  payload,
                 );
-              },
-            };
-            this.setStatusInternal(
-              reqInfo.callId,
-              'awaiting_approval',
-              wrappedConfirmationDetails,
-            );
 
-            // Open blocked_on_user span as a child of the tool span — covers
-            // the entire awaiting_approval phase, including any
-            // ModifyWithEditor side trip (#3731 Phase 2). Finalized in
-            // handleConfirmationResponse / autoApproveCompatiblePendingTools
-            // / the global-abort catch block above.
-            const blockedSpan = startToolBlockedOnUserSpan(toolSpan, {
-              tool_name: canonicalName,
-              call_id: reqInfo.callId,
-            });
-            this.blockedSpans.set(reqInfo.callId, blockedSpan);
+                if (
+                  hookResult.hasDecision &&
+                  (!hookResult.shouldAllow || !requiresUserInteraction)
+                ) {
+                  if (hookResult.shouldAllow) {
+                    if (planShellDecision.classification !== 'not-applicable') {
+                      const approval = await validatePlanModeShellApproval({
+                        config: this.config,
+                        decision: planShellDecision,
+                        requestArgs: reqInfo.args,
+                        invocationParams: invocation.params as Record<
+                          string,
+                          unknown
+                        >,
+                        signal,
+                        outcome: ToolConfirmationOutcome.ProceedOnce,
+                        payload: hookResult.updatedInput
+                          ? { updatedInput: hookResult.updatedInput }
+                          : undefined,
+                      });
+                      if (approval.outcome === ToolConfirmationOutcome.Cancel) {
+                        await confirmationDetails.onConfirm(
+                          approval.outcome,
+                          approval.payload,
+                        );
+                        rejectPlanShell(
+                          approval.payload?.cancelMessage ??
+                            planShellDecision.noApprovalMessage,
+                        );
+                        return;
+                      }
+                      await confirmationDetails.onConfirm(
+                        approval.outcome,
+                        approval.payload,
+                      );
+                      this.recordAutoModeFallbackResolution(
+                        reqInfo.callId,
+                        approval.outcome,
+                      );
+                      this.setToolCallOutcome(reqInfo.callId, approval.outcome);
+                      this.setStatusInternal(reqInfo.callId, 'scheduled');
+                      return;
+                    }
+                    // Hook granted permission - apply updated input if provided and proceed
+                    if (
+                      hookResult.updatedInput &&
+                      typeof reqInfo.args === 'object'
+                    ) {
+                      this.setArgsInternal(
+                        reqInfo.callId,
+                        hookResult.updatedInput,
+                      );
+                    }
+                    await confirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
+                    this.recordAutoModeFallbackResolution(
+                      reqInfo.callId,
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
+                    this.setToolCallOutcome(
+                      reqInfo.callId,
+                      ToolConfirmationOutcome.ProceedOnce,
+                    );
+                    this.setStatusInternal(reqInfo.callId, 'scheduled');
+                  } else {
+                    // Hook denied permission - cancel with optional message
+                    const cancelPayload = hookResult.denyMessage
+                      ? { cancelMessage: hookResult.denyMessage }
+                      : undefined;
+                    await confirmationDetails.onConfirm(
+                      ToolConfirmationOutcome.Cancel,
+                      cancelPayload,
+                    );
+                    this.recordAutoModeFallbackResolution(
+                      reqInfo.callId,
+                      ToolConfirmationOutcome.Cancel,
+                    );
+                    this.setToolCallOutcome(
+                      reqInfo.callId,
+                      ToolConfirmationOutcome.Cancel,
+                    );
+                    this.setStatusInternal(
+                      reqInfo.callId,
+                      'error',
+                      createErrorResponse(
+                        reqInfo,
+                        new Error(
+                          hookResult.denyMessage ||
+                            `Permission denied by hook for "${reqInfo.name}"`,
+                        ),
+                        ToolErrorType.EXECUTION_DENIED,
+                      ),
+                    );
+                    setToolSpanFailure(
+                      toolSpan,
+                      TOOL_FAILURE_KIND_PERMISSION_HOOK_DENIED,
+                      TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED,
+                    );
+                    this.finalizeToolSpan(reqInfo.callId);
+                  }
+                  return;
+                }
+              }
 
-            // Fire permission_prompt notification hook
-            if (hooksEnabled && messageBus) {
-              fireNotificationHook(
-                messageBus,
-                `Qwen Code needs your permission to use ${reqInfo.name}`,
-                NotificationType.PermissionPrompt,
-                'Permission needed',
-              ).catch((error) => {
-                debugLogger.warn(
-                  `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
+              // Background agents can't show interactive prompts.
+              // Auto-deny after hooks have had a chance to decide.
+              if (this.config.getShouldAvoidPermissionPrompts?.()) {
+                const errorMessage =
+                  planShellDecision.classification === 'unknown'
+                    ? planShellDecision.noApprovalMessage
+                    : `Tool "${reqInfo.name}" requires permission, but background agents cannot prompt for confirmation. The tool call was denied.`;
+                if (planShellDecision.classification === 'unknown') {
+                  rejectPlanShell(errorMessage);
+                  return;
+                }
+                this.setStatusInternal(
+                  reqInfo.callId,
+                  'error',
+                  createErrorResponse(
+                    reqInfo,
+                    new Error(errorMessage),
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
                 );
+                setToolSpanFailure(
+                  toolSpan,
+                  TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED,
+                  TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED,
+                );
+                this.finalizeToolSpan(reqInfo.callId);
+                return;
+              }
+
+              // Re-check signal.aborted between the for-loop entry guard and
+              // here: `evaluatePermissionFlow`, `getConfirmationDetails`, and
+              // `firePermissionRequestHook` are all `await` points that can
+              // resolve normally even after the signal aborted. Without this
+              // re-check we'd open `awaiting_approval` + a blocked span on
+              // an already-aborted signal — drainSpansForBatch (deferred via
+              // setTimeout(0)) may have already fired by then, so the new
+              // entries would never be drained (#4321 review-3 wenshao
+              // Critical).
+              if (signal.aborted) {
+                this.setStatusInternal(
+                  reqInfo.callId,
+                  'cancelled',
+                  'Tool call cancelled by user.',
+                );
+                setToolSpanCancelled(toolSpan);
+                this.finalizeToolSpan(reqInfo.callId);
+                return;
+              }
+
+              if (planShellDecision.classification !== 'not-applicable') {
+                const finalPreDisplayPlanShellError =
+                  await validatePlanModeShellContext({
+                    config: this.config,
+                    decision: planShellDecision,
+                    requestArgs: reqInfo.args,
+                    invocationParams: invocation.params as Record<
+                      string,
+                      unknown
+                    >,
+                    signal,
+                  });
+                if (finalPreDisplayPlanShellError) {
+                  rejectPlanShell(finalPreDisplayPlanShellError);
+                  return;
+                }
+              }
+
+              // Allow IDE to resolve confirmation
+              if (
+                confirmationDetails.type !== 'edit' ||
+                !confirmationDetails.skipIdeDiff
+              ) {
+                this.openIdeDiffIfEnabled(
+                  confirmationDetails,
+                  reqInfo.callId,
+                  signal,
+                );
+              }
+
+              const originalOnConfirm = confirmationDetails.onConfirm;
+              let planShellResponseClaimed = false;
+              const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
+                ...confirmationDetails,
+                // When PM has an explicit 'ask' rule, 'always allow' would be
+                // ineffective because ask takes priority over allow.
+                // Hide the option so users aren't misled.
+                ...(pmForcedAsk || requiresUserInteraction
+                  ? { hideAlwaysAllow: true }
+                  : {}),
+                onConfirm: (
+                  outcome: ToolConfirmationOutcome,
+                  payload?: ToolConfirmationPayload,
+                ) =>
+                  runInRequestGoalContext(reqInfo, async () => {
+                    if (planShellDecision.classification !== 'not-applicable') {
+                      if (planShellResponseClaimed) return;
+                      planShellResponseClaimed = true;
+                      const currentCall = this.toolCalls.find(
+                        (call) =>
+                          call.request.callId === reqInfo.callId &&
+                          call.status === 'awaiting_approval',
+                      ) as WaitingToolCall | undefined;
+                      if (!currentCall) return;
+                      const approval = await validatePlanModeShellApproval({
+                        config: this.config,
+                        decision: planShellDecision,
+                        requestArgs: currentCall.request.args,
+                        invocationParams: currentCall.invocation
+                          .params as Record<string, unknown>,
+                        signal,
+                        outcome,
+                        payload,
+                      });
+                      await this.handleConfirmationResponse(
+                        reqInfo.callId,
+                        originalOnConfirm,
+                        approval.outcome,
+                        signal,
+                        approval.payload,
+                      );
+                      return;
+                    }
+                    await this.handleConfirmationResponse(
+                      reqInfo.callId,
+                      originalOnConfirm,
+                      outcome,
+                      signal,
+                      payload,
+                    );
+                  }),
+              };
+              this.setStatusInternal(
+                reqInfo.callId,
+                'awaiting_approval',
+                wrappedConfirmationDetails,
+              );
+
+              // Open blocked_on_user span as a child of the tool span — covers
+              // the entire awaiting_approval phase, including any
+              // ModifyWithEditor side trip (#3731 Phase 2). Finalized in
+              // handleConfirmationResponse / autoApproveCompatiblePendingTools
+              // / the global-abort catch block above.
+              const blockedSpan = startToolBlockedOnUserSpan(toolSpan, {
+                tool_name: canonicalName,
+                call_id: reqInfo.callId,
               });
+              this.blockedSpans.set(reqInfo.callId, blockedSpan);
+
+              // Fire permission_prompt notification hook
+              if (hooksEnabled && messageBus) {
+                fireNotificationHook(
+                  messageBus,
+                  `Qwen Code needs your permission to use ${reqInfo.name}`,
+                  NotificationType.PermissionPrompt,
+                  'Permission needed',
+                ).catch((error) => {
+                  debugLogger.warn(
+                    `Permission prompt notification hook failed: ${error instanceof Error ? error.message : String(error)}`,
+                  );
+                });
+              }
             }
-          }
-        } catch (error) {
-          if (signal.aborted) {
+          } catch (error) {
+            if (signal.aborted) {
+              this.setStatusInternal(
+                reqInfo.callId,
+                'cancelled',
+                'Tool call cancelled by user.',
+              );
+              // If this tool was waiting on the user, end the blocked span
+              // as aborted before the tool span itself.
+              this.finalizeBlockedSpan(reqInfo.callId, 'aborted', 'system');
+              setToolSpanCancelled(toolSpan);
+              this.finalizeToolSpan(reqInfo.callId);
+              return;
+            }
+
+            // Errors thrown from getConfirmationDetails() may carry a
+            // structured ToolErrorType via an `errorType` instance
+            // field (see StructuredToolError in
+            // tools/priorReadEnforcement.ts). When present, surface
+            // that code instead of collapsing every confirmation-time
+            // failure into UNHANDLED_EXCEPTION.
+            const explicitErrorType = (
+              error as { errorType?: ToolErrorType } | undefined
+            )?.errorType;
             this.setStatusInternal(
               reqInfo.callId,
-              'cancelled',
-              'Tool call cancelled by user.',
+              'error',
+              createErrorResponse(
+                reqInfo,
+                error instanceof Error ? error : new Error(String(error)),
+                explicitErrorType ?? ToolErrorType.UNHANDLED_EXCEPTION,
+              ),
             );
-            // If this tool was waiting on the user, end the blocked span
-            // as aborted before the tool span itself.
-            this.finalizeBlockedSpan(reqInfo.callId, 'aborted', 'system');
-            setToolSpanCancelled(toolSpan);
+            // Non-aborted catch is a system error (e.g. getConfirmationDetails
+            // threw). 'error' decision keeps it distinct from user 'cancel'
+            // counts in dashboards.
+            this.finalizeBlockedSpan(reqInfo.callId, 'error', 'system');
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_TOOL_EXCEPTION,
+              error instanceof Error ? error.message : String(error),
+            );
             this.finalizeToolSpan(reqInfo.callId);
-            continue;
           }
-
-          // Errors thrown from getConfirmationDetails() may carry a
-          // structured ToolErrorType via an `errorType` instance
-          // field (see StructuredToolError in
-          // tools/priorReadEnforcement.ts). When present, surface
-          // that code instead of collapsing every confirmation-time
-          // failure into UNHANDLED_EXCEPTION.
-          const explicitErrorType = (
-            error as { errorType?: ToolErrorType } | undefined
-          )?.errorType;
-          this.setStatusInternal(
-            reqInfo.callId,
-            'error',
-            createErrorResponse(
-              reqInfo,
-              error instanceof Error ? error : new Error(String(error)),
-              explicitErrorType ?? ToolErrorType.UNHANDLED_EXCEPTION,
-            ),
-          );
-          // Non-aborted catch is a system error (e.g. getConfirmationDetails
-          // threw). 'error' decision keeps it distinct from user 'cancel'
-          // counts in dashboards.
-          this.finalizeBlockedSpan(reqInfo.callId, 'error', 'system');
-          setToolSpanFailure(
-            toolSpan,
-            TOOL_FAILURE_KIND_TOOL_EXCEPTION,
-            error instanceof Error ? error.message : String(error),
-          );
-          this.finalizeToolSpan(reqInfo.callId);
-        }
+        });
       }
       await this.attemptExecutionOfScheduledCalls(signal);
       void this.checkAndNotifyCompletion().catch((error: unknown) => {
@@ -3199,6 +3220,18 @@ export class CoreToolScheduler {
     // another confirmation path, e.g. IDE vs CLI race), skip to avoid double
     // processing and potential re-execution.
     if (!toolCall) return;
+
+    if (goalTurnContext.getStore() !== toolCall.request.goalContext) {
+      return runInRequestGoalContext(toolCall.request, () =>
+        this.handleConfirmationResponse(
+          callId,
+          originalOnConfirm,
+          outcome,
+          signal,
+          payload,
+        ),
+      );
+    }
 
     try {
       await this._handleConfirmationResponseInner(
@@ -3672,6 +3705,12 @@ export class CoreToolScheduler {
     signal: AbortSignal,
   ): Promise<void> {
     if (toolCall.status !== 'scheduled') return;
+
+    if (goalTurnContext.getStore() !== toolCall.request.goalContext) {
+      return runInRequestGoalContext(toolCall.request, () =>
+        this.executeSingleToolCall(toolCall, signal),
+      );
+    }
 
     const scheduledCall = toolCall;
     const { callId, name: toolName } = scheduledCall.request;
@@ -4635,6 +4674,7 @@ export class CoreToolScheduler {
           ...('modelOverride' in toolResult
             ? { modelOverride: toolResult.modelOverride }
             : {}),
+          ...(toolResult.terminateTurn ? { terminateTurn: true } : {}),
           ...(artifacts.length > 0 ? { artifacts } : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
@@ -5152,13 +5192,35 @@ export class CoreToolScheduler {
     if (!this.chatRecordingService) return;
 
     for (const call of completedCalls) {
-      this.chatRecordingService.recordToolResult(call.response.responseParts, {
+      const result = {
         callId: call.request.callId,
         status: call.status,
         resultDisplay: call.response.resultDisplay,
         error: call.response.error,
         errorType: call.response.errorType,
-      });
+      };
+      const goalContext = call.request.goalContext;
+      if (!goalContext) {
+        this.chatRecordingService.recordToolResult(
+          call.response.responseParts,
+          result,
+        );
+      } else if (
+        call.request.name === ToolNames.GET_GOAL ||
+        call.request.name === ToolNames.UPDATE_GOAL
+      ) {
+        this.chatRecordingService.recordToolResult(
+          call.response.responseParts,
+          result,
+          { goalContext: { ...goalContext }, provenance: 'goal_runtime' },
+        );
+      } else {
+        this.chatRecordingService.recordToolResult(
+          call.response.responseParts,
+          result,
+          { goalContext: { ...goalContext } },
+        );
+      }
     }
   }
 
@@ -5197,184 +5259,190 @@ export class CoreToolScheduler {
     ) as WaitingToolCall[];
 
     for (const pendingTool of pendingTools) {
-      try {
-        // Re-run L3→L4 to see if the tool can now be auto-approved
-        const toolParams = pendingTool.invocation.params as Record<
-          string,
-          unknown
-        >;
-        const flowResult = await evaluatePermissionFlow(
-          this.config,
-          pendingTool.invocation,
-          pendingTool.request.name,
-          toolParams,
-        );
-        const { finalPermission, pmForcedAsk, pmCtx, requiresUserInteraction } =
-          flowResult;
-
-        if (requiresUserInteraction) {
-          continue;
-        }
-
-        const forceAutoReviewForAllow =
-          this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
-            shouldClassifyAllShellForAutoMode(
-              pendingTool.request.name,
-              this.config,
-            ));
-
-        if (finalPermission === 'allow' && forceAutoReviewForAllow) {
-          debugLogger.info(
-            `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
-          );
-          const denialState = this.config.getAutoModeDenialState();
-          const fallback = shouldFallback(denialState);
-          const messages =
-            this.config
-              .getGeminiClient?.()
-              ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
-          const decision = await evaluateAutoMode({
-            ctx: pmCtx,
-            pmForcedAsk,
-            toolParams,
-            messages,
-            config: this.config,
-            signal,
-            skipClassifierReason: fallback.fallback
-              ? fallback.reason
-              : undefined,
-          });
-
-          const outcome = applyAutoModeDecision(
-            decision,
+      await runInRequestGoalContext(pendingTool.request, async () => {
+        try {
+          // Re-run L3→L4 to see if the tool can now be auto-approved
+          const toolParams = pendingTool.invocation.params as Record<
+            string,
+            unknown
+          >;
+          const flowResult = await evaluatePermissionFlow(
             this.config,
-            denialState,
+            pendingTool.invocation,
+            pendingTool.request.name,
+            toolParams,
           );
-          if (
-            !this.config.getDisableAllHooks() &&
-            shouldFirePermissionDeniedForAutoMode(decision, outcome)
-          ) {
-            try {
-              await this.config
-                .getHookSystem?.()
-                ?.firePermissionDeniedEvent(
-                  pendingTool.request.name,
-                  toolParams,
-                  pendingTool.request.callId,
-                  getAutoModePermissionDeniedReason(decision),
-                  signal,
-                  pendingTool.request.callId,
-                );
-            } catch (hookError) {
-              debugLogger.warn(
-                `PermissionDenied hook failed for pending tool ${pendingTool.request.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
-              );
-            }
+          const {
+            finalPermission,
+            pmForcedAsk,
+            pmCtx,
+            requiresUserInteraction,
+          } = flowResult;
+
+          if (requiresUserInteraction) {
+            return;
           }
-          switch (outcome.kind) {
-            case 'approved':
-              this.setToolCallOutcome(
-                pendingTool.request.callId,
-                ToolConfirmationOutcome.ProceedAlways,
-              );
-              this.setStatusInternal(pendingTool.request.callId, 'scheduled');
-              this.finalizeBlockedSpan(
-                pendingTool.request.callId,
-                'auto_approved',
-                'auto',
-              );
-              break;
-            case 'blocked': {
-              this.setStatusInternal(
-                pendingTool.request.callId,
-                'error',
-                createErrorResponse(
-                  pendingTool.request,
-                  new Error(outcome.errorMessage),
-                  ToolErrorType.EXECUTION_DENIED,
-                ),
-              );
-              this.finalizeBlockedSpan(
-                pendingTool.request.callId,
-                'error',
-                'auto',
-              );
-              const toolSpan = this.toolSpans.get(pendingTool.request.callId);
-              if (toolSpan) {
-                setToolSpanFailure(
-                  toolSpan,
-                  TOOL_FAILURE_KIND_PERMISSION_DENIED,
-                  TOOL_SPAN_STATUS_PERMISSION_DENIED,
-                );
-                this.finalizeToolSpan(pendingTool.request.callId);
-              }
-              break;
-            }
-            case 'fallback':
-              if (
-                isDenialFallbackReason(outcome.reason) ||
-                outcome.reason === 'classifier_unavailable'
-              ) {
-                this.autoModeFallbackCallIds.add(pendingTool.request.callId);
-                if (outcome.message) {
-                  this.setStatusInternal(
+
+          const forceAutoReviewForAllow =
+            this.config.getApprovalMode() === ApprovalMode.AUTO &&
+            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+              shouldClassifyAllShellForAutoMode(
+                pendingTool.request.name,
+                this.config,
+              ));
+
+          if (finalPermission === 'allow' && forceAutoReviewForAllow) {
+            debugLogger.info(
+              `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
+            );
+            const denialState = this.config.getAutoModeDenialState();
+            const fallback = shouldFallback(denialState);
+            const messages =
+              this.config
+                .getGeminiClient?.()
+                ?.getHistoryTail(MAX_TRANSCRIPT_MESSAGES, false) ?? [];
+            const decision = await evaluateAutoMode({
+              ctx: pmCtx,
+              pmForcedAsk,
+              toolParams,
+              messages,
+              config: this.config,
+              signal,
+              skipClassifierReason: fallback.fallback
+                ? fallback.reason
+                : undefined,
+            });
+
+            const outcome = applyAutoModeDecision(
+              decision,
+              this.config,
+              denialState,
+            );
+            if (
+              !this.config.getDisableAllHooks() &&
+              shouldFirePermissionDeniedForAutoMode(decision, outcome)
+            ) {
+              try {
+                await this.config
+                  .getHookSystem?.()
+                  ?.firePermissionDeniedEvent(
+                    pendingTool.request.name,
+                    toolParams,
                     pendingTool.request.callId,
-                    'awaiting_approval',
-                    decorateClassifierUnavailableConfirmation(
-                      pendingTool.confirmationDetails,
-                      outcome.message,
-                    ),
+                    getAutoModePermissionDeniedReason(decision),
+                    signal,
+                    pendingTool.request.callId,
+                  );
+              } catch (hookError) {
+                debugLogger.warn(
+                  `PermissionDenied hook failed for pending tool ${pendingTool.request.callId}: ${hookError instanceof Error ? hookError.message : String(hookError)}`,
+                );
+              }
+            }
+            switch (outcome.kind) {
+              case 'approved':
+                this.setToolCallOutcome(
+                  pendingTool.request.callId,
+                  ToolConfirmationOutcome.ProceedAlways,
+                );
+                this.setStatusInternal(pendingTool.request.callId, 'scheduled');
+                this.finalizeBlockedSpan(
+                  pendingTool.request.callId,
+                  'auto_approved',
+                  'auto',
+                );
+                break;
+              case 'blocked': {
+                this.setStatusInternal(
+                  pendingTool.request.callId,
+                  'error',
+                  createErrorResponse(
+                    pendingTool.request,
+                    new Error(outcome.errorMessage),
+                    ToolErrorType.EXECUTION_DENIED,
+                  ),
+                );
+                this.finalizeBlockedSpan(
+                  pendingTool.request.callId,
+                  'error',
+                  'auto',
+                );
+                const toolSpan = this.toolSpans.get(pendingTool.request.callId);
+                if (toolSpan) {
+                  setToolSpanFailure(
+                    toolSpan,
+                    TOOL_FAILURE_KIND_PERMISSION_DENIED,
+                    TOOL_SPAN_STATUS_PERMISSION_DENIED,
+                  );
+                  this.finalizeToolSpan(pendingTool.request.callId);
+                }
+                break;
+              }
+              case 'fallback':
+                if (
+                  isDenialFallbackReason(outcome.reason) ||
+                  outcome.reason === 'classifier_unavailable'
+                ) {
+                  this.autoModeFallbackCallIds.add(pendingTool.request.callId);
+                  if (outcome.message) {
+                    this.setStatusInternal(
+                      pendingTool.request.callId,
+                      'awaiting_approval',
+                      decorateClassifierUnavailableConfirmation(
+                        pendingTool.confirmationDetails,
+                        outcome.message,
+                      ),
+                    );
+                  }
+                  debugLogger.warn(
+                    `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
                   );
                 }
-                debugLogger.warn(
-                  `Auto mode fallback for pending tool (${outcome.reason}): consecutiveBlock=${denialState.consecutiveBlock}, consecutiveUnavailable=${denialState.consecutiveUnavailable}`,
-                );
+                break;
+              default: {
+                const _exhaustive: never = outcome;
+                void _exhaustive;
               }
-              break;
-            default: {
-              const _exhaustive: never = outcome;
-              void _exhaustive;
+            }
+            if (
+              outcome.kind === 'approved' ||
+              outcome.kind === 'blocked' ||
+              outcome.kind === 'fallback'
+            ) {
+              return;
             }
           }
-          if (
-            outcome.kind === 'approved' ||
-            outcome.kind === 'blocked' ||
-            outcome.kind === 'fallback'
-          ) {
-            continue;
-          }
-        }
 
-        if (finalPermission === 'allow') {
-          this.setToolCallOutcome(
-            pendingTool.request.callId,
-            ToolConfirmationOutcome.ProceedAlways,
+          if (finalPermission === 'allow') {
+            this.setToolCallOutcome(
+              pendingTool.request.callId,
+              ToolConfirmationOutcome.ProceedAlways,
+            );
+            this.setStatusInternal(pendingTool.request.callId, 'scheduled');
+            // Sister tool was waiting on the user but a sibling's
+            // ProceedAlways* outcome auto-approved it. Close the blocked span
+            // with auto_approved so the trace explains why this branch
+            // skipped a manual decision (#3731 Phase 2).
+            this.finalizeBlockedSpan(
+              pendingTool.request.callId,
+              'auto_approved',
+              'auto',
+            );
+          }
+        } catch (error) {
+          debugLogger.error(
+            `Error checking confirmation for tool ${pendingTool.request.callId}:`,
+            error,
           );
-          this.setStatusInternal(pendingTool.request.callId, 'scheduled');
-          // Sister tool was waiting on the user but a sibling's
-          // ProceedAlways* outcome auto-approved it. Close the blocked span
-          // with auto_approved so the trace explains why this branch
-          // skipped a manual decision (#3731 Phase 2).
-          this.finalizeBlockedSpan(
-            pendingTool.request.callId,
-            'auto_approved',
-            'auto',
-          );
+          // Intentionally do NOT finalize the blocked span here: the tool
+          // remains in `awaiting_approval` and the user can still respond.
+          // Closing the span on a transient permission-flow error would
+          // make the user's eventual decision a no-op (Map already cleared)
+          // and the actual decision/source would be lost. If the user
+          // never responds, the 30-min TTL in session-tracing.ts cleans
+          // up the span (#4321 codex P3 review).
         }
-      } catch (error) {
-        debugLogger.error(
-          `Error checking confirmation for tool ${pendingTool.request.callId}:`,
-          error,
-        );
-        // Intentionally do NOT finalize the blocked span here: the tool
-        // remains in `awaiting_approval` and the user can still respond.
-        // Closing the span on a transient permission-flow error would
-        // make the user's eventual decision a no-op (Map already cleared)
-        // and the actual decision/source would be lost. If the user
-        // never responds, the 30-min TTL in session-tracing.ts cleans
-        // up the span (#4321 codex P3 review).
-      }
+      });
     }
   }
 }

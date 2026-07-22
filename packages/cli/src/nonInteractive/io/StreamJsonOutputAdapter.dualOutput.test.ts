@@ -67,6 +67,42 @@ describe('StreamJsonOutputAdapter — dual-output extensions', () => {
       const lastParsed = JSON.parse(writes[writes.length - 1]);
       expect(lastParsed.type).toBe('assistant');
     });
+
+    it('writes unconditional goal_state events to the injected stream', () => {
+      const writes: string[] = [];
+      const customStream = {
+        write(chunk: string): boolean {
+          writes.push(chunk);
+          return true;
+        },
+      } as unknown as NodeJS.WritableStream;
+      const adapter = new StreamJsonOutputAdapter(
+        mockConfig,
+        false,
+        customStream,
+      );
+
+      adapter.processEvent({
+        type: GeminiEventType.GoalState,
+        value: {
+          v: 2,
+          activity: 'idle',
+          goal: null,
+        },
+        cause: 'clear',
+      });
+
+      expect(writes).toHaveLength(1);
+      expect(JSON.parse(writes[0])).toMatchObject({
+        type: 'stream_event',
+        session_id: 'test-session-id',
+        event: {
+          type: 'goal_state',
+          goal_state: { v: 2, activity: 'idle', goal: null },
+        },
+      });
+      expect(stdoutWriteSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('emitPermissionRequest / emitControlResponse', () => {

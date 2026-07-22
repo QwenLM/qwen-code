@@ -1,4 +1,5 @@
 import * as React from 'react'
+import { useTranslation } from 'react-i18next'
 import { cn } from '@/lib/utils'
 import { CHAT_LAYOUT } from '@/config/layout'
 import { flattenLabels, type LabelConfig } from '@craft-agent/shared/labels'
@@ -9,6 +10,11 @@ import { ActiveOptionBadges } from '../ActiveOptionBadges'
 import { InputContainer } from './InputContainer'
 import { InputErrorBoundary } from './InputErrorBoundary'
 import { FEATURE_FLAGS } from '@craft-agent/shared/feature-flags'
+import type {
+  GoalControlRequest,
+  GoalSnapshotV2,
+} from '../../../../shared/types'
+import { GoalStatusBar, type GoalStatusBarLabels } from './GoalStatusBar'
 
 interface ChatInputZoneProps {
   compactMode?: boolean
@@ -26,6 +32,9 @@ interface ChatInputZoneProps {
   sessionStatuses?: SessionStatus[]
   currentSessionStatus?: string
   onSessionStatusChange?: (stateId: string) => void
+  goalState?: GoalSnapshotV2
+  onGoalControl?: (request: GoalControlRequest) => Promise<void>
+  onGoalError?: (error: unknown) => void
   className?: string
   inputProps: React.ComponentProps<typeof InputContainer>
 }
@@ -46,9 +55,13 @@ export function ChatInputZone({
   sessionStatuses = [],
   currentSessionStatus = 'todo',
   onSessionStatusChange,
+  goalState,
+  onGoalControl,
+  onGoalError,
   className,
   inputProps,
 }: ChatInputZoneProps) {
+  const { t } = useTranslation()
   const [autoOpenLabelId, setAutoOpenLabelId] = React.useState<string | null>(
     null,
   )
@@ -58,6 +71,31 @@ export function ChatInputZone({
   const visibleSessionLabels = FEATURE_FLAGS.sessionLabelsUi
     ? sessionLabels
     : []
+  const goalLabels = React.useMemo<GoalStatusBarLabels>(
+    () => ({
+      status: {
+        active: t('goal.status.active'),
+        paused: t('goal.status.paused'),
+        blocked: t('goal.status.blocked'),
+        usage_limited: t('goal.status.usageLimited'),
+        complete: t('goal.status.complete'),
+      },
+      activity: {
+        idle: t('goal.activity.idle'),
+        running: t('goal.activity.running'),
+        verifying: t('goal.activity.verifying'),
+      },
+      edit: t('goal.edit'),
+      pause: t('goal.pause'),
+      resume: t('goal.resume'),
+      clear: t('goal.clear'),
+      save: t('common.save'),
+      cancel: t('common.cancel'),
+      objective: t('goal.objective'),
+      elapsed: t('goal.elapsed'),
+    }),
+    [t],
+  )
 
   const handleClearDraft = React.useCallback(() => {
     inputProps.onInputChange?.('')
@@ -117,6 +155,15 @@ export function ChatInputZone({
           sessionStatuses={sessionStatuses}
           currentSessionStatus={currentSessionStatus}
           onSessionStatusChange={onSessionStatusChange}
+        />
+      )}
+
+      {goalState?.goal && onGoalControl && (
+        <GoalStatusBar
+          snapshot={goalState}
+          labels={goalLabels}
+          onControl={onGoalControl}
+          onError={onGoalError}
         />
       )}
 

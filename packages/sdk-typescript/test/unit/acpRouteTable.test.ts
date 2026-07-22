@@ -6,7 +6,10 @@
 
 import { describe, it, expect } from 'vitest';
 import { ROUTE_TABLE } from '../../src/daemon/acpRouteTable.js';
-import { matchRoute } from '../../src/daemon/acpTransportUtils.js';
+import {
+  jsonRpcErrorToHttpStatusWithData,
+  matchRoute,
+} from '../../src/daemon/acpTransportUtils.js';
 
 // ---------------------------------------------------------------------------
 // ROUTE_TABLE shape
@@ -99,6 +102,59 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/s1/cancel', 'POST')!;
     const params = result.mapping.extractParams(result.segments, {}, 'POST');
     expect(params).toEqual({ sessionId: 's1' });
+  });
+
+  it('GET /session/:id/goal maps to the ACP Goal read method', () => {
+    const result = matchRoute('/session/s1/goal', 'GET');
+
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/goal');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'GET'),
+    ).toEqual({ sessionId: 's1' });
+  });
+
+  it('POST /session/:id/goal maps the exact body under request', () => {
+    const result = matchRoute('/session/s1/goal', 'POST');
+    const request = {
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 3,
+    };
+
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/goal/control');
+    expect(
+      result!.mapping.extractParams(result!.segments, request, 'POST'),
+    ).toEqual({ sessionId: 's1', request });
+  });
+
+  it('keeps the legacy Goal clear route on the child atomic wrapper', () => {
+    const result = matchRoute('/session/s1/goal/clear', 'POST');
+
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/goal/clear');
+    expect(result!.mapping.extractParams(result!.segments, {}, 'POST')).toEqual(
+      { sessionId: 's1' },
+    );
+  });
+
+  it('preserves Goal conflict status through ACP-backed SDK transport', () => {
+    expect(
+      jsonRpcErrorToHttpStatusWithData(-32009, {
+        errorKind: 'goal_conflict',
+      }),
+    ).toBe(409);
+    expect(
+      jsonRpcErrorToHttpStatusWithData(-32009, {
+        errorKind: 'goal_invalid_transition',
+      }),
+    ).toBe(409);
+    expect(
+      jsonRpcErrorToHttpStatusWithData(-32603, {
+        errorKind: 'goal_persist_failed',
+      }),
+    ).toBe(500);
   });
 
   // ---- DELETE /session/:id → session/close ----------------------------

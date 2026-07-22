@@ -21,12 +21,17 @@ import type {
   FunctionCall,
   GenerateContentResponse,
   Part,
+  PartListUnion,
 } from '@google/genai';
 import type {
   ChatRecord,
   Config,
   Extension,
   GeminiChat,
+  GoalRuntime,
+  GoalSnapshotV2,
+  GoalTurnHost,
+  GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
@@ -45,7 +50,6 @@ import type {
 import type { LoadedSettings } from '../../config/settings.js';
 import * as nonInteractiveCliCommands from '../../nonInteractiveCliCommands.js';
 import { CommandKind } from '../../ui/commands/types.js';
-import { MessageType } from '../../ui/types.js';
 import { buildAcpModelOptions } from '../../utils/acpModelUtils.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
@@ -318,6 +322,8 @@ describe('Session', () => {
     recordSlashCommand: ReturnType<typeof vi.fn>;
     recordNotification: ReturnType<typeof vi.fn>;
     recordFileHistorySnapshot: ReturnType<typeof vi.fn>;
+    recordGoalRuntimeMessage: ReturnType<typeof vi.fn>;
+    flush: ReturnType<typeof vi.fn>;
     rewindRecording: ReturnType<typeof vi.fn>;
     setTitleRecordedCallback: ReturnType<typeof vi.fn>;
   };
@@ -350,6 +356,12 @@ describe('Session', () => {
     getTool: ReturnType<typeof vi.fn>;
     ensureTool: ReturnType<typeof vi.fn>;
   };
+  let mockGoalRuntime: GoalRuntime;
+  let goalRuntimeSnapshot: GoalSnapshotV2;
+  let goalRuntimeListener: Parameters<GoalRuntime['subscribe']>[0] | undefined;
+  let goalHost: GoalTurnHost | undefined;
+  let unsubscribeGoalRuntime: ReturnType<typeof vi.fn>;
+  let unbindGoalHost: ReturnType<typeof vi.fn>;
 
   function mockConfirmingTool(
     name: string,
@@ -419,9 +431,14 @@ describe('Session', () => {
     return request?.message ?? [];
   }
 
-  function textParts(parts: Part[]): string[] {
-    return parts.flatMap((part) =>
-      typeof part.text === 'string' ? [part.text] : [],
+  function textParts(parts: PartListUnion): string[] {
+    const values = Array.isArray(parts) ? parts : [parts];
+    return values.flatMap((part) =>
+      typeof part === 'string'
+        ? [part]
+        : typeof part.text === 'string'
+          ? [part.text]
+          : [],
     );
   }
 
@@ -499,6 +516,8 @@ describe('Session', () => {
       recordSlashCommand: vi.fn(),
       recordNotification: vi.fn(),
       recordFileHistorySnapshot: vi.fn(),
+      recordGoalRuntimeMessage: vi.fn(),
+      flush: vi.fn().mockResolvedValue(undefined),
       rewindRecording: vi.fn(),
       setTitleRecordedCallback: vi.fn(),
     };
@@ -517,6 +536,31 @@ describe('Session', () => {
       shouldGitIgnoreFile: vi.fn().mockReturnValue(false),
       shouldIgnoreFile: vi.fn().mockReturnValue(false),
     };
+
+    goalRuntimeSnapshot = { v: 2, goal: null, activity: 'idle' };
+    goalRuntimeListener = undefined;
+    goalHost = undefined;
+    unsubscribeGoalRuntime = vi.fn();
+    unbindGoalHost = vi.fn();
+    mockGoalRuntime = {
+      getSnapshot: vi.fn(() => structuredClone(goalRuntimeSnapshot)),
+      subscribe: vi.fn((listener) => {
+        goalRuntimeListener = listener;
+        return unsubscribeGoalRuntime;
+      }),
+      restore: vi.fn().mockResolvedValue(undefined),
+      dispatch: vi.fn(),
+      bindHost: vi.fn(),
+      beginTurn: vi.fn(),
+      releaseTurn: vi.fn().mockResolvedValue(false),
+      permitForTurn: vi.fn(),
+      getVerifierFeedback: vi.fn(),
+      finishTurn: vi.fn().mockResolvedValue(undefined),
+      getGoalForWorker: vi.fn(),
+      recordTerminalProposal: vi.fn(),
+      takePendingTerminalProposal: vi.fn(),
+      dispose: vi.fn(),
+    } as unknown as GoalRuntime;
 
     mockConfig = {
       storage: {
@@ -575,6 +619,12 @@ describe('Session', () => {
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
+      getGoalRuntime: vi.fn().mockReturnValue(mockGoalRuntime),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
+      bindGoalTurnHost: vi.fn((host: GoalTurnHost) => {
+        goalHost = host;
+        return unbindGoalHost;
+      }),
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       setSubSessionSpawner: vi.fn(),
       getSubSessionSpawner: vi.fn(),
@@ -854,6 +904,1509 @@ describe('Session', () => {
     ).pendingPromptCompletion = null;
     await vi.waitFor(() => {
       expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('Goal v3 host lifecycle', () => {
+    const permit: GoalTurnPermit = {
+      goalId: 'goal-1',
+      revision: 3,
+      turnId: 'turn-1',
+    };
+
+    const activeSnapshot = (
+      activity: GoalSnapshotV2['activity'] = 'running',
+    ): GoalSnapshotV2 => ({
+      v: 2,
+      goal: {
+        goalId: permit.goalId,
+        revision: permit.revision,
+        objective: 'ship the ACP Goal worker',
+        status: 'active',
+        evidenceCursor: { recordId: 'before-goal-turn' },
+        turnCount: 2,
+        activeTimeMs: 500,
+        createdAt: 100,
+        updatedAt: 200,
+      },
+      activity,
+    });
+
+    async function activateGoalHost(): Promise<GoalTurnHost> {
+      session.installRewriter();
+      await vi.waitFor(() => {
+        expect(goalHost).toBeDefined();
+      });
+      return goalHost!;
+    }
+
+    it('binds once only after post-replay setup and disposes both subscriptions', async () => {
+      expect(mockConfig.getGoalRuntimeReady).not.toHaveBeenCalled();
+      expect(mockConfig.bindGoalTurnHost).not.toHaveBeenCalled();
+
+      session.installRewriter();
+      session.installRewriter();
+
+      await vi.waitFor(() => {
+        expect(mockConfig.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+        expect(mockGoalRuntime.subscribe).toHaveBeenCalledTimes(1);
+        expect(mockConfig.bindGoalTurnHost).toHaveBeenCalledTimes(1);
+      });
+
+      session.dispose();
+
+      expect(unsubscribeGoalRuntime).toHaveBeenCalledOnce();
+      expect(unbindGoalHost).toHaveBeenCalledOnce();
+    });
+
+    it('starts one restored active Goal turn after the single host bind', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      vi.mocked(mockGoalRuntime.permitForTurn).mockReturnValue(permit);
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      mockConfig.bindGoalTurnHost = vi.fn((host: GoalTurnHost) => {
+        goalHost = host;
+        void host.startGoalTurn({
+          permit,
+          continuationContext: goalRuntimeSnapshot.goal!.objective,
+        });
+        return unbindGoalHost;
+      });
+
+      session.installRewriter();
+      session.installRewriter();
+
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+      expect(mockConfig.bindGoalTurnHost).toHaveBeenCalledOnce();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+    });
+
+    it.each(['paused', 'blocked', 'usage_limited', 'complete'] as const)(
+      'keeps a restored %s Goal display-only',
+      async (status) => {
+        const snapshot = activeSnapshot('idle');
+        goalRuntimeSnapshot = {
+          ...snapshot,
+          goal: { ...snapshot.goal!, status },
+        };
+        mockConfig.bindGoalTurnHost = vi.fn((host: GoalTurnHost) => {
+          goalHost = host;
+          if (goalRuntimeSnapshot.goal?.status === 'active') {
+            void host.startGoalTurn({
+              permit,
+              continuationContext: goalRuntimeSnapshot.goal.objective,
+            });
+          }
+          return unbindGoalHost;
+        });
+
+        session.installRewriter();
+        session.installRewriter();
+
+        await vi.waitFor(() => {
+          expect(mockConfig.bindGoalTurnHost).toHaveBeenCalledOnce();
+        });
+        await Promise.resolve();
+        expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+        expect(
+          mockChatRecordingService.recordGoalRuntimeMessage,
+        ).not.toHaveBeenCalled();
+      },
+    );
+
+    it('serializes live snapshot emission in runtime order', async () => {
+      await activateGoalHost();
+      let releaseFirst!: () => void;
+      const firstGate = new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      });
+      vi.mocked(mockClient.sessionUpdate)
+        .mockImplementationOnce(() => firstGate)
+        .mockResolvedValue(undefined);
+
+      const created = activeSnapshot('idle');
+      const paused: GoalSnapshotV2 = {
+        ...created,
+        goal: { ...created.goal!, revision: 4, status: 'paused' },
+      };
+      goalRuntimeListener?.(created, 'create');
+      goalRuntimeListener?.(paused, 'pause');
+
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(1);
+      });
+      releaseFirst();
+      await vi.waitFor(() => {
+        expect(mockClient.sessionUpdate).toHaveBeenCalledTimes(2);
+      });
+
+      const goalStates = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([request]) => request.update._meta?.['goalState']);
+      expect(goalStates).toEqual([created, paused]);
+    });
+
+    it('runs generic Stop hooks before flushing and finishing the exact permit', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === `goal-runtime:${permit.turnId}` ? permit : undefined,
+      );
+      const stopHook = vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'continue the Goal' },
+        })
+        .mockResolvedValueOnce({ output: undefined });
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({ request: stopHook });
+      mockConfig.hasHooksForEvent = vi.fn((event) => event === 'Stop');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      const host = await activateGoalHost();
+
+      await host.startGoalTurn({
+        permit,
+        continuationContext: 'continue from the durable Goal state',
+        verifierFeedback: 'cite the delivered output record',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+      expect(
+        mockChatRecordingService.recordGoalRuntimeMessage,
+      ).toHaveBeenCalledWith(expect.anything(), permit);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        textParts(
+          vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[1].message ??
+            [],
+        ),
+      ).toContain(
+        "Continue working on the active Goal.\nUse get_goal for the authoritative objective and evidence state.\nFollow the objective's requested output format exactly. Do not add progress, status, or completion commentary unless the objective asks for it.\nIf completion depends on content delivered in this turn, deliver only that content and call get_goal in the same response before update_goal.\nRuntime continuation context: continue from the durable Goal state\nVerifier feedback: cite the delivered output record",
+      );
+      for (const call of vi.mocked(mockChat.sendMessageStream).mock.calls) {
+        expect(call[2]).toContain(permit.turnId);
+        expect(call[3]).toEqual(permit);
+      }
+      expect(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
+      ).toContainEqual({ text: 'continue the Goal' });
+      expect(stopHook).toHaveBeenCalledTimes(2);
+      expect(stopHook.mock.invocationCallOrder[1]).toBeLessThan(
+        mockChatRecordingService.flush.mock.invocationCallOrder[0]!,
+      );
+      expect(
+        mockChatRecordingService.flush.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(mockGoalRuntime.finishTurn).mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('drains and records inserted user input before an automatic Goal turn finishes', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === `goal-runtime:${permit.turnId}` ? permit : undefined,
+      );
+      vi.mocked(mockClient.extMethod)
+        .mockResolvedValueOnce({ messages: ['GOAL_DONE'] })
+        .mockResolvedValue({ messages: [] });
+      vi.mocked(mockChat.sendMessageStream)
+        .mockResolvedValueOnce(createEmptyStream())
+        .mockResolvedValueOnce(createEmptyStream());
+      const host = await activateGoalHost();
+
+      await host.startGoalTurn({
+        permit,
+        continuationContext: 'continue',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+
+      const insertedPart = {
+        text: '\n[User message received during tool execution]: GOAL_DONE',
+      };
+      expect(mockClient.extMethod).toHaveBeenCalledWith(
+        'craft/drainMidTurnQueue',
+        { sessionId: 'test-session-id' },
+      );
+      expect(
+        mockChatRecordingService.recordMidTurnUserMessage,
+      ).toHaveBeenCalledWith([insertedPart], 'GOAL_DONE', permit);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
+      ).toContainEqual(insertedPart);
+    });
+
+    it.each([
+      [
+        core.ToolNames.GET_GOAL,
+        { goalContext: permit, provenance: 'goal_runtime' },
+      ],
+      [
+        core.ToolNames.UPDATE_GOAL,
+        { goalContext: permit, provenance: 'goal_runtime' },
+      ],
+      ['read_file', { goalContext: permit }],
+    ] as const)(
+      'keeps %s build, permission, execution, and recording on the exact permit',
+      async (toolName, expectedRecording) => {
+        goalRuntimeSnapshot = activeSnapshot();
+        vi.mocked(mockGoalRuntime.permitForTurn).mockReturnValue(permit);
+        const observedContexts: Array<{
+          stage: 'build' | 'permission' | 'execute';
+          permit: GoalTurnPermit | undefined;
+        }> = [];
+        const execute = vi.fn().mockImplementation(async () => {
+          observedContexts.push({
+            stage: 'execute',
+            permit: core.goalTurnContext.getStore(),
+          });
+          return { llmContent: 'goal details', returnDisplay: 'goal details' };
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: toolName,
+          kind: core.Kind.Read,
+          displayName: toolName,
+          description: toolName,
+          build: vi.fn().mockImplementation(() => {
+            observedContexts.push({
+              stage: 'build',
+              permit: core.goalTurnContext.getStore(),
+            });
+            return {
+              params: {},
+              execute,
+              getDefaultPermission: vi.fn().mockImplementation(async () => {
+                observedContexts.push({
+                  stage: 'permission',
+                  permit: core.goalTurnContext.getStore(),
+                });
+                return 'allow';
+              }),
+              getDescription: vi.fn().mockReturnValue(toolName),
+              toolLocations: vi.fn().mockReturnValue([]),
+            };
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        vi.mocked(mockChat.sendMessageStream)
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [
+                          {
+                            functionCall: {
+                              id: 'goal-tool-call',
+                              name: toolName,
+                              args: {},
+                            },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'goal-tool-call',
+                      name: toolName,
+                      args: {},
+                    },
+                  ],
+                },
+              },
+            ]) as AsyncGenerator<core.StreamEvent>,
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+        const host = await activateGoalHost();
+
+        await host.startGoalTurn({ permit, continuationContext: 'continue' });
+
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+        expect(observedContexts).toEqual([
+          { stage: 'build', permit },
+          { stage: 'permission', permit },
+          { stage: 'build', permit },
+          { stage: 'execute', permit },
+        ]);
+        expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+          expect.any(Array),
+          expect.objectContaining({ callId: 'goal-tool-call' }),
+          expectedRecording,
+        );
+        expect(mockChat.sendMessageStream).toHaveBeenNthCalledWith(
+          2,
+          expect.any(String),
+          expect.objectContaining({
+            message: expect.arrayContaining([
+              expect.objectContaining({ functionResponse: expect.any(Object) }),
+            ]),
+          }),
+          expect.stringContaining(permit.turnId),
+          permit,
+        );
+      },
+    );
+
+    it('ends an automatic Goal turn at a terminal update_goal result', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      vi.mocked(mockGoalRuntime.permitForTurn).mockReturnValue(permit);
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.UPDATE_GOAL,
+        kind: core.Kind.Think,
+        displayName: 'UpdateGoal',
+        description: 'Update Goal',
+        build: vi.fn().mockReturnValue({
+          params: {},
+          execute: vi.fn().mockResolvedValue({
+            llmContent: 'proposal recorded',
+            returnDisplay: 'proposal recorded',
+            terminateTurn: true,
+          }),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Update Goal'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValueOnce(
+        createStreamWithChunks([
+          {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: 'update-goal-terminal',
+                          name: core.ToolNames.UPDATE_GOAL,
+                          args: {},
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+              functionCalls: [
+                {
+                  id: 'update-goal-terminal',
+                  name: core.ToolNames.UPDATE_GOAL,
+                  args: {},
+                },
+              ],
+            },
+          },
+        ]) as AsyncGenerator<core.StreamEvent>,
+      );
+      const host = await activateGoalHost();
+
+      await host.startGoalTurn({ permit, continuationContext: 'complete' });
+
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          expect.objectContaining({
+            functionResponse: expect.objectContaining({
+              name: core.ToolNames.UPDATE_GOAL,
+            }),
+          }),
+        ],
+      });
+      expect(
+        mockChatRecordingService.flush.mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        vi.mocked(mockGoalRuntime.finishTurn).mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('preempts only the dedicated Goal turn', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      let permitIsCurrent = true;
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation(() =>
+        permitIsCurrent ? permit : undefined,
+      );
+      let goalSignal: AbortSignal | undefined;
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(
+        async (_model, params) => {
+          goalSignal = params.config?.abortSignal;
+          return (async function* () {
+            await new Promise<void>((resolve) => {
+              if (goalSignal?.aborted) resolve();
+              else
+                goalSignal?.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+            });
+            yield* [];
+          })();
+        },
+      );
+      const host = await activateGoalHost();
+      await host.startGoalTurn({ permit, continuationContext: 'continue' });
+      await vi.waitFor(() => expect(goalSignal).toBeDefined());
+      const ordinaryController = new AbortController();
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = ordinaryController;
+
+      permitIsCurrent = false;
+      host.preemptGoalTurn('Goal edited');
+
+      await vi.waitFor(() => expect(goalSignal?.aborted).toBe(true));
+      expect(ordinaryController.signal.aborted).toBe(false);
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = null;
+      await vi.waitFor(() => {
+        expect(session.isIdle()).toBe(true);
+      });
+      expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+    });
+
+    it('waits for a running Goal turn, then admits an ordinary prompt on its own exact permit', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-turn-1',
+      };
+      let currentTurnKey: string | undefined = `goal-runtime:${permit.turnId}`;
+      let currentPermit: GoalTurnPermit | undefined = permit;
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === currentTurnKey ? currentPermit : undefined,
+      );
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        if (currentPermit || goalRuntimeSnapshot.goal?.status !== 'active') {
+          return undefined;
+        }
+        currentTurnKey = turnKey;
+        currentPermit = userPermit;
+        goalRuntimeSnapshot = activeSnapshot('running');
+        goalRuntimeListener?.(goalRuntimeSnapshot);
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.finishTurn).mockImplementation(
+        async (finishedPermit) => {
+          expect(finishedPermit).toEqual(currentPermit);
+          currentPermit = undefined;
+          currentTurnKey = undefined;
+          goalRuntimeSnapshot = activeSnapshot('idle');
+          goalRuntimeListener?.(goalRuntimeSnapshot);
+        },
+      );
+      let releaseGoalCompression!: () => void;
+      const goalCompression = new Promise<{
+        originalTokenCount: number;
+        newTokenCount: number;
+        compressionStatus: core.CompressionStatus;
+      }>((resolve) => {
+        releaseGoalCompression = () =>
+          resolve({
+            originalTokenCount: 0,
+            newTokenCount: 0,
+            compressionStatus: core.CompressionStatus.NOOP,
+          });
+      });
+      vi.mocked(mockGeminiClient.tryCompressChat)
+        .mockImplementationOnce(() => goalCompression)
+        .mockResolvedValue({
+          originalTokenCount: 0,
+          newTokenCount: 0,
+          compressionStatus: core.CompressionStatus.NOOP,
+        });
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      const host = await activateGoalHost();
+
+      await host.startGoalTurn({ permit, continuationContext: 'continue' });
+      await vi.waitFor(() => {
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
+      });
+
+      const ordinaryPrompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'user request wins' }],
+      });
+      await Promise.resolve();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+
+      releaseGoalCompression();
+      await expect(ordinaryPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'user request wins',
+        userPermit,
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[3]).toEqual(
+        permit,
+      );
+      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[3]).toEqual(
+        userPermit,
+      );
+      expect(
+        vi.mocked(mockGoalRuntime.finishTurn).mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        mockChatRecordingService.recordUserMessage.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('does not send after the ordinary prompt loses its exact permit during compression', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-turn-invalidated',
+      };
+      let userTurnKey: string | undefined;
+      let permitIsCurrent = true;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        permitIsCurrent && turnKey === userTurnKey ? userPermit : undefined,
+      );
+      let releaseCompression!: () => void;
+      vi.mocked(mockGeminiClient.tryCompressChat).mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseCompression = () =>
+              resolve({
+                originalTokenCount: 0,
+                newTokenCount: 0,
+                compressionStatus: core.CompressionStatus.NOOP,
+              });
+          }),
+      );
+      await activateGoalHost();
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'must keep the exact permit' }],
+      });
+      await vi.waitFor(() => {
+        expect(mockGeminiClient.tryCompressChat).toHaveBeenCalledOnce();
+      });
+
+      permitIsCurrent = false;
+      goalRuntimeSnapshot = {
+        ...activeSnapshot('idle'),
+        goal: { ...activeSnapshot('idle').goal!, status: 'paused' },
+      };
+      goalRuntimeListener?.(goalRuntimeSnapshot, 'pause');
+      releaseCompression();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+    });
+
+    it('waits for paused running ownership to settle, but admits paused idle without a permit', async () => {
+      await activateGoalHost();
+      const paused = activeSnapshot('running');
+      goalRuntimeSnapshot = {
+        ...paused,
+        goal: { ...paused.goal!, status: 'paused' },
+      };
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+
+      const waitingPrompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'wait for settlement' }],
+      });
+      await Promise.resolve();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockGoalRuntime.beginTurn).not.toHaveBeenCalled();
+
+      goalRuntimeSnapshot = { ...goalRuntimeSnapshot, activity: 'idle' };
+      goalRuntimeListener?.(goalRuntimeSnapshot);
+      await expect(waitingPrompt).resolves.toEqual({
+        stopReason: 'end_turn',
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[3]).toBe(
+        undefined,
+      );
+
+      vi.mocked(mockChat.sendMessageStream).mockClear();
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'paused idle can proceed' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.beginTurn).not.toHaveBeenCalled();
+      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[0]?.[3]).toBe(
+        undefined,
+      );
+      expect(textParts(firstSentMessage()).join('\n')).toContain(
+        'The Goal is paused. Do not continue its objective unless the user resumes it.',
+      );
+    });
+
+    it('releases only its queued turn key when cancelled while waiting for Goal ownership', async () => {
+      goalRuntimeSnapshot = activeSnapshot('running');
+      vi.mocked(mockGoalRuntime.beginTurn).mockReturnValue(undefined);
+      vi.mocked(mockGoalRuntime.permitForTurn).mockReturnValue(undefined);
+      await activateGoalHost();
+      let admissionListener:
+        | Parameters<GoalRuntime['subscribe']>[0]
+        | undefined;
+      vi.mocked(mockGoalRuntime.subscribe).mockImplementationOnce(
+        (listener) => {
+          admissionListener = listener;
+          return vi.fn();
+        },
+      );
+      vi.mocked(mockGoalRuntime.releaseTurn).mockImplementationOnce(
+        async () => {
+          goalRuntimeSnapshot = activeSnapshot('idle');
+          admissionListener?.(goalRuntimeSnapshot);
+          return true;
+        },
+      );
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'cancel while waiting' }],
+      });
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.beginTurn).toHaveBeenCalled();
+      });
+      const turnKey = vi.mocked(mockGoalRuntime.beginTurn).mock.calls[0]?.[0];
+      const beginCallsBeforeCancel = vi.mocked(mockGoalRuntime.beginTurn).mock
+        .calls.length;
+
+      await session.cancelPendingPrompt();
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+
+      expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledOnce();
+      expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+      expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalled();
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockGoalRuntime.beginTurn).toHaveBeenCalledTimes(
+        beginCallsBeforeCancel,
+      );
+      expect(session.isIdle()).toBe(true);
+    });
+
+    it.each([
+      ['/goal', { kind: 'status' }],
+      ['/goal pause', { kind: 'pause' }],
+      [
+        '/goal edit revised objective',
+        {
+          kind: 'edit',
+          objective: 'revised objective',
+        },
+      ],
+      ['/goal clear', { kind: 'clear' }],
+    ] as const)(
+      'dispatches running %s before any ACP admission preemption',
+      async (command, operation) => {
+        goalRuntimeSnapshot = activeSnapshot('running');
+        vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation(
+          (turnKey) =>
+            turnKey === `goal-runtime:${permit.turnId}` ? permit : undefined,
+        );
+        let goalSignal: AbortSignal | undefined;
+        let releaseGoal!: () => void;
+        const goalGate = new Promise<void>((resolve) => {
+          releaseGoal = resolve;
+        });
+        vi.mocked(mockChat.sendMessageStream).mockImplementation(
+          async (_model, params) => {
+            goalSignal = params.config?.abortSignal;
+            return (async function* () {
+              await goalGate;
+              yield* [];
+            })();
+          },
+        );
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockImplementationOnce(async () => {
+          expect(goalSignal?.aborted).toBe(false);
+          return {
+            type: 'goal_control',
+            operation,
+            response: { snapshot: goalRuntimeSnapshot },
+          };
+        });
+        const host = await activateGoalHost();
+        await host.startGoalTurn({
+          permit,
+          continuationContext: 'continue running Goal',
+        });
+        await vi.waitFor(() => expect(goalSignal).toBeDefined());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: command }],
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        expect(goalSignal?.aborted).toBe(false);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        releaseGoal();
+        await vi.waitFor(() => {
+          expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+        });
+      },
+    );
+
+    it('keeps an active ordinary prompt on one exact permit through a tool follow-up', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-tool-stop-turn',
+      };
+      let userTurnKey: string | undefined;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === userTurnKey ? userPermit : undefined,
+      );
+      const observedToolContexts: Array<GoalTurnPermit | undefined> = [];
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'read_file',
+        kind: core.Kind.Read,
+        displayName: 'read_file',
+        description: 'read_file',
+        build: vi.fn().mockReturnValue({
+          params: {},
+          execute: vi.fn().mockImplementation(async () => {
+            observedToolContexts.push(core.goalTurnContext.getStore());
+            return { llmContent: 'contents', returnDisplay: 'contents' };
+          }),
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('read_file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      vi.mocked(mockChat.sendMessageStream)
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          functionCall: {
+                            id: 'user-goal-tool',
+                            name: 'read_file',
+                            args: {},
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+                functionCalls: [
+                  { id: 'user-goal-tool', name: 'read_file', args: {} },
+                ],
+              },
+            },
+          ]) as AsyncGenerator<core.StreamEvent>,
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+      await activateGoalHost();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'use a tool then continue' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'use a tool then continue',
+        userPermit,
+      );
+      expect(observedToolContexts).toEqual([userPermit]);
+      expect(mockChatRecordingService.recordToolResult).toHaveBeenCalledWith(
+        expect.any(Array),
+        expect.objectContaining({ callId: 'user-goal-tool' }),
+        { goalContext: userPermit },
+      );
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      for (const call of vi.mocked(mockChat.sendMessageStream).mock.calls) {
+        expect(call[3]).toEqual(userPermit);
+      }
+      expect(mockChatRecordingService.flush).toHaveBeenCalledBefore(
+        vi.mocked(mockGoalRuntime.finishTurn),
+      );
+      expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+    });
+
+    it('revalidates the exact permit immediately before a tool side effect', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-tool-toctou-turn',
+      };
+      let userTurnKey: string | undefined;
+      let permitIsCurrent = true;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        permitIsCurrent && turnKey === userTurnKey ? userPermit : undefined,
+      );
+      let permissionStarted!: () => void;
+      const permissionStart = new Promise<void>((resolve) => {
+        permissionStarted = resolve;
+      });
+      let releasePermission!: () => void;
+      const permissionGate = new Promise<void>((resolve) => {
+        releasePermission = resolve;
+      });
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'side effect ran',
+        returnDisplay: 'side effect ran',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: 'write_file',
+        kind: core.Kind.Edit,
+        displayName: 'write_file',
+        description: 'write_file',
+        build: vi.fn().mockReturnValue({
+          params: {},
+          execute,
+          getDefaultPermission: vi.fn().mockImplementation(async () => {
+            permissionStarted();
+            await permissionGate;
+            return 'allow';
+          }),
+          getDescription: vi.fn().mockReturnValue('write_file'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      vi.mocked(mockChat.sendMessageStream)
+        .mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          functionCall: {
+                            id: 'goal-toctou-tool',
+                            name: 'write_file',
+                            args: {},
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+                functionCalls: [
+                  { id: 'goal-toctou-tool', name: 'write_file', args: {} },
+                ],
+              },
+            },
+          ]) as AsyncGenerator<core.StreamEvent>,
+        )
+        .mockResolvedValue(createEmptyStream());
+      const host = await activateGoalHost();
+
+      const prompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'run a guarded side effect' }],
+      });
+      await permissionStart;
+
+      permitIsCurrent = false;
+      host.preemptGoalTurn('Goal edited');
+      releasePermission();
+
+      await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+      expect(execute).not.toHaveBeenCalled();
+    });
+
+    it('keeps an active ordinary prompt on the same exact permit through a Stop-hook continuation', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-stop-turn',
+      };
+      let userTurnKey: string | undefined;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === userTurnKey ? userPermit : undefined,
+      );
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      const stopHook = vi
+        .fn()
+        .mockResolvedValueOnce({
+          output: { decision: 'block', reason: 'continue exactly once' },
+        })
+        .mockResolvedValueOnce({ output: undefined });
+      mockConfig.getMessageBus = vi.fn().mockReturnValue({ request: stopHook });
+      mockConfig.hasHooksForEvent = vi.fn((event) => event === 'Stop');
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      await activateGoalHost();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'honor the Stop hook' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(stopHook).toHaveBeenCalledTimes(2);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      for (const call of vi.mocked(mockChat.sendMessageStream).mock.calls) {
+        expect(call[3]).toEqual(userPermit);
+      }
+      expect(
+        vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[1].message,
+      ).toContainEqual({ text: 'continue exactly once' });
+      expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+    });
+
+    it('does not apply the generic session token cap to a Goal-owned ordinary prompt', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-over-generic-cap',
+      };
+      let userTurnKey: string | undefined;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === userTurnKey ? userPermit : undefined,
+      );
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(1);
+      vi.mocked(mockGeminiClient.tryCompressChat).mockResolvedValue({
+        originalTokenCount: 500,
+        newTokenCount: 500,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      await activateGoalHost();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'continue despite generic cap' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Object),
+        expect.any(String),
+        userPermit,
+      );
+      expect(agentMessageChunks()).not.toContainEqual(
+        expect.stringContaining('Session token limit exceeded'),
+      );
+    });
+
+    it('flushes and finishes the exact ordinary permit when the model send fails', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-error-turn',
+      };
+      let userTurnKey: string | undefined;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === userTurnKey ? userPermit : undefined,
+      );
+      vi.mocked(mockChat.sendMessageStream).mockRejectedValue(
+        new Error('provider failed'),
+      );
+      vi.mocked(mockGoalRuntime.dispatch).mockRejectedValue(
+        new Error('pause failed'),
+      );
+      await activateGoalHost();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'fail after admission' }],
+        }),
+      ).rejects.toThrow('provider failed');
+
+      expect(mockGoalRuntime.dispatch).toHaveBeenCalledWith({
+        action: 'pause',
+        expectedGoalId: userPermit.goalId,
+        expectedRevision: userPermit.revision,
+      });
+      expect(mockChatRecordingService.flush).toHaveBeenCalledBefore(
+        vi.mocked(mockGoalRuntime.finishTurn),
+      );
+      expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+      expect(mockGoalRuntime.releaseTurn).not.toHaveBeenCalled();
+    });
+
+    it('releases the exact ordinary key when transcript flush fails and preserves the provider error', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-flush-failure-turn',
+      };
+      let userTurnKey: string | undefined;
+      let currentPermit: GoalTurnPermit | undefined = userPermit;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return currentPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === userTurnKey ? currentPermit : undefined,
+      );
+      vi.mocked(mockGoalRuntime.releaseTurn).mockImplementation(
+        async (turnKey) => {
+          if (turnKey !== userTurnKey) return false;
+          currentPermit = undefined;
+          goalRuntimeSnapshot = {
+            ...activeSnapshot('idle'),
+            goal: { ...activeSnapshot('idle').goal!, status: 'paused' },
+          };
+          return true;
+        },
+      );
+      mockChatRecordingService.flush.mockRejectedValueOnce(
+        new Error('transcript append failed'),
+      );
+      vi.mocked(mockChat.sendMessageStream)
+        .mockRejectedValueOnce(new Error('provider failed'))
+        .mockResolvedValueOnce(createEmptyStream());
+      await activateGoalHost();
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'fail and release exactly' }],
+        }),
+      ).rejects.toThrow('provider failed');
+
+      expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(userTurnKey);
+      expect(mockGoalRuntime.finishTurn).not.toHaveBeenCalledWith(userPermit);
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'next prompt remains usable' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+    });
+
+    it('releases an automatic Goal key after finish append failure so a later Goal turn can run', async () => {
+      const secondPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'automatic-after-journal-failure',
+      };
+      let currentTurnKey = `goal-runtime:${permit.turnId}`;
+      let currentPermit: GoalTurnPermit | undefined = permit;
+      goalRuntimeSnapshot = activeSnapshot('running');
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === currentTurnKey ? currentPermit : undefined,
+      );
+      vi.mocked(mockGoalRuntime.finishTurn)
+        .mockRejectedValueOnce(new Error('goal journal append failed'))
+        .mockResolvedValueOnce(undefined);
+      vi.mocked(mockGoalRuntime.releaseTurn).mockImplementation(
+        async (turnKey) => {
+          if (turnKey !== currentTurnKey) return false;
+          currentPermit = undefined;
+          return true;
+        },
+      );
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      const host = await activateGoalHost();
+
+      await host.startGoalTurn({ permit, continuationContext: 'first turn' });
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(
+          `goal-runtime:${permit.turnId}`,
+        );
+      });
+
+      currentTurnKey = `goal-runtime:${secondPermit.turnId}`;
+      currentPermit = secondPermit;
+      await host.startGoalTurn({
+        permit: secondPermit,
+        continuationContext: 'second turn',
+      });
+
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(secondPermit);
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+    });
+
+    it('releases its queued key and leaves Session usable when Goal admission throws', async () => {
+      goalRuntimeSnapshot = activeSnapshot('running');
+      vi.mocked(mockGoalRuntime.beginTurn).mockReturnValue(undefined);
+      await activateGoalHost();
+      vi.mocked(mockGoalRuntime.subscribe).mockImplementationOnce(() => {
+        throw new Error('Goal subscription failed');
+      });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'admission should fail cleanly' }],
+        }),
+      ).rejects.toThrow('Goal subscription failed');
+
+      const turnKey = vi.mocked(mockGoalRuntime.beginTurn).mock.calls[0]?.[0];
+      expect(mockGoalRuntime.releaseTurn).toHaveBeenCalledWith(turnKey);
+      expect(session.isIdle()).toBe(true);
+
+      goalRuntimeSnapshot = {
+        ...activeSnapshot('idle'),
+        goal: { ...activeSnapshot('idle').goal!, status: 'paused' },
+      };
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'next prompt still works' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+    });
+
+    it('handles concurrent Goal status without aborting a Goal-owned user turn', async () => {
+      goalRuntimeSnapshot = activeSnapshot('idle');
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-running-during-status',
+      };
+      let userTurnKey: string | undefined;
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        userTurnKey = turnKey;
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === userTurnKey ? userPermit : undefined,
+      );
+      let userSignal: AbortSignal | undefined;
+      let releaseUser!: () => void;
+      const userGate = new Promise<void>((resolve) => {
+        releaseUser = resolve;
+      });
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(
+        async (_model, params) => {
+          userSignal = params.config?.abortSignal;
+          return (async function* () {
+            await userGate;
+            yield* [];
+          })();
+        },
+      );
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'goal_control',
+        operation: { kind: 'status' },
+        response: { snapshot: goalRuntimeSnapshot },
+      });
+      await activateGoalHost();
+      const userPrompt = session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'keep working during status' }],
+      });
+      await vi.waitFor(() => expect(userSignal).toBeDefined());
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '/goal' }],
+        }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(userSignal?.aborted).toBe(false);
+
+      releaseUser();
+      await expect(userPrompt).resolves.toEqual({ stopReason: 'end_turn' });
+      expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(userPermit);
+    });
+
+    it('settles a Goal queued behind background work before the user prompt starts', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      const userPermit: GoalTurnPermit = {
+        ...permit,
+        turnId: 'user-after-background-goal',
+      };
+      let currentTurnKey: string | undefined = `goal-runtime:${permit.turnId}`;
+      let currentPermit: GoalTurnPermit | undefined = permit;
+      vi.mocked(mockGoalRuntime.permitForTurn).mockImplementation((turnKey) =>
+        turnKey === currentTurnKey ? currentPermit : undefined,
+      );
+      vi.mocked(mockGoalRuntime.beginTurn).mockImplementation((turnKey) => {
+        if (currentPermit) return undefined;
+        currentTurnKey = turnKey;
+        currentPermit = userPermit;
+        goalRuntimeSnapshot = activeSnapshot('running');
+        goalRuntimeListener?.(goalRuntimeSnapshot);
+        return userPermit;
+      });
+      vi.mocked(mockGoalRuntime.finishTurn).mockImplementation(async () => {
+        currentTurnKey = undefined;
+        currentPermit = undefined;
+        goalRuntimeSnapshot = activeSnapshot('idle');
+        goalRuntimeListener?.(goalRuntimeSnapshot);
+      });
+      vi.mocked(mockChat.sendMessageStream).mockImplementation(
+        async (_model, params, promptId) => {
+          if (!promptId.includes('notification')) return createEmptyStream();
+          const signal = params.config?.abortSignal;
+          return (async function* () {
+            await new Promise<void>((resolve) => {
+              if (signal?.aborted) resolve();
+              else
+                signal?.addEventListener('abort', () => resolve(), {
+                  once: true,
+                });
+            });
+            yield* [];
+          })();
+        },
+      );
+      const host = await activateGoalHost();
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0]?.[0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+      callback('Background task completed.', 'background result', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      });
+      await host.startGoalTurn({ permit, continuationContext: 'continue' });
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'take priority' }],
+      });
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[2]?.[3]).toEqual(
+        userPermit,
+      );
+      expect(
+        vi.mocked(mockGoalRuntime.finishTurn).mock.invocationCallOrder[0],
+      ).toBeLessThan(
+        mockChatRecordingService.recordUserMessage.mock.invocationCallOrder[0]!,
+      );
+    });
+
+    it('drains a queued Goal turn after a background notification settles', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      vi.mocked(mockGoalRuntime.permitForTurn).mockReturnValue(permit);
+      let releaseNotification!: () => void;
+      const notificationGate = new Promise<void>((resolve) => {
+        releaseNotification = resolve;
+      });
+      vi.mocked(mockChat.sendMessageStream)
+        .mockResolvedValueOnce(
+          (async function* () {
+            await notificationGate;
+            yield* [];
+          })(),
+        )
+        .mockResolvedValueOnce(createEmptyStream());
+      const host = await activateGoalHost();
+      const callback = mockBackgroundTaskRegistry.setNotificationCallback.mock
+        .calls[0]?.[0] as (
+        displayText: string,
+        modelText: string,
+        meta: { agentId: string; status: string },
+      ) => void;
+
+      callback('Background task completed.', 'background result', {
+        agentId: 'agent-1',
+        status: 'completed',
+      });
+      await vi.waitFor(() => {
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      });
+      await host.startGoalTurn({ permit, continuationContext: 'continue' });
+      await Promise.resolve();
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+
+      releaseNotification();
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(mockChat.sendMessageStream).mock.calls[1]?.[3]).toEqual(
+        permit,
+      );
+    });
+
+    it('does not apply the ordinary session token cap to a Goal turn', async () => {
+      goalRuntimeSnapshot = activeSnapshot();
+      vi.mocked(mockGoalRuntime.permitForTurn).mockReturnValue(permit);
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(1);
+      vi.mocked(mockGeminiClient.tryCompressChat).mockResolvedValue({
+        originalTokenCount: 500,
+        newTokenCount: 500,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      const host = await activateGoalHost();
+
+      await host.startGoalTurn({ permit, continuationContext: 'continue' });
+
+      await vi.waitFor(() => {
+        expect(mockGoalRuntime.finishTurn).toHaveBeenCalledWith(permit);
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(agentMessageChunks()).not.toContainEqual(
+        expect.stringContaining('Session token limit exceeded'),
+      );
+    });
+
+    it('keeps ordinary prompts usable when Goal host binding fails', async () => {
+      mockConfig.bindGoalTurnHost = vi.fn(() => {
+        throw new Error('host bind failed');
+      });
+      vi.mocked(mockChat.sendMessageStream).mockResolvedValue(
+        createEmptyStream(),
+      );
+      session.installRewriter();
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'ordinary request' }],
+      });
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('Failed to activate Goal runtime'),
+      );
+      session.dispose();
+      expect(unsubscribeGoalRuntime).toHaveBeenCalledOnce();
+    });
+
+    it('handles typed Goal status without entering the model prompt path', async () => {
+      const snapshot = activeSnapshot('idle');
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'goal_control',
+        operation: { kind: 'status' },
+        response: { snapshot },
+      });
+      session.installRewriter();
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/goal' }],
+      });
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+        sessionId: 'test-session-id',
+        update: expect.objectContaining({
+          _meta: expect.objectContaining({ goalState: snapshot }),
+        }),
+      });
+      expect(
+        mockChatRecordingService.recordSlashCommand,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('leaves Goal state persistence to the Core runtime transcript', async () => {
+      const snapshot: GoalSnapshotV2 = {
+        v: 2,
+        goal: null,
+        activity: 'idle',
+      };
+      vi.mocked(
+        nonInteractiveCliCommands.handleSlashCommand,
+      ).mockResolvedValueOnce({
+        type: 'goal_control',
+        operation: { kind: 'clear' },
+        response: { snapshot },
+      });
+      session.installRewriter();
+
+      const result = await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: '/goal clear' }],
+      });
+
+      expect(result).toEqual({ stopReason: 'end_turn' });
+      expect(mockChat.sendMessageStream).not.toHaveBeenCalled();
+      expect(
+        mockChatRecordingService.recordSlashCommand,
+      ).not.toHaveBeenCalled();
     });
   });
 
@@ -9237,206 +10790,6 @@ describe('Session', () => {
           },
         });
       });
-
-      it('keeps goal terminal observer after ACP /goal set', async () => {
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
-        });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal check weather' }],
-        });
-
-        core.notifyGoalTerminal('test-session-id', {
-          kind: 'achieved',
-          condition: 'check weather',
-          iterations: 1,
-          durationMs: 5000,
-          lastReason: 'Weather checked.',
-        });
-
-        await vi.waitFor(() => {
-          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
-            sessionId: 'test-session-id',
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: '' },
-              _meta: {
-                goalTerminal: {
-                  kind: 'achieved',
-                  condition: 'check weather',
-                  iterations: 1,
-                  durationMs: 5000,
-                  lastReason: 'Weather checked.',
-                },
-              },
-            },
-          });
-        });
-      });
-
-      const recordedGoalCards = () =>
-        mockChatRecordingService.recordSlashCommand.mock.calls
-          .map((call) => call[0] as { outputHistoryItems?: unknown[] })
-          .flatMap((payload) => payload.outputHistoryItems ?? [])
-          .filter(
-            (item) =>
-              (item as { type?: string }).type === MessageType.GOAL_STATUS,
-          );
-
-      it('persists a cleared card, so resume cannot revive a goal the user dropped', () => {
-        // The `sessionGoalClear` ext method reaches the transcript through this
-        // method. Without the record, the last persisted card stays `set` and
-        // the next resume re-registers a goal the user explicitly cleared.
-        session.emitGoalStatus({
-          kind: 'cleared',
-          condition: 'check weather',
-          iterations: 2,
-          durationMs: 5000,
-        });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'cleared',
-            condition: 'check weather',
-            iterations: 2,
-            durationMs: 5000,
-          },
-        ]);
-      });
-
-      it('persists the cleared card when /goal clear arrives as a prompt', async () => {
-        // The web shell clears via the `sessionGoalClear` ext method, but an ACP
-        // client (Zed) can send `/goal clear` as a prompt. That returns a
-        // `message` result, whose `outputHistoryItems` still carry the cleared
-        // card — `#emitGoalStatusItems` runs before the switch — so the card is
-        // persisted on this path too.
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'message',
-          messageType: 'info',
-          content: 'Goal cleared: check weather',
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'cleared',
-              condition: 'check weather',
-              iterations: 2,
-              durationMs: 5000,
-            },
-          ],
-        });
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal clear' }],
-        });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'cleared',
-            condition: 'check weather',
-            iterations: 2,
-            durationMs: 5000,
-          },
-        ]);
-      });
-
-      it('persists the goal card so a resumed session can restore the hook', async () => {
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
-        });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal check weather' }],
-        });
-
-        expect(recordedGoalCards()).toEqual([
-          {
-            type: MessageType.GOAL_STATUS,
-            kind: 'set',
-            condition: 'check weather',
-            setAt: 1234,
-          },
-        ]);
-      });
-
-      it('persists the terminal goal card so resume does not revive a finished goal', async () => {
-        vi.mocked(
-          nonInteractiveCliCommands.handleSlashCommand,
-        ).mockResolvedValueOnce({
-          type: 'submit_prompt',
-          content: [{ text: 'Continue until the goal is met.' }],
-          outputHistoryItems: [
-            {
-              type: MessageType.GOAL_STATUS,
-              kind: 'set',
-              condition: 'check weather',
-              setAt: 1234,
-            },
-          ],
-        });
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockResolvedValue(createEmptyStream());
-
-        await session.prompt({
-          sessionId: 'test-session-id',
-          prompt: [{ type: 'text', text: '/goal check weather' }],
-        });
-
-        core.notifyGoalTerminal('test-session-id', {
-          kind: 'achieved',
-          condition: 'check weather',
-          iterations: 1,
-          durationMs: 5000,
-          lastReason: 'Weather checked.',
-        });
-
-        await vi.waitFor(() => {
-          expect(recordedGoalCards()).toContainEqual({
-            type: MessageType.GOAL_STATUS,
-            kind: 'achieved',
-            condition: 'check weather',
-            iterations: 1,
-            durationMs: 5000,
-            lastReason: 'Weather checked.',
-          });
-        });
-      });
     });
 
     describe('tool preparation stream lifecycle', () => {
@@ -12313,57 +13666,6 @@ describe('Session', () => {
             }),
             expect.anything(),
           );
-        });
-
-        it('preserves goal feedback alongside an external stop reason', async () => {
-          const messageBus = {
-            request: vi
-              .fn()
-              .mockResolvedValueOnce({
-                success: true,
-                output: {
-                  decision: 'block',
-                  continue: false,
-                  stopReason: 'External stop hook feedback',
-                  reason: 'Keep working on the active goal',
-                  hookSpecificOutput: {
-                    qwenGoalHookId: 'goal-hook',
-                  },
-                },
-              })
-              .mockResolvedValueOnce({
-                success: true,
-                output: {},
-              }),
-          };
-          mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
-          mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
-          mockConfig.hasHooksForEvent = vi
-            .fn()
-            .mockImplementation((eventName: string) => eventName === 'Stop');
-          mockChat.getHistory = vi
-            .fn()
-            .mockReturnValue([
-              { role: 'model', parts: [{ text: 'response text' }] },
-            ]);
-          mockChat.getLastModelMessageText = vi
-            .fn()
-            .mockReturnValue('response text');
-          mockChat.sendMessageStream = vi
-            .fn()
-            .mockResolvedValue(createEmptyStream());
-
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'hello' }],
-          });
-
-          expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(2);
-          const continuation = vi.mocked(mockChat.sendMessageStream).mock
-            .calls[1]?.[1] as { message: Part[] };
-          expect(textParts(continuation.message)).toEqual([
-            'External stop hook feedback\nKeep working on the active goal',
-          ]);
         });
 
         it('ends Stop hook continuation when the blocking cap is reached', async () => {

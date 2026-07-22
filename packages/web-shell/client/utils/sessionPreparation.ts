@@ -46,7 +46,10 @@ export async function createAndAttachSessionForPrompt({
   onSessionAllocated?: (sessionId: string) => void;
   getCurrentSessionId: () => string | undefined;
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
-}): Promise<{ worktree?: { slug: string; path: string; branch: string } }> {
+}): Promise<{
+  sessionId: string;
+  worktree?: { slug: string; path: string; branch: string };
+}> {
   // Seed the approval mode in the create request itself so the daemon applies
   // it atomically at spawn (`POST /session` → `spawnOrAttach({ approvalMode })`),
   // saving a follow-up round-trip. Approval mode is fail-closed at spawn: if the
@@ -132,5 +135,5 @@ export async function createAndAttachSessionForPrompt({
       warn('[WebShell] failed to set model for new session:', error);
     });
   }
-  return worktreeInfo ? { worktree: worktreeInfo } : {};
+  return worktreeInfo ? { sessionId, worktree: worktreeInfo } : { sessionId };
 }

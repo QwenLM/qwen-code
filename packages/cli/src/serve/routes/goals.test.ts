@@ -16,6 +16,7 @@ import type {
   BridgeSessionGoal,
   BridgeSessionSummary,
 } from '@qwen-code/acp-bridge';
+import type { GoalSnapshotV2, GoalStatus } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { registerGoalsRoutes, type GoalsSessionBridge } from './goals.js';
 
@@ -36,11 +37,48 @@ const summary = (
 const activeGoal = (
   condition: string,
   overrides: Partial<NonNullable<BridgeSessionGoal['active']>> = {},
-): BridgeSessionGoal => ({
-  active: { condition, iterations: 0, setAt: 1000, ...overrides },
-});
+): BridgeSessionGoal => {
+  const active = { condition, iterations: 0, setAt: 1000, ...overrides };
+  return {
+    active,
+    goalState: goalSnapshot('active', {
+      objective: condition,
+      turnCount: active.iterations,
+      createdAt: active.setAt,
+      updatedAt: active.setAt,
+      ...(active.lastReason !== undefined
+        ? { lastReason: active.lastReason }
+        : {}),
+    }),
+  };
+};
 
-const noGoal: BridgeSessionGoal = { active: null };
+const noGoal: BridgeSessionGoal = {
+  active: null,
+  goalState: { v: 2, goal: null, activity: 'idle' },
+};
+
+function goalSnapshot(
+  status: GoalStatus,
+  overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+): GoalSnapshotV2 {
+  return {
+    v: 2,
+    activity: status === 'active' ? 'running' : 'idle',
+    goal: {
+      goalId: `goal-${status}`,
+      revision: 4,
+      objective: `${status} objective`,
+      status,
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 2,
+      activeTimeMs: 3000,
+      createdAt: 1000,
+      updatedAt: 2000,
+      ...overrides,
+    },
+  };
+}
 
 function makeApp(bridge: GoalsSessionBridge) {
   const app = express();
@@ -89,6 +127,7 @@ describe('GET /goals', () => {
         iterations: 0,
         setAt: 2000,
         hasActivePrompt: true,
+        snapshot: goals['s2'].goalState,
       },
       {
         sessionId: 's1',
@@ -98,6 +137,7 @@ describe('GET /goals', () => {
         setAt: 1000,
         lastReason: 'two tests still fail',
         hasActivePrompt: false,
+        snapshot: goals['s1'].goalState,
       },
     ]);
   });
@@ -123,6 +163,7 @@ describe('GET /goals', () => {
         iterations: 0,
         setAt: 1000,
         hasActivePrompt: false,
+        snapshot: activeGoal('keep going').goalState,
       },
     ]);
 
@@ -235,6 +276,60 @@ describe('GET /goals', () => {
     // All 25 are still probed — the cap bounds the burst, not the coverage.
     expect(res.body.goals).toHaveLength(25);
     expect(peak).toBe(10);
+  });
+
+  it('lists every unfinished v2 state and excludes complete snapshots', async () => {
+    const statuses: GoalStatus[] = [
+      'active',
+      'paused',
+      'blocked',
+      'usage_limited',
+      'complete',
+    ];
+    const app = makeApp({
+      listWorkspaceSessions: () => statuses.map((status) => summary(status)),
+      getSessionGoal: async (status) => ({
+        active: status === 'active' ? activeGoal('active').active : null,
+        goalState: goalSnapshot(status as GoalStatus, {
+          createdAt: 1000 + statuses.indexOf(status as GoalStatus),
+        }),
+      }),
+    });
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    expect(
+      res.body.goals.map(
+        (goal: { snapshot: GoalSnapshotV2 }) => goal.snapshot.goal?.status,
+      ),
+    ).toEqual(['usage_limited', 'blocked', 'paused', 'active']);
+    expect(
+      res.body.goals.every(
+        (goal: { condition: string; iterations: number; setAt: number }) =>
+          typeof goal.condition === 'string' &&
+          typeof goal.iterations === 'number' &&
+          typeof goal.setAt === 'number',
+      ),
+    ).toBe(true);
+  });
+
+  it('does not synthesize v2 rows from legacy-only active goals', async () => {
+    const app = makeApp({
+      listWorkspaceSessions: () => [summary('legacy')],
+      getSessionGoal: async () => ({
+        active: {
+          condition: 'legacy only',
+          iterations: 2,
+          setAt: 1000,
+        },
+      }),
+    });
+
+    const res = await request(app).get('/goals');
+
+    expect(res.status).toBe(200);
+    expect(res.body.goals).toEqual([]);
   });
 
   it('keeps a rejection attributed to the session that caused it', async () => {

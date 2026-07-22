@@ -11,7 +11,10 @@ import {
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
 import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
-import type { WebShellSlashCommandHandler } from '../App';
+import type {
+  WebShellGoalWorkspaceTarget,
+  WebShellSlashCommandHandler,
+} from '../App';
 import { useI18n } from '../i18n';
 import { ChatPane } from './ChatPane';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -53,6 +56,7 @@ export interface SplitViewProps {
   onExit: () => void;
   onError?: (error: unknown, fallback: string) => void;
   onSlashCommand?: WebShellSlashCommandHandler;
+  onOpenGoals?: (target: WebShellGoalWorkspaceTarget) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
@@ -88,6 +92,7 @@ export function SplitView({
   onExit,
   onError,
   onSlashCommand,
+  onOpenGoals,
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
@@ -499,6 +504,7 @@ export function SplitView({
                       isMaximized={isMaximized}
                       onError={onError}
                       onSlashCommand={onSlashCommand}
+                      onOpenGoals={onOpenGoals}
                       onRightPanelOpen={onRightPanelOpen}
                       onPaneArtifactsChange={onPaneArtifactsChange}
                       messageTurnOutputs={messageTurnOutputs}

@@ -7,12 +7,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import { useBranchCommand } from './useBranchCommand.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { LoadedSettings } from '../../config/settings.js';
-
-vi.mock('../utils/restoreGoal.js', () => ({
-  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
-}));
 
 const mockSettings = {
   merged: { ui: { history: { collapseOnResume: false } } },
@@ -26,6 +21,7 @@ describe('useBranchCommand', () => {
   let finalize: ReturnType<typeof vi.fn>;
   let flush: ReturnType<typeof vi.fn>;
   let startNewSessionConfig: ReturnType<typeof vi.fn>;
+  let getGoalRuntimeReady: ReturnType<typeof vi.fn>;
   let startNewSessionUI: ReturnType<typeof vi.fn>;
   let findSessionTitlesByPrefix: ReturnType<typeof vi.fn>;
   let clearItems: ReturnType<typeof vi.fn>;
@@ -78,7 +74,6 @@ describe('useBranchCommand', () => {
   });
 
   beforeEach(() => {
-    vi.mocked(restoreGoalFromHistory).mockClear();
     forkSession = vi
       .fn()
       .mockResolvedValue({ filePath: '/tmp/new.jsonl', copiedCount: 2 });
@@ -95,6 +90,7 @@ describe('useBranchCommand', () => {
     flush = vi.fn().mockResolvedValue(undefined);
     findSessionTitlesByPrefix = vi.fn().mockResolvedValue([]);
     startNewSessionConfig = vi.fn();
+    getGoalRuntimeReady = vi.fn().mockResolvedValue({});
     startNewSessionUI = vi.fn();
     clearItems = vi.fn();
     loadHistory = vi.fn();
@@ -133,6 +129,7 @@ describe('useBranchCommand', () => {
       getBackgroundShellRegistry: () => backgroundShellRegistry,
       getWorkflowRunRegistry: () => workflowRunRegistry,
       startNewSession: startNewSessionConfig,
+      getGoalRuntimeReady,
       getDebugLogger: () => ({ warn: vi.fn() }),
     };
   });
@@ -201,6 +198,10 @@ describe('useBranchCommand', () => {
       return true;
     });
     startNewSessionConfig.mockImplementation(() => order.push('config.start'));
+    getGoalRuntimeReady.mockImplementation(async () => {
+      order.push('goal.ready');
+      return {};
+    });
 
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
@@ -216,6 +217,7 @@ describe('useBranchCommand', () => {
       'rename',
       'load', // final load after title persistence
       'config.start',
+      'goal.ready',
     ]);
   });
 
@@ -250,20 +252,35 @@ describe('useBranchCommand', () => {
     );
   });
 
-  it('re-arms /goal against the forked sessionId after the UI swap', async () => {
-    // The branched JSONL is a verbatim copy of the parent's, so an active
-    // goal sentinel rides along. Without this restore call the forked
-    // session inherits the goal in transcript only — store stays empty,
-    // footer pill shows nothing, and the Stop hook never fires under the
-    // new sessionId. Same root cause as the /resume gap; pin it here.
+  it('waits for the forked session Goal runtime exactly once', async () => {
     const { result } = renderHook(() => useBranchCommand(makeOptions()));
     await act(async () => {
       await result.current.handleBranch('my-branch');
     });
-    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
-      expect.any(Array),
-      config,
-      addItem,
+    expect(getGoalRuntimeReady).toHaveBeenCalledTimes(1);
+  });
+
+  it('rolls core back when the fork contains malformed Goal state', async () => {
+    getGoalRuntimeReady.mockRejectedValueOnce(
+      new Error('unsupported Goal lifecycle record'),
+    );
+
+    const { result } = renderHook(() => useBranchCommand(makeOptions()));
+    await act(async () => {
+      await result.current.handleBranch('my-branch');
+    });
+
+    expect(startNewSessionConfig).toHaveBeenCalledTimes(2);
+    expect(startNewSessionUI).not.toHaveBeenCalled();
+    expect(clearItems).not.toHaveBeenCalled();
+    expect(loadHistory).not.toHaveBeenCalled();
+    expect(removeSession).toHaveBeenCalledTimes(1);
+    expect(addItem).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'error',
+        text: expect.stringMatching(/unsupported Goal lifecycle record/),
+      }),
+      expect.any(Number),
     );
   });
 

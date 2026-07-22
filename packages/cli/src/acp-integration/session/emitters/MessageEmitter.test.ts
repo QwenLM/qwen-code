@@ -7,7 +7,30 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { MessageEmitter } from './MessageEmitter.js';
 import type { SessionContext } from '../types.js';
-import { apiActivityTracker, type Config } from '@qwen-code/qwen-code-core';
+import {
+  apiActivityTracker,
+  type Config,
+  type GoalRecord,
+  type GoalSnapshotV2,
+} from '@qwen-code/qwen-code-core';
+
+const GOAL: GoalRecord = {
+  goalId: 'goal-1',
+  revision: 2,
+  objective: 'ship goal support',
+  status: 'active',
+  evidenceCursor: { recordId: 'record-1' },
+  turnCount: 2,
+  activeTimeMs: 1234,
+  createdAt: 100,
+  updatedAt: 200,
+  lastReason: 'continuing',
+};
+
+const snapshot = (
+  goal: GoalRecord | null = GOAL,
+  activity: GoalSnapshotV2['activity'] = 'idle',
+): GoalSnapshotV2 => ({ v: 2, goal, activity });
 
 describe('MessageEmitter', () => {
   let mockContext: SessionContext;
@@ -114,26 +137,106 @@ describe('MessageEmitter', () => {
     });
   });
 
-  describe('emitGoalTerminal', () => {
-    it('should send a goal terminal update in metadata', async () => {
-      const event = {
-        kind: 'achieved' as const,
-        condition: 'ship goal support',
-        iterations: 2,
-        durationMs: 1234,
-        lastReason: 'The requested support is complete.',
+  describe('emitGoalState', () => {
+    it('emits v2 before the matching legacy status in one update', async () => {
+      const value = snapshot();
+
+      await emitter.emitGoalState(value, 'create');
+
+      const update = sendUpdateSpy.mock.calls[0][0] as {
+        _meta: Record<string, unknown>;
       };
-
-      await emitter.emitGoalTerminal(event);
-
-      expect(sendUpdateSpy).toHaveBeenCalledTimes(1);
-      expect(sendUpdateSpy).toHaveBeenCalledWith({
+      expect(Object.keys(update._meta)).toEqual(['goalState', 'goalStatus']);
+      expect(update).toEqual({
         sessionUpdate: 'agent_message_chunk',
         content: { type: 'text', text: '' },
         _meta: {
-          goalTerminal: event,
+          goalState: value,
+          goalStatus: {
+            kind: 'set',
+            condition: GOAL.objective,
+            iterations: GOAL.turnCount,
+            setAt: GOAL.createdAt,
+            durationMs: GOAL.activeTimeMs,
+            lastReason: GOAL.lastReason,
+          },
         },
       });
+    });
+
+    it('appends the matching terminal projection after v2 and status', async () => {
+      const completed = snapshot({ ...GOAL, status: 'complete' });
+
+      await emitter.emitGoalState(completed, 'complete');
+
+      const update = sendUpdateSpy.mock.calls[0][0] as {
+        _meta: Record<string, unknown>;
+      };
+      expect(Object.keys(update._meta)).toEqual([
+        'goalState',
+        'goalStatus',
+        'goalTerminal',
+      ]);
+      expect(update._meta['goalTerminal']).toEqual({
+        kind: 'achieved',
+        condition: GOAL.objective,
+        iterations: GOAL.turnCount,
+        durationMs: GOAL.activeTimeMs,
+        lastReason: GOAL.lastReason,
+      });
+    });
+
+    it('emits pause as a non-terminal paused status', async () => {
+      const paused = snapshot({ ...GOAL, status: 'paused' });
+
+      await emitter.emitGoalState(paused, 'pause');
+
+      const update = sendUpdateSpy.mock.calls[0][0] as {
+        _meta: Record<string, unknown>;
+      };
+      expect(update._meta['goalStatus']).toMatchObject({ kind: 'paused' });
+      expect(update._meta).not.toHaveProperty('goalTerminal');
+    });
+
+    it('uses the previous goal when projecting a clear', async () => {
+      await emitter.emitGoalState(snapshot(null), 'clear', GOAL);
+
+      expect(sendUpdateSpy.mock.calls[0][0]).toMatchObject({
+        _meta: {
+          goalState: { v: 2, goal: null, activity: 'idle' },
+          goalStatus: { kind: 'cleared', condition: GOAL.objective },
+        },
+      });
+    });
+
+    it('emits only v2 for activity-only updates', async () => {
+      const running = snapshot(GOAL, 'running');
+
+      await emitter.emitGoalState(running);
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { goalState: running },
+      });
+    });
+  });
+
+  describe('emitStopHookLoop', () => {
+    it('emits generic Stop-hook loop metadata', async () => {
+      await emitter.emitStopHookLoop(3, ['continue'], 1);
+
+      const update = sendUpdateSpy.mock.calls[0][0] as {
+        _meta: Record<string, unknown>;
+      };
+      expect(update._meta).toEqual({
+        stopHookLoop: {
+          iterationCount: 3,
+          reasons: ['continue'],
+          stopHookCount: 1,
+        },
+      });
+      expect(update._meta).not.toHaveProperty('goalState');
     });
   });
 

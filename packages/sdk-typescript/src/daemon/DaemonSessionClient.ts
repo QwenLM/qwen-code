@@ -46,6 +46,8 @@ import type {
   PromptResult,
   SetModelResult,
   SessionMetadataResult,
+  GoalControlRequest,
+  GoalStateResponse,
 } from './types.js';
 
 /** Compacted replay snapshot returned by the daemon on session load. */
@@ -547,9 +549,11 @@ export class DaemonSessionClient {
 
   async removePendingPrompt(
     promptId: string,
+    opts?: { ifState?: 'queued' | 'running' },
   ): Promise<DaemonRemovePendingPromptResult> {
     return await this.client.removePendingPrompt(this.sessionId, promptId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
+      ...(opts?.ifState ? { ifState: opts.ifState } : {}),
     });
   }
 
@@ -616,6 +620,18 @@ export class DaemonSessionClient {
 
   async clearGoal(): Promise<{ cleared: boolean; condition?: string }> {
     return await this.client.sessionGoalClear(this.sessionId, this.clientId);
+  }
+
+  async goal(): Promise<GoalStateResponse> {
+    return await this.client.sessionGoal(this.sessionId, this.clientId);
+  }
+
+  async controlGoal(request: GoalControlRequest): Promise<GoalStateResponse> {
+    return await this.client.sessionGoalControl(
+      this.sessionId,
+      request,
+      this.clientId,
+    );
   }
 
   async stats(): Promise<DaemonSessionStatsStatus> {

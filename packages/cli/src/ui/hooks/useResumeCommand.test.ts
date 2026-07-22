@@ -11,7 +11,6 @@ import {
   useResumeCommand,
 } from './useResumeCommand.js';
 import { useHistory } from './useHistoryManager.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 
 import type { Content } from '@google/genai';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -82,10 +81,6 @@ vi.mock('../utils/resumeHistoryUtils.js', async (importOriginal) => {
     ]),
   };
 });
-
-vi.mock('../utils/restoreGoal.js', () => ({
-  restoreGoalFromHistory: vi.fn(() => ({ restored: false })),
-}));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const original =
@@ -255,6 +250,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -330,15 +326,7 @@ describe('useResumeCommand', () => {
     expect(historyManager.clearItems).toHaveBeenCalledTimes(1);
     expect(historyManager.loadHistory).toHaveBeenCalledTimes(1);
     expect(resetMonitorRegistry).toHaveBeenCalledTimes(1);
-    // Goal must be re-armed under the resumed sessionId so the in-memory
-    // activeGoalStore entry (potentially stale across /new + /resume) gets
-    // a fresh setAt / hookId / observer — otherwise the footer pill ticks
-    // from the pre-/new setAt and the Stop hook is silently dead.
-    expect(restoreGoalFromHistory).toHaveBeenCalledWith(
-      expect.any(Array),
-      config,
-      historyManager.addItem,
-    );
+    expect(config.getGoalRuntimeReady).toHaveBeenCalledTimes(1);
   });
 
   it('adds a recovery notice when resuming an interrupted tool turn', async () => {
@@ -360,6 +348,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -443,6 +432,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -538,6 +528,7 @@ describe('useResumeCommand', () => {
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockResolvedValue({}),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -729,20 +720,19 @@ describe('useResumeCommand', () => {
     );
   });
 
-  it('rolls core back to the old session when something fails after core swap but before UI swap', async () => {
+  it('rolls core back when persisted Goal state is malformed', async () => {
     const startNewSession = vi.fn();
     const geminiClient = {
-      initialize: vi
-        .fn()
-        .mockRejectedValueOnce(new Error('init boom'))
-        .mockResolvedValueOnce(undefined),
+      initialize: vi.fn().mockResolvedValue(undefined),
     };
+    const goalFailure = new Error('unsupported Goal lifecycle record');
 
     const config = {
       getSessionId: () => 'old-session-id',
       getTargetDir: () => '/tmp',
       getGeminiClient: () => geminiClient,
       startNewSession: vi.fn(),
+      getGoalRuntimeReady: vi.fn().mockRejectedValue(goalFailure),
       getBackgroundTaskRegistry: () => ({
         hasRunningTasks: vi.fn().mockReturnValue(false),
         reset: vi.fn(),
@@ -808,9 +798,12 @@ describe('useResumeCommand', () => {
     expect(historyManager.addItem).toHaveBeenCalledWith(
       expect.objectContaining({
         type: 'error',
-        text: expect.stringMatching(/Failed to resume session.*init boom/),
+        text: expect.stringMatching(
+          /Failed to resume session.*unsupported Goal lifecycle record/,
+        ),
       }),
       expect.any(Number),
     );
+    expect(geminiClient.initialize).not.toHaveBeenCalled();
   });
 });

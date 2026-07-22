@@ -337,6 +337,8 @@ export interface ElectronAPI {
     | RefreshTitleResult
     | import('@craft-agent/shared/protocol').QwenPermissionSettings
     | QwenCoreSettingsSnapshot
+    | import('@craft-agent/shared/protocol').GoalSnapshotV2
+    | import('@craft-agent/shared/protocol').GoalStateResponse
     | { count: number }
     | {
         success: boolean;
@@ -1248,6 +1250,11 @@ export interface SessionsNavigationState {
   rightSidebar?: RightSidebarPanel;
 }
 
+export interface GoalsNavigationState {
+  navigator: 'goals';
+  rightSidebar?: RightSidebarPanel;
+}
+
 /**
  * Source type filter for sources navigation
  */
@@ -1316,6 +1323,7 @@ export interface AutomationsNavigationState {
  */
 export type NavigationState =
   | SessionsNavigationState
+  | GoalsNavigationState
   | SourcesNavigationState
   | SettingsNavigationState
   | SkillsNavigationState
@@ -1325,6 +1333,10 @@ export type NavigationState =
 export const isSessionsNavigation = (
   state: NavigationState,
 ): state is SessionsNavigationState => state.navigator === 'sessions';
+
+export const isGoalsNavigation = (
+  state: NavigationState,
+): state is GoalsNavigationState => state.navigator === 'goals';
 
 export const isSourcesNavigation = (
   state: NavigationState,
@@ -1354,6 +1366,8 @@ export const DEFAULT_NAVIGATION_STATE: NavigationState = {
 };
 
 export const getNavigationStateKey = (state: NavigationState): string => {
+  if (state.navigator === 'goals') return 'goals';
+
   if (state.navigator === 'sources') {
     if (state.details) {
       return `sources/source/${state.details.sourceSlug}`;
@@ -1397,6 +1411,8 @@ export const getNavigationStateKey = (state: NavigationState): string => {
 export const parseNavigationStateKey = (
   key: string,
 ): NavigationState | null => {
+  if (key === 'goals') return { navigator: 'goals' };
+
   // Handle sources
   if (key === 'sources') return { navigator: 'sources', details: null };
   if (key.startsWith('sources/source/')) {

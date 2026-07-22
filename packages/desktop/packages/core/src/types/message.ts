@@ -619,11 +619,36 @@ export interface AvailableSkillDetail {
   modelInvocable?: boolean
 }
 
+export type GoalStatus =
+  | 'active'
+  | 'paused'
+  | 'blocked'
+  | 'usage_limited'
+  | 'complete'
+
+export interface GoalSnapshotV2 {
+  v: 2
+  goal: {
+    goalId: string
+    revision: number
+    objective: string
+    status: GoalStatus
+    evidenceCursor: { recordId: string | null }
+    turnCount: number
+    activeTimeMs: number
+    createdAt: number
+    updatedAt: number
+    lastReason?: string
+  } | null
+  activity: 'idle' | 'running' | 'verifying'
+}
+
 /**
  * Events emitted by CraftAgent during chat
  * turnId: Correlation ID from the API's message.id, groups all events in an assistant turn
  */
 export type AgentEvent =
+  | { type: 'goal_state'; snapshot: GoalSnapshotV2 }
   | { type: 'status'; message: string }
   | { type: 'info'; message: string }
   | {

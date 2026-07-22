@@ -4,62 +4,176 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-  __resetActiveGoalStoreForTests,
-  registerGoalHook,
-  unregisterGoalHook,
-  type Config,
+import { act } from '@testing-library/react';
+import { render } from 'ink-testing-library';
+import { Text } from 'ink';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import type {
+  Config,
+  GoalRuntime,
+  GoalSnapshotV2,
+  GoalStateCause,
 } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../test-utils/render.js';
-import { GoalPill } from './GoalPill.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import {
+  GoalPill,
+  useFooterGoalState,
+  type GoalPillProps,
+} from './GoalPill.js';
 
-function makeConfig(): Config {
+const NOW = 10_000;
+
+function snapshot(
+  status: NonNullable<GoalSnapshotV2['goal']>['status'],
+  activity: GoalSnapshotV2['activity'] = 'idle',
+  overrides: Partial<NonNullable<GoalSnapshotV2['goal']>> = {},
+): GoalSnapshotV2 {
   return {
-    getSessionId: () => 'sess-pill',
-    isTrustedFolder: () => true,
-    getDisableAllHooks: () => false,
-    getHookSystem: () => ({
-      addFunctionHook: vi.fn().mockReturnValue('hook-pill'),
-      removeFunctionHook: vi.fn().mockReturnValue(true),
-    }),
-  } as unknown as Config;
+    v: 2,
+    activity,
+    goal: {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'finish the refactor',
+      status,
+      evidenceCursor: { recordId: null },
+      turnCount: 3,
+      activeTimeMs: 2_000,
+      createdAt: 1_000,
+      updatedAt: 7_000,
+      ...overrides,
+    },
+  };
 }
 
-describe('GoalPill', () => {
-  beforeEach(() => __resetActiveGoalStoreForTests());
-  afterEach(() => __resetActiveGoalStoreForTests());
+const noGoalSnapshot: GoalSnapshotV2 = {
+  v: 2,
+  activity: 'idle',
+  goal: null,
+};
 
-  it('renders nothing when no goal is active', () => {
-    const { lastFrame, unmount } = renderWithProviders(<GoalPill />, {
-      config: makeConfig(),
-    });
-    expect(lastFrame()).toBe('');
-    unmount();
+function renderPill(props: GoalPillProps) {
+  return render(<GoalPill {...props} />);
+}
+
+function createRuntime(initial: GoalSnapshotV2) {
+  let current = initial;
+  const listeners = new Set<
+    (value: GoalSnapshotV2, cause?: GoalStateCause) => void
+  >();
+  const unsubscribe = vi.fn();
+  const runtime = {
+    getSnapshot: () => structuredClone(current),
+    subscribe: (
+      listener: (value: GoalSnapshotV2, cause?: GoalStateCause) => void,
+    ) => {
+      listeners.add(listener);
+      return () => {
+        unsubscribe();
+        listeners.delete(listener);
+      };
+    },
+  } as GoalRuntime;
+  return {
+    runtime,
+    unsubscribe,
+    emit(next: GoalSnapshotV2) {
+      current = next;
+      for (const listener of listeners) listener(structuredClone(next));
+    },
+  };
+}
+
+const GoalProbe = () => {
+  const goalState = useFooterGoalState();
+  return goalState ? <GoalPill snapshot={goalState} /> : <Text />;
+};
+
+describe('GoalPill', () => {
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
-  it('renders a compact label once a goal is active', () => {
-    const config = makeConfig();
-    registerGoalHook({
-      config,
-      sessionId: 'sess-pill',
-      condition: 'do something',
-      tokensAtStart: 0,
+  it.each([
+    ['no goal', noGoalSnapshot, ''],
+    ['active and idle', snapshot('active', 'idle'), '◎ /goal active'],
+    ['active and running', snapshot('active', 'running'), '◎ /goal active'],
+    [
+      'active and verifying',
+      snapshot('active', 'verifying'),
+      '○ /goal checking',
+    ],
+    ['paused', snapshot('paused'), '! /goal paused'],
+    ['blocked', snapshot('blocked'), '✖ /goal blocked'],
+    ['usage limited', snapshot('usage_limited'), '! /goal usage limited'],
+    ['complete', snapshot('complete'), ''],
+  ])('renders accessible lifecycle text for %s', (_name, value, expected) => {
+    vi.setSystemTime(NOW);
+    const { lastFrame } = renderPill({ snapshot: value });
+
+    if (expected) {
+      expect(lastFrame()).toContain(expected);
+      expect(lastFrame()).not.toContain('finish the refactor');
+      expect(lastFrame()).not.toContain('turn');
+    } else {
+      expect(lastFrame()).toBe('');
+    }
+  });
+
+  it('adds the current active span to persisted active time', () => {
+    vi.setSystemTime(NOW);
+    const { lastFrame } = renderPill({
+      snapshot: snapshot('active', 'running'),
     });
 
-    const { lastFrame, unmount } = renderWithProviders(<GoalPill />, {
-      config,
+    expect(lastFrame()).toContain('(5s)');
+  });
+
+  it('keeps paused elapsed time frozen while wall clock advances', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(NOW);
+    const paused = snapshot('paused');
+    const { lastFrame, rerender } = renderPill({ snapshot: paused });
+    expect(lastFrame()).toContain('(2s)');
+
+    act(() => {
+      vi.advanceTimersByTime(60_000);
     });
-    // Aligned with Claude Code 2.1.140 footer: "◎ /goal active" (no time
-    // suffix during the first second, terse — turns/reason live elsewhere).
-    expect(lastFrame()).toMatch(/\/goal active/);
-    expect(lastFrame()).toMatch(/◎/);
-    // Pill should not leak the raw condition into the footer.
-    expect(lastFrame()).not.toMatch(/do something/);
-    // Turns count should not appear here either (intentionally moved to the
-    // /goal status card to stop pill jitter).
-    expect(lastFrame()).not.toMatch(/turn/);
+    rerender(<GoalPill snapshot={paused} />);
+
+    expect(lastFrame()).toContain('(2s)');
+    expect(lastFrame()).not.toContain('1m');
+  });
+
+  it('subscribes once and re-subscribes when Config changes sessions', () => {
+    const first = createRuntime(snapshot('active', 'running'));
+    const second = createRuntime(snapshot('paused'));
+    let sessionId = 'session-1';
+    let runtime = first.runtime;
+    const config = {
+      getSessionId: () => sessionId,
+      getGoalRuntime: () => runtime,
+    } as unknown as Config;
+    const tree = () => (
+      <ConfigContext.Provider value={config}>
+        <GoalProbe />
+      </ConfigContext.Provider>
+    );
+    const { lastFrame, rerender, unmount } = render(tree());
+    expect(lastFrame()).toContain('/goal active');
+    act(() => first.emit(snapshot('active', 'verifying')));
+    expect(lastFrame()).toContain('/goal checking');
+
+    sessionId = 'session-2';
+    runtime = second.runtime;
+    rerender(tree());
+
+    expect(first.unsubscribe).toHaveBeenCalledOnce();
+    expect(lastFrame()).toContain('/goal paused');
+    act(() => first.emit(snapshot('blocked')));
+    expect(lastFrame()).toContain('/goal paused');
+
     unmount();
-    unregisterGoalHook(config, 'sess-pill');
+    expect(second.unsubscribe).toHaveBeenCalledOnce();
   });
 });

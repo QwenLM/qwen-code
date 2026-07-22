@@ -28,6 +28,10 @@ import type {
   SessionWriterUnavailableError,
   SessionWriterLease,
 } from './session-writer-lease.js';
+import type {
+  GoalStateRecordPayloadV2,
+  GoalTurnPermit,
+} from '../goals/goal-protocol.js';
 
 vi.mock('node:path');
 vi.mock('node:child_process');
@@ -75,6 +79,7 @@ describe('ChatRecordingService', () => {
         }),
       }),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
+      getSessionService: vi.fn(),
     } as unknown as Config;
 
     vi.mocked(randomUUID).mockImplementation(
@@ -149,6 +154,7 @@ describe('ChatRecordingService', () => {
       expect(record.cwd).toBe('/test/project/root');
       expect(record.version).toBe('1.0.0');
       expect(record.gitBranch).toBe('main');
+      expect(record.provenance).toBe('real_user');
     });
 
     it('blocks later turns after a generic durable write failure', async () => {
@@ -241,6 +247,375 @@ describe('ChatRecordingService', () => {
       });
       expect(record.systemPayload).toEqual({ displayText: 'save logs' });
     });
+
+    it('records defensive Goal context on top-level and mid-turn real user messages', async () => {
+      const topLevelPermit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 2,
+        turnId: 'turn-top-level',
+      };
+      const midTurnPermit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 2,
+        turnId: 'turn-mid-turn',
+      };
+
+      chatRecordingService.recordUserMessage(
+        [{ text: 'top-level evidence' }],
+        topLevelPermit,
+      );
+      chatRecordingService.recordMidTurnUserMessage(
+        [{ text: 'mid-turn evidence' }],
+        'mid-turn evidence',
+        midTurnPermit,
+      );
+      topLevelPermit.revision = 99;
+      midTurnPermit.turnId = 'mutated';
+      await chatRecordingService.flush();
+
+      const [topLevel, midTurn] = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(topLevel).toMatchObject({
+        type: 'user',
+        provenance: 'real_user',
+        goalContext: {
+          goalId: 'goal-1',
+          revision: 2,
+          turnId: 'turn-top-level',
+        },
+      });
+      expect(midTurn).toMatchObject({
+        type: 'user',
+        subtype: 'mid_turn_user_message',
+        provenance: 'real_user',
+        goalContext: {
+          goalId: 'goal-1',
+          revision: 2,
+          turnId: 'turn-mid-turn',
+        },
+      });
+    });
+
+    it('keeps notification-like provenance while recording defensive Goal context', async () => {
+      const notificationPermit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 2,
+        turnId: 'turn-notification',
+      };
+      const cronPermit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 2,
+        turnId: 'turn-cron',
+      };
+
+      chatRecordingService.recordNotification(
+        [{ text: 'dependency completed' }],
+        'Dependency completed',
+        notificationPermit,
+      );
+      chatRecordingService.recordCronPrompt(
+        [{ text: 'scheduled check' }],
+        'Scheduled check',
+        cronPermit,
+      );
+      notificationPermit.turnId = 'mutated';
+      cronPermit.revision = 99;
+      await chatRecordingService.flush();
+
+      const [notification, cron] = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(notification).toMatchObject({
+        type: 'user',
+        subtype: 'notification',
+        provenance: 'system',
+        goalContext: {
+          goalId: 'goal-1',
+          revision: 2,
+          turnId: 'turn-notification',
+        },
+      });
+      expect(cron).toMatchObject({
+        type: 'user',
+        subtype: 'cron',
+        provenance: 'system',
+        goalContext: {
+          goalId: 'goal-1',
+          revision: 2,
+          turnId: 'turn-cron',
+        },
+      });
+    });
+  });
+
+  describe('Goal records', () => {
+    const goalPayload: GoalStateRecordPayloadV2 = {
+      v: 2,
+      cause: 'create',
+      snapshot: {
+        v: 2,
+        activity: 'running',
+        goal: {
+          goalId: 'goal-1',
+          revision: 1,
+          objective: 'ship it',
+          status: 'active',
+          evidenceCursor: { recordId: 'goal-record' },
+          turnCount: 0,
+          activeTimeMs: 0,
+          createdAt: 100,
+          updatedAt: 100,
+        },
+      },
+    };
+
+    it('strictly persists the caller-owned lifecycle UUID and normalizes activity', async () => {
+      let resolveWrite!: () => void;
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            resolveWrite = resolve;
+          }),
+      );
+
+      let settled = false;
+      const pending = chatRecordingService
+        .recordGoalState('goal-record', goalPayload)
+        .then((value) => {
+          settled = true;
+          return value;
+        });
+      await Promise.resolve();
+
+      expect(settled).toBe(false);
+      const record = vi.mocked(jsonl.writeLine).mock
+        .calls[0]?.[1] as ChatRecord;
+      expect(record).toMatchObject({
+        uuid: 'goal-record',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+      });
+      expect(record.systemPayload).toMatchObject({
+        snapshot: {
+          activity: 'idle',
+          goal: { evidenceCursor: { recordId: 'goal-record' } },
+        },
+      });
+
+      resolveWrite();
+      await expect(pending).resolves.toEqual(record);
+      expect(chatRecordingService.getTranscriptCursor()).toEqual({
+        recordId: 'goal-record',
+      });
+    });
+
+    it('rejects a lifecycle append on disk failure and restores the cursor', async () => {
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+
+      await expect(
+        chatRecordingService.recordGoalState('goal-record', goalPayload),
+      ).rejects.toThrow('disk full');
+      expect(chatRecordingService.getTranscriptCursor()).toEqual({
+        recordId: null,
+      });
+    });
+
+    it('restores the last persisted cursor when a queued successor follows a failed lifecycle append', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'persisted baseline' }]);
+      await chatRecordingService.flush();
+      const persistedCursor = chatRecordingService.getTranscriptCursor();
+
+      let rejectStrict!: (error: Error) => void;
+      const strictWrite = new Promise<void>((_resolve, reject) => {
+        rejectStrict = reject;
+      });
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(() => strictWrite);
+
+      const strict = chatRecordingService.recordGoalState(
+        'goal-record',
+        goalPayload,
+      );
+      chatRecordingService.recordUserMessage([
+        { text: 'queued after strict record' },
+      ]);
+      rejectStrict(new Error('disk full'));
+
+      await expect(strict).rejects.toThrow('disk full');
+      await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      expect(chatRecordingService.getTranscriptCursor()).toEqual(
+        persistedCursor,
+      );
+    });
+
+    it('keeps Goal-owned external tool results eligible while excluding explicit control results', async () => {
+      const goalContext = { goalId: 'goal-1', revision: 1, turnId: 'turn-1' };
+
+      chatRecordingService.recordGoalRuntimeMessage(
+        [{ text: 'continue' }],
+        goalContext,
+      );
+      chatRecordingService.recordToolResult(
+        [{ functionResponse: { name: 'run', response: { ok: true } } }],
+        undefined,
+        { goalContext },
+      );
+      chatRecordingService.recordToolResult(
+        [{ functionResponse: { name: 'update_goal', response: { ok: true } } }],
+        undefined,
+        { goalContext, provenance: 'goal_runtime' },
+      );
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'done' }],
+        goalContext,
+      });
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records[0]).toMatchObject({
+        subtype: 'goal_runtime',
+        provenance: 'goal_runtime',
+        goalContext,
+      });
+      expect(records[1]).toMatchObject({
+        provenance: 'tool_result',
+        goalContext,
+      });
+      expect(records[2]).toMatchObject({
+        provenance: 'goal_runtime',
+        goalContext,
+      });
+      expect(records[3]).toMatchObject({
+        provenance: 'assistant_output',
+        goalContext,
+      });
+    });
+
+    it('defensively copies Goal context for runtime, assistant, and tool records', async () => {
+      const runtimePermit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 3,
+        turnId: 'runtime-turn',
+      };
+      const assistantPermit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 3,
+        turnId: 'assistant-turn',
+      };
+      const toolPermit: GoalTurnPermit = {
+        goalId: 'goal-1',
+        revision: 3,
+        turnId: 'tool-turn',
+      };
+
+      chatRecordingService.recordGoalRuntimeMessage(
+        [{ text: 'continue' }],
+        runtimePermit,
+      );
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'working' }],
+        goalContext: assistantPermit,
+      });
+      chatRecordingService.recordToolResult(
+        [{ functionResponse: { name: 'run', response: { ok: true } } }],
+        undefined,
+        { goalContext: toolPermit },
+      );
+      runtimePermit.turnId = 'mutated-runtime';
+      assistantPermit.revision = 99;
+      toolPermit.goalId = 'mutated-goal';
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records.map((record) => record.goalContext)).toEqual([
+        { goalId: 'goal-1', revision: 3, turnId: 'runtime-turn' },
+        { goalId: 'goal-1', revision: 3, turnId: 'assistant-turn' },
+        { goalId: 'goal-1', revision: 3, turnId: 'tool-turn' },
+      ]);
+    });
+
+    it('treats Goal runtime continuations as top-level rewind boundaries', async () => {
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'before Goal runtime turn' }],
+      });
+      chatRecordingService.recordGoalRuntimeMessage(
+        [{ text: 'continue Goal' }],
+        { goalId: 'goal-1', revision: 1, turnId: 'turn-1' },
+      );
+      chatRecordingService.recordAssistantTurn({
+        model: 'gemini-pro',
+        message: [{ text: 'after Goal runtime turn' }],
+      });
+
+      chatRecordingService.rewindRecording(0, { truncatedCount: 2 });
+      await chatRecordingService.flush();
+
+      const records = vi
+        .mocked(jsonl.writeLine)
+        .mock.calls.map((call) => call[1] as ChatRecord);
+      expect(records[3]).toMatchObject({
+        type: 'system',
+        subtype: 'rewind',
+        parentUuid: records[0].uuid,
+      });
+    });
+
+    it('flushes before returning the canonical active transcript chain', async () => {
+      const order: string[] = [];
+      const activeChain = [
+        {
+          uuid: 'active-record',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: '2026-07-21T00:00:00.000Z',
+          type: 'user' as const,
+          provenance: 'real_user' as const,
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'user' as const, parts: [{ text: 'active' }] },
+        },
+      ];
+      const originalFlush =
+        chatRecordingService.flush.bind(chatRecordingService);
+      vi.spyOn(chatRecordingService, 'flush').mockImplementation(async () => {
+        order.push('flush');
+        await originalFlush();
+      });
+      const loadSession = vi.fn().mockImplementation(async () => {
+        order.push('load');
+        return {
+          conversation: { messages: activeChain },
+        };
+      });
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession,
+      } as unknown as ReturnType<Config['getSessionService']>);
+
+      await expect(
+        chatRecordingService.readActiveTranscriptChain(),
+      ).resolves.toEqual(activeChain);
+      expect(order).toEqual(['flush', 'load']);
+      expect(loadSession).toHaveBeenCalledWith('test-session-id');
+    });
+
+    it('fails closed when the canonical active session cannot be loaded', async () => {
+      const loadSession = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(mockConfig.getSessionService).mockReturnValue({
+        loadSession,
+      } as unknown as ReturnType<Config['getSessionService']>);
+
+      await expect(
+        chatRecordingService.readActiveTranscriptChain(),
+      ).rejects.toThrow(/active transcript/i);
+    });
   });
 
   describe('rewindRecording', () => {
@@ -283,6 +658,30 @@ describe('ChatRecordingService', () => {
       const rewind = vi.mocked(jsonl.writeLine).mock.calls[0][1] as ChatRecord;
       expect(rewind.subtype).toBe('rewind');
       expect(rewind.parentUuid).toBe('pre-resume-parent');
+    });
+
+    it('treats a rebuilt conversation tail as persisted during failure rollback', async () => {
+      chatRecordingService.rebuildTurnBoundaries([
+        {
+          uuid: 'persisted-tail',
+          parentUuid: null,
+          sessionId: 'test-session-id',
+          timestamp: '2026-06-27T00:00:00.000Z',
+          type: 'assistant',
+          cwd: '/test/project/root',
+          version: '1.0.0',
+          message: { role: 'model', parts: [{ text: 'persisted response' }] },
+          model: 'gemini-pro',
+        },
+      ]);
+      vi.mocked(jsonl.writeLine).mockRejectedValueOnce(new Error('disk full'));
+
+      chatRecordingService.recordUserMessage([{ text: 'new message' }]);
+
+      await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+      expect(chatRecordingService.getTranscriptCursor()).toEqual({
+        recordId: 'persisted-tail',
+      });
     });
   });
 
@@ -1346,6 +1745,28 @@ describe('ChatRecordingService', () => {
       } finally {
         process.off('unhandledRejection', handler);
       }
+    });
+
+    it('restores the last persisted cursor when a normal write and its successor are skipped by failure', async () => {
+      chatRecordingService.recordUserMessage([{ text: 'persisted baseline' }]);
+      await chatRecordingService.flush();
+      const persistedCursor = chatRecordingService.getTranscriptCursor();
+
+      let rejectWrite!: (error: Error) => void;
+      const failedWrite = new Promise<void>((_resolve, reject) => {
+        rejectWrite = reject;
+      });
+      vi.mocked(jsonl.writeLine).mockImplementationOnce(() => failedWrite);
+
+      chatRecordingService.recordUserMessage([{ text: 'failing write' }]);
+      chatRecordingService.recordUserMessage([{ text: 'queued successor' }]);
+      rejectWrite(new Error('disk full'));
+
+      await expect(chatRecordingService.flush()).rejects.toThrow('disk full');
+      expect(jsonl.writeLine).toHaveBeenCalledTimes(2);
+      expect(chatRecordingService.getTranscriptCursor()).toEqual(
+        persistedCursor,
+      );
     });
 
     it('stops queued normal writes when a strict artifact write fails', async () => {

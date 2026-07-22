@@ -611,7 +611,7 @@ export { type StopFailureErrorType } from './hooks/types.js';
 export { buildContextUsage } from './hooks/context-usage.js';
 
 // ============================================================================
-// Goals (/goal command runtime)
+// Goals (/goal command runtime and protocol)
 // ============================================================================
 
 export * from './goals/index.js';

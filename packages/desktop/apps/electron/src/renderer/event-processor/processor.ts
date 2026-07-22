@@ -49,6 +49,7 @@ import {
   handleAuthCompleted,
   handleUsageUpdate,
   handleAvailableCommandsUpdate,
+  handleGoalState,
 } from './handlers/session'
 
 /**
@@ -223,6 +224,9 @@ export function processEvent(
 
     case 'available_commands_update':
       return handleAvailableCommandsUpdate(state, event)
+
+    case 'goal_state':
+      return handleGoalState(state, event)
 
     default: {
       // Unknown event type - return state unchanged but as new reference

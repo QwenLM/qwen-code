@@ -17,7 +17,6 @@ import {
   buildResumedHistoryItems,
   applyCollapsePolicyAndSummary,
 } from '../utils/resumeHistoryUtils.js';
-import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
@@ -25,6 +24,7 @@ import {
   hasBlockingBackgroundWork,
   resetBackgroundStateForSessionSwitch,
 } from '../utils/backgroundWorkUtils.js';
+import { waitForGoalRuntime } from '../utils/goal-runtime.js';
 
 const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
   "Stop the current session's running background tasks before branching the conversation.";
@@ -188,6 +188,7 @@ export function useBranchCommand(
         //    the parent, silently recording user input into an orphan.
         config.startNewSession(newSessionId, resumed);
         coreSwapped = true;
+        await waitForGoalRuntime(config);
         await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 
         // 8. Swap UI. Once this commits, rolling core back is unsafe —
@@ -212,29 +213,13 @@ export function useBranchCommand(
         uiSwapped = true;
         resetBackgroundStateForSessionSwitch(config);
 
-        // 9. Re-arm /goal under the fork's new sessionId. The branched JSONL
-        // is a verbatim copy of the parent's, so an active goal sentinel
-        // carries over — but `config.startNewSession` rebuilt the hook
-        // system under `newSessionId`, leaving the parent's `activeGoal`
-        // store entry stale and the Stop hook unregistered. Same rationale
-        // as the /resume path; see [[useResumeCommand]] for details.
-        try {
-          restoreGoalFromHistory(
-            uiHistoryItems,
-            config,
-            historyManager.addItem,
-          );
-        } catch {
-          // Best-effort — branch must not fail on goal restoration.
-        }
-
-        // 10. Apply the already-persisted title to the prompt bar.
+        // 9. Apply the already-persisted title to the prompt bar.
         setSessionName?.(effectiveTitle);
 
         // Refresh terminal UI.
         remount?.();
 
-        // 11. Announce. Two history items mirror Claude's success message
+        // 10. Announce. Two history items mirror Claude's success message
         //    (branched line + resume hint). The quoted name is the raw
         //    user-provided `name`; no `(Branch)` suffix — that decoration
         //    belongs in the picker/prompt bar, not in the user-facing

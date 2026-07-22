@@ -5,7 +5,7 @@
  * All agent events flow through a single pure function for consistent state transitions.
  */
 
-import type { Session, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta, AvailableSlashCommand } from '../../shared/types'
+import type { Session, Message, PermissionRequest, CredentialRequest, TypedError, PermissionMode, SessionStatus, AuthRequest, ToolDisplayMeta, AvailableSlashCommand, GoalSnapshotV2 } from '../../shared/types'
 
 /**
  * Streaming state for a session - replaces streamingTextRef
@@ -491,6 +491,12 @@ export interface AvailableCommandsUpdateEvent {
   availableSkillDetails?: import('@craft-agent/core/types').AvailableSkillDetail[]
 }
 
+export interface GoalStateEvent {
+  type: 'goal_state'
+  sessionId: string
+  snapshot: GoalSnapshotV2
+}
+
 /**
  * Union of all agent events
  */
@@ -538,6 +544,7 @@ export type AgentEvent =
   | SourceActivatedEvent
   | UsageUpdateEvent
   | AvailableCommandsUpdateEvent
+  | GoalStateEvent
 
 /**
  * Side effects that need to be handled outside the pure processor

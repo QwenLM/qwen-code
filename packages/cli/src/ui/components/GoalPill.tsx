@@ -7,79 +7,137 @@
 import type React from 'react';
 import { useEffect, useState } from 'react';
 import { Text } from 'ink';
-import { getActiveGoal, type ActiveGoal } from '@qwen-code/qwen-code-core';
+import { elapsedActiveTime } from '@qwen-code/qwen-code-core';
+import type {
+  Config,
+  GoalRuntime,
+  GoalSnapshotV2,
+} from '@qwen-code/qwen-code-core';
 import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 
-const POLL_INTERVAL_MS = 1000;
+const ELAPSED_REFRESH_MS = 1000;
 
-/**
- * Most-significant-unit elapsed string for the footer pill. Returns an empty
- * string when under 1 second so the pill collapses to just "◎ /goal active"
- * in its first second — matches Claude Code 2.1.140's footer behavior
- * (`f < 1000 ? "" : (formattedElapsed)`).
- */
 function formatElapsed(ms: number): string {
   if (ms < 1000) return '';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
+}
+
+function getRuntime(config: Config): GoalRuntime | null {
+  if (typeof config.getGoalRuntime !== 'function') return null;
+  try {
+    return config.getGoalRuntime();
+  } catch {
+    return null;
+  }
 }
 
 /**
- * Polls the in-memory active goal store so the footer pill reflects elapsed
- * time without coupling the store to React state. Polling is cheap (one map
- * lookup) and aligns the pill's freshness budget with the user's wall-clock
- * patience for the loop.
+ * Subscribes to the canonical runtime owned by the current Config session.
+ * The session id is a dependency because Config replaces its runtime in place
+ * when a resume or branch operation switches sessions.
  */
-function useActiveGoal(sessionId: string): ActiveGoal | undefined {
-  const [goal, setGoal] = useState<ActiveGoal | undefined>(() =>
-    getActiveGoal(sessionId),
-  );
-  // Re-render once per second to refresh elapsed time while a goal is active.
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    const id = setInterval(() => {
-      const next = getActiveGoal(sessionId);
-      setGoal(next);
-      // Bump tick so derived strings (elapsed) recompute even when the goal
-      // reference is stable.
-      if (next) setTick((t) => (t + 1) % 1_000_000);
-    }, POLL_INTERVAL_MS);
-    return () => clearInterval(id);
-  }, [sessionId]);
-  return goal;
-}
-
-/**
- * Hook exposed for parent containers (e.g. Footer) so they can omit the
- * surrounding divider chip entirely when no goal is active — avoids a stray
- * separator next to a render-null pill.
- */
-export function useFooterGoalState(): ActiveGoal | undefined {
+export function useFooterGoalState(): GoalSnapshotV2 | undefined {
   const config = useConfig();
-  return useActiveGoal(config.getSessionId());
+  const sessionId = config.getSessionId();
+  const runtime = getRuntime(config);
+  const [observed, setObserved] = useState<{
+    runtime: GoalRuntime | null;
+    snapshot?: GoalSnapshotV2;
+  }>(() => ({
+    runtime,
+    snapshot: runtime?.getSnapshot(),
+  }));
+
+  useEffect(() => {
+    if (!runtime) {
+      setObserved({ runtime });
+      return;
+    }
+
+    setObserved({ runtime, snapshot: runtime.getSnapshot() });
+    return runtime.subscribe((snapshot) => {
+      setObserved({ runtime, snapshot });
+    });
+  }, [runtime, sessionId]);
+
+  return observed.runtime === runtime
+    ? observed.snapshot
+    : runtime?.getSnapshot();
 }
 
-/**
- * Compact "Goal is running" indicator for the footer. Renders nothing when no
- * goal is active. Aligned with Claude Code 2.1.140's footer pill:
- *
- *   ◎ /goal active           (during the first second)
- *   ◎ /goal active (12s)     (afterwards, most-significant unit only)
- *
- * Turns count and last-check reason are intentionally NOT in the pill — those
- * live in `/goal` status output and the `goal_status` history items so the
- * footer stays terse and stops jitter from per-iteration count flicker.
- */
-export const GoalPill: React.FC = () => {
-  const goal = useFooterGoalState();
-  if (!goal) return null;
+export function isLiveGoalSnapshot(
+  snapshot: GoalSnapshotV2 | undefined,
+): boolean {
+  const status = snapshot?.goal?.status;
+  return status !== undefined && status !== 'complete';
+}
 
-  const elapsed = formatElapsed(Date.now() - goal.setAt);
+function presentation(snapshot: GoalSnapshotV2): {
+  icon: string;
+  label: string;
+  color: string;
+} | null {
+  const goal = snapshot.goal;
+  if (!goal || goal.status === 'complete') return null;
+
+  if (goal.status === 'active') {
+    return snapshot.activity === 'verifying'
+      ? { icon: '○', label: 'checking', color: theme.text.secondary }
+      : { icon: '◎', label: 'active', color: theme.text.accent };
+  }
+  switch (goal.status) {
+    case 'paused':
+      return { icon: '!', label: 'paused', color: theme.status.warning };
+    case 'blocked':
+      return { icon: '✖', label: 'blocked', color: theme.status.error };
+    case 'usage_limited':
+      return {
+        icon: '!',
+        label: 'usage limited',
+        color: theme.status.warning,
+      };
+    default: {
+      const exhaustive: never = goal.status;
+      void exhaustive;
+      return null;
+    }
+  }
+}
+
+export interface GoalPillProps {
+  snapshot: GoalSnapshotV2 | undefined;
+}
+
+/** Compact live lifecycle indicator for the existing Ink footer. */
+export const GoalPill: React.FC<GoalPillProps> = ({ snapshot }) => {
+  const [, setTick] = useState(0);
+  const refreshElapsed = snapshot?.goal?.status === 'active';
+  useEffect(() => {
+    if (!refreshElapsed) return;
+    const interval = setInterval(() => {
+      setTick((tick) => (tick + 1) % 1_000_000);
+    }, ELAPSED_REFRESH_MS);
+    return () => clearInterval(interval);
+  }, [refreshElapsed]);
+
+  if (!snapshot) return null;
+  const goal = snapshot.goal;
+  if (!goal) return null;
+  const visible = presentation(snapshot);
+  if (!visible) return null;
+
+  const elapsed = formatElapsed(elapsedActiveTime(goal, Date.now()));
   const suffix = elapsed ? ` (${elapsed})` : '';
-  return <Text color={theme.text.accent}>◎ /goal active{suffix}</Text>;
+  return (
+    <Text color={visible.color}>
+      {visible.icon} /goal {visible.label}
+      {suffix}
+    </Text>
+  );
 };

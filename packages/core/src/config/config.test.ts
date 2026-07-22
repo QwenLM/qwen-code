@@ -75,14 +75,21 @@ import * as runtimeStatus from '../utils/runtimeStatus.js';
 import { ExtensionManager } from '../extension/extensionManager.js';
 import { SkillManager } from '../skills/skill-manager.js';
 import { HookSystem } from '../hooks/index.js';
-import { GOAL_HOOK_ID_OUTPUT_KEY } from '../goals/goalHook.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
-import type { ChatRecordingFailureEvent } from '../services/chatRecordingService.js';
+import type {
+  ChatRecord,
+  ChatRecordingFailureEvent,
+} from '../services/chatRecordingService.js';
 import {
   SessionTranscriptChangedError,
   SessionWriterLease,
 } from '../services/session-writer-lease.js';
+import type { ResumedSessionData } from '../services/sessionService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
+import {
+  GoalPersistenceUnavailableError,
+  type GoalTurnHost,
+} from '../goals/goal-runtime.js';
 
 function createToolMock(toolName: string) {
   const ToolMock = vi.fn();
@@ -2160,6 +2167,159 @@ describe('Server Config (config.ts)', () => {
       expect(flush).not.toHaveBeenCalled();
     });
 
+    const resumedGoalSession = (status: 'active' | 'paused') => {
+      const record: ChatRecord = {
+        uuid: `goal-${status}`,
+        parentUuid: null,
+        sessionId: 'resumed-session',
+        timestamp: new Date(0).toISOString(),
+        type: 'system',
+        subtype: 'goal_state',
+        provenance: 'goal_control',
+        cwd: '/tmp',
+        version: 'test',
+        systemPayload: {
+          v: 2,
+          cause: status === 'active' ? 'create' : 'pause',
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'g-resumed',
+              revision: 1,
+              objective: 'resume me',
+              status,
+              evidenceCursor: { recordId: 'goal-active' },
+              turnCount: 1,
+              activeTimeMs: 10,
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          },
+        },
+      };
+      return {
+        conversation: { messages: [record] },
+      } as ResumedSessionData;
+    };
+
+    it('restores the complete resumed-session Goal before exposing readiness', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+
+      const initial = await config.getGoalRuntimeReady();
+      expect(initial.getSnapshot().goal).toMatchObject({
+        objective: 'resume me',
+        status: 'paused',
+      });
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      const replacement = await config.getGoalRuntimeReady();
+      expect(replacement).not.toBe(initial);
+      expect(replacement.getSnapshot().goal?.status).toBe('active');
+    });
+
+    it('owns one durable Goal runtime per canonical session', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const first = config.getGoalRuntime();
+
+      expect(config.getGoalRuntime()).toBe(first);
+      config.startNewSession('replacement-session');
+      const replacement = config.getGoalRuntime();
+
+      expect(replacement).not.toBe(first);
+      await expect(
+        first.dispatch({ action: 'create', objective: 'stale' }),
+      ).rejects.toThrow('Goal runtime has been disposed');
+    });
+
+    it('rebinds the current Goal host to every replacement runtime', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('active'),
+      });
+      const started: string[] = [];
+      const host: GoalTurnHost = {
+        startGoalTurn: vi.fn(async ({ permit }) => {
+          started.push(permit.goalId);
+        }),
+        preemptGoalTurn: vi.fn(),
+      };
+
+      config.bindGoalTurnHost(host);
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() => expect(started).toEqual(['g-resumed']));
+
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() =>
+        expect(started).toEqual(['g-resumed', 'g-resumed']),
+      );
+    });
+
+    it('does not let an obsolete Goal host unbind detach its replacement', async () => {
+      const config = new Config({
+        ...baseParams,
+        chatRecording: true,
+        sessionData: resumedGoalSession('paused'),
+      });
+      const firstHost: GoalTurnHost = {
+        startGoalTurn: vi.fn(async () => undefined),
+        preemptGoalTurn: vi.fn(),
+      };
+      const replacementHost: GoalTurnHost = {
+        startGoalTurn: vi.fn(async () => undefined),
+        preemptGoalTurn: vi.fn(),
+      };
+      const unbindFirst = config.bindGoalTurnHost(firstHost);
+      config.bindGoalTurnHost(replacementHost);
+
+      unbindFirst();
+      config.startNewSession(
+        'replacement-session',
+        resumedGoalSession('active'),
+      );
+      await config.getGoalRuntimeReady();
+      await vi.waitFor(() =>
+        expect(replacementHost.startGoalTurn).toHaveBeenCalledOnce(),
+      );
+
+      expect(firstHost.startGoalTurn).not.toHaveBeenCalled();
+    });
+
+    it('does not expose volatile Goal state when chat recording is disabled', () => {
+      const config = new Config({ ...baseParams, chatRecording: false });
+
+      expect(() => config.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+    });
+
+    it('does not leak the canonical Goal runtime through subagent prototypes', async () => {
+      const config = new Config({ ...baseParams, chatRecording: true });
+      const canonical = config.getGoalRuntime();
+      const child = Object.create(config) as Config;
+
+      expect(() => child.getGoalRuntime()).toThrow(
+        GoalPersistenceUnavailableError,
+      );
+      await child.shutdown();
+      await expect(
+        canonical.dispatch({ action: 'create', objective: 'still live' }),
+      ).resolves.toBeDefined();
+      expect(config.getGoalRuntime()).toBe(canonical);
+    });
+
     it('clears the FileReadCache so a new session does not inherit prior reads', () => {
       // Regression guard: the file-read cache backs ReadFile's
       // file_unchanged placeholder, whose correctness depends on the
@@ -2702,7 +2862,20 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
+    });
+
+    it('registers Goal Worker tools in the regular main registry', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).toContain(ToolNames.UPDATE_GOAL);
     });
 
     it('should skip hook, skill, and file checkpointing side effects when requested', async () => {
@@ -2852,6 +3025,8 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).not.toContain(ToolNames.ASK_USER_QUESTION);
       expect(registeredNames).not.toContain(ToolNames.ENTER_PLAN_MODE);
       expect(registeredNames).toContain(ToolNames.EXIT_PLAN_MODE);
+      expect(registeredNames).not.toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.UPDATE_GOAL);
     });
 
     it('does not register artifact tools when artifacts are disabled', async () => {
@@ -5366,6 +5541,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
       ]);
     });
 
@@ -5396,6 +5573,8 @@ describe('Server Config (config.ts)', () => {
         ToolNames.EDIT,
         ToolNames.NOTEBOOK_EDIT,
         ToolNames.SHELL,
+        ToolNames.GET_GOAL,
+        ToolNames.UPDATE_GOAL,
         ToolNames.STRUCTURED_OUTPUT,
       ]);
     });
@@ -5438,6 +5617,8 @@ describe('Server Config (config.ts)', () => {
         (call) => call[0],
       );
       expect(registeredNames).not.toContain(ToolNames.STRUCTURED_OUTPUT);
+      expect(registeredNames).not.toContain(ToolNames.GET_GOAL);
+      expect(registeredNames).not.toContain(ToolNames.UPDATE_GOAL);
       // The bare tools still register so the subagent has its toolset.
       expect(registeredNames).toEqual([
         ToolNames.READ_FILE,
@@ -7605,78 +7786,6 @@ describe('Model Switching and Config Updates', () => {
       // Zero context_limit: returns undefined
       expect(buildContextUsage(0, 64000)).toBeUndefined();
     });
-  });
-
-  describe('Stop dispatch through the hook execution bridge', () => {
-    it.each([
-      {
-        name: 'ignores non-blocking outputs',
-        otherOutput: { continue: true },
-        expected: false,
-        expectedReason: undefined,
-      },
-      {
-        name: 'detects another blocking output',
-        otherOutput: {
-          decision: 'block',
-          reason: 'Policy review is still required',
-        },
-        expected: true,
-        expectedReason: 'Policy review is still required',
-      },
-      {
-        name: 'preserves a stop reason',
-        otherOutput: {
-          continue: false,
-          stopReason: 'External stop hook feedback',
-        },
-        expected: true,
-        expectedReason: 'External stop hook feedback',
-      },
-    ])(
-      '$name when a goal hook blocks',
-      async ({ otherOutput, expected, expectedReason }) => {
-        const config = new Config({ ...baseParams });
-        await config.initialize();
-        const goalOutput = {
-          decision: 'block' as const,
-          reason: 'Keep working',
-          hookSpecificOutput: {
-            [GOAL_HOOK_ID_OUTPUT_KEY]: 'goal-hook-id',
-          },
-        };
-        const fireStopEvent = vi.fn().mockResolvedValue({
-          finalOutput: {
-            ...goalOutput,
-            ...otherOutput,
-          },
-          allOutputs: [goalOutput, otherOutput],
-        });
-        // @ts-expect-error - accessing private for testing
-        config['hookSystem'] = { fireStopEvent };
-
-        const response = await config
-          .getMessageBus()!
-          .request<HookExecutionRequest, HookExecutionResponse>(
-            {
-              type: MessageBusType.HOOK_EXECUTION_REQUEST,
-              eventName: 'Stop',
-              input: {
-                stop_hook_active: true,
-                last_assistant_message: 'last response',
-              },
-            },
-            MessageBusType.HOOK_EXECUTION_RESPONSE,
-          );
-
-        expect(response.error).toBeUndefined();
-        expect(response).toMatchObject({
-          success: true,
-          hasNonGoalBlockingStopHook: expected,
-        });
-        expect(response.nonGoalBlockingStopReason).toBe(expectedReason);
-      },
-    );
   });
 
   describe('MessageDisplay dispatch through the hook execution bridge', () => {

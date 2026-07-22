@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Maximize2Icon, Minimize2Icon } from 'lucide-react';
 import {
   useActions,
@@ -18,7 +18,10 @@ import {
   useWorkspaceActions,
   type DaemonWorkspaceActions,
 } from '@qwen-code/webui/daemon-react-sdk';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArtifact,
+  GoalControlRequest,
+} from '@qwen-code/sdk/daemon';
 import type { ACPToolCall } from '../adapters/types';
 import { SubagentDetailsProvider } from '../subagentDetailsContext';
 import { useI18n } from '../i18n';
@@ -38,7 +41,11 @@ import { isDaemonApprovalMode } from '../utils/sessionPreparation';
 import { isVisibleComposerModel } from '../utils/composerModels';
 import { shouldBlockComposerSubmit } from '../utils/composerInputState';
 import { invokeSlashCommandHandler } from '../utils/slash-command-action';
-import type { WebShellSlashCommandHandler } from '../App';
+import { parseWebShellGoalCommand } from '../utils/goalCondition';
+import type {
+  WebShellGoalWorkspaceTarget,
+  WebShellSlashCommandHandler,
+} from '../App';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import {
   hasMultipleWorkspaces,
@@ -54,6 +61,9 @@ import { mergeCommands } from '../hooks/daemonSessionMappers';
 import { MessageList } from './MessageList';
 import { StreamingStatus } from './StreamingStatus';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
+import { GoalStatusStrip } from './GoalStatusStrip';
+import composerStatusStyles from './ComposerStatusStack.module.css';
+import { GoalEditDialog } from './dialogs/GoalEditDialog';
 import { QueuedPromptDisplay } from './QueuedPromptDisplay';
 import { ToolApproval } from './messages/ToolApproval';
 import { AskUserQuestion } from './messages/AskUserQuestion';
@@ -101,6 +111,8 @@ export interface ChatPaneProps {
   onError?: (error: unknown, fallback: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
+  /** Open the shared Goals workspace page for a bare `/goal`. */
+  onOpenGoals?: (target: WebShellGoalWorkspaceTarget) => void;
   onRightPanelOpen?: (request: TurnOutputOpenRequest) => void;
   onPaneArtifactsChange?: (
     sessionId: string,
@@ -127,6 +139,7 @@ export function ChatPane({
   isMaximized = false,
   onError,
   onSlashCommand,
+  onOpenGoals,
   onRightPanelOpen,
   onPaneArtifactsChange,
   messageTurnOutputs,
@@ -142,6 +155,19 @@ export function ChatPane({
   const transcriptHistory = useTranscriptHistory();
   const store = useTranscriptStore();
   const streamingState = useStreamingState();
+  const [goalControlBusy, setGoalControlBusy] = useState(false);
+  const [goalEditOpen, setGoalEditOpen] = useState(false);
+  const [goalEditError, setGoalEditError] = useState<string | null>(null);
+  const connectionGoalComplete =
+    connection.goalState?.goal?.status === 'complete';
+  useEffect(() => {
+    setGoalEditOpen(false);
+    setGoalEditError(null);
+  }, [
+    connection.goalState?.goal?.goalId,
+    connection.sessionId,
+    connectionGoalComplete,
+  ]);
   const { artifacts } = useSessionArtifacts();
   const openSubagentDetails = useCallback(
     (tool: ACPToolCall) => {
@@ -280,6 +306,7 @@ export function ChatPane({
     sessionId: connection.sessionId,
     clientId: connection.clientId,
     streamingState,
+    holdQueuedPromptsLocally: connection.goalState?.goal?.status === 'active',
     sessionActions: actions,
     store,
     editorRef,
@@ -300,6 +327,77 @@ export function ChatPane({
     return undefined;
   }, [messages, isResponding]);
 
+  const controlGoal = useCallback(
+    async (
+      action: 'replace' | 'edit' | 'pause' | 'resume' | 'clear',
+      objective?: string,
+    ) => {
+      let snapshot = connection.goalState;
+      if (!snapshot) snapshot = (await actions.getGoal()).snapshot;
+      const goal = snapshot.goal;
+      if (!goal && action === 'clear') return { snapshot };
+      let request: GoalControlRequest;
+      if (action === 'replace') {
+        if (!objective) throw new Error(t('goals.error.emptyCondition'));
+        request = goal
+          ? {
+              action,
+              objective,
+              expectedGoalId: goal.goalId,
+              expectedRevision: goal.revision,
+            }
+          : { action: 'create', objective };
+      } else {
+        if (!goal) throw new Error(t('goals.error.goalUnavailable'));
+        request = {
+          action,
+          ...(action === 'edit'
+            ? { objective: objective ?? goal.objective }
+            : {}),
+          expectedGoalId: goal.goalId,
+          expectedRevision: goal.revision,
+        } as GoalControlRequest;
+      }
+      setGoalControlBusy(true);
+      try {
+        return await actions.controlGoal(request);
+      } catch (error) {
+        await actions.getGoal().catch(() => undefined);
+        throw error;
+      } finally {
+        setGoalControlBusy(false);
+      }
+    },
+    [actions, connection.goalState, t],
+  );
+
+  const runGoalControl = useCallback(
+    (action: 'pause' | 'resume' | 'clear') => {
+      void controlGoal(action).catch((error: unknown) => {
+        reportError(error, t(`goals.error.${action}Failed`));
+      });
+    },
+    [controlGoal, reportError, t],
+  );
+
+  const handleGoalClear = useCallback(() => {
+    runGoalControl('clear');
+  }, [runGoalControl]);
+
+  const handleGoalEditSave = useCallback(
+    (objective: string) => {
+      setGoalEditError(null);
+      void controlGoal('edit', objective)
+        .then(() => setGoalEditOpen(false))
+        .catch((error: unknown) => {
+          setGoalEditError(
+            error instanceof Error ? error.message : String(error),
+          );
+        });
+    },
+    [controlGoal],
+  );
+
   const handleSubmit = useCallback(
     (
       text: string,
@@ -314,6 +412,31 @@ export function ChatPane({
       ) {
         return true;
       }
+      if (/^\/goal(?:\s|$)/i.test(trimmed)) {
+        const operation = parseWebShellGoalCommand(trimmed);
+        if (operation.kind === 'status') {
+          if (connection.sessionId) {
+            onOpenGoals?.({
+              sessionId: connection.sessionId,
+              snapshot: connection.goalState,
+            });
+          }
+          return true;
+        }
+        if (operation.kind === 'error') {
+          reportError(new Error(operation.message), 'Invalid /goal command');
+          return true;
+        }
+        const action = operation.kind === 'set' ? 'replace' : operation.kind;
+        const objective =
+          operation.kind === 'set' || operation.kind === 'edit'
+            ? operation.objective
+            : undefined;
+        void controlGoal(action, objective).catch((error: unknown) => {
+          reportError(error, `Failed to ${operation.kind} /goal`);
+        });
+        return true;
+      }
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connection.status,
@@ -324,7 +447,10 @@ export function ChatPane({
         return false;
       }
       const inputAnnotations = metadata?.inputAnnotations;
-      if (streamingStateRef.current === 'idle') {
+      if (
+        streamingStateRef.current === 'idle' &&
+        connection.goalState?.goal?.status !== 'active'
+      ) {
         actions
           .sendPrompt(trimmed, {
             ...(images && images.length ? { images } : {}),
@@ -346,9 +472,12 @@ export function ChatPane({
     [
       actions,
       clearFollowup,
+      connection.goalState,
       connection.sessionId,
       connection.status,
+      controlGoal,
       enqueuePrompt,
+      onOpenGoals,
       reportError,
       restartSseOnPrompt,
     ],
@@ -509,6 +638,19 @@ export function ChatPane({
       data-testid="chat-pane"
       aria-label={headerLabel}
     >
+      {goalEditOpen && connection.goalState?.goal && (
+        <GoalEditDialog
+          objective={connection.goalState.goal.objective}
+          saving={goalControlBusy}
+          error={goalEditError}
+          onSave={handleGoalEditSave}
+          onClose={() => {
+            if (goalControlBusy) return;
+            setGoalEditOpen(false);
+            setGoalEditError(null);
+          }}
+        />
+      )}
       <header
         className={`${styles.header} ${workspaceAccentClass ?? ''}`.trim()}
       >
@@ -650,13 +792,33 @@ export function ChatPane({
         {/* Panes keep the composer status compact: spinner + elapsed time +
             token count + cancel hint, but no rotating "witty" loading phrase. */}
         <StreamingStatus startedAt={activeTurnStartedAt} showPhrase={false} />
-        <QueuedPromptDisplay
-          prompts={queuedPrompts}
-          t={t}
-          onDelete={removeQueuedPrompt}
-          onInsert={insertQueuedPrompt}
-          onEdit={editQueuedPrompt}
-        />
+        {(queuedPrompts.length > 0 || connection.goalState?.goal) && (
+          <div
+            className={composerStatusStyles.root}
+            data-testid="composer-status-stack"
+          >
+            <QueuedPromptDisplay
+              prompts={queuedPrompts}
+              t={t}
+              onDelete={removeQueuedPrompt}
+              onInsert={insertQueuedPrompt}
+              onEdit={editQueuedPrompt}
+            />
+            {connection.goalState?.goal && (
+              <GoalStatusStrip
+                snapshot={connection.goalState}
+                busy={goalControlBusy}
+                onEdit={() => {
+                  setGoalEditError(null);
+                  setGoalEditOpen(true);
+                }}
+                onPause={() => runGoalControl('pause')}
+                onResume={() => runGoalControl('resume')}
+                onClear={handleGoalClear}
+              />
+            )}
+          </div>
+        )}
         <ChatEditor
           ref={editorRef}
           onSubmit={handleSubmit}

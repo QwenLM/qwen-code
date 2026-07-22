@@ -86,6 +86,7 @@ export function isSyntheticHistoryItem(
     case 'arena_agent_complete':
     case 'arena_session_complete':
     case 'goal_status':
+    case 'goal_state':
       return false;
 
     default: {

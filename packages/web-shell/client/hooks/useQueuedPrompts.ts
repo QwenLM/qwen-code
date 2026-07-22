@@ -43,6 +43,7 @@ interface UseQueuedPromptsArgs {
   sessionId?: string;
   clientId?: string;
   streamingState: DaemonStreamingState;
+  holdQueuedPromptsLocally?: boolean;
   sessionActions: DaemonSessionActions;
   store: DaemonTranscriptStore;
   editorRef: RefBox<EditorHandle | null>;
@@ -52,6 +53,72 @@ interface UseQueuedPromptsArgs {
 }
 
 const MAX_COMPLETED_PROMPT_IDS = 100;
+const LOCAL_PROMPTS_STORAGE_PREFIX = 'qwen-web-shell:queued-prompts:';
+const localPromptsBySession = new Map<string, QueuedPrompt[]>();
+
+function readPersistedLocalPrompts(sessionId: string): QueuedPrompt[] {
+  const cached = localPromptsBySession.get(sessionId);
+  if (cached) return cached;
+  if (typeof window === 'undefined') return [];
+  try {
+    const stored = window.sessionStorage.getItem(
+      `${LOCAL_PROMPTS_STORAGE_PREFIX}${sessionId}`,
+    );
+    if (!stored) return [];
+    const parsed: unknown = JSON.parse(stored);
+    if (!Array.isArray(parsed)) return [];
+    const prompts = parsed
+      .filter(
+        (value): value is QueuedPrompt =>
+          typeof value === 'object' &&
+          value !== null &&
+          typeof (value as { id?: unknown }).id === 'number' &&
+          typeof (value as { text?: unknown }).text === 'string' &&
+          !(value as { serverPromptId?: unknown }).serverPromptId,
+      )
+      .map((prompt) => ({
+        ...prompt,
+        isEditing: false,
+        isRemoving: false,
+        isInserting: false,
+        onComplete: undefined,
+      }));
+    localPromptsBySession.set(sessionId, prompts);
+    return prompts;
+  } catch {
+    return [];
+  }
+}
+
+function persistLocalPrompts(
+  sessionId: string | undefined,
+  prompts: readonly QueuedPrompt[],
+): void {
+  if (!sessionId) return;
+  const localPrompts = prompts
+    .filter((prompt) => !prompt.serverPromptId)
+    .map((prompt) => ({
+      ...prompt,
+      isInserting: false,
+      onComplete: undefined,
+    }));
+  if (localPrompts.length > 0) {
+    localPromptsBySession.set(sessionId, localPrompts);
+  } else {
+    localPromptsBySession.delete(sessionId);
+  }
+  if (typeof window === 'undefined') return;
+  try {
+    const key = `${LOCAL_PROMPTS_STORAGE_PREFIX}${sessionId}`;
+    if (localPrompts.length > 0) {
+      window.sessionStorage.setItem(key, JSON.stringify(localPrompts));
+    } else {
+      window.sessionStorage.removeItem(key);
+    }
+  } catch {
+    return;
+  }
+}
 
 /**
  * Merge a restored prompt's text into the editor content. Restoration paths
@@ -90,6 +157,7 @@ function areQueuedPromptsEqual(
       prompt.serverState === other.serverState &&
       prompt.isEditing === other.isEditing &&
       prompt.isRemoving === other.isRemoving &&
+      prompt.isInserting === other.isInserting &&
       (prompt.images?.length ?? 0) === (other.images?.length ?? 0) &&
       (prompt.inputAnnotations?.length ?? 0) ===
         (other.inputAnnotations?.length ?? 0)
@@ -128,6 +196,7 @@ export function useQueuedPrompts({
   sessionId,
   clientId,
   streamingState,
+  holdQueuedPromptsLocally = false,
   sessionActions,
   store,
   editorRef,
@@ -135,9 +204,16 @@ export function useQueuedPrompts({
   notifySuccess,
   t,
 }: UseQueuedPromptsArgs): UseQueuedPromptsResult {
-  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const nextQueuedPromptIdRef = useRef(1);
+  const initialQueuedPrompts = sessionId
+    ? readPersistedLocalPrompts(sessionId)
+    : [];
+  const [queuedPrompts, setQueuedPrompts] =
+    useState<QueuedPrompt[]>(initialQueuedPrompts);
+  const queuedPromptsRef = useRef<QueuedPrompt[]>(initialQueuedPrompts);
+  const displayedSessionIdRef = useRef(sessionId);
+  const nextQueuedPromptIdRef = useRef(
+    Math.max(0, ...initialQueuedPrompts.map((prompt) => prompt.id)) + 1,
+  );
   const latestSessionIdRef = useRef(sessionId);
   const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const submitAbortControllersRef = useRef<Set<AbortController>>(new Set());
@@ -147,10 +223,12 @@ export function useQueuedPrompts({
   const completedPromptIdsRef = useRef<Set<string>>(new Set());
   const completedPromptIdOrderRef = useRef<string[]>([]);
   const latestStreamingStateRef = useRef(streamingState);
+  const holdQueuedPromptsLocallyRef = useRef(holdQueuedPromptsLocally);
   const refreshRequestSeqRef = useRef(0);
 
   latestSessionIdRef.current = sessionId;
   latestStreamingStateRef.current = streamingState;
+  holdQueuedPromptsLocallyRef.current = holdQueuedPromptsLocally;
 
   const queuedTexts = useMemo(
     () => queuedPrompts.map((prompt) => prompt.text),
@@ -162,8 +240,15 @@ export function useQueuedPrompts({
   }, [queuedPrompts]);
 
   useEffect(() => {
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
+    const previousSessionId = displayedSessionIdRef.current;
+    if (previousSessionId === sessionId) return;
+    persistLocalPrompts(previousSessionId, queuedPromptsRef.current);
+    const restored = sessionId ? readPersistedLocalPrompts(sessionId) : [];
+    displayedSessionIdRef.current = sessionId;
+    queuedPromptsRef.current = restored;
+    nextQueuedPromptIdRef.current =
+      Math.max(0, ...restored.map((prompt) => prompt.id)) + 1;
+    setQueuedPrompts(restored);
     completionCallbacksRef.current.clear();
     completedPromptIdsRef.current.clear();
     completedPromptIdOrderRef.current = [];
@@ -174,9 +259,27 @@ export function useQueuedPrompts({
     removingServerPromptIdsRef.current.clear();
     displayedServerPromptIdsRef.current.clear();
     initialRefreshSessionIdRef.current = undefined;
+    refreshRequestSeqRef.current += 1;
     midTurnEnqueueAbortRef.current?.abort();
     midTurnEnqueueAbortRef.current = null;
   }, [sessionId]);
+
+  useEffect(
+    () => () => {
+      persistLocalPrompts(
+        displayedSessionIdRef.current,
+        queuedPromptsRef.current,
+      );
+    },
+    [],
+  );
+
+  useEffect(() => {
+    persistLocalPrompts(
+      displayedSessionIdRef.current,
+      queuedPromptsRef.current,
+    );
+  }, [queuedPrompts]);
 
   const syncServerQueuedPrompts = useCallback(
     (serverQueued: DaemonPendingPromptSummary[], targetSessionId: string) => {
@@ -395,7 +498,37 @@ export function useQueuedPrompts({
           }
         }
         void refreshPendingPrompts();
-      } else if (event.type === 'turn_complete') {
+      } else if (
+        event.type === 'turn_complete' ||
+        event.type === 'turn_error'
+      ) {
+        const prompt = queuedPromptsRef.current.find(
+          (item) => item.serverPromptId === promptId,
+        );
+        const shouldAppendLocalUserMessage =
+          event.originatorClientId === undefined ||
+          event.originatorClientId === clientId;
+        if (
+          prompt &&
+          shouldAppendLocalUserMessage &&
+          !displayedServerPromptIdsRef.current.has(promptId)
+        ) {
+          displayedServerPromptIdsRef.current.add(promptId);
+          store.appendLocalUserMessage(
+            prompt.text,
+            toStoreImages(prompt.images),
+            prompt.inputAnnotations?.length
+              ? { inputAnnotations: prompt.inputAnnotations }
+              : undefined,
+          );
+        }
+        if (prompt) {
+          const next = queuedPromptsRef.current.filter(
+            (item) => item.id !== prompt.id,
+          );
+          queuedPromptsRef.current = next;
+          setQueuedPrompts(next);
+        }
         displayedServerPromptIdsRef.current.delete(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
         completionCallbacksRef.current.delete(promptId);
@@ -417,9 +550,8 @@ export function useQueuedPrompts({
           }
         }
       } else if (
-        event.type === 'turn_error' ||
-        (event.type === 'pending_prompt_completed' &&
-          event.data.state === 'removed')
+        event.type === 'pending_prompt_completed' &&
+        event.data.state === 'removed'
       ) {
         displayedServerPromptIdsRef.current.delete(promptId);
         const callback = completionCallbacksRef.current.get(promptId);
@@ -457,8 +589,6 @@ export function useQueuedPrompts({
       if (!trimmed) return true;
       const localId = nextQueuedPromptIdRef.current++;
       const targetSessionId = latestSessionIdRef.current;
-      const submitAbort = new AbortController();
-      submitAbortControllersRef.current.add(submitAbort);
       const queuedImages = images ? [...images] : undefined;
       const queuedAnnotations = inputAnnotations
         ? [...inputAnnotations]
@@ -470,10 +600,17 @@ export function useQueuedPrompts({
         images: queuedImages,
         inputAnnotations: queuedAnnotations,
         onComplete,
-        serverState: 'submitting',
+        ...(holdQueuedPromptsLocallyRef.current
+          ? {}
+          : { serverState: 'submitting' }),
       };
       queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
       setQueuedPrompts(queuedPromptsRef.current);
+
+      if (holdQueuedPromptsLocallyRef.current) return true;
+
+      const submitAbort = new AbortController();
+      submitAbortControllersRef.current.add(submitAbort);
 
       sessionActions
         .submitPrompt(trimmed, {
@@ -498,7 +635,10 @@ export function useQueuedPrompts({
               });
             return;
           }
-          if (latestStreamingStateRef.current === 'idle') {
+          if (
+            latestStreamingStateRef.current === 'idle' ||
+            completedPromptIdsRef.current.has(result.promptId)
+          ) {
             if (!displayedServerPromptIdsRef.current.has(result.promptId)) {
               displayedServerPromptIdsRef.current.add(result.promptId);
               store.appendLocalUserMessage(
@@ -575,12 +715,20 @@ export function useQueuedPrompts({
   );
 
   useEffect(() => {
-    if (streamingState !== 'idle') return;
+    if (streamingState !== 'idle' || holdQueuedPromptsLocally) return;
     const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [streamingState]);
+    if (ctrl) {
+      ctrl.abort();
+      midTurnEnqueueAbortRef.current = null;
+    }
+    const next = queuedPromptsRef.current.map((prompt) =>
+      prompt.isInserting ? { ...prompt, isInserting: false } : prompt,
+    );
+    if (!areQueuedPromptsEqual(next, queuedPromptsRef.current)) {
+      queuedPromptsRef.current = next;
+      setQueuedPrompts(next);
+    }
+  }, [holdQueuedPromptsLocally, streamingState]);
 
   const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
     const current = queuedPromptsRef.current;
@@ -600,7 +748,9 @@ export function useQueuedPrompts({
   const setQueuedPromptFlags = useCallback(
     (
       id: number,
-      flags: Partial<Pick<QueuedPrompt, 'isEditing' | 'isRemoving'>>,
+      flags: Partial<
+        Pick<QueuedPrompt, 'isEditing' | 'isRemoving' | 'isInserting'>
+      >,
     ) => {
       const next = queuedPromptsRef.current.map((prompt) =>
         prompt.id === id ? { ...prompt, ...flags } : prompt,
@@ -615,7 +765,9 @@ export function useQueuedPrompts({
   const removeServerPromptForAction = useCallback(
     async (
       target: QueuedPrompt,
-      flags: Partial<Pick<QueuedPrompt, 'isEditing' | 'isRemoving'>>,
+      flags: Partial<
+        Pick<QueuedPrompt, 'isEditing' | 'isRemoving' | 'isInserting'>
+      >,
       fallback: string,
     ): Promise<boolean> => {
       if (!target.serverPromptId) return true;
@@ -631,6 +783,7 @@ export function useQueuedPrompts({
           target.serverPromptId,
           {
             sessionId: targetSessionId,
+            ifState: 'queued',
           },
         );
         removingServerPromptIdsRef.current.delete(target.serverPromptId);
@@ -640,6 +793,7 @@ export function useQueuedPrompts({
             isRemoving: false,
           });
           await refreshPendingPrompts(targetSessionId);
+          if (result.currentState === 'running') return false;
           reportError(
             new Error('Prompt could not be removed from queue'),
             fallback,
@@ -683,7 +837,7 @@ export function useQueuedPrompts({
   const removeQueuedPrompt = useCallback(
     (id: number) => {
       const target = queuedPromptsRef.current.find((p) => p.id === id);
-      if (target?.serverState === 'submitting') return;
+      if (target?.serverState === 'submitting' || target?.isInserting) return;
       if (!target) return;
       if (!target.serverPromptId) {
         const next = queuedPromptsRef.current.filter(
@@ -705,19 +859,34 @@ export function useQueuedPrompts({
   const insertQueuedPrompt = useCallback(
     async (id: number) => {
       const prompt = queuedPromptsRef.current.find((item) => item.id === id);
-      if (!prompt || (prompt.images?.length ?? 0) > 0) return;
+      if (!prompt) return;
+      if (!prompt.serverPromptId && !holdQueuedPromptsLocallyRef.current) {
+        const next = queuedPromptsRef.current.filter((item) => item.id !== id);
+        queuedPromptsRef.current = next;
+        setQueuedPrompts(next);
+        enqueuePrompt(
+          prompt.text,
+          prompt.images,
+          prompt.onComplete,
+          prompt.inputAnnotations,
+        );
+        return;
+      }
+      if ((prompt.images?.length ?? 0) > 0) return;
       if (
         prompt.serverState === 'submitting' ||
         prompt.isEditing ||
         prompt.isRemoving ||
+        prompt.isInserting ||
         isCommandPrompt(prompt.text)
       ) {
         return;
       }
-      const removedCompletionCallback = prompt.serverPromptId
-        ? (prompt.onComplete ??
-          completionCallbacksRef.current.get(prompt.serverPromptId))
-        : undefined;
+      const removedCompletionCallback =
+        prompt.onComplete ??
+        (prompt.serverPromptId
+          ? completionCallbacksRef.current.get(prompt.serverPromptId)
+          : undefined);
       const finishRemovedPrompt = () => {
         if (prompt.serverPromptId) {
           completionCallbacksRef.current.delete(prompt.serverPromptId);
@@ -733,6 +902,9 @@ export function useQueuedPrompts({
         ))
       ) {
         return;
+      }
+      if (!prompt.serverPromptId) {
+        setQueuedPromptFlags(prompt.id, { isInserting: true });
       }
       let abort = midTurnEnqueueAbortRef.current;
       if (!abort) {
@@ -750,6 +922,8 @@ export function useQueuedPrompts({
         if (prompt.serverPromptId) {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
           finishRemovedPrompt();
+        } else {
+          setQueuedPromptFlags(prompt.id, { isInserting: false });
         }
         reportError(error, t('queue.insertFailed'));
         return;
@@ -758,27 +932,22 @@ export function useQueuedPrompts({
         if (prompt.serverPromptId) {
           restoreTextToEditor(prompt.text, prompt.images, prompt.sessionId);
           finishRemovedPrompt();
+        } else {
+          setQueuedPromptFlags(prompt.id, { isInserting: false });
         }
-        reportError(
-          new Error('Queued message was not accepted for insertion'),
-          t('queue.insertFailed'),
-        );
         return;
       }
-      finishRemovedPrompt();
-      if (!prompt.serverPromptId) {
-        const next = queuedPromptsRef.current.filter((item) => item.id !== id);
-        queuedPromptsRef.current = next;
-        setQueuedPrompts(next);
-      }
+      if (prompt.serverPromptId) finishRemovedPrompt();
       notifySuccess(t('queue.inserted'));
     },
     [
+      enqueuePrompt,
       removeServerPromptForAction,
       notifySuccess,
       reportError,
       restoreTextToEditor,
       sessionActions,
+      setQueuedPromptFlags,
       t,
     ],
   );
@@ -787,6 +956,7 @@ export function useQueuedPrompts({
     async (id: number) => {
       const target = queuedPromptsRef.current.find((p) => p.id === id);
       if (!target || target.serverState === 'submitting') return;
+      if (target.isInserting) return;
       if (target.isEditing || target.isRemoving) return;
       if (target.serverPromptId) {
         const removed = await removeServerPromptForAction(
@@ -965,6 +1135,14 @@ export function useQueuedPrompts({
       clientId,
     );
     if (next) {
+      const remainingIds = new Set(next.map((prompt) => prompt.id));
+      for (const prompt of queuedPromptsRef.current) {
+        if (remainingIds.has(prompt.id)) continue;
+        if (prompt.serverPromptId) {
+          completionCallbacksRef.current.delete(prompt.serverPromptId);
+        }
+        prompt.onComplete?.();
+      }
       queuedPromptsRef.current = next;
       setQueuedPrompts(next);
     }

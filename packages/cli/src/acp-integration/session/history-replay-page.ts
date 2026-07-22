@@ -4,12 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type {
-  ChatRecord,
-  Config,
-  HistoryGap,
-  SessionTranscriptCursorState,
-  SessionTranscriptRecordPage,
+import {
+  parseGoalSnapshotV2,
+  type ChatRecord,
+  type Config,
+  type GoalSnapshotV2,
+  type HistoryGap,
+  type SessionTranscriptCursorState,
+  type SessionTranscriptRecordPage,
 } from '@qwen-code/qwen-code-core';
 import type { SessionUpdate } from '@agentclientprotocol/sdk';
 import type { TranscriptReplayStateV1 } from '@qwen-code/acp-bridge/transcriptReplay';
@@ -90,6 +92,7 @@ function parseTranscriptReplayState(
 ): {
   pendingToolCalls: PendingReplayToolCall[];
   cumulativeUsage: CumulativeUsage;
+  goalState?: GoalSnapshotV2;
 } {
   if (!isObjectRecord(replay)) {
     return {
@@ -132,7 +135,17 @@ function parseTranscriptReplayState(
   const cumulativeUsage = isCumulativeUsage(replay['cumulativeUsage'])
     ? { ...replay['cumulativeUsage'] }
     : createReplayCumulativeUsage();
-  return { pendingToolCalls, cumulativeUsage };
+  const rawGoalState = replay['goalState'];
+  const goalState =
+    rawGoalState === undefined ? undefined : parseGoalSnapshotV2(rawGoalState);
+  if (logger && rawGoalState !== undefined && !goalState) {
+    logger.warn('[transcript] replay state dropped a malformed Goal state');
+  }
+  return {
+    pendingToolCalls,
+    cumulativeUsage,
+    ...(goalState ? { goalState } : {}),
+  };
 }
 
 function replayContext(
@@ -170,28 +183,22 @@ export async function collectHistoryReplayUpdates({
   records,
   gaps,
   cumulativeUsage,
+  goalState,
   logger,
-  supersedeUnrestorableGoal,
 }: {
   sessionId: string;
   config?: Config;
   records: ChatRecord[];
   gaps?: HistoryGap[];
   cumulativeUsage: CumulativeUsage;
+  goalState?: GoalSnapshotV2;
   logger?: ReplayLogger;
-  /**
-   * Forwarded to `HistoryReplayer`. Only the resume path, where
-   * `#restoreGoalOnResume` follows, sets this. Reading another session's
-   * history must render it as it was, not editorialize a goal it won't restore.
-   */
-  supersedeUnrestorableGoal?: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   try {
     await new HistoryReplayer(
       replayContext(sessionId, updates, cumulativeUsage, config),
-      { supersedeUnrestorableGoal },
-    ).replay(records, gaps);
+    ).replay(records, gaps, goalState);
   } catch (error) {
     const replayError = error instanceof Error ? error.message : String(error);
     logger?.warn(
@@ -254,6 +261,7 @@ export async function replayTranscriptRecordPage({
         page.direction === 'backward' ? [] : state.pendingToolCalls,
       finalizeDangling: page.direction === 'backward' || !page.hasMore,
       gaps: page.gaps,
+      ...(state.goalState ? { goalState: state.goalState } : {}),
     });
     replayState = replayPageState.replay;
   } catch (error) {

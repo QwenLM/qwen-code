@@ -24,6 +24,7 @@ import {
   buildApiHistoryFromConversation,
   getResumePromptTokenCount,
   getResumeTokenCounts,
+  recoverGoalFromResumedSession,
   type ConversationRecord,
 } from './sessionService.js';
 import {
@@ -141,6 +142,53 @@ describe('SessionService', () => {
     cwd: '/test/project/root',
     version: '1.0.0',
   };
+
+  it('classifies Goal recovery from the complete resumed conversation', () => {
+    const recovery = recoverGoalFromResumedSession({
+      conversation: {
+        sessionId: sessionIdA,
+        projectHash: 'test-project-hash',
+        startTime: '2024-01-01T00:00:00Z',
+        lastUpdated: '2024-01-01T00:00:00Z',
+        messages: [
+          recordA1,
+          {
+            ...recordA1,
+            uuid: 'goal-state',
+            parentUuid: 'a1',
+            type: 'system',
+            subtype: 'goal_state',
+            systemPayload: {
+              v: 2,
+              cause: 'create',
+              snapshot: {
+                v: 2,
+                activity: 'idle',
+                goal: {
+                  goalId: 'goal-1',
+                  revision: 1,
+                  objective: 'ship it',
+                  status: 'active',
+                  evidenceCursor: { recordId: 'goal-state' },
+                  turnCount: 0,
+                  activeTimeMs: 0,
+                  createdAt: 1,
+                  updatedAt: 1,
+                },
+              },
+            },
+          },
+        ],
+      },
+      filePath: '/tmp/session.jsonl',
+      lastCompletedUuid: 'goal-state',
+    });
+
+    expect(recovery).toMatchObject({
+      kind: 'v2',
+      payload: { snapshot: { goal: { objective: 'ship it' } } },
+    });
+  });
 
   describe('listSessions', () => {
     it('should return empty list when no sessions exist', async () => {

@@ -130,6 +130,7 @@ export interface QueuedPrompt {
   serverState?: 'submitting' | 'queued' | 'running';
   isEditing?: boolean;
   isRemoving?: boolean;
+  isInserting?: boolean;
 }
 
 export function QueuedPromptDisplay({
@@ -155,7 +156,7 @@ export function QueuedPromptDisplay({
   if (prompts.length === 0) return null;
 
   return (
-    <div className={styles.queuedPrompts}>
+    <div className={styles.queuedPrompts} data-web-shell-queued-prompts="">
       {prompts.map((prompt) => {
         const preview = truncateQueuedPromptParts(
           getQueuedPromptParts(prompt, parseUserMessageContent),
@@ -165,8 +166,13 @@ export function QueuedPromptDisplay({
         const isSubmitting = prompt.serverState === 'submitting';
         const isRunning = prompt.serverState === 'running';
         const isRemoving = prompt.isRemoving === true;
+        const isInserting = prompt.isInserting === true;
         const isBusy =
-          isSubmitting || isRunning || prompt.isEditing === true || isRemoving;
+          isSubmitting ||
+          isRunning ||
+          prompt.isEditing === true ||
+          isRemoving ||
+          isInserting;
         let insertTitle = t('queue.insertTip');
         if (isBusy) {
           insertTitle = t('queue.submittingDisabled');
@@ -208,14 +214,16 @@ export function QueuedPromptDisplay({
               {imageCount > 0
                 ? ` ${t('queue.imageCount', { count: imageCount })}`
                 : ''}
-              {isSubmitting || prompt.isEditing || isRemoving ? (
+              {isSubmitting || prompt.isEditing || isRemoving || isInserting ? (
                 <span className={styles.queuedPromptState}>
                   <span className={styles.queuedPromptSpinner} />
                   {isRemoving
                     ? t('queue.removing')
                     : prompt.isEditing
                       ? t('queue.editing')
-                      : t('queue.submitting')}
+                      : isInserting
+                        ? t('queue.inserting')
+                        : t('queue.submitting')}
                 </span>
               ) : null}
             </span>

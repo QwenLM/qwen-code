@@ -584,6 +584,19 @@ export function sendBridgeError(
         });
         return;
       }
+      if (
+        kind === 'goal_conflict' ||
+        kind === 'goal_invalid_transition' ||
+        kind === 'goal_persist_failed'
+      ) {
+        const d = data as { current?: unknown };
+        res.status(kind === 'goal_persist_failed' ? 500 : 409).json({
+          error: errorMessage(err),
+          code: kind,
+          ...(d.current !== undefined ? { current: d.current } : {}),
+        });
+        return;
+      }
       if (kind === 'mcp_budget_would_exceed') {
         const d = data as { serverName?: string };
         res.status(409).json({

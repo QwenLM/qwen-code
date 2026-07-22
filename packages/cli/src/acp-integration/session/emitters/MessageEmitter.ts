@@ -12,8 +12,10 @@ import {
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import {
   apiActivityTracker,
-  getActiveGoal,
-  type GoalTerminalEvent,
+  projectGoalStateToLegacy,
+  type GoalRecord,
+  type GoalSnapshotV2,
+  type GoalStateCause,
 } from '@qwen-code/qwen-code-core';
 import { BaseEmitter } from './base-emitter.js';
 import type { HistoryItemGoalStatus } from '../../../ui/types.js';
@@ -39,7 +41,6 @@ export class MessageEmitter extends BaseEmitter {
     reasons: string[],
     stopHookCount: number,
   ): Promise<void> {
-    const activeGoal = getActiveGoal(this.sessionId);
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
@@ -48,27 +49,37 @@ export class MessageEmitter extends BaseEmitter {
           iterationCount,
           reasons,
           stopHookCount,
-          ...(activeGoal
-            ? {
-                goal: {
-                  condition: activeGoal.condition,
-                  iterations: activeGoal.iterations,
-                  setAt: activeGoal.setAt,
-                  lastReason: activeGoal.lastReason,
-                },
-              }
-            : {}),
         },
       },
     });
   }
 
-  async emitGoalTerminal(event: GoalTerminalEvent): Promise<void> {
+  async emitGoalState(
+    snapshot: GoalSnapshotV2,
+    cause?: GoalStateCause,
+    previousGoal: GoalRecord | null = null,
+  ): Promise<void> {
+    let legacyMeta: Record<string, unknown> = {};
+    if (cause) {
+      const projection = projectGoalStateToLegacy(
+        { v: 2, cause, snapshot },
+        previousGoal,
+      );
+      const { type: _type, ...goalStatus } = projection.goalStatus;
+      legacyMeta = {
+        goalStatus,
+        ...(projection.goalTerminal
+          ? { goalTerminal: projection.goalTerminal }
+          : {}),
+      };
+    }
+
     await this.sendUpdate({
       sessionUpdate: 'agent_message_chunk',
       content: { type: 'text', text: '' },
       _meta: {
-        goalTerminal: event,
+        goalState: snapshot,
+        ...legacyMeta,
       },
     });
   }

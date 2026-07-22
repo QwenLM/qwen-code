@@ -25,8 +25,11 @@ import { useAppShellContext } from '@/context/AppShellContext'
 import { sessionMetaMapAtom, type SessionMeta } from '@/atoms/sessions'
 import { StoplightProvider } from '@/context/StoplightContext'
 import {
+  routes,
+  useNavigation,
   useNavigationState,
   isSessionsNavigation,
+  isGoalsNavigation,
   isSourcesNavigation,
   isSettingsNavigation,
   isSkillsNavigation,
@@ -47,11 +50,13 @@ import {
 import { extractLabelId } from '@craft-agent/shared/labels'
 import type { SessionStatusId } from '@/config/session-status-config'
 import { SourceInfoPage, ChatPage, DraftChatPage } from '@/pages'
+import { GoalsPanel } from './GoalsPanel'
 import SkillInfoPage from '@/pages/SkillInfoPage'
 import { SkillMarketplaceDetailPanel } from './SkillMarketplaceDetailPanel'
 import { getSettingsPageComponent } from '@/pages/settings/settings-pages'
 import { AutomationInfoPage } from '../automations/AutomationInfoPage'
 import type { ExecutionEntry } from '../automations/types'
+import type { GoalControlRequest } from '../../../shared/types'
 import { automationsAtom } from '@/atoms/automations'
 import {
   SendResourceToWorkspaceDialog,
@@ -86,6 +91,7 @@ export function MainContentPanel({
     onSessionStatusChange,
     onArchiveSession,
     onSessionLabelsChange,
+    onCreateSession,
     sessionStatuses,
     labels,
     onTestAutomation,
@@ -109,6 +115,36 @@ export function MainContentPanel({
   const { clearMultiSelect } = useSessionSelection()
   const sessionMetaMap = useAtomValue(sessionMetaMapAtom)
   const automations = useAtomValue(automationsAtom)
+  const { navigate } = useNavigation()
+
+  const goalSessions = useMemo(() => {
+    const activeWorkspace = workspaces.find(
+      (workspace) => workspace.id === activeWorkspaceId,
+    )
+    const remoteWorkspaceId = activeWorkspace?.remoteServer?.remoteWorkspaceId
+    return Array.from(sessionMetaMap.values()).filter(
+      (session) =>
+        (session.workspaceId === activeWorkspaceId ||
+          (remoteWorkspaceId && session.workspaceId === remoteWorkspaceId)),
+    )
+  }, [activeWorkspaceId, sessionMetaMap, workspaces])
+
+  const handleGoalControl = useCallback(
+    async (sessionId: string, request: GoalControlRequest) => {
+      try {
+        await window.electronAPI.sessionCommand(sessionId, {
+          type: 'controlGoal',
+          request,
+        })
+      } catch (error) {
+        await window.electronAPI
+          .sessionCommand(sessionId, { type: 'getGoalState' })
+          .catch(() => undefined)
+        throw error
+      }
+    },
+    [],
+  )
 
   // Execution history for the selected automation
   const selectedAutomationId = isAutomationsNavigation(navState)
@@ -277,6 +313,40 @@ export function MainContentPanel({
   )
 
   // Settings navigator - uses component map from settings-pages.ts
+  if (isGoalsNavigation(navState)) {
+    return wrapWithStoplight(
+      <Panel variant="grow" className={className}>
+        <GoalsPanel
+          sessions={goalSessions}
+          activeWorkspaceId={activeWorkspaceId}
+          labels={{
+            title: t('goal.pageTitle'),
+            newObjective: t('goal.newObjective'),
+            create: t('goal.create'),
+            empty: t('goal.empty'),
+            open: t('goal.open'),
+            edit: t('goal.edit'),
+            pause: t('goal.pause'),
+            resume: t('goal.resume'),
+            clear: t('goal.clear'),
+            save: t('common.save'),
+            cancel: t('common.cancel'),
+            status: {
+              active: t('goal.status.active'),
+              paused: t('goal.status.paused'),
+              blocked: t('goal.status.blocked'),
+              usage_limited: t('goal.status.usageLimited'),
+              complete: t('goal.status.complete'),
+            },
+          }}
+          onCreateSession={onCreateSession}
+          onControl={handleGoalControl}
+          onOpen={(sessionId) => navigate(routes.view.allSessions(sessionId))}
+        />
+      </Panel>,
+    )
+  }
+
   if (isSettingsNavigation(navState)) {
     const SettingsPageComponent = getSettingsPageComponent(navState.subpage)
     return wrapWithStoplight(

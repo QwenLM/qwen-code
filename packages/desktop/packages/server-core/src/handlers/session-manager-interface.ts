@@ -21,6 +21,9 @@ import type {
   AvailableSlashCommand,
   CreateSessionOptions,
   FileAttachment,
+  GoalControlRequest,
+  GoalSnapshotV2,
+  GoalStateResponse,
   SendMessageOptions,
   PermissionResponseOptions,
   CredentialResponse,
@@ -87,6 +90,11 @@ export interface ISessionManager {
   setSessionStatus(sessionId: string, status: SessionStatus): Promise<void>
   markSessionRead(sessionId: string): Promise<void>
   markSessionUnread(sessionId: string): Promise<void>
+  getSessionGoalState(sessionId: string): Promise<GoalSnapshotV2 | undefined>
+  controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+  ): Promise<GoalStateResponse>
   markAllSessionsRead(workspaceId: string): Promise<void>
   setActiveViewingSession(sessionId: string | null, workspaceId: string): void
   clearActiveViewingSession(workspaceId: string): void

@@ -162,6 +162,18 @@ export const legacySessionTelemetryRoutes = [
     route: 'POST /session/:id/tasks/:taskId/cancel',
   },
   {
+    method: 'GET',
+    path: '/session/:id/goal',
+    attribution: 'handler_resolved',
+    route: 'GET /session/:id/goal',
+  },
+  {
+    method: 'POST',
+    path: '/session/:id/goal',
+    attribution: 'handler_resolved',
+    route: 'POST /session/:id/goal',
+  },
+  {
     method: 'POST',
     path: '/session/:id/goal/clear',
     attribution: 'handler_resolved',

@@ -113,6 +113,7 @@ import {
   setToolCallPreparations,
 } from './tool-call-preparation.js';
 import { InvalidStreamError } from './invalid-stream-error.js';
+import type { GoalTurnPermit } from '../goals/goal-protocol.js';
 
 export { InvalidStreamError };
 
@@ -1900,7 +1901,9 @@ export class GeminiChat {
     model: string,
     params: SendMessageParameters,
     prompt_id: string,
+    goalContext?: GoalTurnPermit,
   ): Promise<AsyncGenerator<StreamEvent>> {
+    const turnGoalContext = goalContext ? { ...goalContext } : undefined;
     const fullTurnRoute = model.endsWith('\0');
     const exactRoute = fullTurnRoute
       ? await this.config
@@ -2342,6 +2345,7 @@ export class GeminiChat {
               params,
               prompt_id,
               requestOverrides,
+              turnGoalContext,
             );
 
             lastFinishReason = undefined;
@@ -2705,6 +2709,7 @@ export class GeminiChat {
                 attemptState.params,
                 prompt_id,
                 requestOverrides,
+                turnGoalContext,
               );
               for await (const chunk of stream) {
                 yield { type: StreamEventType.CHUNK, value: chunk };
@@ -3121,6 +3126,7 @@ export class GeminiChat {
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
+                    turnGoalContext,
                   )) {
                     const emittedUserVisibleOutput =
                       event.type !== StreamEventType.CHUNK ||
@@ -3274,6 +3280,7 @@ export class GeminiChat {
       retryAuthType?: string;
       retryErrorCodes?: readonly number[];
     },
+    goalContext?: GoalTurnPermit,
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
     const generator =
       overrides?.contentGenerator ?? this.config.getContentGenerator();
@@ -3341,7 +3348,7 @@ export class GeminiChat {
       },
     });
 
-    return this.processStreamResponse(model, streamResponse);
+    return this.processStreamResponse(model, streamResponse, goalContext);
   }
 
   private async *makeFallbackStream(
@@ -3352,6 +3359,7 @@ export class GeminiChat {
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
+    goalContext?: GoalTurnPermit,
   ): AsyncGenerator<StreamEvent> {
     const stream = await this.makeApiCallAndProcessStream(
       model,
@@ -3359,6 +3367,7 @@ export class GeminiChat {
       params,
       prompt_id,
       { contentGenerator, retryAuthType, retryErrorCodes },
+      goalContext,
     );
 
     for await (const chunk of stream) {
@@ -3685,6 +3694,7 @@ export class GeminiChat {
   private async *processStreamResponse(
     model: string,
     streamResponse: AsyncGenerator<GenerateContentResponse>,
+    goalContext?: GoalTurnPermit,
   ): AsyncGenerator<GenerateContentResponse> {
     // Collect ALL parts from the model response (including thoughts for recording)
     const allModelParts: Part[] = [];
@@ -3999,6 +4009,7 @@ export class GeminiChat {
           ? { ...usageMetadata, ...coercedUsage }
           : usageMetadata,
         contextWindowSize,
+        ...(goalContext ? { goalContext: { ...goalContext } } : {}),
       };
       if (streamError !== null) {
         // Stream-error + tool-use partial: defer the JSONL append until

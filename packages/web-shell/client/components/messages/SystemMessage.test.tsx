@@ -92,4 +92,19 @@ describe('SystemMessage — goal status activation', () => {
     expect(handler).not.toHaveBeenCalled();
     window.removeEventListener('web-shell-goal-status-active', handler);
   });
+
+  it('renders pause without claiming that the Goal was aborted', () => {
+    const paused = serializeGoalStatusMessage({
+      kind: 'paused',
+      condition: 'Ship safely',
+      durationMs: 12_000,
+    });
+
+    const container = render(
+      <SystemMessage content={paused} variant="info" isLatest />,
+    );
+
+    expect(container.textContent).toContain('Paused');
+    expect(container.textContent).not.toContain('aborted');
+  });
 });

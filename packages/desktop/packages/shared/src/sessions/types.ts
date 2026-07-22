@@ -11,6 +11,7 @@
 
 import type { PermissionMode } from '../agent/mode-manager.ts';
 import type { ThinkingLevel } from '../agent/thinking-levels.ts';
+import type { GoalSnapshotV2 } from '../protocol/dto.ts';
 import type { StoredAttachment, MessageRole, ToolStatus, AuthRequestType, AuthStatus, CredentialInputMode, StoredMessage } from '@craft-agent/core/types';
 
 /**
@@ -30,6 +31,8 @@ export const SESSION_PERSISTENT_FIELDS = [
   'createdAt', 'lastUsedAt', 'lastMessageAt',
   // Display
   'name', 'isFlagged', 'sessionStatus', 'labels', 'hidden',
+  // Goal state (display-only after restart; provider remains authoritative)
+  'goalState',
   // Read tracking
   'lastReadMessageId', 'hasUnread',
   // Config
@@ -111,6 +114,8 @@ export interface SessionConfig {
   lastMessageAt?: number;
   /** Whether this session is flagged */
   isFlagged?: boolean;
+  /** Last authoritative Goal snapshot, restored for display only. */
+  goalState?: GoalSnapshotV2;
   /** Legacy/runtime-only permission mode. New JSONL headers do not persist this field. */
   permissionMode?: PermissionMode;
   /** Legacy/runtime-only previous permission mode. New JSONL headers do not persist this field. */
@@ -224,6 +229,8 @@ export interface SessionHeader {
   lastMessageAt?: number;
   /** Whether this session is flagged */
   isFlagged?: boolean;
+  /** Last authoritative Goal snapshot, restored for display only. */
+  goalState?: GoalSnapshotV2;
   /** Legacy/runtime-only permission mode. New JSONL headers do not persist this field. */
   permissionMode?: PermissionMode;
   /** Legacy/runtime-only previous permission mode. New JSONL headers do not persist this field. */
@@ -315,6 +322,8 @@ export interface SessionMetadata {
   sdkSessionId?: string;
   /** Whether this session is flagged */
   isFlagged?: boolean;
+  /** Last authoritative Goal snapshot, restored for display only. */
+  goalState?: GoalSnapshotV2;
   /** User-controlled session status */
   sessionStatus?: SessionStatus;
   /** Labels applied to this session (bare IDs or "id::value" entries) */

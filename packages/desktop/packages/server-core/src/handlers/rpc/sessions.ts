@@ -427,6 +427,10 @@ export function registerSessionsHandlers(
           return sessionManager.markSessionRead(sessionId);
         case 'markUnread':
           return sessionManager.markSessionUnread(sessionId);
+        case 'getGoalState':
+          return sessionManager.getSessionGoalState(sessionId);
+        case 'controlGoal':
+          return sessionManager.controlSessionGoal(sessionId, command.request);
         case 'setActiveViewing':
           // Track which session user is actively viewing (for unread state machine)
           return sessionManager.setActiveViewingSession(

@@ -15,6 +15,62 @@
 
 export type DaemonMode = 'http-bridge' | 'native';
 
+/** Goal v2 wire types. Kept SDK-local to avoid an SDK-to-Core dependency. */
+export type GoalStatus =
+  | 'active'
+  | 'paused'
+  | 'blocked'
+  | 'usage_limited'
+  | 'complete';
+
+export type GoalActivity = 'idle' | 'running' | 'verifying';
+
+export interface TranscriptCursor {
+  recordId: string | null;
+}
+
+export interface GoalExpectedVersion {
+  goalId: string;
+  revision: number;
+}
+
+export interface GoalRecord {
+  goalId: string;
+  revision: number;
+  objective: string;
+  status: GoalStatus;
+  evidenceCursor: TranscriptCursor;
+  turnCount: number;
+  activeTimeMs: number;
+  createdAt: number;
+  updatedAt: number;
+  lastReason?: string;
+}
+
+export interface GoalSnapshotV2 {
+  v: 2;
+  goal: GoalRecord | null;
+  activity: GoalActivity;
+}
+
+export type GoalControlRequest =
+  | { action: 'create'; objective: string }
+  | {
+      action: 'replace' | 'edit';
+      objective: string;
+      expectedGoalId: string;
+      expectedRevision: number;
+    }
+  | {
+      action: 'pause' | 'resume' | 'clear';
+      expectedGoalId: string;
+      expectedRevision: number;
+    };
+
+export interface GoalStateResponse {
+  snapshot: GoalSnapshotV2;
+}
+
 export interface DaemonProtocolVersions {
   current: string;
   supported: string[];
@@ -2544,6 +2600,7 @@ export interface DaemonPendingPromptsResult {
 
 export interface DaemonRemovePendingPromptResult {
   removed: boolean;
+  currentState?: 'queued' | 'running';
 }
 
 export interface DaemonShellCommandResult {

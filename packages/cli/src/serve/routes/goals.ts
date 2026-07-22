@@ -8,12 +8,9 @@
  * Workspace-wide `/goal` listing — the daemon-side surface behind the Web Shell
  * "Goals" page.
  *
- * A goal is a session-scoped Stop hook whose state (condition, judge turn count,
- * last verdict) lives only in the `qwen --acp` child's in-memory store. The serve
+ * Goal lifecycle state is owned by each live `qwen --acp` child. The serve
  * process holds no copy, so this route fans out one `sessionGoalGet` ext-method
- * call per live session and collects the answers. There is no durable goal store
- * to read instead: a goal only advances while its session is resident, so "the
- * live sessions" IS the complete set of goals that are actually running.
+ * call per live session and collects the authoritative v2 snapshots.
  *
  * A session whose child is wedged or dying rejects; those are dropped (and
  * logged) rather than failing the whole list, so one bad session can't hide the
@@ -21,9 +18,8 @@
  * (up to `PROBE_CONCURRENCY`), so a wedged child costs one timeout rather than
  * one per session.
  *
- * Read-only: clearing a goal stays on `POST /session/:id/goal/clear`, and
- * setting one stays a prompt (`/goal <condition>` registers the hook and kicks
- * off the first turn — it is not a pure write).
+ * Read-only: controls stay on `POST /session/:id/goal` (with the legacy atomic
+ * clear wrapper retained at `POST /session/:id/goal/clear`).
  */
 
 import type { Application } from 'express';
@@ -92,6 +88,7 @@ interface GoalView {
   iterations: number;
   setAt: number;
   lastReason?: string;
+  snapshot: NonNullable<BridgeSessionGoal['goalState']>;
   /**
    * The owning session is mid-turn. For a goal session that is almost always
    * the loop working, but a manual prompt in the same session sets it too — so
@@ -136,17 +133,20 @@ export function registerGoalsRoutes(
           continue;
         }
         const { session, goal } = outcome.value;
-        if (!goal.active) continue;
+        const snapshot = goal.goalState;
+        const record = snapshot?.goal;
+        if (!record || record.status === 'complete') continue;
         goals.push({
           sessionId: session.sessionId,
           displayName: session.displayName ?? null,
-          condition: goal.active.condition,
-          iterations: goal.active.iterations,
-          setAt: goal.active.setAt,
-          ...(goal.active.lastReason !== undefined
-            ? { lastReason: goal.active.lastReason }
+          condition: record.objective,
+          iterations: record.turnCount,
+          setAt: record.createdAt,
+          ...(record.lastReason !== undefined
+            ? { lastReason: record.lastReason }
             : {}),
           hasActivePrompt: session.hasActivePrompt,
+          snapshot,
         });
       }
       if (dropped.length > 0) {

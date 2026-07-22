@@ -473,6 +473,8 @@ interface SessionEntry {
   promptQueue: Promise<void>;
   /** Accepted prompts that have not settled yet (queued + active). */
   pendingPromptCount: number;
+  /** Cached from the child's v2 Goal state updates. */
+  goalLifecycleActive?: boolean;
   /**
    * Detailed list of prompts accepted into the FIFO queue. Each entry
    * carries its `promptId`, summary, and an `abortController` so the
@@ -489,12 +491,9 @@ interface SessionEntry {
    * /session/:id/mid-turn-message`) while a turn is running. The ACP child
    * drains these between tool batches via the `craft/drainMidTurnQueue`
    * ext-method so the model sees them before the turn ends. The queue is
-   * accepted into only while the session is busy (`pendingPromptCount > 0`)
-   * and emptied when the session next goes idle — see the settle handler in
-   * `sendPrompt`. The browser keeps its own copy as the next-turn fallback,
-   * so a message left undrained here is NOT lost: it is dropped server-side
-   * (preventing a stale next-turn re-injection) and resent by the browser as
-   * a fresh prompt.
+   * accepted while a prompt is busy or an active Goal owns the next turn
+   * boundary. The browser keeps its own copy until the child acknowledges the
+   * injection, so a message left undrained here is not lost.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
   /**
@@ -5547,6 +5546,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           // user) and only clears at the true idle boundary.
           if (
             entry.pendingPromptCount === 0 &&
+            !entry.goalLifecycleActive &&
             entry.midTurnMessageQueue.length > 0
           ) {
             // One line when we actually drop something — makes the
@@ -6616,18 +6616,44 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
     },
 
+    async controlSessionGoal(sessionId, request, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const info = channelInfoForEntry(entry);
+      if (!info || info.isDying) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
+      const result = await requestSessionStatus<{
+        snapshot: NonNullable<BridgeSessionGoal['goalState']>;
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionGoalControl, { request });
+      entry.goalLifecycleActive = result.snapshot.goal?.status === 'active';
+      return result;
+    },
+
     async clearSessionGoal(sessionId) {
-      return requestSessionStatus<{ cleared: boolean; condition?: string }>(
-        sessionId,
-        SERVE_CONTROL_EXT_METHODS.sessionGoalClear,
-      );
+      const result = await requestSessionStatus<{
+        cleared: boolean;
+        condition?: string;
+      }>(sessionId, SERVE_CONTROL_EXT_METHODS.sessionGoalClear);
+      if (result.cleared) {
+        const entry = byId.get(sessionId);
+        if (entry) entry.goalLifecycleActive = false;
+      }
+      return result;
     },
 
     async getSessionGoal(sessionId) {
-      return requestSessionStatus<BridgeSessionGoal>(
+      const result = await requestSessionStatus<BridgeSessionGoal>(
         sessionId,
         SERVE_CONTROL_EXT_METHODS.sessionGoalGet,
       );
+      if (result.goalState) {
+        const entry = byId.get(sessionId);
+        if (entry) {
+          entry.goalLifecycleActive =
+            result.goalState.goal?.status === 'active';
+        }
+      }
+      return result;
     },
 
     async continueSession(sessionId, context) {
@@ -7155,6 +7181,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // A running prompt already removed once is invisible to the API —
       // repeat removals are no-ops.
       if (target.removed) return { removed: false };
+      if (context?.ifState && target.state !== context.ifState) {
+        return { removed: false, currentState: target.state };
+      }
       writeStderrLine(
         `[pending-prompt] session=${sessionId} removing promptId=${promptId} state=${target.state}`,
       );
@@ -7219,19 +7248,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         context?.clientId,
       );
       const trimmed = message.trim();
-      // Reject empty messages and — critically — messages that arrive while
-      // the session is idle. The browser only pushes here when it believes a
-      // turn is running, but the turn may have settled in the small window
-      // before its turn-complete frame landed. Accepting an idle message
-      // would strand it until the NEXT turn's first tool batch drained it,
-      // by which point the browser has already resent it as a fresh prompt —
-      // double delivery. Rejecting keeps the browser's next-turn fallback the
-      // single delivery path in that race.
-      if (trimmed.length === 0 || entry.pendingPromptCount === 0) {
+      // Ordinary idle sessions reject insertion so the browser keeps the
+      // single queued copy. An active Goal is different: its next automatic
+      // turn owns a guaranteed drain point, so accepting at the turn boundary
+      // preserves the user's one-click insertion intent.
+      if (
+        trimmed.length === 0 ||
+        (entry.pendingPromptCount === 0 && !entry.goalLifecycleActive)
+      ) {
         // Rejects are low-volume (the browser only pushes when it believes a
         // turn is running) but the silent path made "why wasn't my mid-turn
         // message injected?" undiagnosable. Empty is a client bug; idle is the
-        // settle-window race the browser recovers from via its next-turn queue.
+        // settle-window race the browser recovers from via its local queue.
         writeStderrLine(
           `[mid-turn] session=${entry.sessionId} rejected: ${
             trimmed.length === 0 ? 'empty message' : 'session idle'

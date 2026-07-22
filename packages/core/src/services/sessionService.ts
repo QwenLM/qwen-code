@@ -46,6 +46,10 @@ import {
 } from './session-artifact-persistence.js';
 import { SessionOrganizationService } from './session-organization-service.js';
 import { SessionTranscriptTooLargeError } from './session-transcript-reader.js';
+import {
+  recoverGoalFromRecords,
+  type GoalRecovery,
+} from '../goals/goal-persistence.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -228,6 +232,12 @@ export interface ResumedSessionData {
    * when the chain was intact.
    */
   historyGaps?: HistoryGap[];
+}
+
+export function recoverGoalFromResumedSession(
+  data: ResumedSessionData,
+): GoalRecovery {
+  return recoverGoalFromRecords(data.conversation.messages);
 }
 
 /**

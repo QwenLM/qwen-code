@@ -23,6 +23,7 @@ import {
   type SessionArchiveState,
   type SubagentLevel,
   IMAGE_CAPABILITY,
+  parseGoalControlRequest,
 } from '@qwen-code/qwen-code-core';
 // Import the permission error classes from the same module REST's
 // `sendPermissionVoteError` uses, so `instanceof` matches the class the bridge
@@ -235,6 +236,9 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/goal`,
+  `${QWEN_METHOD_NS}session/goal/control`,
+  `${QWEN_METHOD_NS}session/goal/clear`,
   `${QWEN_METHOD_NS}session/lsp`,
   `${QWEN_METHOD_NS}session/artifacts`,
   `${QWEN_METHOD_NS}session/artifacts/add`,
@@ -504,6 +508,24 @@ function toRpcError(err: unknown): {
 } {
   const writerError = sessionWriterRpcError(err);
   if (writerError) return writerError;
+  if (err && typeof err === 'object') {
+    const data = (err as { data?: unknown }).data;
+    if (data && typeof data === 'object') {
+      const errorKind = (data as { errorKind?: unknown }).errorKind;
+      if (
+        errorKind === 'goal_conflict' ||
+        errorKind === 'goal_invalid_transition' ||
+        errorKind === 'goal_persist_failed'
+      ) {
+        return {
+          code:
+            errorKind === 'goal_persist_failed' ? RPC.INTERNAL_ERROR : -32009,
+          message: errMsg(err),
+          data: data as Record<string, unknown>,
+        };
+      }
+    }
+  }
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -2696,6 +2718,56 @@ export class AcpDispatcher {
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionTasksStatus(sessionId);
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/goal`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionGoal(sessionId);
+          if (!result.goalState) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INTERNAL_ERROR,
+                  'The session does not expose Goal state v2',
+                  {
+                    errorKind: 'goal_state_unavailable',
+                    httpStatus: 503,
+                  },
+                ),
+              );
+            }
+            return;
+          }
+          this.replyConn(conn, id, { snapshot: result.goalState });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/goal/control`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const request = parseGoalControlRequest(params['request']);
+            if (!request) {
+              throw new AcpParamError('Invalid Goal control request');
+            }
+            const result = await this.bridge.controlSessionGoal(
+              sessionId,
+              request,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/goal/clear`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const result = await this.bridge.clearSessionGoal(sessionId);
+            this.replyConn(conn, id, result as unknown);
+          });
           return;
         }
 

@@ -5,24 +5,50 @@
  */
 
 /**
- * Words the daemon reads as "drop the goal" rather than as a condition.
+ * The standalone word the Goal v3 command reads as a lifecycle control rather
+ * than as an objective.
  *
- * Mirrors CLEAR_KEYWORDS in packages/cli/src/ui/commands/goalCommand.ts, which
- * is the authority. The test beside this file reads that source and fails on
- * drift — this client bundles for the browser and cannot import from core.
+ * Mirrors `parseGoalCommand` in packages/cli/src/ui/commands/goalCommand.ts,
+ * which is the authority. The test beside this file reads that source and
+ * fails on drift — this client bundles for the browser and cannot import it.
  */
-export const GOAL_CLEAR_KEYWORDS: ReadonlySet<string> = new Set([
-  'clear',
-  'stop',
-  'off',
-  'reset',
-  'none',
-  'cancel',
-]);
+export const GOAL_CLEAR_KEYWORDS: ReadonlySet<string> = new Set(['clear']);
+
+export type ParsedWebShellGoalCommand =
+  | { kind: 'status' }
+  | { kind: 'set' | 'edit'; objective: string }
+  | { kind: 'pause' | 'resume' | 'clear' }
+  | { kind: 'error'; message: string };
 
 /** The argument of a `/goal …` command; `''` for a bare `/goal`. */
 export function goalArgOf(text: string): string {
   return text.replace(/^\/goal\b/i, '').trim();
+}
+
+/** Browser-side mirror of the CLI's Goal v3 command grammar. */
+export function parseWebShellGoalCommand(
+  text: string,
+): ParsedWebShellGoalCommand {
+  const input = goalArgOf(text);
+  if (!input) return { kind: 'status' };
+
+  const [head = '', ...tail] = input.split(/\s+/);
+  const keyword = head.toLowerCase();
+  const objective = tail.join(' ').trim();
+  if (keyword === 'set' || keyword === 'edit') {
+    return objective
+      ? { kind: keyword, objective }
+      : {
+          kind: 'error',
+          message: `/goal ${keyword} requires an objective.`,
+        };
+  }
+  if (tail.length === 0) {
+    if (keyword === 'pause') return { kind: 'pause' };
+    if (keyword === 'resume') return { kind: 'resume' };
+    if (keyword === 'clear') return { kind: 'clear' };
+  }
+  return { kind: 'set', objective: input };
 }
 
 /**
@@ -39,9 +65,8 @@ export function isGoalClearCommand(text: string): boolean {
 }
 
 /**
- * True when a would-be goal condition is really a clear keyword. `/goal clear`
- * clears rather than sets, so a form that accepts "clear" as a condition would
- * silently start a session that immediately drops the goal.
+ * True when a command argument is the exact v3 clear operation. Words such as
+ * "stop" and "cancel" are valid objectives now.
  */
 export function isGoalClearKeyword(condition: string): boolean {
   return GOAL_CLEAR_KEYWORDS.has(condition.trim().toLowerCase());

@@ -41,7 +41,7 @@ import {
 } from "@craft-agent/ui"
 import { useFocusZone } from "@/hooks/keyboard"
 import { useTheme } from "@/hooks/useTheme"
-import type { Session, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, LoadedSource, LoadedSkill } from "../../../shared/types"
+import type { Session, Message, FileAttachment, StoredAttachment, PermissionRequest, CredentialRequest, CredentialResponse, LoadedSource, LoadedSkill, GoalControlRequest } from "../../../shared/types"
 import type { PermissionMode } from "@craft-agent/shared/agent/modes"
 import type { ThinkingLevel } from "@craft-agent/shared/agent/thinking-levels"
 import {
@@ -1594,6 +1594,25 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
     [sessionMessages]
   )
 
+  const handleGoalControl = useCallback(async (request: GoalControlRequest) => {
+    if (!session) return
+    await window.electronAPI.sessionCommand(session.id, {
+      type: "controlGoal",
+      request,
+    })
+  }, [session])
+
+  const handleGoalError = useCallback((error: unknown) => {
+    if (session) {
+      void window.electronAPI
+        .sessionCommand(session.id, { type: "getGoalState" })
+        .catch(() => undefined)
+    }
+    toast.error(t("goal.updateFailed"), {
+      description: error instanceof Error ? error.message : String(error),
+    })
+  }, [session, t])
+
   const renderChatInputZone = (className?: string) => {
     if (!session) return null
 
@@ -1613,6 +1632,9 @@ export const ChatDisplay = React.forwardRef<ChatDisplayHandle, ChatDisplayProps>
         sessionStatuses={sessionStatuses}
         currentSessionStatus={session.sessionStatus || 'todo'}
         onSessionStatusChange={onSessionStatusChange}
+        goalState={session.goalState}
+        onGoalControl={handleGoalControl}
+        onGoalError={handleGoalError}
         className={className}
         inputProps={{
           placeholder,

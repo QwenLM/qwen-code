@@ -23,7 +23,7 @@ function createActions(
 function prepareSession(
   args: Omit<CreateSessionArgs, 'getCurrentSessionId'> &
     Partial<Pick<CreateSessionArgs, 'getCurrentSessionId'>>,
-): Promise<void> {
+) {
   return createAndAttachSessionForPrompt({
     getCurrentSessionId: () => sessionResult.sessionId,
     ...args,
@@ -133,7 +133,7 @@ describe('createAndAttachSessionForPrompt', () => {
         modeId: 'yolo',
         warn,
       }),
-    ).resolves.toEqual({});
+    ).resolves.toEqual({ sessionId: 'session-1' });
 
     expect(order).toEqual(['create', 'attach', 'model']);
     expect(warn).toHaveBeenCalledWith(

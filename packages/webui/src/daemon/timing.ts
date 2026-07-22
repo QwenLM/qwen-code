@@ -81,8 +81,9 @@ export function schedulePassiveAssistantDone(
   clearPassiveAssistantDoneTimer(timerRef);
   timerRef.current = setTimeout(() => {
     timerRef.current = undefined;
-    if (!store.getSnapshot().activeAssistantBlockId) return;
-    store.dispatch({ type: 'assistant.done', reason });
+    if (store.getSnapshot().activeAssistantBlockId) {
+      store.dispatch({ type: 'assistant.done', reason });
+    }
     onDone?.();
   }, delayMs);
 }

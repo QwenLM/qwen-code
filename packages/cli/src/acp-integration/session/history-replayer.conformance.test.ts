@@ -24,7 +24,8 @@ import type { SessionEmitterContext } from './types.js';
 describe('HistoryReplayer projection conformance', () => {
   it('matches the SDK offline projection for the same prepared records', async () => {
     const records = [
-      record('user', null, 'user', {
+      goalRecord('goal-create', null, 'create', 'active'),
+      record('user', 'goal-create', 'user', {
         role: 'user',
         parts: [{ text: 'hello' }],
       }),
@@ -59,6 +60,7 @@ describe('HistoryReplayer projection conformance', () => {
           resultDisplay: 'contents',
         },
       },
+      goalRecord('goal-complete', 'result', 'complete', 'complete'),
     ];
 
     const projection = projectChatRecordsToDaemonTranscript(records);
@@ -73,6 +75,16 @@ describe('HistoryReplayer projection conformance', () => {
     await new HistoryReplayer(context).replay(
       prepared.records as readonly ChatRecord[] as ChatRecord[],
     );
+
+    const goalUpdates = updates.filter((update) =>
+      Boolean(
+        (update._meta as Record<string, unknown> | undefined)?.['goalState'],
+      ),
+    );
+    expect(goalUpdates).toHaveLength(2);
+    expect(
+      Object.keys(goalUpdates[1]?._meta as Record<string, unknown>).slice(0, 3),
+    ).toEqual(['goalState', 'goalStatus', 'goalTerminal']);
 
     let state = createDaemonTranscriptState({
       maxBlocks: Number.MAX_SAFE_INTEGER,
@@ -95,6 +107,43 @@ describe('HistoryReplayer projection conformance', () => {
     );
   });
 });
+
+function goalRecord(
+  uuid: string,
+  parentUuid: string | null,
+  cause: 'create' | 'complete',
+  status: 'active' | 'complete',
+): Record<string, unknown> {
+  return {
+    uuid,
+    parentUuid,
+    sessionId: 'session-1',
+    timestamp: '2026-07-14T00:00:00.000Z',
+    type: 'system',
+    subtype: 'goal_state',
+    cwd: '/tmp',
+    version: '1',
+    systemPayload: {
+      v: 2,
+      cause,
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'goal-1',
+          revision: cause === 'create' ? 1 : 2,
+          objective: 'ship it',
+          status,
+          evidenceCursor: { recordId: null },
+          turnCount: status === 'complete' ? 1 : 0,
+          activeTimeMs: status === 'complete' ? 100 : 0,
+          createdAt: 100,
+          updatedAt: status === 'complete' ? 200 : 100,
+        },
+      },
+    },
+  };
+}
 
 function record(
   uuid: string,

@@ -5168,6 +5168,264 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    describe('Goal v3 controls', () => {
+      const request = {
+        action: 'pause' as const,
+        expectedGoalId: 'goal-1',
+        expectedRevision: 3,
+      };
+      const response = {
+        snapshot: {
+          v: 2 as const,
+          activity: 'idle' as const,
+          goal: {
+            goalId: 'goal-1',
+            revision: 3,
+            objective: 'ship it',
+            status: 'paused' as const,
+            evidenceCursor: { recordId: 'record-1' },
+            turnCount: 2,
+            activeTimeMs: 1200,
+            createdAt: 123,
+            updatedAt: 456,
+          },
+        },
+      };
+
+      it('authorizes the originator then forwards one exact nested request', async () => {
+        const handle = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl) {
+              return response;
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(session.clientId).toEqual(expect.any(String));
+
+        await expect(
+          bridge.controlSessionGoal(session.sessionId, request, {
+            clientId: session.clientId,
+          }),
+        ).resolves.toEqual(response);
+
+        expect(
+          handle.agent.extMethodCalls.filter(
+            ({ method }) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+          ),
+        ).toEqual([
+          {
+            method: SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+            params: { sessionId: session.sessionId, request },
+          },
+        ]);
+
+        await bridge.shutdown();
+      });
+
+      it('rejects a missing live session before child dispatch', async () => {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+
+        await expect(
+          bridge.controlSessionGoal('missing-session', request),
+        ).rejects.toBeInstanceOf(SessionNotFoundError);
+        expect(handle.agent.extMethodCalls).toHaveLength(0);
+
+        await bridge.shutdown();
+      });
+
+      it('rejects a session whose child is no longer live before dispatch', async () => {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        handle.crash({ exitCode: 1, signalCode: null });
+        await vi.waitFor(() =>
+          expect(bridge.getDaemonStatusSnapshot().sessions).toHaveLength(0),
+        );
+
+        await expect(
+          bridge.controlSessionGoal(session.sessionId, request, {
+            clientId: session.clientId,
+          }),
+        ).rejects.toBeInstanceOf(SessionNotFoundError);
+        expect(
+          handle.agent.extMethodCalls.filter(
+            ({ method }) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+          ),
+        ).toHaveLength(0);
+
+        await bridge.shutdown();
+      });
+
+      it('rejects an untrusted client before child dispatch', async () => {
+        const handle = makeChannel();
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(
+          bridge.controlSessionGoal(session.sessionId, request, {
+            clientId: 'not-registered',
+          }),
+        ).rejects.toBeInstanceOf(InvalidClientIdError);
+        expect(
+          handle.agent.extMethodCalls.filter(
+            ({ method }) =>
+              method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+          ),
+        ).toHaveLength(0);
+
+        await bridge.shutdown();
+      });
+
+      it('accepts an old child get response without goalState', async () => {
+        const legacy = {
+          active: {
+            condition: 'legacy goal',
+            iterations: 2,
+            setAt: 123,
+            lastReason: 'working',
+          },
+        };
+        const handle = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionGoalGet) {
+              return legacy;
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(bridge.getSessionGoal(session.sessionId)).resolves.toEqual(
+          legacy,
+        );
+
+        await bridge.shutdown();
+      });
+
+      it('uses a fetched active Goal to accept insertion at a turn boundary', async () => {
+        const active = {
+          active: {
+            condition: 'keep working',
+            iterations: 2,
+            setAt: 123,
+          },
+          goalState: {
+            v: 2 as const,
+            activity: 'idle' as const,
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective: 'keep working',
+              status: 'active' as const,
+              evidenceCursor: { recordId: null },
+              turnCount: 2,
+              activeTimeMs: 100,
+              createdAt: 1,
+              updatedAt: 2,
+            },
+          },
+        };
+        const handle = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionGoalGet) {
+              return active;
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await bridge.getSessionGoal(session.sessionId);
+
+        expect(
+          bridge.enqueueMidTurnMessage(session.sessionId, 'stop token'),
+        ).toEqual({ accepted: true });
+        await bridge.shutdown();
+      });
+
+      it('does not emulate typed controls when an old child lacks the method', async () => {
+        const handle = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionGoalControl) {
+              throw new Error('Method not found: goal control');
+            }
+            if (
+              method === SERVE_CONTROL_EXT_METHODS.sessionGoalGet ||
+              method === SERVE_CONTROL_EXT_METHODS.sessionGoalClear
+            ) {
+              throw new Error('legacy Goal methods must not be called');
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(
+          bridge.controlSessionGoal(session.sessionId, request, {
+            clientId: session.clientId,
+          }),
+        ).rejects.toThrow();
+        expect(handle.agent.extMethodCalls).toEqual([
+          {
+            method: SERVE_CONTROL_EXT_METHODS.sessionGoalControl,
+            params: { sessionId: session.sessionId, request },
+          },
+        ]);
+
+        await bridge.shutdown();
+      });
+
+      it('keeps legacy clear to one child call without a parent get', async () => {
+        const handle = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === SERVE_CONTROL_EXT_METHODS.sessionGoalClear) {
+              return { cleared: true, condition: 'legacy goal' };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+        await expect(
+          bridge.clearSessionGoal(session.sessionId),
+        ).resolves.toEqual({ cleared: true, condition: 'legacy goal' });
+        expect(handle.agent.extMethodCalls).toEqual([
+          {
+            method: SERVE_CONTROL_EXT_METHODS.sessionGoalClear,
+            params: { sessionId: session.sessionId },
+          },
+        ]);
+
+        await bridge.shutdown();
+      });
+    });
+
     it('rejects continueSession for a nonexistent session', async () => {
       const handle = makeChannel();
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
@@ -6835,6 +7093,47 @@ describe('createAcpSessionBridge', () => {
       expect(removedEvent).toBeDefined();
 
       sub.catch(() => {});
+      await bridge.shutdown();
+    });
+
+    it('does not remove a running prompt when the caller requires queued state', async () => {
+      let resolvePrompt: (() => void) | undefined;
+      const handle = makeChannel({
+        promptImpl: async () => {
+          await new Promise<void>((resolve) => {
+            resolvePrompt = resolve;
+          });
+          return { stopReason: 'end_turn' } as PromptResponse;
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const running = bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'already running' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(bridge.getPendingPrompts(session.sessionId)[0]?.state).toBe(
+          'running',
+        );
+        expect(resolvePrompt).toBeTypeOf('function');
+      });
+      const runningId = bridge.getPendingPrompts(session.sessionId)[0]!
+        .promptId;
+
+      expect(
+        bridge.removePendingPrompt(session.sessionId, runningId, {
+          ifState: 'queued',
+        }),
+      ).toEqual({ removed: false, currentState: 'running' });
+      expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+      expect(handle.agent.cancelCalls).toHaveLength(0);
+
+      resolvePrompt!();
+      await running;
       await bridge.shutdown();
     });
 
@@ -17314,6 +17613,71 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     expect(
       bridge.enqueueMidTurnMessage(session.sessionId, 'next time'),
     ).toEqual({ accepted: false });
+    await bridge.shutdown();
+  });
+
+  it('accepts throughout an active Goal lifecycle without a daemon prompt', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const goal = {
+      goalId: 'goal-1',
+      revision: 1,
+      objective: 'keep working',
+      status: 'active' as const,
+      evidenceCursor: { recordId: null },
+      turnCount: 2,
+      activeTimeMs: 100,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { goalState: { v: 2, goal, activity: 'running' } },
+      },
+    });
+
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { goalState: { v: 2, goal, activity: 'idle' } },
+      },
+    });
+
+    expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]);
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'stop token'),
+    ).toEqual({ accepted: true });
+    expect(
+      await handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+        sessionId: session.sessionId,
+      }),
+    ).toEqual({ messages: ['stop token'], hasQueuedPrompt: false });
+
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          goalState: {
+            v: 2,
+            goal: { ...goal, status: 'paused' },
+            activity: 'idle',
+          },
+        },
+      },
+    });
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'after pause'),
+    ).toEqual({ accepted: false });
+
     await bridge.shutdown();
   });
 

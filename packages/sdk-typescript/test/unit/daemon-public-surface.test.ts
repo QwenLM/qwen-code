@@ -40,6 +40,13 @@ import type {
   DaemonGithubSetupWorkflowResult,
   DaemonHistoryTruncatedData,
   DaemonHistoryTruncatedEvent,
+  GoalActivity,
+  GoalControlRequest,
+  GoalExpectedVersion,
+  GoalRecord,
+  GoalSnapshotV2,
+  GoalStateResponse,
+  GoalStatus,
   DaemonKnownEventType,
   DaemonModelSwitchedData,
   DaemonModelSwitchedEvent,
@@ -118,6 +125,7 @@ import type {
   DaemonWorkspaceVoiceTranscriptionResult,
   DaemonWorkspaceVoiceUpdate,
   KnownDaemonEvent,
+  TranscriptCursor,
 } from '../../src/index.js';
 import type {
   DaemonChannelStartupAttemptFailure as DaemonEntryChannelStartupAttemptFailure,
@@ -222,6 +230,14 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonChannelStartupAttemptFailure>().toEqualTypeOf<DaemonEntryChannelStartupAttemptFailure>();
     expectTypeOf<DaemonChannelWorkerStartErrorResponse>().toEqualTypeOf<DaemonEntryChannelWorkerStartErrorResponse>();
     expectTypeOf<DaemonHistoryTruncatedData>().not.toBeNever();
+    expectTypeOf<GoalStatus>().not.toBeNever();
+    expectTypeOf<GoalActivity>().not.toBeNever();
+    expectTypeOf<TranscriptCursor>().not.toBeNever();
+    expectTypeOf<GoalExpectedVersion>().not.toBeNever();
+    expectTypeOf<GoalRecord>().not.toBeNever();
+    expectTypeOf<GoalSnapshotV2>().not.toBeNever();
+    expectTypeOf<GoalControlRequest>().not.toBeNever();
+    expectTypeOf<GoalStateResponse>().not.toBeNever();
     expectTypeOf<DaemonStreamErrorData>().not.toBeNever();
     expectTypeOf<DaemonPermissionOption>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();

@@ -96,6 +96,36 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function readGoalExecutionState(
+  params: SessionNotification,
+): { lifecycleActive: boolean } | undefined {
+  const meta = (params.update as { _meta?: Record<string, unknown> })._meta;
+  const snapshot = meta?.['goalState'];
+  if (!isRecord(snapshot) || snapshot['v'] !== 2) return undefined;
+  const activity = snapshot['activity'];
+  if (
+    activity !== 'idle' &&
+    activity !== 'running' &&
+    activity !== 'verifying'
+  ) {
+    return undefined;
+  }
+  const goal = snapshot['goal'];
+  if (goal === null) return { lifecycleActive: false };
+  if (!isRecord(goal)) return undefined;
+  const status = goal['status'];
+  if (
+    status !== 'active' &&
+    status !== 'paused' &&
+    status !== 'blocked' &&
+    status !== 'usage_limited' &&
+    status !== 'complete'
+  ) {
+    return undefined;
+  }
+  return { lifecycleActive: status === 'active' };
+}
+
 function pendingInteractionOptions(
   options: RequestPermissionRequest['options'],
 ): BridgePendingInteraction['options'] {
@@ -471,6 +501,8 @@ export interface BridgeClientSessionEntry {
   todoStopGuardAwaitingQueuedPrompt?: boolean;
   /** True while a prompt is executing for this session. */
   promptActive?: boolean;
+  /** True while the child reports a non-terminal active Goal lifecycle. */
+  goalLifecycleActive?: boolean;
   /** Admitted id for the prompt currently executing on this session. */
   activePromptId?: string;
   activePromptOriginatorClientId?: string;
@@ -746,6 +778,21 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
+    const goalExecution = readGoalExecutionState(params);
+    if (entry && goalExecution) {
+      const wasActive = entry.goalLifecycleActive === true;
+      entry.goalLifecycleActive = goalExecution.lifecycleActive;
+      if (
+        wasActive &&
+        !goalExecution.lifecycleActive &&
+        entry.midTurnMessageQueue.length > 0
+      ) {
+        writeStderrLine(
+          `[mid-turn] session=${entry.sessionId} dropped ${entry.midTurnMessageQueue.length} undrained message(s) when Goal left active lifecycle; browser keeps the queued fallback`,
+        );
+        entry.midTurnMessageQueue.length = 0;
+      }
+    }
     const prepared = this.prepareSessionUpdateFrames(params, entry);
     for (const frame of prepared.frames) {
       events.publish(frame);

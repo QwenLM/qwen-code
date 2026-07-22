@@ -2,7 +2,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonInputAnnotation,
+  GoalSnapshotV2,
+} from '@qwen-code/sdk/daemon';
 import type { WebShellApi } from './App';
 import { loadSplitSessions, saveSplitSessions } from './utils/splitUrl';
 
@@ -25,6 +28,7 @@ type MockConnection = {
   error?: string;
   errorStatus?: number;
   missingSession?: boolean;
+  goalState?: GoalSnapshotV2;
 };
 
 type ChatEditorTestProps = {
@@ -58,6 +62,15 @@ type AddWorkspaceDialogTestProps = {
   displayNameEnabled?: boolean;
   persistenceSupported?: boolean;
 };
+
+function setTextareaValue(element: HTMLTextAreaElement, value: string) {
+  const setter = Object.getOwnPropertyDescriptor(
+    HTMLTextAreaElement.prototype,
+    'value',
+  )?.set;
+  setter?.call(element, value);
+  element.dispatchEvent(new Event('input', { bubbles: true }));
+}
 
 const {
   mockConnection,
@@ -115,6 +128,12 @@ const {
       rewindSession: vi.fn().mockResolvedValue(undefined),
       submitPermission: vi.fn().mockResolvedValue(undefined),
       clearGoal: vi.fn().mockResolvedValue(undefined),
+      getGoal: vi.fn().mockResolvedValue({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      }),
+      controlGoal: vi.fn().mockResolvedValue({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      }),
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
@@ -131,6 +150,13 @@ const {
     },
     mockWorkspaceActions: {
       loadSkillsStatus,
+      listGoals: vi.fn().mockResolvedValue({ goals: [], droppedCount: 0 }),
+      getGoal: vi.fn().mockResolvedValue({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      }),
+      controlGoal: vi.fn().mockResolvedValue({
+        snapshot: { v: 2, goal: null, activity: 'idle' },
+      }),
       loadProviders: vi.fn().mockResolvedValue({ current: null }),
       loadPreflight: vi.fn().mockResolvedValue(null),
       loadEnv: vi.fn().mockResolvedValue(null),
@@ -639,6 +665,10 @@ vi.doMock('./components/SplitView', async () => {
   return {
     SplitView: (props: {
       onExit?: () => void;
+      onOpenGoals?: (target: {
+        sessionId: string;
+        snapshot: GoalSnapshotV2 | null;
+      }) => void;
       sessionIds?: string[];
       onPanesChange?: (ids: string[]) => void;
       onPaneArtifactsChange?: (
@@ -742,6 +772,43 @@ vi.doMock('./components/SplitView', async () => {
               }),
           },
           'open artifact',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-goals-session-b',
+            type: 'button',
+            onClick: () =>
+              props.onOpenGoals?.({ sessionId: 'session-b', snapshot: null }),
+          },
+          'goals from session b',
+        ),
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'split-open-complete-goals-session-b',
+            type: 'button',
+            onClick: () =>
+              props.onOpenGoals?.({
+                sessionId: 'session-b',
+                snapshot: {
+                  v: 2,
+                  activity: 'idle',
+                  goal: {
+                    goalId: 'complete-goal-b',
+                    revision: 12,
+                    objective: 'completed in pane b',
+                    status: 'complete',
+                    evidenceCursor: { recordId: 'record-complete-b' },
+                    turnCount: 4,
+                    activeTimeMs: 5_000,
+                    createdAt: 1_000,
+                    updatedAt: 9_000,
+                  },
+                },
+              }),
+          },
+          'complete goals from session b',
         ),
         React.createElement(
           'button',
@@ -975,6 +1042,7 @@ beforeEach(() => {
   mockConnection.skills = [];
   mockConnection.loadingTranscript = false;
   mockConnection.catchingUp = false;
+  mockConnection.goalState = undefined;
   mockWorkspace.capabilities = {
     workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
   };
@@ -1023,6 +1091,12 @@ beforeEach(() => {
   mockSessionActions.rewindSession.mockResolvedValue(undefined);
   mockSessionActions.submitPermission.mockResolvedValue(undefined);
   mockSessionActions.clearGoal.mockResolvedValue(undefined);
+  mockSessionActions.getGoal.mockResolvedValue({
+    snapshot: { v: 2, goal: null, activity: 'idle' },
+  });
+  mockSessionActions.controlGoal.mockResolvedValue({
+    snapshot: { v: 2, goal: null, activity: 'idle' },
+  });
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
@@ -1030,6 +1104,19 @@ beforeEach(() => {
   mockStore.reset.mockClear();
   mockStore.dispatch.mockClear();
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
+  mockWorkspaceActions.listGoals.mockClear();
+  mockWorkspaceActions.listGoals.mockResolvedValue({
+    goals: [],
+    droppedCount: 0,
+  });
+  mockWorkspaceActions.getGoal.mockClear();
+  mockWorkspaceActions.getGoal.mockResolvedValue({
+    snapshot: { v: 2, goal: null, activity: 'idle' },
+  });
+  mockWorkspaceActions.controlGoal.mockClear();
+  mockWorkspaceActions.controlGoal.mockResolvedValue({
+    snapshot: { v: 2, goal: null, activity: 'idle' },
+  });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
   mockWorkspaceActions.loadEnv.mockResolvedValue(null);
@@ -2329,58 +2416,58 @@ describe('App session callbacks', () => {
     expect(onSessionIdChange).not.toHaveBeenCalled();
   });
 
-  it('preserves active goal for the same session and clears it after session changes', async () => {
-    const activeGoals: unknown[] = [];
+  it('projects the authoritative Goal snapshot to custom footers', async () => {
+    const goalSnapshots: unknown[] = [];
     const { rerender } = renderApp({
       renderFooter: (props) => {
-        activeGoals.push(props.activeGoal);
+        goalSnapshots.push(props.goalSnapshot);
         return null;
       },
     });
     await flush();
 
-    await act(async () => {
-      window.dispatchEvent(
-        new CustomEvent('web-shell-goal-status-active', {
-          detail: {
-            active: true,
-            condition: 'ship it',
-            setAt: 123,
-          },
-        }),
-      );
-      await Promise.resolve();
-    });
-
-    expect(activeGoals.at(-1)).toMatchObject({
-      condition: 'ship it',
-      setAt: 123,
-    });
-
-    mockConnection.errorStatus = 404;
+    mockConnection.goalState = {
+      v: 2,
+      activity: 'running',
+      goal: {
+        goalId: 'goal-1',
+        revision: 2,
+        objective: 'ship it',
+        status: 'active',
+        evidenceCursor: { recordId: null },
+        turnCount: 1,
+        activeTimeMs: 100,
+        createdAt: 123,
+        updatedAt: 123,
+      },
+    };
     rerender({
       renderFooter: (props) => {
-        activeGoals.push(props.activeGoal);
+        goalSnapshots.push(props.goalSnapshot);
         return null;
       },
     });
     await flush();
 
-    expect(activeGoals.at(-1)).toMatchObject({
-      condition: 'ship it',
-      setAt: 123,
+    expect(goalSnapshots.at(-1)).toMatchObject({
+      activity: 'running',
+      goal: { objective: 'ship it', revision: 2 },
     });
 
     mockConnection.sessionId = 'session-2';
+    mockConnection.goalState = undefined;
     rerender({
       renderFooter: (props) => {
-        activeGoals.push(props.activeGoal);
+        goalSnapshots.push(props.goalSnapshot);
         return null;
       },
     });
     await flush();
 
-    expect(activeGoals.at(-1)).toBeNull();
+    expect(goalSnapshots.at(-1)).toMatchObject({
+      goal: null,
+      activity: 'idle',
+    });
   });
 
   it('gates direct submissions and dispatches submit events with delayed sidebar reload', async () => {
@@ -3130,7 +3217,7 @@ describe('App session callbacks', () => {
     expect(editorCommit).not.toHaveBeenCalled();
   });
 
-  it('keeps daemon-bound slash command drafts when onSubmitBefore rejects', async () => {
+  it('keeps Goal controls outside the prompt admission hook', async () => {
     const onSubmitBefore = vi.fn().mockRejectedValue(new Error('blocked'));
     const { container } = renderApp({ onSubmitBefore });
     await flush();
@@ -3139,13 +3226,12 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(onSubmitBefore).toHaveBeenCalledWith({
-      sessionId: 'session-1',
-      prompt: '/goal ship it',
+    expect(onSubmitBefore).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
     });
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
-    expect(editorCommit).not.toHaveBeenCalled();
-    expect(editorClear).not.toHaveBeenCalled();
   });
 
   it('notifies the host before forwarding a slash command', async () => {
@@ -5557,7 +5643,23 @@ describe('App session callbacks', () => {
 });
 
 describe('App /goal command', () => {
-  it('opens the Goals page for a bare /goal instead of sending a prompt', async () => {
+  const activeGoal = (): GoalSnapshotV2 => ({
+    v: 2,
+    activity: 'running',
+    goal: {
+      goalId: 'goal-1',
+      revision: 4,
+      objective: 'ship it',
+      status: 'active',
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 2,
+      activeTimeMs: 2_000,
+      createdAt: 1_000,
+      updatedAt: 2_000,
+    },
+  });
+
+  it('opens the Goals page for a bare /goal instead of mutating the session', async () => {
     const { container } = renderApp();
     await flush();
 
@@ -5568,10 +5670,11 @@ describe('App /goal command', () => {
     expect(
       container.querySelector('[data-testid="goals-page"]'),
     ).not.toBeNull();
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('opens the Goals page for a bare /goal even while a turn is running', async () => {
+  it('opens the Goals page for a bare /goal while a turn is running', async () => {
     const { container, rerender } = renderApp();
     await flush();
     act(() => {
@@ -5589,7 +5692,7 @@ describe('App /goal command', () => {
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
   });
 
-  it('still sends /goal <condition> as a prompt rather than opening the page', async () => {
+  it('creates through Goal control v2 instead of sending a prompt', async () => {
     const { container } = renderApp();
     await flush();
 
@@ -5597,11 +5700,54 @@ describe('App /goal command', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
-    expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'ship it',
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
   });
 
-  it('still routes /goal clear through the daemon clear path', async () => {
+  it('creates a session when /goal is the first message', async () => {
+    mockConnection.sessionId = undefined;
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    testState.prompt = '/goal ship it';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.createSession).toHaveBeenCalledOnce();
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith('session-1', {
+      action: 'create',
+      objective: 'ship it',
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalledWith(
+      'info',
+      expect.stringContaining('first message'),
+    );
+  });
+
+  it('replaces an existing Goal with its exact id and revision', async () => {
+    mockConnection.goalState = activeGoal();
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal ship every surface';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'replace',
+      objective: 'ship every surface',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
+    });
+  });
+
+  it('clears through the same optimistic-concurrency control API', async () => {
+    mockConnection.goalState = activeGoal();
     const { container } = renderApp();
     await flush();
 
@@ -5609,106 +5755,36 @@ describe('App /goal command', () => {
     await clickSubmit(container);
     await flush();
 
-    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
-    expect(mockSessionActions.clearGoal).toHaveBeenCalled();
-  });
-
-  it('starts a goal in a fresh session from the Goals page', async () => {
-    const { container } = renderApp();
-    await flush();
-
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
-    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
-    mockSessionActions.clearSession.mockClear();
-    mockSessionActions.sendPrompt.mockClear();
-
-    await act(async () => {
-      await onCreateGoal('all tests pass');
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'clear',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
     });
-
-    // A goal takes over its session's turns, so it starts in a NEW one
-    // (clearSession is how createNewSession starts one) rather than hijacking
-    // the conversation the user was already having.
-    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
-    expect(mockSessionActions.sendPrompt).toHaveBeenCalledWith(
-      '/goal all tests pass',
-      expect.anything(),
-    );
+    expect(mockSessionActions.clearGoal).not.toHaveBeenCalled();
   });
 
-  it('keeps the Goals page mounted across createNewSession, not just after it', async () => {
-    // `createNewSession` switches to the chat view itself, before any await. That
-    // silently defeated the deferred switch below: by the time `sendPrompt`
-    // rejected, the Goals page — and the form that renders the error — was already
-    // gone, dumping the user in an empty chat with no explanation. The handler
-    // passes `keepView` so the page survives until the prompt is admitted.
+  it('treats clear as an idempotent no-op when no Goal is active', async () => {
+    mockConnection.goalState = { v: 2, goal: null, activity: 'idle' };
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    testState.prompt = '/goal clear';
+    await clickSubmit(container);
+    await flush();
+
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    expect(mockSessionActions.clearGoal).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('sets a Goal from the workspace page in the current session', async () => {
     const { container } = renderApp();
     await flush();
 
     testState.prompt = '/goal';
     await clickSubmit(container);
     await flush();
-
-    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
-      new Error('daemon says no'),
-    );
-
-    await act(async () => {
-      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
-        'daemon says no',
-      );
-    });
-
-    // createNewSession ran (a fresh session was started) …
-    expect(mockSessionActions.clearSession).toHaveBeenCalled();
-    // … and the Goals page is STILL up, so the rejection has somewhere to land.
-    expect(
-      container.querySelector('[data-testid="goals-page"]'),
-    ).not.toBeNull();
-  });
-
-  it('keeps the Goals page open when the goal prompt is rejected', async () => {
-    const { container } = renderApp();
-    await flush();
-
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
-    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
-      new Error('daemon says no'),
-    );
-
-    await act(async () => {
-      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
-        'daemon says no',
-      );
-    });
-
-    // Switching to the chat first would unmount the page, leaving the rejection
-    // with nowhere to render: the user would land in an empty session with no
-    // explanation.
-    expect(
-      container.querySelector('[data-testid="goals-page"]'),
-    ).not.toBeNull();
-  });
-
-  it('switches to the chat view only after the goal prompt is admitted', async () => {
-    const { container } = renderApp();
-    await flush();
-
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
     const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
     if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
 
@@ -5716,231 +5792,648 @@ describe('App /goal command', () => {
       await onCreateGoal('all tests pass');
     });
 
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'create',
+      objective: 'all tests pass',
+    });
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
   });
 
-  it("opens a goal's session in the chat view", async () => {
-    // The goal's session transcript IS its history, so the Goals page has to be
-    // able to hand off to it. Nothing exercised this wiring before.
+  it('creates a workspace Goal in the split pane session that opened it', async () => {
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    const { container } = renderApp({ splitSessionIds: ['session-b'] });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-goals-session-b"]',
+        )
+        ?.click();
+    });
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+
+    await act(async () => {
+      await onCreateGoal('goal owned by pane b');
+    });
+
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith('session-b', {
+      action: 'create',
+      objective: 'goal owned by pane b',
+    });
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+  });
+
+  it('replaces an existing split-pane Goal when its opening state is unknown', async () => {
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    mockWorkspaceActions.getGoal.mockResolvedValueOnce({
+      snapshot: {
+        ...activeGoal(),
+        goal: {
+          ...activeGoal().goal!,
+          goalId: 'goal-b',
+          revision: 8,
+          objective: 'existing in pane b',
+        },
+      },
+    });
+    const { container } = renderApp({ splitSessionIds: ['session-b'] });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-goals-session-b"]',
+        )
+        ?.click();
+    });
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+
+    await act(async () => {
+      await onCreateGoal('replace pane b');
+    });
+
+    expect(mockWorkspaceActions.getGoal).toHaveBeenCalledWith('session-b');
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith('session-b', {
+      action: 'replace',
+      objective: 'replace pane b',
+      expectedGoalId: 'goal-b',
+      expectedRevision: 8,
+    });
+  });
+
+  it('replaces a complete split-pane Goal using the opening snapshot OCC', async () => {
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    mockWorkspaceActions.getGoal.mockResolvedValueOnce({
+      snapshot: {
+        v: 2,
+        activity: 'idle',
+        goal: {
+          goalId: 'complete-goal-b',
+          revision: 12,
+          objective: 'completed in pane b',
+          status: 'complete',
+          evidenceCursor: { recordId: 'record-complete-b' },
+          turnCount: 4,
+          activeTimeMs: 5_000,
+          createdAt: 1_000,
+          updatedAt: 9_000,
+        },
+      },
+    });
+    const { container } = renderApp({ splitSessionIds: ['session-b'] });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-complete-goals-session-b"]',
+        )
+        ?.click();
+    });
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    await act(async () => {
+      await onCreateGoal('replace completed goal in pane b');
+    });
+
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenCalledWith('session-b', {
+      action: 'replace',
+      objective: 'replace completed goal in pane b',
+      expectedGoalId: 'complete-goal-b',
+      expectedRevision: 12,
+    });
+    expect(mockWorkspaceActions.getGoal).toHaveBeenCalledWith('session-b');
+  });
+
+  it('reads a fresh split-pane Goal revision when retrying after a conflict', async () => {
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    const revision = (value: number): GoalSnapshotV2 => ({
+      ...activeGoal(),
+      goal: {
+        ...activeGoal().goal!,
+        goalId: 'goal-b',
+        revision: value,
+        objective: 'pane b',
+      },
+    });
+    mockWorkspaceActions.getGoal
+      .mockResolvedValueOnce({ snapshot: revision(8) })
+      .mockResolvedValueOnce({ snapshot: revision(9) });
+    mockWorkspaceActions.controlGoal
+      .mockRejectedValueOnce(new Error('revision conflict'))
+      .mockResolvedValueOnce({ snapshot: revision(10) });
+    const { container } = renderApp({ splitSessionIds: ['session-b'] });
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="split-open-goals-session-b"]',
+        )
+        ?.click();
+    });
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+
+    await act(async () => {
+      await expect(onCreateGoal('replace pane b')).rejects.toThrow(
+        'revision conflict',
+      );
+      await onCreateGoal('replace pane b');
+    });
+
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenNthCalledWith(
+      1,
+      'session-b',
+      expect.objectContaining({ expectedRevision: 8 }),
+    );
+    expect(mockWorkspaceActions.controlGoal).toHaveBeenNthCalledWith(
+      2,
+      'session-b',
+      expect.objectContaining({ expectedRevision: 9 }),
+    );
+  });
+
+  it('keeps the workspace page open when Goal control is rejected', async () => {
     const { container } = renderApp();
     await flush();
 
     testState.prompt = '/goal';
     await clickSubmit(container);
     await flush();
+    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
+    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
+    mockSessionActions.controlGoal.mockRejectedValueOnce(
+      new Error('revision conflict'),
+    );
+
+    await act(async () => {
+      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
+        'revision conflict',
+      );
+    });
+
     expect(
       container.querySelector('[data-testid="goals-page"]'),
     ).not.toBeNull();
+    expect(mockSessionActions.clearSession).not.toHaveBeenCalled();
+  });
 
+  it("opens a workspace Goal's owning session in the chat view", async () => {
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/goal';
+    await clickSubmit(container);
+    await flush();
     const onOpenSession = testState.latestGoalsProps?.onOpenSession;
     if (!onOpenSession) throw new Error('onOpenSession was not captured');
-    mockSessionActions.loadSession.mockClear();
 
     await act(async () => {
       onOpenSession('goal-session-9');
     });
     await flush();
 
-    // Pin the session id, not the options bag — main added a `{ workspaceCwd }`
-    // second argument and will likely keep evolving it; the id is what this test
-    // is about.
     expect(mockSessionActions.loadSession.mock.calls[0][0]).toBe(
       'goal-session-9',
     );
-    // It must leave the Goals page, or the user loads a transcript they cannot see.
     expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
   });
 
-  it("reports a failure to open a goal's session instead of swallowing it", async () => {
+  it('renders the authoritative composer strip and pauses with exact version', async () => {
+    mockConnection.goalState = activeGoal();
+    mockSessionActions.controlGoal.mockResolvedValueOnce({
+      snapshot: {
+        ...activeGoal(),
+        activity: 'idle',
+        goal: { ...activeGoal().goal!, status: 'paused', revision: 5 },
+      },
+    });
     const { container } = renderApp();
     await flush();
 
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
-    const onOpenSession = testState.latestGoalsProps?.onOpenSession;
-    if (!onOpenSession) throw new Error('onOpenSession was not captured');
-    mockSessionActions.loadSession.mockRejectedValueOnce(
-      new Error('session is gone'),
-    );
-    const consoleError = vi
-      .spyOn(console, 'error')
-      .mockImplementation(() => {});
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('ship it');
 
     await act(async () => {
-      onOpenSession('goal-session-9');
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Pause goal"]')
+        ?.click();
+      await Promise.resolve();
     });
-    await flush();
 
-    // `loadSidebarSession` rethrows, so the handler's own `.catch` is the only
-    // thing standing between a dead session and an unhandled rejection. It has
-    // to route the failure to `reportError` (console + toast), not swallow it.
-    expect(consoleError).toHaveBeenCalledWith(
-      '[web-shell]',
-      expect.stringContaining('session is gone'),
-      expect.anything(),
-    );
-    consoleError.mockRestore();
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'pause',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
+    });
   });
 
-  it('reuses the empty session a failed goal attempt left behind', async () => {
-    // `sendPrompt` creates the daemon session lazily, so a prompt that fails
-    // after admission leaves a created-but-empty session. The form keeps the
-    // condition and invites a retry; if that retry started ANOTHER new session,
-    // every failed attempt would strand a blank chat in the sidebar.
+  it('clears the composer Goal without confirmation', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mockConnection.goalState = activeGoal();
     const { container } = renderApp();
     await flush();
 
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
-    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
-
-    mockSessionActions.clearSession.mockClear();
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
-      new Error('daemon says no'),
-    );
-
     await act(async () => {
-      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
-        'daemon says no',
-      );
-    });
-    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
-
-    // Retry: the session from the failed attempt is still current and empty, so
-    // it is reused rather than abandoned. No second clearSession.
-    await act(async () => {
-      await onCreateGoal('all tests pass');
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Clear goal"]')
+        ?.click();
+      await Promise.resolve();
     });
 
-    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
-    expect(mockSessionActions.sendPrompt).toHaveBeenLastCalledWith(
-      '/goal all tests pass',
-      expect.anything(),
-    );
+    expect(confirm).not.toHaveBeenCalled();
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'clear',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
+    });
   });
 
-  it('forgets the stranded session once the user leaves the Goals page', async () => {
-    // The stranded session is only a scratch session while the Goals page is
-    // up. Leave, and the composer can talk to it — reusing it for a later goal
-    // would drop the goal loop on top of a real conversation, which is the very
-    // thing starting a fresh session exists to prevent.
+  it('edits from the composer strip through the versioned control API', async () => {
+    mockConnection.goalState = activeGoal();
     const { container } = renderApp();
     await flush();
 
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
-    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
-
-    mockSessionActions.clearSession.mockClear();
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
-      new Error('daemon says no'),
-    );
-    await act(async () => {
-      await expect(onCreateGoal('all tests pass')).rejects.toThrow(
-        'daemon says no',
-      );
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.click();
     });
-    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
-
-    // Leave the Goals page via its Back button, then use the session from the
-    // composer — it is now a real conversation, not a scratch session.
-    const back = container.querySelector<HTMLButtonElement>(
-      '[data-testid="goals-page"] button[aria-label="back"]',
-    );
-    if (!back) throw new Error('Back button not found');
-    await act(async () => {
-      back.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    const textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    act(() => {
+      setTextareaValue(textarea, 'ship every surface');
     });
-    await flush();
-    expect(container.querySelector('[data-testid="goals-page"]')).toBeNull();
-
-    testState.prompt = 'hello from the composer';
-    await clickSubmit(container);
-    await flush();
-
-    // Re-open Goals and set a goal: it must NOT reuse the session the user has
-    // since been talking to.
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
-    const onCreateGoalAgain = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoalAgain) throw new Error('onCreateGoal was not captured');
-    mockSessionActions.clearSession.mockClear();
-
     await act(async () => {
-      await onCreateGoalAgain('all tests pass');
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Save')
+        ?.click();
+      await Promise.resolve();
     });
 
-    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledWith({
+      action: 'edit',
+      objective: 'ship every surface',
+      expectedGoalId: 'goal-1',
+      expectedRevision: 4,
+    });
   });
 
-  it('starts a fresh session again once a goal has actually been sent', async () => {
-    // The reuse above is only for a session stranded by a failure. Once a goal
-    // lands, that session belongs to it, and the next goal must not be dropped
-    // on top of the running one.
-    const { container } = renderApp();
+  it('clears fallback Goal UI immediately when switching sessions', async () => {
+    const nextGoal = deferred<{ snapshot: GoalSnapshotV2 }>();
+    mockSessionActions.getGoal
+      .mockResolvedValueOnce({ snapshot: activeGoal() })
+      .mockImplementationOnce(() => nextGoal.promise);
+    const { container, rerender } = renderApp();
     await flush();
 
-    testState.prompt = '/goal';
-    await clickSubmit(container);
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).not.toBeNull();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.click();
+    });
+    expect(
+      document.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+
+    mockConnection.sessionId = 'session-2';
+    rerender({});
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).toBeNull();
+    expect(document.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+
+    nextGoal.resolve({
+      snapshot: { v: 2, goal: null, activity: 'idle' },
+    });
     await flush();
-
-    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
-
-    mockSessionActions.clearSession.mockClear();
-    mockSessionActions.sendPrompt.mockRejectedValueOnce(
-      new Error('daemon says no'),
-    );
-    await act(async () => {
-      await expect(onCreateGoal('first goal')).rejects.toThrow(
-        'daemon says no',
-      );
-    });
-    await act(async () => {
-      await onCreateGoal('first goal');
-    });
-    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(1);
-
-    // A brand-new goal after a successful send: fresh session again.
-    await act(async () => {
-      await onCreateGoal('second goal');
-    });
-    expect(mockSessionActions.clearSession).toHaveBeenCalledTimes(2);
   });
 
-  it('does not drop the goal into the current session when the new session fails', async () => {
-    const { container } = renderApp();
-    await flush();
-
-    testState.prompt = '/goal';
-    await clickSubmit(container);
-    await flush();
-
-    const onCreateGoal = testState.latestGoalsProps?.onCreateGoal;
-    if (!onCreateGoal) throw new Error('onCreateGoal was not captured');
-    mockSessionActions.clearSession.mockRejectedValueOnce(
-      new Error('daemon unreachable'),
+  it('ignores a delayed Goal control response from the previous session', async () => {
+    const pendingControl = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const sessionBGoal: GoalSnapshotV2 = {
+      ...activeGoal(),
+      goal: {
+        ...activeGoal().goal!,
+        goalId: 'goal-b',
+        revision: 9,
+        objective: 'goal owned by session b',
+      },
+    };
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    mockSessionActions.controlGoal.mockImplementationOnce(
+      () => pendingControl.promise,
     );
-    mockSessionActions.sendPrompt.mockClear();
+    const { container, rerender } = renderApp();
+    await flush();
 
     await act(async () => {
-      await onCreateGoal('all tests pass');
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Pause goal"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-b';
+      mockConnection.goalState = sessionBGoal;
+      rerender({});
+    });
+    pendingControl.resolve({
+      snapshot: {
+        ...activeGoal(),
+        activity: 'idle',
+        goal: { ...activeGoal().goal!, status: 'paused', revision: 5 },
+      },
+    });
+    await flush();
+
+    expect(container.textContent).toContain('goal owned by session b');
+    expect(container.textContent).not.toContain('ship it');
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Pause goal"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(mockSessionActions.controlGoal).toHaveBeenLastCalledWith({
+      action: 'pause',
+      expectedGoalId: 'goal-b',
+      expectedRevision: 9,
+    });
+  });
+
+  it('keeps session B controls locked when session A finishes first', async () => {
+    const pendingA = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const pendingB = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const sessionBGoal: GoalSnapshotV2 = {
+      ...activeGoal(),
+      goal: {
+        ...activeGoal().goal!,
+        goalId: 'goal-b',
+        revision: 9,
+        objective: 'goal owned by session b',
+      },
+    };
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    mockSessionActions.controlGoal
+      .mockImplementationOnce(() => pendingA.promise)
+      .mockImplementationOnce(() => pendingB.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Pause goal"]')
+        ?.click();
+    });
+    act(() => {
+      mockConnection.sessionId = 'session-b';
+      mockConnection.goalState = sessionBGoal;
+      rerender({});
+    });
+    testState.prompt = '/goal pause';
+    await clickSubmit(container);
+    expect(mockSessionActions.controlGoal).toHaveBeenCalledTimes(2);
+
+    pendingA.resolve({
+      snapshot: {
+        ...activeGoal(),
+        activity: 'idle',
+        goal: { ...activeGoal().goal!, status: 'paused', revision: 5 },
+      },
+    });
+    await flush();
+    expect(
+      container.querySelector<HTMLButtonElement>('[aria-label="Pause goal"]')
+        ?.disabled,
+    ).toBe(true);
+
+    pendingB.resolve({
+      snapshot: {
+        ...sessionBGoal,
+        activity: 'idle',
+        goal: { ...sessionBGoal.goal!, status: 'paused', revision: 10 },
+      },
+    });
+    await flush();
+    expect(
+      container.querySelector<HTMLButtonElement>('[aria-label="Resume goal"]')
+        ?.disabled,
+    ).toBe(false);
+  });
+
+  it('silently abandons Goal control when ownership changes during refresh', async () => {
+    const pendingGet = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const sessionBGoal: GoalSnapshotV2 = {
+      ...activeGoal(),
+      goal: {
+        ...activeGoal().goal!,
+        goalId: 'goal-b',
+        revision: 9,
+        objective: 'goal owned by session b',
+      },
+    };
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = undefined;
+    mockSessionActions.getGoal.mockReturnValue(pendingGet.promise);
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+
+    testState.prompt = '/goal pause';
+    await clickSubmit(container);
+    act(() => {
+      mockConnection.sessionId = 'session-b';
+      mockConnection.goalState = sessionBGoal;
+      rerender({});
+    });
+    pendingGet.resolve({ snapshot: activeGoal() });
+    await flush();
+    await flush();
+
+    expect(container.textContent).toContain('goal owned by session b');
+    expect(mockSessionActions.controlGoal).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('does not report a delayed Goal control error after switching sessions', async () => {
+    const pendingControl = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const sessionBGoal: GoalSnapshotV2 = {
+      ...activeGoal(),
+      goal: {
+        ...activeGoal().goal!,
+        goalId: 'goal-b',
+        revision: 9,
+        objective: 'goal owned by session b',
+      },
+    };
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    mockSessionActions.controlGoal.mockReturnValueOnce(pendingControl.promise);
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+
+    testState.prompt = '/goal pause';
+    await clickSubmit(container);
+    act(() => {
+      mockConnection.sessionId = 'session-b';
+      mockConnection.goalState = sessionBGoal;
+      rerender({ onToast });
+    });
+    pendingControl.reject(new Error('session a failed late'));
+    await flush();
+    await flush();
+
+    expect(container.textContent).toContain('goal owned by session b');
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('does not restore a stale control error when its conflict refresh loses ownership', async () => {
+    const pendingControl = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const pendingRefresh = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const sessionBGoal: GoalSnapshotV2 = {
+      ...activeGoal(),
+      goal: {
+        ...activeGoal().goal!,
+        goalId: 'goal-b',
+        revision: 9,
+        objective: 'goal owned by session b',
+      },
+    };
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    mockSessionActions.controlGoal.mockReturnValueOnce(pendingControl.promise);
+    mockSessionActions.getGoal.mockReturnValueOnce(pendingRefresh.promise);
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+
+    testState.prompt = '/goal pause';
+    await clickSubmit(container);
+    pendingControl.reject(new Error('session a conflict'));
+    await flush();
+    expect(mockSessionActions.getGoal).toHaveBeenCalledOnce();
+
+    act(() => {
+      mockConnection.sessionId = 'session-b';
+      mockConnection.goalState = sessionBGoal;
+      rerender({ onToast });
+    });
+    pendingRefresh.resolve({ snapshot: activeGoal() });
+    await flush();
+    await flush();
+
+    expect(container.textContent).toContain('goal owned by session b');
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('keeps session B edit open when session A edit succeeds late', async () => {
+    const pendingControl = deferred<{ snapshot: GoalSnapshotV2 }>();
+    const sessionBGoal: GoalSnapshotV2 = {
+      ...activeGoal(),
+      goal: {
+        ...activeGoal().goal!,
+        goalId: 'goal-b',
+        revision: 9,
+        objective: 'goal owned by session b',
+      },
+    };
+    mockConnection.sessionId = 'session-a';
+    mockConnection.goalState = activeGoal();
+    mockSessionActions.controlGoal.mockReturnValueOnce(pendingControl.promise);
+    const { container, rerender } = renderApp();
+    await flush();
+
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.click();
+    });
+    let textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    act(() => {
+      setTextareaValue(textarea, 'session a edit');
+      Array.from(document.querySelectorAll('button'))
+        .find((button) => button.textContent === 'Save')
+        ?.click();
     });
 
-    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    act(() => {
+      mockConnection.sessionId = 'session-b';
+      mockConnection.goalState = sessionBGoal;
+      rerender({});
+    });
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.click();
+    });
+    textarea = document.querySelector('textarea') as HTMLTextAreaElement;
+    expect(textarea.value).toBe('goal owned by session b');
+
+    pendingControl.resolve({
+      snapshot: {
+        ...activeGoal(),
+        goal: {
+          ...activeGoal().goal!,
+          revision: 5,
+          objective: 'session a edit',
+        },
+      },
+    });
+    await flush();
+    await flush();
+
+    expect(
+      document.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+    expect(
+      (document.querySelector('textarea') as HTMLTextAreaElement).value,
+    ).toBe('goal owned by session b');
+  });
+
+  it('closes Goal UI when the current Goal completes', async () => {
+    mockConnection.goalState = activeGoal();
+    const { container, rerender } = renderApp();
+    await flush();
+    act(() => {
+      container
+        .querySelector<HTMLButtonElement>('[aria-label="Edit goal"]')
+        ?.click();
+    });
+    expect(
+      document.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+
+    mockConnection.goalState = {
+      ...activeGoal(),
+      activity: 'idle',
+      goal: { ...activeGoal().goal!, status: 'complete', revision: 5 },
+    };
+    rerender({});
+
+    expect(
+      container.querySelector('[data-testid="goal-status-strip"]'),
+    ).toBeNull();
+    expect(document.querySelector('[data-testid="dialog-shell"]')).toBeNull();
   });
 });
-
 describe('App manual-run orchestration (scheduled tasks)', () => {
   // Drives App's real runTaskManually / enqueueManualRun / tryFireBoundRun via
   // the onRunPrompt prop the (captured) ScheduledTasksDialog mock receives.

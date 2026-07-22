@@ -15,6 +15,12 @@ import type {
   TranscriptRecordInput,
   TranscriptReplayGapInput,
 } from '@qwen-code/qwen-code-core/transcriptRecords';
+import {
+  parseGoalSnapshotV2,
+  parseGoalStateRecordPayloadV2,
+  projectGoalStateToLegacy,
+  type GoalSnapshotV2,
+} from '@qwen-code/qwen-code-core/goalWire';
 
 export const MISSING_TRANSCRIPT_TOOL_RESULT_MESSAGE =
   'Tool result missing from saved history; the previous run likely ended ' +
@@ -45,6 +51,7 @@ export interface TranscriptReplayStateV1 {
   readonly v: 1;
   readonly pendingToolCalls: readonly PendingTranscriptToolCall[];
   readonly cumulativeUsage: TranscriptReplayUsageState;
+  readonly goalState?: GoalSnapshotV2;
 }
 
 export interface TranscriptReplayToolMetadata {
@@ -349,6 +356,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     apiTimeMs: number;
   };
   private finalized = false;
+  private goalState: GoalSnapshotV2 | undefined;
 
   constructor(private readonly options: TranscriptReplayMachineOptions) {
     const initialState = parseInitialState(
@@ -356,6 +364,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
       options.onDiagnostic,
     );
     this.usage = { ...initialState.cumulativeUsage };
+    this.goalState = initialState.goalState;
     for (const pending of initialState.pendingToolCalls) {
       this.pendingToolCalls.set(pending.callId, pending);
       this.usedToolCallIds.add(pending.callId);
@@ -455,6 +464,7 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
         ...pending,
       })),
       cumulativeUsage: { ...this.usage },
+      ...(this.goalState ? { goalState: this.goalState } : {}),
     };
   }
 
@@ -704,6 +714,40 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     emit: (update: SessionUpdate) => TranscriptReplayEmission,
     meta: UpdateMetaOptions,
   ): Iterable<TranscriptReplayEmission> {
+    if (record.subtype === 'goal_state') {
+      const payload = parseGoalStateRecordPayloadV2(record.systemPayload);
+      if (!payload) {
+        this.report(
+          'malformed_goal_state',
+          'Skipped a malformed Goal state transcript record.',
+          record.uuid,
+          'systemPayload',
+        );
+        return;
+      }
+      const projection = projectGoalStateToLegacy(
+        payload,
+        this.goalState?.goal ?? null,
+      );
+      this.goalState = payload.snapshot;
+      const { type: _type, ...goalStatus } = projection.goalStatus;
+      yield emit(
+        createTranscriptMessageUpdate({
+          role: 'assistant',
+          text: '',
+          ...meta,
+          extra: {
+            goalState: payload.snapshot,
+            goalStatus,
+            ...(projection.goalTerminal
+              ? { goalTerminal: projection.goalTerminal }
+              : {}),
+            'qwen.session.recordId': record.uuid,
+          },
+        }),
+      );
+      return;
+    }
     if (record.subtype !== 'slash_command') return;
     const payload = isObjectRecord(record.systemPayload)
       ? record.systemPayload
@@ -982,6 +1026,17 @@ function parseInitialState(
       affectsCompleteness: true,
     });
   }
+  const rawGoalState = value['goalState'];
+  const goalState =
+    rawGoalState === undefined ? undefined : parseGoalSnapshotV2(rawGoalState);
+  if (rawGoalState !== undefined && !goalState) {
+    onDiagnostic?.({
+      code: 'invalid_replay_state',
+      severity: 'warning',
+      message: 'Dropped a malformed Goal state from replay state.',
+      affectsCompleteness: true,
+    });
+  }
   return {
     v: 1,
     pendingToolCalls,
@@ -993,6 +1048,7 @@ function parseInitialState(
           apiTimeMs: usage['apiTimeMs'] as number,
         }
       : emptyUsage(),
+    ...(goalState ? { goalState } : {}),
   };
 }
 

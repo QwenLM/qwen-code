@@ -21,6 +21,7 @@ import {
   SessionTranscriptReader,
   SessionTranscriptSnapshotUnavailableError,
   addDaemonRequestAttribute,
+  parseGoalControlRequest,
   runWithoutDebugLogSession,
   writeWorktreeSessionMarker,
   writeWorktreeSession,
@@ -2453,6 +2454,53 @@ export function registerSessionRoutes(
     ),
   );
 
+  app.get(
+    '/session/:id/goal',
+    withOwnerReadSession(
+      'GET /session/:id/goal',
+      async (_req, res, sessionId, runtime) => {
+        const result = await runtime.bridge.getSessionGoal(sessionId);
+        if (!result.goalState) {
+          res.status(503).json({
+            error: 'The session does not expose Goal state v2',
+            code: 'goal_state_unavailable',
+          });
+          return;
+        }
+        res.status(200).json({ snapshot: result.goalState });
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/goal',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/goal',
+      async (req, res, sessionId, runtime) => {
+        const request = parseGoalControlRequest(safeBody(req));
+        if (!request) {
+          res.status(400).json({
+            error: 'Invalid Goal control request',
+            code: 'invalid_goal_control_request',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.controlSessionGoal(
+              sessionId,
+              request,
+              clientId === undefined ? undefined : { clientId },
+            ),
+          );
+      },
+    ),
+  );
+
   app.post(
     '/session/:id/goal/clear',
     mutate({ strict: true }),
@@ -3789,10 +3837,26 @@ export function registerSessionRoutes(
             .json({ error: '`promptId` route parameter is required' });
           return;
         }
+        const ifState = req.query['ifState'];
+        if (
+          ifState !== undefined &&
+          ifState !== 'queued' &&
+          ifState !== 'running'
+        ) {
+          res.status(400).json({
+            error: '`ifState` must be either `queued` or `running`',
+          });
+          return;
+        }
         const result = runtime.bridge.removePendingPrompt(
           sessionId,
           promptId,
-          clientId !== undefined ? { clientId } : undefined,
+          clientId !== undefined || ifState !== undefined
+            ? {
+                ...(clientId !== undefined ? { clientId } : {}),
+                ...(ifState !== undefined ? { ifState } : {}),
+              }
+            : undefined,
         );
         res.status(200).json(result);
       },

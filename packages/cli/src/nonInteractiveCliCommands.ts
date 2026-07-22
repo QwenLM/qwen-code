@@ -13,6 +13,7 @@ import {
   Logger,
   uiTelemetryService,
   type Config,
+  type GoalStateResponse,
   createDebugLogger,
   recordSkillInvocation,
 } from '@qwen-code/qwen-code-core';
@@ -26,6 +27,7 @@ import { SkillCommandLoader } from './services/SkillCommandLoader.js';
 import {
   type CommandContext,
   CommandKind,
+  type GoalCommandOperation,
   type SlashCommand,
   type SlashCommandActionReturn,
   type ExecutionMode,
@@ -56,6 +58,7 @@ function getSkillCommandName(command: SlashCommand): string {
  * - 'submit_prompt': Submits content to the model (supports all modes)
  * - 'message': Returns a single message (supports non-interactive JSON/text only)
  * - 'stream_messages': Streams multiple messages (supports ACP only)
+ * - 'goal_control': Returns the canonical Goal control result
  * - 'unsupported': Command cannot be executed in this mode
  * - 'no_command': No command was found or executed
  */
@@ -82,6 +85,11 @@ export type NonInteractiveSlashCommandResult =
       >;
     }
   | {
+      type: 'goal_control';
+      operation: GoalCommandOperation;
+      response: GoalStateResponse;
+    }
+  | {
       type: 'unsupported';
       reason: string;
       originalType: string;
@@ -97,6 +105,7 @@ export type NonInteractiveSlashCommandResult =
  * - submit_prompt: Submits content to the model (all modes)
  * - message: Returns a single message (non-interactive JSON/text only)
  * - stream_messages: Streams multiple messages (ACP only)
+ * - goal_control: Returns a canonical Goal control result
  *
  * All other result types are converted to 'unsupported'.
  *
@@ -130,6 +139,13 @@ function handleCommandResult(
       return {
         type: 'stream_messages',
         messages: result.messages,
+      };
+
+    case 'goal_control':
+      return {
+        type: 'goal_control',
+        operation: result.operation,
+        response: result.response,
       };
 
     /**

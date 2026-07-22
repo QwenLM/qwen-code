@@ -3,6 +3,8 @@ export { InputContainer } from './InputContainer'
 export { ChatInputZone } from './ChatInputZone'
 export { FreeFormInput } from './FreeFormInput'
 export { StructuredInput } from './StructuredInput'
+export { GoalStatusBar } from './GoalStatusBar'
+export type { GoalStatusBarLabels } from './GoalStatusBar'
 
 // Structured input components
 export { PermissionRequest } from './structured/PermissionRequest'

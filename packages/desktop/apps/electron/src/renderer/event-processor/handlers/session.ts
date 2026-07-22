@@ -41,6 +41,7 @@ import type {
   AuthCompletedEvent,
   UsageUpdateEvent,
   AvailableCommandsUpdateEvent,
+  GoalStateEvent,
   Effect,
 } from '../types';
 import type { Message } from '../../../shared/types';
@@ -563,6 +564,19 @@ export function handleAvailableCommandsUpdate(
         availableSkillDetails: event.availableSkillDetails,
       },
       streaming,
+    },
+    effects: [],
+  };
+}
+
+export function handleGoalState(
+  state: SessionState,
+  event: GoalStateEvent,
+): ProcessResult {
+  return {
+    state: {
+      session: { ...state.session, goalState: event.snapshot },
+      streaming: state.streaming,
     },
     effects: [],
   };

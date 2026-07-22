@@ -59,7 +59,9 @@ export function jsonRpcErrorToHttpStatusWithData(
     isRecord(data) &&
     (data['errorKind'] === 'session_archived' ||
       data['errorKind'] === 'session_conflict' ||
-      data['errorKind'] === 'session_archiving')
+      data['errorKind'] === 'session_archiving' ||
+      data['errorKind'] === 'goal_conflict' ||
+      data['errorKind'] === 'goal_invalid_transition')
   ) {
     return 409;
   }

@@ -14,6 +14,7 @@ import type {
   CommandContext,
   ConfirmActionReturn,
   ConfirmShellCommandsActionReturn,
+  GoalControlActionReturn,
   SlashCommand,
 } from '../commands/types.js';
 import { CommandKind } from '../commands/types.js';
@@ -890,6 +891,73 @@ describe('useSlashCommandProcessor', () => {
 
       expect(mockSetQuittingMessages).toHaveBeenCalledWith(['bye']);
     });
+
+    it('handles goal control without sending its objective to the model', async () => {
+      const objective = 'keep this objective out of the model';
+      const goalControlResult: GoalControlActionReturn = {
+        type: 'goal_control',
+        operation: { kind: 'set', objective },
+        response: {
+          snapshot: {
+            v: 2,
+            activity: 'idle',
+            goal: {
+              goalId: 'goal-1',
+              revision: 1,
+              objective,
+              status: 'active',
+              evidenceCursor: { recordId: 'record-1' },
+              turnCount: 0,
+              activeTimeMs: 0,
+              createdAt: 10,
+              updatedAt: 10,
+            },
+          },
+        },
+      };
+      const command = createTestCommand({
+        name: 'goal',
+        action: vi.fn().mockResolvedValue(goalControlResult),
+      });
+      const result = setupProcessorHook([command]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(1));
+
+      let actionResult;
+      await act(async () => {
+        actionResult = await result.current.handleSlashCommand(
+          `/goal set ${objective}`,
+        );
+      });
+
+      expect(actionResult).toEqual({ type: 'handled' });
+      expect(mockAddItem).toHaveBeenCalledTimes(1);
+      expect(mockAddItem).toHaveBeenCalledWith(
+        {
+          type: MessageType.USER,
+          text: `/goal set ${objective}`,
+          sentToModel: false,
+        },
+        expect.any(Number),
+      );
+      expect(mockUpdateItem).not.toHaveBeenCalled();
+      expect(mockFireUserPromptExpansionEvent).not.toHaveBeenCalled();
+
+      const recorder = mockConfig.getChatRecordingService() as unknown as {
+        recordSlashCommand: ReturnType<typeof vi.fn>;
+      };
+      expect(recorder.recordSlashCommand).toHaveBeenCalledTimes(2);
+      expect(recorder.recordSlashCommand).toHaveBeenNthCalledWith(1, {
+        phase: 'invocation',
+        rawCommand: `/goal set ${objective}`,
+        sentToModel: false,
+      });
+      expect(recorder.recordSlashCommand).toHaveBeenNthCalledWith(2, {
+        phase: 'result',
+        rawCommand: `/goal set ${objective}`,
+        outputHistoryItems: [],
+      });
+    });
+
     it('should handle "submit_prompt" action returned from a file-based command', async () => {
       const fileCommand = createTestCommand(
         {

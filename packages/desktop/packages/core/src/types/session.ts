@@ -5,7 +5,7 @@
  * with a CraftAgent instance and SDK conversation.
  */
 
-import type { StoredMessage, TokenUsage } from './message.ts';
+import type { GoalSnapshotV2, StoredMessage, TokenUsage } from './message.ts';
 
 /**
  * Session status for workflow tracking
@@ -29,6 +29,7 @@ export interface Session {
   status?: SessionStatus;        // Workflow status (todo, in_progress, needs_review, done, cancelled)
   // Read/unread tracking
   lastReadMessageId?: string;    // ID of the last message the user has read
+  goalState?: GoalSnapshotV2;    // Last authoritative Goal snapshot for display
 }
 
 /**
@@ -57,4 +58,5 @@ export interface SessionMetadata {
   isFlagged?: boolean;     // Whether this session is flagged
   status?: SessionStatus;  // Workflow status
   hidden?: boolean;        // Whether this session is hidden from session list
+  goalState?: GoalSnapshotV2; // Last authoritative Goal snapshot for display
 }

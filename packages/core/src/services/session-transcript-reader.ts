@@ -12,6 +12,8 @@ import { Storage } from '../config/storage.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import type { HistoryGap } from '../utils/conversation-chain.js';
+import { parseGoalStateRecordPayloadV2 } from '../goals/goal-reducer.js';
+import type { GoalSnapshotV2 } from '../goals/goal-protocol.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import {
   aggregateTranscriptRecordFragments,
@@ -772,6 +774,21 @@ async function readAggregatedRecords(
   }
 }
 
+async function readGoalStateBeforePosition(
+  index: TranscriptIndex,
+  position: number,
+): Promise<GoalSnapshotV2 | undefined> {
+  for (let i = position - 1; i >= 0; i--) {
+    const uuid = index.activeUuids[i]!;
+    const entry = index.byUuid.get(uuid);
+    if (entry?.type !== 'system' || entry.subtype !== 'goal_state') continue;
+    const [record] = await readAggregatedRecords(index, [uuid]);
+    const payload = parseGoalStateRecordPayloadV2(record?.systemPayload);
+    if (payload) return payload.snapshot;
+  }
+  return undefined;
+}
+
 async function buildIndex(params: {
   filePath: string;
   fileIdentity: SessionTranscriptFileIdentity;
@@ -1056,6 +1073,10 @@ export class SessionTranscriptReader {
     const nextPosition =
       backwardPage?.nextPosition ?? position + pageUuids.length;
     const records = await readAggregatedRecords(index, pageUuids);
+    const backwardGoalState =
+      direction === 'backward'
+        ? await readGoalStateBeforePosition(index, nextPosition)
+        : undefined;
     const hasMore =
       direction === 'backward'
         ? nextPosition > 0
@@ -1090,7 +1111,11 @@ export class SessionTranscriptReader {
       hasMore,
       ...(direction === 'backward' ? { direction: 'backward' as const } : {}),
       ...(nextCursorState ? { nextCursorState } : {}),
-      ...(cursor?.replay !== undefined ? { replay: cursor.replay } : {}),
+      ...(backwardGoalState
+        ? { replay: { goalState: backwardGoalState } }
+        : cursor?.replay !== undefined
+          ? { replay: cursor.replay }
+          : {}),
       startTime: index.startTime,
       lastUpdated: index.lastUpdated,
     };

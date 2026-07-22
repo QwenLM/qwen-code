@@ -155,6 +155,28 @@ describe('prepareTranscriptRecords', () => {
     );
   });
 
+  it('accepts goal lifecycle and runtime records without completeness gaps', () => {
+    const prepared = prepareTranscriptRecords([
+      record('state', null, {
+        type: 'system',
+        subtype: 'goal_state',
+        message: undefined,
+        systemPayload: { v: 2 },
+      }),
+      record('runtime', 'state', {
+        subtype: 'goal_runtime',
+        message: { role: 'user', parts: [{ text: 'continue' }] },
+      }),
+    ]);
+
+    expect(prepared.diagnostics).not.toContainEqual(
+      expect.objectContaining({
+        code: 'unknown_record_or_part',
+        affectsCompleteness: true,
+      }),
+    );
+  });
+
   it('rejects mixed sessions and an explicit artifact leaf', () => {
     expect(() =>
       prepareTranscriptRecords([

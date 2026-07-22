@@ -7,12 +7,24 @@
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { CONDITIONAL_SERVE_FEATURES } from './capabilities.js';
+import {
+  CONDITIONAL_SERVE_FEATURES,
+  getAdvertisedServeFeatures,
+  SERVE_CAPABILITY_REGISTRY,
+} from './capabilities.js';
 
 const START = '<!-- conditional-serve-features:start -->';
 const END = '<!-- conditional-serve-features:end -->';
 
 describe('conditional serve capability documentation', () => {
+  it('advertises typed Goal lifecycle control as an unconditional v1 capability', () => {
+    expect(SERVE_CAPABILITY_REGISTRY.session_goal_control).toEqual({
+      since: 'v1',
+    });
+    expect(CONDITIONAL_SERVE_FEATURES.has('session_goal_control')).toBe(false);
+    expect(getAdvertisedServeFeatures()).toContain('session_goal_control');
+  });
+
   it('documents exactly the conditional feature registry keys', async () => {
     const protocol = await readFile(
       resolve(process.cwd(), '../../docs/developers/qwen-serve-protocol.md'),

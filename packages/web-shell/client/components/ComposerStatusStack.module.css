@@ -1,0 +1,22 @@
+.root {
+  box-sizing: border-box;
+  width: calc(100% - 32px);
+  overflow: hidden;
+  margin: 0 auto -8px;
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  background: color-mix(in srgb, var(--background) 96%, var(--muted));
+}
+
+.root > [data-web-shell-queued-prompts],
+.root > [data-web-shell-goal-status] {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
+.root > [data-web-shell-queued-prompts] + [data-web-shell-goal-status] {
+  border-top: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+}

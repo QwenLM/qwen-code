@@ -146,6 +146,9 @@ import {
   type RemoteSessionTransferPayload,
   type ImportRemoteSessionTransferResult,
   type AvailableSlashCommand,
+  type GoalControlRequest,
+  type GoalSnapshotV2,
+  type GoalStateResponse,
   type RefreshAvailableCommandsOptions,
   type PermissionRuleType,
   type PermissionSettingsScope,
@@ -849,6 +852,11 @@ type QwenProvidersAgent = AgentBackend & {
   ): Promise<QwenProviderConnectResult>
 }
 
+type GoalAgent = AgentBackend & {
+  getGoalState(): Promise<GoalSnapshotV2 | undefined>
+  controlGoal(request: GoalControlRequest): Promise<GoalStateResponse>
+}
+
 function canRewindToUserTurn(agent: AgentBackend): agent is RewindableAgent {
   return typeof agent.rewindToUserTurn === 'function'
 }
@@ -885,6 +893,14 @@ function canManageQwenProviders(
   return (
     typeof candidate.listProviders === 'function' &&
     typeof candidate.connectProvider === 'function'
+  )
+}
+
+function canManageGoal(agent: AgentBackend): agent is GoalAgent {
+  const candidate = agent as Partial<GoalAgent>
+  return (
+    typeof candidate.getGoalState === 'function' &&
+    typeof candidate.controlGoal === 'function'
   )
 }
 
@@ -1055,6 +1071,8 @@ interface ManagedSession {
   agentCreatePromise?: Promise<AgentInstance>
   messages: Message[]
   isProcessing: boolean
+  /** Last authoritative Goal v2 state; persisted for restart display only. */
+  goalState?: GoalSnapshotV2
   /** Set when user requests stop - allows event loop to drain before clearing isProcessing */
   stopRequested?: boolean
   lastUsedAt?: number
@@ -1429,6 +1447,7 @@ function managedToSession(
     availableCommands: m.availableCommands,
     availableSkills: m.availableSkills,
     availableSkillDetails: m.availableSkillDetails,
+    goalState: m.goalState,
     ...overrides,
   } as Session
 }
@@ -1525,6 +1544,8 @@ export class SessionManager implements ISessionManager {
     new Map()
   private pendingExternalSessionDeletes: Set<string> = new Set()
   private externalSessionAgents: Map<string, AgentBackend> = new Map()
+  private goalStateApplyTails: Map<string, Promise<void>> = new Map()
+  private goalStateApplyingIds: Set<string> = new Set()
   /**
    * Track which session the user is actively viewing (per workspace).
    * Map of workspaceId -> sessionId. Used to determine if a session should be
@@ -2895,6 +2916,11 @@ export class SessionManager implements ISessionManager {
       QWEN_CODE_CONNECTION_SLUG
     )
       return false
+    if (
+      managed.goalState?.goal &&
+      managed.goalState.goal.status !== 'complete'
+    )
+      return false
     if (!this.hasNoRenderableLocalMessages(managed)) return false
     const title = typeof managed.name === 'string' ? managed.name : undefined
     if (title && !this.isExternalSessionPlaceholderTitle(title))
@@ -3040,6 +3066,14 @@ export class SessionManager implements ISessionManager {
   ): void {
     if (!result?.tokenUsage) return
     managed.tokenUsage = { ...result.tokenUsage }
+  }
+
+  private async applyGoalStateFromMessagesResult(
+    managed: ManagedSession,
+    result: BackendSessionMessagesResult | undefined,
+  ): Promise<void> {
+    if (!result?.goalState) return
+    await this.applyGoalState(managed, result.goalState)
   }
 
   private applyLoadedExternalMessages(
@@ -3249,7 +3283,10 @@ export class SessionManager implements ISessionManager {
       )
       const inspectedMessages = inspectedResult?.messages
 
-      if (!inspectedMessages || inspectedMessages.length === 0) {
+      if (
+        (!inspectedMessages || inspectedMessages.length === 0) &&
+        !inspectedResult?.goalState
+      ) {
         if (
           managed &&
           !managed.isProcessing &&
@@ -3262,7 +3299,9 @@ export class SessionManager implements ISessionManager {
           (managed.isProcessing || !this.hasNoRenderableLocalMessages(managed))
         )
       }
-      title = this.extractMessagePreview(inspectedMessages) ?? title
+      if (inspectedMessages?.length) {
+        title = this.extractMessagePreview(inspectedMessages) ?? title
+      }
     }
 
     if (managed) {
@@ -3293,6 +3332,7 @@ export class SessionManager implements ISessionManager {
         'provider-native session inspection',
       )
       this.applyTokenUsageFromMessagesResult(managed, inspectedResult)
+      await this.applyGoalStateFromMessagesResult(managed, inspectedResult)
       const inspectedMessages = inspectedResult?.messages
       if (inspectedMessages?.length) {
         this.applyLoadedExternalMessages(managed, inspectedMessages)
@@ -3342,8 +3382,6 @@ export class SessionManager implements ISessionManager {
         : storedSessionBase
     ) as StoredSessionWithHeaderOptions
 
-    await saveStoredSession(storedSession)
-
     const storedMetadata = pickSessionFields(storedSession) as {
       id: string
     } & Partial<ManagedSession>
@@ -3375,6 +3413,11 @@ export class SessionManager implements ISessionManager {
     if (inspectedMessages?.length) {
       this.applyLoadedExternalMessages(imported, inspectedMessages)
       this.markExternalMessagesLoadedThrough(imported)
+    }
+    if (inspectedResult?.goalState) {
+      await this.applyGoalStateFromMessagesResult(imported, inspectedResult)
+    } else {
+      await saveStoredSession(storedSession)
     }
     this.sessions.set(imported.id, imported)
     setPermissionMode(imported.id, defaultPermissionMode, {
@@ -3422,46 +3465,52 @@ export class SessionManager implements ISessionManager {
     return removed
   }
 
+  private buildStoredSession(
+    managed: ManagedSession,
+  ): StoredSessionWithHeaderOptions | undefined {
+    const usesQwenCanonicalMessages =
+      this.isQwenCanonicalMessageSession(managed)
+    // Filter out transient status messages (progress indicators like "Compacting...")
+    // Error messages are now persisted with rich fields for diagnostics
+    const persistableMessages = usesQwenCanonicalMessages
+      ? qwenCanonicalLocalVisualMessages(managed.messages)
+      : managed.messages.filter((m) => m.role !== 'status')
+    // If messages haven't been loaded yet (e.g., branched session not yet opened),
+    // skip persistence to avoid overwriting JSONL messages with empty array
+    if (!managed.messagesLoaded && !usesQwenCanonicalMessages) return undefined
+
+    const storedSessionBase: StoredSession = {
+      ...pickSessionFields(managed),
+      workspaceRootPath: managed.workspace.rootPath,
+      createdAt: managed.createdAt ?? Date.now(),
+      lastUsedAt: usesQwenCanonicalMessages
+        ? (managed.lastUsedAt ??
+          managed.lastMessageAt ??
+          managed.createdAt ??
+          Date.now())
+        : Date.now(),
+      messages: persistableMessages.map(messageToStored),
+      tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
+    } as StoredSession
+    return (
+      usesQwenCanonicalMessages
+        ? {
+            ...stripQwenCanonicalStoredFields(storedSessionBase),
+            omitMessageDerivedHeaderFields: true,
+            omitTranscriptDerivedHeaderFields: true,
+            omitHeaderTokenUsage: true,
+            preserveSessionTimestamps: true,
+          }
+        : storedSessionBase
+    ) as StoredSessionWithHeaderOptions
+  }
+
   // Persist a session to disk (async with debouncing)
   private persistSession(managed: ManagedSession): void {
+    if (this.goalStateApplyingIds.has(managed.id)) return
     try {
-      const usesQwenCanonicalMessages =
-        this.isQwenCanonicalMessageSession(managed)
-      // Filter out transient status messages (progress indicators like "Compacting...")
-      // Error messages are now persisted with rich fields for diagnostics
-      const persistableMessages = usesQwenCanonicalMessages
-        ? qwenCanonicalLocalVisualMessages(managed.messages)
-        : managed.messages.filter((m) => m.role !== 'status')
-      // If messages haven't been loaded yet (e.g., branched session not yet opened),
-      // skip persistence to avoid overwriting JSONL messages with empty array
-      if (!managed.messagesLoaded && !usesQwenCanonicalMessages) {
-        return
-      }
-
-      const storedSessionBase: StoredSession = {
-        ...pickSessionFields(managed),
-        workspaceRootPath: managed.workspace.rootPath,
-        createdAt: managed.createdAt ?? Date.now(),
-        lastUsedAt: usesQwenCanonicalMessages
-          ? (managed.lastUsedAt ??
-            managed.lastMessageAt ??
-            managed.createdAt ??
-            Date.now())
-          : Date.now(),
-        messages: persistableMessages.map(messageToStored),
-        tokenUsage: managed.tokenUsage ?? DEFAULT_TOKEN_USAGE,
-      } as StoredSession
-      const storedSession = (
-        usesQwenCanonicalMessages
-          ? {
-              ...stripQwenCanonicalStoredFields(storedSessionBase),
-              omitMessageDerivedHeaderFields: true,
-              omitTranscriptDerivedHeaderFields: true,
-              omitHeaderTokenUsage: true,
-              preserveSessionTimestamps: true,
-            }
-          : storedSessionBase
-      ) as StoredSessionWithHeaderOptions
+      const storedSession = this.buildStoredSession(managed)
+      if (!storedSession) return
 
       // Queue for async persistence with debouncing
       sessionPersistenceQueue.enqueue(storedSession)
@@ -3471,6 +3520,58 @@ export class SessionManager implements ISessionManager {
         error,
       )
     }
+  }
+
+  private applyGoalState(
+    managed: ManagedSession,
+    snapshot: GoalSnapshotV2,
+  ): Promise<void> {
+    this.goalStateApplyingIds.add(managed.id)
+    const previous = this.goalStateApplyTails.get(managed.id) ?? Promise.resolve()
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const projected = structuredClone(snapshot)
+        if (
+          JSON.stringify(managed.goalState) === JSON.stringify(projected)
+        ) {
+          return
+        }
+
+        const candidate = { ...managed, goalState: projected } as ManagedSession
+        const storedSession = this.buildStoredSession(candidate)
+        if (!storedSession) {
+          throw new Error(
+            `Cannot persist Goal state for session ${managed.id} before projection`,
+          )
+        }
+
+        sessionPersistenceQueue.enqueue(storedSession)
+        await sessionPersistenceQueue.flushOrThrow(managed.id)
+        managed.goalState = projected
+        this.sendEvent(
+          {
+            type: 'goal_state',
+            sessionId: managed.id,
+            snapshot: structuredClone(projected),
+          },
+          managed.workspace.id,
+        )
+      })
+
+    this.goalStateApplyTails.set(managed.id, next)
+    void next
+      .finally(() => {
+        if (this.goalStateApplyTails.get(managed.id) === next) {
+          this.goalStateApplyTails.delete(managed.id)
+          this.goalStateApplyingIds.delete(managed.id)
+          if (this.sessions.get(managed.id) === managed) {
+            this.persistSession(managed)
+          }
+        }
+      })
+      .catch(() => undefined)
+    return next
   }
 
   // Flush a specific session immediately (call on session close/switch)
@@ -4231,6 +4332,7 @@ export class SessionManager implements ISessionManager {
         'provider-native message load',
       )
       this.applyTokenUsageFromMessagesResult(managed, result)
+      await this.applyGoalStateFromMessagesResult(managed, result)
 
       const messages = result.messages
       if (messages.length === 0) {
@@ -5186,6 +5288,9 @@ export class SessionManager implements ISessionManager {
           managed.workspace.id,
         )
       }
+
+      managed.agent.onGoalStateChange = (snapshot) =>
+        this.applyGoalState(managed, snapshot)
 
       // Run post-init (auth injection) — each backend handles its own
       const postInitResult = await managed.agent.postInit()
@@ -7026,6 +7131,33 @@ export class SessionManager implements ISessionManager {
       })
       this.emitUnreadSummaryChanged()
     }
+  }
+
+  async getSessionGoalState(
+    sessionId: string,
+  ): Promise<GoalSnapshotV2 | undefined> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+
+    const agent = await this.getOrCreateAgent(managed)
+    if (!canManageGoal(agent)) {
+      throw new Error('This session backend does not support Goals')
+    }
+    return agent.getGoalState()
+  }
+
+  async controlSessionGoal(
+    sessionId: string,
+    request: GoalControlRequest,
+  ): Promise<GoalStateResponse> {
+    const managed = this.sessions.get(sessionId)
+    if (!managed) throw new Error(`Session ${sessionId} not found`)
+
+    const agent = await this.getOrCreateAgent(managed)
+    if (!canManageGoal(agent)) {
+      throw new Error('This session backend does not support Goals')
+    }
+    return agent.controlGoal(request)
   }
 
   /**
@@ -10853,6 +10985,10 @@ export class SessionManager implements ISessionManager {
     const workspaceId = managed.workspace.id
 
     switch (event.type) {
+      case 'goal_state':
+        await this.applyGoalState(managed, event.snapshot)
+        break
+
       case 'text_delta':
         managed.streamingText += event.text
         // Queue delta for batched sending (performance: reduces IPC from 50+/sec to ~20/sec)

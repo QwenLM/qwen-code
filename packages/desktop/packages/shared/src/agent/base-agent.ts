@@ -28,7 +28,10 @@ import { buildCallLlmRequest, type LLMQueryRequest, type LLMQueryResult } from '
 import { getLlmConnections, getDefaultLlmConnection } from '../config/storage.ts';
 import { loadAllSources } from '../sources/storage.ts';
 import type { ApiServerConfig } from '../mcp/mcp-pool.ts';
-import type { PermissionResponseOptions } from '../protocol/dto.ts';
+import type {
+  GoalSnapshotV2,
+  PermissionResponseOptions,
+} from '../protocol/dto.ts';
 
 import type {
   AgentBackend,
@@ -248,6 +251,9 @@ export abstract class BaseAgent implements AgentBackend {
   onSourceActivationRequest: SourceActivationCallback | null = null;
   onUsageUpdate: ((update: UsageUpdate) => void) | null = null;
   onBackendAuthRequired: ((reason: string) => void) | null = null;
+  onGoalStateChange:
+    | ((snapshot: GoalSnapshotV2) => void | Promise<void>)
+    | null = null;
   onSpawnSession: ((request: SpawnSessionRequest) => Promise<SpawnSessionResult>) | null = null;
 
   // ============================================================

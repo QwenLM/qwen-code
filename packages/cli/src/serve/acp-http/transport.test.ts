@@ -382,6 +382,48 @@ class FakeBridge {
   async getSessionTasksStatus(sessionId: string) {
     return { sessionId, tasks: [] };
   }
+  goalState = {
+    v: 2 as const,
+    activity: 'running' as const,
+    goal: {
+      goalId: 'goal-1',
+      revision: 3,
+      objective: 'ship it',
+      status: 'active' as const,
+      evidenceCursor: { recordId: 'record-1' },
+      turnCount: 2,
+      activeTimeMs: 4000,
+      createdAt: 1000,
+      updatedAt: 2000,
+    },
+  };
+  goalStateUnavailable = false;
+  lastGoalControl: unknown;
+  goalControlError: unknown;
+  async getSessionGoal() {
+    return this.goalStateUnavailable
+      ? { active: null }
+      : {
+          active: {
+            condition: 'ship it',
+            iterations: 2,
+            setAt: 1000,
+          },
+          goalState: this.goalState,
+        };
+  }
+  async controlSessionGoal(
+    sessionId: string,
+    request: unknown,
+    context: unknown,
+  ) {
+    this.lastGoalControl = { sessionId, request, context };
+    if (this.goalControlError !== undefined) throw this.goalControlError;
+    return { snapshot: this.goalState };
+  }
+  async clearSessionGoal() {
+    return { cleared: true, condition: 'ship it' };
+  }
   async getSessionLspStatus(sessionId: string) {
     return {
       v: 1,
@@ -6174,6 +6216,155 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
         result: { sessionId: 'sess-1', tasks: [] },
+      });
+    });
+
+    it('_qwen/session/goal returns the authoritative v2 snapshot', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/goal',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { snapshot: bridge.goalState },
+      });
+    });
+
+    it('_qwen/session/goal reports an unavailable v2 child as HTTP 503 metadata', async () => {
+      bridge.goalStateUnavailable = true;
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 581,
+        method: '_qwen/session/goal',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          data: {
+            errorKind: 'goal_state_unavailable',
+            httpStatus: 503,
+          },
+        },
+      });
+    });
+
+    it('_qwen/session/goal/control applies the exact request as the owner', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      const request = {
+        action: 'pause',
+        expectedGoalId: 'goal-1',
+        expectedRevision: 3,
+      };
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/goal/control',
+        params: { sessionId: 'sess-1', request },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { snapshot: bridge.goalState },
+      });
+      expect(bridge.lastGoalControl).toMatchObject({
+        sessionId: 'sess-1',
+        request,
+        context: { clientId: 'client-1' },
+      });
+    });
+
+    it('_qwen/session/goal/control preserves Goal conflicts', async () => {
+      bridge.goalControlError = Object.assign(new Error('stale Goal'), {
+        data: {
+          errorKind: 'goal_conflict',
+          current: bridge.goalState,
+        },
+      });
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/goal/control',
+        params: {
+          sessionId: 'sess-1',
+          request: {
+            action: 'pause',
+            expectedGoalId: 'goal-1',
+            expectedRevision: 2,
+          },
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          data: {
+            errorKind: 'goal_conflict',
+            current: bridge.goalState,
+          },
+        },
+      });
+    });
+
+    it('_qwen/session/goal/clear keeps the child atomic clear wrapper', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/goal/clear',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { cleared: true, condition: 'ship it' },
       });
     });
 
