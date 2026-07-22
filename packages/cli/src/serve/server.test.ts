@@ -151,6 +151,10 @@ import {
   resetTrustedFoldersForTesting,
   TRUSTED_FOLDERS_FILENAME,
 } from '../config/trustedFolders.js';
+import {
+  createVirtualSubagentSessionId,
+  VirtualSubagentSessions,
+} from './virtual-subagent-sessions.js';
 
 // ── Worktree mock infrastructure ────────────────────────────────────
 // GitWorktreeService's constructor calls simpleGit() which validates
@@ -478,8 +482,10 @@ const EXPECTED_REGISTERED_FEATURES = [
   'multi_workspace_sessions',
   'multi_workspace_session_rewind',
   'multi_workspace_session_shell',
+  'dynamic_workspace_registration',
   'persistent_workspace_registration',
   'workspace_display_name',
+  'scratch_workspace_registration',
   'workspace_runtime_removal',
   'workspace_qualified_rest_core',
   'workspace_qualified_voice',
@@ -2156,15 +2162,6 @@ describe('detectFromLoopback (#4335 / 3272581557)', () => {
   });
 });
 
-function abortableBridgePromptImpl(): FakeBridgeOpts['promptImpl'] {
-  return (_sid, _req, signal) =>
-    new Promise((resolve) => {
-      const onAbort = () => resolve({ stopReason: 'cancelled' });
-      if (signal?.aborted) onAbort();
-      else signal?.addEventListener('abort', onAbort, { once: true });
-    });
-}
-
 describe('createServeApp', () => {
   it('rejects client-MCP over WS with an injected bridge but no matching sender registry', () => {
     expect(() =>
@@ -2500,6 +2497,21 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'dynamic_workspace_registration') {
+          expect(
+            predicate({ dynamicWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ dynamicWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              dynamicWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
+          continue;
+        }
         if (feature === 'persistent_workspace_registration') {
           expect(
             predicate({ persistentWorkspaceRegistrationAvailable: true }),
@@ -2516,6 +2528,21 @@ describe('createServeApp', () => {
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
             feature,
           );
+          continue;
+        }
+        if (feature === 'scratch_workspace_registration') {
+          expect(
+            predicate({ scratchWorkspaceRegistrationAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ scratchWorkspaceRegistrationAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              scratchWorkspaceRegistrationAvailable: true,
+            }),
+          ).toContain(feature);
           continue;
         }
         if (feature === 'workspace_runtime_removal') {
@@ -3096,6 +3123,7 @@ describe('createServeApp', () => {
       const app = createServeApp(baseOpts, undefined, {
         bridge: primaryBridge,
         workspaceRegistry: registry,
+        createWorkspaceRuntime: vi.fn(),
         workspaceRegistrationStore: {} as unknown as WorkspaceRegistrationStore,
       });
 
@@ -3105,6 +3133,10 @@ describe('createServeApp', () => {
       expect(before.status).toBe(200);
       expect(before.body.features).toContain(
         'persistent_workspace_registration',
+      );
+      expect(before.body.features).toContain('dynamic_workspace_registration');
+      expect(before.body.features).not.toContain(
+        'scratch_workspace_registration',
       );
       expect(before.body.features).not.toContain('multi_workspace_sessions');
       expect(before.body.workspaces).toEqual([
@@ -3130,6 +3162,52 @@ describe('createServeApp', () => {
       expect(after.status).toBe(200);
       expect(after.body.features).toContain('multi_workspace_sessions');
       expect(after.body.workspaces).toHaveLength(2);
+    });
+
+    it('advertises scratch only with a compatible root and complete disposal owner', async () => {
+      const primaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'primary-id',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+      ]);
+      const app = createServeApp(baseOpts, undefined, {
+        bridge: primaryBridge,
+        workspaceRegistry: registry,
+        createWorkspaceRuntime: vi.fn(),
+        managedScratchRoot: {
+          canonicalRoot: '/managed-scratch',
+          device: 1,
+          inode: 1,
+        },
+        workspaceRuntimeRemoval: {},
+        voiceCoordinator: {},
+      } as Parameters<typeof createServeApp>[2]);
+
+      const supported = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(supported.body.features).toContain(
+        'scratch_workspace_registration',
+      );
+
+      registry.add(
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'conflict',
+          workspaceCwd: '/managed-scratch/project',
+          primary: false,
+          bridge: fakeBridge(),
+        }),
+      );
+      const conflicted = await request(app)
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(conflicted.body.features).not.toContain(
+        'scratch_workspace_registration',
+      );
     });
 
     it('advertises workspace voice transcription when a batch ASR model is configured', async () => {
@@ -7337,6 +7415,142 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('resolves and cancels a virtual subagent through its routes', async () => {
+      const bridge = fakeBridge({
+        cancelSessionTaskImpl: async () => ({ cancelled: true }),
+      });
+      const resolveSpy = vi
+        .spyOn(VirtualSubagentSessions.prototype, 'resolve')
+        .mockResolvedValue({
+          sessionId: createVirtualSubagentSessionId('s-1', 'agent-1'),
+          taskId: 'agent-1',
+          title: 'Investigate',
+          status: 'running',
+        });
+      const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+      const app = createServeApp(
+        { ...tokenOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      try {
+        const resolveRes = await request(app)
+          .get('/session/s-1/subagents/tool-1')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+        const cancelRes = await request(app)
+          .post('/session/s-1/subagents/tool-1/cancel')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret');
+
+        expect(resolveRes.status).toBe(200);
+        expect(resolveRes.headers['cache-control']).toBe('no-store');
+        expect(resolveRes.body).toMatchObject({
+          taskId: 'agent-1',
+          status: 'running',
+        });
+        expect(cancelRes.status).toBe(200);
+        expect(cancelRes.body).toEqual({ cancelled: true });
+        expect(resolveSpy).toHaveBeenCalledTimes(2);
+        expect(resolveSpy.mock.calls[0]?.slice(1)).toEqual(['s-1', 'tool-1']);
+        expect(resolveSpy.mock.calls[1]?.slice(1)).toEqual(['s-1', 'tool-1']);
+        expect(bridge.cancelSessionTaskCalls).toEqual([
+          { sessionId: 's-1', taskId: 'agent-1', taskKind: 'agent' },
+        ]);
+      } finally {
+        resolveSpy.mockRestore();
+      }
+    });
+
+    it('requires the parent runtime for virtual heartbeat and detach', async () => {
+      const primaryBridge = fakeBridge();
+      const secondaryBridge = fakeBridge();
+      const registry = createWorkspaceRegistry([
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-primary',
+          workspaceCwd: WS_BOUND,
+          primary: true,
+          bridge: primaryBridge,
+        }),
+        makeWorkspaceRuntimeForTest({
+          workspaceId: 'ws-secondary',
+          workspaceCwd: WS_DIFFERENT,
+          primary: false,
+          bridge: secondaryBridge,
+        }),
+      ]);
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { workspaceRegistry: registry },
+      );
+      const sessionId = createVirtualSubagentSessionId(
+        'missing-parent',
+        'agent-1',
+      );
+
+      const heartbeat = await request(app)
+        .post(`/session/${sessionId}/heartbeat`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+      const detach = await request(app)
+        .post(`/session/${sessionId}/detach`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(heartbeat.status).toBe(404);
+      expect(heartbeat.body.sessionId).toBe('missing-parent');
+      expect(detach.status).toBe(404);
+      expect(detach.body.sessionId).toBe('missing-parent');
+    });
+
+    it('serves virtual session stubs without calling the parent bridge', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const sessionId = createVirtualSubagentSessionId('s-1', 'agent-1');
+
+      const context = await request(app)
+        .get(`/session/${sessionId}/context`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const commands = await request(app)
+        .get(`/session/${sessionId}/supported-commands`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      const heartbeat = await request(app)
+        .post(`/session/${sessionId}/heartbeat`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('X-Qwen-Client-Id', 'detail-client')
+        .send({});
+
+      expect(context.status).toBe(200);
+      expect(context.body).toEqual({
+        v: 1,
+        sessionId,
+        workspaceCwd: WS_BOUND,
+        state: {},
+      });
+      expect(commands.status).toBe(200);
+      expect(commands.body).toEqual({
+        v: 1,
+        sessionId,
+        availableCommands: [],
+        availableSkills: [],
+      });
+      expect(heartbeat.status).toBe(200);
+      expect(heartbeat.body).toMatchObject({
+        sessionId,
+        clientId: 'detail-client',
+      });
+      expect(heartbeat.body.lastSeenAt).toEqual(expect.any(Number));
+      expect(bridge.sessionContextCalls).toEqual([]);
+      expect(bridge.sessionSupportedCommandsCalls).toEqual([]);
+      expect(bridge.heartbeatCalls).toEqual([]);
+    });
+
     it('maps task cancellation bridge errors', async () => {
       const bridge = fakeBridge({
         cancelSessionTaskImpl: async (sessionId) => {
@@ -8321,6 +8535,29 @@ describe('createServeApp', () => {
   });
 
   describe('POST /session/:id/load and /resume', () => {
+    it('reports resume as unsupported for virtual subagent sessions', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      const sessionId = createVirtualSubagentSessionId('parent-1', 'agent-1');
+
+      const res = await request(app)
+        .post(`/session/${sessionId}/resume`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        error: 'Virtual subagent sessions do not support resume',
+        code: 'unsupported_action',
+        sessionId,
+      });
+      expect(bridge.resumeCalls).toEqual([]);
+    });
+
     it('passes the requested initial history page size to load', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(
@@ -19746,6 +19983,56 @@ describe('GET /session/:id/events (SSE)', () => {
     expect(JSON.parse(frames[1]!.data!)).not.toHaveProperty('promptId');
   });
 
+  it('streams virtual subagent events without subscribing to the parent session', async () => {
+    const bridge = fakeBridge({
+      subscribeImpl: () => {
+        throw new Error('parent bridge must not be subscribed');
+      },
+    });
+    const subscribeSpy = vi
+      .spyOn(VirtualSubagentSessions.prototype, 'subscribe')
+      .mockResolvedValue(
+        (async function* () {
+          yield {
+            id: 1,
+            v: 1,
+            type: 'session_update',
+            data: { source: 'subagent' },
+          } satisfies BridgeEvent;
+          await new Promise(() => {});
+        })(),
+      );
+    handle = await runQwenServe(
+      { hostname: '127.0.0.1', port: 0, mode: 'http-bridge' },
+      { bridge },
+    );
+    const port = (handle.server.address() as { port: number }).port;
+    const sessionId = createVirtualSubagentSessionId('parent-1', 'agent-1');
+
+    try {
+      const res = await fetch(
+        `http://127.0.0.1:${port}/session/${sessionId}/events?maxQueued=32`,
+        { headers: { 'Last-Event-ID': '7' } },
+      );
+      expect(res.status).toBe(200);
+
+      const frames = await readSseFrames(res.body!, 1);
+
+      expect(JSON.parse(frames[0]!.data!)).toMatchObject({
+        id: 1,
+        data: { source: 'subagent' },
+      });
+      expect(subscribeSpy).toHaveBeenCalledTimes(1);
+      expect(subscribeSpy.mock.calls[0]?.[1]).toBe(sessionId);
+      expect(subscribeSpy.mock.calls[0]?.[2]).toMatchObject({
+        lastEventId: 7,
+        maxQueued: 32,
+      });
+    } finally {
+      subscribeSpy.mockRestore();
+    }
+  });
+
   it('stamps _meta.serverTimestamp on every SSE frame (#4175 F4 prereq, chiga0 #19 P0)', async () => {
     // The daemon stamps `_meta.serverTimestamp` so multi-client UIs
     // use the server clock for transcript ordering / "X minutes ago"
@@ -22219,20 +22506,15 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       },
     );
 
-    it('returns cleanly when client disconnects in the same tick the deadline fires (wenshao review #3)', async () => {
-      // Critical regression from wenshao's CHANGES_REQUESTED on #4530:
-      // when `res.writableEnded` was true at the moment the deadline
-      // rejection surfaced, the early code `if (err instanceof
-      // PromptDeadlineExceededError && !res.writableEnded) { ...
-      // return; }` would skip BOTH the body AND the return, fall
-      // through to `sendBridgeError`, and try to write 500 to an
-      // already-ended response → ERR_STREAM_WRITE_AFTER_END.
-      //
-      // We force the race by destroying the client socket
-      // immediately after the bridge starts the prompt, so by the
-      // time the 50ms deadline fires the response is already ended.
-      // The route MUST handle this without throwing — assertion is
-      // implicit: a thrown uncaughtException would fail the test.
+    it('returns cleanly when client disconnects right after admission (wenshao review #3)', async () => {
+      // Historic regression from wenshao's CHANGES_REQUESTED on #4530:
+      // the route-side deadline rejection used to race `res.writableEnded`
+      // and write 500 to an already-ended response →
+      // ERR_STREAM_WRITE_AFTER_END. The deadline timer has since moved
+      // into the bridge (DAEMON-003), but the socket-destroy-after-202
+      // scenario stays as a regression guard: the route MUST handle the
+      // disconnect without throwing — assertion is implicit: a thrown
+      // uncaughtException would fail the test.
       let promptStarted: (() => void) | undefined;
       const promptStartedPromise = new Promise<void>((r) => {
         promptStarted = r;
@@ -22282,10 +22564,11 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         // block to handle the race.
         await new Promise((r) => setTimeout(r, 200));
         expect(bridge.promptCalls).toHaveLength(1);
-        // The bridge's signal MUST still have been aborted with the
-        // typed reason — the cleanup path still runs even though the
-        // response was already ended.
-        expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
+        // The deadline race now lives in the bridge: after admission the
+        // route neither arms a timer nor aborts the signal, it only
+        // forwards the effective deadline via `context.deadlineMs`.
+        expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
+        expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
       } finally {
         await localHandle.close();
       }
@@ -22309,12 +22592,16 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
     });
 
-    it('fires the server-side deadline and aborts the bridge signal', async () => {
-      // 50ms server deadline + a prompt that resolves only on abort:
-      // the deadline timer must abort the AbortController. With non-
-      // blocking prompt the HTTP response is always 202; the deadline
-      // outcome is delivered via `turn_error` on the SSE bus.
-      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+    it('forwards the server-side deadline to the bridge via context.deadlineMs', async () => {
+      // The bridge owns the deadline race (DAEMON-003): the route only
+      // resolves the effective deadline and passes it through the
+      // sendPrompt context. With non-blocking prompt the HTTP response
+      // is always 202; the deadline outcome (`turn_error` with code
+      // `prompt_deadline_exceeded`) is published by the bridge and is
+      // covered by bridge.test.ts.
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise(() => {}),
+      });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 50 },
         undefined,
@@ -22327,13 +22614,9 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       expect(res.status).toBe(202);
       expect(res.body).toHaveProperty('promptId');
       expect(res.body).toHaveProperty('lastEventId');
-      // Wait for the deadline timer to fire asynchronously.
-      await new Promise((r) => setTimeout(r, 200));
       expect(bridge.promptCalls).toHaveLength(1);
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
     });
 
     it('strips route-only deadlineMs before forwarding the prompt body', async () => {
@@ -22367,10 +22650,11 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
     });
 
     it('caps a per-prompt `deadlineMs` override at the server flag', async () => {
-      // Server flag 50ms, request asks for 5000ms — effective deadline
-      // must be 50ms. With non-blocking prompt the HTTP response is
-      // always 202; we verify the abort signal fires within ~50ms.
-      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+      // Server flag 50ms, request asks for 5000ms — the effective
+      // deadline forwarded to the bridge must be min(server, request).
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise(() => {}),
+      });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 50 },
         undefined,
@@ -22384,17 +22668,16 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
           deadlineMs: 5_000,
         });
       expect(res.status).toBe(202);
-      await new Promise((r) => setTimeout(r, 200));
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
     });
 
     it('uses the per-prompt override when shorter than the server flag', async () => {
       // Server flag 10s, request 30ms — request wins as the tighter
-      // bound. Abort signal should fire within ~30ms.
-      const bridge = fakeBridge({ promptImpl: abortableBridgePromptImpl() });
+      // bound; the bridge receives the request value.
+      const bridge = fakeBridge({
+        promptImpl: () => new Promise(() => {}),
+      });
       const app = createServeApp(
         { ...baseOpts, promptDeadlineMs: 10_000 },
         undefined,
@@ -22408,17 +22691,15 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
           deadlineMs: 30,
         });
       expect(res.status).toBe(202);
-      await new Promise((r) => setTimeout(r, 200));
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(30);
     });
 
-    it('still aborts the signal when the bridge IGNORES the abort (non-cooperative bridge)', async () => {
-      // With non-blocking prompt the HTTP response is always 202. The
-      // deadline timer must still fire and abort the signal so the
-      // bridge can observe it, even if it ignores the abort.
+    it('never aborts the bridge signal from a route-side timer (deadline owned by the bridge)', async () => {
+      // Regression guard for the DAEMON-003 timer migration: even well
+      // past the configured deadline the route must NOT abort the
+      // signal — deadline enforcement (terminal publication, FIFO
+      // release, best-effort agent cancel) is the bridge's job.
       const bridge = fakeBridge({
         promptImpl: () => new Promise(() => {}),
       });
@@ -22433,10 +22714,8 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .send({ prompt: [{ type: 'text', text: 'slow' }] });
       expect(res.status).toBe(202);
       await new Promise((r) => setTimeout(r, 200));
-      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(true);
-      expect(bridge.promptCalls[0]?.signal?.reason).toBeInstanceOf(
-        PromptDeadlineExceededError,
-      );
+      expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(50);
     });
 
     it('returns 202 without deadline when the flag is unset', async () => {
@@ -22451,10 +22730,14 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
       expect(res.status).toBe(202);
       expect(res.body).toHaveProperty('promptId');
       expect(res.body).toHaveProperty('lastEventId');
+      expect(bridge.promptCalls).toHaveLength(1);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBeUndefined();
     });
 
-    it('does not fire the deadline when the prompt resolves promptly', async () => {
-      // 5s deadline + immediate resolve: the timer must not fire.
+    it('forwards the deadline even when the prompt resolves promptly', async () => {
+      // 5s deadline + immediate resolve: the route passes the deadline
+      // through unconditionally; the bridge clears its own timer when
+      // the prompt settles (covered by bridge.test.ts).
       const bridge = fakeBridge({
         promptImpl: async () => ({ stopReason: 'end_turn' }),
       });
@@ -22469,9 +22752,21 @@ describe('T2.9 prompt absolute deadline (issue #4514)', () => {
         .send({ prompt: [{ type: 'text', text: 'hi' }] });
       expect(res.status).toBe(202);
       expect(res.body).toHaveProperty('promptId');
-      // Give enough time for a timer to fire if it were going to.
+      // Give enough time for a stray route-side timer to fire if one
+      // still existed.
       await new Promise((r) => setTimeout(r, 100));
       expect(bridge.promptCalls[0]?.signal?.aborted).toBe(false);
+      expect(bridge.promptCalls[0]?.context?.deadlineMs).toBe(5_000);
+    });
+
+    it('keeps re-exporting PromptDeadlineExceededError after the bridge migration', () => {
+      // The class definition moved into acp-bridge (DAEMON-003); the
+      // server module must keep exporting it so SDK consumers and
+      // `instanceof` checks across the package boundary stay intact.
+      const err = new PromptDeadlineExceededError(75);
+      expect(err).toBeInstanceOf(Error);
+      expect(err.name).toBe('PromptDeadlineExceededError');
+      expect(err.deadlineMs).toBe(75);
     });
   });
 

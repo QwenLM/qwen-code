@@ -11,9 +11,6 @@ import * as fsPromises from 'node:fs/promises';
 import * as path from 'node:path';
 import process from 'node:process';
 
-// External dependencies
-import { EnvHttpProxyAgent, setGlobalDispatcher } from 'undici';
-
 // Types
 import type {
   ContentGenerator,
@@ -168,6 +165,7 @@ import { WorkspaceContext } from '../utils/workspaceContext.js';
 import { type ToolName } from '../utils/tool-utils.js';
 import { FatalConfigError, getErrorMessage } from '../utils/errors.js';
 import { normalizeProxyUrl } from '../utils/proxyUtils.js';
+import { loadUndici, redactProxyError } from '../utils/runtimeFetchOptions.js';
 
 // Local config modules
 import type { FileFilteringOptions } from './constants.js';
@@ -241,9 +239,11 @@ import {
   type ModelProvidersConfig,
   type ProviderProtocolConfig,
   type AvailableModel,
+  type ResolvedModelConfig,
   type RuntimeModelSnapshot,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
+import type { WebSearchSettings } from '../tools/web-search.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
 export function parseVisionModelSetting(setting: string | undefined):
@@ -1191,6 +1191,16 @@ export interface ConfigParameters {
    */
   fastModel?: string;
   /**
+   * Built-in WebSearch tool settings (`tools.webSearch` / ENABLE_WEB_SEARCH +
+   * WEB_SEARCH_MODEL env overrides). The tool registers only when `enabled`
+   * is true and `model` resolves to a DashScope-compatible modelProviders
+   * entry carrying a direct API key — or, for environments that cannot write
+   * settings.json, when an env-declared backend is supplied (`baseUrl` from
+   * WEB_SEARCH_BASE_URL, `apiKeyEnv` naming the key variable), which takes
+   * precedence over modelProviders resolution.
+   */
+  webSearch?: WebSearchSettings;
+  /**
    * Safe mode: disables all user customizations (context files, hooks,
    * extensions, skills, MCP servers, rules) for troubleshooting.
    * Activated via `--safe-mode` CLI flag or `QWEN_CODE_SAFE_MODE=true` env var.
@@ -1833,6 +1843,7 @@ export class Config {
     rule: string,
   ) => Promise<void>;
   private initialized: boolean = false;
+  private proxyDispatcherReady?: Promise<void>;
   storage: Storage;
   private runtimeStatusWrite: Promise<void> = Promise.resolve();
   private readonly fileExclusions: FileExclusions;
@@ -1863,6 +1874,8 @@ export class Config {
   private readonly autoSkillConfirm: boolean;
   private readonly memoryAgentTimeoutMinutes: number | undefined;
   private fastModel?: string;
+  private readonly webSearchSettings?: WebSearchSettings;
+  private webSearchNoticeEmitted = false;
   private visionModel?: string;
   private readonly visionBridgeTimeoutMs: number | undefined;
   private readonly modelFallbacks: string[];
@@ -2222,9 +2235,32 @@ export class Config {
       // `--proxy` / `settings.proxy` value (resolved by `getProxy()`)
       // overrides env `http(s)_proxy`; `NO_PROXY` continues to come from the
       // environment. See issue #3696 (local MCP + corporate proxy).
-      setGlobalDispatcher(
-        new EnvHttpProxyAgent({ httpProxy: proxyUrl, httpsProxy: proxyUrl }),
-      );
+      //
+      // undici loads behind a dynamic import to keep it out of the eager
+      // startup closure (issue #7264); initialize() awaits this promise so
+      // the dispatcher is installed before any network activity.
+      this.proxyDispatcherReady = loadUndici()
+        .then(({ EnvHttpProxyAgent, setGlobalDispatcher }) => {
+          setGlobalDispatcher(
+            new EnvHttpProxyAgent({
+              httpProxy: proxyUrl,
+              httpsProxy: proxyUrl,
+            }),
+          );
+        })
+        .catch((error) => {
+          // Redact before logging: the error can embed the proxy URL with
+          // credentials. Rethrow so initialize() fails loudly, matching the
+          // old synchronous constructor behavior.
+          this.debugLogger.error(
+            'Failed to install proxy dispatcher:',
+            redactProxyError(error),
+          );
+          throw error;
+        });
+      // Swallow an early rejection so it cannot become an unhandledRejection
+      // before initialize() awaits (and surfaces) the stored promise.
+      this.proxyDispatcherReady.catch(() => {});
     }
     this.geminiClient = new GeminiClient(this);
     this.chatRecordingService = this.chatRecordingEnabled
@@ -2251,6 +2287,7 @@ export class Config {
         ? params.memoryAgentTimeoutMinutes
         : undefined;
     this.fastModel = params.fastModel || undefined;
+    this.webSearchSettings = params.webSearch;
     this.visionModel = params.visionModel || undefined;
     // Guard: nothing validates settings.json on the load path, so this is the
     // only real gate. `AbortSignal.timeout()` requires an integer in
@@ -2316,6 +2353,7 @@ export class Config {
     options?: ConfigInitializeOptions,
   ): Promise<void> {
     this.debugLogger.info('Config initialization started');
+    await this.proxyDispatcherReady;
     if (options?.skipFileCheckpointing === true) {
       this.fileCheckpointingEnabled = false;
       this.fileHistoryService = undefined;
@@ -3603,6 +3641,14 @@ export class Config {
       : selector.modelId;
   }
 
+  /**
+   * Settings for the built-in WebSearch tool. Undefined when the feature was
+   * never configured.
+   */
+  getWebSearchSettings(): WebSearchSettings | undefined {
+    return this.webSearchSettings;
+  }
+
   private resolveFastModelSelector() {
     if (!this.fastModel) return undefined;
     try {
@@ -3995,6 +4041,19 @@ export class Config {
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
     return this.modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
+   * Get the fully resolved provider model config (generationConfig defaults
+   * applied) for a specific modelProviders entry.
+   * Delegates to ModelsConfig.
+   */
+  getResolvedModelConfig(
+    authType: AuthType,
+    modelId: string,
+    baseUrl?: string,
+  ): ResolvedModelConfig | undefined {
+    return this.modelsConfig.getResolvedModel(authType, modelId, baseUrl);
   }
 
   /**
@@ -6854,6 +6913,23 @@ export class Config {
       const { WebFetchTool } = await import('../tools/web-fetch.js');
       return new WebFetchTool(this);
     });
+    // WebSearch is opt-in: it registers only when explicitly enabled AND the
+    // configured search model resolves to a usable DashScope entry. A failed
+    // gate surfaces a one-time startup notice instead of a silently missing
+    // tool. Nothing is imported unless the feature is enabled.
+    if (this.webSearchSettings?.enabled) {
+      const { evaluateWebSearchGate } = await import('../tools/web-search.js');
+      const gate = evaluateWebSearchGate(this);
+      if (gate.ok) {
+        await registerLazy(ToolNames.WEB_SEARCH, async () => {
+          const { WebSearchTool } = await import('../tools/web-search.js');
+          return new WebSearchTool(this);
+        });
+      } else if (!this.webSearchNoticeEmitted && !options?.forSubAgent) {
+        this.webSearchNoticeEmitted = true;
+        this.warnings.push(gate.notice);
+      }
+    }
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
         const { ArtifactTool } = await import(

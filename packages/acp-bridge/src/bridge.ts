@@ -82,6 +82,7 @@ import {
   isNotCurrentlyGeneratingCancelError,
   SessionBusyError,
   InvalidRewindTargetError,
+  PromptDeadlineExceededError,
 } from './bridgeErrors.js';
 import {
   canonicalizeWorkspace,
@@ -1123,6 +1124,96 @@ function broadcastTurnError(
   }
 }
 
+/**
+ * The formal terminal outcome of an accepted prompt. Every prompt that was
+ * admitted (202) must observe exactly one of these, published as either a
+ * `turn_complete` (complete / cancelled) or `turn_error` event keyed by
+ * `promptId`.
+ */
+type PromptTerminal =
+  | { kind: 'complete'; result: { stopReason?: string; [k: string]: unknown } }
+  | { kind: 'cancelled' }
+  | { kind: 'error'; err: unknown };
+
+/**
+ * Publish the formal terminal event for an accepted prompt exactly once.
+ * All terminal paths (agent settle, queued removal, deadline, session
+ * close/kill/crash flush) funnel through here; the per-prompt
+ * `terminalPublished` latch suppresses later attempts so consumers keyed
+ * on `promptId` see one and only one `turn_complete`/`turn_error`.
+ * `originatorClientId` is always taken from the pending entry so callers
+ * can't disagree with the admission-time attribution.
+ */
+function publishPromptTerminal(
+  entry: SessionEntry,
+  pendingEntry: PendingPromptEntry,
+  terminal: PromptTerminal,
+): void {
+  if (pendingEntry.terminalPublished) {
+    writeStderrLine(
+      `publishPromptTerminal: suppressed duplicate ${terminal.kind} terminal ` +
+        `for prompt ${pendingEntry.promptId} (session ${entry.sessionId})`,
+    );
+    return;
+  }
+  pendingEntry.terminalPublished = true;
+  const originatorClientId = pendingEntry.originatorClientId;
+  if (terminal.kind === 'complete') {
+    broadcastTurnComplete(
+      entry,
+      entry.sessionId,
+      terminal.result,
+      pendingEntry.promptId,
+      originatorClientId,
+    );
+  } else if (terminal.kind === 'cancelled') {
+    broadcastTurnComplete(
+      entry,
+      entry.sessionId,
+      { stopReason: 'cancelled' },
+      pendingEntry.promptId,
+      originatorClientId,
+    );
+  } else {
+    broadcastTurnError(
+      entry,
+      entry.sessionId,
+      terminal.err,
+      pendingEntry.promptId,
+      originatorClientId,
+    );
+  }
+}
+
+/**
+ * Publish an error terminal for every prompt still pending on a session
+ * that is being torn down (close/kill/channel crash/daemon shutdown), then
+ * abort each prompt so residual FIFO nodes skip at their pre-dispatch
+ * check instead of being promoted to running. Must run before
+ * `entry.events.close()` — the bus swallows publishes afterwards. Any
+ * later settle of the same prompts re-enters `publishPromptTerminal` and
+ * is deduped by the latch.
+ */
+function flushPromptTerminals(
+  entry: SessionEntry,
+  code: string,
+  message: string,
+): void {
+  for (const pending of [...entry.pendingPromptList]) {
+    publishPromptTerminal(entry, pending, {
+      kind: 'error',
+      err: { code, message },
+    });
+    try {
+      pending.abortController.abort(
+        new DOMException('Prompt aborted', 'AbortError'),
+      );
+    } catch {
+      /* listeners must not break teardown */
+    }
+  }
+}
+
 function hasControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
@@ -1446,6 +1537,29 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     lastActivityTimestamp = Date.now();
   }
 
+  /**
+   * Idempotently clear a session's active-prompt bookkeeping, but only if
+   * `promptId` still owns it. The ownership gate matters: after a deadline
+   * releases the FIFO, the wedged agent's old `promptPromise` may settle
+   * late — while the NEXT prompt is already active — and must not steal
+   * that prompt's `activePromptId`/`promptActive` state. Called from the
+   * prompt settle path, the echo-failure path, and the deadline path;
+   * without the `promptActive` reset here a wedged agent would pin
+   * `promptActive` true forever and the session reaper would skip the
+   * session indefinitely.
+   */
+  function settleActivePromptState(entry: SessionEntry, promptId: string) {
+    if (entry.activePromptId !== promptId) return;
+    delete entry.activePromptId;
+    delete entry.activePromptOriginatorClientId;
+    if (entry.promptActive) {
+      entry.promptActive = false;
+      activePromptCounter--;
+      entry.sessionLastSeenAt = Date.now();
+      touchActivity();
+    }
+  }
+
   function resolvePositiveFiniteMs(
     raw: number | undefined,
     fallback: number,
@@ -1601,7 +1715,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (shuttingDown) return;
       const now = Date.now();
       for (const [id, entry] of byId) {
-        if (entry.promptActive) continue;
+        // `pendingPromptCount` (not `promptActive`): queued prompts and the
+        // FIFO hand-off gap between two prompts must also block the reap.
+        if (entry.pendingPromptCount > 0) continue;
         if (entry.events.subscriberCount > 0) continue;
         // Note: clientIds.size is NOT checked here. Close-on-last-detach
         // handles the normal path (client sends detach → immediate close).
@@ -1894,7 +2010,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     } else if (
       entry.clientIds.size === 0 &&
       entry.events.subscriberCount === 0 &&
-      !entry.promptActive
+      entry.pendingPromptCount === 0
     ) {
       await closeSessionImpl(entry.sessionId, undefined, {
         reason: 'last_client_detached',
@@ -2151,6 +2267,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           const sessEntry = byId.get(sid);
           if (!sessEntry) continue;
           cancelPendingForSession(sid);
+          // DAEMON-002/005: every still-pending prompt owes its formal
+          // terminal before the bus closes below.
+          flushPromptTerminals(
+            sessEntry,
+            'channel_closed',
+            'agent channel exited before the prompt completed',
+          );
           try {
             sessEntry.events.publish({
               type: 'session_died',
@@ -4498,6 +4621,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // from the (now-defunct) child can't seed the early-event buffer
     // and leak into a future load/resume of the same persisted id.
     ci?.client.markSessionClosed(sessionId);
+    // DAEMON-002/005: publish the formal terminal for every still-pending
+    // prompt (active AND queued) before `session_closed` and the bus close
+    // below — afterwards the bus swallows publishes and subscribers keyed
+    // on promptId would never see a turn terminal.
+    flushPromptTerminals(
+      entry,
+      'session_closed',
+      'session closed before the prompt completed',
+    );
     try {
       entry.events.publish({
         type: 'session_closed',
@@ -4958,6 +5090,53 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         state: isQueued ? 'queued' : 'running',
       };
       entry.pendingPromptList.push(pendingEntry);
+      // DAEMON-003: absolute wallclock deadline. Armed at admission (the
+      // 202 point) so it covers queue wait AND execution. On expiry the
+      // prompt gets its formal `turn_error{code:'prompt_deadline_exceeded'}`
+      // terminal, the per-session FIFO is released via `deadlineReject`
+      // racing the (possibly wedged) `promptPromise`, and the agent is
+      // best-effort cancelled through the existing abort path. The channel
+      // is NOT killed — it may be shared by other sessions; reclaiming a
+      // wedged agent's channel is a tracked follow-up.
+      const deadlineMs = context?.deadlineMs;
+      const hasDeadline =
+        typeof deadlineMs === 'number' &&
+        Number.isFinite(deadlineMs) &&
+        deadlineMs > 0;
+      let deadlineReject: ((err: unknown) => void) | undefined;
+      let deadlinePromise: Promise<never> | undefined;
+      let deadlineTimer: NodeJS.Timeout | undefined;
+      if (hasDeadline) {
+        deadlinePromise = new Promise<never>((_resolve, reject) => {
+          deadlineReject = reject;
+        });
+        // The race consumer may not be attached yet (or ever, for a queued
+        // prompt that never dispatches) — keep the rejection handled.
+        deadlinePromise.catch(() => {});
+        const onDeadline = () => {
+          if (pendingEntry.terminalPublished) return;
+          const deadlineErr = new PromptDeadlineExceededError(deadlineMs);
+          writeStderrLine(
+            `sendPrompt: prompt ${promptId} exceeded ${deadlineMs}ms deadline ` +
+              `for session ${sessionId}; agent may still be executing`,
+          );
+          publishPromptTerminal(entry, pendingEntry, {
+            kind: 'error',
+            err: {
+              code: 'prompt_deadline_exceeded',
+              message: deadlineErr.message,
+            },
+          });
+          settleActivePromptState(entry, pendingEntry.promptId);
+          // Unlock the dispatch race / FIFO first, then abort so the
+          // existing onAbort path (prompt_cancelled UI signal +
+          // cancelPendingForSession + best-effort connection.cancel) runs.
+          deadlineReject?.(deadlineErr);
+          pendingAbort.abort(deadlineErr);
+        };
+        deadlineTimer = setTimeout(onDeadline, deadlineMs);
+        deadlineTimer.unref();
+      }
       if (isQueued) {
         pendingAbort.signal.addEventListener(
           'abort',
@@ -5128,40 +5307,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     );
                   }
                 } catch (echoErr) {
-                  delete entry.activePromptId;
-                  delete entry.activePromptOriginatorClientId;
-                  if (entry.promptActive) {
-                    entry.promptActive = false;
-                    activePromptCounter--;
-                    touchActivity();
-                  }
+                  settleActivePromptState(entry, pendingEntry.promptId);
                   throw echoErr;
                 }
                 const promptPromise = entry.connection
                   .prompt(promptRequest)
                   .finally(() => {
-                    if (entry.promptActive) {
-                      entry.promptActive = false;
-                      activePromptCounter--;
-                      entry.sessionLastSeenAt = Date.now();
-                      touchActivity();
-                    }
-                    delete entry.activePromptId;
-                    delete entry.activePromptOriginatorClientId;
-                    if (
-                      entry.clientIds.size === 0 &&
-                      entry.events.subscriberCount === 0 &&
-                      byId.has(sessionId)
-                    ) {
-                      void closeSessionImpl(sessionId, undefined, {
-                        reason: 'last_client_detached',
-                      }).catch((err) => {
-                        writeStderrLine(
-                          `qwen serve: deferred close-on-prompt-complete failed for ` +
-                            `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
-                        );
-                      });
-                    }
+                    // Ownership-gated: a late settle after a deadline
+                    // already released the FIFO must not clear the NEXT
+                    // prompt's active state. The deferred
+                    // close-on-prompt-complete lives in `result.finally`
+                    // (after the terminal broadcast), not here.
+                    settleActivePromptState(entry, pendingEntry.promptId);
                   });
 
                 // Race against channel termination: if the underlying transport
@@ -5172,19 +5329,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // queued prompt with an unbounded await. See
                 // `getTransportClosedReject` for the single-listener invariant.
                 //
-                // FIXME(stage-2): no absolute prompt deadline. A buggy agent
-                // that ignores `cancel()` while keeping the channel alive can
-                // hold this race open indefinitely — the abort path fires
-                // `cancel()` and resolves pending permissions, but the
-                // `promptPromise` itself only settles when the agent
-                // cooperates. Stage 2 should add a configurable per-prompt
-                // wall clock (e.g. `--prompt-deadline 30m`) into this race so
-                // a wedged agent can't slow-leak prompt promises. Tracked
-                // as a follow-up.
-                const racedPromise = Promise.race([
-                  promptPromise,
-                  getTransportClosedReject(entry),
-                ]);
+                // The optional `deadlinePromise` (DAEMON-003) joins the same
+                // race: a buggy agent that ignores `cancel()` while keeping
+                // the channel alive can otherwise hold this race open
+                // indefinitely — the deadline rejection settles the raced
+                // promise so the FIFO moves on even though the agent-side
+                // `promptPromise` never resolves.
+                const racedPromise = deadlinePromise
+                  ? Promise.race([
+                      promptPromise,
+                      getTransportClosedReject(entry),
+                      deadlinePromise,
+                    ])
+                  : Promise.race([
+                      promptPromise,
+                      getTransportClosedReject(entry),
+                    ]);
 
                 // The user echo (`echoPromptToSessionBus`) was already published
                 // BEFORE the forward. If the forward itself fails (transport died,
@@ -5198,6 +5358,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   .then(
                     () => {},
                     (err) => {
+                      if (err instanceof PromptDeadlineExceededError) {
+                        // onDeadline already published the terminal and
+                        // aborted the prompt — the abort listener (onAbort)
+                        // ran synchronously and handled the cancel broadcast
+                        // + connection.cancel. Nothing to compensate.
+                        return;
+                      }
                       if (
                         err instanceof DOMException &&
                         err.name === 'AbortError' &&
@@ -5269,23 +5436,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       result.then(
         (promptResult) => {
-          broadcastTurnComplete(
-            entry,
-            sessionId,
-            promptResult,
-            pendingEntry.promptId,
-            originatorClientId,
-          );
+          publishPromptTerminal(entry, pendingEntry, {
+            kind: 'complete',
+            result: promptResult,
+          });
         },
         (err) => {
-          if (err instanceof DOMException && err.name === 'AbortError') return;
-          broadcastTurnError(
-            entry,
-            sessionId,
-            err,
-            pendingEntry.promptId,
-            originatorClientId,
-          );
+          if (err instanceof DOMException && err.name === 'AbortError') {
+            // An aborted prompt (queued removal, caller socket close,
+            // deadline…) still owes its formal terminal — fall back to a
+            // `cancelled` turn_complete. Paths that already published one
+            // (removePendingPrompt, onDeadline, flush) are deduped by the
+            // per-prompt latch inside `publishPromptTerminal`.
+            publishPromptTerminal(entry, pendingEntry, { kind: 'cancelled' });
+            return;
+          }
+          publishPromptTerminal(entry, pendingEntry, { kind: 'error', err });
         },
       );
       // Tail swallows failures so subsequent prompts still run. The caller
@@ -5296,6 +5462,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       result
         .finally(() => {
+          if (deadlineTimer !== undefined) clearTimeout(deadlineTimer);
           // Remove this prompt from the pending list and publish a
           // completed event so SSE subscribers can update their queue view.
           // If `removePendingPrompt` already spliced this entry and
@@ -5344,6 +5511,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               `[mid-turn] session=${entry.sessionId} dropped ${entry.midTurnMessageQueue.length} undrained message(s) at idle; browser resends next turn`,
             );
             entry.midTurnMessageQueue.length = 0;
+          }
+          // DAEMON-005: deferred close-on-prompt-complete. Lives here (not
+          // in `promptPromise.finally`) so the terminal broadcast — the
+          // `result.then` registered above on this same promise — runs
+          // before the bus closes. Conditions: nobody attached or
+          // subscribed, no other prompt pending (a queued successor keeps
+          // the session draining and triggers its own close), and this
+          // exact entry is still registered — after killSession's eager
+          // delete the same persisted id can be re-registered as a NEW
+          // entry by `session/load`, which a late settle must not close.
+          if (
+            entry.clientIds.size === 0 &&
+            entry.events.subscriberCount === 0 &&
+            entry.pendingPromptCount === 0 &&
+            byId.get(sessionId) === entry
+          ) {
+            void closeSessionImpl(sessionId, undefined, {
+              reason: 'last_client_detached',
+            }).catch((err) => {
+              writeStderrLine(
+                `qwen serve: deferred close-on-prompt-complete failed for ` +
+                  `${JSON.stringify(sessionId)}: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}`,
+              );
+            });
           }
         })
         .catch(() => {});
@@ -6942,6 +7133,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } catch {
         /* bus may be closed during session teardown */
       }
+      // DAEMON-004: a deleted QUEUED prompt never dispatches, so nothing
+      // downstream would ever emit its formal terminal — publish the
+      // `cancelled` turn_complete now. Running prompts keep the existing
+      // cooperative cancel path (agent returns cancelled → turn_complete);
+      // the FIFO node's later AbortError is deduped by the latch.
+      if (target.state === 'queued') {
+        publishPromptTerminal(entry, target, { kind: 'cancelled' });
+      }
       return { removed: true };
     },
 
@@ -7742,6 +7941,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // `byId.get(...)` returns undefined so the automatic publish
       // at crash time wouldn't fire. SSE subscribers need this
       // terminal frame to know the session is gone.
+      // DAEMON-002/005: pending prompts owe their formal terminal first.
+      flushPromptTerminals(
+        entry,
+        'session_killed',
+        'session killed before the prompt completed',
+      );
       try {
         entry.events.publish({
           type: 'session_died',
@@ -7810,14 +8015,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } else if (
         entry.clientIds.size === 0 &&
         entry.events.subscriberCount === 0 &&
-        !entry.promptActive
+        entry.pendingPromptCount === 0
       ) {
         // Last registered client left, no SSE subscribers remain, and
-        // no prompt is in flight. Close the session immediately so it
-        // doesn't linger in memory. The JSONL transcript on disk is
+        // no prompt is pending (active OR queued — `pendingPromptCount`
+        // covers the FIFO hand-off gap where `promptActive` is briefly
+        // false between two prompts). Close the session immediately so
+        // it doesn't linger in memory. The JSONL transcript on disk is
         // preserved — session/load or session/resume can restore it
-        // later. When a prompt IS active, skip the close and let the
-        // idle reaper handle it after the prompt completes.
+        // later. When prompts ARE pending, skip the close: the deferred
+        // close in `sendPrompt`'s result.finally fires after the last
+        // one settles (and publishes its terminal).
         await closeSessionImpl(sessionId, undefined, {
           reason: 'last_client_detached',
         }).catch((err) => {
@@ -7921,6 +8129,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             workspaceCwd: e.workspaceCwd,
             reason: shutdownReason,
           });
+          // DAEMON-002/005: pending prompts owe their formal terminal
+          // before the bus closes.
+          flushPromptTerminals(
+            e,
+            'daemon_shutdown',
+            'daemon shut down before the prompt completed',
+          );
           try {
             e.events.publish({
               type: 'session_died',

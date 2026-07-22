@@ -1,28 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { createDecipheriv, createCipheriv } from 'node:crypto';
-import { encryptAesEcb, computeMd5 } from './media.js';
+import { encryptAesEcb, computeMd5, parseAesKey } from './media.js';
 
 /**
  * Test the AES key parsing and decryption logic used in media.ts.
- * We test the pure crypto functions by reimplementing them here
- * since they're not exported, but the behavior must match.
+ * decryptAesEcb remains private, so keep only that helper here.
  */
-
-function parseAesKey(aesKeyBase64: string): Buffer {
-  const decoded = Buffer.from(aesKeyBase64, 'base64');
-  if (decoded.length === 16) {
-    return decoded;
-  }
-  if (
-    decoded.length === 32 &&
-    /^[0-9a-fA-F]{32}$/.test(decoded.toString('ascii'))
-  ) {
-    return Buffer.from(decoded.toString('ascii'), 'hex');
-  }
-  throw new Error(
-    `Invalid aes_key: expected 16 raw bytes or 32 hex chars, got ${decoded.length} bytes`,
-  );
-}
 
 function decryptAesEcb(ciphertext: Buffer, key: Buffer): Buffer {
   const decipher = createDecipheriv('aes-128-ecb', key, null);

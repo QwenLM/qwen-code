@@ -199,7 +199,6 @@ describe('AgentTool', () => {
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
-      isForkSubagentEnabled: vi.fn().mockReturnValue(false),
       getFileFilteringOptions: vi.fn().mockReturnValue({
         respectGitIgnore: true,
         respectQwenIgnore: true,
@@ -316,7 +315,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('omits fork discipline but keeps "Writing the prompt" when non-interactive', async () => {
+    it('includes fork discipline when non-interactive', async () => {
       (config as unknown as Record<string, unknown>)['isInteractive'] = vi
         .fn()
         .mockReturnValue(false);
@@ -324,21 +323,19 @@ describe('AgentTool', () => {
       const nonInteractiveTool = new AgentTool(config);
       await vi.runAllTimersAsync();
 
-      // Fork-specific sections must be absent
-      expect(nonInteractiveTool.description).not.toContain('When to fork');
-      expect(nonInteractiveTool.description).not.toContain("Don't peek");
-      expect(nonInteractiveTool.description).not.toContain("Don't race");
-      expect(nonInteractiveTool.description).not.toContain(
-        'Writing a fork prompt',
-      );
-
-      // "Writing the prompt" section is always present (useful for fresh agents too)
+      expect(nonInteractiveTool.description).toContain('When to fork');
+      expect(nonInteractiveTool.description).toContain("Don't peek");
+      expect(nonInteractiveTool.description).toContain("Don't race");
+      expect(nonInteractiveTool.description).toContain('Writing a fork prompt');
       expect(nonInteractiveTool.description).toContain('Writing the prompt');
       expect(nonInteractiveTool.description).toContain(
         'Never delegate understanding',
       );
-      // ...but its live fork reference is gated with the fork framework.
-      expect(nonInteractiveTool.description).not.toContain('forks inherit');
+      // Forks are now available in headless sessions too, so the fork
+      // inheritance guidance is present regardless of interactivity.
+      expect(nonInteractiveTool.description).toContain(
+        'forks inherit all or the selected recent window',
+      );
     });
 
     it('includes fork discipline when interactive', async () => {
@@ -761,6 +758,47 @@ describe('AgentTool', () => {
           working_dir: '   ',
         }),
       ).toMatch(/working_dir/i);
+    });
+
+    it('accepts an empty working_dir with worktree isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('accepts a whitespace-only working_dir with worktree isolation', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          working_dir: '   ',
+          isolation: 'worktree',
+        }),
+      ).toBeNull();
+    });
+
+    it('normalizes an empty working_dir before creating an isolated invocation', () => {
+      const params = {
+        ...validParams,
+        working_dir: '',
+        isolation: 'worktree' as const,
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+
+      const invocation = (
+        agentTool as AgentTool & {
+          createInvocation(params: AgentParams): {
+            params: AgentParams;
+          };
+        }
+      ).createInvocation(params);
+
+      expect(invocation.params.working_dir).toBeUndefined();
+      expect(invocation.params.isolation).toBe('worktree');
     });
 
     it('accepts redundant worktree isolation when working_dir is set', () => {
@@ -1238,10 +1276,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('falls back to a regular general-purpose sub-agent when a nested sub-agent requests a fork', async () => {
-      // Fork is a top-level-only capability in v1. A nested sub-agent
-      // requesting `subagent_type: "fork"` must get the awaitable
-      // general-purpose sub-agent, not an error and not a nested fork.
+    it('rejects a nested fork request instead of changing its context mode', async () => {
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
       vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
       const invocation = agentTool.build({
@@ -1249,13 +1284,17 @@ describe('AgentTool', () => {
         prompt: 'Do work',
         subagent_type: 'fork',
       });
-      await runWithAgentContext('sub-1', () =>
+      const result = await runWithAgentContext('sub-1', () =>
         invocation.execute(new AbortController().signal),
       );
 
-      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
-        'general-purpose',
+      expect(partToString(result.llmContent)).toContain(
+        'subagent_type "fork" is not supported',
       );
+      expect(result.error?.message).toContain(
+        'subagent_type "fork" is not supported',
+      );
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
     });
   });
 
@@ -3012,57 +3051,88 @@ describe('AgentTool', () => {
       expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 
-    it('falls back to general-purpose when non-interactive', async () => {
+    it('runs a non-interactive fork through the background registry', async () => {
       vi.mocked(
         config.isInteractive as ReturnType<typeof vi.fn>,
       ).mockReturnValue(false);
-      // Non-interactive sessions cannot service fork progress or prompts.
-
-      const mockLoadedSubagent: SubagentConfig = {
-        name: 'general-purpose',
-        description: 'General-purpose agent',
-        systemPrompt: 'You are a general-purpose agent.',
-        level: 'builtin',
-        filePath: '<builtin:general-purpose>',
-      };
-      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
-        mockLoadedSubagent,
-      );
+      (mockAgent as unknown as Record<string, unknown>)['getCore'] = vi
+        .fn()
+        .mockReturnValue({
+          modelConfig: { model: 'subagent-model' },
+          getEventEmitter: () => ({ on: vi.fn(), off: vi.fn() }),
+        });
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageProvider'
+      ] = vi.fn();
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageWaiter'
+      ] = vi.fn();
+      (mockAgent as unknown as Record<string, unknown>)[
+        'setExternalMessageWaitPredicate'
+      ] = vi.fn();
+      vi.mocked(config.getGeminiClient).mockReturnValue({
+        getHistory: vi.fn().mockReturnValue([
+          {
+            role: 'user',
+            parts: [{ text: 'parent marker: FORK7348_PARENT_7XQ9' }],
+          },
+          { role: 'model', parts: [{ text: 'Ready.' }] },
+        ]),
+        getChat: vi.fn().mockReturnValue({
+          getGenerationConfig: vi.fn().mockReturnValue({}),
+        }),
+      } as unknown as ReturnType<Config['getGeminiClient']>);
+      const stubRegistry = (
+        config as unknown as {
+          getBackgroundTaskRegistry: () => {
+            register: ReturnType<typeof vi.fn>;
+          };
+        }
+      ).getBackgroundTaskRegistry();
 
       const params: AgentParams = {
         description: 'fork task',
         prompt: 'do the thing',
         subagent_type: 'fork',
+        // A fork is detached by definition. Headless execution must still
+        // register it so the process waits for completion.
+        run_in_background: false,
       };
 
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation(params);
-      await invocation.execute();
+      const result = await invocation.execute();
 
-      // Should fall back to general-purpose
-      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
-        'general-purpose',
+      expect(partToString(result.llmContent)).toContain(
+        'Background agent launched',
       );
-      expect(AgentHeadless.create).not.toHaveBeenCalled();
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      expect(AgentHeadless.create).toHaveBeenCalled();
+      expect(stubRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({
+          isBackgrounded: true,
+          subagentType: 'fork',
+        }),
+        expect.anything(),
+      );
+      const createCalls = vi.mocked(AgentHeadless.create).mock.calls;
+      const headlessForkConfig = createCalls[createCalls.length - 1][1];
+      expect(headlessForkConfig.getShouldAvoidPermissionPrompts()).toBe(true);
+      expect(JSON.stringify(createCalls[createCalls.length - 1][2])).toContain(
+        'FORK7348_PARENT_7XQ9',
+      );
+
+      await vi.runAllTimersAsync();
+      expect(mockStartSubagentSpan).toHaveBeenCalledWith(
+        expect.objectContaining({
+          invocationKind: 'fork',
+          subagentName: 'fork',
+        }),
+      );
     });
 
-    it('falls back to general-purpose when a nested sub-agent requests a fork', async () => {
-      // v1: fork is a top-level-only capability. A sub-agent — which may
-      // carry the AgentTool via nesting — that requests a fork downgrades to
-      // the awaitable general-purpose subagent instead of opening a nested
-      // fork, even in interactive mode where fork is otherwise enabled.
-      const mockLoadedSubagent: SubagentConfig = {
-        name: 'general-purpose',
-        description: 'General-purpose agent',
-        systemPrompt: 'You are a general-purpose agent.',
-        level: 'builtin',
-        filePath: '<builtin:general-purpose>',
-      };
-      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
-        mockLoadedSubagent,
-      );
-
+    it('rejects a nested fork request', async () => {
       const invocation = (
         agentTool as AgentToolWithProtectedMethods
       ).createInvocation({
@@ -3070,13 +3140,17 @@ describe('AgentTool', () => {
         prompt: 'do the thing',
         subagent_type: 'fork',
       });
-      // One agent frame → the invoker is a level-1 sub-agent, not the
-      // top-level session, so the fork request must take the fallback path.
-      await runWithAgentContext('parent-sub', () => invocation.execute());
-
-      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
-        'general-purpose',
+      const result = await runWithAgentContext('parent-sub', () =>
+        invocation.execute(),
       );
+
+      expect(partToString(result.llmContent)).toContain(
+        'subagent_type "fork" is not supported',
+      );
+      expect(result.error?.message).toContain(
+        'subagent_type "fork" is not supported',
+      );
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
       expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 

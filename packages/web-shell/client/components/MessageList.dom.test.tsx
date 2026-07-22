@@ -214,6 +214,14 @@ function mount(
     };
     onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
     isResponding?: boolean;
+    hideFirstUserMessage?: boolean;
+    firstTurnMetrics?: {
+      durationMs?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      cachedTokens?: number;
+    };
+    includeSubagentToolUsageInMetrics?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
   } = {},
@@ -240,6 +248,11 @@ function mount(
             transcriptActivity={opts.transcriptActivity}
             onReloadTranscript={opts.onReloadTranscript}
             isResponding={opts.isResponding}
+            hideFirstUserMessage={opts.hideFirstUserMessage}
+            firstTurnMetrics={opts.firstTurnMetrics}
+            includeSubagentToolUsageInMetrics={
+              opts.includeSubagentToolUsageInMetrics
+            }
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
           />
         </WebShellCustomizationProvider>
@@ -401,6 +414,34 @@ describe('MessageList — turn collapse (DOM)', () => {
     await act(async () => resolveReload());
   });
 
+  it('hides only the first user message and overrides first-turn metrics', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), content: 'first prompt' },
+        toolMsg('g1'),
+        asstMsg('a1'),
+        { ...userMsg('u2'), content: 'second prompt' },
+        toolMsg('g2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      {
+        hideFirstUserMessage: true,
+        firstTurnMetrics: {
+          durationMs: 9_000,
+          inputTokens: 1_200,
+          outputTokens: 45,
+          cachedTokens: 800,
+        },
+      },
+    );
+
+    expect(has(c, 'u1')).toBe(false);
+    expect(has(c, 'u2')).toBe(true);
+    expect(c.textContent).toContain('9s');
+    expect(c.textContent).toContain('↑1.2k (800 cached, 67%) ↓45');
+  });
+
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')]);
     expect(has(c, 'u1')).toBe(true);
@@ -433,6 +474,28 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(text).toContain('1 thought');
     expect(text).not.toContain('1 step');
     expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('1 tool call'));
+  });
+
+  it('does not add tool summary usage when full transcript usage includes it', () => {
+    const agent = agentMsg('nested');
+    agent.tools[0]!.rawOutput = {
+      executionSummary: { inputTokens: 100, outputTokens: 20 },
+    };
+    const c = mount(
+      [
+        userMsg('u1'),
+        agent,
+        {
+          ...asstMsg('a1'),
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+      ],
+      undefined,
+      { includeSubagentToolUsageInMetrics: false },
+    );
+
+    expect(c.textContent).toContain('↑100 ↓20');
+    expect(c.textContent).not.toContain('↑200 ↓40');
   });
 
   it('renders step-less metrics without a toggle', () => {

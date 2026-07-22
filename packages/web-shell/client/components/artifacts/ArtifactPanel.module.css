@@ -8,6 +8,13 @@
   min-height: 0;
 }
 
+.panelDrawer {
+  border-left: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+
 .header {
   flex: 0 0 auto;
   display: flex;
@@ -777,7 +784,7 @@ button.treeRow:hover {
 }
 
 @media (max-width: 900px) {
-  .panel {
+  .panel:not(.panelDrawer) {
     position: fixed;
     inset: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) auto;
     z-index: 60;

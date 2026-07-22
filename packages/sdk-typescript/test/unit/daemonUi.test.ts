@@ -103,6 +103,65 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
+  it('preserves the initial tool title when a later update only has a tool name', () => {
+    const initial = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call',
+        toolCallId: 'agent-1',
+        title: 'agent: 查询阿里云官网信息',
+        status: 'in_progress',
+        _meta: { toolName: 'agent' },
+      },
+    });
+    const completed = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'failed',
+        _meta: { toolName: 'agent' },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(createDaemonTranscriptState(), [
+      ...initial,
+      ...completed,
+    ]);
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'tool',
+        title: 'agent: 查询阿里云官网信息',
+        status: 'failed',
+      },
+    ]);
+  });
+
+  it('uses the tool name when replay starts with a tool update', () => {
+    const events = normalizeDaemonEvent({
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        status: 'in_progress',
+        _meta: { toolName: 'agent' },
+      },
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      events,
+    );
+
+    expect(state.blocks).toMatchObject([
+      { kind: 'tool', title: 'agent', status: 'in_progress' },
+    ]);
+  });
+
   it('normalizes an in_progress frame that carries a kind (the drop is scoped to kind-less heartbeats)', () => {
     // The `kind === undefined` condition is load-bearing: an in_progress
     // frame WITH a kind is not a bare heartbeat and must pass through to a
@@ -470,7 +529,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
     ]);
   });
 
-  it('folds sub-agent usage (parentToolCallId) into the parent turn total', () => {
+  it('keeps sub-agent usage in the parent turn total by default', () => {
     const state = reduceDaemonTranscriptEvents(
       createDaemonTranscriptState({ now: 1 }),
       [
@@ -480,7 +539,11 @@ describe('daemon UI normalizer and transcript reducer', () => {
           type: 'assistant.usage',
           usage: { inputTokens: 100, outputTokens: 20 },
         },
-        // A round from a spawned sub-agent — part of the turn's real cost.
+        {
+          type: 'assistant.text.delta',
+          text: 'sub-agent answer',
+          parentToolCallId: 'sub-1',
+        },
         {
           type: 'assistant.usage',
           usage: { inputTokens: 5000, outputTokens: 800 },
@@ -495,6 +558,11 @@ describe('daemon UI normalizer and transcript reducer', () => {
         kind: 'assistant',
         text: 'answer',
         usage: { inputTokens: 5100, outputTokens: 820 },
+      },
+      {
+        kind: 'assistant',
+        text: 'sub-agent answer',
+        parentToolCallId: 'sub-1',
       },
     ]);
   });
@@ -6888,6 +6956,232 @@ describe('daemon UI normalizer — artifact events', () => {
 });
 
 describe('parallel subAgent text interleaving fix', () => {
+  it('drops subagent detail blocks while retaining parent usage', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      { type: 'assistant.text.delta', text: 'Main response' },
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-A',
+        toolName: 'agent',
+        status: 'running',
+      },
+      {
+        type: 'assistant.text.delta',
+        text: 'Subagent answer',
+        parentToolCallId: 'agent-task-A',
+      },
+      {
+        type: 'thought.text.delta',
+        text: 'Subagent thinking',
+        parentToolCallId: 'agent-task-A',
+      },
+      {
+        type: 'tool.update',
+        toolCallId: 'child-tool',
+        status: 'completed',
+        parentToolCallId: 'agent-task-A',
+        rawOutput: 'large tool output',
+      },
+      {
+        type: 'assistant.usage',
+        usage: { inputTokens: 100, outputTokens: 20, cachedTokens: 40 },
+        parentToolCallId: 'agent-task-A',
+      },
+    ] as DaemonUiEvent[]);
+
+    expect(state.blocks).toHaveLength(2);
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'Main response',
+    });
+    expect(state.blocks[1]).toMatchObject({
+      kind: 'tool',
+      toolCallId: 'agent-task-A',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'running',
+        executionSummary: {
+          inputTokens: 100,
+          outputTokens: 20,
+          cachedTokens: 40,
+          totalTokens: 120,
+        },
+      },
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-A',
+        toolName: 'agent',
+        status: 'completed',
+        content: [{ type: 'content', text: 'large result' }],
+        rawOutput: {
+          type: 'task_execution',
+          status: 'completed',
+          result: 'large result',
+          taskPrompt: 'large prompt',
+          toolCalls: [{ callId: 'child-tool' }],
+          executionSummary: {
+            inputTokens: 100,
+            outputTokens: 20,
+            cachedTokens: 40,
+            totalTokens: 120,
+          },
+        },
+      },
+    ] as DaemonUiEvent[]);
+
+    expect(
+      (state.blocks[1] as { rawOutput?: Record<string, unknown> }).rawOutput,
+    ).not.toMatchObject({
+      result: expect.anything(),
+      taskPrompt: expect.anything(),
+      toolCalls: expect.anything(),
+    });
+    expect(state.blocks[1]).not.toHaveProperty('content');
+  });
+
+  it('preserves accumulated subagent usage when completed rawOutput has lower totals', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-B',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: { type: 'task_execution', status: 'running' },
+      },
+      {
+        type: 'assistant.usage',
+        usage: { inputTokens: 5000, outputTokens: 800, cachedTokens: 200 },
+        parentToolCallId: 'agent-task-B',
+      },
+    ] as DaemonUiEvent[]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      rawOutput: {
+        executionSummary: {
+          inputTokens: 5000,
+          outputTokens: 800,
+          cachedTokens: 200,
+          totalTokens: 5800,
+        },
+      },
+    });
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-B',
+        toolName: 'agent',
+        status: 'completed',
+        rawOutput: {
+          type: 'task_execution',
+          status: 'completed',
+          executionSummary: {
+            inputTokens: 0,
+            outputTokens: 0,
+            cachedTokens: 0,
+            totalTokens: 0,
+          },
+        },
+      },
+    ] as DaemonUiEvent[]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'tool',
+      status: 'completed',
+      rawOutput: {
+        type: 'task_execution',
+        status: 'completed',
+        executionSummary: {
+          inputTokens: 5000,
+          outputTokens: 800,
+          cachedTokens: 200,
+          totalTokens: 5800,
+        },
+      },
+    });
+  });
+
+  it('keeps merged subagent totals consistent without mutating the event', () => {
+    let state = createDaemonTranscriptState({
+      now: 1,
+      retainSubagentBlocks: false,
+    });
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-task-C',
+        toolName: 'agent',
+        status: 'running',
+        rawOutput: {
+          type: 'task_execution',
+          executionSummary: {
+            inputTokens: 5000,
+            outputTokens: 800,
+            totalTokens: 5800,
+          },
+        },
+      },
+    ] as DaemonUiEvent[]);
+    const completed = {
+      type: 'tool.update' as const,
+      toolCallId: 'agent-task-C',
+      toolName: 'agent',
+      status: 'completed',
+      rawOutput: {
+        type: 'task_execution',
+        executionSummary: {
+          inputTokens: 4500,
+          outputTokens: 1000,
+          totalTokens: 5500,
+        },
+      },
+    };
+
+    state = reduceDaemonTranscriptEvents(state, [completed]);
+
+    expect(state.blocks[0]).toMatchObject({
+      rawOutput: {
+        executionSummary: {
+          inputTokens: 5000,
+          outputTokens: 1000,
+          totalTokens: 6000,
+        },
+      },
+    });
+    expect(completed.rawOutput.executionSummary).toEqual({
+      inputTokens: 4500,
+      outputTokens: 1000,
+      totalTokens: 5500,
+    });
+  });
+
+  it('keeps subagent block filtering enabled after store reset', () => {
+    const store = createDaemonTranscriptStore({ retainSubagentBlocks: false });
+    store.reset();
+    store.dispatch({
+      type: 'assistant.text.delta',
+      text: 'Subagent answer',
+      parentToolCallId: 'agent-task-A',
+    });
+
+    expect(store.getSnapshot().retainSubagentBlocks).toBe(false);
+    expect(store.getSnapshot().blocks).toHaveLength(0);
+  });
+
   it('T1: separates text chunks by parentToolCallId into independent blocks', () => {
     let state = createDaemonTranscriptState({ now: 1 });
 

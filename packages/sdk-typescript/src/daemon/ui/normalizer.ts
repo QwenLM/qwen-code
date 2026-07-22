@@ -884,7 +884,12 @@ function normalizeToolUpdate(
     (metadata ? getString(metadata, 'toolName') : undefined) ??
     (metadata ? getString(metadata, 'name') : undefined);
   const toolKind = getString(update, 'kind');
-  const title = getString(update, 'title') ?? toolName ?? toolKind;
+  const explicitTitle = getString(update, 'title');
+  const title =
+    explicitTitle ??
+    (getString(update, 'sessionUpdate') === 'tool_call'
+      ? (toolName ?? toolKind)
+      : undefined);
   const rawInputSource =
     update['rawInput'] ?? update['input'] ?? update['args'];
   const rawOutputSource =

@@ -5,18 +5,12 @@
  */
 
 /**
- * Sentinel passed as `AbortController.abort(reason)` when a prompt
- * exceeds its server-configured wallclock. Exported so tests can
- * match on the class identity.
+ * Rejected by the bridge's `sendPrompt` when a prompt exceeds its
+ * wallclock deadline. The class itself lives in the acp-bridge package
+ * (the bridge owns the deadline race since DAEMON-003); re-exported here
+ * so existing `server.ts` / test imports keep working.
  */
-export class PromptDeadlineExceededError extends Error {
-  readonly deadlineMs: number;
-  constructor(deadlineMs: number) {
-    super(`prompt exceeded the ${deadlineMs}ms deadline`);
-    this.name = 'PromptDeadlineExceededError';
-    this.deadlineMs = deadlineMs;
-  }
-}
+export { PromptDeadlineExceededError } from '../acp-session-bridge.js';
 
 /**
  * Resolve the effective per-prompt wallclock from the server flag +

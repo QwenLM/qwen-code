@@ -234,6 +234,7 @@ export function WorkspaceSessionProvider({
       workspaceCwd={targetWorkspace?.cwd}
       clientId={clientId}
       historyPageSize={historyPageSize}
+      subagentTranscriptMode="summary"
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       suppressOwnUserEcho
       restartEventStreamOnPrompt={restartSseOnPrompt}
