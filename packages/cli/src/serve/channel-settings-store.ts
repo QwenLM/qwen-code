@@ -413,6 +413,9 @@ export class WorkspaceChannelSettingsStore {
     names: readonly string[],
     options: ChannelSettingsMutationOptions,
   ): Promise<ChannelSettingsSnapshot> {
+    for (const name of names) {
+      assertSafeChannelName(name);
+    }
     this.assertRevision(options.expectedRevision);
     const workspaceFile = loadSettings(this.workspaceCwd, {
       skipLoadEnvironment: true,

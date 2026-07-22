@@ -521,6 +521,20 @@ describe('WorkspaceChannelSettingsStore', () => {
     expect(next.startupNames).toEqual(['bot']);
   });
 
+  it('rejects unsafe startup names without writing', async () => {
+    const store = new WorkspaceChannelSettingsStore(workspace);
+    const before = fs.readFileSync(settingsPath, 'utf8');
+
+    for (const name of ['__proto__', 'constructor', 'prototype']) {
+      await expect(
+        store.setStartupNames([name], {
+          expectedRevision: store.snapshot().revision,
+        }),
+      ).rejects.toMatchObject({ code: 'channel_settings_invalid_name' });
+      expect(fs.readFileSync(settingsPath, 'utf8')).toBe(before);
+    }
+  });
+
   it('rejects stale startup names without changing workspace settings', async () => {
     const store = new WorkspaceChannelSettingsStore(workspace);
     const before = fs.readFileSync(settingsPath, 'utf8');
