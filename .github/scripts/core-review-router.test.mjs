@@ -207,4 +207,16 @@ describe('classify', () => {
     assert.equal(result.reviewers.length, 0);
     assert.match(result.reason, /no core files/);
   });
+
+  it('ignores tsconfig files as non-source', () => {
+    const result = classify(
+      [
+        'packages/core/tsconfig.json',
+        'packages/core/tsconfig.build.json',
+      ],
+      'someone',
+    );
+    assert.equal(result.reviewers.length, 0);
+    assert.match(result.reason, /no core files/);
+  });
 });

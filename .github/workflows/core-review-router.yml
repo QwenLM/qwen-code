@@ -34,8 +34,12 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
-          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '[.[].filename]')"
-          echo "files=$files" >> "$GITHUB_OUTPUT"
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files?per_page=100" --jq '.[].filename' | jq -R . | jq -sc '.')"
+          {
+            echo 'files<<EOF'
+            echo "$files"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
 
       - name: 'Classify and pick reviewers'
         id: 'classify'
@@ -83,14 +87,16 @@ jobs:
           to_remove="$(jq -cn --argjson a "$managed" --argjson b "$desired" '$a - $b')"
           if [ "$to_remove" != "[]" ]; then
             echo "$to_remove" | jq '{reviewers: .}' \
-              | gh api --method DELETE "$api" --input - > /dev/null || true
+              | gh api --method DELETE "$api" --input - > /dev/null \
+              || echo "::warning::Failed to remove reviewers: $to_remove"
           fi
 
           # Add maintainers that should be newly requested.
           to_add="$(jq -cn --argjson a "$desired" --argjson b "$managed" '$a - $b')"
           if [ "$to_add" != "[]" ]; then
             echo "$to_add" | jq '{reviewers: .}' \
-              | gh api --method POST "$api" --input - > /dev/null || true
+              | gh api --method POST "$api" --input - > /dev/null \
+              || echo "::warning::Failed to add reviewers: $to_add"
           fi
 
           echo "Applied: $REVIEWERS ($REASON)"

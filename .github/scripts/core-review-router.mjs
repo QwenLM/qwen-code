@@ -20,7 +20,8 @@ const CORE_PREFIX = 'packages/core/';
 
 const TEST_PATTERN = /\.test\.|\.spec\.|__tests__|\.test-utils\./;
 
-const NON_SOURCE_PATTERN = /(?:^|\/)(?:package\.json|package-lock\.json|tsconfig.*\.json|\.eslintrc|\.prettierrc|CHANGELOG\.md)$/;
+const NON_SOURCE_PATTERN =
+  /(?:^|\/)(?:package\.json|package-lock\.json|tsconfig[^/]*\.json|\.eslintrc|\.prettierrc|CHANGELOG\.md)$/;
 
 /**
  * Domain expertise: map core sub-paths to the maintainer who knows
