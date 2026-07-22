@@ -216,6 +216,14 @@ describe('defaultModalities', () => {
   });
 
   describe('Kimi', () => {
+    it('returns image + video for kimi-k3', () => {
+      const m = defaultModalities('kimi-k3');
+      expect(m.image).toBe(true);
+      expect(m.video).toBe(true);
+      expect(m.pdf).toBeUndefined();
+      expect(m.audio).toBeUndefined();
+    });
+
     it('returns image + video for kimi-k2.5', () => {
       const m = defaultModalities('kimi-k2.5');
       expect(m.image).toBe(true);

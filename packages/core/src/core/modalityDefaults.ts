@@ -79,6 +79,7 @@ const MODALITY_PATTERNS: Array<[RegExp, InputModalities]> = [
   // -------------------
   // Moonshot / Kimi
   // -------------------
+  [/^kimi-k3/, { image: true, video: true }],
   [/^kimi-k2\./, { image: true, video: true }],
   [/^kimi-/, {}],
 
