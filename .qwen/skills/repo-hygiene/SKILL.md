@@ -75,30 +75,12 @@ fixing is a valid, silent outcome.
 
 ## Scan Targets
 
-### A. Deterministic docs patterns (`rg`)
-
-Run read-only `rg` scans like these, then confirm each hit by reading the
-surrounding lines before recording a finding — a pattern hit is a lead, not a
-finding:
-
-- `rg -nF 'qwen*' docs/ README.md` — malformed emphasis such as
-  `qwen*api_key` that should read `qwen_api_key` (confirm it is mistaken
-  Markdown, not legitimate glob syntax).
-- `rg -n '\*\(Optional\)\\_' docs/` — stale `*(Optional)\_` artifacts.
-- Broken Markdown emphasis you can show renders wrong; do not mass-rewrite
-  emphasis that renders fine.
-
-Only fix a docs finding when it would mislead a user into a wrong action,
-points at a wrong API or design, ships example code that cannot run, or
-provably contradicts current behavior. Plain typos and harmless wording stay
-untouched.
-
-### B. Judgment scans (read code; parallelize with subagents)
-
 Use subagents to scan the six angles below in parallel. A subagent reports
 **candidates only** — it does not modify the working tree, does not commit,
 and does not run verification. The main agent collects, deduplicates, then
-decides which candidates to accept as findings.
+decides which candidates to accept as findings. A pattern hit (from `rg`,
+`grep`, or any other scanner) is a lead, not a finding — confirm each hit by
+reading the surrounding context before recording it.
 
 For each angle, grep/code-reference evidence is required; a candidate that
 cannot point at file:line with a quote is not a finding.
@@ -125,11 +107,11 @@ cannot point at file:line with a quote is not a finding.
 - **User-visible configuration/API**: config field names, command options,
   error messages, and example code against the real parser or schema.
   Show the parser/schema line and the prose or example that disagrees.
-- **Docs as secondary scan only**: docs findings are accepted only when
-  the prose would mislead a user into a wrong action, points at a wrong
-  API or design, ships example code that cannot run, or provably
-  contradicts current behavior. Plain typos and harmless wording stay
-  untouched.
+- **Docs**: docs findings are accepted only when the prose would mislead
+  a user into a wrong action, points at a wrong API or design, ships
+  example code that cannot run, or provably contradicts current behavior.
+  Plain typos, harmless wording, and broken-but-rendering-fine emphasis
+  stay untouched.
 
 Do NOT scan GitHub issues as a source. Every finding must be provable from the
 repository itself.
