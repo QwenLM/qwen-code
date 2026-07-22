@@ -1738,6 +1738,8 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  private systemPromptContext: string;
+  private systemPromptVolatileMemory = '';
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -1977,6 +1979,7 @@ export class Config {
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
+    this.systemPromptContext = this.userMemory;
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
@@ -3163,23 +3166,21 @@ export class Config {
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      this.setUserMemory(
-        this.memoryManager.appendToUserMemory(
-          memoryContent,
-          getAutoMemoryRoot(this.getProjectRoot()),
-          managedAutoMemoryIndex,
-          {
-            memoryDir: getUserAutoMemoryRoot(),
-            indexContent: userAutoMemoryIndex,
-          },
-          teamMemoryEnabled
-            ? {
-                memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
-                indexContent: teamAutoMemoryIndex,
-              }
-            : undefined,
-        ),
+      const managedMemory = this.memoryManager.buildManagedPrompt(
+        getAutoMemoryRoot(this.getProjectRoot()),
+        managedAutoMemoryIndex,
+        {
+          memoryDir: getUserAutoMemoryRoot(),
+          indexContent: userAutoMemoryIndex,
+        },
+        teamMemoryEnabled
+          ? {
+              memoryDir: getTeamAutoMemoryRoot(this.getProjectRoot()),
+              indexContent: teamAutoMemoryIndex,
+            }
+          : undefined,
       );
+      this.setSystemPromptMemory(memoryContent, managedMemory);
     } else {
       this.setUserMemory(memoryContent);
     }
@@ -5165,6 +5166,14 @@ export class Config {
     return this.userMemory;
   }
 
+  getSystemPromptContext(): string {
+    return this.systemPromptContext;
+  }
+
+  getSystemPromptVolatileMemory(): string {
+    return this.systemPromptVolatileMemory;
+  }
+
   getOutputLanguageFilePath(): string | undefined {
     return this.outputLanguageFilePath;
   }
@@ -5175,6 +5184,16 @@ export class Config {
 
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
+    this.systemPromptContext = newUserMemory;
+    this.systemPromptVolatileMemory = '';
+  }
+
+  private setSystemPromptMemory(context: string, volatileMemory: string): void {
+    this.systemPromptContext = context;
+    this.systemPromptVolatileMemory = volatileMemory;
+    this.userMemory = [context.trim(), volatileMemory.trim()]
+      .filter(Boolean)
+      .join('\n\n---\n\n');
   }
 
   getGeminiMdFileCount(): number {

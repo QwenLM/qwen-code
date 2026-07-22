@@ -550,6 +550,8 @@ describe('Gemini Client (client.ts)', () => {
       getVertexAI: vi.fn().mockReturnValue(false),
       getUserAgent: vi.fn().mockReturnValue('test-agent'),
       getUserMemory: vi.fn().mockReturnValue(''),
+      getSystemPromptContext: vi.fn(() => mockConfig.getUserMemory()),
+      getSystemPromptVolatileMemory: vi.fn().mockReturnValue(''),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
       getFullContext: vi.fn().mockReturnValue(false),
@@ -2047,6 +2049,11 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValueOnce('Git snapshot A')
         .mockReturnValueOnce('Git snapshot B');
       vi.mocked(getRecentGitStatus).mockClear();
+      vi.mocked(getCoreSystemPrompt).mockImplementation(
+        (_memory, _model, _append, _mode, fragments = []) =>
+          fragments.map((fragment) => fragment.content).join('\n') ||
+          'Base instruction',
+      );
 
       await client.startChat();
       expect(client.getChat()['generationConfig'].systemInstruction).toContain(
@@ -2070,6 +2077,11 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValueOnce('Git snapshot A')
         .mockReturnValueOnce('Git snapshot B');
       vi.mocked(getRecentGitStatus).mockClear();
+      vi.mocked(getCoreSystemPrompt).mockImplementation(
+        (_memory, _model, _append, _mode, fragments = []) =>
+          fragments.map((fragment) => fragment.content).join('\n') ||
+          'Base instruction',
+      );
 
       const instructionBeforeReset = (
         client as unknown as {
@@ -9956,6 +9968,7 @@ Other open files:
         'Override prompt',
         'Saved memory',
         undefined,
+        [],
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -9988,6 +10001,79 @@ Other open files:
         'test-model',
         'Be extra concise.',
         'headless',
+        [],
+      );
+    });
+
+    it('passes project, git, and managed memory as separate prompt tiers', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+      vi.mocked(mockConfig.getSystemPromptContext).mockReturnValue(
+        'Project instructions',
+      );
+      vi.mocked(mockConfig.getSystemPromptVolatileMemory).mockReturnValue(
+        'Managed memory',
+      );
+      vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot');
+
+      await client.generateContent(
+        contents,
+        {},
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
+        'Project instructions',
+        'test-model',
+        undefined,
+        'headless',
+        [
+          {
+            marker: 'git-status',
+            role: 'system',
+            tier: 'context',
+            content: 'Git snapshot',
+          },
+          {
+            marker: 'managed-auto-memory',
+            role: 'system',
+            tier: 'volatile',
+            content: 'Managed memory',
+          },
+        ],
+      );
+    });
+
+    it('keeps managed memory volatile with a per-request system prompt', async () => {
+      const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
+      const abortSignal = new AbortController().signal;
+      vi.mocked(mockConfig.getSystemPromptContext).mockReturnValue(
+        'Project instructions',
+      );
+      vi.mocked(mockConfig.getSystemPromptVolatileMemory).mockReturnValue(
+        'Managed memory',
+      );
+
+      await client.generateContent(
+        contents,
+        { systemInstruction: 'Request instructions' },
+        abortSignal,
+        DEFAULT_QWEN_FLASH_MODEL,
+      );
+
+      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
+        'Request instructions',
+        'Project instructions',
+        undefined,
+        [
+          {
+            marker: 'managed-auto-memory',
+            role: 'system',
+            tier: 'volatile',
+            content: 'Managed memory',
+          },
+        ],
       );
     });
 
@@ -10019,6 +10105,7 @@ Other open files:
           'test-model',
           undefined,
           mode,
+          [],
         );
       },
     );
@@ -10051,6 +10138,7 @@ Other open files:
         'Override prompt',
         'Saved memory',
         'Focus on findings only.',
+        [],
       );
       expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -10068,7 +10156,12 @@ Other open files:
 
       vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
       vi.mocked(getRecentGitStatus).mockClear();
-      vi.mocked(getCoreSystemPrompt).mockReturnValue('Core prompt');
+      vi.mocked(getCoreSystemPrompt).mockImplementation(
+        (_memory, _model, _append, _mode, fragments = []) =>
+          `Core prompt\n\n${fragments
+            .map((fragment) => fragment.content)
+            .join('\n\n')}`,
+      );
 
       await client.generateContent(
         contents,

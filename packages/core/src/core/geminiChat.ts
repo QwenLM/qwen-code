@@ -102,6 +102,7 @@ import {
 } from '../utils/environmentContext.js';
 import type { SessionStartSource } from '../hooks/types.js';
 import { getCustomSystemPrompt } from './prompts.js';
+import type { PromptFragment } from './prompt-fragments.js';
 import { RETRYABLE_STREAM_TRANSPORT_CODES } from './stream-transport-retry.js';
 import {
   collectToolCallIdsFromHistory,
@@ -1858,8 +1859,13 @@ export class GeminiChat {
       baseInstruction = getCustomSystemPrompt(current);
       baseInstruction = stripTrailingSessionStartContextBlock(baseInstruction);
     }
-    const contextBlock = buildSessionStartContextBlock(trimmed);
-    this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
+    const fragment: PromptFragment = {
+      marker: 'session-start-hook',
+      role: 'system',
+      tier: 'volatile',
+      content: buildSessionStartContextBlock(trimmed),
+    };
+    this.generationConfig.systemInstruction = `${baseInstruction}${fragment.content}`;
   }
 
   applySessionStartContext(

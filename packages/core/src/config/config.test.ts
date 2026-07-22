@@ -3862,6 +3862,8 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(baseParams);
 
     expect(config.getUserMemory()).toBe(USER_MEMORY);
+    expect(config.getSystemPromptContext()).toBe(USER_MEMORY);
+    expect(config.getSystemPromptVolatileMemory()).toBe('');
     // Verify other getters if needed
     expect(config.getTargetDir()).toBe(path.resolve(TARGET_DIR)); // Check resolved path
   });
@@ -3908,6 +3910,12 @@ describe('Server Config (config.ts)', () => {
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).toContain('# auto memory');
     expect(config.getUserMemory()).toContain('[Project Memory](project.md)');
+    expect(config.getSystemPromptContext()).toContain('Project rules');
+    expect(config.getSystemPromptContext()).not.toContain('# auto memory');
+    expect(config.getSystemPromptVolatileMemory()).toContain('# auto memory');
+    expect(config.getSystemPromptVolatileMemory()).toContain(
+      '[Project Memory](project.md)',
+    );
   });
 
   it('refreshHierarchicalMemory should not load team memory from untrusted workspaces', async () => {
@@ -4647,6 +4655,8 @@ describe('Server Config (config.ts)', () => {
 
     expect(config.getUserMemory()).toContain('Project rules');
     expect(config.getUserMemory()).not.toContain('# auto memory');
+    expect(config.getSystemPromptContext()).toContain('Project rules');
+    expect(config.getSystemPromptVolatileMemory()).toBe('');
     expect(readAutoMemoryIndex).not.toHaveBeenCalled();
   });
 

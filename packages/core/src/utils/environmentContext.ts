@@ -19,6 +19,10 @@ import {
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
+import {
+  orderPromptFragments,
+  type PromptFragment,
+} from '../core/prompt-fragments.js';
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
@@ -86,19 +90,39 @@ ${folderStructure}`;
  * @param {Config} config - The runtime configuration and services.
  * @returns A promise that resolves to an array of `Part` objects containing environment information.
  */
-export async function getEnvironmentContext(config: Config): Promise<Part[]> {
+async function getEnvironmentPromptFragments(
+  config: Config,
+): Promise<PromptFragment[]> {
   const today = formatDateForContext();
   const platform = process.platform;
   const directoryContext = await getDirectoryContextString(config);
 
-  const context = `
+  const environmentContext = `
 This is the Qwen Code. We are setting up the context for our chat.
-Today's date is ${today}.
 My operating system is: ${platform}
 ${directoryContext}
         `.trim();
 
-  return [{ text: context }];
+  return [
+    {
+      marker: 'startup-environment',
+      role: 'user',
+      tier: 'context',
+      content: environmentContext,
+    },
+    {
+      marker: 'startup-date',
+      role: 'user',
+      tier: 'volatile',
+      content: `Today's date is ${today}.`,
+    },
+  ];
+}
+
+export async function getEnvironmentContext(config: Config): Promise<Part[]> {
+  return (await getEnvironmentPromptFragments(config)).map((fragment) => ({
+    text: fragment.content || '',
+  }));
 }
 
 // Centralized reminder envelope. Every reminder body — startup/env context,
@@ -477,6 +501,15 @@ export async function buildStartupContextReminder(
   return wrapSystemReminder(envContextString);
 }
 
+async function buildStartupContextFragments(
+  config: Config,
+): Promise<PromptFragment[]> {
+  return (await getEnvironmentPromptFragments(config)).map((fragment) => ({
+    ...fragment,
+    content: wrapSystemReminder(fragment.content || ''),
+  }));
+}
+
 export interface InitialChatHistoryOptions {
   includeDeferredToolsReminder?: boolean;
   // Whether to include the session-start <available_skills> snapshot. Defaults
@@ -504,26 +537,39 @@ export async function getInitialChatHistory(
     options.includeDeferredToolsReminder ?? true;
   const includeAvailableSkillsReminder =
     options.includeAvailableSkillsReminder ?? true;
-  const startupReminder = config.getSkipStartupContext()
-    ? null
-    : await buildStartupContextReminder(config);
+  const startupFragments = config.getSkipStartupContext()
+    ? []
+    : await buildStartupContextFragments(config);
   const skillsResult = includeAvailableSkillsReminder
     ? await buildAvailableSkillsReminder(config)
     : null;
 
-  // Stable parts first (MCP, skills, startup) so prefix-caching servers
-  // retain the KV-cache for the shared prefix. Deferred-tools is last
-  // because tool_search revelations change it — only the tail recomputes.
-  const reminderParts = [
-    buildMcpServerInstructionsReminder(toolRegistry),
-    skillsResult?.reminder ?? null,
-    startupReminder,
-    includeDeferredToolsReminder
-      ? buildDeferredToolsReminder(toolRegistry)
-      : null,
-  ]
-    .filter((text): text is string => text !== null)
-    .map((text) => ({ text }));
+  const reminderFragments: PromptFragment[] = [
+    {
+      marker: 'mcp-server-instructions',
+      role: 'user',
+      tier: 'context',
+      content: buildMcpServerInstructionsReminder(toolRegistry),
+    },
+    {
+      marker: 'available-skills',
+      role: 'user',
+      tier: 'context',
+      content: skillsResult?.reminder,
+    },
+    ...startupFragments,
+    {
+      marker: 'deferred-tools',
+      role: 'user',
+      tier: 'volatile',
+      content: includeDeferredToolsReminder
+        ? buildDeferredToolsReminder(toolRegistry)
+        : null,
+    },
+  ];
+  const reminderParts = orderPromptFragments(reminderFragments).map(
+    (fragment) => ({ text: fragment.content || '' }),
+  );
 
   const prelude =
     reminderParts.length === 0

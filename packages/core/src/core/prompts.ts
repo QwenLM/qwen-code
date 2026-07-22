@@ -14,6 +14,10 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  renderPromptFragments,
+  type PromptFragment,
+} from './prompt-fragments.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
 
@@ -201,6 +205,7 @@ export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   userMemory?: string,
   appendInstruction?: string,
+  additionalFragments: readonly PromptFragment[] = [],
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -223,10 +228,27 @@ export function getCustomSystemPrompt(
     instructionText = customInstruction.text || '';
   }
 
-  // Append user memory using the same pattern as getCoreSystemPrompt
-  const memorySuffix = buildSystemPromptSuffix(userMemory);
-
-  return `${instructionText}${memorySuffix}${buildSystemPromptSuffix(appendInstruction)}`;
+  return renderPromptFragments([
+    {
+      marker: 'custom-system-prompt',
+      role: 'system',
+      tier: 'stable',
+      content: instructionText,
+    },
+    {
+      marker: 'user-memory',
+      role: 'system',
+      tier: 'context',
+      content: userMemory?.trim(),
+    },
+    ...additionalFragments,
+    {
+      marker: 'append-system-prompt',
+      role: 'system',
+      tier: 'volatile',
+      content: appendInstruction?.trim(),
+    },
+  ]);
 }
 
 export function getCoreSystemPrompt(
@@ -234,6 +256,7 @@ export function getCoreSystemPrompt(
   model?: string,
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
+  additionalFragments: readonly PromptFragment[] = [],
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
@@ -442,18 +465,27 @@ Interaction mode reminder: ${interaction.questions}
     fs.writeFileSync(writePath, basePrompt);
   }
 
-  const memorySuffix =
-    userMemory && userMemory.trim().length > 0
-      ? buildSystemPromptSuffix(userMemory)
-      : '';
-  const appendSuffix = buildSystemPromptSuffix(appendInstruction);
-
-  return `${basePrompt}${memorySuffix}${appendSuffix}`;
-}
-
-function buildSystemPromptSuffix(text?: string): string {
-  const trimmed = text?.trim();
-  return trimmed ? `\n\n---\n\n${trimmed}` : '';
+  return renderPromptFragments([
+    {
+      marker: 'core-system-prompt',
+      role: 'system',
+      tier: 'stable',
+      content: basePrompt,
+    },
+    {
+      marker: 'user-memory',
+      role: 'system',
+      tier: 'context',
+      content: userMemory?.trim(),
+    },
+    ...additionalFragments,
+    {
+      marker: 'append-system-prompt',
+      role: 'system',
+      tier: 'volatile',
+      content: appendInstruction?.trim(),
+    },
+  ]);
 }
 
 /**

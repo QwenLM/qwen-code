@@ -136,8 +136,8 @@ describe('getEnvironmentContext', () => {
   it('should return basic environment context for a single directory', async () => {
     const parts = await getEnvironmentContext(mockConfig as Config);
 
-    expect(parts.length).toBe(1);
-    const context = parts[0].text;
+    expect(parts.length).toBe(2);
+    const context = parts.map((part) => part.text).join('\n');
 
     expect(context).toContain("Today's date is");
     expect(context).toContain(`My operating system is: ${process.platform}`);
@@ -162,8 +162,8 @@ describe('getEnvironmentContext', () => {
 
     const parts = await getEnvironmentContext(mockConfig as Config);
 
-    expect(parts.length).toBe(1);
-    const context = parts[0].text;
+    expect(parts.length).toBe(2);
+    const context = parts.map((part) => part.text).join('\n');
 
     expect(context).toContain(
       "I'm currently working in the following directories:\n  - /test/dir1\n  - /test/dir2",
@@ -221,13 +221,17 @@ describe('getInitialChatHistory', () => {
           expect.objectContaining({
             text: expect.stringContaining(SYSTEM_REMINDER_OPEN),
           }),
+          expect.objectContaining({
+            text: expect.stringContaining("Today's date is"),
+          }),
         ],
       }),
     );
     expect(history[0]?.parts?.[0]?.text).toContain(
       "I'm currently working in the directory",
     );
-    expect(history[0]?.parts?.[0]?.text).toContain('</system-reminder>');
+    expect(history[0]?.parts?.[1]?.text).toContain("Today's date is");
+    expect(history[0]?.parts?.[1]?.text).toContain('</system-reminder>');
     expect(JSON.stringify(history)).not.toContain(
       'Got it. Thanks for the context!',
     );
@@ -305,7 +309,7 @@ describe('getInitialChatHistory', () => {
     );
 
     expect(history).toHaveLength(1);
-    expect(history[0]?.parts).toHaveLength(1);
+    expect(history[0]?.parts).toHaveLength(2);
     expect(history[0]?.parts?.[0]?.text).toContain(
       "I'm currently working in the directory",
     );
@@ -338,6 +342,20 @@ describe('getInitialChatHistory', () => {
     expect(lastText).toContain('reachable via `tool_search`');
     expect(lastText).toContain('web_fetch');
     expect(parts[0]?.text).not.toContain('reachable via `tool_search`');
+  });
+
+  it('orders workspace context before volatile date and deferred tools', async () => {
+    mockToolRegistry.getDeferredToolSummary.mockReturnValue([
+      { name: 'web_fetch', description: 'Fetches web pages' },
+    ]);
+
+    const [history] = await getInitialChatHistory(mockConfig as Config);
+    const texts = history[0]?.parts?.map((part) => part.text || '') ?? [];
+
+    expect(texts).toHaveLength(3);
+    expect(texts[0]).toContain("I'm currently working in the directory");
+    expect(texts[1]).toContain("Today's date is");
+    expect(texts[2]).toContain('reachable via `tool_search`');
   });
 });
 

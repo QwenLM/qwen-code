@@ -245,6 +245,21 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
   });
 
+  it('places additional context fragments before volatile append instructions', () => {
+    const result = getCustomSystemPrompt('Base', 'Memory', 'Append', [
+      {
+        marker: 'git-status',
+        role: 'system',
+        tier: 'context',
+        content: 'Git',
+      },
+    ]);
+
+    expect(result).toBe(
+      ['Base', ['Memory', 'Git'].join('\n\n'), 'Append'].join('\n\n---\n\n'),
+    );
+  });
+
   it('should include sandbox-specific instructions when SANDBOX env var is set', () => {
     vi.stubEnv('SANDBOX', 'true'); // Generic sandbox value
     const prompt = getCoreSystemPrompt();
