@@ -27,7 +27,10 @@ import { VimModeProvider } from './contexts/VimModeContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
-import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
+import {
+  disableKittyProtocol,
+  pushKittyProtocolFlags,
+} from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
 import { registerCleanup } from '../utils/cleanup.js';
@@ -206,6 +209,17 @@ export async function startInteractiveUI(
       alternateScreen: useVP,
     },
   );
+  if (useVP) {
+    // Ink entered the alternate screen synchronously inside render() above.
+    // The Kitty keyboard flags were pushed at startup on the main screen, and
+    // the spec tracks them per screen, so re-push them onto the alternate
+    // screen now — otherwise Shift+Enter (and other modified keys) arrive
+    // without their modifier and degrade to a bare Enter or an orphaned Escape.
+    // The push is ordered after Ink's enter-alternate-screen write, and Ink
+    // discards the alternate screen (and its flag stack) on unmount, so the
+    // startup main-screen push remains balanced by disableKittyProtocol() below.
+    pushKittyProtocolFlags();
+  }
   // Records the moment Ink's `render()` call has returned, which is
   // synchronous and happens before React reconciliation actually pushes
   // bytes to the terminal. We intentionally keep the legacy name

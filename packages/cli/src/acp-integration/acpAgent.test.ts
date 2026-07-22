@@ -11559,6 +11559,8 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       getSessionRuntimeBaseDir: vi
         .fn()
         .mockReturnValue('/tmp/qwen-runtime-test'),
+      loadPausedBackgroundAgents: vi.fn().mockResolvedValue([]),
+      consumePendingRecoveredAgentsNotice: vi.fn().mockReturnValue(null),
       assertCanStartTurn: vi.fn().mockResolvedValue(undefined),
       getSessionService: vi.fn(),
       // load path reads back the persisted conversation here and feeds
@@ -12078,7 +12080,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
   it('loadSession returns LoadSessionResponse and replays history on the session', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
-    bindRestoreMocks({
+    const innerConfig = bindRestoreMocks({
       sessionExists: true,
       resumedConversation: {
         messages,
@@ -12107,6 +12109,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);
+    expect(innerConfig.loadPausedBackgroundAgents).toHaveBeenCalledWith(
+      'persisted-1',
+    );
+    expect(
+      innerConfig.consumePendingRecoveredAgentsNotice,
+    ).toHaveBeenCalledOnce();
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -13132,6 +13140,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       filesystem: { command: 'node', args: ['server.js'] },
     };
     const runtimeServer = { command: 'runtime-server' };
+    const forceDiscover = vi.fn().mockResolvedValue(undefined);
     let finishDiscovery!: () => void;
     const discoveryPending = new Promise<void>((resolve) => {
       finishDiscovery = resolve;
@@ -13179,6 +13188,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockConfig.getWorkingDir = vi.fn().mockReturnValue('/tmp');
     mockConfig.isMcpServerDisabled = vi.fn().mockReturnValue(false);
     mockConfig.getToolRegistry = vi.fn().mockReturnValue({
+      discoverToolsForServer: forceDiscover,
       getMcpClientManager: vi.fn().mockReturnValue({
         getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
         getMcpClientAccounting: vi.fn().mockReturnValue({
@@ -13273,6 +13283,29 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
         ],
       });
     });
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {
+        forceReconnectWhich: ['runtime'],
+      }),
+    ).resolves.toEqual({ accepted: true });
+    await vi.waitFor(() =>
+      expect(forceDiscover).toHaveBeenCalledWith('runtime'),
+    );
+
+    const secondaryServer = { command: 'secondary-server' };
+    mockConfig.getMcpServers = vi.fn().mockReturnValue({
+      runtime: runtimeServer,
+      secondary: secondaryServer,
+    });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {
+        forceReconnectAll: true,
+      }),
+    ).resolves.toEqual({ accepted: true });
+    await vi.waitFor(() =>
+      expect(forceDiscover).toHaveBeenCalledWith('secondary'),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

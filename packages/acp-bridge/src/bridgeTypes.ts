@@ -601,6 +601,13 @@ export interface PendingPromptEntry {
    * later publish attempts for the same prompt are suppressed.
    */
   terminalPublished?: boolean;
+  /**
+   * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
+   * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until
+   * the prompt settles, so the teardown flush can still publish its
+   * terminal if the session closes before the agent cooperates.
+   */
+  removed?: boolean;
 }
 
 /**
@@ -1011,7 +1018,10 @@ export interface AcpSessionBridge {
   initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
 
   /** Reload persisted MCP settings into workspace and active session configs. */
-  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+  reloadWorkspaceMcp(options?: {
+    forceReconnectAll?: boolean;
+    forceReconnectWhich?: string[];
+  }): Promise<{ accepted: boolean }>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.
