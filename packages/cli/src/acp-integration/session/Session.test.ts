@@ -8228,6 +8228,90 @@ describe('Session', () => {
         );
       });
 
+      it('does not submit partial delivery when a scheduled prompt is cancelled', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn(
+            (
+              callback: (job: {
+                id: string;
+                prompt: string;
+                lastFiredAt: number;
+                delivery: unknown;
+              }) => void,
+            ) => {
+              callback({
+                id: 'task-cancelled',
+                prompt: 'scheduled prompt',
+                lastFiredAt: 1_750_000_000_012,
+                delivery: {
+                  kind: 'channel',
+                  target: {
+                    channelName: 'dingtalk',
+                    type: 'chat',
+                    id: 'chat-1',
+                  },
+                },
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+
+        let markStarted!: () => void;
+        const started = new Promise<void>((resolve) => {
+          markStarted = resolve;
+        });
+        let rejectStream!: (reason?: unknown) => void;
+        const gate = new Promise<never>((_resolve, reject) => {
+          rejectStream = reject;
+        });
+        const scheduledStream = (async function* () {
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                { content: { parts: [{ text: 'partial scheduled answer' }] } },
+              ],
+            },
+          };
+          markStarted();
+          yield await gate;
+        })();
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(scheduledStream);
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start scheduler' }],
+        });
+        await started;
+
+        const internals = session as unknown as {
+          cronAbortController: AbortController | null;
+          cronProcessing: boolean;
+        };
+        internals.cronAbortController?.abort();
+        const abortError = new Error('aborted');
+        abortError.name = 'AbortError';
+        rejectStream(abortError);
+
+        await vi.waitFor(() => {
+          expect(internals.cronProcessing).toBe(false);
+        });
+        expect(mockClient.extMethod).not.toHaveBeenCalledWith(
+          'qwen/control/channel-delivery',
+          expect.anything(),
+        );
+      });
+
       it('marks loop wakeup ACP prompts with loop source metadata', async () => {
         const scheduler = {
           size: 1,
