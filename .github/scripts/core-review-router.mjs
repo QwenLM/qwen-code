@@ -15,6 +15,8 @@ import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
 const MAINTAINERS = ['wenshao', 'tanzhenxin', 'yiliang114', 'LaZzyMan'];
+// NOTE: this list is canonical. Keep the YAML `if:` condition and
+// the apply-step `maintainers=` variable in sync.
 
 const CORE_PREFIX = 'packages/core/';
 
