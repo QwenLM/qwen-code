@@ -243,6 +243,9 @@ export function WorkspaceSessionProvider({
         {...webShellProps}
         historyPageSize={historyPageSize}
         restartSseOnPrompt={restartSseOnPrompt}
+        initialSelectedWorkspaceCwd={
+          effectiveWorkspaceId ? targetWorkspace?.cwd : undefined
+        }
         lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
         lockedWorkspaceCapability={
           lockWorkspaceCwd ? targetWorkspace : undefined
