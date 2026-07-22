@@ -1188,6 +1188,15 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
+    expect(workflow).toContain(
+      '_late_ready="$(jq -r --arg l "${READY_FOR_AGENT_LABEL}"',
+    );
+    expect(workflow).toContain(
+      '_late_approved="$(jq -r --arg l "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'if [[ "${ISSUE_STATE}" == \'open\' && "${_late_ready}" == \'true\' && "${_late_approved}" == \'true\' && "${sender_is_trusted}" == \'true\' ]]; then',
+    );
     expect(issueAutofixJob).toContain(
       "group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'",
     );
