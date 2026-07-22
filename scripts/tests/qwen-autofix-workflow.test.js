@@ -4805,12 +4805,21 @@ describe('qwen-autofix workflow', () => {
     expect(runMark({ NEWEST: '2026-07-16T00:00:00Z', DETAIL_FILE: '' })).toBe(
       `${SENTINEL}|3`,
     );
-    // 3. Crash before prepare (NEWEST empty): terminal round so the scan skips
+    // 3. NEWEST empty but Prepare RAN to a verdict (outcome success/failure)
+    //    and the agent crashed before reading: terminal round so the scan skips
     //    instead of re-handing-off forever; ts falls back to WATERMARK/sentinel.
-    expect(runMark({ NEWEST: '', WATERMARK: '2026-07-10T00:00:00Z' })).toBe(
-      '2026-07-10T00:00:00Z|5',
-    );
-    expect(runMark({ NEWEST: '', WATERMARK: '' })).toBe(`${SENTINEL}|5`);
+    //    (An empty/skipped/cancelled Prepare — the agent never ran — now retries
+    //    instead; that is the dedicated skipped-Prepare test above.)
+    expect(
+      runMark({
+        NEWEST: '',
+        WATERMARK: '2026-07-10T00:00:00Z',
+        PREPARE_OUTCOME: 'success',
+      }),
+    ).toBe('2026-07-10T00:00:00Z|5');
+    expect(
+      runMark({ NEWEST: '', WATERMARK: '', PREPARE_OUTCOME: 'failure' }),
+    ).toBe(`${SENTINEL}|5`);
 
     // The no-output-crash HEADLINE must only promise a retry when one will
     // actually happen: at the final attempt (MARK_ROUND == MAX_ROUNDS) the
