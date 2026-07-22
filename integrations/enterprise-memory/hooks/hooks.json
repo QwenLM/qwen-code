@@ -1,0 +1,79 @@
+{
+  "SessionStart": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "name": "enterprise-memory-session-context",
+          "timeout": 1800
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "name": "enterprise-memory-turn-open",
+          "timeout": 1800
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "^(read_file|grep_search|glob|list_directory|write_file|edit|notebook_edit|run_shell_command)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "name": "enterprise-memory-tool-evidence",
+          "async": true,
+          "timeout": 5000
+        }
+      ]
+    }
+  ],
+  "PostToolUseFailure": [
+    {
+      "matcher": "^(read_file|grep_search|glob|list_directory|write_file|edit|notebook_edit|run_shell_command)$",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "name": "enterprise-memory-tool-failure",
+          "async": true,
+          "timeout": 5000
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "name": "enterprise-memory-turn-stop",
+          "timeout": 1200
+        }
+      ]
+    }
+  ],
+  "StopFailure": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/agent/main.js\" hook",
+          "name": "enterprise-memory-turn-failure",
+          "async": true,
+          "timeout": 5000
+        }
+      ]
+    }
+  ]
+}

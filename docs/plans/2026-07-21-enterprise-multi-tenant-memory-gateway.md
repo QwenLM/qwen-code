@@ -30,6 +30,12 @@ flowchart LR
     S --> G
 ```
 
+## 当前仓库实现状态
+
+`integrations/enterprise-memory/` 已实现不修改 Core 的参考纵切：Qwen Extension、确定性 Hook、受限 MCP、mTLS runtime capability、独立 OIDC 管理面、PostgreSQL `FORCE RLS` canonical store、个人隐私模式、候选审核与审批、Mem0 provider adapter、外部 content handle 与 anti-resurrection ledger 契约，以及单调删除 saga。runtime 与 management 必须以两个 OS 进程和两个最小权限数据库角色部署，二者不得互相获得数据库或身份凭证。当前 adapter 采用每个 tenant/environment 一组 Gateway 工作负载和一个固定 Mem0 Project 的分片方式，身份 claim 必须匹配 `MEMORY_TENANT_ID`；不能让同一个 `MEM0_API_KEY` 服务多个租户。
+
+该纵切不是生产环境已就绪声明。签名 policy resolver、受控 extractor/typed verifier、outbox worker、24 小时原始数据清理、expired replay 清理、orphan/provider reconciliation、entity HMAC 轮换与 reindex、审计 sink、配额/熔断、principal/tenant offboarding 编排仍由部署侧按本文完成。实现把这些缺口保留为显式 deployment gate；不得用环境变量 readiness 声明替代真实控制器，也不得在外部依赖失败时回退到 Qwen 本地记忆。
+
 ## 核心实现
 
 ### 1. Qwen 部署边界
@@ -67,7 +73,7 @@ flowchart LR
 
 `memory-agent` 是一个 stdio MCP server，同时作为 command hook 可执行文件。Gateway JWT 不写入 settings、磁盘或长生命周期 MCP 环境；agent 每次操作通过外部 workload-identity broker 获取 workspace/repository-bound capability。broker 从编排器登记的 daemon endpoint、平台 attested workload identity 和当前授权租约选择 binding，忽略请求中的 tenant、principal、workspace 和 repository 值。broker endpoint 和 mTLS private key 不得挂载或路由到 tool sandbox，不能只用 peer UID 识别调用进程；真实工具探针能够触达 broker 时 readiness 失败。受信 `memory-agent` 通道只授予 search/get/candidate proposal/advisory feedback，并由固定 scope、速率、返回条数和字节上限约束，绝不授予 approve/update/delete/export/admin；这些限制只是 host compromise 的纵深防御，不能替代 workload 隔离。
 
-本地状态位于 tmpfs 的 `0700` 目录，状态文件权限 `0600`，使用 per-session lock 和 atomic replace，只保存 `turn_id`、单调 turn sequence、event ID、召回 memory ID、policy version 和重试标志，不保存 capability、对话或记忆正文。状态只是优化：丢失后 Gateway 可以按 session/event ID 暂存待关联事件，但绝不能跨 tenant/principal/workspace/repository 猜测 turn。
+本地状态位于 tmpfs 的 `0700` 目录，状态文件权限 `0600`，使用 per-session lock 和 atomic replace，只保存 session、`turn_id` 和 pending event ID，不保存 capability、对话或记忆正文。状态只是优化：丢失后 Gateway 可以按 session/event ID 暂存待关联事件，但绝不能跨 tenant/principal/workspace/repository 猜测 turn。
 
 Hook 使用 command 类型；其 `timeout` 在 Qwen 中按毫秒解释，而 HTTP hook 按秒解释且网络错误会强制 fail-open。
 
