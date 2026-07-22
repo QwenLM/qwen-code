@@ -4,7 +4,7 @@
 
 **Goal:** Let a user reference a prior chat session via `@`, injecting a deterministically-slimmed copy of its history as read-only context, and redesign the `@` completion dropdown into a tab-switched layout.
 
-**Architecture:** Backend is a pure, unit-testable core service (`SessionReferenceService`) plus a ref parser (`sessionMentionRef`); it loads a session via the existing `SessionService`, slims records to user/assistant text + one-line tool summaries, and tail-trims to a fixed token budget. `atCommandProcessor` gains a `@session:` routing branch that injects the slimmed block as a scoped-mention part. Frontend adds a `category` field to `Suggestion`, a session-suggestion producer in `useAtCompletion`, and a tab bar in `SuggestionsDisplay` driven by a new tab-switch keybinding.
+**Architecture:** Backend is a pure, unit-testable core service (`SessionReferenceService`) plus a ref parser (`session-mention-ref`); it loads a session via the existing `SessionService`, slims records to user/assistant text + one-line tool summaries, and tail-trims to a fixed token budget. `atCommandProcessor` gains a `@session:` routing branch that injects the slimmed block as a scoped-mention part. Frontend adds a `category` field to `Suggestion`, a session-suggestion producer in `useAtCompletion`, and a tab bar in `SuggestionsDisplay` driven by a new tab-switch keybinding.
 
 **Tech Stack:** TypeScript, React + Ink (TUI), Vitest, existing qwen-code `SessionService` / `atCommandProcessor` / completion hooks.
 
@@ -21,12 +21,12 @@
 
 ---
 
-### Task 1: `sessionMentionRef` — parse/build/validate `@session:` refs
+### Task 1: `session-mention-ref` — parse/build/validate `@session:` refs
 
 **Files:**
 
-- Create: `packages/cli/src/ui/hooks/sessionMentionRef.ts`
-- Test: `packages/cli/src/ui/hooks/sessionMentionRef.test.ts`
+- Create: `packages/cli/src/ui/hooks/session-mention-ref.ts`
+- Test: `packages/cli/src/ui/hooks/session-mention-ref.test.ts`
 
 **Interfaces:**
 
@@ -43,14 +43,14 @@ Note on `@`: mirror `extension-mention-ref.ts` — `buildExtensionRef` returns t
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// packages/cli/src/ui/hooks/sessionMentionRef.test.ts
+// packages/cli/src/ui/hooks/session-mention-ref.test.ts
 import { describe, it, expect } from 'vitest';
 import {
   parseSessionRef,
   buildSessionRef,
   isSessionId,
   SESSION_MENTION_PREFIX,
-} from './sessionMentionRef.js';
+} from './session-mention-ref.js';
 
 const UUID = '3f2504e0-4f89-41d3-9a0c-0305e82c3301';
 
@@ -89,13 +89,13 @@ describe('sessionMentionRef', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run packages/cli/src/ui/hooks/sessionMentionRef.test.ts`
-Expected: FAIL — `Cannot find module './sessionMentionRef.js'`.
+Run: `npx vitest run packages/cli/src/ui/hooks/session-mention-ref.test.ts`
+Expected: FAIL — `Cannot find module './session-mention-ref.js'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// packages/cli/src/ui/hooks/sessionMentionRef.ts
+// packages/cli/src/ui/hooks/session-mention-ref.ts
 export const SESSION_MENTION_PREFIX = 'session:';
 
 const UUID_RE =
@@ -124,13 +124,13 @@ export function buildSessionRef(idOrTitle: string): string {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run packages/cli/src/ui/hooks/sessionMentionRef.test.ts`
+Run: `npx vitest run packages/cli/src/ui/hooks/session-mention-ref.test.ts`
 Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/cli/src/ui/hooks/sessionMentionRef.ts packages/cli/src/ui/hooks/sessionMentionRef.test.ts
+git add packages/cli/src/ui/hooks/session-mention-ref.ts packages/cli/src/ui/hooks/session-mention-ref.test.ts
 git commit -m "feat(cli): add @session: mention ref parser"
 ```
 
@@ -140,9 +140,9 @@ git commit -m "feat(cli): add @session: mention ref parser"
 
 **Files:**
 
-- Create: `packages/core/src/services/sessionReferenceService.ts`
-- Test: `packages/core/src/services/sessionReferenceService.test.ts`
-- Modify (export barrel): `packages/core/src/index.ts` (add `export * from './services/sessionReferenceService.js';` alongside existing service exports)
+- Create: `packages/core/src/services/session-reference-service.ts`
+- Test: `packages/core/src/services/session-reference-service.test.ts`
+- Modify (export barrel): `packages/core/src/index.ts` (add `export * from './services/session-reference-service.js';` alongside existing service exports)
 
 **Interfaces:**
 
@@ -150,7 +150,7 @@ git commit -m "feat(cli): add @session: mention ref parser"
 - Produces:
   - `const SESSION_REF_TOKEN_BUDGET = 8000`
   - `interface SlimmedSessionReference { text: string; meta: { sessionId: string; title: string; messageCount: number; approxTokens: number }; truncated: boolean }`
-  - `class SessionReferenceService { constructor(cwd: string); resolve(ref: { id?: string; title?: string }, opts?: { budgetTokens?: number }): Promise<SlimmedSessionReference | { notFound: true } | { ambiguous: true; count: number }> }`
+  - `class SessionReferenceService { constructor(cwd: string); resolve(sessionId: string, opts?: { budgetTokens?: number; title?: string }): Promise<SlimmedSessionReference | { notFound: true }> }`
 
 Design notes for the implementer:
 
@@ -159,19 +159,12 @@ Design notes for the implementer:
 - Title resolution for the `{ title }` case is done by the CALLER (atCommandProcessor) via `SessionService.findSessionsByTitle` before calling `resolve`; `resolve` itself takes an `{ id }`. Keep `resolve` id-only to stay pure/testable. (Update the Produces signature accordingly: `resolve(id: string, opts?)`.) The ambiguous/not-found title handling lives in Task 3.
 - Budget trim: build an array of per-turn strings, estimate tokens of the joined text via `estimateContentTokens([{ role: 'user', parts: [{ text }] }])`; while over budget, drop the OLDEST line and re-check; if any dropped, prepend `[earlier turns omitted]\n` and set `truncated: true`.
 
-Revised Produces (authoritative):
-
-```ts
-resolve(sessionId: string, opts?: { budgetTokens?: number }):
-  Promise<SlimmedSessionReference | { notFound: true }>
-```
-
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-// packages/core/src/services/sessionReferenceService.test.ts
+// packages/core/src/services/session-reference-service.test.ts
 import { describe, it, expect, vi } from 'vitest';
-import { SessionReferenceService } from './sessionReferenceService.js';
+import { SessionReferenceService } from './session-reference-service.js';
 import type { ResumedSessionData } from './sessionService.js';
 
 function fakeResumed(messages: unknown[]): ResumedSessionData {
@@ -267,13 +260,13 @@ describe('SessionReferenceService', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run packages/core/src/services/sessionReferenceService.test.ts`
-Expected: FAIL — `Cannot find module './sessionReferenceService.js'`.
+Run: `npx vitest run packages/core/src/services/session-reference-service.test.ts`
+Expected: FAIL — `Cannot find module './session-reference-service.js'`.
 
 - [ ] **Step 3: Write minimal implementation**
 
 ```ts
-// packages/core/src/services/sessionReferenceService.ts
+// packages/core/src/services/session-reference-service.ts
 import type { Content, Part } from '@google/genai';
 import { SessionService } from './sessionService.js';
 import type { ChatRecord } from './chatRecordingService.js';
@@ -411,7 +404,7 @@ export class SessionReferenceService {
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run packages/core/src/services/sessionReferenceService.test.ts`
+Run: `npx vitest run packages/core/src/services/session-reference-service.test.ts`
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Add barrel export + typecheck**
@@ -419,7 +412,7 @@ Expected: PASS (4 tests).
 Add to `packages/core/src/index.ts` (near other `./services/*` exports):
 
 ```ts
-export * from './services/sessionReferenceService.js';
+export * from './services/session-reference-service.js';
 ```
 
 Run: `npx tsc --noEmit -p packages/core/tsconfig.json`
@@ -428,7 +421,7 @@ Expected: no errors in the new file.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add packages/core/src/services/sessionReferenceService.ts packages/core/src/services/sessionReferenceService.test.ts packages/core/src/index.ts
+git add packages/core/src/services/session-reference-service.ts packages/core/src/services/session-reference-service.test.ts packages/core/src/index.ts
 git commit -m "feat(core): add SessionReferenceService for slimmed session injection"
 ```
 
@@ -454,6 +447,7 @@ Behavior:
 2. Call `new SessionReferenceService(config.getWorkingDir()).resolve(id)`.
    - `{ notFound: true }` OR ambiguous OR 0-match → leave the `@session:…` token as literal text in the prompt and push a warning note (mirror how unresolved mentions are surfaced elsewhere in this file); do NOT throw.
    - success → push `{ text: result.text }` into the scoped-mention parts and add a display card titled `Referenced session` (mirror existing `Activate Extension` card construction in this file).
+   - exception from `resolve()` (e.g. corrupt session file, I/O error) → leave the `@session:…` token as literal text and push a warning note; do NOT throw.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -508,7 +502,7 @@ Expected: FAIL — assertion fails (session text not injected) because the branc
 In `atCommandProcessor.ts`, add imports at the top:
 
 ```ts
-import { parseSessionRef } from './sessionMentionRef.js';
+import { parseSessionRef } from './session-mention-ref.js';
 import { SessionReferenceService } from '@qwen-code/qwen-code-core';
 ```
 
@@ -539,22 +533,33 @@ if (sessionRef) {
       continue; // token already retained as literal text
     }
   }
-  const ref = await new SessionReferenceService(config.getWorkingDir()).resolve(
-    sessionId!,
-  );
-  if ('notFound' in ref) {
+  try {
+    const ref = await new SessionReferenceService(
+      config.getWorkingDir(),
+    ).resolve(sessionId!);
+    if ('notFound' in ref) {
+      addItem(
+        { type: MessageType.INFO, text: `Session "${sessionId}" not found.` },
+        userMessageTimestamp,
+      );
+      continue;
+    }
+    scopedMentionEntries.push({
+      part: { text: ref.text },
+      // mirror the card shape used by the extension/MCP-server branches:
+      card: { title: 'Referenced session', detail: ref.meta.title },
+    });
+    continue;
+  } catch {
     addItem(
-      { type: MessageType.INFO, text: `Session "${sessionId}" not found.` },
+      {
+        type: MessageType.INFO,
+        text: `Failed to load session "${sessionId}".`,
+      },
       userMessageTimestamp,
     );
     continue;
   }
-  scopedMentionEntries.push({
-    part: { text: ref.text },
-    // mirror the card shape used by the extension/MCP-server branches:
-    card: { title: 'Referenced session', detail: ref.meta.title },
-  });
-  continue;
 }
 ```
 
@@ -586,9 +591,9 @@ git commit -m "feat(cli): inject slimmed prior-session context on @session: ment
 **Files:**
 
 - Modify: `packages/cli/src/ui/components/SuggestionsDisplay.tsx:19-45` (add `category` to `Suggestion`, add `SuggestionCategory` type)
-- Create: `packages/cli/src/ui/hooks/sessionCompletion.ts` (producer, mirrors `extension-mention-ref.ts`)
+- Create: `packages/cli/src/ui/hooks/session-completion.ts` (producer, mirrors `extension-mention-ref.ts`)
 - Modify: `packages/cli/src/ui/hooks/useAtCompletion.ts` (call producer; tag file results; merge near lines 439/486/493)
-- Test: `packages/cli/src/ui/hooks/sessionCompletion.test.ts`
+- Test: `packages/cli/src/ui/hooks/session-completion.test.ts`
 
 **Interfaces:**
 
@@ -616,7 +621,7 @@ and inside `Suggestion`:
 Producer test:
 
 ```ts
-// packages/cli/src/ui/hooks/sessionCompletion.test.ts
+// packages/cli/src/ui/hooks/session-completion.test.ts
 import { describe, it, expect, vi } from 'vitest';
 
 vi.mock('@qwen-code/qwen-code-core', async (orig) => {
@@ -645,7 +650,7 @@ vi.mock('@qwen-code/qwen-code-core', async (orig) => {
   };
 });
 
-import { getSessionSuggestions } from './sessionCompletion.js';
+import { getSessionSuggestions } from './session-completion.js';
 
 describe('getSessionSuggestions', () => {
   it('maps sessions to category:session suggestions with @session: values', async () => {
@@ -670,16 +675,16 @@ describe('getSessionSuggestions', () => {
 
 - [ ] **Step 2: Run test to verify it fails**
 
-Run: `npx vitest run packages/cli/src/ui/hooks/sessionCompletion.test.ts`
-Expected: FAIL — `Cannot find module './sessionCompletion.js'`.
+Run: `npx vitest run packages/cli/src/ui/hooks/session-completion.test.ts`
+Expected: FAIL — `Cannot find module './session-completion.js'`.
 
 - [ ] **Step 3: Implement the producer**
 
 ```ts
-// packages/cli/src/ui/hooks/sessionCompletion.ts
+// packages/cli/src/ui/hooks/session-completion.ts
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
-import { buildSessionRef } from './sessionMentionRef.js';
+import { buildSessionRef } from './session-mention-ref.js';
 
 const MAX_SESSION_SUGGESTIONS = 20;
 
@@ -720,12 +725,12 @@ export async function getSessionSuggestions(
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `npx vitest run packages/cli/src/ui/hooks/sessionCompletion.test.ts`
+Run: `npx vitest run packages/cli/src/ui/hooks/session-completion.test.ts`
 Expected: PASS (2 tests).
 
 - [ ] **Step 5: Wire into `useAtCompletion.ts`**
 
-- Add import: `import { getSessionSuggestions } from './sessionCompletion.js';`
+- Add import: `import { getSessionSuggestions } from './session-completion.js';`
 - Tag file results with `category: 'file'` at the `fileSuggestions` map (~line 486):
 
 ```ts
@@ -763,7 +768,7 @@ Expected: PASS (existing) + no type errors.
 - [ ] **Step 7: Commit**
 
 ```bash
-git add packages/cli/src/ui/components/SuggestionsDisplay.tsx packages/cli/src/ui/hooks/sessionCompletion.ts packages/cli/src/ui/hooks/sessionCompletion.test.ts packages/cli/src/ui/hooks/useAtCompletion.ts packages/cli/src/ui/hooks/extension-mention-ref.ts
+git add packages/cli/src/ui/components/SuggestionsDisplay.tsx packages/cli/src/ui/hooks/session-completion.ts packages/cli/src/ui/hooks/session-completion.test.ts packages/cli/src/ui/hooks/useAtCompletion.ts packages/cli/src/ui/hooks/extension-mention-ref.ts
 git commit -m "feat(cli): surface prior sessions as @ completion suggestions"
 ```
 

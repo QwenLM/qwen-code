@@ -100,6 +100,30 @@ describe('SessionReferenceService', () => {
     expect(res.text).toContain('[tool: write_file — error]');
   });
 
+  it('surfaces an error tool_result that has no functionResponse parts', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'tool_result',
+          toolCallResult: {
+            callId: 'c1',
+            error: new Error('permission denied'),
+          },
+          message: {
+            role: 'user',
+            parts: [],
+          },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    // No functionResponse names to derive a tool line from; the record
+    // contributes nothing to the slimmed output. Verify it does not throw
+    // and the session still resolves.
+    expect(res.text).toContain('Referenced session');
+  });
+
   it('keeps assistant text on a turn that ALSO calls a tool', async () => {
     // An assistant turn that calls a tool is a SINGLE record carrying both the
     // text and the functionCall parts; the paired tool_result carries the

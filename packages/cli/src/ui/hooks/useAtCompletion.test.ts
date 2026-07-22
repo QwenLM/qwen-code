@@ -997,6 +997,35 @@ describe('useAtCompletion', () => {
       expect(values).not.toContain('myserver:');
       expect(values).toContain('my-notes.txt');
     });
+
+    it('tags MCP server and resource suggestions with category mcp', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ myserver: {} }),
+        getResourceRegistry: () => ({
+          getResourcesByServer: (name: string) =>
+            name === 'myserver'
+              ? [{ uri: 'res://x', name: 'x', serverName: 'myserver' }]
+              : [],
+        }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(true, 'my', resourceConfig, testRootDir),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      const mcpSuggestions = result.current.suggestions.filter(
+        (s) => s.value === 'mcp:myserver' || s.value === 'myserver:',
+      );
+      expect(mcpSuggestions.length).toBeGreaterThan(0);
+      for (const s of mcpSuggestions) {
+        expect(s.category).toBe('mcp');
+      }
+    });
   });
 
   describe('Global MCP resource completion', () => {

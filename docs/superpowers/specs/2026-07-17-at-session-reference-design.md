@@ -125,12 +125,12 @@ text with a surfaced note (never silently dropped).
 - **Producer.** In `useAtCompletion.ts` add a session producer that calls
   `SessionService.listSessions` (current project), maps each to a `Suggestion`
   with `category:'session'`, `label` = title (fallback: first user prompt,
-  truncated), `value` = `@session:<id>`, `description` = relative time / message
-  count. Shown on **bare `@`** (like extensions) and filtered by pattern.
+  truncated), `value` = `@session:<id>`, `description` = first user prompt
+  (when session has a custom title; otherwise omitted). Shown on **bare `@`** (like extensions) and filtered by pattern.
 - **Rendering.** `SuggestionsDisplay.tsx` gains an optional top tab bar modeled on
   `StatsDialog`'s `StatsTabs` / `handleTabChange` / `useKeypress` trio: tabs are
   `All` + each non-empty category. `All` shows every suggestion (current
-  behavior); a specific tab filters to that category. Tab counts shown per tab.
+  behavior); a specific tab filters to that category.
   When only one category is present, the tab bar is hidden (no regression for
   plain file completion).
 - **Keyboard.** `↑/↓` selects within the active tab (unchanged). Tab **switching**
