@@ -156,6 +156,8 @@ export function GitModePopover({
           align="end"
           sideOffset={8}
           className={styles.popover}
+          onOpenAutoFocus={(e) => e.preventDefault()}
+          onInteractOutside={(e) => e.preventDefault()}
         >
           <div className={styles.header}>{t('gitMode.title')}</div>
 
