@@ -116,6 +116,8 @@ export interface AgentMeta {
    * `running` as resumable work that was interrupted by process exit.
    */
   status?: 'running' | 'completed' | 'failed' | 'cancelled' | 'paused';
+  /** Whether the original launch used temporary worktree isolation. */
+  isolation?: 'worktree';
   /** ISO 8601 timestamp of the latest lifecycle transition. */
   lastUpdatedAt?: string;
   /** Resolved approval mode used when the agent was launched. */
@@ -150,6 +152,8 @@ export interface AgentPersistedCliFlags {
   sandbox?: SandboxConfig | null;
   screenReader?: boolean;
   model?: string;
+  authType?: string;
+  baseUrl?: string;
   maxSessionTurns?: number;
   maxToolCalls?: number;
   /**

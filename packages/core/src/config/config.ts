@@ -4299,6 +4299,7 @@ export class Config {
       this.chatRecordingService?.resetStoragePaths();
     }
 
+    this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
     await this.refreshCurrentRuntimeStatus(expected);
