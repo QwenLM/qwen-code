@@ -259,16 +259,16 @@ export function registerA2uiActionRoutes(
     '/session/:id/a2ui-action',
     mutate(),
     async (req: Request, res: Response) => {
+      if (opts.isWorkspaceTrusted?.() === false) {
+        sendUntrustedWorkspaceResponse(res);
+        return;
+      }
       const assertGenerationOpen = opts.captureGenerationAssertion?.();
       try {
         assertGenerationOpen?.();
       } catch (error) {
         if (sendGenerationClosedError(res, error)) return;
         throw error;
-      }
-      if (opts.isWorkspaceTrusted?.() === false) {
-        sendUntrustedWorkspaceResponse(res);
-        return;
       }
       const body = safeBody(req);
       const name = body['name'];

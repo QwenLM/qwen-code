@@ -2304,6 +2304,7 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        runtime.generationGuard?.assertOpen();
         const result = await runtime.bridge.changeSessionCwd(
           sessionId,
           { path: targetPath },

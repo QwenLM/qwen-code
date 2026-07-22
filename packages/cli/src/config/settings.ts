@@ -491,12 +491,12 @@ export class LoadedSettings {
     if (key === 'model.name' && typeof value === 'string') {
       value = stripRuntimeSnapshotPrefix(value);
     }
+    assertCanCommit?.();
     const settingsFile = this.forScope(scope);
     setNestedPropertySafe(settingsFile.settings, key, value);
     setNestedPropertySafe(settingsFile.originalSettings, key, value);
     this._merged = this.computeMergedSettings();
     const replacePath = key === 'mcpServers' ? key.split('.') : [];
-    assertCanCommit?.();
     saveSettings(settingsFile, createSettingsUpdate(key, value), replacePath);
   }
 
