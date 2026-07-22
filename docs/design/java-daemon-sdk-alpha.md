@@ -178,6 +178,15 @@ daemon does not advertise a capability that distinguishes these implementations
 with the same REST/SSE feature set, so the SDK cannot negotiate this minimum at
 runtime and fails closed when a formal terminal is absent.
 
+The handshake intentionally waits for the targeted prompt call to settle before
+the FIFO may dispatch its successor. Adding an acknowledgement-only timeout
+would allow a late session-scoped cancel to reach that successor and would break
+the ordering guarantee. Consequently, a provider, tool, or custom integration
+that ignores its `AbortSignal` indefinitely can leave the cancel mutation
+outcome unknown and the session unusable. Reclaiming a wedged shared ACP child
+without terminating sibling sessions requires stronger runtime isolation and is
+outside this alpha.
+
 The alpha does not promise exactly-once execution across daemon restarts,
 automatic epoch recovery, snapshot/resync, persisted cursors, or true
 prompt-ID-targeted cancellation. It also does not expose creation-time model

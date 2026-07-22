@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -13,7 +14,15 @@ import {
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
 
+// This harness executes the root bundle, which `npm run build` does not refresh.
+// Run `npm run build && npm run bundle` from the repository root first.
 const root = process.cwd();
+const cliBundle = path.join(root, 'dist', 'cli.js');
+if (!existsSync(cliBundle)) {
+  throw new Error(
+    'Java daemon E2E requires dist/cli.js; run `npm run build && npm run bundle` from the repository root first.',
+  );
+}
 const temporary = mkdtempSync(path.join(tmpdir(), 'java-daemon-e2e-'));
 const workspace = path.join(temporary, 'workspace');
 const testHome = path.join(temporary, 'home');
@@ -87,7 +96,7 @@ const cleanEnvironment = Object.fromEntries(
 const daemon = spawn(
   process.execPath,
   [
-    path.join(root, 'dist', 'cli.js'),
+    cliBundle,
     'serve',
     '--port',
     '0',

@@ -33,7 +33,7 @@ This release adds the Java 11 daemon transport to the existing `com.alibaba:qwen
 
 ### Known alpha limits
 
-The SDK does not promise exactly-once prompt execution across daemon restarts, automatic epoch recovery, snapshot/resync, persisted cursors, or true prompt-ID-targeted cancellation. Creation-time model selection is omitted because the current daemon reports rejection only through an SSE event emitted before the create response. An ambiguous create may leave an unidentified session until the daemon reaps it.
+The SDK does not promise exactly-once prompt execution across daemon restarts, automatic epoch recovery, snapshot/resync, persisted cursors, or true prompt-ID-targeted cancellation. Creation-time model selection is omitted because the current daemon reports rejection only through an SSE event emitted before the create response. An ambiguous create may leave an unidentified session until the daemon reaps it. The acknowledged cancellation handshake intentionally has no acknowledgement-only timeout because that could let a late session-scoped cancel reach the next prompt; a provider or tool that ignores its `AbortSignal` can therefore leave the session unusable until stronger runtime isolation is available.
 
 ### Maven configuration
 

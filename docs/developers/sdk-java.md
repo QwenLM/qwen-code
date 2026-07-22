@@ -51,11 +51,25 @@ mvn package
 mvn install
 ```
 
+### Real daemon E2E from source
+
+Run the real-daemon Java integration tests from the repository root after building both the workspaces and the root CLI bundle:
+
+```bash
+npm run build
+npm run bundle
+npx tsx scripts/run-java-daemon-sdk-e2e.ts
+```
+
+`npm run build` alone does not refresh `dist/cli.js`; the E2E harness launches that bundle and fails with an explicit prerequisite error when it is missing.
+
 ## Recommended daemon API
 
 Start `qwen serve`, then create an independent thread-scoped session. `promptText` returns only after a matching `turn_complete`; incomplete streams fail with `PromptOutcomeIndeterminateException` rather than returning partial text as success.
 
 For the lifecycle guarantees assumed by `0.1.0-alpha`, use the qwen-code build released from the same source revision as the SDK. The daemon must contain the idempotent per-client detach ledger from [#7386](https://github.com/QwenLM/qwen-code/pull/7386), the per-epoch terminal guarantee from [#7400](https://github.com/QwenLM/qwen-code/pull/7400), and this release's acknowledged admission cancellation plus FIFO cancel-drain fence. The #7400 commit alone is not sufficient: a same-wire daemon can acknowledge cancel before agent dispatch without stopping the admitted prompt, or let an unacknowledged session-scoped cancel reach a queued successor. The bundled ACP child uses one acknowledged admission-aware cancellation handshake; a custom standards-compliant ACP child without that extension receives one standard `session/cancel` notification. Feature negotiation cannot distinguish older same-wire daemon builds, so the SDK fails closed rather than reporting partial output as success.
+
+The bundled cancellation handshake deliberately waits for the targeted prompt call to settle before the daemon dispatches its queued successor. It has no timeout that merely acknowledges cancellation: doing so could let a late session-scoped cancel reach the next prompt. If a provider, tool, or custom integration ignores its `AbortSignal` indefinitely, the cancel mutation can therefore remain outcome-unknown and that session must not be reused. Treat a formal prompt terminal received within the caller's observation boundary as authoritative; otherwise close or destroy the session after observation fails. Recovering a wedged shared ACP child without disturbing its sibling sessions requires stronger runtime isolation and is outside this alpha contract.
 
 ```java
 import com.alibaba.qwen.code.daemon.DaemonClient;
