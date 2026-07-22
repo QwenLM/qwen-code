@@ -1,3 +1,4 @@
+import './styles/globals.css';
 import {
   createContext,
   useCallback,
@@ -258,7 +259,6 @@ import {
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import { WebShellPortalRootContext } from './portalRoot';
-import './styles/globals.css';
 import styles from './App.module.css';
 
 export const CompactModeContext = createContext(false);
