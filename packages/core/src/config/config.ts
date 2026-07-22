@@ -4399,12 +4399,14 @@ export class Config {
       // Log but don't throw - cleanup should be best-effort
       this.debugLogger.error('Error during Config shutdown:', error);
     } finally {
-      await this.chatRecordingService?.close().catch((error) => {
-        this.debugLogger.error(
-          'Failed to release session writer lease:',
-          error,
-        );
-      });
+      if (Object.hasOwn(this, 'chatRecordingService')) {
+        await this.chatRecordingService?.close().catch((error) => {
+          this.debugLogger.error(
+            'Failed to release session writer lease:',
+            error,
+          );
+        });
+      }
       const pendingLease = this.pendingSessionWriterLease;
       if (pendingLease) {
         try {

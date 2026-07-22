@@ -413,14 +413,24 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
 
     const childNames = child.getToolRegistry().getAllToolNames().sort();
 
-    // After warmAll the core tool sets must match — the child registry
-    // is built from the same Config (just the override), and we copied
-    // any discovered tools across. So the name set should equal parent's.
-    expect(childNames).toEqual(parentRegistry.getAllToolNames().sort());
-    // And the parent's pre-warm names must be a subset of the post-warm
+    // Goal tools are deliberately excluded from subagent registries, while
+    // all other warmed core and discovered tools must be copied from parent.
+    expect(childNames).toEqual(
+      parentRegistry
+        .getAllToolNames()
+        .filter(
+          (name) =>
+            name !== ToolNames.GET_GOAL && name !== ToolNames.UPDATE_GOAL,
+        )
+        .sort(),
+    );
+    // The parent's pre-warm non-Goal names must be a subset of the post-warm
     // names — sanity check that warmAll didn't lose anything.
     const beforeSet = new Set(beforeNames);
     for (const name of beforeSet) {
+      if (name === ToolNames.GET_GOAL || name === ToolNames.UPDATE_GOAL) {
+        continue;
+      }
       expect(childNames).toContain(name);
     }
 
