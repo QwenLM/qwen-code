@@ -1018,7 +1018,10 @@ export interface AcpSessionBridge {
   initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
 
   /** Reload persisted MCP settings into workspace and active session configs. */
-  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+  reloadWorkspaceMcp(options?: {
+    forceReconnectAll?: boolean;
+    forceReconnectWhich?: string[];
+  }): Promise<{ accepted: boolean }>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.

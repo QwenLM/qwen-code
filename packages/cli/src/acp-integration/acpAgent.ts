@@ -3205,7 +3205,14 @@ class QwenAgent implements Agent {
     });
   }
 
-  private reloadWorkspaceMcpDiscovery(): { accepted: boolean } {
+  private reloadWorkspaceMcpDiscovery(
+    options: {
+      forceReconnectAll?: boolean;
+      forceReconnectWhich?: string[];
+    } = {},
+  ): {
+    accepted: boolean;
+  } {
     return this.enqueueWorkspaceMcpDiscovery('reload', async () => {
       const settings = loadSettings(this.config.getTargetDir());
       const discoveryConfig = this.workspaceMcpDiscoveryConfig;
@@ -3251,7 +3258,71 @@ class QwenAgent implements Agent {
           'Failed to synchronize MCP settings with live sessions',
         );
       }
+      if (
+        options.forceReconnectAll === true ||
+        options.forceReconnectWhich !== undefined
+      ) {
+        await this.forceReconnectWorkspaceMcp(options.forceReconnectWhich);
+      }
     });
+  }
+
+  private async forceReconnectWorkspaceMcp(
+    requestedServerNames?: readonly string[],
+  ): Promise<void> {
+    const serverNames = new Set<string>();
+    for (const config of [
+      this.workspaceMcpDiscoveryConfig,
+      this.config,
+      ...this.getActiveSessions().map((session) => session.getConfig()),
+    ]) {
+      for (const name of Object.keys(config?.getMcpServers() ?? {})) {
+        serverNames.add(name);
+      }
+    }
+
+    const selectedServerNames = requestedServerNames
+      ? [...new Set(requestedServerNames)].filter((name) =>
+          serverNames.has(name),
+        )
+      : [...serverNames];
+    const errors: unknown[] = [];
+    for (const serverName of selectedServerNames) {
+      try {
+        const poolHasEntries =
+          (this.mcpPool?.getSnapshot().byName[serverName]?.entryCount ?? 0) > 0;
+        if (this.mcpPool && poolHasEntries) {
+          const results = await this.mcpPool.restartByName(serverName);
+          const failed = results.find((result) => !result.restarted);
+          if (failed) {
+            throw new Error(
+              `MCP server ${JSON.stringify(serverName)} failed to reconnect: ${failed.reason ?? 'unknown error'}`,
+            );
+          }
+          await Promise.all(
+            this.getLiveMcpConfigs(serverName).map(async (config) => {
+              const geminiClient = config.getGeminiClient?.();
+              if (geminiClient?.isInitialized?.()) {
+                await geminiClient.setTools?.();
+              }
+            }),
+          );
+        } else {
+          await this.reconcileMcpServerAcrossLiveConfigs(
+            serverName,
+            'discover',
+          );
+        }
+      } catch (error) {
+        errors.push(error);
+      }
+    }
+    if (errors.length > 0) {
+      throw new AggregateError(
+        errors,
+        'Failed to force reconnect one or more MCP servers',
+      );
+    }
   }
 
   /**
@@ -7517,8 +7588,42 @@ class QwenAgent implements Agent {
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize:
         return this.initializeWorkspaceMcpDiscovery();
-      case SERVE_CONTROL_EXT_METHODS.workspaceMcpReload:
-        return this.reloadWorkspaceMcpDiscovery();
+      case SERVE_CONTROL_EXT_METHODS.workspaceMcpReload: {
+        const forceReconnectAll = params['forceReconnectAll'];
+        const forceReconnectWhich = params['forceReconnectWhich'];
+        if (
+          forceReconnectAll !== undefined &&
+          typeof forceReconnectAll !== 'boolean'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'forceReconnectAll must be a boolean',
+          );
+        }
+        if (
+          forceReconnectWhich !== undefined &&
+          (!Array.isArray(forceReconnectWhich) ||
+            forceReconnectWhich.some(
+              (serverName) =>
+                typeof serverName !== 'string' || serverName.length === 0,
+            ))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'forceReconnectWhich must be an array of server names',
+          );
+        }
+        if (forceReconnectAll === true && forceReconnectWhich !== undefined) {
+          throw RequestError.invalidParams(
+            undefined,
+            'forceReconnectAll and forceReconnectWhich cannot be used together',
+          );
+        }
+        return this.reloadWorkspaceMcpDiscovery({
+          forceReconnectAll: forceReconnectAll === true,
+          forceReconnectWhich: forceReconnectWhich as string[] | undefined,
+        });
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpManage: {
         const serverName = params['serverName'];
         const action = params['action'];
