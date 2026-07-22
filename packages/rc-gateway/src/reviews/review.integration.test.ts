@@ -28,7 +28,7 @@ import { DaemonClient } from '@qwen-code/sdk';
 import { createGatewayApp } from '../server.js';
 import { TokenStore } from '../tokenStore.js';
 import { PairingService } from '../pairing.js';
-import { ReviewRegistry } from '../reviews/reviewRegistry.js';
+import { ReviewRegistry } from './reviewRegistry.js';
 import { startStubDaemon, type StubDaemon } from '../testing/stubDaemon.js';
 import type { OwnerEvent } from '../ownerEvents.js';
 
@@ -172,9 +172,15 @@ describe('remote review end-to-end (real permission bridge)', () => {
             requestId: 'q-read',
             sessionId: reviewSessionId,
             toolCall: { kind: 'read', rawInput: {} },
+            // allow_always FIRST (index 0), allow_once SECOND: this makes the
+            // test discriminate kind-based selection from a regressed
+            // positional `options[0]` selector. If selection ever degraded to
+            // "pick index 0", this would return 'always' and the assertion
+            // below (expecting 'ok') would fail — proving the real
+            // `selectAllowOnceOptionId` picks by `kind`, not position.
             options: [
-              { optionId: 'ok', kind: 'allow_once' },
               { optionId: 'always', kind: 'allow_always' },
+              { optionId: 'ok', kind: 'allow_once' },
             ],
           },
         },
