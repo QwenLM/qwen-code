@@ -47,10 +47,6 @@ const EN: Messages = {
   'gitDiff.hidden': (v) => `${v?.count ?? 0} more file(s) not shown`,
   'gitDiff.expand': (v) => `Show changes for ${v?.path ?? 'file'}`,
   'gitDiff.collapse': (v) => `Hide changes for ${v?.path ?? 'file'}`,
-  'worktree.welcomeTitle': 'Worktree isolated session',
-  'worktree.toggleHint': 'Isolated copy · main branch untouched',
-  'worktree.welcomeDesc': 'Changes happen in an isolated copy',
-  'worktree.cancel': 'Cancel worktree isolation',
   'gitMode.title': 'Git mode',
   'gitMode.current': 'Current branch',
   'gitMode.currentDesc': (v) => `Develop directly on ${v?.branch ?? 'main'}`,
@@ -61,10 +57,6 @@ const EN: Messages = {
   'gitMode.branchLabel': 'Branch name',
   'gitMode.branchConflictWarning':
     'Only one branch session per workspace at a time',
-  'gitMode.branch.dirtyTree':
-    'Uncommitted changes detected. Commit or stash first.',
-  'gitMode.branch.exists': (v) =>
-    `Branch "${v?.name ?? ''}" already exists. Choose a different name.`,
   'gitMode.branchInvalidName': 'Invalid branch name',
   'gitMode.worktree': 'Worktree',
   'gitMode.worktreeDesc': 'Isolated copy · can run in parallel',
@@ -2241,10 +2233,6 @@ const ZH: Messages = {
   'gitDiff.hidden': (v) => `还有 ${v?.count ?? 0} 个文件未显示`,
   'gitDiff.expand': (v) => `显示 ${v?.path ?? '文件'} 的变更`,
   'gitDiff.collapse': (v) => `隐藏 ${v?.path ?? '文件'} 的变更`,
-  'worktree.welcomeTitle': 'Worktree 隔离会话',
-  'worktree.toggleHint': '独立副本 · 不影响主分支',
-  'worktree.welcomeDesc': '变更在独立副本中进行',
-  'worktree.cancel': '取消 Worktree 隔离',
   'gitMode.title': 'Git 模式',
   'gitMode.current': '当前分支',
   'gitMode.currentDesc': (v) => `直接在 ${v?.branch ?? 'main'} 上开发`,
@@ -2253,9 +2241,6 @@ const ZH: Messages = {
   'gitMode.branchPlaceholder': 'feat/my-feature',
   'gitMode.branchLabel': '分支名',
   'gitMode.branchConflictWarning': '同一 workspace 同时只能有一个分支会话',
-  'gitMode.branch.dirtyTree': '检测到未提交的变更，请先提交或暂存。',
-  'gitMode.branch.exists': (v) =>
-    `分支 "${v?.name ?? ''}" 已存在，请使用其他名称。`,
   'gitMode.branchInvalidName': '分支名不合法',
   'gitMode.worktree': 'Worktree 隔离',
   'gitMode.worktreeDesc': '独立副本 · 可并行',
