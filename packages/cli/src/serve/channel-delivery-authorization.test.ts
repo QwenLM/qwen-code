@@ -77,6 +77,13 @@ describe('ChannelDeliveryAuthorizationStore', () => {
       target,
     };
     expect(store.consume(workspace, fire)).toBe(true);
+    store.registerScheduledTask(workspace, {
+      sessionId: 'session-1',
+      taskId: 'task-1',
+      target,
+      recurring: true,
+      lastFiredAt: 1_000,
+    });
     expect(store.consume(workspace, fire)).toBe(false);
     expect(
       store.consume(workspace, {

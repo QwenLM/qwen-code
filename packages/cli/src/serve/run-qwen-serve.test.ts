@@ -195,6 +195,116 @@ describe('createBoundChannelDeliveryHandler', () => {
     await expect(handler(info)).resolves.toEqual({ status: 'delivered' });
     expect(deliverChannelMessage).toHaveBeenCalledTimes(1);
   });
+
+  it('consumes prompt authorization before skipping an empty final', async () => {
+    const getManager = vi.fn(() => undefined);
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.authorizePrompt('/canonical', {
+      sessionId: info.sessionId,
+      deliveryId: info.deliveryId,
+      target: info.target,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      getManager,
+      authorizations,
+    );
+
+    await expect(handler({ ...info, text: '  \n' })).resolves.toEqual({
+      status: 'skipped',
+    });
+    expect(getManager).not.toHaveBeenCalled();
+    await expect(handler(info)).resolves.toEqual({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+      error: 'Channel delivery is not authorized.',
+    });
+  });
+
+  it('advances recurring scheduled authorization before skipping an empty final', async () => {
+    const deliverChannelMessage = vi.fn(async () => ({
+      delivered: true as const,
+    }));
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.registerScheduledTask('/canonical', {
+      sessionId: info.sessionId,
+      taskId: 'task-1',
+      target: info.target,
+      recurring: true,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      () => ({ deliverChannelMessage }) as never,
+      authorizations,
+    );
+    const scheduledInfo = {
+      ...info,
+      deliveryId: 'task-1:100',
+      source: 'scheduled' as const,
+      text: '',
+      promptId: undefined,
+      taskId: 'task-1',
+      firedAt: 100,
+    };
+
+    await expect(handler(scheduledInfo)).resolves.toEqual({
+      status: 'skipped',
+    });
+    expect(deliverChannelMessage).not.toHaveBeenCalled();
+    await expect(handler(scheduledInfo)).resolves.toMatchObject({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+    });
+    await expect(
+      handler({
+        ...scheduledInfo,
+        deliveryId: 'task-1:101',
+        firedAt: 101,
+        text: 'next answer',
+      }),
+    ).resolves.toEqual({ status: 'delivered' });
+  });
+
+  it('consumes one-shot scheduled authorization before skipping an empty final', async () => {
+    const getManager = vi.fn(() => undefined);
+    const authorizations = new ChannelDeliveryAuthorizationStore();
+    authorizations.registerScheduledTask('/canonical', {
+      sessionId: info.sessionId,
+      taskId: 'task-once',
+      target: info.target,
+      recurring: false,
+    });
+    const handler = createBoundChannelDeliveryHandler(
+      '/canonical',
+      getManager,
+      authorizations,
+    );
+    const scheduledInfo = {
+      ...info,
+      deliveryId: 'task-once:100',
+      source: 'scheduled' as const,
+      text: '',
+      promptId: undefined,
+      taskId: 'task-once',
+      firedAt: 100,
+    };
+
+    await expect(handler(scheduledInfo)).resolves.toEqual({
+      status: 'skipped',
+    });
+    expect(getManager).not.toHaveBeenCalled();
+    await expect(
+      handler({
+        ...scheduledInfo,
+        deliveryId: 'task-once:101',
+        firedAt: 101,
+        text: 'later answer',
+      }),
+    ).resolves.toMatchObject({
+      status: 'failed',
+      code: 'channel_delivery_invalid',
+    });
+  });
 });
 
 function makeRuntimeBridge(): HttpAcpBridge {

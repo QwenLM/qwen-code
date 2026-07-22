@@ -800,9 +800,29 @@ The replayable result event contains only correlation and sanitized status:
 }
 ```
 
+An empty successful Prompt final omits error fields:
+
+```json
+{
+  "type": "channel_delivery_result",
+  "promptId": "prompt-1",
+  "data": {
+    "sessionId": "session-1",
+    "deliveryId": "prompt-1",
+    "source": "prompt",
+    "status": "skipped",
+    "promptId": "prompt-1"
+  }
+}
+```
+
 `source` is `prompt` or `scheduled`; `status` is `delivered`, `failed`, or
-`skipped`. Scheduled correlation uses `taskId` and `firedAt`. The event never
-contains target IDs, message text, credentials, or webhook secrets.
+`skipped`. `skipped` means the eligible turn completed successfully but its
+last tool-free assistant response block was empty or whitespace-only. The
+daemon consumes the delivery authorization and publishes the event without
+resolving a Channel Worker. Scheduled correlation uses `taskId` and `firedAt`.
+The event never contains target IDs, message text, credentials, or webhook
+secrets.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. Both detail
@@ -2189,10 +2209,15 @@ Request:
 `delivery` is optional and requires the `channel_delivery` capability. The
 daemon still returns `202 {promptId,lastEventId}` when the prompt is admitted.
 After a successful `end_turn`, the session submits the visible final text to
-the exact workspace's already-running Channel Worker. Delivery success or
-failure arrives later as a replayable `channel_delivery_result` SSE event; it
-never changes `turn_complete` into `turn_error`. Cancellation, Agent failure,
-and token-limit termination do not send.
+the exact workspace's already-running Channel Worker. The payload is only the
+last tool-free assistant response block; tool-call preambles, inter-tool
+narration, superseded retries, and earlier automatic-continuation blocks are
+excluded. An empty or whitespace-only final still produces a correlated
+`channel_delivery_result` with `status: "skipped"` after authorization is
+consumed, but it does not contact a worker. Delivery success or failure arrives
+later through the same replayable event and never changes `turn_complete` into
+`turn_error`. Cancellation, Agent failure, and token-limit termination do not
+send or publish a delivery result.
 
 Validation: `prompt` must be a non-empty array of objects. Other failures return `400` before reaching the bridge.
 

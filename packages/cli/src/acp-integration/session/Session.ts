@@ -778,6 +778,28 @@ interface PromptChannelDelivery {
   target: CronTaskDelivery['target'];
 }
 
+interface ChannelDeliveryCapture {
+  finalText: string;
+}
+
+function beginChannelDeliveryResponseBlock(
+  capture: ChannelDeliveryCapture | undefined,
+): string[] | undefined {
+  if (!capture) return undefined;
+  capture.finalText = '';
+  return [];
+}
+
+function commitChannelDeliveryResponseBlock(
+  capture: ChannelDeliveryCapture | undefined,
+  responseBlock: string[] | undefined,
+  hasFunctionCalls: boolean,
+): void {
+  if (capture && responseBlock && !hasFunctionCalls) {
+    capture.finalText = responseBlock.join('');
+  }
+}
+
 function parsePromptChannelDelivery(
   params: PromptRequest,
 ): PromptChannelDelivery | undefined {
@@ -1156,11 +1178,6 @@ export class Session implements SessionContext {
     apiTimeMs: 0,
   };
   private readonly runtimeBaseDir: string;
-  // Invariant: only one turn (prompt or cron) streams at a time, so a single
-  // field is safe. Both paths capture a local reference and null the field
-  // in a finally block with an identity check.
-  private channelDeliveryCollector: string[] | null = null;
-
   // Cron scheduling state
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
@@ -2091,8 +2108,9 @@ export class Session implements SessionContext {
 
     this.duplicateProviderToolCallResponseIds.clear();
     const channelDelivery = parsePromptChannelDelivery(params);
-    const channelDeliveryCollector = channelDelivery ? [] : null;
-    this.channelDeliveryCollector = channelDeliveryCollector;
+    const channelDeliveryCapture = channelDelivery
+      ? { finalText: '' }
+      : undefined;
 
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
@@ -2101,24 +2119,27 @@ export class Session implements SessionContext {
     });
 
     try {
-      const result = await this.#executePrompt(params, pendingSend);
+      const result = await this.#executePrompt(
+        params,
+        pendingSend,
+        channelDeliveryCapture,
+      );
       this.pendingPrompt = null;
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
       void this.#drainNotificationQueue();
       this.#maybeEmitFollowupSuggestion(result);
       if (channelDelivery && result.stopReason === 'end_turn') {
-        const rawText = channelDeliveryCollector?.join('') ?? '';
-        if (rawText.trim().length > 0) {
-          this.#scheduleChannelDelivery({
-            sessionId: this.sessionId,
-            deliveryId: channelDelivery.deliveryId,
-            source: 'prompt',
-            target: channelDelivery.target,
-            text: normalizeChannelDeliveryText(rawText),
-            promptId: channelDelivery.deliveryId,
-          });
-        }
+        this.#scheduleChannelDelivery({
+          sessionId: this.sessionId,
+          deliveryId: channelDelivery.deliveryId,
+          source: 'prompt',
+          target: channelDelivery.target,
+          text: normalizeChannelDeliveryText(
+            channelDeliveryCapture?.finalText ?? '',
+          ),
+          promptId: channelDelivery.deliveryId,
+        });
       }
       return result;
     } catch (error) {
@@ -2129,9 +2150,6 @@ export class Session implements SessionContext {
       }
       throw error;
     } finally {
-      if (this.channelDeliveryCollector === channelDeliveryCollector) {
-        this.channelDeliveryCollector = null;
-      }
       this.pendingPrompt = null;
       const shouldDrainAutomaticQueues =
         todoStopGuardPreparation.drainSupersededAutomaticQueues ||
@@ -2316,19 +2334,21 @@ export class Session implements SessionContext {
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
   ): Promise<PromptResponse> {
     // Bind this turn to the session's ID via AsyncLocalStorage so shell
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
     return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executePromptInner(params, pendingSend),
+      this.#executePromptInner(params, pendingSend, channelDeliveryCapture),
     );
   }
 
   async #executePromptInner(
     params: PromptRequest,
     pendingSend: AbortController,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
   ): Promise<PromptResponse> {
     return Storage.runWithRuntimeBaseDir(
       this.runtimeBaseDir,
@@ -2644,6 +2664,7 @@ export class Session implements SessionContext {
                 const messageDisplay = this.#createMessageDisplayDispatcher(
                   pendingSend.signal,
                 );
+                let channelDeliveryResponseBlock: string[] | undefined;
 
                 try {
                   const sendResult =
@@ -2668,8 +2689,10 @@ export class Session implements SessionContext {
                   }
                   const responseStream = sendResult.responseStream;
                   nextMessage = null;
+                  channelDeliveryResponseBlock =
+                    beginChannelDeliveryResponseBlock(channelDeliveryCapture);
                   const channelDeliveryCheckpoint =
-                    this.channelDeliveryCollector?.length ?? 0;
+                    channelDeliveryResponseBlock?.length ?? 0;
 
                   let streamFailed = false;
                   try {
@@ -2696,7 +2719,7 @@ export class Session implements SessionContext {
                             part.thought,
                           );
                           if (!part.thought) {
-                            this.#collectChannelDeliveryText(part.text);
+                            channelDeliveryResponseBlock?.push(part.text);
                             messageDisplay?.addChunk(part.text);
                           }
                         }
@@ -2724,9 +2747,10 @@ export class Session implements SessionContext {
                           resp.type === StreamEventType.MODEL_FALLBACK ||
                           !resp.isContinuation
                         ) {
-                          this.#rollbackChannelDeliveryText(
-                            channelDeliveryCheckpoint,
-                          );
+                          if (channelDeliveryResponseBlock) {
+                            channelDeliveryResponseBlock.length =
+                              channelDeliveryCheckpoint;
+                          }
                         }
                         await finalizeToolCallPreparations(
                           preparationTracker,
@@ -2819,6 +2843,12 @@ export class Session implements SessionContext {
                   await messageDisplay?.finish();
                 }
 
+                commitChannelDeliveryResponseBlock(
+                  channelDeliveryCapture,
+                  channelDeliveryResponseBlock,
+                  functionCalls.length > 0,
+                );
+
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata);
                   // Kick off rewrite in background (non-blocking, runs parallel to tools)
@@ -2893,6 +2923,7 @@ export class Session implements SessionContext {
                 messageBus,
                 true,
                 fullTurnModelOverride,
+                channelDeliveryCapture,
               );
             } finally {
               logConversationFinishedEvent(
@@ -2918,6 +2949,7 @@ export class Session implements SessionContext {
     messageBus: MessageBus | undefined,
     allowExternalHooks = true,
     modelOverride?: string,
+    channelDeliveryCapture?: ChannelDeliveryCapture,
   ): Promise<{ stopReason: PromptResponse['stopReason'] }> {
     const stopHookBlockingCap = this.config.getStopHookBlockingCap();
     let stopHookIterationCount = 0;
@@ -2965,6 +2997,7 @@ export class Session implements SessionContext {
             {
               onFullTurnModel,
               getModelOverride: () => modelOverride,
+              channelDeliveryCapture,
             },
           );
           if (continuation.kind === 'terminal') {
@@ -3043,6 +3076,7 @@ export class Session implements SessionContext {
               {
                 onFullTurnModel,
                 getModelOverride: () => modelOverride,
+                channelDeliveryCapture,
               },
             );
             if (continuation.kind === 'terminal') {
@@ -3153,6 +3187,7 @@ export class Session implements SessionContext {
             : {}),
           onFullTurnModel,
           getModelOverride: () => modelOverride,
+          channelDeliveryCapture,
         },
       );
       if (continuation.supersededAutomaticContinuation && externalReason) {
@@ -3177,6 +3212,7 @@ export class Session implements SessionContext {
       onAutomaticContinuationValidated?: () => Promise<void>;
       onFullTurnModel?: (model: string) => boolean;
       getModelOverride?: () => string | undefined;
+      channelDeliveryCapture?: ChannelDeliveryCapture;
     } = {},
   ): Promise<StopContinuationResult> {
     let nextMessage: Content | null = { role: 'user', parts };
@@ -3217,6 +3253,7 @@ export class Session implements SessionContext {
       const messageDisplay = this.#createMessageDisplayDispatcher(
         pendingSend.signal,
       );
+      let channelDeliveryResponseBlock: string[] | undefined;
 
       try {
         const sendResult = await this.#sendMessageStreamWithAutoCompression(
@@ -3395,8 +3432,11 @@ export class Session implements SessionContext {
 
         const responseStream = sendResult.responseStream;
         nextMessage = null;
+        channelDeliveryResponseBlock = beginChannelDeliveryResponseBlock(
+          options.channelDeliveryCapture,
+        );
         const channelDeliveryCheckpoint =
-          this.channelDeliveryCollector?.length ?? 0;
+          channelDeliveryResponseBlock?.length ?? 0;
         initialSend = false;
         if (guardForThisSend) {
           const guardCommitted = this.todoStopGuard.commitContinuation(
@@ -3436,7 +3476,7 @@ export class Session implements SessionContext {
                 part.thought,
               );
               if (!part.thought) {
-                this.#collectChannelDeliveryText(part.text);
+                channelDeliveryResponseBlock?.push(part.text);
                 messageDisplay?.addChunk(part.text);
               }
             }
@@ -3463,7 +3503,9 @@ export class Session implements SessionContext {
               response.type === StreamEventType.MODEL_FALLBACK ||
               !response.isContinuation
             ) {
-              this.#rollbackChannelDeliveryText(channelDeliveryCheckpoint);
+              if (channelDeliveryResponseBlock) {
+                channelDeliveryResponseBlock.length = channelDeliveryCheckpoint;
+              }
             }
             await finalizeToolCallPreparations(
               preparationTracker,
@@ -3510,6 +3552,12 @@ export class Session implements SessionContext {
           await messageDisplay?.finish();
         }
       }
+
+      commitChannelDeliveryResponseBlock(
+        options.channelDeliveryCapture,
+        channelDeliveryResponseBlock,
+        functionCalls.length > 0,
+      );
 
       if (usageMetadata) {
         this.#recordPromptTokenCount(usageMetadata);
@@ -3661,18 +3709,6 @@ export class Session implements SessionContext {
     };
 
     await this.client.sessionUpdate(params);
-  }
-
-  #collectChannelDeliveryText(text: string): void {
-    if (this.channelDeliveryCollector) {
-      this.channelDeliveryCollector.push(text);
-    }
-  }
-
-  #rollbackChannelDeliveryText(checkpoint: number): void {
-    if (this.channelDeliveryCollector) {
-      this.channelDeliveryCollector.length = checkpoint;
-    }
   }
 
   #scheduleChannelDelivery(params: Record<string, unknown>): void {
@@ -4527,8 +4563,9 @@ export class Session implements SessionContext {
           this.config.getSessionId() + '########cron' + Date.now();
         let cronHadError = false;
         let cronCompleted = false;
-        const channelDeliveryCollector = item.delivery ? [] : null;
-        this.channelDeliveryCollector = channelDeliveryCollector;
+        const channelDeliveryCapture = item.delivery
+          ? { finalText: '' }
+          : undefined;
         await withInteractionSpan(
           this.config,
           {
@@ -4712,8 +4749,10 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                const channelDeliveryResponseBlock =
+                  beginChannelDeliveryResponseBlock(channelDeliveryCapture);
                 const channelDeliveryCheckpoint =
-                  this.channelDeliveryCollector?.length ?? 0;
+                  channelDeliveryResponseBlock?.length ?? 0;
                 if (loopTick && turnCount === 1) {
                   // The block reached the model (the send started); commit it so
                   // the next tick can detect "unchanged". Deferring the commit
@@ -4748,7 +4787,7 @@ export class Session implements SessionContext {
                           part.thought,
                         );
                         if (!part.thought) {
-                          this.#collectChannelDeliveryText(part.text);
+                          channelDeliveryResponseBlock?.push(part.text);
                           messageDisplay?.addChunk(part.text);
                         }
                       }
@@ -4776,9 +4815,10 @@ export class Session implements SessionContext {
                         resp.type === StreamEventType.MODEL_FALLBACK ||
                         !resp.isContinuation
                       ) {
-                        this.#rollbackChannelDeliveryText(
-                          channelDeliveryCheckpoint,
-                        );
+                        if (channelDeliveryResponseBlock) {
+                          channelDeliveryResponseBlock.length =
+                            channelDeliveryCheckpoint;
+                        }
                       }
                       await finalizeToolCallPreparations(
                         preparationTracker,
@@ -4804,6 +4844,12 @@ export class Session implements SessionContext {
                     await messageDisplay?.finish();
                   }
                 }
+
+                commitChannelDeliveryResponseBlock(
+                  channelDeliveryCapture,
+                  channelDeliveryResponseBlock,
+                  functionCalls.length > 0,
+                );
 
                 if (usageMetadata) {
                   this.#recordPromptTokenCount(usageMetadata);
@@ -4851,6 +4897,8 @@ export class Session implements SessionContext {
                   false,
                   undefined,
                   false,
+                  undefined,
+                  channelDeliveryCapture,
                 );
                 stopReason = guardStop.stopReason;
                 if (guardStop.stopReason === 'max_tokens') {
@@ -4889,29 +4937,24 @@ export class Session implements SessionContext {
           },
           () =>
             ac.signal.aborted ? 'cancelled' : cronHadError ? 'error' : 'ok',
-        ).finally(() => {
-          if (this.channelDeliveryCollector === channelDeliveryCollector) {
-            this.channelDeliveryCollector = null;
-          }
-        });
+        );
         if (
           cronCompleted &&
           item.delivery &&
           item.taskId &&
           item.firedAt !== undefined
         ) {
-          const rawText = channelDeliveryCollector?.join('') ?? '';
-          if (rawText.trim().length > 0) {
-            this.#scheduleChannelDelivery({
-              sessionId: this.sessionId,
-              deliveryId: `${item.taskId}:${item.firedAt}`,
-              source: 'scheduled',
-              target: item.delivery.target,
-              text: normalizeChannelDeliveryText(rawText),
-              taskId: item.taskId,
-              firedAt: item.firedAt,
-            });
-          }
+          this.#scheduleChannelDelivery({
+            sessionId: this.sessionId,
+            deliveryId: `${item.taskId}:${item.firedAt}`,
+            source: 'scheduled',
+            target: item.delivery.target,
+            text: normalizeChannelDeliveryText(
+              channelDeliveryCapture?.finalText ?? '',
+            ),
+            taskId: item.taskId,
+            firedAt: item.firedAt,
+          });
         }
       },
     );

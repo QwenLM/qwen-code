@@ -1187,15 +1187,15 @@ describe('BridgeClient — channel-delivery extMethod dispatch', () => {
     expect(JSON.stringify(publish.mock.calls)).not.toContain('dingtalk');
   });
 
-  it('publishes skipped without invoking the host when final text is empty', async () => {
-    const deliver = vi.fn();
+  it('lets the host authorize an empty final before publishing skipped', async () => {
+    const deliver = vi.fn(async () => ({ status: 'skipped' }));
     const { client, publish } = makeClient(deliver);
 
     await expect(
       client.extMethod(METHOD, { ...validParams, text: '' }),
     ).resolves.toEqual({ status: 'skipped' });
 
-    expect(deliver).not.toHaveBeenCalled();
+    expect(deliver).toHaveBeenCalledWith({ ...validParams, text: '' });
     expect(publish.mock.calls[0]?.[0]).toMatchObject({
       type: 'channel_delivery_result',
       data: { status: 'skipped' },
@@ -1265,6 +1265,30 @@ describe('BridgeClient — channel-delivery extMethod dispatch', () => {
       'scheduled answer',
     );
     expect(JSON.stringify(publish.mock.calls)).not.toContain('chat-1');
+  });
+
+  it('publishes a correlated scheduled skipped result from the host', async () => {
+    const deliver = vi.fn(async () => ({ status: 'skipped' }));
+    const { client, publish } = makeClient(deliver);
+
+    await expect(
+      client.extMethod(METHOD, { ...scheduledParams, text: '  \n' }),
+    ).resolves.toEqual({ status: 'skipped' });
+    expect(deliver).toHaveBeenCalledWith({
+      ...scheduledParams,
+      text: '  \n',
+    });
+    expect(publish).toHaveBeenCalledWith({
+      type: 'channel_delivery_result',
+      data: {
+        sessionId: 'session-1',
+        deliveryId: 'task-1:1750000000000',
+        source: 'scheduled',
+        status: 'skipped',
+        taskId: 'task-1',
+        firedAt: 1_750_000_000_000,
+      },
+    });
   });
 
   it('rejects a scheduled request with an inconsistent fire correlation', async () => {

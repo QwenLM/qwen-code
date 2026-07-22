@@ -545,6 +545,7 @@ export interface ChannelDeliveryInfo {
 
 export type ChannelDeliveryHostResult =
   | { status: 'delivered' }
+  | { status: 'skipped' }
   | {
       status: 'failed';
       code: ChannelDeliveryErrorCode;

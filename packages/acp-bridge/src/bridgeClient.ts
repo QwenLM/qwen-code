@@ -138,6 +138,7 @@ function normalizeChannelDeliveryHostResult(
   value: ChannelDeliveryHostResult,
 ): ChannelDeliveryHostResult {
   if (value.status === 'delivered') return { status: 'delivered' };
+  if (value.status === 'skipped') return { status: 'skipped' };
   const code = CHANNEL_DELIVERY_ERROR_CODES.has(value.code)
     ? value.code
     : 'channel_delivery_failed';
@@ -1219,21 +1220,17 @@ export class BridgeClient implements Client {
         ? { taskId: taskId as string, firedAt: firedAt as number }
         : {}),
     };
-    let result: ChannelDeliveryHostResult | { status: 'skipped' };
-    if (text.trim().length === 0) {
-      result = { status: 'skipped' };
-    } else {
-      try {
-        result = normalizeChannelDeliveryHostResult(
-          await this.onChannelDelivery(info),
-        );
-      } catch {
-        result = {
-          status: 'failed',
-          code: 'channel_delivery_failed',
-          error: 'Channel delivery failed.',
-        };
-      }
+    let result: ChannelDeliveryHostResult;
+    try {
+      result = normalizeChannelDeliveryHostResult(
+        await this.onChannelDelivery(info),
+      );
+    } catch {
+      result = {
+        status: 'failed',
+        code: 'channel_delivery_failed',
+        error: 'Channel delivery failed.',
+      };
     }
     try {
       entry.events.publish({

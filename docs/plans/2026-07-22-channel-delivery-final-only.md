@@ -29,10 +29,10 @@
 - Consumes: streamed assistant chunks, function calls, retry/fallback events, and successful `end_turn`.
 - Produces: one reverse-control request whose `text` is the last tool-free response block, or `''` for an empty successful final.
 
-- [ ] Add a Prompt test with `"I will inspect" + tool call`, tool result, then `"final answer"`; assert delivery text is exactly `"final answer"`.
-- [ ] Add the same scheduled-turn regression test.
-- [ ] Add Prompt and scheduled successful-empty tests that assert one `qwen/control/channel-delivery` call with `text: ''`.
-- [ ] Run `cd packages/cli && npx vitest run src/acp-integration/session/Session.test.ts` and verify the final-only tests fail with accumulated intermediate text while empty-final tests fail because no reverse-control call occurs.
+- [x] Add a Prompt test with `"I will inspect" + tool call`, tool result, then `"final answer"`; assert delivery text is exactly `"final answer"`.
+- [x] Add the same scheduled-turn regression test.
+- [x] Add Prompt and scheduled successful-empty tests that assert one `qwen/control/channel-delivery` call with `text: ''`.
+- [x] Run `cd packages/cli && npx vitest run src/acp-integration/session/Session.test.ts` and verify the final-only tests fail with accumulated intermediate text while empty-final tests fail because no reverse-control call occurs.
 
 ### Task 2: Capture one model response block at a time
 
@@ -46,12 +46,12 @@
 - Produces: turn-local `{ finalText }` capture passed through `#executePrompt`, `#handleStopHookLoop`, and `#runStopContinuation`.
 - Produces: per-send chunk arrays supporting retry rollback and a commit decision based on `functionCalls.length === 0`.
 
-- [ ] Replace the Session-wide collector field with a turn-local capture created only when delivery metadata exists.
-- [ ] Begin a response block only after a model stream is obtained; beginning a later block clears the previous candidate.
-- [ ] Append non-thought chunks to the current block and roll back only that block on non-continuation retry/model fallback.
-- [ ] Commit the block only when the completed stream has no function calls; otherwise leave the final candidate empty until a later send completes.
-- [ ] Submit the final candidate once for successful Prompt/scheduled `end_turn`, without an empty-text guard.
-- [ ] Re-run the focused Session test and verify all delivery and existing cancellation/error/retry tests pass.
+- [x] Replace the Session-wide collector field with a turn-local capture created only when delivery metadata exists.
+- [x] Begin a response block only after a model stream is obtained; beginning a later block clears the previous candidate.
+- [x] Append non-thought chunks to the current block and roll back only that block on non-continuation retry/model fallback.
+- [x] Commit the block only when the completed stream has no function calls; otherwise leave the final candidate empty until a later send completes.
+- [x] Submit the final candidate once for successful Prompt/scheduled `end_turn`, without an empty-text guard.
+- [x] Re-run the focused Session test and verify all delivery and existing cancellation/error/retry tests pass.
 
 ### Task 3: Consume authorization before reporting skipped
 
@@ -69,12 +69,12 @@
 - Changes: `ChannelDeliveryHandler` always validates/consumes daemon authorization, including empty text.
 - Preserves: `channel_delivery_result` SSE schema already accepts `status: 'skipped'`.
 
-- [ ] Change the BridgeClient empty-text test to require host invocation and fail on the current short circuit.
-- [ ] Add a bound-handler test proving empty text returns `skipped`, does not resolve/call a worker, and consumes Prompt authorization.
-- [ ] Add scheduled coverage proving a skipped fire advances recurring monotonic state and consumes one-shot state.
-- [ ] Run the ACP bridge and CLI tests and verify the new assertions fail for the intended authorization reason.
-- [ ] Extend the host-result union with `skipped`, make BridgeClient always call the host, and return `skipped` in the bound handler after authorization consume but before worker lookup.
-- [ ] Re-run the focused tests and verify sanitized SSE events still contain correlation only.
+- [x] Change the BridgeClient empty-text test to require host invocation and fail on the current short circuit.
+- [x] Add a bound-handler test proving empty text returns `skipped`, does not resolve/call a worker, and consumes Prompt authorization.
+- [x] Add scheduled coverage proving a skipped fire advances recurring monotonic state and consumes one-shot state.
+- [x] Run the ACP bridge and CLI tests and verify the new assertions fail for the intended authorization reason.
+- [x] Extend the host-result union with `skipped`, make BridgeClient always call the host, and return `skipped` in the bound handler after authorization consume but before worker lookup.
+- [x] Re-run the focused tests and verify sanitized SSE events still contain correlation only.
 
 ### Task 4: Contract, verification, and delivery
 
@@ -91,9 +91,9 @@
 - Documents: final-block-only semantics and authorized `skipped` SSE behavior.
 - Verifies: no behavior change for Notify, Webhook, cancellation, errors, token limit, or worker failure isolation.
 
-- [ ] Add the Apache-2.0 license header to the two test files.
-- [ ] Update protocol wording and event example for `skipped`.
-- [ ] Run focused tests in `packages/cli` and `packages/acp-bridge`.
-- [ ] Run `npm run build`, `npm run typecheck`, and `npm run lint`.
-- [ ] Execute real IM Prompt and scheduled E2E with a tool preamble and confirm only the final answer reaches IM; verify empty final emits `skipped` without provider traffic.
-- [ ] Perform two clean diff self-audit passes, commit, and push `feat/channel-delivery-v1`.
+- [x] Add the Apache-2.0 license header to the two test files.
+- [x] Update protocol wording and event example for `skipped`.
+- [x] Run focused tests in `packages/cli` and `packages/acp-bridge`.
+- [x] Run `npm run build`, `npm run typecheck`, and `npm run lint`.
+- [x] Execute real IM Prompt and scheduled E2E with a tool preamble and confirm only the final answer reaches IM; verify empty final emits `skipped` without provider traffic.
+- [x] Perform two clean diff self-audit passes before committing and pushing `feat/channel-delivery-v1`.

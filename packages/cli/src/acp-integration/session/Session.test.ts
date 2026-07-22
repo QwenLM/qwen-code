@@ -7415,6 +7415,192 @@ describe('Session', () => {
         });
       });
 
+      it('delivers only the final tool-free response block for a prompt', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          displayName: 'Read File',
+          description: 'Read file',
+          build: vi.fn().mockReturnValue({
+            params: { file_path: 'a.ts' },
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I will inspect the file.' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'read-1',
+                      name: 'read_file',
+                      args: { file_path: 'a.ts' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I found one lead; checking again.' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'read-2',
+                      name: 'read_file',
+                      args: { file_path: 'b.ts' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'final answer' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'inspect it' }],
+          _meta: {
+            'qwen.daemon.channelDelivery': {
+              deliveryId: 'prompt-tool-final',
+              target: {
+                channelName: 'dingtalk',
+                type: 'user',
+                id: 'user-1',
+              },
+            },
+          },
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.objectContaining({
+              deliveryId: 'prompt-tool-final',
+              text: 'final answer',
+            }),
+          );
+        });
+      });
+
+      it('replaces the prompt candidate with a Stop-hook continuation final', async () => {
+        const messageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              success: true,
+              output: {
+                decision: 'block',
+                reason: 'Continue after Stop hook',
+              },
+            })
+            .mockResolvedValueOnce({ success: true, output: {} }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([
+            { role: 'model', parts: [{ text: 'initial answer' }] },
+          ]);
+        mockChat.getLastModelMessageText = vi
+          .fn()
+          .mockReturnValue('initial answer');
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'initial answer' }] } },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'continued final' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'finish it' }],
+          _meta: {
+            'qwen.daemon.channelDelivery': {
+              deliveryId: 'prompt-stop-final',
+              target: {
+                channelName: 'dingtalk',
+                type: 'user',
+                id: 'user-1',
+              },
+            },
+          },
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.objectContaining({
+              deliveryId: 'prompt-stop-final',
+              text: 'continued final',
+            }),
+          );
+        });
+      });
+
       it('keeps continuation retry text in the delivered prompt final', async () => {
         mockChat.sendMessageStream = vi.fn().mockResolvedValue(
           createStreamWithChunks([
@@ -7461,6 +7647,39 @@ describe('Session', () => {
             expect.objectContaining({
               deliveryId: 'prompt-continuation',
               text: 'first half second half',
+            }),
+          );
+        });
+      });
+
+      it('submits an empty successful prompt final for skipped reporting', async () => {
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await expect(
+          session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+            _meta: {
+              'qwen.daemon.channelDelivery': {
+                deliveryId: 'prompt-empty',
+                target: {
+                  channelName: 'dingtalk',
+                  type: 'user',
+                  id: 'user-1',
+                },
+              },
+            },
+          }),
+        ).resolves.toEqual({ stopReason: 'end_turn' });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.objectContaining({
+              deliveryId: 'prompt-empty',
+              text: '',
             }),
           );
         });
@@ -7758,6 +7977,192 @@ describe('Session', () => {
               taskId: 'task-1',
               firedAt: 1_750_000_000_000,
             },
+          );
+        });
+      });
+
+      it('delivers only the final tool-free response block for a scheduled prompt', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn(
+            (
+              callback: (job: {
+                id: string;
+                prompt: string;
+                lastFiredAt: number;
+                delivery: unknown;
+              }) => void,
+            ) => {
+              callback({
+                id: 'task-tool',
+                prompt: 'scheduled prompt',
+                lastFiredAt: 1_750_000_000_010,
+                delivery: {
+                  kind: 'channel',
+                  target: {
+                    channelName: 'dingtalk',
+                    type: 'chat',
+                    id: 'chat-1',
+                  },
+                },
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'read_file',
+          kind: core.Kind.Read,
+          displayName: 'Read File',
+          description: 'Read file',
+          build: vi.fn().mockReturnValue({
+            params: { file_path: 'a.ts' },
+            execute: vi.fn().mockResolvedValue({
+              llmContent: 'file contents',
+              returnDisplay: 'file contents',
+            }),
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          }),
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I will inspect the file.' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'read-cron-1',
+                      name: 'read_file',
+                      args: { file_path: 'a.ts' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    {
+                      content: {
+                        parts: [{ text: 'I found one lead; checking again.' }],
+                      },
+                    },
+                  ],
+                  functionCalls: [
+                    {
+                      id: 'read-cron-2',
+                      name: 'read_file',
+                      args: { file_path: 'b.ts' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  candidates: [
+                    { content: { parts: [{ text: 'scheduled final' }] } },
+                  ],
+                },
+              },
+            ]),
+          );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start scheduler' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.objectContaining({
+              deliveryId: 'task-tool:1750000000010',
+              text: 'scheduled final',
+            }),
+          );
+        });
+      });
+
+      it('submits an empty successful scheduled final for skipped reporting', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          start: vi.fn(
+            (
+              callback: (job: {
+                id: string;
+                prompt: string;
+                lastFiredAt: number;
+                delivery: unknown;
+              }) => void,
+            ) => {
+              callback({
+                id: 'task-empty',
+                prompt: 'scheduled prompt',
+                lastFiredAt: 1_750_000_000_011,
+                delivery: {
+                  kind: 'channel',
+                  target: {
+                    channelName: 'dingtalk',
+                    type: 'chat',
+                    id: 'chat-1',
+                  },
+                },
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'start scheduler' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'qwen/control/channel-delivery',
+            expect.objectContaining({
+              deliveryId: 'task-empty:1750000000011',
+              text: '',
+            }),
           );
         });
       });

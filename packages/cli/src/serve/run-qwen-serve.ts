@@ -200,6 +200,9 @@ export function createBoundChannelDeliveryHandler(
         'Channel delivery is not authorized.',
       );
     }
+    if (info.text.trim().length === 0) {
+      return { status: 'skipped' };
+    }
     const manager = getManager();
     if (!manager) {
       return failed(
