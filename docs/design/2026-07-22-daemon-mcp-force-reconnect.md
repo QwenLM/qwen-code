@@ -14,8 +14,9 @@ workspace MCP reload routes and their SDK/ACP bridge methods.
 `forceReconnectAll` defaults to `false`; `forceReconnectWhich` selects named
 servers. The fields are mutually exclusive.
 
-When `true`, the daemon first performs the normal settings reconciliation.
-It then reconnects every configured MCP server across the workspace:
+When either reconnect option is supplied, the daemon first performs the normal
+settings reconciliation. It then reconnects every configured MCP server across
+the workspace, or only the names selected by `forceReconnectWhich`:
 
 - pooled servers restart through the workspace transport pool once per server
   name, then refresh the model tool snapshots for live configs;

@@ -13222,6 +13222,20 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       expect(forceDiscover).toHaveBeenCalledWith('runtime'),
     );
 
+    const secondaryServer = { command: 'secondary-server' };
+    mockConfig.getMcpServers = vi.fn().mockReturnValue({
+      runtime: runtimeServer,
+      secondary: secondaryServer,
+    });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {
+        forceReconnectAll: true,
+      }),
+    ).resolves.toEqual({ accepted: true });
+    await vi.waitFor(() =>
+      expect(forceDiscover).toHaveBeenCalledWith('secondary'),
+    );
+
     mockConnectionState.resolve();
     await agentPromise;
   });

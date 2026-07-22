@@ -14064,6 +14064,20 @@ describe('createServeApp', () => {
         code: 'invalid_force_reconnect_which',
       });
       expect(bridge.workspaceMcpReloadCalls).toBe(2);
+
+      const conflicting = await request(app)
+        .post('/workspace/mcp/reload')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          forceReconnectAll: true,
+          forceReconnectWhich: ['docs'],
+        });
+      expect(conflicting.status).toBe(400);
+      expect(conflicting.body).toMatchObject({
+        code: 'conflicting_force_reconnect_options',
+      });
+      expect(bridge.workspaceMcpReloadCalls).toBe(2);
     });
   });
 
