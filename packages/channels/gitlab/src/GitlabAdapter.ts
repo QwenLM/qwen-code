@@ -109,12 +109,8 @@ export class GitlabChannel extends ChannelBase {
       return;
     }
     if (!threadId) {
-      const title = text.split('\n')[0]!.trim().slice(0, 250) || 'New issue';
-      const result = await this.gitlab.Issues.create(chatId, title, {
-        description: text,
-      });
       process.stderr.write(
-        `[GitLab:${this.name}] created issue #${(result as Record<string, unknown>)['iid']} in ${chatId}\n`,
+        `[GitLab:${this.name}] no threadId for ${chatId}, cannot send reply\n`,
       );
       return;
     }

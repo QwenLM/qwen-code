@@ -98,16 +98,8 @@ export class GiteaChannel extends ChannelBase {
       return;
     }
     if (!threadId) {
-      const { data: issue } = await this.client.repos.issueCreateIssue(
-        chat.owner,
-        chat.repo,
-        {
-          title: text.split('\n')[0]!.trim().slice(0, 250) || 'New issue',
-          body: text,
-        },
-      );
       process.stderr.write(
-        `[Gitea:${this.name}] created issue #${issue.number} in ${chat.owner}/${chat.repo}\n`,
+        `[Gitea:${this.name}] no threadId for ${chatId}, cannot send reply\n`,
       );
       return;
     }

@@ -350,9 +350,7 @@ describe('GiteaChannel', () => {
     });
   });
 
-  it('sendThreadMessage creates new issue when threadId is undefined', async () => {
-    mockCreateIssue.mockResolvedValueOnce({ data: { number: 99 } });
-
+  it('sendThreadMessage logs error when threadId is undefined', async () => {
     const channel = new GiteaChannel('test', baseConfig, mockBridge());
     await channel.sendThreadMessage(
       'owner/repo',
@@ -360,10 +358,8 @@ describe('GiteaChannel', () => {
       'Your pairing code is: abc123',
     );
 
-    expect(mockCreateIssue).toHaveBeenCalledWith('owner', 'repo', {
-      title: 'Your pairing code is: abc123',
-      body: 'Your pairing code is: abc123',
-    });
+    expect(mockCreateComment).not.toHaveBeenCalled();
+    expect(mockCreateIssue).not.toHaveBeenCalled();
   });
 
   it('sendThreadMessage ignores invalid chatId', async () => {

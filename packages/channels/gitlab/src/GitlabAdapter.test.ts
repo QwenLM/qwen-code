@@ -332,12 +332,7 @@ describe('GitlabChannel', () => {
     expect(mockMRNotesCreate).toHaveBeenCalledWith('owner/repo', 3, 'Review');
   });
 
-  it('sendThreadMessage creates new issue when threadId is undefined', async () => {
-    mockIssuesCreate.mockResolvedValueOnce({
-      iid: 42,
-      web_url: 'https://gitlab.com/owner/repo/-/issues/42',
-    });
-
+  it('sendThreadMessage logs error when threadId is undefined', async () => {
     const channel = new GitlabChannel('test', baseConfig, mockBridge());
     await channel.sendThreadMessage(
       'owner/repo',
@@ -345,11 +340,7 @@ describe('GitlabChannel', () => {
       'Your pairing code is: abc123',
     );
 
-    expect(mockIssuesCreate).toHaveBeenCalledWith(
-      'owner/repo',
-      'Your pairing code is: abc123',
-      { description: 'Your pairing code is: abc123' },
-    );
+    expect(mockIssuesCreate).not.toHaveBeenCalled();
   });
 
   it('dismisses todos with unsupported target_type', async () => {

@@ -415,9 +415,7 @@ describe('GithubChannel', () => {
     });
   });
 
-  it('sendThreadMessage creates new issue when threadId is undefined', async () => {
-    mockCreateIssue.mockResolvedValueOnce({ data: { number: 99 } });
-
+  it('sendThreadMessage logs error when threadId is undefined', async () => {
     const channel = new GithubChannel('test', baseConfig, mockBridge());
     await channel.sendThreadMessage(
       'owner/repo',
@@ -425,12 +423,8 @@ describe('GithubChannel', () => {
       'Your pairing code is: abc123',
     );
 
-    expect(mockCreateIssue).toHaveBeenCalledWith({
-      owner: 'owner',
-      repo: 'repo',
-      title: 'Your pairing code is: abc123',
-      body: 'Your pairing code is: abc123',
-    });
+    expect(mockCreateIssue).not.toHaveBeenCalled();
+    expect(mockCreateComment).not.toHaveBeenCalled();
   });
 
   it('resolves sender from PR review comment when issues.getComment fails', async () => {

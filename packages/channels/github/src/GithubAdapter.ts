@@ -100,14 +100,8 @@ export class GithubChannel extends ChannelBase {
       return;
     }
     if (!threadId) {
-      const { data: issue } = await this.octokit.rest.issues.create({
-        owner: chat.owner,
-        repo: chat.repo,
-        title: text.split('\n')[0]!.trim().slice(0, 250) || 'New issue',
-        body: text,
-      });
       process.stderr.write(
-        `[GitHub:${this.name}] created issue #${issue.number} in ${chat.owner}/${chat.repo}\n`,
+        `[GitHub:${this.name}] no threadId for ${chatId}, cannot send reply\n`,
       );
       return;
     }
