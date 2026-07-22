@@ -303,6 +303,51 @@ describe('Session.pendingWorktreeNotice', () => {
     expect(session.pendingRecoveredAgentsNotice).toBeNull();
   });
 
+  it('does not consume a recovered-agents notice on an interrupted-turn continuation', async () => {
+    const session = new Session(
+      SESSION_ID,
+      mockConfig,
+      mockClient,
+      mockSettings,
+    );
+    const notice = 'Recovered agents are available.';
+    session.pendingRecoveredAgentsNotice = notice;
+
+    // A daemon continuation (`qwen.daemon.continueLastTurn`) closing a dangling
+    // tool call re-sends synthesized functionResponse parts. The one-shot
+    // recovered-agents notice must survive it (the `!isContinue` guard) so it
+    // is delivered on the user's next ordinary prompt instead.
+    vi.mocked(mockChat.getHistory).mockReturnValue([
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+        ],
+      },
+    ] as never);
+    await session.prompt({
+      ...makePromptRequest(''),
+      _meta: { 'qwen.daemon.continueLastTurn': true },
+    } as PromptRequest);
+
+    // The continuation send leads with the synthesized functionResponse and
+    // carries no recovered-agents notice; the notice is still pending.
+    const continuationParts = capturedMessages[0] as Array<{ text?: string }>;
+    expect(continuationParts.some((part) => part.text?.includes(notice))).toBe(
+      false,
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBe(notice);
+
+    // The next ordinary prompt consumes it exactly once.
+    vi.mocked(mockChat.getHistory).mockReturnValue([]);
+    await session.prompt(makePromptRequest('ordinary prompt'));
+    const ordinaryParts = capturedMessages[1] as Array<{ text?: string }>;
+    expect(ordinaryParts.some((part) => part.text?.includes(notice))).toBe(
+      true,
+    );
+    expect(session.pendingRecoveredAgentsNotice).toBeNull();
+  });
+
   // VP4b: sanity — no notice set, prompt works normally, no worktree reminder injected
   it('VP4b: no notice set — prompt proceeds normally without worktree system-reminder', async () => {
     const session = new Session(
