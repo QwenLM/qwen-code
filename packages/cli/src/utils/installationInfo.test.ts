@@ -7,6 +7,7 @@
 import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   formatUpdateInstructions,
+  getNpmCliPath,
   getInstallationInfo,
   PackageManager,
   resolveUpdateCommand,
@@ -51,6 +52,16 @@ const mockedExistsSync = vi.mocked(fs.existsSync);
 const mockedLstatSync = vi.mocked(fs.lstatSync);
 const mockedReadFileSync = vi.mocked(fs.readFileSync);
 const mockedExecSync = vi.mocked(childProcess.execSync);
+
+describe('getNpmCliPath', () => {
+  it('falls back to npm-cli.js when adjacent npm is a wrapper', () => {
+    mockedRealPathSync.mockReturnValue('/prefix/bin/npm');
+
+    expect(getNpmCliPath('/prefix/bin/node', 'linux')).toBe(
+      '/prefix/lib/node_modules/npm/bin/npm-cli.js',
+    );
+  });
+});
 
 describe('getInstallationInfo', () => {
   const projectRoot = '/path/to/project';

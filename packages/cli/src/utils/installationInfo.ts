@@ -35,6 +35,15 @@ export function getNpmCliPath(
       'npm-cli.js',
     );
   }
+  const npmCliPath = path.join(
+    path.dirname(nodePath),
+    '..',
+    'lib',
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
   // Prefer the npm symlink that sits next to the node binary and resolve it to
   // the real npm-cli.js. On split layouts where npm is not adjacent to node,
   // fall back to the conventional `<prefix>/lib/node_modules/npm` location
@@ -43,17 +52,10 @@ export function getNpmCliPath(
   // downstream spawn surface any failure through its 'error' handler.
   const adjacentNpm = path.join(path.dirname(nodePath), 'npm');
   try {
-    return fs.realpathSync(adjacentNpm);
+    const resolvedNpm = fs.realpathSync(adjacentNpm);
+    return resolvedNpm.endsWith('.js') ? resolvedNpm : npmCliPath;
   } catch {
-    return path.join(
-      path.dirname(nodePath),
-      '..',
-      'lib',
-      'node_modules',
-      'npm',
-      'bin',
-      'npm-cli.js',
-    );
+    return npmCliPath;
   }
 }
 
