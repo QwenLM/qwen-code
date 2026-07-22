@@ -82,7 +82,7 @@ The adapter fetches only the `latest_comment_url` from each notification thread.
 
 ## Proactive Sends
 
-The agent can proactively create issues or post comments without an inbound notification. Without a `threadId`, a new issue is created. With a `threadId`, a comment is added to the existing issue or pull request.
+The agent can proactively post comments on existing issues or pull requests. A `threadId` is required — if it is missing, the adapter logs an error and the message is not sent.
 
 ## Mention Detection
 

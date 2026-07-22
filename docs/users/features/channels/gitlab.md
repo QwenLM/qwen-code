@@ -77,7 +77,7 @@ The adapter only processes `Issue` and `MergeRequest` todo target types. Todos f
 
 ## Proactive Sends
 
-The agent can proactively create issues or post notes without an inbound todo. Without a `threadId`, a new issue is created. With a `threadId`, a note is added to the existing issue or merge request.
+The agent can proactively post notes on existing issues or merge requests. A `threadId` is required — if it is missing, the adapter logs an error and the message is not sent.
 
 > ⚠️ **Security:** On a **public** project with `senderPolicy: "open"`, any GitLab user who mentions the bot can submit a prompt that drives the agent in your `cwd` — reading code, spending tokens, posting notes, and running tools (subject to the daemon's permission policy). Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public projects.
 

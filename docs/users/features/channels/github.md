@@ -82,7 +82,7 @@ The adapter fetches only the `latest_comment_url` from each notification thread.
 
 ## Proactive Sends
 
-The agent can proactively create issues or post comments without an inbound notification. Without a `threadId`, a new issue is created. With a `threadId`, a comment is added to the existing issue or pull request.
+The agent can proactively post comments on existing issues or pull requests. A `threadId` is required — if it is missing, the adapter logs an error and the message is not sent.
 
 > ⚠️ **Security:** On a **public** repository with `senderPolicy: "open"`, any GitHub user who mentions the bot can submit a prompt that drives the agent in your `cwd` — reading code, spending tokens, posting comments, and running tools (subject to the daemon's permission policy). Always use `senderPolicy: "allowlist"` with explicit `allowedUsers` on public repos.
 
