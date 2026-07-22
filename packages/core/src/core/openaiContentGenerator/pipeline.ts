@@ -31,8 +31,20 @@ import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { InvalidStreamError } from '../invalid-stream-error.js';
 import { logProtocolTagSanitized } from '../../telemetry/loggers.js';
 import { ProtocolTagSanitizedEvent } from '../../telemetry/types.js';
+import { getErrorMessage, getErrorStatus } from '../../utils/errors.js';
+import { getRateLimitErrorDetails } from '../../utils/rateLimit.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
+
+function isRequiredThinkingError(error: unknown): boolean {
+  if (getErrorStatus(error) !== 400) return false;
+  const providerMessage = getRateLimitErrorDetails(error).providerMessage;
+  const message = `${getErrorMessage(error)} ${providerMessage ?? ''}`;
+  return (
+    message.includes('enable_thinking') &&
+    /(?:restricted to|must be) true/i.test(message)
+  );
+}
 
 /**
  * Error thrown when the API returns an error embedded as stream content
@@ -281,6 +293,7 @@ export type { PipelineConfig } from './types.js';
 export class ContentGenerationPipeline {
   client: OpenAI;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  private readonly requiredThinkingModels = new Set<string>();
   // Resolved once (config field > env > default) so the env read + any
   // invalid-value warning happen per pipeline, not per streaming request.
   private readonly streamIdleTimeoutMs: number;
@@ -826,10 +839,7 @@ export class ContentGenerationPipeline {
     const isDashScope = DashScopeOpenAICompatibleProvider.isDashScopeProvider(
       this.contentGeneratorConfig,
     );
-    const configModel = (this.contentGeneratorConfig.model ?? '').toLowerCase();
-    const thinkingMandatory =
-      this.contentGeneratorConfig.thinkingMandatory === true &&
-      model === configModel;
+    const thinkingMandatory = this.requiresThinking(model);
     const reasoningDisabled =
       request.config?.thinkingConfig?.includeThoughts === false ||
       this.contentGeneratorConfig.reasoning === false;
@@ -923,6 +933,16 @@ export class ContentGenerationPipeline {
     }
 
     return providerRequest;
+  }
+
+  private requiresThinking(model: string): boolean {
+    const normalizedModel = model.toLowerCase();
+    return (
+      this.requiredThinkingModels.has(normalizedModel) ||
+      (this.contentGeneratorConfig.thinkingMandatory === true &&
+        normalizedModel ===
+          (this.contentGeneratorConfig.model ?? '').toLowerCase())
+    );
   }
 
   private buildGenerateContentConfig(
@@ -1066,9 +1086,9 @@ export class ContentGenerationPipeline {
     ) => Promise<T>,
   ): Promise<T> {
     const context = this.createRequestContext(request, isStreaming);
-
-    try {
-      const openaiRequest = await this.buildRequest(
+    let openaiRequest: OpenAI.Chat.ChatCompletionCreateParams | undefined;
+    const executeAttempt = async () => {
+      openaiRequest = await this.buildRequest(
         request,
         userPromptId,
         context,
@@ -1081,9 +1101,28 @@ export class ContentGenerationPipeline {
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
       runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
 
-      const result = await executor(openaiRequest, context);
-      return result;
+      return executor(openaiRequest, context);
+    };
+
+    try {
+      return await executeAttempt();
     } catch (error) {
+      const model = context.model.toLowerCase();
+      if (
+        (openaiRequest as Record<string, unknown> | undefined)?.[
+          'enable_thinking'
+        ] === false &&
+        request.config?.abortSignal?.aborted !== true &&
+        isRequiredThinkingError(error)
+      ) {
+        this.requiredThinkingModels.add(model);
+        debugLogger.warn('Retrying with required thinking enabled', { model });
+        try {
+          return await executeAttempt();
+        } catch (retryError) {
+          return await this.handleError(retryError, context, request);
+        }
+      }
       // Use shared error handling logic
       return await this.handleError(error, context, request);
     }
