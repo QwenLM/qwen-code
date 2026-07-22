@@ -24,6 +24,9 @@ export const FunctionCallingConfigMode = {
   ANY: 'ANY' as GenAiFunctionCallingConfigMode,
 } as const;
 
+// Content conversion is adapted from @google/genai 2.6.0's `_isPart` and
+// `_toParts` helpers (Copyright 2025 Google LLC, Apache-2.0); re-check parity
+// on SDK upgrades.
 function isPart(value: unknown): value is Part {
   return (
     typeof value === 'object' &&

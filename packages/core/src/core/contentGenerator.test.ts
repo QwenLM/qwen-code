@@ -16,7 +16,6 @@ import type { Config } from '../config/config.js';
 vi.mock('@google/genai');
 
 const openaiMockState = vi.hoisted(() => ({
-  importError: null as Error | null,
   generatorError: null as Error | null,
   createCount: 0,
 }));
@@ -29,9 +28,6 @@ const qwenMockState = vi.hoisted(() => ({
 
 vi.mock('./openaiContentGenerator/index.js', () => ({
   createOpenAIContentGenerator: () => {
-    if (openaiMockState.importError) {
-      throw openaiMockState.importError;
-    }
     if (openaiMockState.generatorError) {
       throw openaiMockState.generatorError;
     }
@@ -78,7 +74,6 @@ vi.mock('../qwen/qwenContentGenerator.js', () => ({
 describe('createContentGenerator', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    openaiMockState.importError = null;
     openaiMockState.generatorError = null;
     openaiMockState.createCount = 0;
     qwenMockState.oauthError = null;
@@ -292,42 +287,12 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
   } as unknown as Config;
 
   beforeEach(() => {
-    openaiMockState.importError = null;
     openaiMockState.generatorError = null;
     openaiMockState.createCount = 0;
     qwenMockState.oauthError = null;
     qwenMockState.oauthCount = 0;
     qwenMockState.constructorCount = 0;
     vi.resetModules();
-  });
-
-  it('should throw friendly restart message with cause when dynamic import fails with ERR_MODULE_NOT_FOUND', async () => {
-    const moduleError = new Error(
-      "Cannot find module './openaiContentGenerator-STALE.js'",
-    );
-    (moduleError as NodeJS.ErrnoException).code = 'ERR_MODULE_NOT_FOUND';
-    openaiMockState.importError = moduleError;
-
-    try {
-      const generator = await createContentGenerator(
-        {
-          model: 'test-model',
-          apiKey: 'test-key',
-          authType: AuthType.USE_OPENAI,
-        },
-        mockConfig,
-      );
-      await generator.countTokens({ model: 'test-model', contents: 'hello' });
-      expect.unreachable('should have thrown');
-    } catch (error) {
-      expect(error).toBeInstanceOf(Error);
-      const err = error as Error;
-      expect(err.message).toMatch(
-        /updated in the background and needs to be restarted/,
-      );
-      expect(err.message).toMatch(/openai/);
-      expect(err.cause).toBe(moduleError);
-    }
   });
 
   it('should re-throw non-module errors unchanged', async () => {
@@ -367,6 +332,40 @@ describe('createContentGenerator - ERR_MODULE_NOT_FOUND handling', () => {
         /updated in the background and needs to be restarted/,
       );
       expect(err.message).toMatch(/qwen-oauth/);
+      expect(err.cause).toBe(moduleError);
+    }
+  });
+
+  it('should throw friendly restart message with cause when dynamic import fails with ERR_MODULE_NOT_FOUND', async () => {
+    const moduleError = new Error(
+      "Cannot find module './openaiContentGenerator-STALE.js'",
+    );
+    (moduleError as NodeJS.ErrnoException).code = 'ERR_MODULE_NOT_FOUND';
+    vi.doMock('./openaiContentGenerator/index.js', () => {
+      throw moduleError;
+    });
+    const { createContentGenerator: createWithMissingProvider } = await import(
+      './contentGenerator.js'
+    );
+
+    try {
+      const generator = await createWithMissingProvider(
+        {
+          model: 'test-model',
+          apiKey: 'test-key',
+          authType: AuthType.USE_OPENAI,
+        },
+        mockConfig,
+      );
+      await generator.countTokens({ model: 'test-model', contents: 'hello' });
+      expect.unreachable('should have thrown');
+    } catch (error) {
+      expect(error).toBeInstanceOf(Error);
+      const err = error as Error;
+      expect(err.message).toMatch(
+        /updated in the background and needs to be restarted/,
+      );
+      expect(err.message).toMatch(/openai/);
       expect(err.cause).toBe(moduleError);
     }
   });
