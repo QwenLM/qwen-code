@@ -3,6 +3,7 @@ name: 'Core Review Router'
 on:
   pull_request_target:
     types: ['opened', 'synchronize', 'ready_for_review']
+    paths: ['packages/core/**']
 
 permissions:
   contents: 'read'
@@ -24,6 +25,7 @@ jobs:
         with:
           ref: '${{ github.event.repository.default_branch }}'
           sparse-checkout: '.github/scripts/core-review-router.mjs'
+          sparse-checkout-cone-mode: false
 
       - name: 'Collect changed files'
         id: 'files'
@@ -32,7 +34,7 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
-          files="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json files --jq '[.files[].path]')"
+          files="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '[.[].filename]')"
           echo "files=$files" >> "$GITHUB_OUTPUT"
 
       - name: 'Classify and pick reviewers'
@@ -88,7 +90,7 @@ jobs:
           to_add="$(jq -cn --argjson a "$desired" --argjson b "$managed" '$a - $b')"
           if [ "$to_add" != "[]" ]; then
             echo "$to_add" | jq '{reviewers: .}' \
-              | gh api --method POST "$api" --input - > /dev/null
+              | gh api --method POST "$api" --input - > /dev/null || true
           fi
 
           echo "Applied: $REVIEWERS ($REASON)"
