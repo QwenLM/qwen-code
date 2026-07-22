@@ -82,6 +82,14 @@ function sendSerializedPrompt(
  * malformed shape — a `pr` MUST be a positive integer, a `path` a non-empty
  * string — so the caller can 400 `invalid_target`. Fail-closed: anything that
  * is not exactly one of the three sanctioned shapes is rejected.
+ *
+ * SECURITY-CRITICAL path sanitization: `targetToPrompt` concatenates `path`
+ * directly after `/review ` as a command argument, so a `path` that is
+ * flag-shaped (`--comment`) or multi-token (`42 --comment`, or one carrying a
+ * newline) would smuggle an owner-gated flag — or arbitrary prompt text — past
+ * the owner-scope gate on a WRITE-only token. A flag/multi-token path is
+ * INDISTINGUISHABLE from a real flag once it lands as an argument, so we reject
+ * any `path` that begins with `-` or contains ANY whitespace/newline character.
  */
 export function parseReviewTarget(raw: unknown): ReviewTarget | null {
   if (raw === undefined || raw === null) return { kind: 'local' };
@@ -96,8 +104,10 @@ export function parseReviewTarget(raw: unknown): ReviewTarget | null {
   }
   if ('path' in t) {
     const p = t['path'];
-    if (typeof p === 'string' && p.length > 0) return { kind: 'path', path: p };
-    return null;
+    if (typeof p !== 'string' || p.length === 0) return null;
+    if (p.startsWith('-')) return null; // flag-shaped → indistinguishable from a flag
+    if (/\s/.test(p)) return null; // whitespace/newline → multi-token / injection
+    return { kind: 'path', path: p };
   }
   if ('local' in t) {
     return t['local'] === true ? { kind: 'local' } : null;
@@ -166,6 +176,20 @@ export function createTriggerReviewRoute(
       (comment || autofix || autoApprove) &&
       !hasScope(req.rcClient?.scopes ?? [], OWNER)
     ) {
+      // Audit the denial so a WRITE token attempting a privileged review is
+      // logged (the mount-level scope_denied never fires — WRITE passes it).
+      void deps.audit?.record({
+        action: 'scope_denied',
+        actorTokenId: req.rcClient?.id,
+        subActor: req.rcClient?.subActor,
+        detail: {
+          required: 'owner',
+          reason: 'privileged_review_flags',
+          comment,
+          autofix,
+          autoApprove,
+        },
+      });
       res.status(403).json({
         error: 'Owner scope required',
         code: 'owner_scope_required',
@@ -222,95 +246,121 @@ export function createTriggerReviewRoute(
       return;
     }
 
-    // Saga leg 5: open the permission bridge BEFORE sending the prompt, so no
-    // early permission_request is missed. worktreeRoot confines auto-approved
-    // edits; a null root escalates all edits.
-    await deps.bridge.open(sessionId, {
-      autoApprove,
-      autofix,
-      comment,
-      worktreeRoot: workspaceCwd,
-    });
+    // Legs 5–8 run under a rollback guard: once the session exists, ANY thrown
+    // error (a `registry.register` file-persist rejection, a `bridge.open`
+    // throw, an unexpected emit/audit throw) MUST NOT leak a live session +
+    // open bridge or hang the client (Express 4 does not catch async-handler
+    // throws). The catch best-effort closes the bridge (a no-op if never
+    // opened) and ends the session, then 502 review_start_failed.
+    try {
+      // Saga leg 5: open the permission bridge BEFORE sending the prompt, so no
+      // early permission_request is missed. worktreeRoot confines auto-approved
+      // edits; a null root escalates all edits.
+      await deps.bridge.open(sessionId, {
+        autoApprove,
+        autofix,
+        comment,
+        worktreeRoot: workspaceCwd,
+      });
 
-    // Saga leg 6: register the review record.
-    const approvalLeg: 'vote' | 'auto' = autoApprove ? 'auto' : 'vote';
-    const record = await deps.registry.register({
-      sessionId,
-      target,
-      comment,
-      autofix,
-      approvalLeg,
-      triggeredByTokenId: req.rcClient?.id ?? '',
-    });
-
-    // Saga leg 7: send the `/review` prompt, raced against the accept window.
-    // Survival (or early resolution) accepts the trigger; an EARLY rejection
-    // is a send failure → roll back (close bridge, end session, mark failed).
-    const promptText = targetToPrompt(target, comment, autofix);
-    const promptPromise = sendSerializedPrompt(deps, sessionId, promptText);
-    let acceptTimer: ReturnType<typeof setTimeout> | undefined;
-    const outcome = await Promise.race([
-      promptPromise.then(
-        () => 'settled' as const,
-        () => 'send_failed' as const,
-      ),
-      new Promise<'accepted'>((resolve) => {
-        acceptTimer = setTimeout(() => resolve('accepted'), acceptMs);
-        acceptTimer.unref?.();
-      }),
-    ]);
-    clearTimeout(acceptTimer);
-
-    if (outcome === 'send_failed') {
-      // Rollback: no zombie session, no half-triggered review.
-      deps.bridge.close(sessionId);
-      try {
-        await deps.daemon.endSession(sessionId);
-      } catch {
-        // Best-effort.
-      }
-      await deps.registry.setStatus(record.reviewId, 'failed');
-      res
-        .status(502)
-        .json({ error: 'Prompt send failed', code: 'prompt_send_failed' });
-      return;
-    }
-
-    // Accepted. The prompt's eventual settlement drives completed/failed, then
-    // the bridge closes (the review's permission window is over once its prompt
-    // settles). (If it already resolved — 'settled' — this fires immediately.)
-    void (async () => {
-      try {
-        await promptPromise;
-        await deps.lifecycle.onPromptSettled(record.reviewId, 'completed');
-      } catch {
-        try {
-          await deps.lifecycle.onPromptSettled(record.reviewId, 'failed');
-        } catch {
-          // Best-effort terminal transition.
-        }
-      } finally {
-        deps.bridge.close(sessionId);
-      }
-    })();
-
-    deps.lifecycle.emit('review_started', deps.registry.get(record.reviewId)!);
-    // Audit: ids + flags + approvalLeg ONLY — NEVER the prompt/diff/report.
-    void deps.audit?.record({
-      action: 'review_started',
-      actorTokenId: req.rcClient?.id,
-      subActor: req.rcClient?.subActor,
-      target: record.reviewId,
-      detail: {
+      // Saga leg 6: register the review record.
+      const approvalLeg: 'vote' | 'auto' = autoApprove ? 'auto' : 'vote';
+      const record = await deps.registry.register({
         sessionId,
         target,
         comment,
         autofix,
-        autoApprove,
         approvalLeg,
-      },
-    });
+        triggeredByTokenId: req.rcClient?.id ?? '',
+      });
 
-    res.status(202).json({ reviewId: record.reviewId, sessionId });
+      // Saga leg 7: send the `/review` prompt, raced against the accept window.
+      // Survival (or early resolution) accepts the trigger; an EARLY rejection
+      // is a send failure → roll back (close bridge, end session, mark failed).
+      const promptText = targetToPrompt(target, comment, autofix);
+      const promptPromise = sendSerializedPrompt(deps, sessionId, promptText);
+      let acceptTimer: ReturnType<typeof setTimeout> | undefined;
+      const outcome = await Promise.race([
+        promptPromise.then(
+          () => 'settled' as const,
+          () => 'send_failed' as const,
+        ),
+        new Promise<'accepted'>((resolve) => {
+          acceptTimer = setTimeout(() => resolve('accepted'), acceptMs);
+          acceptTimer.unref?.();
+        }),
+      ]);
+      clearTimeout(acceptTimer);
+
+      if (outcome === 'send_failed') {
+        // Rollback: no zombie session, no half-triggered review.
+        deps.bridge.close(sessionId);
+        try {
+          await deps.daemon.endSession(sessionId);
+        } catch {
+          // Best-effort.
+        }
+        await deps.registry.setStatus(record.reviewId, 'failed');
+        res
+          .status(502)
+          .json({ error: 'Prompt send failed', code: 'prompt_send_failed' });
+        return;
+      }
+
+      // Accepted. The prompt's eventual settlement drives completed/failed,
+      // then the bridge closes (the review's permission window is over once its
+      // prompt settles). (If it already resolved — 'settled' — this fires now.)
+      void (async () => {
+        try {
+          await promptPromise;
+          await deps.lifecycle.onPromptSettled(record.reviewId, 'completed');
+        } catch {
+          try {
+            await deps.lifecycle.onPromptSettled(record.reviewId, 'failed');
+          } catch {
+            // Best-effort terminal transition.
+          }
+        } finally {
+          deps.bridge.close(sessionId);
+        }
+      })();
+
+      deps.lifecycle.emit(
+        'review_started',
+        deps.registry.get(record.reviewId)!,
+      );
+      // Audit: ids + flags + approvalLeg ONLY — NEVER the prompt/diff/report.
+      void deps.audit?.record({
+        action: 'review_started',
+        actorTokenId: req.rcClient?.id,
+        subActor: req.rcClient?.subActor,
+        target: record.reviewId,
+        detail: {
+          sessionId,
+          target,
+          comment,
+          autofix,
+          autoApprove,
+          approvalLeg,
+        },
+      });
+
+      res.status(202).json({ reviewId: record.reviewId, sessionId });
+    } catch {
+      // A leg 5–7 throw (e.g. a registry persist rejection) — roll back so no
+      // zombie session or open bridge survives, and never hang the client.
+      deps.bridge.close(sessionId);
+      try {
+        await deps.daemon.endSession(sessionId);
+      } catch {
+        // Best-effort — the daemon may already have dropped the session.
+      }
+      if (!res.headersSent) {
+        res.status(502).json({
+          error: 'Review start failed',
+          code: 'review_start_failed',
+        });
+      }
+    }
   };
 }

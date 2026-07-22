@@ -163,8 +163,8 @@ describe('POST /rc/reviews (trigger saga)', () => {
     expect(registry.list()).toHaveLength(0);
   });
 
-  it('write token + autofix → 403 owner_scope_required, nothing registered, bridge not opened', async () => {
-    const { url, tokens, registry, bridge } = await setup();
+  it('write token + autofix → 403 owner_scope_required, nothing registered, bridge not opened, scope_denied audited', async () => {
+    const { url, tokens, registry, bridge, frames } = await setup();
     const res = await post(url, tokens.write, {
       target: { local: true },
       autofix: true,
@@ -175,6 +175,28 @@ describe('POST /rc/reviews (trigger saga)', () => {
     });
     expect(registry.list()).toHaveLength(0);
     expect(bridge.open).not.toHaveBeenCalled();
+
+    // The owner-gate denial is audited as a scope_denied row (the mount-level
+    // scope_denied never fires — a WRITE token passes requireScope(WRITE)).
+    await waitFor(() =>
+      frames.some(
+        (f) =>
+          f.type === 'audit' &&
+          (f as Extract<OwnerEvent, { type: 'audit' }>).record.action ===
+            'scope_denied',
+      ),
+    );
+    const denied = frames.find(
+      (f) =>
+        f.type === 'audit' &&
+        (f as Extract<OwnerEvent, { type: 'audit' }>).record.action ===
+          'scope_denied',
+    ) as Extract<OwnerEvent, { type: 'audit' }>;
+    expect(denied.record.detail).toMatchObject({
+      required: 'owner',
+      reason: 'privileged_review_flags',
+      autofix: true,
+    });
   });
 
   it('write token + comment → 403 owner_scope_required', async () => {
@@ -307,6 +329,12 @@ describe('POST /rc/reviews (trigger saga)', () => {
     [{ path: '' }, 'empty path'],
     [{ path: 42 }, 'non-string path'],
     [{ bogus: true }, 'unknown shape'],
+    // SECURITY: a flag-shaped or multi-token path smuggles an owner-gated flag
+    // (or arbitrary prompt text) past the owner-scope gate on a WRITE token.
+    [{ path: '--comment' }, 'flag-shaped path'],
+    [{ path: '42 --comment' }, 'multi-token path'],
+    [{ path: 'src/a.ts\n--comment' }, 'newline-injected path'],
+    [{ path: '-x' }, 'dash-prefixed path'],
   ])('malformed target %#: 400 invalid_target', async (target) => {
     const { url, tokens, registry } = await setup();
     const res = await post(url, tokens.owner, { target });
@@ -315,6 +343,55 @@ describe('POST /rc/reviews (trigger saga)', () => {
       code: 'invalid_target',
     });
     expect(registry.list()).toHaveLength(0);
+  });
+
+  it('the flag-shaped path bypass is blocked even for a WRITE token (403/400, no comment review)', async () => {
+    // The bypass targeted a WRITE token running NO flags but a path of
+    // `--comment`. Sanitization rejects it at parse (400) BEFORE the prompt is
+    // ever built, so no `/review --comment` reaches the daemon.
+    const { url, tokens, registry } = await setup();
+    const res = await post(url, tokens.write, {
+      target: { path: '--comment' },
+    });
+    expect(res.status).toBe(400);
+    expect((await res.json()) as { code: string }).toMatchObject({
+      code: 'invalid_target',
+    });
+    expect(registry.list()).toHaveLength(0);
+    expect(stub!.lastPromptBody).toBeUndefined();
+  });
+
+  it('a normal in-tree path → 202 with prompt starting /review <path> (discrimination)', async () => {
+    const { url, tokens } = await setup();
+    const res = await post(url, tokens.owner, {
+      target: { path: 'src/foo.ts' },
+    });
+    expect(res.status).toBe(202);
+    await waitFor(() => stub!.lastPromptBody !== undefined);
+    const promptText = (
+      stub!.lastPromptBody as { prompt: Array<{ text: string }> }
+    ).prompt[0].text;
+    expect(promptText.startsWith('/review src/foo.ts')).toBe(true);
+  });
+
+  it('registry.register throws → 502 review_start_failed: bridge closed, session ended, no hang', async () => {
+    // A leg-6 file-persist rejection must NOT leak a live session + open bridge
+    // or hang the client. The rollback guard catches it, closes the bridge, and
+    // ends the session.
+    const { url, tokens, bridge, registry } = await setup();
+    // Force register to reject (simulate a disk/persist failure).
+    vi.spyOn(registry, 'register').mockRejectedValueOnce(
+      new Error('persist failed'),
+    );
+    const res = await post(url, tokens.owner, { target: { local: true } });
+    expect(res.status).toBe(502);
+    expect((await res.json()) as { code: string }).toMatchObject({
+      code: 'review_start_failed',
+    });
+    // Bridge was opened (leg 5) then closed by the rollback guard; session ended.
+    expect(bridge.open).toHaveBeenCalledTimes(1);
+    expect(bridge.close).toHaveBeenCalledWith('stub-agent-1');
+    expect(stub!.lastEndedSessionId).toBe('stub-agent-1');
   });
 
   it('prompt send failure → 502 prompt_send_failed: bridge closed, session ended, review failed', async () => {
