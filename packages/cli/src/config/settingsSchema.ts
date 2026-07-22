@@ -1965,9 +1965,10 @@ const SETTINGS_SCHEMA = {
           'resolve against the working directory. Each directory is scanned ' +
           'one level deep for subdirectories containing a SKILL.md file. ' +
           'Skills from these directories are loaded at user level, after ' +
-          'the default skill directories; a custom skill with the same ' +
-          'name as a default skill will not override it. Only point this ' +
-          'at trusted locations, since skills can define hooks and commands.',
+          'the default user skill directories; a custom skill with the ' +
+          'same name as one in the default user directories will not ' +
+          'override it. Only point this at trusted locations, since ' +
+          'skills can define hooks and commands.',
         showInDialog: false,
         mergeStrategy: MergeStrategy.UNION,
       },

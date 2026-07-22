@@ -909,13 +909,13 @@ export class SkillManager {
         );
         for (const customDir of this.config.getCustomSkillDirs?.() ?? []) {
           const homeExpanded = expandHomeDir(customDir);
+          const expanded = path.resolve(homeExpanded);
           if (!path.isAbsolute(homeExpanded)) {
             debugLogger.warn(
               `Custom skill directory "${customDir}" is relative; ` +
-                'resolved against the working directory',
+                `resolved to "${expanded}" against the working directory`,
             );
           }
-          const expanded = path.resolve(homeExpanded);
           if (!dirs.includes(expanded)) {
             dirs.push(expanded);
           }
