@@ -174,6 +174,26 @@ describe('AddWorkspaceDialog', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('hides persistence and always submits false when unsupported', async () => {
+    const onAdd = vi.fn().mockResolvedValue(undefined);
+    mount(
+      <AddWorkspaceDialog
+        onClose={vi.fn()}
+        onAdd={onAdd}
+        persistenceSupported={false}
+      />,
+    );
+
+    expect(document.querySelector('[role="switch"]')).toBeNull();
+    type('/abs/project');
+    submit();
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onAdd).toHaveBeenCalledWith('/abs/project', false);
+  });
+
   it('surfaces an onAdd failure as an inline error and stays open', async () => {
     const onAdd = vi.fn().mockRejectedValue(new Error('daemon unreachable'));
     const onClose = vi.fn();

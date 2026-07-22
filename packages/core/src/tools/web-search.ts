@@ -10,7 +10,10 @@ import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { resolveRequestTimeout } from '../core/openaiContentGenerator/constants.js';
 import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
-import { buildRuntimeFetchOptions } from '../utils/runtimeFetchOptions.js';
+import {
+  buildRuntimeFetchOptions,
+  preloadRuntimeFetchModule,
+} from '../utils/runtimeFetchOptions.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { delay } from '../utils/retry.js';
 import { ToolErrorType } from './tool-error.js';
@@ -621,6 +624,10 @@ class WebSearchToolInvocation extends BaseToolInvocation<
       );
     }
     const backend = gate.backend;
+
+    // The sync option builder below requires undici to be loaded (issue
+    // #7264); web search runs outside the content-generator preload path.
+    await preloadRuntimeFetchModule();
 
     const startedAt = Date.now();
     const apiKey = process.env[backend.apiKeyEnvKey];

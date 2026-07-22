@@ -218,7 +218,21 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || \'qwen-code-dev-bot\' }}"',
     );
-    expect(workflow).toContain("MAX_ROUNDS: '5'");
+    // The round budgets are tuning knobs; what must hold is their ORDERING.
+    // Asserting the literal numbers only detected edits — it would not catch
+    // a cap that stopped binding, which is the failure that matters.
+    const num = (key) =>
+      Number(workflow.match(new RegExp(`\\b${key}: '(\\d+)'`))?.[1]);
+    const strictRounds = num('MAX_ROUNDS');
+    const takeoverRounds = num('TAKEOVER_MAX_ROUNDS');
+    const authRounds = num('API_AUTH_MAX_ROUNDS');
+    // A strict cap at or above the takeover cap makes the takeover label a
+    // no-op; an auth sub-cap at or above the strict cap stops short-circuiting
+    // the retries only a maintainer can fix, which is what it exists for.
+    expect(strictRounds).toBeGreaterThan(0);
+    expect(strictRounds).toBeLessThan(takeoverRounds);
+    expect(authRounds).toBeGreaterThan(0);
+    expect(authRounds).toBeLessThan(strictRounds);
     expect(workflow).toContain("MAX_OPEN_AUTOFIX_PRS: '5'");
     expect(reviewScanJob).toContain('isCrossRepository');
     expect(reviewScanJob).toContain('not an open main-targeting PR');
@@ -280,9 +294,16 @@ describe('qwen-autofix workflow', () => {
     expect(reviewScanJob).toContain('.conclusion // .state // ""');
     expect(reviewScanJob).toContain('.workflowName // ""');
     expect(reviewScanJob).toContain('startswith("review-address")');
+    // Every failed-check selector must carry the address-check carve-out, or
+    // the loop reads its OWN runs as feedback about the PR. Asserting the
+    // property rather than the count lets a new selector be added, but not
+    // one that forgets the carve-out.
+    const scanCheckSelectors =
+      reviewScanJob.match(/IN\("(?:FAILURE|QUEUED)"/g) ?? [];
+    expect(scanCheckSelectors.length).toBeGreaterThanOrEqual(3);
     expect(
       reviewScanJob.match(/startswith\("review-address"\)/g) ?? [],
-    ).toHaveLength(2);
+    ).toHaveLength(scanCheckSelectors.length);
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
@@ -380,6 +401,182 @@ describe('qwen-autofix workflow', () => {
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
   });
 
+  it('keeps a still-red check visible, but only once per head', () => {
+    // A red check is a STATE, not the instant it turned red. Counting only
+    // "failed since the watermark" made a still-failing PR invisible the
+    // moment the watermark passed the failure. Measured: #6451 (3 reds
+    // completed 09:30-09:51, watermark 10:55), #7357 (red 07:59, watermark
+    // 09:18), #7390 (red and watermark BOTH 11:27:37, so a strict `>` hid it
+    // the instant it appeared) — all three sat red for hours while every scan
+    // logged "nothing new".
+    const block = reviewScanJob.match(
+      /LIVE_HEAD="\$\(jq -r[\s\S]*?\n {12}fi\n/,
+    )?.[0];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+    const run = (reds, redHead, liveHead) =>
+      execFileSync(
+        'bash',
+        ['-c', `set -uo pipefail\n${script}\nprintf '%s' "$N_RED_NOW"`],
+        {
+          env: {
+            ...process.env,
+            PR_META: JSON.stringify({ headRefOid: liveHead }),
+            CHECKS_JSON: JSON.stringify(
+              reds.map((name) => ({
+                name,
+                conclusion: 'FAILURE',
+                workflowName: 'CI',
+              })),
+            ),
+            RED_HEAD: redHead,
+          },
+          encoding: 'utf8',
+        },
+      );
+
+    // Never evaluated: the red is visible however old it is.
+    expect(run(['Test'], '', 'abc123')).toBe('1');
+    // Already evaluated on THIS head: left alone. This is what bounds it to
+    // one look per head instead of re-selecting the PR every single scan.
+    expect(run(['Test'], 'abc123', 'abc123')).toBe('0');
+    // A new commit re-opens it — the reds now belong to a head nobody judged.
+    expect(run(['Test'], 'old999', 'abc123')).toBe('1');
+    // Green stays green.
+    expect(run([], '', 'abc123')).toBe('0');
+    expect(run(['a', 'b', 'c'], '', 'abc123')).toBe('3');
+    // Empty LIVE_HEAD → fail-closed regardless of RED_HEAD. Without this,
+    // a simplified guard (removing -n) would select a PR with no evaluable head.
+    expect(run(['Test'], '', '')).toBe('0');
+    expect(run(['Test'], 'abc123', '')).toBe('0');
+
+    // The count must actually GATE selection — computing it and then not
+    // consulting it is the whole bug, and every other assertion here still
+    // passes without this line.
+    const idleGate = reviewScanJob.match(
+      /if \[\[ "\$\{N_REVIEWS\}" -eq 0[^\n]*\]\]; then/,
+    )?.[0];
+    expect(idleGate).toBeTruthy();
+    expect(idleGate).toContain('"${N_RED_NOW}" -eq 0');
+
+    // The head is recorded by its OWN marker inside the eval comment, so no
+    // ts/acted/round parser changes — and the comment still matches the eval
+    // filter, so the agent never sees it as feedback.
+    expect(reviewScanJob).toContain('autofix-redcheck head=([0-9a-f]+)');
+    expect(
+      workflow.match(/<!-- autofix-redcheck head=\$\{REPORT_HEAD\} -->/g) ?? [],
+    ).toHaveLength(3);
+    // Every step that EMITS the marker must define REPORT_HEAD itself — a
+    // shell variable does not cross step boundaries — and no step may define
+    // it without emitting. Counting the two kinds separately missed exactly
+    // this: one assignment had landed in `issue-autofix`, which emits no
+    // marker and has no ${PR} in scope, while review-address's handoff step
+    // emitted the marker with the variable unset. Both counts were "right";
+    // the pairing was not.
+    // Checked PER STEP BLOCK, not by step name: `Report dry-run / failure`
+    // exists in BOTH issue-autofix and review-address, so a name-keyed set
+    // merges them and the misplacement stays invisible — that is how the
+    // first version of this assertion passed while the bug was live.
+    let emitterSteps = 0;
+    for (const m of workflow.matchAll(
+      /\n {6}- name: '(?:[^']+)'\n([\s\S]*?)(?=\n {6}- name: '|\n {2}[a-z][a-z0-9-]*:\n|$)/g,
+    )) {
+      const body = m[1];
+      const emits = body.includes(
+        '<!-- autofix-redcheck head=${REPORT_HEAD} -->',
+      );
+      const defines = body.includes('REPORT_HEAD="${CHECKED_OUT_HEAD}"');
+      expect(emits).toBe(defines);
+      if (emits) emitterSteps += 1;
+    }
+    expect(emitterSteps).toBe(2);
+    // The head is captured in prepare (before agent mutations) and forwarded
+    // via a step output — not re-fetched from the API at report time, which
+    // could return a DIFFERENT head if the branch moved during the run.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'CHECKED_OUT_HEAD="$(git rev-parse HEAD)"',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'checked_out_head=${CHECKED_OUT_HEAD}',
+    );
+    expect(workflow).not.toContain('REPORT_HEAD="$(gh api');
+    // The handoff step must NOT stamp the redcheck marker when the agent
+    // evaluated nothing (sentinel ts): doing so would make RED_HEAD ==
+    // LIVE_HEAD and the retry scan would see N_RED_NOW=0, going idle
+    // despite the handoff promising a retry.
+    expect(reviewAddressReportStep).toContain(
+      'if [[ "${MARK_TS}" != \'9999-12-31T23:59:59Z\' ]]; then',
+    );
+  });
+
+  it('renders persistent red checks into the agent feedback', () => {
+    // The scan selects a PR via N_RED_NOW (currently-red, head unjudged),
+    // but the prepare step's "Failed checks" renderer only shows checks
+    // that completed AFTER the watermark. In the exact case N_RED_NOW
+    // targets (red completed before/equal to the watermark), the agent
+    // would receive an empty "Failed checks" section with no check name
+    // to reproduce. The "Still-red checks" section closes that gap.
+    expect(prepareBranchAndFeedbackStep).toContain(
+      '## Still-red checks (persisting from before the last evaluation)',
+    );
+    // The still-red section must use <= (complement of the > in "Failed
+    // checks") so the two sections partition the red checks without overlap
+    // or gap.
+    const stillRedBlock = prepareBranchAndFeedbackStep.match(
+      /Still-red checks[\s\S]*?checks\.json"/,
+    )?.[0];
+    expect(stillRedBlock).toBeTruthy();
+    expect(stillRedBlock).toContain('<= $wm');
+    // Must carry the same conclusion filter as N_RED_NOW (no CANCELLED:
+    // a cancelled check is not a persistent red state).
+    expect(stillRedBlock).toContain(
+      'IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED")',
+    );
+    expect(stillRedBlock).not.toContain('CANCELLED');
+    // Must carry the address-check carve-out, same as every other
+    // failed-check selector.
+    expect(stillRedBlock).toContain('startswith("review-address")');
+
+    // Behavioral: the jq filter renders a persistent red check that the
+    // "Failed checks" section (completedAt > wm) would miss.
+    const jqFilter = stillRedBlock.match(
+      /jq -r --arg wm.*?'([\s\S]*?)'\s*\\/,
+    )?.[1];
+    expect(jqFilter).toBeTruthy();
+    const checksJson = JSON.stringify([
+      {
+        name: 'Test / unit',
+        conclusion: 'FAILURE',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T09:00:00Z',
+      },
+      {
+        name: 'Lint',
+        conclusion: 'SUCCESS',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T09:00:00Z',
+      },
+      {
+        name: 'Build',
+        conclusion: 'FAILURE',
+        workflowName: 'CI',
+        completedAt: '2026-01-01T11:00:00Z',
+      },
+    ]);
+    const result = execFileSync(
+      'jq',
+      ['-r', '--arg', 'wm', '2026-01-01T10:00:00Z', jqFilter],
+      { encoding: 'utf8', input: checksJson },
+    );
+    // Test / unit completed BEFORE the watermark: shown in still-red.
+    expect(result).toContain('Test / unit: FAILURE');
+    // Build completed AFTER the watermark: NOT in still-red (it is in
+    // "Failed checks" instead).
+    expect(result).not.toContain('Build');
+    // Green check: never shown.
+    expect(result).not.toContain('Lint');
+  });
+
   it('bounds fleet-wide simultaneity below the per-scan target budget', () => {
     // max-parallel is the ONE place different PRs wait on each other: the scan
     // emits every eligible PR (up to MAX_TARGETS_PER_SCAN) and the matrix
@@ -430,6 +627,9 @@ describe('qwen-autofix workflow', () => {
       // Default: the job was selected under the CURRENT window (the latest
       // ack, or 'none' before any takeover) — the normal, non-raced case.
       window = undefined,
+      // The head this job checked out (CHECKED_OUT_HEAD). The no-op same-head
+      // duplicate signature compares the live redcheck marker against it.
+      head = 'aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111',
     }) => {
       const effWindow =
         window ?? (acks.length ? acks[acks.length - 1] : 'none');
@@ -441,7 +641,7 @@ describe('qwen-autofix workflow', () => {
             ...marks.map((m) => ({
               user: { login: 'qwen-code-dev-bot' },
               created_at: m.at ?? '2026-07-18T09:00:00Z',
-              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->`,
+              body: `eval <!-- autofix-eval ts=${m.ts} acted=${m.acted ?? 'true'} round=${m.round}${m.win ? ` win=${m.win}` : ''} -->${m.head ? `\n<!-- autofix-redcheck head=${m.head} -->` : ''}`,
             })),
             ...acks.map((at) => ({
               user: { login: 'qwen-code-dev-bot' },
@@ -477,6 +677,7 @@ describe('qwen-autofix workflow', () => {
               CONFLICT: conflict,
               MAX_ROUNDS: '5',
               WINDOW: effWindow,
+              CHECKED_OUT_HEAD: head,
               AUTOFIX_BOT: 'qwen-code-dev-bot',
               REVIEW_BOT: 'qwen-code-ci-bot',
               TRUSTED_ASSOC: '["OWNER","MEMBER","COLLABORATOR"]',
@@ -654,6 +855,51 @@ describe('qwen-autofix workflow', () => {
         commands: ['2026-07-18T08:45:00Z'],
       }).stale,
     ).toBe(true);
+    // No-op same-head duplicate (signature c): two scans both emit the PR with
+    // watermark W; the first serialized job ends in a no-op, recording a
+    // redcheck marker for head H while keeping ts=W and round UNCHANGED.
+    // Neither the watermark nor the round trigger fires, so without the
+    // redcheck re-check the second job would run the agent again and post a
+    // duplicate report for the same head.
+    const H = 'aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111';
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: H,
+      }).stale,
+    ).toBe(true);
+    // A new commit moved the head: the sibling judged a DIFFERENT head, so
+    // this target is real work, not a duplicate.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: 'bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222',
+      }).stale,
+    ).toBe(false);
+    // Same head, but trusted feedback arrived after the watermark the no-op
+    // sibling evaluated through: the queued job has real work and proceeds.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'false',
+        round: 2,
+        head: H,
+        reviews: [F2],
+      }).stale,
+    ).toBe(false);
+    // Same head, but a live conflict is actionable regardless of the redcheck.
+    expect(
+      runStaleGate({
+        marks: [{ ts: W, round: 2, acted: 'false', head: H }],
+        conflict: 'true',
+        round: 2,
+        head: H,
+      }).stale,
+    ).toBe(false);
   });
 
   it('behaviorally replays the eligibility recheck across lifecycle and label states', () => {
@@ -1365,7 +1611,7 @@ describe('qwen-autofix workflow', () => {
       ).length - 1,
     ).toBe(2);
     expect(reviewScanJob).toContain(
-      '--json headRefName,statusCheckRollup,createdAt,labels',
+      '--json headRefName,headRefOid,statusCheckRollup,createdAt,labels',
     );
     // Command-style comments are instructions, not feedback — excluded at
     // ALL FOUR feedback sites (scan count via $cf; NEWEST, LIVE_NEW, and
@@ -2343,13 +2589,13 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '.[3] | map(select((.conclusion // .state // "")',
     );
-    // Three sites: the NEWEST computation, the live-watermark revalidation,
-    // and the feedback rendering — all must share the same address-check
-    // carve-out.
+    // Four sites: the NEWEST computation, the live-watermark revalidation,
+    // the "Failed checks" rendering, and the "Still-red checks" rendering
+    // — all must share the same address-check carve-out.
     expect(
       prepareBranchAndFeedbackStep.match(/startswith\("review-address"\)/g) ??
         [],
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     expect(prepareBranchAndFeedbackStep).toContain(
       'gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]',
     );
@@ -3510,13 +3756,22 @@ describe('qwen-autofix workflow', () => {
       '::warning::Failed to post handoff comment on PR #${PR}',
     );
     expect(reviewAddressReportStep).toContain('human should take over');
-    // Token-breaking neutralization at ALL FOUR agent-derived publish sites
-    // (the three model-output bodies + the API_ERROR_DETAIL headline, whose
+    // Token-breaking neutralization at ALL FIVE agent-derived publish sites
+    // (address-summary, no-action, DETAIL_FILE, API_ERROR_DETAIL, and the
+    // gate-rejection body, whose
     // content is agent stdout that can echo external comment text), and it
     // must be LINE-INDEPENDENT: a whole-comment strip misses a marker whose
     // --> sits on another line, while jq scan() matches across newlines.
     // Proven end-to-end on a split forged marker.
-    expect(workflow.split("sed 's/<!--/<!\\\\-\\\\-/g'").length - 1).toBe(4);
+    // Count the correct spelling AND prove no site uses a different one.
+    // Counting alone is not enough: a fifth site added with `\-\-` (single
+    // backslashes — a NO-OP on both GNU and BSD sed, verified) left the count
+    // at four and this test green, shipping an unescaped publish site.
+    const escapeSites = workflow.match(/sed 's\/<!--\/[^']*\/g'/g) ?? [];
+    expect(escapeSites).toHaveLength(5);
+    for (const site of escapeSites) {
+      expect(site).toBe("sed 's/<!--/<!\\\\-\\\\-/g'");
+    }
     const forged =
       '<!-- autofix-eval ts=2099-01-01T00:00:00Z\nx acted=true round=99 -->';
     const sedCmd = workflow.match(/sed 's\/<!--\/[^']*\/g'/)?.[0];
@@ -3777,11 +4032,14 @@ describe('qwen-autofix workflow', () => {
     // writes outcome=failed; an unwired check would read as a gate crash and be
     // retried instead of reported. Drive the extracted helper for real.
     const gate = verificationGateSteps[1];
+    // Each check runs through run_check, which tees its output to GATE_LOG and
+    // calls reject_fix on failure - so the verdict is declared AND the reason
+    // is captured for the retry.
     for (const check of [
-      "npm run build || reject_fix 'build failed on the agent-committed fix'",
-      "npm run typecheck || reject_fix 'typecheck failed on the agent-committed fix'",
-      "npm run lint || reject_fix 'lint failed on the agent-committed fix'",
-      'reject_fix "tests failed in ${p}"',
+      "run_check 'build failed on the agent-committed fix' npm run build",
+      "run_check 'typecheck failed on the agent-committed fix' npm run typecheck",
+      "run_check 'lint failed on the agent-committed fix' npm run lint",
+      'run_check "tests failed in ${p}"',
     ]) {
       expect(gate).toContain(check);
     }
@@ -3802,6 +4060,46 @@ describe('qwen-autofix workflow', () => {
     }
     expect(status).not.toBe(0);
     expect(readFileSync(out, 'utf8')).toContain('outcome=failed');
+    // The verdict must be declared BEFORE the detail file is written, and the
+    // write must be non-fatal. An empty outcome on a failed job reads as "the
+    // gate never reached a verdict" — a CRASH, which is retried — so a
+    // rejection that died writing its detail would be re-attempted forever
+    // instead of reported once. Drive it with an unwritable WORKDIR: the
+    // detail is lost, the verdict is not.
+    //
+    // The ordering is asserted STATICALLY as the primary guard, because the
+    // behavioural half is not portable: bash 3.2 suspends set -e through a
+    // `||`-invoked function and bash 5 does not, so the wrong order runs
+    // clean on macOS and aborts on a Linux runner. That is precisely how this
+    // shipped green locally and red in CI, so the guard must not depend on
+    // which bash the reviewer happens to have.
+    expect(helper.indexOf('outcome=failed')).toBeLessThan(
+      helper.indexOf('gate-rejection.md'),
+    );
+    // ...and the detail write is non-fatal, so it cannot abort before exit 1.
+    expect(helper).toMatch(/gate-rejection\.md" \|\|\n/);
+    const outNoDir = join(dir, 'gh_output_nodir');
+    writeFileSync(outNoDir, '');
+    let degraded = 0;
+    try {
+      execFileSync(
+        'bash',
+        ['-c', `set -eo pipefail\n${helper}\nfalse || reject_fix 'boom'`],
+        {
+          env: {
+            ...process.env,
+            GITHUB_OUTPUT: outNoDir,
+            WORKDIR: join(dir, 'does', 'not', 'exist'),
+          },
+          encoding: 'utf8',
+          stdio: 'pipe',
+        },
+      );
+    } catch (e) {
+      degraded = e.status;
+    }
+    expect(degraded).not.toBe(0);
+    expect(readFileSync(outNoDir, 'utf8')).toContain('outcome=failed');
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -4095,6 +4393,119 @@ describe('qwen-autofix workflow', () => {
     expect(failed.body).toBe('');
     expect(failed.stdout).toContain('Failed to verify CI_DEV_BOT_PAT identity');
     expect(failed.stdout).toContain('Bad credentials');
+  });
+
+  it('feeds the gate rejection back so the retry can fix what it broke', () => {
+    // #7208 was handed to a human over a two-character TS4111 error its own
+    // compiler output already spelled out: the gate rejected the commit, the
+    // handoff showed only the agent's optimistic summary, and the next round
+    // re-read the original review points with no idea why it had been refused.
+    const gate = verificationGateSteps[1];
+    const prep =
+      workflow.match(
+        /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n {6}- name: )/,
+      )?.[0] ?? '';
+
+    // 1. A failing check records WHY, not just THAT, it failed.
+    const capture = gate.match(
+      /GATE_LOG="\$\{WORKDIR\}\/gate-output\.log"[\s\S]*?\n {10}\}\n {10}run_check\(\) \{[\s\S]*?\n {10}\}/,
+    )?.[0];
+    expect(capture).toBeTruthy();
+    const dir = mkdtempSync(join(tmpdir(), 'gate-'));
+    const out = join(dir, 'gh_output');
+    writeFileSync(out, '');
+    let status = 0;
+    try {
+      execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -eo pipefail',
+            `WORKDIR=${JSON.stringify(dir)}`,
+            capture,
+            "run_check 'build failed on the agent-committed fix' bash -c \"echo 'src/goals/goalJudge.ts(364,13): error TS4111'; exit 1\"",
+          ].join('\n'),
+        ],
+        { env: { ...process.env, GITHUB_OUTPUT: out }, encoding: 'utf8' },
+      );
+    } catch (e) {
+      status = e.status;
+    }
+    expect(status).not.toBe(0);
+    expect(readFileSync(out, 'utf8')).toContain('outcome=failed');
+    const rejection = readFileSync(join(dir, 'gate-rejection.md'), 'utf8');
+    expect(rejection).toContain('build failed on the agent-committed fix');
+    // The compiler's own words must survive - that is the whole point.
+    expect(rejection).toContain('error TS4111');
+    // A four-backtick fence cannot be closed by captured ``` output.
+    expect(rejection).toContain('````');
+
+    // 2. The handoff delimits it so the retry can lift it back out.
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-gate-rejection-start -->',
+    );
+    expect(reviewAddressReportStep).toContain(
+      '<!-- autofix-gate-rejection-end -->',
+    );
+
+    // 3. Round-trip: the prepare step recovers it from the bot's newest comment.
+    const extract = prep.match(
+      /LAST_REJECTION="\$\(jq[\s\S]*?\n {14}\| sed '1d;\$d'\)"/,
+    )?.[0];
+    expect(extract).toBeTruthy();
+    const runExtract = (comments) => {
+      const d = mkdtempSync(join(tmpdir(), 'fb-'));
+      writeFileSync(join(d, 'ic.json'), JSON.stringify(comments));
+      const res = execFileSync(
+        'bash',
+        [
+          '-c',
+          [
+            'set -uo pipefail',
+            `WORKDIR=${JSON.stringify(d)}`,
+            'AUTOFIX_BOT=qwen-code-dev-bot',
+            extract,
+            'printf "%s" "${LAST_REJECTION}"',
+          ].join('\n'),
+        ],
+        { encoding: 'utf8' },
+      );
+      rmSync(d, { recursive: true, force: true });
+      return res;
+    };
+    const withRejection = [
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-07-20T10:00:00Z',
+        body: 'old <!-- autofix-eval ts=1 acted=true round=1 -->',
+      },
+      {
+        user: { login: 'qwen-code-dev-bot' },
+        created_at: '2026-07-20T19:32:00Z',
+        body: [
+          'handoff',
+          '<!-- autofix-gate-rejection-start -->',
+          '**build failed on the agent-committed fix**',
+          "error TS4111: Property must be accessed with ['truncated']",
+          '<!-- autofix-gate-rejection-end -->',
+          '<!-- autofix-eval ts=2 acted=false round=5 -->',
+        ].join('\n'),
+      },
+    ];
+    const recovered = runExtract(withRejection);
+    expect(recovered).toContain('error TS4111');
+    expect(recovered).not.toContain('autofix-gate-rejection'); // markers stripped
+    // A round that pushed carries no rejection - nothing to replay.
+    expect(
+      runExtract([
+        {
+          user: { login: 'qwen-code-dev-bot' },
+          created_at: '2026-07-20T19:32:00Z',
+          body: 'pushed <!-- autofix-eval ts=2 acted=true round=5 -->',
+        },
+      ]).trim(),
+    ).toBe('');
   });
 
   it('resolves only the review threads whose findings it implemented', () => {

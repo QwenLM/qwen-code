@@ -122,6 +122,48 @@ describe('executeToolCall', () => {
     });
   });
 
+  it('records direct calls by default and can defer to an outer boundary', async () => {
+    const recordToolResult = vi.fn();
+    mockConfig.getChatRecordingService = () =>
+      ({
+        recordToolResult,
+        recordUiTelemetryEvent: vi.fn(),
+      }) as unknown as ReturnType<Config['getChatRecordingService']>;
+    const directRequest: ToolCallRequestInfo = {
+      callId: 'direct-call',
+      name: 'testTool',
+      args: { param1: 'value1' },
+      isClientInitiated: false,
+      prompt_id: 'prompt-direct',
+    };
+    vi.mocked(mockToolRegistry.getTool).mockReturnValue(mockTool);
+    executeFn.mockResolvedValue({
+      llmContent: 'record later',
+      returnDisplay: 'record later',
+    } satisfies ToolResult);
+
+    const directResponse = await executeToolCall(
+      mockConfig,
+      directRequest,
+      abortController.signal,
+    );
+
+    expect(recordToolResult).toHaveBeenCalledWith(
+      directResponse.responseParts,
+      expect.objectContaining({ callId: directRequest.callId }),
+    );
+    recordToolResult.mockClear();
+    const deferredRequest = { ...directRequest, callId: 'deferred-call' };
+    await expect(
+      executeToolCall(mockConfig, deferredRequest, abortController.signal, {
+        recordToolResult: false,
+      }),
+    ).resolves.toEqual(
+      expect.objectContaining({ callId: deferredRequest.callId }),
+    );
+    expect(recordToolResult).not.toHaveBeenCalled();
+  });
+
   it('should return an error if tool is not found', async () => {
     const request: ToolCallRequestInfo = {
       callId: 'call2',
