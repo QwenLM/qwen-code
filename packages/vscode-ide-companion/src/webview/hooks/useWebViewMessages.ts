@@ -21,6 +21,10 @@ import {
   type WebViewMessage,
   type WebViewMessageBase,
 } from './useImage.js';
+import {
+  escapePath,
+  isDisplayableImagePath,
+} from '../../utils/imageSupport.js';
 
 const FORCE_CLEAR_STREAM_END_REASONS = new Set([
   'user_cancelled',
@@ -1296,9 +1300,12 @@ export const useWebViewMessages = ({
 
           if (inputFieldRef.current) {
             const currentText = inputFieldRef.current.textContent || '';
+            const referenceText = isDisplayableImagePath(attachment.value)
+              ? escapePath(attachment.value)
+              : attachment.name;
             const newText = currentText
-              ? `${currentText} @${attachment.name} `
-              : `@${attachment.name} `;
+              ? `${currentText} @${referenceText} `
+              : `@${referenceText} `;
             inputFieldRef.current.textContent = newText;
             setInputText(newText);
 

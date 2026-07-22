@@ -594,4 +594,72 @@ describe('useWebViewMessages', () => {
       '/tmp/insight-report.html',
     );
   });
+
+  it('inserts resolved image attachments as escaped absolute references', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    const input = document.createElement('div');
+    (
+      rendered.handlers.inputFieldRef as { current: HTMLDivElement | null }
+    ).current = input;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'fileAttached',
+            data: {
+              id: 'file-1',
+              type: 'file',
+              name: 'screen shot.png',
+              value: 'C:\\Users\\Me\\Pictures\\screen shot.png',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(rendered.handlers.fileContext.addFileReference).toHaveBeenCalledWith(
+      'screen shot.png',
+      'C:\\Users\\Me\\Pictures\\screen shot.png',
+    );
+    expect(input.textContent).toBe(
+      '@C:\\Users\\Me\\Pictures\\screen\\ shot.png ',
+    );
+    expect(rendered.handlers.setInputText).toHaveBeenCalledWith(
+      '@C:\\Users\\Me\\Pictures\\screen\\ shot.png ',
+    );
+  });
+
+  it('keeps non-image attachments as file-name references', () => {
+    const rendered = renderHookHarness();
+    root = rendered.root;
+    container = rendered.container;
+
+    const input = document.createElement('div');
+    (
+      rendered.handlers.inputFieldRef as { current: HTMLDivElement | null }
+    ).current = input;
+
+    act(() => {
+      window.dispatchEvent(
+        new MessageEvent('message', {
+          data: {
+            type: 'fileAttached',
+            data: {
+              id: 'file-1',
+              type: 'file',
+              name: 'notes.txt',
+              value: 'C:\\Users\\Me\\Documents\\notes.txt',
+            },
+          },
+        }),
+      );
+    });
+
+    expect(input.textContent).toBe('@notes.txt ');
+    expect(rendered.handlers.setInputText).toHaveBeenCalledWith('@notes.txt ');
+  });
 });
