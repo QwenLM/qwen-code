@@ -42,7 +42,7 @@ function isRequiredThinkingError(error: unknown): boolean {
   const message = `${getErrorMessage(error)} ${providerMessage ?? ''}`;
   return (
     message.includes('enable_thinking') &&
-    /(?:restricted to|must be) true/i.test(message)
+    /(?:restricted to|must be) true\b/i.test(message)
   );
 }
 
@@ -1108,10 +1108,13 @@ export class ContentGenerationPipeline {
       return await executeAttempt();
     } catch (error) {
       const model = context.model.toLowerCase();
+      const wireRequest = openaiRequest as Record<string, unknown> | undefined;
+      const chatTemplateKwargs = wireRequest?.['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
       if (
-        (openaiRequest as Record<string, unknown> | undefined)?.[
-          'enable_thinking'
-        ] === false &&
+        (wireRequest?.['enable_thinking'] === false ||
+          chatTemplateKwargs?.['enable_thinking'] === false) &&
         request.config?.abortSignal?.aborted !== true &&
         isRequiredThinkingError(error)
       ) {

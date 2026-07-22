@@ -904,6 +904,57 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
+    it('retries when non-DashScope chat_template_kwargs disables required thinking', async () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => req);
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'What is 2+2?' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+
+      const requiredThinkingError = Object.assign(
+        new Error('enable_thinking must be true for this model'),
+        { status: 400 },
+      );
+      (mockClient.chat.completions.create as Mock)
+        .mockRejectedValueOnce(requiredThinkingError)
+        .mockResolvedValue({
+          id: 'r',
+          choices: [{ message: { content: '4' }, finish_reason: 'stop' }],
+        } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(
+        {
+          model: 'Qwen3.6-27B',
+          contents: [{ parts: [{ text: 'What is 2+2?' }], role: 'user' }],
+          config: { thinkingConfig: { includeThoughts: false } },
+        },
+        'forked_query',
+      );
+
+      const calls = (mockClient.chat.completions.create as Mock).mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0][0].chat_template_kwargs).toEqual({
+        enable_thinking: false,
+      });
+      expect(calls[0][0].enable_thinking).toBeUndefined();
+      expect(calls[1][0].chat_template_kwargs).toBeUndefined();
+      expect(calls[1][0].enable_thinking).toBeUndefined();
+      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
     it('handles the retry error when required-thinking retry fails', async () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
