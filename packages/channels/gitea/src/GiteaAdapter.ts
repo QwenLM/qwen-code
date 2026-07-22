@@ -167,7 +167,7 @@ export class GiteaChannel extends ChannelBase {
       const { data: batch } =
         await this.client.notifications.notifyGetList(params);
       notifications.push(...batch);
-      if (batch.length < 100) break;
+      if (batch.length === 0) break;
       page++;
     }
     notifications.sort((a, b) =>

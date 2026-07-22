@@ -123,11 +123,11 @@ The two-line format handles same-timestamp deduplication: when multiple notifica
 
 Polling adapters resolve the sender (the person who triggered the notification) from the platform API:
 
-| Adapter | Strategy                                                                                        |
-| ------- | ----------------------------------------------------------------------------------------------- |
-| GitHub  | Fetch `latest_comment_url` → comment author; fallback to issue/PR author; fallback to `ghost`   |
-| GitLab  | Use `todo.author.username` directly                                                             |
-| Gitea   | Fetch `latest_comment_url` → comment author; fallback to issue/PR author; fallback to repo name |
+| Adapter | Strategy                                                                                                                      |
+| ------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| GitHub  | Fetch `latest_comment_url` → comment author (`ghost` if the user is null); fallback to issue/PR author; fallback to repo name |
+| GitLab  | Use `todo.author.username` directly                                                                                           |
+| Gitea   | Fetch `latest_comment_url` → comment author; fallback to issue/PR author; fallback to repo name                               |
 
 GitHub and Gitea require additional API calls (1–2 per notification) to resolve the sender. In the worst case, a batch of 100 notifications triggers up to 200 additional API calls.
 

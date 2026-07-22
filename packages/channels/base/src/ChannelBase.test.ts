@@ -7404,6 +7404,36 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toContain('Session cleared');
     });
 
+    it('/clear in a chat_thread-scoped shared group is restricted to authorized senders', async () => {
+      const ch = createChannel({
+        sessionScope: 'chat_thread',
+        groupPolicy: 'open',
+        senderPolicy: 'open',
+        allowedUsers: ['boss'],
+      });
+      const g = envelope({ isGroup: true, isMentioned: true, chatId: 'g1' });
+      await ch.handleInbound({ ...g, senderId: 'boss', text: 'hello' });
+      // a non-authorized member cannot clear, even with confirm
+      ch.sent = [];
+      await ch.handleInbound({
+        ...g,
+        senderId: 'rando',
+        text: '/clear confirm',
+      });
+      expect(ch.sent[0]!.text).toContain('authorized');
+      ch.sent = [];
+      await ch.handleInbound({ ...g, senderId: 'boss', text: '/status' });
+      expect(ch.sent[0]!.text).toContain('Session: active');
+      // the authorized owner can clear
+      ch.sent = [];
+      await ch.handleInbound({
+        ...g,
+        senderId: 'boss',
+        text: '/clear confirm',
+      });
+      expect(ch.sent[0]!.text).toContain('Session cleared');
+    });
+
     it('audit-logs a successful shared /clear with a sanitized sender and the session id', async () => {
       // Clearing a SHARED session wipes the conversation for every participant, so a
       // SUCCESSFUL clear (not just the unauthorized branch) must leave an operator

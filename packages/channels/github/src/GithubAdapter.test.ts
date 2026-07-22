@@ -602,6 +602,52 @@ describe('GithubChannel', () => {
     expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(false);
   });
 
+  it('sets isReplyToBot false and isMentioned false for author reason', async () => {
+    mockPaginate.mockResolvedValue([
+      {
+        id: '4',
+        reason: 'author',
+        subject: {
+          type: 'Issue',
+          title: 'Bot-created issue reply',
+          url: 'https://api.github.com/repos/owner/repo/issues/4',
+          latest_comment_url: null,
+        },
+        repository: {
+          full_name: 'owner/repo',
+          html_url: 'https://github.com/owner/repo',
+        },
+        updated_at: '2026-01-01T00:00:00Z',
+      },
+    ]);
+    mockGetIssue.mockResolvedValueOnce({
+      data: { user: { login: 'bot-user' }, body: '' },
+    });
+
+    const envelopes: unknown[] = [];
+    const channel = new GithubChannel('test', baseConfig, mockBridge());
+    const origHandleInbound = (
+      channel as unknown as { handleInbound: (e: unknown) => Promise<void> }
+    ).handleInbound.bind(channel);
+    (
+      channel as unknown as { handleInbound: (e: unknown) => Promise<void> }
+    ).handleInbound = async (e: unknown) => {
+      envelopes.push(e);
+      await origHandleInbound(e);
+    };
+
+    await channel.connect();
+    await vi.waitFor(() => expect(envelopes.length).toBe(1), {
+      timeout: 2000,
+    });
+    channel.disconnect();
+
+    expect((envelopes[0] as { isMentioned: boolean }).isMentioned).toBe(false);
+    expect((envelopes[0] as { isReplyToBot: boolean }).isReplyToBot).toBe(
+      false,
+    );
+  });
+
   it('sendThreadMessage ignores invalid chatId', async () => {
     const channel = new GithubChannel('test', baseConfig, mockBridge());
     await channel.sendThreadMessage('noslash', 'issue:1', 'Hello');

@@ -451,7 +451,7 @@ describe('GiteaChannel', () => {
 
   it('connects successfully when bot identity is unavailable', async () => {
     mockUserGetCurrent.mockRejectedValueOnce(new Error('forbidden'));
-    mockNotifyGetList.mockResolvedValueOnce([]);
+    mockNotifyGetList.mockResolvedValueOnce({ data: [] });
     const bridge = mockBridge();
 
     const channel = new GiteaChannel('test', baseConfig, bridge);
