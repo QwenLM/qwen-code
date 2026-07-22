@@ -1679,6 +1679,7 @@ export class Session implements SessionContext {
       this.#stopCronSchedulerInRuntime();
     }
 
+    this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
