@@ -35,12 +35,18 @@ import { render, cleanup } from 'ink-testing-library';
 import { useContext, act } from 'react';
 import {
   AppContainer,
+  answerAgentViewPendingToolCall,
+  applyAgentViewWorkerControlEventForUi,
   dedupeNewestFirst,
+  getAgentViewAnswerableToolCalls,
+  getAgentViewWorkerStateForUi,
+  getLastAgentViewModelOutputLine,
   getSpeculativeToolResult,
   getNextRenderMode,
   isInputActiveForState,
   isRenderModeToggleKey,
   mergeStartupWarnings,
+  runAgentViewRosterCommand,
   shouldAutoOpenSkillReview,
   shouldDrainMessageQueue,
 } from './AppContainer.js';
@@ -54,6 +60,8 @@ import {
   makeFakeConfig,
   type GeminiClient,
   type SubagentManager,
+  ToolConfirmationOutcome,
+  type WaitingToolCall,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
@@ -184,6 +192,8 @@ import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { ShellExecutionService } from '@qwen-code/qwen-code-core';
+
+type SpawnSync = typeof import('node:child_process').spawnSync;
 
 describe('AppContainer State Management', () => {
   let mockConfig: Config;
@@ -616,6 +626,54 @@ describe('AppContainer State Management', () => {
 
       expect(mockedUseGitBranchName).toHaveBeenCalledWith('/test/workspace');
     });
+  });
+
+  it('runs Agent View roster through the current CLI entrypoint', () => {
+    const spawnSyncSpy = vi.fn(() => ({ status: 0 }));
+    const originalArgv1 = process.argv[1];
+    process.argv[1] = '/workspace/qwen-code/packages/cli/dist/src/cli.js';
+    try {
+      expect(
+        runAgentViewRosterCommand(
+          '/workspace/qwen-code',
+          spawnSyncSpy as unknown as SpawnSync,
+        ),
+      ).toBe(0);
+    } finally {
+      process.argv[1] = originalArgv1;
+    }
+
+    expect(spawnSyncSpy).toHaveBeenCalledWith(
+      process.execPath,
+      [
+        '/workspace/qwen-code/packages/cli/dist/src/cli.js',
+        'agents',
+        '--cwd',
+        '/workspace/qwen-code',
+      ],
+      expect.objectContaining({
+        stdio: 'inherit',
+        env: expect.objectContaining({
+          QWEN_CODE_NO_RELAUNCH: '1',
+        }),
+      }),
+    );
+  });
+
+  it('treats signal-killed Agent View roster process as failed', () => {
+    const spawnSyncSpy = vi.fn(() => ({ status: null, signal: 'SIGTERM' }));
+    const originalArgv1 = process.argv[1];
+    process.argv[1] = '/workspace/qwen-code/packages/cli/dist/src/cli.js';
+    try {
+      expect(
+        runAgentViewRosterCommand(
+          '/workspace/qwen-code',
+          spawnSyncSpy as unknown as SpawnSync,
+        ),
+      ).toBe(1);
+    } finally {
+      process.argv[1] = originalArgv1;
+    }
   });
 
   describe('Basic Rendering', () => {
@@ -2461,6 +2519,96 @@ describe('AppContainer State Management', () => {
         ) as ((key: Key) => void) | undefined;
       expect(handleKeypress).toBeDefined();
       expect(() => handleKeypress!(optionMKey)).not.toThrow();
+    });
+
+    it('does not route empty left arrow to Agent View background handoff outside Agent View workers', async () => {
+      const mockHandleSlashCommand = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand: mockHandleSlashCommand,
+        slashCommands: [],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const keypressHandlers = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function',
+        );
+      expect(keypressHandlers.length).toBeGreaterThan(0);
+
+      const leftKey: Key = {
+        name: 'left',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\u001b[D',
+      };
+      for (const handleKeypress of keypressHandlers) {
+        handleKeypress(leftKey);
+      }
+
+      expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/background');
+    });
+
+    it('does not route non-empty left arrow to Agent View background handoff', async () => {
+      const mockHandleSlashCommand = vi.fn();
+      mockedUseSlashCommandProcessor.mockReturnValue({
+        handleSlashCommand: mockHandleSlashCommand,
+        slashCommands: [],
+        pendingHistoryItems: [],
+        commandContext: {},
+        shellConfirmationRequest: null,
+        confirmationRequest: null,
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: 'draft prompt',
+        setText: vi.fn(),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      const keypressHandlers = mockedUseKeypress.mock.calls
+        .map((call) => call[0])
+        .filter(
+          (handler): handler is (key: Key) => void =>
+            typeof handler === 'function',
+        );
+      expect(keypressHandlers.length).toBeGreaterThan(0);
+
+      const leftKey: Key = {
+        name: 'left',
+        ctrl: false,
+        meta: false,
+        shift: false,
+        paste: false,
+        sequence: '\u001b[D',
+      };
+      for (const handleKeypress of keypressHandlers) {
+        handleKeypress(leftKey);
+      }
+
+      expect(mockHandleSlashCommand).not.toHaveBeenCalledWith('/background');
     });
   });
 
@@ -4524,6 +4672,293 @@ describe('AppContainer State Management', () => {
         }),
       ).toBe(false);
     });
+  });
+});
+
+describe('getAgentViewWorkerStateForUi', () => {
+  it('selects the newest non-empty model output line', () => {
+    expect(
+      getLastAgentViewModelOutputLine([
+        { type: 'gemini', text: 'first response' },
+        {
+          type: 'gemini_content',
+          text: 'opening line\n\nfinal question?',
+        },
+      ]),
+    ).toBe('final question?');
+  });
+
+  it('maps responding state to working with the last model output', () => {
+    expect(
+      getAgentViewWorkerStateForUi({
+        initError: null,
+        streamingState: StreamingState.Responding,
+        pendingToolCalls: [{ status: 'executing', request: { name: 'Bash' } }],
+        lastResult: 'Running the requested test file.',
+      }),
+    ).toEqual({
+      sessionState: 'working',
+      lastResult: 'Running the requested test file.',
+    });
+  });
+
+  it('maps confirmation waits to needs_input', () => {
+    expect(
+      getAgentViewWorkerStateForUi({
+        initError: null,
+        streamingState: StreamingState.WaitingForConfirmation,
+        pendingToolCalls: [
+          { status: 'awaiting_approval', request: { name: 'Edit' } },
+        ],
+      }),
+    ).toEqual({
+      sessionState: 'needs_input',
+      waitingFor: 'Edit',
+      inputKind: 'blocking',
+    });
+  });
+
+  it('maps nested Agent confirmation waits to needs_input', () => {
+    expect(
+      getAgentViewWorkerStateForUi({
+        initError: null,
+        streamingState: StreamingState.WaitingForConfirmation,
+        pendingToolCalls: [
+          {
+            status: 'executing',
+            request: { name: 'Agent' },
+            liveOutput: {
+              type: 'task_execution',
+              pendingConfirmation: { type: 'info' },
+            },
+          },
+        ],
+      }),
+    ).toEqual({
+      sessionState: 'needs_input',
+      waitingFor: 'Agent',
+      inputKind: 'blocking',
+    });
+  });
+
+  it('maps idle and initialization failures', () => {
+    expect(
+      getAgentViewWorkerStateForUi({
+        initError: null,
+        streamingState: StreamingState.Idle,
+        lastResult: 'Ready for the next step.',
+      }),
+    ).toEqual({
+      sessionState: 'idle',
+      lastResult: 'Ready for the next step.',
+    });
+
+    expect(
+      getAgentViewWorkerStateForUi({
+        initError: new Error('init failed'),
+        streamingState: StreamingState.Idle,
+      }),
+    ).toEqual({
+      sessionState: 'failed',
+      summary: 'init failed',
+    });
+  });
+
+  it('maps idle model questions to needs_input', () => {
+    expect(
+      getAgentViewWorkerStateForUi({
+        initError: null,
+        streamingState: StreamingState.Idle,
+        lastResult:
+          'What would you like to test? A specific file, the full suite, or something else?',
+      }),
+    ).toEqual({
+      sessionState: 'needs_input',
+      waitingFor: 'response',
+      inputKind: 'soft',
+      lastResult:
+        'What would you like to test? A specific file, the full suite, or something else?',
+    });
+  });
+});
+
+describe('answerAgentViewPendingToolCall', () => {
+  it('resolves a matching permission confirmation', async () => {
+    const onConfirm = vi.fn(async () => {});
+    const pendingCall = {
+      status: 'awaiting_approval',
+      request: { callId: 'call-1', name: 'Edit' },
+      confirmationDetails: {
+        type: 'info',
+        title: 'Allow edit?',
+        prompt: 'Allow edit?',
+        onConfirm,
+      },
+    } as unknown as WaitingToolCall;
+
+    await expect(
+      answerAgentViewPendingToolCall(
+        {
+          type: 'answer',
+          sequence: 1,
+          callId: 'call-1',
+          text: 'yes',
+          at: '2026-07-17T00:00:00.000Z',
+        },
+        [pendingCall],
+      ),
+    ).resolves.toBe(true);
+
+    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
+  });
+
+  it('passes text answers to AskUserQuestion confirmations', async () => {
+    const onConfirm = vi.fn(async () => {});
+    const pendingCall = {
+      status: 'awaiting_approval',
+      request: { callId: 'call-2', name: 'AskUserQuestion' },
+      confirmationDetails: {
+        type: 'ask_user_question',
+        title: 'Choose',
+        questions: [
+          {
+            question: 'Which path?',
+            header: 'Path',
+            options: [],
+          },
+        ],
+        onConfirm,
+      },
+    } as unknown as WaitingToolCall;
+
+    await expect(
+      answerAgentViewPendingToolCall(
+        {
+          type: 'answer',
+          sequence: 1,
+          text: 'src/index.ts',
+          at: '2026-07-17T00:00:00.000Z',
+        },
+        [pendingCall],
+      ),
+    ).resolves.toBe(true);
+
+    expect(onConfirm).toHaveBeenCalledWith(
+      ToolConfirmationOutcome.ProceedOnce,
+      { answers: { 0: 'src/index.ts' } },
+    );
+  });
+
+  it('maps negative text answers to cancel', async () => {
+    const onConfirm = vi.fn(async () => {});
+    const pendingCall = {
+      status: 'awaiting_approval',
+      request: { callId: 'call-3', name: 'Bash' },
+      confirmationDetails: {
+        type: 'exec',
+        title: 'Run command?',
+        prompt: 'Run command?',
+        command: 'npm test',
+        rootCommand: 'npm',
+        onConfirm,
+      },
+    } as unknown as WaitingToolCall;
+
+    await expect(
+      answerAgentViewPendingToolCall(
+        {
+          type: 'answer',
+          sequence: 1,
+          text: 'no',
+          at: '2026-07-17T00:00:00.000Z',
+        },
+        [pendingCall],
+      ),
+    ).resolves.toBe(true);
+
+    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
+  });
+
+  it('answers nested Agent pending confirmations', async () => {
+    const onConfirm = vi.fn(async () => {});
+    const answerable = getAgentViewAnswerableToolCalls([
+      {
+        status: 'executing',
+        request: { callId: 'agent-call', name: 'Agent' },
+        liveOutput: {
+          type: 'task_execution',
+          pendingConfirmation: {
+            type: 'info',
+            title: 'Allow nested action?',
+            prompt: 'Allow nested action?',
+            onConfirm,
+          },
+        },
+      },
+    ]);
+
+    await expect(
+      answerAgentViewPendingToolCall(
+        {
+          type: 'answer',
+          sequence: 1,
+          text: 'yes',
+          at: '2026-07-17T00:00:00.000Z',
+        },
+        answerable,
+      ),
+    ).resolves.toBe(true);
+
+    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
+  });
+});
+
+describe('applyAgentViewWorkerControlEventForUi', () => {
+  it('queues normal text answers as prompts when no approval is pending', async () => {
+    const enqueuePrompt = vi.fn();
+
+    await applyAgentViewWorkerControlEventForUi(
+      {
+        type: 'answer',
+        sequence: 1,
+        text: 'run the focused test',
+        at: '2026-07-17T00:00:00.000Z',
+      },
+      [],
+      enqueuePrompt,
+    );
+
+    expect(enqueuePrompt).toHaveBeenCalledWith('run the focused test');
+  });
+
+  it('does not queue approval answers as prompts', async () => {
+    const onConfirm = vi.fn(async () => {});
+    const enqueuePrompt = vi.fn();
+    const pendingCall = {
+      status: 'awaiting_approval',
+      request: { callId: 'call-1', name: 'Edit' },
+      confirmationDetails: {
+        type: 'info',
+        title: 'Allow edit?',
+        prompt: 'Allow edit?',
+        onConfirm,
+      },
+    } as unknown as WaitingToolCall;
+
+    await applyAgentViewWorkerControlEventForUi(
+      {
+        type: 'answer',
+        sequence: 1,
+        callId: 'call-1',
+        text: 'yes',
+        at: '2026-07-17T00:00:00.000Z',
+      },
+      [pendingCall],
+      enqueuePrompt,
+    );
+
+    expect(onConfirm).toHaveBeenCalledWith(ToolConfirmationOutcome.ProceedOnce);
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 });
 
