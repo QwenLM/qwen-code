@@ -11,7 +11,6 @@ import {
   classifyUpdateCheckError,
   fetchGlobalNpmUpdateInfo,
   FETCH_TIMEOUT_MS,
-  isGlobalNpmInstallation,
   runGlobalNpm,
   UpdateCheckTimeoutError,
 } from './updateCheck.js';
@@ -27,7 +26,6 @@ describe('checkForUpdates', () => {
     vi.resetAllMocks();
     // Clear DEV environment variable before each test
     delete process.env['DEV'];
-    delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE'];
   });
 
   afterEach(() => {
@@ -276,64 +274,6 @@ describe('checkForUpdates', () => {
     );
   });
 
-  it('does not treat pnpm installs as global npm installs', async () => {
-    const run = vi.fn();
-
-    await expect(
-      isGlobalNpmInstallation(
-        '/home/user/.pnpm/@qwen-code+qwen-code/node_modules/@qwen-code/qwen-code/dist/index.js',
-        run as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[1]
-        >,
-      ),
-    ).resolves.toBe(false);
-    expect(run).not.toHaveBeenCalled();
-  });
-
-  it('uses the global npm registry for managed background updates', async () => {
-    process.env['QWEN_CODE_MANAGED_NPM_UPDATE'] = 'true';
-    const run = vi.fn();
-    const canonicalize = vi.fn();
-
-    await expect(
-      isGlobalNpmInstallation(
-        '/home/user/.qwen/updates/npm/versions/2.0.0/dist/cli.js',
-        run as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[1]
-        >,
-        canonicalize as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[2]
-        >,
-      ),
-    ).resolves.toBe(true);
-    expect(run).not.toHaveBeenCalled();
-    expect(canonicalize).not.toHaveBeenCalled();
-  });
-
-  it('resolves a bin symlink before matching the npm package path', async () => {
-    const run = vi.fn().mockResolvedValue({
-      stdout: '/usr/local/lib/node_modules\n',
-      stderr: '',
-    });
-    const canonicalize = vi.fn(async (candidate: string) =>
-      candidate === '/usr/local/bin/qwen'
-        ? '/usr/local/lib/node_modules/@qwen-code/qwen-code/dist/cli.js'
-        : '/usr/local/lib/node_modules',
-    );
-
-    await expect(
-      isGlobalNpmInstallation(
-        '/usr/local/bin/qwen',
-        run as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[1]
-        >,
-        canonicalize as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[2]
-        >,
-      ),
-    ).resolves.toBe(true);
-  });
-
   it('runs the Windows npm CLI through Node without a shell', async () => {
     const run = vi.fn().mockResolvedValue({ stdout: '"1.1.0"', stderr: '' });
     const resolveNpmCliPath = vi
@@ -363,84 +303,6 @@ describe('checkForUpdates', () => {
       'C:\\Program Files\\nodejs\\node.exe',
       'win32',
     );
-  });
-
-  it('canonicalizes the global npm root before comparing paths', async () => {
-    const run = vi.fn().mockResolvedValue({
-      stdout: '/linked/node_modules\n',
-      stderr: '',
-    });
-    const canonicalize = vi.fn(async (candidate: string) =>
-      candidate === '/linked/node_modules'
-        ? '/real/node_modules'
-        : '/real/node_modules/@qwen-code/qwen-code/cli.js',
-    );
-
-    await expect(
-      isGlobalNpmInstallation(
-        '/linked/node_modules/@qwen-code/qwen-code/cli.js',
-        run as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[1]
-        >,
-        canonicalize as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[2]
-        >,
-      ),
-    ).resolves.toBe(true);
-    expect(run).toHaveBeenCalledWith(
-      process.execPath,
-      [expect.stringMatching(/npm-cli\.js$/), 'root', '--global'],
-      expect.objectContaining({ timeout: FETCH_TIMEOUT_MS }),
-    );
-  });
-
-  it('does not treat a missing global npm root as a global install', async () => {
-    const run = vi.fn().mockResolvedValue({
-      stdout: '/missing/node_modules\n',
-      stderr: '',
-    });
-    const canonicalize = vi.fn(async (candidate: string) => {
-      if (candidate === '/missing/node_modules') {
-        throw Object.assign(new Error('not found'), { code: 'ENOENT' });
-      }
-      return '/local/node_modules/@qwen-code/qwen-code/cli.js';
-    });
-
-    await expect(
-      isGlobalNpmInstallation(
-        '/local/node_modules/@qwen-code/qwen-code/cli.js',
-        run as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[1]
-        >,
-        canonicalize as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[2]
-        >,
-      ),
-    ).resolves.toBe(false);
-  });
-
-  it('does not treat local npm installs as global npm installs', async () => {
-    const run = vi.fn().mockResolvedValue({
-      stdout: '/global/node_modules\n',
-      stderr: '',
-    });
-    const canonicalize = vi.fn(async (candidate: string) =>
-      candidate === '/global/node_modules'
-        ? '/global/node_modules'
-        : '/repo/node_modules/@qwen-code/qwen-code/cli.js',
-    );
-
-    await expect(
-      isGlobalNpmInstallation(
-        '/repo/node_modules/@qwen-code/qwen-code/cli.js',
-        run as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[1]
-        >,
-        canonicalize as unknown as NonNullable<
-          Parameters<typeof isGlobalNpmInstallation>[2]
-        >,
-      ),
-    ).resolves.toBe(false);
   });
 
   it('does not fall back when the global npm query fails', async () => {

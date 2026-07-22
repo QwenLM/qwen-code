@@ -4,11 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import type { UpdateInfo } from 'update-notifier';
 import semver from 'semver';
 import { execFile } from 'node:child_process';
-import { realpath } from 'node:fs/promises';
-import path from 'node:path';
 import { promisify } from 'node:util';
 import { getPackageJson } from '../../utils/package.js';
 import { getNpmCliPath } from '../../utils/installationInfo.js';
@@ -16,6 +13,18 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
 const debugLogger = createDebugLogger('UPDATE_CHECK');
+
+/**
+ * Result of an update lookup. Mirrors the subset of update-notifier's
+ * UpdateInfo that the CLI consumes — kept local so version checking no longer
+ * depends on update-notifier at all (#7515).
+ */
+export interface UpdateInfo {
+  latest: string;
+  current: string;
+  type: string;
+  name: string;
+}
 
 // 5s matches comparable CLIs (e.g. Claude Code's autoUpdater uses
 // AbortSignal.timeout(5000)) and gives slow mirrors and corporate proxies a
@@ -148,51 +157,6 @@ export async function runGlobalNpm(
     },
   );
   return String(stdout).trim();
-}
-
-function looksLikeNpmPackagePath(cliPath: string): boolean {
-  const normalized = cliPath.replace(/\\/g, '/');
-  return (
-    normalized.includes('/node_modules/@qwen-code/qwen-code/') &&
-    !normalized.includes('/.pnpm/')
-  );
-}
-
-export async function isGlobalNpmInstallation(
-  cliPath = process.argv[1],
-  run: typeof execFileAsync = execFileAsync,
-  canonicalize: typeof realpath = realpath,
-): Promise<boolean> {
-  if (process.env['QWEN_CODE_MANAGED_NPM_UPDATE'] === 'true') return true;
-  if (!cliPath) return false;
-  // Canonicalize before matching. The CLI can be launched through its global
-  // bin symlink (e.g. `.../bin/qwen`), whose path carries no `node_modules`
-  // segment, and Node does not resolve `process.argv[1]` symlinks. Matching the
-  // raw path would silently skip the global-npm path here, unlike
-  // getInstallationInfo which realpath-resolves first.
-  let resolvedCliPath: string;
-  try {
-    resolvedCliPath = await canonicalize(cliPath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
-  if (!looksLikeNpmPackagePath(resolvedCliPath)) return false;
-  const unresolvedGlobalRoot = await runGlobalNpm(['root', '--global'], run);
-  let globalRoot: string;
-  try {
-    globalRoot = await canonicalize(unresolvedGlobalRoot);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
-    throw error;
-  }
-  const relative = path.relative(globalRoot, resolvedCliPath);
-  return (
-    relative !== '' &&
-    relative !== '..' &&
-    !relative.startsWith(`..${path.sep}`) &&
-    !path.isAbsolute(relative)
-  );
 }
 
 export async function fetchGlobalNpmUpdateInfo(
