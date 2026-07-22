@@ -61,6 +61,10 @@ const EN: Messages = {
   'gitMode.branchLabel': 'Branch name',
   'gitMode.branchConflictWarning':
     'Only one branch session per workspace at a time',
+  'gitMode.branch.dirtyTree':
+    'Uncommitted changes detected. Commit or stash first.',
+  'gitMode.branch.exists': (v) =>
+    `Branch "${v?.name ?? ''}" already exists. Choose a different name.`,
   'gitMode.branchInvalidName': 'Invalid branch name',
   'gitMode.worktree': 'Worktree',
   'gitMode.worktreeDesc': 'Isolated copy · can run in parallel',
@@ -2249,6 +2253,9 @@ const ZH: Messages = {
   'gitMode.branchPlaceholder': 'feat/my-feature',
   'gitMode.branchLabel': '分支名',
   'gitMode.branchConflictWarning': '同一 workspace 同时只能有一个分支会话',
+  'gitMode.branch.dirtyTree': '检测到未提交的变更，请先提交或暂存。',
+  'gitMode.branch.exists': (v) =>
+    `分支 "${v?.name ?? ''}" 已存在，请使用其他名称。`,
   'gitMode.branchInvalidName': '分支名不合法',
   'gitMode.worktree': 'Worktree 隔离',
   'gitMode.worktreeDesc': '独立副本 · 可并行',

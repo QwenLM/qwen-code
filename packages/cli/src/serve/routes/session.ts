@@ -1229,6 +1229,7 @@ export function registerSessionRoutes(
     // before spawning. The session runs in the same working directory
     // but on the new branch. Mutually exclusive with `worktree`.
     let branchMeta: { name: string; baseBranch: string } | undefined;
+    let branchBaseCommit: string | undefined;
     const rawBranch = body['branch'];
     if (rawBranch !== undefined && rawBranch !== null) {
       if (body['worktree'] !== undefined && body['worktree'] !== null) {
@@ -1282,6 +1283,7 @@ export function registerSessionRoutes(
         branchName.startsWith('/') ||
         branchName.endsWith('/') ||
         branchName.endsWith('.') ||
+        branchName.includes('@{') ||
         branchName
           .split('/')
           .some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
@@ -1321,7 +1323,7 @@ export function registerSessionRoutes(
       try {
         ({ stdout: statusOut } = await execFileAsync(
           'git',
-          ['status', '--porcelain'],
+          ['status', '--porcelain', '--untracked-files=no'],
           { cwd: workspaceCwd, maxBuffer: 10 * 1024 * 1024 },
         ));
       } catch {
@@ -1338,6 +1340,11 @@ export function registerSessionRoutes(
         });
         return;
       }
+      const baseCommit = await execFileAsync('git', ['rev-parse', 'HEAD'], {
+        cwd: workspaceCwd,
+      })
+        .then(({ stdout }) => stdout.trim())
+        .catch(() => undefined);
       const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
       // Reserve the workspace before mutating HEAD. The conflict guard above
       // runs before several awaits (rev-parse, status, checkout), so two
@@ -1366,6 +1373,7 @@ export function registerSessionRoutes(
         return;
       }
       branchMeta = { name: branchName, baseBranch };
+      branchBaseCommit = baseCommit;
       sessionScope = 'thread';
     }
 
@@ -1525,7 +1533,12 @@ export function registerSessionRoutes(
                 inFlightBranchWorkspaces.delete(workspaceCwd);
                 await execFileAsync(
                   'git',
-                  ['checkout', branchMeta.baseBranch],
+                  [
+                    'checkout',
+                    branchMeta.baseBranch === 'HEAD' && branchBaseCommit
+                      ? branchBaseCommit
+                      : branchMeta.baseBranch,
+                  ],
                   {
                     cwd: workspaceCwd,
                   },
@@ -1672,9 +1685,18 @@ export function registerSessionRoutes(
       if (branchMeta) {
         activeBranchSessions.delete(workspaceCwd);
         inFlightBranchWorkspaces.delete(workspaceCwd);
-        await execFileAsync('git', ['checkout', branchMeta.baseBranch], {
-          cwd: workspaceCwd,
-        }).catch((rollbackErr) => {
+        await execFileAsync(
+          'git',
+          [
+            'checkout',
+            branchMeta.baseBranch === 'HEAD' && branchBaseCommit
+              ? branchBaseCommit
+              : branchMeta.baseBranch,
+          ],
+          {
+            cwd: workspaceCwd,
+          },
+        ).catch((rollbackErr) => {
           daemonLog?.warn('branch rollback checkout failed', {
             error: rollbackErr,
           });

@@ -194,7 +194,11 @@ test('git mode chip clear button resets to current branch', async ({
   page,
 }, testInfo) => {
   const scenario = createGitWorkspaceScenario();
-  await installScenario(page, scenario, String(testInfo.project.use.baseURL));
+  const daemon = await installScenario(
+    page,
+    scenario,
+    String(testInfo.project.use.baseURL),
+  );
 
   await page.goto('/');
 
@@ -221,6 +225,14 @@ test('git mode chip clear button resets to current branch', async ({
   await clearBtn.click();
   await expect(chip).toContainText('main');
   await expect(clearBtn).not.toBeVisible();
+
+  // Submit a message and verify neither branch nor worktree is sent
+  await fillComposer(page, 'task after clear');
+  await page.locator('[data-web-shell-composer-submit]').click();
+
+  await expect.poll(() => sessionCreateBody(daemon) !== undefined).toBe(true);
+  expect(sessionCreateBody(daemon)?.['branch']).toBeUndefined();
+  expect(sessionCreateBody(daemon)?.['worktree']).toBeUndefined();
 });
 
 test('git mode chip is hidden when workspace is not a git repo', async ({

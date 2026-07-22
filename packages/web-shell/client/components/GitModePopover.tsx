@@ -5,7 +5,7 @@
  */
 
 import { useCallback, useMemo, useRef, useState } from 'react';
-import { CircleDotIcon, GitForkIcon } from 'lucide-react';
+import { CircleDotIcon, GitBranchIcon, GitForkIcon } from 'lucide-react';
 import { useI18n } from '../i18n';
 import { Popover, PopoverContent, PopoverTrigger } from './ui/popover';
 import styles from './GitModePopover.module.css';
@@ -14,28 +14,6 @@ export type SessionGitIntent =
   | { mode: 'current' }
   | { mode: 'branch'; name: string }
   | { mode: 'worktree'; slug?: string };
-
-function GitBranchIcon() {
-  return (
-    <svg
-      viewBox="0 0 24 24"
-      fill="none"
-      aria-hidden="true"
-      width={15}
-      height={15}
-    >
-      <circle cx="6" cy="5" r="2.5" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="18" cy="6" r="2.5" stroke="currentColor" strokeWidth="1.8" />
-      <circle cx="6" cy="19" r="2.5" stroke="currentColor" strokeWidth="1.8" />
-      <path
-        d="M6 7.5v9M8.5 12h3.25A6.25 6.25 0 0 0 18 5.75"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-      />
-    </svg>
-  );
-}
 
 function validateBranchName(name: string): boolean {
   if (!name) return false;
@@ -48,6 +26,7 @@ function validateBranchName(name: string): boolean {
     name.startsWith('/') ||
     name.endsWith('/') ||
     name.endsWith('.') ||
+    name.includes('@{') ||
     name.split('/').some((c) => c.startsWith('.') || c.endsWith('.lock')) ||
     name === 'HEAD'
   );
@@ -113,6 +92,7 @@ export function GitModePopover({
     (e: React.MouseEvent) => {
       e.stopPropagation();
       onIntentChange({ mode: 'current' });
+      setOpen(false);
     },
     [onIntentChange],
   );
@@ -140,7 +120,7 @@ export function GitModePopover({
               {isWorktree ? (
                 <GitForkIcon size={14} strokeWidth={1.5} />
               ) : (
-                <GitBranchIcon />
+                <GitBranchIcon size={15} strokeWidth={1.5} />
               )}
             </span>
             {!compact && <span className={styles.chipText}>{chipLabel}</span>}
@@ -199,7 +179,7 @@ export function GitModePopover({
             onClick={() => setSelectedMode('branch')}
           >
             <span className={`${styles.optionIcon} ${styles.iconBranch}`}>
-              <GitBranchIcon />
+              <GitBranchIcon size={15} strokeWidth={1.5} />
             </span>
             <span className={styles.optionText}>
               <span className={styles.optionName}>{t('gitMode.branch')}</span>

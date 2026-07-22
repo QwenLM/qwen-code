@@ -7774,8 +7774,8 @@ export function App({
                                     undefined))
                           }
                           gitWorktree={Boolean(sessionWorktree)}
-                          gitModeIntent={connection.sessionId ? undefined : gitModeIntent}
-                          onGitModeIntentChange={connection.sessionId ? undefined : setGitModeIntent}
+                          gitModeIntent={connection.sessionId || !workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted ? undefined : gitModeIntent}
+                          onGitModeIntentChange={connection.sessionId || !workspaces.find((entry) => entry.cwd === activeWorkspaceCwd)?.trusted ? undefined : setGitModeIntent}
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd && !sessionWorktree
