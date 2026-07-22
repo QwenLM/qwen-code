@@ -26,6 +26,12 @@ export interface StubDaemon {
   /** Body of the most recent POST /session/:id/rewind request. */
   lastRewindBody: unknown;
   /**
+   * `{ requestId, response }` captured from the most recent
+   * POST /session/:id/permission/:requestId request. Lets a test assert
+   * which vote the review permission bridge actually sent upstream.
+   */
+  lastRespondedPermission: { requestId: string; response: unknown } | undefined;
+  /**
    * Start/end wall-clock timestamps (ms, `Date.now()`) for every
    * POST /session/:id/prompt call the stub has served, in completion order.
    * Lets a test assert non-overlap ("call B started after call A ended") to
@@ -43,6 +49,17 @@ export interface StubDaemon {
 export interface StubDaemonOptions {
   /** Frames to emit on /session/:id/events, as {id, type, data}. */
   frames?: Array<{ id: number; type: string; data: unknown }>;
+  /**
+   * Extra frames emitted on /session/:id/events immediately after `frames`,
+   * for tests that want to script permission-request notifications a
+   * `subscribeEvents` consumer (e.g. the review permission bridge, which
+   * subscribes with `lastEventId: 0` and expects a full replay) will see.
+   * Ids are assigned sequentially continuing on from `frames` — so with the
+   * default two `frames`, the first `permissionFrames` entry lands at id 3.
+   * Pass `frames: []` alongside this if a test needs the replay to contain
+   * only the scripted permission frames.
+   */
+  permissionFrames?: Array<{ type: string; data: unknown }>;
   /** When set, /events responds with this status instead of streaming. */
   eventsStatus?: number;
   /**
@@ -86,6 +103,12 @@ export interface StubDaemonOptions {
   rewindResult?: { targetTurnIndex: number; apiTruncateIndex: number };
   /** Status for POST /session (default 200). Non-200 → { error }. */
   createSessionStatus?: number;
+  /**
+   * Skills reported by GET /session/:id/supported-commands, the route the
+   * SDK's `daemon.sessionSupportedCommands(sessionId)` hits (default
+   * `['review']`).
+   */
+  supportedSkills?: string[];
 }
 
 /** Start a minimal daemon-shaped SSE server on an ephemeral loopback port. */
@@ -104,6 +127,9 @@ export async function startStubDaemon(
     lastCreateSessionBody: undefined as unknown,
     lastPromptBody: undefined as unknown,
     lastRewindBody: undefined as unknown,
+    lastRespondedPermission: undefined as
+      | { requestId: string; response: unknown }
+      | undefined,
     promptCallLog: [] as Array<{
       sessionId: string;
       startedAt: number;
@@ -147,7 +173,20 @@ export async function startStubDaemon(
       'Cache-Control': 'no-cache',
       Connection: 'keep-alive',
     });
-    for (const f of frames) {
+    // Extend `frames` with any scripted `permissionFrames`, assigning ids
+    // sequentially so both sets replay through the same JSON-envelope
+    // convention documented below.
+    const allFrames = opts.permissionFrames
+      ? [
+          ...frames,
+          ...opts.permissionFrames.map((f, i) => ({
+            id: frames.length + i + 1,
+            type: f.type,
+            data: f.data,
+          })),
+        ]
+      : frames;
+    for (const f of allFrames) {
       // IMPORTANT: the SDK's parseSseStream reads the event id from INSIDE
       // the data JSON envelope (`parsed.id`, required to be an integer >= 1),
       // and ignores the SSE `id:` line. So the id MUST live in the JSON. We
@@ -175,9 +214,22 @@ export async function startStubDaemon(
     res.end();
   });
 
-  app.post('/session/:id/permission/:requestId', (_req, res) => {
+  app.post('/session/:id/permission/:requestId', (req, res) => {
+    state.lastRespondedPermission = {
+      requestId: req.params.requestId,
+      response: req.body,
+    };
     const status = opts.permissionStatus ?? 200;
     res.status(status).json(status === 200 ? {} : { error: 'no pending' });
+  });
+
+  app.get('/session/:id/supported-commands', (req, res) => {
+    res.json({
+      v: 1,
+      sessionId: req.params.id,
+      availableSkills: opts.supportedSkills ?? ['review'],
+      availableCommands: [],
+    });
   });
 
   app.post('/session/:id/end', (req, res) => {
@@ -292,6 +344,9 @@ export async function startStubDaemon(
     },
     get lastRewindBody() {
       return state.lastRewindBody;
+    },
+    get lastRespondedPermission() {
+      return state.lastRespondedPermission;
     },
     get promptCallLog() {
       return state.promptCallLog;
