@@ -81,7 +81,6 @@ import {
 } from '../ui/dropdown-menu';
 import { formatRelativeTime } from '../../utils/formatRelativeTime';
 import { DialogShell } from '../dialogs/DialogShell';
-import { AddWorkspaceDialog } from '../dialogs/AddWorkspaceDialog';
 import { WorkspaceSection } from './WorkspaceSection';
 import { SessionGroupSection } from './SessionGroupSection';
 import {
@@ -298,6 +297,11 @@ interface WebShellSidebarProps {
    * trusted workspace's folder header, where a live git chip fires it on click.
    */
   onOpenGitDiff?: (workspaceCwd: string) => void;
+  /**
+   * Opens the shared App-owned Add Workspace dialog. Omit this callback when
+   * registration is unavailable; locked workspaces hide the action separately.
+   */
+  onOpenAddWorkspace?: () => void;
   workspaces?: DaemonWorkspaceCapability[];
   lockedWorkspaceCwd?: string;
   lockedWorkspace?: WebShellSidebarLockedWorkspace;
@@ -492,6 +496,7 @@ export function WebShellSidebar({
   selectedWorkspaceCwd,
   onSelectWorkspace,
   onOpenGitDiff,
+  onOpenAddWorkspace,
   workspaces: providedWorkspaces,
   lockedWorkspaceCwd,
   lockedWorkspace: lockedWorkspaceOptions,
@@ -685,7 +690,6 @@ export function WebShellSidebar({
   const [projectExpanded, setProjectExpanded] = useState(false);
   const [projectsExpanded, setProjectsExpanded] = useState(true);
   const [searchOpen, setSearchOpen] = useState(false);
-  const [showAddWorkspaceDialog, setShowAddWorkspaceDialog] = useState(false);
   const [workspaceRemovalCandidate, setWorkspaceRemovalCandidate] =
     useState<DaemonWorkspaceCapability | null>(null);
   const [workspaceRemovalActivity, setWorkspaceRemovalActivity] =
@@ -734,9 +738,6 @@ export function WebShellSidebar({
   const currentSessionId = connection.sessionId;
   const workspaceRemovalEnabled = Boolean(
     connection.capabilities?.features?.includes('workspace_runtime_removal'),
-  );
-  const workspaceDisplayNameEnabled = Boolean(
-    connection.capabilities?.features?.includes('workspace_display_name'),
   );
   const canExportSessions =
     connection.capabilities?.features?.includes('session_export') ?? false;
@@ -1261,34 +1262,6 @@ export function WebShellSidebar({
       return changed ? next : current;
     });
   }, [currentSessionIdentity, getIdentityForSession, sessions]);
-
-  const handleAddWorkspace = useCallback(
-    async (cwd: string, persist: boolean, displayName?: string) => {
-      const result = await workspaceActions.addWorkspace(cwd, {
-        persist,
-        ...(displayName ? { displayName } : {}),
-      });
-      if (persist && result.persisted !== true) {
-        throw new Error(t('sidebar.addWorkspacePersistenceError'));
-      }
-      // Force a fresh capabilities fetch so the new workspace appears
-      // immediately. Best-effort: registration already succeeded, so a
-      // refresh failure must not surface as an add-workspace error — the
-      // next reload reconciles. (The former `getCapabilities?.()` was a
-      // no-op: it returns a cached promise and never updates state.)
-      try {
-        await workspace.refreshCapabilities?.();
-      } catch {
-        // ignore — the workspace is registered; the list reconciles on reload
-      }
-    },
-    [t, workspaceActions, workspace],
-  );
-
-  const handleSuggestWorkspacePaths = useCallback(
-    (prefix: string) => workspaceActions.suggestWorkspacePaths(prefix),
-    [workspaceActions],
-  );
 
   const reconcileRemovedWorkspace = useCallback(
     async (removed: DaemonWorkspaceCapability) => {
@@ -3702,15 +3675,13 @@ export function WebShellSidebar({
                   >
                     <SearchIcon />
                   </button>
-                  {!lockedWorkspaceCwd && (
+                  {!lockedWorkspaceCwd && onOpenAddWorkspace && (
                     <button
                       className={styles.projectsHeaderAction}
                       type="button"
                       title={t('sidebar.addWorkspace')}
                       aria-label={t('sidebar.addWorkspace')}
-                      onClick={() => {
-                        setShowAddWorkspaceDialog(true);
-                      }}
+                      onClick={onOpenAddWorkspace}
                     >
                       <PlusIcon />
                     </button>
@@ -3871,7 +3842,10 @@ export function WebShellSidebar({
                                           />
                                         </button>
                                       </DropdownMenuTrigger>
-                                      <DropdownMenuContent align="end">
+                                      <DropdownMenuContent
+                                        align="end"
+                                        className="w-auto min-w-40"
+                                      >
                                         <DropdownMenuItem
                                           variant="destructive"
                                           aria-label={`${t(
@@ -4041,14 +4015,6 @@ export function WebShellSidebar({
           onPointerDown={handleResizePointerDown}
         />
       </aside>
-      {!lockedWorkspaceCwd && showAddWorkspaceDialog && (
-        <AddWorkspaceDialog
-          onClose={() => setShowAddWorkspaceDialog(false)}
-          onAdd={handleAddWorkspace}
-          displayNameEnabled={workspaceDisplayNameEnabled}
-          onSuggest={handleSuggestWorkspacePaths}
-        />
-      )}
     </>
   );
 }
