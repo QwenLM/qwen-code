@@ -90,7 +90,7 @@ describe('resolveToggleTarget', () => {
     ).toEqual({ modelId: 'unknown-model', authType: AuthType.QWEN_OAUTH });
   });
 
-  it('strips a non-authType parenthesized suffix and treats it as a bare id', () => {
+  it('keeps a non-authType parenthesized suffix as part of the bare model id', () => {
     const config = makeConfig({
       [AuthType.QWEN_OAUTH]: ['some-model(note)'],
     });

@@ -1075,6 +1075,14 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
         return true;
       }
 
+      // In non-vim mode the vimHandleInput guard above is absent, so Ctrl+F
+      // would fall through to text-buffer's cursor-right. Suppress it when
+      // the model toggle is configured and its guard passes — the toggle
+      // itself fires in AppContainer's global keypress handler.
+      if (uiActions.handleToggleKeypress(key)) {
+        return true;
+      }
+
       if (
         !shellModeActive &&
         !reverseSearchActive &&
