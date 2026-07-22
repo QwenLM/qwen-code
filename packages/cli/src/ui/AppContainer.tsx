@@ -424,7 +424,9 @@ export function useQueuedSubmissionDrain({
     try {
       const status = config.getGoalRuntime().getSnapshot().goal?.status;
       holdUserForStoppedGoal =
-        status === 'blocked' || status === 'usage_limited';
+        status === 'blocked' ||
+        status === 'usage_limited' ||
+        status === 'paused';
     } catch {
       // Goal persistence can be disabled for this session.
     }

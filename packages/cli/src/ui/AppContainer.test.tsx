@@ -1215,6 +1215,66 @@ describe('AppContainer State Management', () => {
       expect(unsubscribe).toHaveBeenCalledOnce();
     });
 
+    it('drains Goal controls before held user turns while paused', async () => {
+      const goalRuntime = {
+        getSnapshot: () => ({ goal: { status: 'paused' } }),
+        subscribe: () => vi.fn(),
+      } as unknown as ReturnType<Config['getGoalRuntime']>;
+      vi.spyOn(mockConfig, 'getGoalRuntime').mockReturnValue(goalRuntime);
+
+      const submitQuery = vi.fn().mockResolvedValue(undefined);
+      let submissionPopped = false;
+      const popNextSubmission = vi.fn((holdUser = false) => {
+        if (submissionPopped) return null;
+        submissionPopped = true;
+        return {
+          kind: 'user' as const,
+          text: holdUser ? '/goal edit revised objective' : 'held user work',
+          turnKey: holdUser
+            ? 'message-queue:goal-edit'
+            : 'message-queue:held-user',
+        };
+      });
+      const submissionInFlightRef = { current: false };
+
+      renderHook(() =>
+        useQueuedSubmissionDrain({
+          config: mockConfig,
+          isConfigInitialized: true,
+          streamingState: StreamingState.Idle,
+          isProcessing: false,
+          dialogsVisible: false,
+          isTranscriptOpen: false,
+          pendingSubmissionCount: 2,
+          getPendingSubmissionCount: () => 2,
+          popNextSubmission,
+          enqueueGoalTurn: vi.fn(),
+          restoreMessages: vi.fn(),
+          submitQuery,
+          submissionInFlightRef,
+          submissionSettledRevision: 0,
+        }),
+      );
+
+      await vi.waitFor(() => {
+        expect(popNextSubmission).toHaveBeenCalledWith(true);
+        expect(submitQuery).toHaveBeenCalledWith(
+          '/goal edit revised objective',
+          SendMessageType.UserQuery,
+          undefined,
+          expect.objectContaining({
+            userAdmission: { turnKey: 'message-queue:goal-edit' },
+          }),
+        );
+      });
+      expect(submitQuery).not.toHaveBeenCalledWith(
+        'held user work',
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it('does not hot-loop a queued submission whose admission keeps failing', async () => {
       const goalRuntime = {
         getSnapshot: () => ({ goal: { status: 'active' } }),
