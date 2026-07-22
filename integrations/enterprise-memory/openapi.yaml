@@ -1,0 +1,339 @@
+openapi: 3.1.0
+info:
+  title: Qwen Enterprise Memory Gateway
+  version: 0.1.0
+  description: Provider-neutral runtime and management contracts. Runtime identity is derived only from a sender-constrained capability and live workspace binding.
+servers:
+  - url: https://memory-runtime.example.com
+    description: mTLS runtime listener
+  - url: https://memory-management.example.com
+    description: OIDC management listener
+tags:
+  - name: runtime
+  - name: management
+paths:
+  /v1/runtime/session-context:
+    post:
+      tags: [runtime]
+      security: [{ runtimeCapability: [] }]
+      operationId: getSessionContext
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [session_id, source, model, permission_mode]
+              properties:
+                session_id: { type: string, minLength: 1, maxLength: 256 }
+                source: { enum: [startup, resume, clear, compact, branch] }
+                model: { type: string, minLength: 1, maxLength: 256 }
+                permission_mode: { type: string, minLength: 1, maxLength: 64 }
+      responses:
+        '200':
+          description: Current signed and authorized policy projection, or an empty projection.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [policy_version, expires_at, system_context]
+                properties:
+                  policy_version: { type: [integer, 'null'], minimum: 0 }
+                  expires_at: { type: [string, 'null'], format: date-time }
+                  system_context: { type: string, maxLength: 4000 }
+  /v1/runtime/turns:open:
+    post:
+      tags: [runtime]
+      security: [{ runtimeCapability: [] }]
+      operationId: openTurn
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TurnOpen' }
+      responses:
+        '200':
+          description: New deterministic turn ID and currently authorized reference context.
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [turn_id, memories, additional_context]
+                properties:
+                  turn_id: { type: string, format: uuid }
+                  memories: { type: array, maxItems: 6, items: {} }
+                  additional_context: { type: string, maxLength: 6000 }
+  /v1/runtime/turn-events:
+    post:
+      tags: [runtime]
+      security: [{ runtimeCapability: [] }]
+      operationId: recordTurnEvent
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TurnEvent' }
+      responses:
+        '202':
+          {
+            description: Accepted or intentionally suppressed by the safe capture policy.,
+          }
+  /v1/runtime/search:
+    post:
+      tags: [runtime]
+      security: [{ runtimeCapability: [] }]
+      operationId: searchMemory
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [query]
+              properties:
+                query: { type: string, minLength: 1, maxLength: 64000 }
+      responses:
+        '200':
+          description: Canonical memories re-authorized after provider candidate lookup.
+  /v1/runtime/memories/{memoryId}:
+    get:
+      tags: [runtime]
+      security: [{ runtimeCapability: [] }]
+      operationId: getMemory
+      parameters:
+        - { $ref: '#/components/parameters/OperationId' }
+        - { $ref: '#/components/parameters/MemoryId' }
+      responses:
+        '200': { description: Authorized active and live canonical memory. }
+        '404':
+          { description: Missing, unauthorized, inactive, or deletion-blocked. }
+  /v1/runtime/proposals:
+    post:
+      tags: [runtime]
+      security: [{ runtimeCapability: [] }]
+      operationId: proposeMemory
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/Proposal' }
+      responses:
+        '202':
+          { description: Candidate created; never activated by this route. }
+  /v1/runtime/feedback:
+    post:
+      tags: [runtime]
+      security: [{ runtimeCapability: [] }]
+      operationId: submitFeedback
+      parameters: [{ $ref: '#/components/parameters/OperationId' }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              allOf:
+                - { $ref: '#/components/schemas/BaseEvent' }
+                - type: object
+                  required: [memory_id, signal]
+                  properties:
+                    memory_id: { type: string, format: uuid }
+                    signal: { enum: [helpful, not_helpful, stale, unsafe] }
+              unevaluatedProperties: false
+      responses:
+        '202': { description: Content-free advisory feedback recorded. }
+  /v1/manage/personal-memory-mode:
+    put:
+      tags: [management]
+      security: [{ managementOidc: [] }]
+      operationId: setPersonalMemoryMode
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [mode]
+              properties:
+                mode: { enum: [off, read_only, read_write] }
+      responses:
+        '200':
+          {
+            description: Preference for the authenticated data subject updated.,
+          }
+  /v1/manage/personal/memories/{memoryId}:approve:
+    post:
+      tags: [management]
+      security: [{ managementOidc: [] }]
+      operationId: approvePersonalMemory
+      parameters: [{ $ref: '#/components/parameters/MemoryId' }]
+      requestBody: { $ref: '#/components/requestBodies/Approval' }
+      responses:
+        '200':
+          {
+            description: Candidate activated by the authenticated data subject.,
+          }
+  /v1/manage/personal/memories/{memoryId}:
+    get:
+      tags: [management]
+      security: [{ managementOidc: [] }]
+      operationId: reviewPersonalMemoryCandidate
+      parameters: [{ $ref: '#/components/parameters/MemoryId' }]
+      responses:
+        '200':
+          {
+            description: Candidate content for the authenticated data subject to review.,
+          }
+        '404': { description: Missing, unauthorized, or no longer a candidate. }
+    delete:
+      tags: [management]
+      security: [{ managementOidc: [] }]
+      operationId: deletePersonalMemory
+      parameters: [{ $ref: '#/components/parameters/MemoryId' }]
+      requestBody: { $ref: '#/components/requestBodies/PersonalDeletion' }
+      responses:
+        '202': { description: Irreversible erasure is pending or complete. }
+  /v1/manage/repositories/{repositoryId}/memories/{memoryId}:approve:
+    post:
+      tags: [management]
+      security: [{ managementOidc: [] }]
+      operationId: approveRepositoryMemory
+      parameters:
+        - { $ref: '#/components/parameters/RepositoryId' }
+        - { $ref: '#/components/parameters/MemoryId' }
+      requestBody: { $ref: '#/components/requestBodies/Approval' }
+      responses:
+        '200':
+          {
+            description: Candidate activated after a fresh SCM maintainer check.,
+          }
+  /v1/manage/repositories/{repositoryId}/memories/{memoryId}:
+    get:
+      tags: [management]
+      security: [{ managementOidc: [] }]
+      operationId: reviewRepositoryMemoryCandidate
+      parameters:
+        - { $ref: '#/components/parameters/RepositoryId' }
+        - { $ref: '#/components/parameters/MemoryId' }
+      responses:
+        '200':
+          { description: Candidate content after a fresh SCM maintainer check. }
+        '404': { description: Missing, unauthorized, or no longer a candidate. }
+    delete:
+      tags: [management]
+      security: [{ managementOidc: [] }]
+      operationId: deleteRepositoryMemory
+      parameters:
+        - { $ref: '#/components/parameters/RepositoryId' }
+        - { $ref: '#/components/parameters/MemoryId' }
+      requestBody: { $ref: '#/components/requestBodies/RepositoryDeletion' }
+      responses:
+        '202':
+          { description: Erasure accepted after a fresh SCM maintainer check. }
+components:
+  securitySchemes:
+    runtimeCapability:
+      type: http
+      scheme: bearer
+      bearerFormat: qwen-memory-runtime+jwt
+      description: ES256 capability bound to mTLS certificate and exact request bytes.
+    managementOidc:
+      type: openIdConnect
+      openIdConnectUrl: https://identity.example.com/.well-known/openid-configuration
+  parameters:
+    OperationId:
+      name: x-operation-id
+      in: header
+      required: true
+      schema: { type: string, format: uuid }
+    MemoryId:
+      name: memoryId
+      in: path
+      required: true
+      schema: { type: string, format: uuid }
+    RepositoryId:
+      name: repositoryId
+      in: path
+      required: true
+      schema: { type: string, minLength: 1, maxLength: 512 }
+  requestBodies:
+    Approval:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version]
+            properties:
+              expected_version: { type: integer, minimum: 1 }
+    PersonalDeletion:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version, reason]
+            properties:
+              expected_version: { type: integer, minimum: 1 }
+              reason: { enum: [user_request, candidate_rejected] }
+    RepositoryDeletion:
+      required: true
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [expected_version, reason]
+            properties:
+              expected_version: { type: integer, minimum: 1 }
+              reason: { enum: [maintainer_request, candidate_rejected] }
+  schemas:
+    BaseEvent:
+      type: object
+      description: event_id must equal the x-operation-id header.
+      required: [event_id, session_id, occurred_at]
+      properties:
+        event_id: { type: string, format: uuid }
+        session_id: { type: string, minLength: 1, maxLength: 256 }
+        occurred_at: { type: string, format: date-time }
+    TurnOpen:
+      allOf:
+        - { $ref: '#/components/schemas/BaseEvent' }
+        - type: object
+          required: [prompt]
+          properties:
+            prompt: { type: string, maxLength: 64000 }
+      unevaluatedProperties: false
+    TurnEvent:
+      allOf:
+        - { $ref: '#/components/schemas/BaseEvent' }
+        - type: object
+          required: [event_kind, payload]
+          properties:
+            turn_id: { type: string, format: uuid }
+            event_kind:
+              { enum: [tool_success, tool_failure, stop, stop_failure] }
+            payload: {}
+      unevaluatedProperties: false
+    Proposal:
+      type: object
+      additionalProperties: false
+      required: [scope, summary]
+      properties:
+        scope: { enum: [personal, repository] }
+        summary: { type: string, minLength: 1, maxLength: 1000 }
+        references:
+          type: array
+          maxItems: 10
+          items: { type: string, minLength: 1, maxLength: 500 }
