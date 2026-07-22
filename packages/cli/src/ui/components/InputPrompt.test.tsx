@@ -75,6 +75,7 @@ vi.mock('../contexts/UIActionsContext.js', () => ({
     handleRetryLastPrompt: vi.fn(),
     temporaryCloseFeedbackDialog: vi.fn(),
     popAllQueuedMessages: vi.fn(() => null),
+    handleToggleKeypress: vi.fn(() => false),
   })),
 }));
 vi.mock('../contexts/AgentViewContext.js', () => ({
@@ -221,6 +222,7 @@ describe('InputPrompt', () => {
       handleRetryLastPrompt: vi.fn(),
       temporaryCloseFeedbackDialog: vi.fn(),
       popAllQueuedMessages: vi.fn(() => null),
+      handleToggleKeypress: vi.fn(() => false),
     } as unknown as ReturnType<typeof useUIActions>);
     mockedUseAgentViewState.mockReturnValue({
       activeView: 'main',
@@ -4493,6 +4495,7 @@ describe('InputPrompt', () => {
       handleRetryLastPrompt: ReturnType<typeof vi.fn>;
       temporaryCloseFeedbackDialog: ReturnType<typeof vi.fn>;
       popAllQueuedMessages: ReturnType<typeof vi.fn>;
+      handleToggleKeypress: ReturnType<typeof vi.fn>;
     };
 
     beforeEach(() => {
@@ -4500,6 +4503,7 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
+        handleToggleKeypress: vi.fn(() => false),
       };
 
       // Override the mock for useUIActions
@@ -4621,6 +4625,7 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: vi.fn(() => null),
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
     });
 
@@ -4634,6 +4639,7 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(
@@ -4661,6 +4667,7 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
       // Set existing text in buffer
@@ -4694,6 +4701,7 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(
@@ -4721,6 +4729,7 @@ describe('InputPrompt', () => {
         handleRetryLastPrompt: vi.fn(),
         temporaryCloseFeedbackDialog: vi.fn(),
         popAllQueuedMessages: mockPopAll,
+        handleToggleKeypress: vi.fn(() => false),
       } as unknown as ReturnType<typeof useUIActions>);
 
       const { stdin, unmount } = renderWithProviders(
