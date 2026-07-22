@@ -8042,6 +8042,7 @@ export function App({
                     error={artifactsError}
                     onSelectTab={setActiveArtifactPanelTabId}
                     onCloseTab={closeArtifactPanelTab}
+                    onOpenFilePreview={openFilePreview}
                     onClose={closeArtifactPanel}
                     variant="drawer"
                   />
