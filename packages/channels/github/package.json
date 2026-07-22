@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/channel-github",
-  "version": "0.20.0",
+  "version": "0.20.1",
   "description": "GitHub channel adapter for Qwen Code",
   "type": "module",
   "main": "dist/index.js",

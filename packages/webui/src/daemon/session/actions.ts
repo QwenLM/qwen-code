@@ -173,6 +173,7 @@ export function createDaemonSessionActions({
   function startPendingSessionLoad(
     sessionId: string,
     mode: PendingSessionLoad['mode'],
+    signal?: AbortSignal,
   ): Promise<void> {
     const loadId = pendingSessionLoadIdRef.current + 1;
     pendingSessionLoadIdRef.current = loadId;
@@ -206,6 +207,7 @@ export function createDaemonSessionActions({
         timeout,
         resolve,
         reject,
+        ...(signal ? { signal } : {}),
       };
     });
     return loadPromise;
@@ -215,9 +217,15 @@ export function createDaemonSessionActions({
     sessionId: string,
     mode: 'load' | 'resume',
     workspaceCwd?: string,
+    signal?: AbortSignal,
   ): Promise<void> {
+    if (signal?.aborted) {
+      return Promise.reject(
+        new DOMException('Session load cancelled', 'AbortError'),
+      );
+    }
     manualSessionClearRef.current = false;
-    const loadPromise = startPendingSessionLoad(sessionId, mode);
+    const loadPromise = startPendingSessionLoad(sessionId, mode, signal);
     const currentSession = sessionRef.current;
     const currentSessionId = currentSession?.sessionId;
     const activePrompt = currentSessionId
@@ -230,31 +238,42 @@ export function createDaemonSessionActions({
       activePromptsRef.current.delete(currentSessionId);
     }
     resetCurrentSessionActivePrompt();
+    const reloadingCurrentSession =
+      mode === 'load' && currentSessionId === sessionId;
     if (currentSession) {
-      void currentSession.detach().catch((error: unknown) => {
-        console.warn(
-          '[DaemonSessionActions] detach before session switch failed:',
-          error,
-        );
-      });
+      const detachCurrentSession = () =>
+        currentSession.detach().catch((error: unknown) => {
+          console.warn(
+            '[DaemonSessionActions] detach before session switch failed:',
+            error,
+          );
+        });
+      if (reloadingCurrentSession) {
+        skipNextCleanupDetachSessionIdRef.current = sessionId;
+        void loadPromise.then(detachCurrentSession, () => undefined);
+      } else {
+        void detachCurrentSession();
+      }
     }
-    sessionRef.current = undefined;
-    setConnection((current) => ({
-      ...current,
-      status: 'connecting',
-      sessionId,
-      clientId: undefined,
-      displayName: undefined,
-      error: undefined,
-      errorStatus: undefined,
-      missingSession: false,
-      loadingTranscript: true,
-      catchingUp: undefined,
-    }));
+    if (!reloadingCurrentSession) sessionRef.current = undefined;
+    if (!reloadingCurrentSession) {
+      setConnection((current) => ({
+        ...current,
+        status: 'connecting',
+        sessionId,
+        clientId: undefined,
+        displayName: undefined,
+        error: undefined,
+        errorStatus: undefined,
+        missingSession: false,
+        loadingTranscript: true,
+        catchingUp: undefined,
+      }));
+    }
     setPromptStatus('idle');
     settledPromptsRef.current.clear();
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-    store.reset();
+    if (!reloadingCurrentSession) store.reset();
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
     setRestoreWorkspaceCwd(workspaceCwd ?? getConnection().workspaceCwd);
@@ -612,6 +631,21 @@ export function createDaemonSessionActions({
 
     async loadSession(sessionId, options) {
       return startSessionSwitch(sessionId, 'load', options?.workspaceCwd);
+    },
+
+    async reloadSession(signal) {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Reload session failed',
+        'load_session',
+      );
+      return startSessionSwitch(
+        session.sessionId,
+        'load',
+        session.workspaceCwd,
+        signal,
+      );
     },
 
     async resumeSession(sessionId, options) {

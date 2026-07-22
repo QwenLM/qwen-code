@@ -7068,6 +7068,70 @@ describe('ChannelBase', () => {
       expect(router.handleSessionDied).toHaveBeenCalledWith('s-1');
     });
 
+    it('proactively delivers a completed background response to the session route', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+      ch.proactiveSupported = true;
+
+      (bridge as unknown as EventEmitter).emit(
+        'backgroundResponse',
+        's-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(ch.proactive).toEqual([
+          { chatId: 'chat1', text: 'Background final answer.' },
+        ]);
+      });
+      expect(ch.proactiveTargets).toEqual([target]);
+      expect(ch.sent).toEqual([]);
+    });
+
+    it('falls back to sendResponseMessage when proactive send is unsupported', async () => {
+      const target: SessionTarget = {
+        channelName: 'test-chan',
+        senderId: 'user1',
+        chatId: 'chat1',
+        isGroup: true,
+      };
+      const router = {
+        getTarget: vi.fn().mockReturnValue(target),
+        handleSessionDied: vi.fn(),
+        setBridge: vi.fn(),
+      };
+      const ch = createChannel({}, {
+        router,
+        registerBridgeEvents: true,
+      } as unknown as ChannelBaseOptions);
+
+      (bridge as unknown as EventEmitter).emit(
+        'backgroundResponse',
+        's-1',
+        'Background final answer.',
+      );
+
+      await vi.waitFor(() => {
+        expect(ch.sent).toEqual([
+          { chatId: 'chat1', text: 'Background final answer.' },
+        ]);
+      });
+      expect(ch.proactive).toEqual([]);
+    });
+
     it('leaves supplied router bridge events to the gateway by default', () => {
       const router = {
         getTarget: vi.fn(),
@@ -8642,6 +8706,7 @@ describe('ChannelBase', () => {
 
     it('continues the user prompt and logs bounded metadata when entry listing fails', async () => {
       const channelMemory = createChannelMemory();
+      const channelMemoryRecallObserver = vi.fn();
       channelMemory.listChannelMemoryEntries.mockRejectedValue(
         new Error(`EIO\n${'x'.repeat(400)}`),
       );
@@ -8650,7 +8715,7 @@ describe('ChannelBase', () => {
         .mockImplementation(() => true);
       const ch = createChannel(
         { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
-        { channelMemory },
+        { channelMemory, channelMemoryRecallObserver },
       );
 
       await ch.handleInbound(envelope({ text: 'ship it', senderId: 'alice' }));
@@ -8665,6 +8730,13 @@ describe('ChannelBase', () => {
       expect(log).not.toContain('EIO');
       expect(log).not.toContain('ship it');
       expect(log.length).toBeLessThan(350);
+      expect(channelMemoryRecallObserver).toHaveBeenCalledOnce();
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith({
+        cache: 'bypass',
+        durationMs: expect.any(Number),
+        result: 'read_error',
+        selectedCount: 0,
+      });
       writeSpy.mockRestore();
     });
 
@@ -8908,10 +8980,14 @@ describe('ChannelBase', () => {
       const first = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
       const second = { id: 'm-b82c4e190a6f', text: 'Use production.' };
       const channelMemory = createChannelMemory();
+      const channelMemoryRecallObserver = vi.fn();
       channelMemory.listChannelMemoryEntries
         .mockResolvedValueOnce([first])
         .mockResolvedValueOnce([second]);
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
@@ -8924,6 +9000,24 @@ describe('ChannelBase', () => {
       expect(secondPrompt).toContain(relevantChannelMemoryPrompt([second]));
       expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
       expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      expect(channelMemoryRecallObserver).toHaveBeenCalledTimes(2);
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(1, {
+        cache: 'bypass',
+        durationMs: expect.any(Number),
+        result: 'selected',
+        selectedCount: 1,
+      });
+      expect(
+        Object.keys(channelMemoryRecallObserver.mock.calls[0]![0]).sort(),
+      ).toEqual(['cache', 'durationMs', 'result', 'selectedCount']);
+      expect(
+        Number.isFinite(
+          channelMemoryRecallObserver.mock.calls[0]![0].durationMs,
+        ),
+      ).toBe(true);
+      expect(
+        channelMemoryRecallObserver.mock.calls[0]![0].durationMs,
+      ).toBeGreaterThanOrEqual(0);
     });
 
     it('reuses a prepared recall index while the memory revision is unchanged', async () => {
@@ -8932,7 +9026,11 @@ describe('ChannelBase', () => {
         ...createChannelMemory([relevant]),
         getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
@@ -8945,6 +9043,14 @@ describe('ChannelBase', () => {
       );
       expect(promptMock.mock.calls[1]![1]).toContain(
         relevantChannelMemoryPrompt([relevant]),
+      );
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ cache: 'miss', result: 'selected' }),
+      );
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        2,
+        expect.objectContaining({ cache: 'hit', result: 'selected' }),
       );
     });
 
@@ -9050,7 +9156,11 @@ describe('ChannelBase', () => {
           .fn()
           .mockRejectedValue(new Error('revision unavailable')),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
       await ch.handleInbound(envelope({ text: 'deploy', senderId: 'alice' }));
@@ -9063,6 +9173,11 @@ describe('ChannelBase', () => {
       );
       expect(promptMock.mock.calls[1]![1]).toContain(
         relevantChannelMemoryPrompt([relevant]),
+      );
+      expect(channelMemoryRecallObserver).toHaveBeenCalledTimes(2);
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({ cache: 'bypass', result: 'selected' }),
       );
     });
 
@@ -9113,7 +9228,11 @@ describe('ChannelBase', () => {
       const stderrSpy = vi
         .spyOn(process.stderr, 'write')
         .mockImplementation(() => true);
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        { allowedUsers: ['alice'] },
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(
         envelope({ text: 'deploy secret-project', senderId: 'alice' }),
@@ -9127,6 +9246,12 @@ describe('ChannelBase', () => {
       expect(
         (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
       ).toContain('Deploy secret-project to staging.');
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith({
+        cache: 'miss',
+        durationMs: expect.any(Number),
+        result: 'revision_unstable',
+        selectedCount: 1,
+      });
       stderrSpy.mockRestore();
     });
 
@@ -9174,6 +9299,7 @@ describe('ChannelBase', () => {
         ...createChannelMemory(),
         getChannelMemoryRevision: vi.fn().mockResolvedValue('revision-1'),
       };
+      const channelMemoryRecallObserver = vi.fn();
       channelMemory.listChannelMemoryEntries
         .mockReturnValueOnce(firstRead)
         .mockImplementation(async () => entries);
@@ -9185,7 +9311,7 @@ describe('ChannelBase', () => {
       );
       const ch = createChannel(
         { instructions: 'Static instructions.', allowedUsers: ['alice'] },
-        { channelMemory },
+        { channelMemory, channelMemoryRecallObserver },
       );
 
       const first = ch.handleInbound(
@@ -9213,6 +9339,14 @@ describe('ChannelBase', () => {
         relevantChannelMemoryPrompt(entries),
       );
       expect(channelMemory.listChannelMemoryEntries).toHaveBeenCalledTimes(2);
+      expect(channelMemoryRecallObserver).toHaveBeenNthCalledWith(
+        1,
+        expect.objectContaining({
+          cache: 'miss',
+          result: 'stale',
+          selectedCount: 0,
+        }),
+      );
     });
 
     it('preserves a pending normal recall snapshot when another target mutates', async () => {
@@ -9262,19 +9396,70 @@ describe('ChannelBase', () => {
           text: `unrelated ${'x'.repeat(121)}`,
         },
       ]);
-      const ch = createChannel({}, { channelMemory });
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        {},
+        { channelMemory, channelMemoryRecallObserver },
+      );
 
       await ch.handleInbound(envelope({ text: 'deploy staging' }));
 
       expect((bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(
         'deploy staging',
       );
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith({
+        cache: 'bypass',
+        durationMs: expect.any(Number),
+        result: 'empty',
+        selectedCount: 0,
+      });
+    });
+
+    it('bounds the observed selected count to the recall entry budget', async () => {
+      const channelMemory = createChannelMemory(
+        Array.from({ length: 4 }, (_, index) => ({
+          id: `m-${String(index).padStart(12, '0')}`,
+          text: `deploy target ${index}`,
+        })),
+      );
+      const channelMemoryRecallObserver = vi.fn();
+      const ch = createChannel(
+        {},
+        { channelMemory, channelMemoryRecallObserver },
+      );
+
+      await ch.handleInbound(envelope({ text: 'deploy target' }));
+
+      expect(channelMemoryRecallObserver).toHaveBeenCalledWith(
+        expect.objectContaining({ selectedCount: 3 }),
+      );
+    });
+
+    it('ignores channel memory recall observer failures', async () => {
+      const relevant = { id: 'm-a31f0d82c7e4', text: 'Use staging.' };
+      const channelMemory = createChannelMemory([relevant]);
+      const ch = createChannel(
+        {},
+        {
+          channelMemory,
+          channelMemoryRecallObserver: () => {
+            throw new Error('observer unavailable');
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: 'deploy staging' }));
+
+      expect(
+        (bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0]![1],
+      ).toContain(relevantChannelMemoryPrompt([relevant]));
     });
 
     it('does not list or inject recall for recognized agent slash commands', async () => {
       const channelMemory = createChannelMemory([
         { id: 'm-a31f0d82c7e4', text: 'Use staging.' },
       ]);
+      const channelMemoryRecallObserver = vi.fn();
       (
         bridge as unknown as {
           availableCommands: Array<{ name: string; description: string }>;
@@ -9282,7 +9467,7 @@ describe('ChannelBase', () => {
       ).availableCommands = [{ name: 'compress', description: 'Compress' }];
       const ch = createChannel(
         { allowedUsers: ['alice'], instructions: 'Static instructions.' },
-        { channelMemory },
+        { channelMemory, channelMemoryRecallObserver },
       );
 
       await ch.handleInbound(
@@ -9291,6 +9476,7 @@ describe('ChannelBase', () => {
 
       expect(channelMemory.listChannelMemoryEntries).not.toHaveBeenCalled();
       expect(channelMemory.readChannelMemory).not.toHaveBeenCalled();
+      expect(channelMemoryRecallObserver).not.toHaveBeenCalled();
       expect((bridge.prompt as ReturnType<typeof vi.fn>).mock.calls[0][1]).toBe(
         'Static instructions.\n\n/compress',
       );

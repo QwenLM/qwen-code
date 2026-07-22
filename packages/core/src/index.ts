@@ -62,6 +62,7 @@ export {
   getRuntimeContentGenerator,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
+  runOutsideAgentContext,
 } from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
@@ -189,7 +190,16 @@ export type {
   TodoWriteParams,
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
+export type {
+  WebSearchTool,
+  WebSearchToolParams,
+  WebSearchSettings,
+} from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+// Exported for the cross-package contract test in packages/cli (see the
+// function's own doc comment) — the daemon's file-read route must resolve the
+// workspacePath this produces.
+export { buildRecordArtifactReminder } from './tools/write-file.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
@@ -252,6 +262,7 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
@@ -529,6 +540,7 @@ export {
   detectRuntime,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
@@ -544,6 +556,7 @@ export * from './utils/textUtils.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
+export { finalizeToolResponses } from './utils/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';

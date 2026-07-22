@@ -30,6 +30,7 @@ export const MODEL_GENERATION_CONFIG_FIELDS = [
   'contextWindowSize',
   'customHeaders',
   'extra_body',
+  'thinkingMandatory',
   'modalities',
   'splitToolMedia',
   'toolResultContentFormat',

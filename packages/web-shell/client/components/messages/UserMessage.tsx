@@ -13,6 +13,7 @@ import {
   getComposerTagIconUrl,
   getComposerTagViewModel,
   isBuiltinComposerTagIconUrl,
+  parseUserMessageContentSafely,
   splitComposerTagContentByAnnotations,
 } from '../../utils/composerTag';
 import type { DaemonInputAnnotation } from '@qwen-code/sdk/daemon';
@@ -23,7 +24,6 @@ import type {
   ComposerTagRenderer,
   WebShellComposerTag,
   WebShellComposerTagIconMap,
-  WebShellUserMessagePart,
 } from '../../customization';
 import {
   getComposerTagDisplay,
@@ -74,7 +74,7 @@ function DefaultUserMessageContent({
         segment.type === 'text' ? (
           <Fragment key={index}>{segment.text}</Fragment>
         ) : (
-          <UserMessageTag
+          <ReadonlyComposerTag
             composerTagIcons={composerTagIcons}
             key={`${segment.tag.id}:${index}`}
             onComposerTagClick={onComposerTagClick}
@@ -127,18 +127,16 @@ export const UserMessage = memo(function UserMessage({
         />
       );
     }
-    let parts: readonly WebShellUserMessagePart[] | undefined | null;
-    try {
-      parts = parseUserMessageContent?.(content);
-    } catch (error) {
-      console.warn('[WebShell] failed to parse user message content', error);
-      return content;
-    }
-    if (!parts || parts.length === 0) return content;
+    const parts = parseUserMessageContentSafely(
+      content,
+      parseUserMessageContent,
+      '[WebShell] failed to parse user message content',
+    );
+    if (!parts) return content;
     return parts.map((part, index) => {
       if (part.type === 'text') return part.text;
       return (
-        <UserMessageTag
+        <ReadonlyComposerTag
           key={`${part.tag.id}-${index}`}
           tag={part.tag}
           composerTagIcons={composerTagIcons}
@@ -248,7 +246,7 @@ function getTagText(tag: WebShellComposerTag): string {
   return getComposerTagDisplay(tag);
 }
 
-function UserMessageTag({
+export function ReadonlyComposerTag({
   tag,
   composerTagIcons,
   renderComposerTag,

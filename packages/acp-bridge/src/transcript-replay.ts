@@ -425,6 +425,11 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
       this.pendingToolCalls.delete(pending.callId);
+      this.report(
+        'missing_tool_result',
+        'A transcript tool call has no persisted result.',
+        pending.sourceRecordId,
+      );
       yield {
         sourceRecordId: pending.sourceRecordId,
         ...(pending.sourceTimestamp

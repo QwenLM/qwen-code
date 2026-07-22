@@ -1911,6 +1911,35 @@ bad`);
         ]);
       });
 
+      it('fails closed when the allow-list is only the unavailable WebSearch', async () => {
+        // The unresolved name stays a dead, restrictive entry: the agent
+        // runs tool-less rather than inheriting shell/write it was not
+        // configured for. Deliberate — supersedes the earlier inherit-all
+        // compatibility fallback for converted Claude agents.
+        const configWithUnregistered: SubagentConfig = {
+          ...validConfig,
+          tools: ['WebSearch'],
+        };
+
+        const runtimeConfig = await manager.convertToRuntimeConfig(
+          configWithUnregistered,
+        );
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['WebSearch']);
+      });
+
+      it('does not widen an allow-list whose names simply fail to resolve', async () => {
+        // A typo'd or temporarily-unavailable tool set must stay a dead,
+        // restrictive list — never silently become inherit-all (that would
+        // grant shell/write to an agent configured without them).
+        const runtimeConfig = await manager.convertToRuntimeConfig({
+          ...validConfig,
+          tools: ['Sheell'],
+        });
+
+        expect(runtimeConfig.toolConfig?.tools).toEqual(['Sheell']);
+      });
+
       it('should set modelConfig.model from model selector and merge run configurations', async () => {
         const configWithCustom: SubagentConfig = {
           ...validConfig,

@@ -37,7 +37,10 @@ import {
   resolveWorkspaceInputs,
 } from './workspace-inputs.js';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import {
+  canonicalizeWorkspace,
+  translateAndCheckAbsoluteWorkspacePath,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type {
   AuthType,
   ProviderSetupInputs,
@@ -89,6 +92,12 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from './workspace-registry.js';
+import {
+  isManagedScratchChild,
+  prepareManagedScratchRoot,
+  type ManagedScratchRoot,
+  type WorkspaceRuntimeProvenance,
+} from './managed-scratch-workspace.js';
 import {
   workspaceRegistrationId,
   type WorkspaceRegistrationStore,
@@ -1695,6 +1704,60 @@ interface DaemonLoggerLifecycleCallbacks {
   signalOwned(): void;
 }
 
+/**
+ * Validates and canonicalizes a `--workspace` boot argument. Extracted to
+ * module scope (from the runQwenServe closure) so the #7139 sandbox path
+ * translation ahead of the absolute-path guard is testable — this is the
+ * primary reproduction path of that issue.
+ */
+export function validateAndCanonicalizeWorkspaceInput(
+  rawWorkspace: string,
+): string {
+  // #7139: inside a Linux container sandbox a Windows host forwards
+  // `--workspace C:\…` in host shape; translate to the bind-mount
+  // location BEFORE the absolute-path guard, which would otherwise
+  // reject it (`path.isAbsolute('C:\…')` is false on POSIX).
+  const workspace = translateAndCheckAbsoluteWorkspacePath(rawWorkspace);
+  if (workspace === null) {
+    throw new Error(
+      `Invalid --workspace "${rawWorkspace}": must be an absolute path.`,
+    );
+  }
+  try {
+    const stats = fs.statSync(workspace);
+    if (!stats.isDirectory()) {
+      throw new Error(
+        `Invalid --workspace "${workspace}": exists but is not a directory.`,
+      );
+    }
+  } catch (err) {
+    if (err && typeof err === 'object' && 'code' in err) {
+      const code = (err as { code?: unknown }).code;
+      if (code === 'ENOENT') {
+        throw new Error(
+          `Invalid --workspace "${workspace}": directory does not exist.`,
+        );
+      }
+      // EACCES / EPERM: the path exists but the current user can't
+      // stat it (typical for SIP-protected paths on macOS, root-owned
+      // dirs the daemon's user can't traverse, etc.). The raw Node
+      // SystemError has the path AND the syscall but no operator-
+      // facing breadcrumb that this came from `--workspace`. Wrap
+      // both codes so the boot failure points at the flag the
+      // operator actually set.
+      if (code === 'EACCES' || code === 'EPERM') {
+        throw new Error(
+          `Invalid --workspace "${workspace}": permission denied ` +
+            `(${String(code)}). The path exists but cannot be stat'd ` +
+            `by the current user.`,
+        );
+      }
+    }
+    throw err;
+  }
+  return canonicalizeWorkspace(workspace);
+}
+
 export async function runQwenServe(
   optsIn: RunQwenServeOptions,
   deps: RunQwenServeDeps = {},
@@ -2053,46 +2116,8 @@ async function runQwenServeImpl(
     );
   }
 
-  const validateAndCanonicalizeWorkspace = (workspace: string): string => {
-    if (!path.isAbsolute(workspace)) {
-      throw new Error(
-        `Invalid --workspace "${workspace}": must be an absolute path.`,
-      );
-    }
-    try {
-      const stats = fs.statSync(workspace);
-      if (!stats.isDirectory()) {
-        throw new Error(
-          `Invalid --workspace "${workspace}": exists but is not a directory.`,
-        );
-      }
-    } catch (err) {
-      if (err && typeof err === 'object' && 'code' in err) {
-        const code = (err as { code?: unknown }).code;
-        if (code === 'ENOENT') {
-          throw new Error(
-            `Invalid --workspace "${workspace}": directory does not exist.`,
-          );
-        }
-        // EACCES / EPERM: the path exists but the current user can't
-        // stat it (typical for SIP-protected paths on macOS, root-owned
-        // dirs the daemon's user can't traverse, etc.). The raw Node
-        // SystemError has the path AND the syscall but no operator-
-        // facing breadcrumb that this came from `--workspace`. Wrap
-        // both codes so the boot failure points at the flag the
-        // operator actually set.
-        if (code === 'EACCES' || code === 'EPERM') {
-          throw new Error(
-            `Invalid --workspace "${workspace}": permission denied ` +
-              `(${String(code)}). The path exists but cannot be stat'd ` +
-              `by the current user.`,
-          );
-        }
-      }
-      throw err;
-    }
-    return canonicalizeWorkspace(workspace);
-  };
+  const validateAndCanonicalizeWorkspace =
+    validateAndCanonicalizeWorkspaceInput;
 
   // Resolve the bound workspace list. The first explicit workspace remains the
   // primary workspace for legacy APIs; later workspaces are isolated secondary
@@ -2396,6 +2421,14 @@ async function runQwenServeImpl(
         `Invalid sessionIdleTimeoutMs: ${opts.sessionIdleTimeoutMs}. Must be a non-negative integer (milliseconds, 0 = disabled).`,
       );
     }
+  }
+  if (opts.initializeTimeoutMs !== undefined) {
+    if (!isPositiveIntegerMs(opts.initializeTimeoutMs)) {
+      throw new TypeError(
+        `Invalid initializeTimeoutMs: ${opts.initializeTimeoutMs}. Must be a positive integer (milliseconds).`,
+      );
+    }
+    assertTimerDelayInRange('initializeTimeoutMs', opts.initializeTimeoutMs);
   }
   // Validate here (not just in the yargs handler) so embedded callers of
   // `runQwenServe({ permissionResponseTimeoutMs })` also fail loud: the
@@ -2823,6 +2856,21 @@ async function runQwenServeImpl(
         cliVersionPromise,
       ]);
     cliVersion = resolvedCliVersion;
+    let managedScratchRoot: ManagedScratchRoot | undefined;
+    try {
+      // Root acceptance is fail-closed and happens only after every startup
+      // workspace (including restored registrations) has been resolved.
+      managedScratchRoot = prepareManagedScratchRoot(
+        path.join(core.Storage.getGlobalQwenDir(), 'scratch-workspaces'),
+        workspaceInputs.map((workspace) => workspace.cwd),
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: managed scratch workspaces are unavailable: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     let runtimeBootSettings:
       | ReturnType<SettingsRuntime['loadSettings']>
       | undefined;
@@ -2926,7 +2974,10 @@ async function runQwenServeImpl(
       }
       throw err;
     }
-    core.initializeTelemetry(
+    // Must settle before initializeDaemonMetrics(): metrics.getMeter() caches
+    // a noop meter permanently if called before the SDK registers the global
+    // MeterProvider. This runs in the deferred runtime load, off the fast path.
+    await core.initializeTelemetry(
       createDaemonTelemetryRuntimeConfig(
         daemonTelemetrySettings,
         resolvedCliVersion,
@@ -3343,6 +3394,9 @@ async function runQwenServeImpl(
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
+          : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3655,6 +3709,9 @@ async function runQwenServeImpl(
         ...(opts.channelIdleTimeoutMs !== undefined
           ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
           : {}),
+        ...(opts.initializeTimeoutMs !== undefined
+          ? { initializeTimeoutMs: opts.initializeTimeoutMs }
+          : {}),
         ...(opts.sessionReapIntervalMs !== undefined
           ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
           : {}),
@@ -3952,7 +4009,19 @@ async function runQwenServeImpl(
     // Factory for dynamically creating workspace runtimes (POST /workspaces).
     const createDynamicWorkspaceRuntime = async (
       cwd: string,
+      options: { provenance: WorkspaceRuntimeProvenance },
     ): Promise<import('./workspace-registry.js').WorkspaceRuntime> => {
+      // HTTP clients cannot choose provenance. This second boundary prevents a
+      // future caller from granting managed trust to an arbitrary directory.
+      if (
+        options.provenance === 'managed-scratch' &&
+        (!managedScratchRoot ||
+          !isManagedScratchChild(cwd, managedScratchRoot.canonicalRoot))
+      ) {
+        throw new Error(
+          'Managed scratch runtime must use an accepted direct child directory',
+        );
+      }
       let wsSettings: ReturnType<SettingsRuntime['loadSettings']> | undefined;
       try {
         wsSettings = settingsRuntime.settings.loadSettings(cwd);
@@ -3965,12 +4034,14 @@ async function runQwenServeImpl(
             `falling back to defaults.`,
         );
       }
-      const trusted = wsSettings
-        ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
-            wsSettings.merged,
-            cwd,
-          ).effective.state === 'trusted'
-        : false;
+      const trusted =
+        options.provenance === 'managed-scratch' ||
+        (wsSettings
+          ? settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+              wsSettings.merged,
+              cwd,
+            ).effective.state === 'trusted'
+          : false);
       const wsEnv = createRuntimeEnvMetadata(cwd, wsSettings);
       const wsHash = core.hashDaemonWorkspace(cwd);
       const wsFsFactory = runtime.resolveBridgeFsFactory({
@@ -4025,6 +4096,9 @@ async function runQwenServeImpl(
             : {}),
           ...(opts.channelIdleTimeoutMs !== undefined
             ? { channelIdleTimeoutMs: opts.channelIdleTimeoutMs }
+            : {}),
+          ...(opts.initializeTimeoutMs !== undefined
+            ? { initializeTimeoutMs: opts.initializeTimeoutMs }
             : {}),
           ...(opts.sessionReapIntervalMs !== undefined
             ? { sessionReapIntervalMs: opts.sessionReapIntervalMs }
@@ -4326,6 +4400,7 @@ async function runQwenServeImpl(
     const app = runtime.createServeApp(opts, () => actualPort, {
       workspaceRegistry,
       createWorkspaceRuntime: createDynamicWorkspaceRuntime,
+      managedScratchRoot,
       workspaceRegistrationStore,
       workspaceRuntimeRemoval,
       voiceCoordinator: workspaceVoiceCoordinator,

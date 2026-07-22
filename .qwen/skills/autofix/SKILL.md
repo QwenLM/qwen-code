@@ -167,6 +167,13 @@ Finish with exactly one outcome:
   the regenerated schema, if a settings source changed), commit once only after
   they pass, then write `<workdir>/address-summary.md` with each feedback point,
   decision, changes, conflict notes, and verification results (bilingual per
-  Shared Rules).
+  Shared Rules). Also write `<workdir>/resolved-comments.txt`: one inline
+  comment id per line — the `rc:<id>` handle shown in `feedback.md` — for each
+  finding you IMPLEMENTED. The workflow resolves exactly those review threads
+  after the push, so a human re-reviewing sees only what is still open. List an
+  id ONLY when you actually made the change: a finding you declined or deferred
+  must stay unresolved so its recorded reason gets read. Omit the file (or
+  leave it empty) when you implemented nothing that came from an inline
+  comment.
 - No change: write `<workdir>/no-action.md` (bilingual per Shared Rules).
 - Cannot confidently proceed: write `<workdir>/failure.md` and do not commit.
