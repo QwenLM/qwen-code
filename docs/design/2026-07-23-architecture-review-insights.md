@@ -1,6 +1,7 @@
 # Qwen Code 设计思路、架构设计与工程思路
 
-> 基于 PR #7530、#7534、#7531、#7551 等核心 PR 的 review 洞察，以及对代码库的深度分析。
+> 基于 33 个 PR 的 review 洞察（#7527–#7569）和代码库深度分析。
+> 包含设计哲学、架构全景、工程模式，以及面向未来开发者的开发指南（第七节）。
 
 ## 一、设计哲学
 
@@ -245,3 +246,225 @@ npm run preflight  → clean → install → format → lint → build → typec
 3. **安全边界收紧**：git guard、env 隔离、权限分层持续完善
 4. **多端一致性**：Web Shell、Desktop、Mobile 共享核心逻辑，UI 层隔离
 5. **可观测性增强**：GenAI 遥测对齐 ARMS（PR #7536），结构化诊断日志
+
+## 七、开发指南：如何在这个项目中正确实现功能
+
+> 基于 33 个 PR 的 review 和代码库深度分析，面向未来开发者。
+> 每一节回答"如何正确做 X"，附带代码路径和关键约束。
+
+### 7.1 如何添加一个新的 CLI Slash Command
+
+**参考实现：** `/advisor`（PR #7567）、`/btw`（`packages/cli/src/ui/commands/btwCommand.ts`）
+
+**步骤：**
+
+1. **创建命令文件** `packages/cli/src/ui/commands/<name>-command.ts`（kebab-case）
+
+```typescript
+import type { CommandContext, SlashCommand, SlashCommandActionReturn } from './types.js';
+import { CommandKind } from './types.js';
+import { MessageType } from '../types.js';
+import { t } from '../../i18n/index.js';
+
+export const myCommand: SlashCommand = {
+  name: 'mycommand',
+  get description() { return t('What this command does'); },
+  kind: CommandKind.BUILT_IN,
+  supportedModes: ['interactive', 'acp'] as const,
+  action: async (context: CommandContext, args: string): Promise<void | SlashCommandActionReturn> => {
+    // 1. 校验输入  2. 获取 config  3. 执行逻辑  4. 返回结果
+  },
+};
+```
+
+2. **注册到 BuiltinCommandLoader**（`packages/cli/src/services/BuiltinCommandLoader.ts`）：
+   - 添加 import，在 `allDefinitions` 数组中按字母序插入
+   - 条件加载：`this.config?.isXxxEnabled() ? myCommand : null`
+
+3. **添加设置（如需要）**：
+   - `packages/cli/src/config/settingsSchema.ts`：`SETTINGS_SCHEMA` 中添加定义
+   - `packages/vscode-ide-companion/schemas/settings.schema.json`：同步 JSON Schema
+   - 读取：`context.services.settings.merged.<name>`
+
+4. **编写测试** `<name>-command.test.ts`：
+   - `createMockCommandContext()`（`packages/cli/src/test-utils/mockCommandContext.ts`）
+   - `vi.hoisted()` 提升 mock（mock factory 在模块加载时执行）
+   - 覆盖：元数据、输入校验、成功/错误/abort 路径、各执行模式
+
+**关键约束：**
+
+- `action` 返回类型决定 UI 行为：`message` / `dialog` / `submit_prompt` / `void`（自行管理）
+- 交互式长操作用 `ui.setPendingItem()` 显示进度，`finally` 中清除
+- `context.abortSignal` 支持 ESC 取消
+- 所有用户可见文本用 `t()` 包裹（i18n）
+
+### 7.2 如何使用 Forked Side-Query（只读模型调用）
+
+**参考实现：** `/btw`、`/advisor`（`packages/core/src/utils/forkedAgent.ts`）
+
+**场景：** 调用模型但不影响主会话历史、不允许工具执行。
+
+```typescript
+import { runForkedAgent, buildBtwCacheSafeParams } from '@qwen-code/qwen-code-core';
+
+const cacheSafeParams = buildBtwCacheSafeParams(config);
+const result = await runForkedAgent({
+  config,
+  userMessage: 'your prompt',
+  cacheSafeParams,     // 共享主会话 prompt cache
+  abortSignal,
+  // model: 'other-model',  // 可选覆盖
+  // jsonSchema: {...},      // 可选结构化输出
+});
+```
+
+| 路径 | 参数 | 特点 | 用途 |
+|------|------|------|------|
+| Cache path | `cacheSafeParams` | 单轮、无工具、共享缓存 | /btw, /advisor |
+| Agent path | `taskPrompt` | 多轮、完整工具、隔离会话 | memory extract, dream |
+
+**关键约束：**
+- Cache path 默认 `NO_TOOLS`——模型不能调用工具
+- 主会话历史不被修改（fork 只读）
+- `buildBtwCacheSafeParams` 返回 `null` = 无对话上下文
+- 并发控制由调用方负责
+
+### 7.3 如何添加新的 Prompt 片段
+
+**参考实现：** PR #7530（`packages/core/src/core/prompt-fragments.ts`，48 行）
+
+**三层缓存模型：** `stable`（跨会话不变）→ `context`（会话内稳定）→ `volatile`（频繁变化）
+
+**步骤：**
+1. 确定缓存层级（内容多久变一次？）
+2. 在 `getAdditionalSystemPromptFragments()`（`client.ts`）中构建 `{ marker, role, tier, content }`
+3. 自动按 tier 排序，同层保持插入顺序，层间 `\n\n---\n\n` 分隔
+
+**关键约束：**
+- 不要手动拼接 system prompt——用 fragment 系统
+- 每日变化内容必须放 volatile 层（否则前缀缓存每日失效）
+- `renderPromptFragments()` 混合 role 时 throw
+
+### 7.4 如何添加 Provider 能力适配
+
+**参考实现：** PR #7534（`pipeline.ts`）
+
+**模式：** 运行时学习优于静态配置
+
+```typescript
+// 1. 检测错误中的能力约束信号（精确正则）
+// 2. 进程级 Set 缓存已学习的能力
+// 3. 统一查询入口合并配置 + 运行时学习
+// 4. 重试时 executeAttempt() 闭包重建请求
+```
+
+**关键约束：**
+- 不硬编码模型名——从错误消息学习
+- 能力缓存进程级、不持久化——重启后重新学习
+- 流式/非流式共享 `executeWithRetry` 路径
+
+### 7.5 如何添加新的工具（Tool）
+
+**参考实现：** `packages/core/src/tools/tool-registry.ts`
+
+**注册流程：** `registerTool()` → 检查 disabledTools → 检查名称冲突 → 存入 Map → 声明排序
+
+**Deferred Tools：** `shouldDefer: true` → 初始不出现在 declarations → `tool_search` 按需加载
+
+**MCP 工具：** `mcp__<server>__<tool>` 命名，`McpTransportPool` 多会话共享
+
+**关键约束：**
+- 声明顺序必须稳定（`compareToolsByDeclarationName`）
+- `disabledTools` 是全局 chokepoint
+- schema 变更影响 prompt cache
+
+### 7.6 如何编写测试
+
+```bash
+# 单个文件（始终优先）
+cd packages/core && npx vitest run src/path/to/file.test.ts
+cd packages/cli && npx vitest run src/path/to/file.test.ts
+```
+
+**CLI 测试关键模式：**
+- `vi.hoisted()` 提升 mock（必需品，不是可选项）
+- `createMockCommandContext()` 构造命令上下文
+- 断言钉住具体值（包括中文字符串）
+
+**工作流测试 single-source 模式（PR #7565）：**
+```javascript
+const value = workflow.match(/MY_VAR: '([^']*)'/)?.[1];
+expect(value).toContain('expected-substring'); // 守卫：提取失败响亮报错
+```
+
+### 7.7 如何实现双语支持
+
+**参考实现：** PR #7564（折叠块）、PR #7569（内联 `·`）
+
+| 模式 | 适用场景 | 实现 |
+|------|----------|------|
+| `<details>` 折叠块 | 长文本 | 英文在前，中文折叠 |
+| 内联 `·` 分隔 | 短文本 | `English · 中文` |
+
+**关键约束：**
+- 英文半边可能承重（被检测器 glob）——修改前 grep 消费方
+- 用结构化数据（`subjectZh`/`reasonZh`），不从渲染文本反解析
+- 中英文串并排维护，空翻译不发布空折叠块
+
+### 7.8 如何添加新的设置项
+
+1. `settingsSchema.ts`：`SETTINGS_SCHEMA` 中添加 `{ type, label, category, requiresRestart, default, description, showInDialog }`
+2. `settings.schema.json`：同步 JSON Schema
+3. 读取：`context.services.settings.merged.<name>`
+
+### 7.9 ContentGenerationPipeline 请求生命周期
+
+```
+GenerateContentParameters (Gemini 格式)
+  → Provider.buildRequest() → OpenAI 格式
+  → executeWithRetry()（429/5xx 退避、能力学习重试、模型降级）
+  → Converter（Gemini ↔ OpenAI 双向转换）
+  → ErrorHandler（统一错误分类）
+```
+
+- 流式/非流式共享 `executeWithErrorHandling()`
+- 每请求创建子 AbortController（防 OpenAI SDK listener 泄漏）
+- 不要在 pipeline 外做重试
+
+### 7.10 三层 Agentic Loop 功能定位
+
+| 功能类型 | 放在哪一层 | 示例 |
+|----------|-----------|------|
+| 会话级编排（跨轮次） | GeminiClient (`client.ts`) | Hook、Loop 检测、Memory |
+| 单轮交互逻辑 | Turn (`turn.ts`) | 事件发射、工具调用分发 |
+| 对话历史管理 | GeminiChat (`geminiChat.ts`) | 压缩、持久化、重试 |
+| 协议转换 | Pipeline/Converter | Gemini ↔ OpenAI |
+
+### 7.11 项目包结构与依赖规则
+
+```
+packages/
+├── core/     → 引擎（Agentic Loop、工具、Provider、配置）
+├── cli/      → TUI（Ink/React、命令、设置）
+├── web-shell/→ Web 嵌入（Shadow DOM 隔离）
+├── desktop/  → Electron 桌面应用
+├── acp-bridge/→ ACP 协议桥接
+├── channels/ → 消息通道（DingTalk、Feishu 等）
+└── sdk-*/    → TypeScript/Python/Java SDK
+```
+
+- `cli` → `core` 单向依赖，用包名 `@qwen-code/qwen-code-core`
+- 不允许包间相对 import
+
+### 7.12 常见开发陷阱
+
+| 陷阱 | 正确做法 |
+|------|----------|
+| 从项目根运行 vitest | `cd packages/<pkg> && npx vitest run <file>` |
+| CLI 测试中直接引用外部变量 | `vi.hoisted()` 提升 |
+| 手动拼接 system prompt | PromptFragment 系统 |
+| 硬编码模型名特判 | 运行时从错误中学习 |
+| pipeline 外做重试 | `executeWithRetry` |
+| 修改英文文案不检查消费方 | grep 检测器/测试中的 glob |
+| 假设库可用 | 检查 package.json + 现有 import |
+| 添加注释解释"做了什么" | 只在"为什么"不明显时添加 |
