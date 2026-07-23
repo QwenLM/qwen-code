@@ -312,6 +312,12 @@ npm run preflight  → clean → install → format → lint → build → typec
 
 **模式：** 设备检测有两种用途——选择 UI 后端和控制设备特定行为（如 focus）。分离为两个独立函数：一个响应配置覆盖（用于 UI 选择），一个忽略覆盖（用于物理行为门控）。即使强制使用某后端，物理行为仍按设备类型执行。
 
+### 5.20 两级所有权验证（Workspace 限定变更）
+
+- **PR #7577**：channel lifecycle 限定到 workspace runtime——`assertRequiredOwner`（目标解析层）+ `assertCommittedOwner`（已提交状态层）
+
+**模式：** 当进程全局服务跨多 workspace 管理资源时，在两个层级验证所有权：(1) 目标解析——资源是否解析到唯一 workspace？(2) 已提交状态——资源是否当前被唯一 worker 拥有？用专用 lane 序列化变更，与读取分离。防止跨 workspace 干扰。
+
 ## 六、架构演进方向
 
 基于当前 PR 趋势的观察：
