@@ -160,6 +160,73 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('channel notify', () => {
+    const notification = {
+      text: 'service unavailable',
+      delivery: {
+        kind: 'channel' as const,
+        target: {
+          channelName: 'dingtalk',
+          type: 'user' as const,
+          id: 'user-1',
+        },
+      },
+    };
+
+    it('POSTs a synchronous notification to the primary workspace', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { delivered: true, deliveryId: 'delivery-1' }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+
+      await expect(client.notify(notification)).resolves.toEqual({
+        delivered: true,
+        deliveryId: 'delivery-1',
+      });
+      expect(calls).toHaveLength(1);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspace/notify',
+        method: 'POST',
+        body: JSON.stringify(notification),
+      });
+      expect(calls[0]?.headers.authorization).toBe('Bearer secret');
+    });
+
+    it('POSTs to the exact workspace-qualified notification route', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { delivered: true, deliveryId: 'delivery-2' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.workspaceByCwd('/work/secondary').notify(notification);
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/workspaces/%2Fwork%2Fsecondary/notify',
+        method: 'POST',
+        body: JSON.stringify(notification),
+      });
+    });
+
+    it('surfaces channel delivery HTTP failures', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(503, {
+          error: 'Channel worker is not running.',
+          code: 'channel_worker_unavailable',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.notify(notification)).rejects.toMatchObject({
+        status: 503,
+        body: { code: 'channel_worker_unavailable' },
+      });
+    });
+  });
+
   describe('daemonStatus', () => {
     it('GETs /daemon/status without a detail param by default', async () => {
       const body = { v: 1, detail: 'summary', status: 'ok', issues: [] };

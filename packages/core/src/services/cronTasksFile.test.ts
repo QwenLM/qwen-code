@@ -145,6 +145,51 @@ describe('cronTasksFile', () => {
       expect(result).toEqual([task]);
     });
 
+    it('round-trips optional channel delivery metadata', async () => {
+      const task = makeTask({
+        delivery: {
+          kind: 'channel',
+          target: {
+            channelName: 'dingtalk',
+            type: 'user',
+            id: 'user-1',
+          },
+        },
+      });
+
+      await writeCronTasks(tmpDir, [task]);
+
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it.each([
+      {
+        kind: 'channel',
+        channelName: 'dingtalk',
+        target: { type: 'user', id: 'user-1' },
+      },
+      {
+        kind: 'channel',
+        target: { channelName: 'dingtalk', type: 'topic', id: 'topic-1' },
+      },
+      {
+        kind: 'channel',
+        target: {
+          channelName: 'dingtalk',
+          type: 'user',
+          id: 'user-1',
+          threadId: 'thread-1',
+        },
+      },
+    ])('rejects malformed delivery metadata %#', async (delivery) => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([{ ...makeTask(), delivery }]),
+      );
+
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('accepts legacy tasks with no name/enabled fields', async () => {
       // A task written before the fields existed must still read back.
       const legacy = makeTask();

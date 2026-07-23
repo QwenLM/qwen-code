@@ -282,6 +282,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Immediate best-effort channel delivery for prompt/scheduled finals and
+  // direct workspace notifications. Presence describes the route/event
+  // contract; current worker availability is reported per delivery.
+  channel_delivery: { since: 'v1' },
   // Daemon supports reloading its daemon-managed channel worker via
   // `POST /workspace/channel/reload`. The worker is stopped and relaunched;
   // on relaunch it re-reads settings.json (channels / proxy / per-channel

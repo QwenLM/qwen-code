@@ -21,6 +21,7 @@ import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  ChannelProactiveDeliveryError,
   ChannelTaskLifecycleEvent,
   SessionTarget,
 } from '@qwen-code/channel-base';
@@ -1284,12 +1285,41 @@ describe('FeishuChannel', () => {
           },
           'hello',
         ),
-      ).rejects.toThrow('Feishu sendMessage failed: HTTP 500');
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: HTTP 500',
+        }),
+      );
 
       expect(stderrSpy).toHaveBeenCalledWith(
         expect.stringContaining('sendMessage failed: HTTP 500'),
       );
       stderrSpy.mockRestore();
+    });
+
+    it('classifies non-retryable proactive HTTP failures as permanent', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('permission denied', { status: 403 }),
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'permanent',
+          message: 'Feishu sendMessage failed: HTTP 403',
+        }),
+      );
     });
 
     it('sends proactive loop output to direct chats', async () => {
@@ -1322,6 +1352,77 @@ describe('FeishuChannel', () => {
         }),
       );
       fetchSpy.mockRestore();
+    });
+
+    it('maps typed chat and user deliveries to Feishu receive ID types', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
+
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'chat', id: 'oc_group' },
+        'group result',
+      );
+      await channel.deliverProactive(
+        { channelName: 'test', type: 'user', id: 'ou_user' },
+        'direct result',
+      );
+
+      expect(fetchSpy.mock.calls[0]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id',
+      );
+      expect(fetchSpy.mock.calls[1]![0]).toBe(
+        'https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=open_id',
+      );
+    });
+
+    it('classifies proactive network failures as transient', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockRejectedValueOnce(
+        new Error('socket token=secret'),
+      );
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'Feishu sendMessage failed: network error',
+        }),
+      );
+    });
+
+    it('classifies unexpected proactive delivery failures as transient', async () => {
+      const channel = createTestableChannel();
+      const failure = new Error('unexpected token lookup failure');
+      Object.assign(channel as unknown as Record<string, unknown>, {
+        getTenantAccessToken: vi.fn().mockRejectedValue(failure),
+      });
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'transient',
+          message: 'unexpected token lookup failure',
+          cause: failure,
+        }),
+      );
     });
   });
 

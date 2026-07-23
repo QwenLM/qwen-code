@@ -493,6 +493,16 @@ export interface BridgeClientRequestContext {
    * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
+  /** Trusted Channel delivery correlation injected by the daemon prompt
+   * route. Never populated from caller-controlled ACP metadata. */
+  channelDelivery?: {
+    deliveryId: string;
+    target: {
+      channelName: string;
+      type: 'user' | 'chat';
+      id: string;
+    };
+  };
   /**
    * Internal: set ONLY by `continueSession` to re-arm the continuation meta
    * key that `sendPrompt` strips from untrusted callers. HTTP routes never
@@ -509,6 +519,8 @@ export interface BridgeClientRequestContext {
    */
   deadlineMs?: number;
 }
+
+export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 
 /**
  * Returned from `recordHeartbeat`. `lastSeenAt` is the server-side

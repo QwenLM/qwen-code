@@ -76,7 +76,11 @@ public final class DaemonClient implements AutoCloseable {
         this.heartbeatInterval = builder.heartbeatInterval;
         long clientNumber = CLIENT_SEQUENCE.incrementAndGet();
         this.promptSlots = new Semaphore(builder.maximumConcurrentPrompts);
-        int streamLifecycleCapacity = builder.maximumConcurrentPrompts;
+        // A prompt publishes its terminal once the prompt slot is released, while
+        // its stream keeps closing asynchronously, so admission must tolerate one
+        // draining cleanup per prompt slot.
+        int streamLifecycleCapacity = (int) Math.min(Integer.MAX_VALUE,
+                builder.maximumConcurrentPrompts * 2L);
         this.streamLifecycleSlots = new Semaphore(streamLifecycleCapacity);
         this.executor = new ThreadPoolExecutor(builder.maximumConcurrentPrompts,
                 builder.maximumConcurrentPrompts, 0L, TimeUnit.MILLISECONDS,

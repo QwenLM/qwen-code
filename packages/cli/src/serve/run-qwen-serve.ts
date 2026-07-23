@@ -108,6 +108,10 @@ import {
   type WorkspaceRegistrationStore,
 } from './workspace-registration-store.js';
 import type { PermissionPolicy } from '@qwen-code/acp-bridge';
+import type {
+  ChannelDeliveryHandler,
+  ChannelDeliveryHostResult,
+} from '@qwen-code/acp-bridge/bridgeOptions';
 import { getCliVersion } from '../utils/version.js';
 import { getRateLimiter } from './rate-limit.js';
 import type { AcpHttpHandle } from './acp-http/index.js';
@@ -131,6 +135,16 @@ import type {
 } from './channel-worker-supervisor.js';
 import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
 import { ChannelWebhookEnqueueError } from './channel-webhook-ipc.js';
+import {
+  ChannelDeliveryError,
+  isChannelDeliveryError,
+} from './channel-delivery-ipc.js';
+import { ChannelDeliveryAuthorizationStore } from './channel-delivery-authorization.js';
+import {
+  normalizeWorkerDiagnostic,
+  sanitizeWorkerDiagnostic,
+  type WorkerDiagnosticRedactionOptions,
+} from './channel-worker-diagnostics.js';
 import { channelSelectionNames } from './channel-selection.js';
 import {
   resolveChannelWorkspaceGroups,
@@ -173,6 +187,107 @@ const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DAEMON_LOG_FORCED_FLUSH_BUDGET_MS = 250;
+
+function channelDeliveryPublicError(
+  code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+): string {
+  switch (code) {
+    case 'channel_worker_unavailable':
+      return 'Channel worker is unavailable.';
+    case 'channel_delivery_timeout':
+      return 'Channel delivery timed out.';
+    case 'channel_delivery_invalid':
+      return 'Channel delivery is invalid.';
+    case 'channel_delivery_rejected':
+      return 'Channel delivery was rejected.';
+    case 'channel_delivery_queue_full':
+      return 'Channel delivery queue is full.';
+    case 'channel_delivery_failed':
+      return 'Channel delivery failed.';
+    default:
+      return 'Channel delivery failed.';
+  }
+}
+
+export function createBoundChannelDeliveryHandler(
+  boundWorkspace: string,
+  getManager: () => ChannelWorkerManager | undefined,
+  authorizations: ChannelDeliveryAuthorizationStore,
+  daemonLog?: Pick<DaemonLogger, 'warn'>,
+  diagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: {},
+  },
+): ChannelDeliveryHandler {
+  return async (info): Promise<ChannelDeliveryHostResult> => {
+    const failed = (
+      code: Extract<ChannelDeliveryHostResult, { status: 'failed' }>['code'],
+      error: string,
+      diagnostic?: unknown,
+    ): ChannelDeliveryHostResult => {
+      writeDaemonLifecycleBestEffort(() => {
+        if (!daemonLog) return;
+        let diagnosticText: string | undefined;
+        if (diagnostic !== undefined) {
+          const message =
+            diagnostic instanceof Error
+              ? diagnostic.message
+              : String(diagnostic);
+          const sanitized = sanitizeWorkerDiagnostic(
+            message,
+            512,
+            diagnosticRedaction,
+          );
+          const targetId = normalizeWorkerDiagnostic(info.target.id);
+          diagnosticText = sanitizeLogText(
+            targetId.length > 0
+              ? sanitized.replaceAll(targetId, '<redacted>')
+              : sanitized,
+            512,
+          );
+        }
+        daemonLog.warn('channel delivery failed', {
+          sessionId: info.sessionId,
+          deliveryId: info.deliveryId,
+          source: info.source,
+          channelName: info.target.channelName,
+          code,
+          ...(diagnosticText ? { diagnostic: diagnosticText } : {}),
+        });
+      });
+      return { status: 'failed', code, error };
+    };
+    if (!authorizations.consume(boundWorkspace, info)) {
+      return failed(
+        'channel_delivery_invalid',
+        'Channel delivery is not authorized.',
+      );
+    }
+    if (info.text.trim().length === 0) {
+      return { status: 'skipped' };
+    }
+    const manager = getManager();
+    if (!manager) {
+      return failed(
+        'channel_worker_unavailable',
+        'Channel worker is not running.',
+      );
+    }
+    try {
+      await manager.deliverChannelMessage(boundWorkspace, {
+        deliveryId: info.deliveryId,
+        channelName: info.target.channelName,
+        target: { type: info.target.type, id: info.target.id },
+        text: info.text,
+      });
+      return { status: 'delivered' };
+    } catch (err) {
+      if (isChannelDeliveryError(err)) {
+        return failed(err.code, channelDeliveryPublicError(err.code), err);
+      }
+      return failed('channel_delivery_failed', 'Channel delivery failed.', err);
+    }
+  };
+}
 
 async function flushDaemonLogBounded(
   daemonLog: DaemonLogger,
@@ -1815,6 +1930,7 @@ async function runQwenServeImpl(
   loggerLifecycle: DaemonLoggerLifecycleCallbacks,
 ): Promise<RunHandle> {
   const runStartedAt = performance.now();
+  const channelDeliveryAuthorizations = new ChannelDeliveryAuthorizationStore();
   const shouldPreheat = !deps.bridge && shouldPreheatBridge(deps);
   const startup: DaemonStartupSnapshot = {
     processStartedAt: new Date(
@@ -1844,6 +1960,10 @@ async function runQwenServeImpl(
     typeof rawToken === 'string' && rawToken.trim().length > 0
       ? rawToken.trim()
       : undefined;
+  const channelDeliveryDiagnosticRedaction: WorkerDiagnosticRedactionOptions = {
+    workerEnv: daemonRuntimeBaseEnv,
+    ...(token ? { daemonToken: token } : {}),
+  };
   const sessionShellCommandEnabled =
     optsIn.enableSessionShell === true && token !== undefined;
   if (optsIn.enableSessionShell === true && token === undefined) {
@@ -3466,6 +3586,13 @@ async function runQwenServeImpl(
         // connection that hosts a named client MCP server (#5626).
         clientMcpSender: clientMcpSenderRegistry.lookup,
         onCreateSubSession: subSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          boundWorkspace,
+          () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
+          channelDeliveryDiagnosticRedaction,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
@@ -3826,6 +3953,13 @@ async function runQwenServeImpl(
       const secondaryBridge = runtime.createAcpSessionBridge({
         clientMcpSender: secondaryClientMcpSenderRegistry.lookup,
         onCreateSubSession: secondarySubSessionLauncher.launch,
+        onChannelDelivery: createBoundChannelDeliveryHandler(
+          workspaceInput.cwd,
+          () => channelWorkerManager,
+          channelDeliveryAuthorizations,
+          daemonLog,
+          channelDeliveryDiagnosticRedaction,
+        ),
         maxSessions: opts.maxSessions,
         freshSessionAdmission: totalSessionAdmission.admit,
         sessionLifecycle: (event) => {
@@ -4306,6 +4440,13 @@ async function runQwenServeImpl(
         wsBridge = runtime.createAcpSessionBridge({
           clientMcpSender: wsClientMcpRegistry.lookup,
           onCreateSubSession: wsSubSessionLauncher.launch,
+          onChannelDelivery: createBoundChannelDeliveryHandler(
+            cwd,
+            () => channelWorkerManager,
+            channelDeliveryAuthorizations,
+            daemonLog,
+            channelDeliveryDiagnosticRedaction,
+          ),
           maxSessions: opts.maxSessions,
           freshSessionAdmission: totalSessionAdmission.admit,
           sessionLifecycle: (event) => {
@@ -4923,6 +5064,19 @@ async function runQwenServeImpl(
         }
         return channelWorkerManager.enqueueWebhookTask(task);
       },
+      deliverChannelMessage: async (workspaceCwd, request) => {
+        if (!channelWorkerManager) {
+          throw new ChannelDeliveryError(
+            'channel_worker_unavailable',
+            'Channel worker is not running.',
+          );
+        }
+        return channelWorkerManager.deliverChannelMessage(
+          workspaceCwd,
+          request,
+        );
+      },
+      channelDeliveryAuthorizations,
       reloadChannelWorker,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
