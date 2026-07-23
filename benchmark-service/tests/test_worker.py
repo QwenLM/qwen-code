@@ -176,7 +176,7 @@ def test_worker_publishes_terminal_failure_without_score(tmp_path: Path, monkeyp
     run, _ = store.create_run(request, suites[request.suite], "worker-failure")
     published: list[tuple[dict, dict]] = []
     monkeypatch.setattr(
-        "qwen_benchmark.worker.publish_check",
+        "qwen_benchmark.worker.publish_release",
         lambda settings, current, summary: published.append((current, summary)),
     )
 

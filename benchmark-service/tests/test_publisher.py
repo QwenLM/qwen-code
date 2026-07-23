@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 
 from qwen_benchmark.config import Settings
-from qwen_benchmark.publisher import publish_check
+from qwen_benchmark.publisher import publish_release
 
 
 def test_publish_updates_the_triggering_release(monkeypatch, tmp_path: Path) -> None:
@@ -30,15 +30,10 @@ def test_publish_updates_the_triggering_release(monkeypatch, tmp_path: Path) -> 
                 json={"body": "Original notes"},
                 request=httpx.Request(method.upper(), url),
             )
-        return httpx.Response(
-            201 if method == "post" else 200,
-            json={},
-            request=httpx.Request(method.upper(), url),
-        )
+        return httpx.Response(200, json={}, request=httpx.Request(method.upper(), url))
 
     monkeypatch.setattr("qwen_benchmark.publisher.httpx.get", lambda url, **kwargs: response("get", url, **kwargs))
     monkeypatch.setattr("qwen_benchmark.publisher.httpx.patch", lambda url, **kwargs: response("patch", url, **kwargs))
-    monkeypatch.setattr("qwen_benchmark.publisher.httpx.post", lambda url, **kwargs: response("post", url, **kwargs))
     run = {
         "run_id": "qwen-bench-test",
         "repository": "QwenLM/qwen-code",
@@ -63,7 +58,7 @@ def test_publish_updates_the_triggering_release(monkeypatch, tmp_path: Path) -> 
         "error_instances": 0,
     }
 
-    assert publish_check(settings, run, summary) == "PUBLISHED"
+    assert publish_release(settings, run, summary) == "PUBLISHED"
     assert calls[0] == ("get", "https://api.github.com/repos/QwenLM/qwen-code/releases/123", None)
     assert calls[1][0] == "patch"
     assert "Qwen Code benchmark" in calls[1][2]["body"]
@@ -71,8 +66,7 @@ def test_publish_updates_the_triggering_release(monkeypatch, tmp_path: Path) -> 
     assert "Qwen Code agent (Harbor)" in calls[1][2]["body"]
     assert "1 / 1 completed" in calls[1][2]["body"]
     assert "**100.00%**" in calls[1][2]["body"]
-    assert calls[2][0] == "post"
-    assert calls[2][2]["output"]["title"] == "100.00% — 1 / 1 resolved"
+    assert len(calls) == 2
 
 
 def test_failed_run_is_published_without_a_score(monkeypatch, tmp_path: Path) -> None:
@@ -91,14 +85,13 @@ def test_failed_run_is_published_without_a_score(monkeypatch, tmp_path: Path) ->
     def response(method: str, url: str, **kwargs):
         calls.append((method, kwargs.get("json")))
         return httpx.Response(
-            200 if method != "post" else 201,
+            200,
             json={"body": "Original notes"} if method == "get" else {},
             request=httpx.Request(method.upper(), url),
         )
 
     monkeypatch.setattr("qwen_benchmark.publisher.httpx.get", lambda url, **kwargs: response("get", url, **kwargs))
     monkeypatch.setattr("qwen_benchmark.publisher.httpx.patch", lambda url, **kwargs: response("patch", url, **kwargs))
-    monkeypatch.setattr("qwen_benchmark.publisher.httpx.post", lambda url, **kwargs: response("post", url, **kwargs))
     run = {
         "run_id": "qwen-bench-failed",
         "repository": "QwenLM/qwen-code",
@@ -123,9 +116,8 @@ def test_failed_run_is_published_without_a_score(monkeypatch, tmp_path: Path) ->
         "error_instances": 1,
     }
 
-    assert publish_check(settings, run, summary) == "PUBLISHED"
+    assert publish_release(settings, run, summary) == "PUBLISHED"
     assert "not scored" in calls[1][1]["body"]
     assert "Score | Not published" in calls[1][1]["body"]
     assert "%" not in calls[1][1]["body"]
-    assert calls[2][1]["conclusion"] == "failure"
-    assert calls[2][1]["output"]["title"] == "Benchmark failed (not scored)"
+    assert len(calls) == 2

@@ -10,7 +10,7 @@ GitHub Release / workflow_dispatch
   -> SQLite
   -> systemd worker
   -> Harbor + Docker + Qwen Code Agent + verifier
-  -> GitHub Release / Check Run
+  -> GitHub Release benchmark summary
 ```
 
 本仓库只包含 Benchmark submit CLI、worker、Harbor 适配、状态存储、部署模板和测试，不包含 Qwen Code 源码、模型密钥、GitHub PAT、运行数据库、trajectory 或历史评测产物。
@@ -90,7 +90,6 @@ harbor run
 终态回写包括：
 
 - 更新触发该任务的 GitHub Release。
-- 为对应 Qwen Code commit 创建 Check Run。
 
 成功结果公开：
 
@@ -374,14 +373,13 @@ sudo visudo -cf /etc/sudoers.d/qwen-benchmark-dispatch
 
 | 配置 | 说明 |
 | --- | --- |
-| `BENCHMARK_GITHUB_TOKEN` | Release/Check API 写权限 |
+| `BENCHMARK_GITHUB_TOKEN` | GitHub Release API 写权限 |
 | `OPENAI_API_KEY` | 模型 API key |
 
 GitHub token 最小权限：
 
 - Repository：仅 `QwenLM/qwen-code`
 - Contents：read/write，用于读取和更新 Release
-- Checks：write，用于创建 Check Run
 
 正式环境优先使用 GitHub App installation token，不长期使用个人 PAT。
 
@@ -505,7 +503,7 @@ Harbor 原始任务目录：
 - 结果：1 resolved、0 unresolved、0 infra error
 - Verifier reward：1.0
 - 耗时：约 6 分 27 秒
-- 测试：12 passed
+- 测试：13 passed
 
 该结果仅证明单 case POC 链路和执行器可用，不能代表完整 SWE-bench Verified 分数。
 

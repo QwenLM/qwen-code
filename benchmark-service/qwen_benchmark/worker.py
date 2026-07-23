@@ -9,7 +9,7 @@ from typing import Any
 from .artifacts import Artifacts
 from .config import Settings, Suite, load_suites
 from .harbor_runner import HarborRunner, qwen_version_from_ref
-from .publisher import publish_check
+from .publisher import publish_release
 from .runner import AgentError, InfrastructureError, RunResult, SwebenchRunner
 from .store import Store
 
@@ -253,7 +253,7 @@ class Worker:
         if not current:
             return
         try:
-            publish_check(self.settings, current, summary)
+            publish_release(self.settings, current, summary)
         except Exception as error:
             LOGGER.exception("result publishing failed for %s", run_id)
             artifacts.write_json("publisher-error.json", {"error": str(error)})

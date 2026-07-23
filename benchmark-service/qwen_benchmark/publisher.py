@@ -8,39 +8,22 @@ import httpx
 from .config import Settings
 
 
-def publish_check(
+def publish_release(
     settings: Settings,
     run: dict[str, Any],
     summary: dict[str, Any],
 ) -> str:
-    if not settings.github_token or not run.get("qwen_commit"):
+    if not settings.github_token:
         return "SKIPPED"
     headers = {
         "Accept": "application/vnd.github+json",
         "Authorization": f"Bearer {settings.github_token}",
         "X-GitHub-Api-Version": "2022-11-28",
     }
-    succeeded = run["status"] == "SUCCEEDED"
-    conclusion = "success" if succeeded else "failure"
     release_id = json.loads(run["request_json"]).get("release_id")
-    if release_id:
-        _update_release_body(settings, run, summary, headers, int(release_id))
-    response = httpx.post(
-        f"https://api.github.com/repos/{run['repository']}/check-runs",
-        headers=headers,
-        json={
-            "name": f"Qwen Code Benchmark / {run['suite']}",
-            "head_sha": run["qwen_commit"],
-            "status": "completed",
-            "conclusion": conclusion,
-            "output": {
-                "title": _check_title(summary, succeeded),
-                "summary": _check_summary(summary, succeeded),
-            },
-        },
-        timeout=30,
-    )
-    response.raise_for_status()
+    if not release_id:
+        return "SKIPPED"
+    _update_release_body(settings, run, summary, headers, int(release_id))
     return "PUBLISHED"
 
 
@@ -64,34 +47,6 @@ def _update_release_body(
         body = existing_body.rstrip() + "\n\n" + section
     patch = httpx.patch(url, headers=headers, json={"body": body}, timeout=30)
     patch.raise_for_status()
-
-
-def _check_title(summary: dict[str, Any], succeeded: bool) -> str:
-    if not succeeded:
-        return "Benchmark failed (not scored)"
-    return (
-        f"{_score(summary):.2f}% — "
-        f"{summary['resolved_instances']} / {summary['expected_instances']} resolved"
-    )
-
-
-def _check_summary(summary: dict[str, Any], succeeded: bool) -> str:
-    if not succeeded:
-        return (
-            f"Dataset: `{summary['dataset']}` at `{summary['dataset_revision']}`.\n\n"
-            f"Execution: {summary['completed_instances']} / "
-            f"{summary['expected_instances']} cases completed.\n\n"
-            f"Run `{summary['run_id']}` failed before a valid score was available."
-        )
-    return (
-        f"Dataset: `{summary['dataset']}` at `{summary['dataset_revision']}`.\n\n"
-        f"Execution: {summary['completed_instances']} / "
-        f"{summary['expected_instances']} cases completed; "
-        f"{summary['resolved_instances']} resolved, "
-        f"{summary['unresolved_instances']} unresolved, and "
-        f"{summary['error_instances']} infrastructure errors.\n\n"
-        f"Score: **{_score(summary):.2f}%**. Run `{summary['run_id']}`."
-    )
 
 
 def _release_section(marker: str, summary: dict[str, Any], succeeded: bool) -> str:
