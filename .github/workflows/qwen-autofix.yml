@@ -3381,14 +3381,15 @@ jobs:
               MARK_ROUND="$(( ROUND + 1 ))"
               MARK_TS='9999-12-31T23:59:59Z'
               if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
-                HEADLINE="🤖 AutoFix could not start — a setup step (installing/building the base) failed before the agent ran, so no fix was attempted. This is normally a transient infra issue or a broken base build, not this PR. It will retry on the next scan."
+                HEADLINE="🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran, so no fix was attempted. This is normally a transient infra issue, a broken base build, or a cancelled run — not this PR. It will retry on the next scan."
               else
                 MARK_ROUND="${MAX_ROUNDS}"
-                HEADLINE="🤖 AutoFix could not start for ${MAX_ROUNDS} rounds — a setup step (base install/build) keeps failing before the agent runs. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
+                HEADLINE="🤖 AutoFix could not start — reached the round cap (${MAX_ROUNDS}) because a setup step (base install/build) kept failing before the agent ran. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
               fi
             else
               # Prepare RAN (outcome success/failure) but produced no feedback to
-              # read — a genuine agent crash or timeout before reading. Mark
+              # read — prepare itself crashed or timed out before emitting a
+              # verdict. Mark
               # terminal so the scan skips (it can't advance the watermark
               # without a read); do NOT imply MAX_ROUNDS attempts were made when
               # zero rounds happened. The headline states the real recovery
@@ -3444,7 +3445,7 @@ jobs:
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
-                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"AutoFix could not start for"* ]]; then
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* ]]; then
                   CONSEC_FAIL=1
                 else
                   CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))

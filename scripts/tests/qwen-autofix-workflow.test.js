@@ -4182,9 +4182,9 @@ describe('qwen-autofix workflow', () => {
     const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
     const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
     const INFRA_FAIL =
-      '🤖 AutoFix could not start — a setup step (installing/building the base) failed before the agent ran.';
+      '🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran.';
     const INFRA_FAIL_CAP =
-      '🤖 AutoFix could not start for 100 rounds — a setup step (base install/build) keeps failing.';
+      '🤖 AutoFix could not start — reached the round cap (100) because a setup step (base install/build) kept failing.';
     const CRASH_TERMINAL =
       '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
 
@@ -4343,17 +4343,16 @@ describe('qwen-autofix workflow', () => {
     expect(infraRetryEmit).toBeTruthy();
     expect(infraRetryEmit[1]).toContain('AutoFix could not start —');
     const infraCapEmit = reviewAddressReportStep.match(
-      /HEADLINE="(🤖 AutoFix could not start for [^"]*)"/,
+      /HEADLINE="(🤖 AutoFix could not start — reached the round cap[^"]*)"/,
     );
     expect(infraCapEmit).toBeTruthy();
-    expect(infraCapEmit[1]).toContain('AutoFix could not start for');
+    expect(infraCapEmit[1]).toContain('AutoFix could not start —');
     // The crash headline must NOT match the infra reset patterns.
     const crashEmit = reviewAddressReportStep.match(
       /HEADLINE="(🤖 AutoFix could not start evaluation[^"]*)"/,
     );
     expect(crashEmit).toBeTruthy();
     expect(crashEmit[1]).not.toContain('AutoFix could not start —');
-    expect(crashEmit[1]).not.toContain('AutoFix could not start for');
     // Window filtering: pre-re-arm failures don't count after a re-arm.
     expect(
       run(
