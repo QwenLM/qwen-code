@@ -21,7 +21,6 @@ import {
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import nodeModule from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
@@ -411,6 +410,7 @@ describe('bootstrap import boundaries', () => {
       tempDir,
       'unsupported-cli-entry.mjs',
     );
+    const probeEntryPath = path.join(tempDir, 'compile-cache-probe.mjs');
     try {
       copyFileSync('../../scripts/cli-entry.js', entryPath);
       writeFileSync(
@@ -419,6 +419,17 @@ describe('bootstrap import boundaries', () => {
           "const { default: module } = await import('node:module');",
           'const module = {};',
         ),
+      );
+      writeFileSync(
+        probeEntryPath,
+        [
+          "import module from 'node:module';",
+          'const result = module.enableCompileCache?.();',
+          'process.stdout.write(JSON.stringify(Boolean(',
+          '  result?.status === module.constants?.compileCacheStatus?.ENABLED &&',
+          '    result?.directory,',
+          ')));',
+        ].join('\n'),
       );
       writeFileSync(
         path.join(tempDir, 'cli.js'),
@@ -439,7 +450,13 @@ describe('bootstrap import boundaries', () => {
           }),
         );
 
-      if (typeof Reflect.get(nodeModule, 'enableCompileCache') === 'function') {
+      const canEnableCompileCache = JSON.parse(
+        execFileSync(process.execPath, [probeEntryPath], {
+          encoding: 'utf8',
+          env: baseEnv,
+        }),
+      );
+      if (canEnableCompileCache) {
         expect(runEntry(baseEnv).cacheDir).toBeTruthy();
       } else {
         expect(runEntry(baseEnv)).toEqual({});
