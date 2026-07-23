@@ -5,6 +5,7 @@
 # core-review-router workflow, which assigns reviewers based
 # on diff size and affected sub-modules instead of requesting
 # all four maintainers on every PR.
+# Maintainer PRs to core are not auto-assigned; request reviewers manually.
 
 # --- CODEOWNERS file itself ---
 /.github/CODEOWNERS    @pomelo-nwu
