@@ -43,6 +43,19 @@ describe('session tool filtering helpers', () => {
     expect(names.includes('send_developer_feedback')).toBe(false);
   });
 
+  it('json schema exposes list_sessions pagination controls as integers', () => {
+    const defs = getToolDefsAsJsonSchema({ includeDeveloperFeedback: false });
+    const listSessions = defs.find(d => d.name === 'list_sessions');
+    const properties = (
+      listSessions?.inputSchema as
+        | { properties?: Record<string, { type?: string }> }
+        | undefined
+    )?.properties;
+
+    expect(properties?.limit?.type).toBe('integer');
+    expect(properties?.offset?.type).toBe('integer');
+  });
+
   it('all canonical session tools declare safeMode metadata', () => {
     for (const def of SESSION_TOOL_DEFS) {
       expect(def.safeMode === 'allow' || def.safeMode === 'block').toBe(true);
