@@ -131,13 +131,16 @@ env:
   NON_BLOCKING_CHECKS: '["review-pr"]'
   # Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the
   # code — a self-hosted runner losing the server, the disk filling, a runner
-  # shutdown. Such a check is red for a reason unrelated to the PR and clears on
-  # a re-run (observed: #7490's E2E "runner lost communication" → green on the
-  # rerun). The scan auto-reruns those failed jobs ONCE, guarded by run_attempt
-  # so a persistent infra problem cannot loop. Deliberately conservative — only
-  # unambiguous machine failures, never a test-level timeout, which could be a
-  # real regression. Case-insensitive, matched against the check's annotations.
-  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)'
+  # shutdown, or a git fetch/clone dying mid-transfer. Such a check is red for a
+  # reason unrelated to the PR and clears on a re-run (observed: #7490's E2E
+  # "runner lost communication"; #6506's checkout "RPC failed; curl 92" /
+  # "fetch-pack: invalid index-pack output" — both green on the rerun). The scan
+  # auto-reruns those failed jobs ONCE, guarded by run_attempt so a persistent
+  # infra problem cannot loop. Deliberately conservative — only unambiguous
+  # machine/transport failures, never a bare test-level timeout, which could be
+  # a real regression (a co-present timeout does not block a match — one
+  # matching line classifies the run). Case-insensitive, vs the annotations.
+  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'

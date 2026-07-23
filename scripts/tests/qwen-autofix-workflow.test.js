@@ -460,7 +460,7 @@ describe('qwen-autofix workflow', () => {
             PR_META: JSON.stringify({ headRefOid: 'headSHA' }),
             CHECKS_JSON: JSON.stringify(checks),
             INFRA_FAILURE_SIGNATURES:
-              'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)',
+              'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed',
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -527,12 +527,36 @@ describe('qwen-autofix workflow', () => {
       'The runner was terminated',
       'The runner has been lost',
       'The runner has been terminated',
+      'fatal: fetch-pack: invalid index-pack output',
+      'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
     ]) {
       expect(run({ checks: [FAIL], annotations: msg })).toEqual({
         reran: true,
         continued: true,
       });
     }
+    // #6506: a git fetch died mid-checkout, then hung the job into the 20m
+    // limit. The bare timeout line is deliberately NOT a signature (it can be a
+    // real regression), but the transport death IS — and one matching line
+    // classifies the whole run, so the co-present timeout does not block it.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: [
+          'The job has exceeded the maximum execution time of 20m0s',
+          'fatal: fetch-pack: invalid index-pack output',
+          'error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)',
+        ].join('\n'),
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // A BARE job timeout with no transport/infra signature is NOT rerun — it
+    // can be a real regression (a test hanging on the PR's own code).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'The job has exceeded the maximum execution time of 20m0s',
+      }),
+    ).toEqual({ reran: false, continued: false });
     // Self-trigger guard: a "Qwen Autofix" workflow's own failed check must NOT
     // be rerun (prevents the autofix from re-triggering itself), UNLESS the
     // check is a review-address job (the exception carved out in the jq filter).
@@ -556,7 +580,9 @@ describe('qwen-autofix workflow', () => {
         annotations: 'No space left on device',
       }),
     ).toEqual({ reran: true, continued: true });
-  });
+    // Spawn-heavy: each run() forks bash + a stubbed gh. The default 5s per-test
+    // budget is tight for this many cases, so give it a comfortable margin.
+  }, 20000);
 
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
