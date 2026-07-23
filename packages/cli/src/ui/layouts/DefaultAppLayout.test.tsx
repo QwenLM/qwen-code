@@ -407,7 +407,7 @@ describe('DefaultAppLayout', () => {
       expect(mockRemoveSession).not.toHaveBeenCalled();
     });
 
-    it('deletes and refreshes a non-current session', () => {
+    it('deletes and refreshes a non-current session', async () => {
       mockRemoveSession.mockResolvedValue(undefined);
       renderFleet();
       let result = false;
@@ -416,6 +416,9 @@ describe('DefaultAppLayout', () => {
       });
       expect(result).toBe(true);
       expect(mockRemoveSession).toHaveBeenCalledWith('other-session');
+      await vi.waitFor(() => {
+        expect(fleetSessionsState.refresh).toHaveBeenCalled();
+      });
     });
 
     it('dispatches the typed prompt and closes', () => {

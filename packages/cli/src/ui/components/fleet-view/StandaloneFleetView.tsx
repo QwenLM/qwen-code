@@ -87,7 +87,8 @@ function StandaloneFleetViewScreen({
           .then(() => {
             void fetchSessions();
           })
-          .catch(() => {
+          .catch((err) => {
+            setError(err instanceof Error ? err.message : 'Deletion failed');
             void fetchSessions();
           });
         return true;

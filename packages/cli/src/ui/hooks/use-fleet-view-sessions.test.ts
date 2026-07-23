@@ -180,6 +180,7 @@ describe('useFleetViewSessions', () => {
 
     expect(result.current.loading).toBe(false);
     expect(result.current.sessions).toHaveLength(1);
+    expect(result.current.error).toBeNull();
   });
 
   it('refresh triggers a new fetch', async () => {

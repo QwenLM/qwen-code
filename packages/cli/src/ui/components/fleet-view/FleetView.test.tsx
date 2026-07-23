@@ -156,6 +156,14 @@ describe('<FleetView />', () => {
     expect(props.onAttach).toHaveBeenCalledWith('sess-1');
   });
 
+  it('attaches on Enter in peek mode', () => {
+    const props = makeProps();
+    renderFleetView(props);
+    pressKey({ name: 'space' });
+    pressKey({ name: 'return' });
+    expect(props.onAttach).toHaveBeenCalledWith('sess-1');
+  });
+
   it('opens peek mode on space', () => {
     const props = makeProps();
     const { lastFrame } = renderFleetView(props);
@@ -367,6 +375,31 @@ describe('<FleetView />', () => {
       expect(onRefresh).toHaveBeenCalled();
       expect(lastFrame()!).toContain('Renamed to "Fix the login bugnew"');
     });
+
+    it('shows failure status and skips refresh when rename returns false', async () => {
+      const renameSession = vi.fn().mockResolvedValue(false);
+      const onRefresh = vi.fn();
+      const props = makeProps({
+        sessionService: { renameSession } as never,
+        onRefresh,
+      });
+      const { lastFrame } = renderFleetView(props);
+
+      pressKey({ name: 'r', ctrl: true });
+      pressKey({ name: 'n', sequence: 'n' });
+      pressKey({ name: 'return' });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(renameSession).toHaveBeenCalledWith(
+        'sess-1',
+        'Fix the login bugn',
+      );
+      expect(onRefresh).not.toHaveBeenCalled();
+      expect(lastFrame()!).toContain('Rename failed');
+    });
   });
 
   it('cycles group mode on Ctrl+S', () => {
@@ -473,6 +506,23 @@ describe('<FleetView />', () => {
 
       expect(lastFrame()!).toContain('Cannot delete the active session');
       expect(lastFrame()!).toContain('space to close');
+    });
+  });
+
+  describe('peek-mode delete success', () => {
+    it('exits peek mode after successful deletion', () => {
+      const props = makeProps({ onDelete: vi.fn(() => true) });
+      const { lastFrame } = renderFleetView(props);
+
+      pressKey({ name: 'space' });
+      expect(lastFrame()!).toContain('space to close');
+
+      pressKey({ name: 'x', ctrl: true });
+      pressKey({ name: 'x', ctrl: true });
+
+      expect(props.onDelete).toHaveBeenCalledWith('sess-1');
+      expect(lastFrame()!).not.toContain('space to close');
+      expect(lastFrame()!).toContain('Session deleted');
     });
   });
 });
