@@ -34,7 +34,7 @@ export interface PolicyRule {
    * Set ONLY when `match.tool` was written as a tool NAME (e.g.
    * `run_shell_command`) and normalized at load to its ACP kind (e.g.
    * `execute`). Absent when `match.tool` was already a kind, a wildcard, or
-   * omitted. Lets `policy lint` (Task 6) warn precisely about ALLOW rules
+   * omitted. Lets `policy lint` warn precisely about ALLOW rules
    * whose tool-name alias widens beyond what was written, without
    * substring-searching the source text.
    */
@@ -75,7 +75,7 @@ export const POLICY_KINDS = [
  *
  * The mapping is LOSSY and widening: `write_file` and `edit` share `edit`, so a
  * rule naming one also matches the other. For `deny` that is safe; for `allow`
- * it grants more than written — `policy lint` warns (Task 6).
+ * it grants more than written — `policy lint` warns about it.
  */
 export const TOOL_ALIAS_TO_KIND: Record<string, string> = {
   read_file: 'read',
@@ -233,8 +233,8 @@ export function loadPolicy(text: string): Policy {
       action: raw['action'],
     };
     // Remember that this rule was WRITTEN as a tool-name alias (not a kind),
-    // so lint (Task 6) can warn precisely instead of substring-searching the
-    // source text.
+    // so lint can warn precisely instead of substring-searching the source
+    // text.
     if (
       originalTool !== undefined &&
       normalizedTool !== undefined &&
@@ -462,7 +462,7 @@ export function policyAdvisories(policy: Policy): string[] {
   for (const rule of policy.rules) {
     if (rule.action !== 'allow') continue;
     // `aliasedTool` is set by the loader ONLY when this rule was written as a
-    // tool name (Task 5) — precise, unlike scanning the raw file text.
+    // tool name — precise, unlike scanning the raw file text.
     const written = rule.aliasedTool;
     if (written === undefined) continue;
     const kind = rule.match.tool;

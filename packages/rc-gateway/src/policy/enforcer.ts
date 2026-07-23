@@ -33,7 +33,10 @@ function readString(
  * - **Fail-safe:** an `allow`/`deny` with no usable `requestId` (or, for allow,
  *   no `approveOptionId`) → DO NOT vote; return false. Never fabricate an id.
  * - **Never throws:** every daemon call is wrapped; a thrown/false vote audits
- *   `voted:false` and returns false (fall through to push).
+ *   `voted:false` and returns false (fall through to push). Frame extraction
+ *   and policy evaluation (`frameToContext`/`evaluate`) are ALSO wrapped, so
+ *   an unexpected throw there takes the same no-vote path as a `prompt`
+ *   decision, rather than escaping this method.
  * - **Audit hygiene:** `policy_decision` detail carries only
  *   `{requestId, action, ruleId?, voted, decisionSource}` — NEVER the tool
  *   args/paths/prompt. `decisionSource` is `'policy'|'default'` (a fixed token).
@@ -106,10 +109,28 @@ export class PolicyEnforcer {
 
     // projectRoot MUST come from the daemon/config resolver (this.projectRootFn),
     // NEVER from the frame's rawInput — see the constructor doc above.
-    const ctx = frameToContext(event.data, {
-      projectRoot: this.projectRootFn(),
-    });
-    const d = evaluate(this.policy, ctx, now, oracle);
+    let d: ReturnType<typeof evaluate>;
+    try {
+      const ctx = frameToContext(event.data, {
+        projectRoot: this.projectRootFn(),
+      });
+      d = evaluate(this.policy, ctx, now, oracle);
+    } catch {
+      // NEVER THROWS (class docstring): an unexpected extraction/evaluation
+      // failure must not crash the caller. Fall through to the same no-vote
+      // path a `prompt` decision takes — never vote, audit it, return false.
+      void this.audit?.record({
+        action: 'policy_decision',
+        target: sessionId,
+        detail: {
+          requestId,
+          action: 'prompt',
+          voted: false,
+          decisionSource: 'default',
+        },
+      });
+      return false;
+    }
 
     if (d.action === 'allow') {
       if (requestId && approveOptionId) {

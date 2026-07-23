@@ -262,7 +262,11 @@ projectRoot)`. A policy author writing `**/.env*` means "anywhere"
   | `write_file`, `edit`                               | `edit`    |
   | `run_shell_command`                                | `execute` |
   | `web_fetch`                                        | `fetch`   |
-  | `agent`, `task`, `lsp`, MCP tools                  | `other`   |
+  | `agent`, `task`, `lsp`                             | `other`   |
+
+  MCP tool names (`mcp__server__tool`) have no ACP-kind equivalent and are
+  NOT in this table — a rule naming one is a load-time `PolicyError` (see
+  "Error handling" below), not a silent `other` mapping.
 
 - `match.operation` added to the schema (`read | write | execute`, string
   or array), validated fail-closed like every other field.

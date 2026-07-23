@@ -59,7 +59,7 @@ Example startup output:
 ```
 qwen-rc: daemon started on loopback (127.0.0.1:xxxxx)
 qwen-rc: gateway listening on 0.0.0.0:<port> (tls: off)
-qwen-rc: pairing code written to /home/you/.config/qwen-rc/pairing-code (mode 0600)
+qwen-rc: pairing code written to /home/you/.qwen/rc/owner-bootstrap.code (mode 0600)
 ```
 
 Leave this process running for the rest of the walkthrough.
@@ -69,7 +69,7 @@ Leave this process running for the rest of the walkthrough.
 Read the pairing code from the path printed above:
 
 ```bash
-cat /home/you/.config/qwen-rc/pairing-code
+cat /home/you/.qwen/rc/owner-bootstrap.code
 ```
 
 Redeem it against the gateway:
@@ -262,26 +262,57 @@ rules:
     action: allow
 
   # pathGlob matches every path the call touches, INCLUDING paths a shell
-  # command reads or writes, so this also blocks `cat .env`.
+  # command reads or writes, so this also blocks `cat .env`. `priority: 10`
+  # is REQUIRED here: `tool` alone scores 100 in the specificity ordering,
+  # higher than pathGlob's 30, so without an explicit priority this rule
+  # would lose to allow-reads above and a `read_file` on `.env` would be
+  # auto-approved instead of denied (see "Rule ordering and the precedence
+  # trap" below).
   - id: deny-dotenv
     match: { pathGlob: ['**/.env*'] }
     action: deny
     reason: secrets
+    priority: 10
 
-  # operation narrows to read | write | execute.
+  # operation narrows to read | write | execute. Given the same priority,
+  # for the same reason as deny-dotenv above.
   - id: deny-writes-to-config
     match: { pathGlob: ['**/config/**'], operation: write }
     action: deny
+    priority: 10
 ```
 
-This example auto-approves read-only calls (kind `read`, e.g. `read_file`,
-`grep_search`), denies any call that touches a `.env*` file anywhere under
-the project root — including one reached through a shell command — and
-denies writes anywhere under `config/`. Anything no rule matches falls
-through to `defaults.action`, `prompt` here, so the operator is asked.
+This example auto-approves calls of kind `read` (e.g. `read_file`) —
+except where a higher-priority deny also matches: `read_file` on `.env`
+is denied by `deny-dotenv`, not auto-approved by `allow-reads`, because of
+the explicit `priority: 10` above. (`grep_search` is kind `search`, a
+different ACP kind from `read`, so `allow-reads` never applies to it
+regardless of priority.) The two deny rules block any call that touches a
+`.env*` file anywhere under the project root — including one reached
+through a shell command such as `cat .env` — and any write anywhere under
+`config/`. Anything no rule matches falls through to `defaults.action`,
+`prompt` here, so the operator is asked.
+
 `pathGlob` patterns are always anchored to the project root, regardless of
 the tool call's own working directory, and an unrecognized `tool` value (not
-a known kind or tool name) is a load error rather than a silent no-op.
+a known kind or tool name) is a load error rather than a silent no-op. A
+leading single `/` in a pattern (e.g. `/etc/**`) is still relative to the
+project root (`<projectRoot>/etc/**`), NOT the filesystem root; a
+filesystem-absolute pattern needs a doubled leading slash (`//etc/**`). A
+deny written for a real absolute path using a single `/` silently never
+fires — it matches a path under the project root that doesn't exist.
+
+**Rule ordering and the precedence trap.** Rules are evaluated in
+`(priority desc, specificity desc, index asc)` order, and the first
+matching rule wins. Specificity is a fixed score per match field present on
+a rule: `tool` scores 100 (or 90 for a tool glob like `read*`), while
+`pathGlob` and `operation` each score only 30. That means a broad `tool:`
+allow OUTRANKS a narrower `pathGlob`/`operation` deny by default, even
+though the deny reads as more specific — exactly the trap `deny-dotenv` and
+`deny-writes-to-config` above avoid by setting an explicit `priority`.
+Whenever a `deny` must beat a broader `allow`, give the `deny` a higher
+`priority` than the `allow`; do not rely on `pathGlob`/`operation` alone to
+out-rank a `tool:` rule.
 
 For a per-project override, create `<workspaceCwd>/.qwen/policy.yaml` in the
 directory the `qwen serve` daemon is running against. Its rules are
@@ -308,9 +339,15 @@ npx qwen-rc policy explain read --path=src/index.ts
 ```
 
 Pass the ACP kind (e.g. `read`, `execute`) as the argument, plus any of
-`--args=`, `--path=`, `--scope=`, `--tag=` to shape the simulated call. The
-output lists each rule in evaluation order as matched, skipped, or
-not-reached, followed by the resulting decision.
+`--args=`, `--path=`, `--operation=read|write|execute` (repeatable or
+comma-separated, e.g. `--operation=read,write`), `--scope=`, `--tag=`, or
+`--project-root=` to shape the simulated call. `--project-root` overrides
+the default `process.cwd()` anchor for both the simulated `pathGlob`
+matching and the workspace policy-file layer — pass it when running
+`explain` from somewhere other than the daemon's actual workspace, or the
+reported verdict can diverge from real enforcement. The output lists each
+rule in evaluation order as matched, skipped, or not-reached, followed by
+the resulting decision.
 
 The policy engine watches the file and hot-reloads it on change — no
 gateway restart needed after editing rules.

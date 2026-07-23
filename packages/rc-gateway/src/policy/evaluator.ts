@@ -24,7 +24,7 @@ export interface ToolCallContext {
    * by the explain CLI from `--path`. Absent → pathGlob rules cannot match.
    */
   paths?: string[];
-  /** Operations the call implies (see Task 4's `match.operation`). */
+  /** Operations the call implies, for `match.operation` narrowing. */
   operations?: string[];
   /** Anchors picomatch path matching; default to `process.cwd()` when absent. */
   projectRoot?: string;

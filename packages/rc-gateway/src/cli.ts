@@ -112,7 +112,11 @@ import {
   type Policy,
 } from './policy/loader.js';
 import { explainPolicy } from './policy/evaluator.js';
-import { parseExplainArgs, formatExplanation } from './policy/explain.js';
+import {
+  parseExplainArgs,
+  formatExplanation,
+  ExplainArgsError,
+} from './policy/explain.js';
 import { PolicyEnforcer } from './policy/enforcer.js';
 import {
   QuotaStore,
@@ -375,7 +379,17 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   try {
     workspaceCwd = (await handle.daemon.capabilities()).workspaceCwd;
   } catch {
-    // Daemon not reporting capabilities → no workspace override layer.
+    // Daemon not reporting capabilities → no workspace override layer. This
+    // also leaves `workspaceCwd` undefined for the policy enforcer below, so
+    // any `pathGlob` anchoring falls back to the GATEWAY PROCESS's own cwd
+    // (not the daemon's workspace) — every path-based policy rule may be
+    // silently inert until the daemon reports capabilities successfully.
+    // eslint-disable-next-line no-console
+    console.warn(
+      'qwen-rc: daemon capabilities() failed; policy pathGlob anchoring ' +
+        "falls back to the gateway's own process cwd, not the daemon's " +
+        'workspace — path-based policy rules may not match as expected',
+    );
   }
   const { matcher: routing, ruleCount: routingRuleCount } =
     await loadLayeredRoutingMatcher(
@@ -682,7 +696,7 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // eslint-disable-next-line no-console
   const warn = (msg: string) => console.warn(msg);
   const policy = await loadLayeredPolicy(userPolicyPath, workspaceCwd, warn);
-  // Advisory-only lint warnings (Task 6): alias-widened `allow` rules and the
+  // Advisory-only lint warnings: alias-widened `allow` rules and the
   // newly-live-allow-rules note from policyAdvisories. Emitted ONCE at boot on
   // the merged policy — never on hot-reload (cycle 45's reloader), which fires
   // on every file change and would spam the same notes repeatedly. Reuses the
@@ -1455,25 +1469,46 @@ if (process.argv[2] === 'serve') {
     process.exit(result.ok ? 0 : 1);
   });
 } else if (process.argv[2] === 'policy' && process.argv[3] === 'explain') {
-  // `qwen-rc policy explain <toolName> [--args=…] [--path=…] [--scope=…]
-  // [--tag=…]` — daemon-free dry-run of the layered policy (user
-  // ~/.qwen/rc/policy.yaml + <cwd>/.qwen/policy.yaml). Read-only INSPECTOR:
-  // exit 0 on success, 2 on a missing tool, 1 when the policy is malformed (it
-  // cannot be explained — surface the loader error rather than pretend). The
-  // bug-prone logic is in the pure, unit-tested parseExplainArgs/explainPolicy/
+  // `qwen-rc policy explain <toolName> [--args=…] [--path=…] [--operation=…]
+  // [--scope=…] [--tag=…] [--project-root=…]` — daemon-free dry-run of the
+  // layered policy (user ~/.qwen/rc/policy.yaml + <project-root>/.qwen/policy.yaml).
+  // Read-only INSPECTOR: exit 0 on success, 2 on a missing tool or an invalid
+  // `--operation` value, 1 when the policy is malformed (it cannot be
+  // explained — surface the loader error rather than pretend). The bug-prone
+  // logic is in the pure, unit-tested parseExplainArgs/explainPolicy/
   // formatExplanation; this is glue. No quota oracle (no live store) → a
   // maxPerWindow rule shows as prompt, as formatExplanation's caveat notes.
-  const { tool, ctx } = parseExplainArgs(process.argv.slice(4));
+  // `--operation` populates `ctx.operations` (without it, a rule using
+  // `match.operation` always reported `operation-mismatch` here, even when
+  // it would match in production). `--project-root` overrides the
+  // `process.cwd()` default for both the evaluator's anchor
+  // (`ctx.projectRoot`/`ctx.cwd`) and the workspace policy-file layer below —
+  // running `explain` from outside the daemon's actual workspace otherwise
+  // yields a verdict that can diverge from real enforcement.
+  let tool: string | undefined;
+  let ctx: ReturnType<typeof parseExplainArgs>['ctx'];
+  try {
+    ({ tool, ctx } = parseExplainArgs(process.argv.slice(4)));
+  } catch (err) {
+    if (err instanceof ExplainArgsError) {
+      // eslint-disable-next-line no-console
+      console.error(err.message);
+      process.exit(2);
+    }
+    throw err;
+  }
   if (!tool) {
     // eslint-disable-next-line no-console
     console.error(
-      'usage: qwen-rc policy explain <toolName> [--args=…] [--path=…] [--scope=…] [--tag=…]',
+      'usage: qwen-rc policy explain <toolName> [--args=…] [--path=…] ' +
+        '[--operation=read|write|execute] [--scope=…] [--tag=…] ' +
+        '[--project-root=…]',
     );
     process.exit(2);
   }
   loadLayeredPolicy(
     join(homedir(), '.qwen', 'rc', 'policy.yaml'),
-    process.cwd(),
+    ctx.projectRoot,
     // eslint-disable-next-line no-console
     (msg) => console.warn(msg),
   )

@@ -19,9 +19,11 @@ export type PolicyOperation = 'read' | 'write' | 'execute';
 /**
  * Parameter keys that carry a filesystem path across the tools behind each ACP
  * kind (`write_file`/`edit` use `file_path`, `notebook_edit` uses
- * `notebook_path`, etc.). `directory` and `cwd` are handled separately for
- * resolving the working directory context. Single source of truth so the
- * list cannot drift.
+ * `notebook_path`, etc.). NOTE: `cwd` is a path candidate here (a call whose
+ * own `rawInput.cwd` names a target counts it), AND it is separately read as
+ * `rawInput.directory`/`rawInput.cwd` below to resolve the working-directory
+ * context — the two uses are not mutually exclusive. Single source of truth
+ * so the list cannot drift.
  */
 export const PATH_PARAM_KEYS = [
   'file_path',
@@ -39,7 +41,7 @@ export interface FrameContext {
   tool: string;
   /** The REAL arguments (`toolCall.rawInput`), never the whole toolCall. */
   args: unknown;
-  /** Every path the call touches (shell-derived paths added in Task 2). */
+  /** Every path the call touches, including shell-derived paths. */
   paths: string[];
   /** Operations the call implies, for `match.operation`. */
   operations: PolicyOperation[];
@@ -64,7 +66,7 @@ function asString(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined;
 }
 
-/** Operations implied by an ACP kind alone (shell adds more in Task 2). */
+/** Operations implied by an ACP kind alone (a shell command can add more). */
 function operationsForKind(kind: string): PolicyOperation[] {
   switch (kind) {
     case 'read':

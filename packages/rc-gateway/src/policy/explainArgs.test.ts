@@ -5,7 +5,11 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { parseExplainArgs, formatExplanation } from './explain.js';
+import {
+  parseExplainArgs,
+  formatExplanation,
+  ExplainArgsError,
+} from './explain.js';
 import { explainPolicy } from './evaluator.js';
 import type { Policy } from './loader.js';
 
@@ -86,6 +90,51 @@ describe('parseExplainArgs', () => {
   it('--path populates ctx.paths for pathGlob rule evaluation', () => {
     const { ctx } = parseExplainArgs(['edit', '--path=/proj/.env']);
     expect(ctx.paths).toEqual(['/proj/.env']);
+    expect(ctx.projectRoot).toBe(process.cwd());
+    expect(ctx.cwd).toBe(process.cwd());
+  });
+
+  it('--operation=write populates ctx.operations', () => {
+    const { ctx } = parseExplainArgs(['edit', '--operation=write']);
+    expect(ctx.operations).toEqual(['write']);
+  });
+
+  it('--operation is comma-separated', () => {
+    const { ctx } = parseExplainArgs(['edit', '--operation=read,write']);
+    expect(ctx.operations).toEqual(['read', 'write']);
+  });
+
+  it('--operation is repeatable', () => {
+    const { ctx } = parseExplainArgs([
+      'edit',
+      '--operation=read',
+      '--operation=write',
+    ]);
+    expect(ctx.operations).toEqual(['read', 'write']);
+  });
+
+  it('an invalid --operation value is rejected', () => {
+    expect(() => parseExplainArgs(['edit', '--operation=delete'])).toThrow(
+      ExplainArgsError,
+    );
+    expect(() => parseExplainArgs(['edit', '--operation=delete'])).toThrow(
+      /invalid --operation value 'delete'/,
+    );
+  });
+
+  it('no --operation flag leaves ctx.operations unset', () => {
+    const { ctx } = parseExplainArgs(['edit']);
+    expect(ctx.operations).toBeUndefined();
+  });
+
+  it('--project-root overrides the process.cwd() default for projectRoot/cwd', () => {
+    const { ctx } = parseExplainArgs(['read', '--project-root=/some/proj']);
+    expect(ctx.projectRoot).toBe('/some/proj');
+    expect(ctx.cwd).toBe('/some/proj');
+  });
+
+  it('without --project-root, projectRoot/cwd default to process.cwd()', () => {
+    const { ctx } = parseExplainArgs(['read']);
     expect(ctx.projectRoot).toBe(process.cwd());
     expect(ctx.cwd).toBe(process.cwd());
   });
