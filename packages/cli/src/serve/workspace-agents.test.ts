@@ -777,6 +777,43 @@ describe('workspace agents routes', () => {
     expect(res.body.error).toMatch(/approvalMode/);
   });
 
+  it('returns 422 invalid_config for unknown permissionMode', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: 'bad-permission-mode',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a bad permission mode test agent',
+      scope: 'workspace',
+      permissionMode: 'invalid',
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/permissionMode/);
+  });
+
+  it('round-trips and clears permissionMode without approvalMode', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const create = await request(app).post('/workspace/agents').send({
+      name: 'permission-mode-agent',
+      description: 'an agent using the compatibility permission mode',
+      systemPrompt: 'you are a permission mode test agent',
+      scope: 'workspace',
+      permissionMode: 'plan',
+    });
+
+    expect(create.status).toBe(201);
+    expect(create.body.agent.permissionMode).toBe('plan');
+
+    const clear = await request(app)
+      .post('/workspace/agents/permission-mode-agent')
+      .send({ permissionMode: null });
+
+    expect(clear.status).toBe(200);
+    expect(clear.body.agent).not.toHaveProperty('permissionMode');
+  });
+
   it('strips unknown runConfig keys and rejects malformed values', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });

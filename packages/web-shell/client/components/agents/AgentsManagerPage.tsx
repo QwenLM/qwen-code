@@ -676,7 +676,7 @@ export function AgentsManagerPage({
           }}
           variant="outline"
           size="sm"
-          aria-label={t('agent.level.project')}
+          aria-label={t('agent.level.filter')}
         >
           {levelOptions.map((option) => (
             <ToggleGroupItem key={option.value} value={option.value}>

@@ -1,7 +1,4 @@
-import type {
-  DaemonWorkspaceAgentSummary,
-  DaemonWorkspaceToolStatus,
-} from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonWorkspaceAgentSummary } from '@qwen-code/webui/daemon-react-sdk';
 
 export type AgentLevelFilter = 'all' | DaemonWorkspaceAgentSummary['level'];
 
@@ -56,42 +53,4 @@ export function scopeForLevel(
   if (level === 'project') return 'workspace';
   if (level === 'user') return 'global';
   return undefined;
-}
-
-export function normalizeToolName(tool: DaemonWorkspaceToolStatus): string {
-  return tool.displayName || tool.name;
-}
-
-export function isReadTool(name: string): boolean {
-  const normalized = name.toLowerCase();
-  return [
-    'read',
-    'grep',
-    'glob',
-    'ls',
-    'list',
-    'search',
-    'fetch',
-    'webfetch',
-    'web_fetch',
-    'websearch',
-    'web_search',
-    'think',
-    'todo',
-    'context',
-  ].some((token) => normalized.includes(token));
-}
-
-export function isEditTool(name: string): boolean {
-  const normalized = name.toLowerCase();
-  return ['edit', 'write', 'delete', 'move', 'patch', 'replace', 'create'].some(
-    (token) => normalized.includes(token),
-  );
-}
-
-export function isExecuteTool(name: string): boolean {
-  const normalized = name.toLowerCase();
-  return ['shell', 'exec', 'run', 'command', 'terminal', 'bash', 'spawn'].some(
-    (token) => normalized.includes(token),
-  );
 }

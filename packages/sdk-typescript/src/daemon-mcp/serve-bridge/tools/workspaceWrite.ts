@@ -302,7 +302,10 @@ async function handleAgentGet(state: BridgeState, args: any): Promise<any> {
     return formatToolError('agent_type is required for get action.');
   }
   return formatJsonResult(
-    await state.client.getWorkspaceAgent(args.agent_type),
+    await state.client.getWorkspaceAgent(
+      args.agent_type,
+      args.scope ? { scope: args.scope } : {},
+    ),
   );
 }
 

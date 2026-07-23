@@ -601,6 +601,38 @@ describe('serve-bridge', () => {
       expect(result.isError).toBeUndefined();
     });
 
+    it('should forward scope for agents_manage get', async () => {
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: () =>
+          jsonResponse(200, {
+            kind: 'agent',
+            name: 'reviewer',
+            description: 'Reviews code',
+            level: 'user',
+            isBuiltin: false,
+            hasTools: false,
+            systemPrompt: 'Review the code.',
+          }),
+      });
+
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const agentsTool = workspaceWriteTools(state).find(
+        (tool: { name: string }) => tool.name === 'workspace_agents_manage',
+      );
+
+      await agentsTool.handler(
+        { action: 'get', agent_type: 'reviewer', scope: 'global' },
+        {},
+      );
+
+      expect(calls[0]?.url).toBe(
+        'http://127.0.0.1:4170/workspace/agents/reviewer?scope=global',
+      );
+    });
+
     it('should reject file_write replace mode without expected_hash', async () => {
       const { state } = makeMockState({
         defaultSessionId: 'test-session',

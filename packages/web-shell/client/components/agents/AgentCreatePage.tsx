@@ -116,7 +116,7 @@ export function AgentCreatePage({
   const [description, setDescription] = useState(agent?.description ?? '');
   const [systemPrompt, setSystemPrompt] = useState(agent?.systemPrompt ?? '');
   const [selectedTools, setSelectedTools] = useState(
-    () => new Set(agent?.tools ?? []),
+    () => new Set(agent?.tools?.includes('*') ? [] : (agent?.tools ?? [])),
   );
   const [disallowedTools, setDisallowedTools] = useState(
     () => new Set(agent?.disallowedTools ?? []),

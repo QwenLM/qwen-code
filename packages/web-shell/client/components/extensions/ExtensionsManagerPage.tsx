@@ -551,9 +551,11 @@ export function ExtensionsManagerPage({
           );
         })
         .catch((error: unknown) => {
-          if (!preserveMessage) setMessageOwner(null);
-          setMessageTone('error');
-          setMessage(error instanceof Error ? error.message : String(error));
+          if (!preserveMessage) {
+            setMessageOwner(null);
+            setMessageTone('error');
+            setMessage(error instanceof Error ? error.message : String(error));
+          }
         })
         .finally(() => setLoading(false));
     },
