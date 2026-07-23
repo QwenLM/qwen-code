@@ -657,31 +657,31 @@ export function endLLMRequestSpan(
 
     if (metadata) {
       if (
-        Number.isSafeInteger(metadata.inputTokens) &&
         metadata.inputTokens !== undefined &&
+        Number.isSafeInteger(metadata.inputTokens) &&
         metadata.inputTokens >= 0
       ) {
         endAttributes['gen_ai.usage.input_tokens'] = metadata.inputTokens;
       }
       if (
-        Number.isSafeInteger(metadata.outputTokens) &&
         metadata.outputTokens !== undefined &&
+        Number.isSafeInteger(metadata.outputTokens) &&
         metadata.outputTokens >= 0
       ) {
         endAttributes['gen_ai.usage.output_tokens'] = metadata.outputTokens;
       }
       if (
         metadata.cachedInputTokensReported &&
-        Number.isSafeInteger(metadata.cachedInputTokens) &&
         metadata.cachedInputTokens !== undefined &&
+        Number.isSafeInteger(metadata.cachedInputTokens) &&
         metadata.cachedInputTokens >= 0
       ) {
         endAttributes['gen_ai.usage.cache_read.input_tokens'] =
           metadata.cachedInputTokens;
       }
       if (
-        Number.isSafeInteger(metadata.cacheCreationInputTokens) &&
         metadata.cacheCreationInputTokens !== undefined &&
+        Number.isSafeInteger(metadata.cacheCreationInputTokens) &&
         metadata.cacheCreationInputTokens >= 0
       ) {
         endAttributes['gen_ai.usage.cache_creation.input_tokens'] =

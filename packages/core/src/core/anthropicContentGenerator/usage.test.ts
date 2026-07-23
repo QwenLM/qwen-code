@@ -148,6 +148,21 @@ describe('buildAnthropicUsageMetadata', () => {
     });
   });
 
+  it('omits output and total before output usage is reported', () => {
+    expect(
+      buildAnthropicUsageMetadata({
+        inputTokens: 2,
+        cacheReadTokens: 3,
+        cacheCreationTokens: 4,
+        cacheReadTokensReported: true,
+        cacheCreationTokensReported: true,
+      }),
+    ).toEqual({
+      promptTokenCount: 9,
+      cachedContentTokenCount: 3,
+    });
+  });
+
   it('records cache provenance without changing the public usage shape', () => {
     const usage = buildAnthropicUsageMetadata({
       inputTokens: 10,

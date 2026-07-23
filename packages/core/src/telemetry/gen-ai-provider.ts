@@ -49,9 +49,16 @@ function providerFromHostname(hostname: string): string | undefined {
     isHostOrSubdomain(hostname, 'dashscope-us.aliyuncs.com') ||
     (hostname.startsWith('token-plan.') &&
       isHostOrSubdomain(hostname, 'maas.aliyuncs.com')) ||
-    isHostOrSubdomain(hostname, 'idealab.alibaba-inc.com')
+    hostname.endsWith('.alibaba-inc.com') ||
+    hostname.endsWith('.aliyun-inc.com')
   ) {
     return 'dashscope';
+  }
+  if (
+    isHostOrSubdomain(hostname, 'openai.azure.com') ||
+    isHostOrSubdomain(hostname, 'services.ai.azure.com')
+  ) {
+    return 'azure.ai.openai';
   }
   if (isHostOrSubdomain(hostname, 'deepseek.com')) return 'deepseek';
   if (isHostOrSubdomain(hostname, 'x.ai')) return 'x_ai';

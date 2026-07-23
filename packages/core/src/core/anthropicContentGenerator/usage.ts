@@ -11,7 +11,7 @@ export interface AnthropicTokenParts {
   inputTokens: number;
   cacheReadTokens: number;
   cacheCreationTokens: number;
-  outputTokens: number;
+  outputTokens?: number;
   cacheReadTokensReported?: boolean;
   cacheCreationTokensReported?: boolean;
 }
@@ -56,9 +56,13 @@ export function buildAnthropicUsageMetadata(
     : inputTokens + cacheReadTokens + cacheCreationTokens;
   const usage: GenerateContentResponseUsageMetadata = {
     promptTokenCount: promptTotal,
-    candidatesTokenCount: outputTokens,
-    totalTokenCount: promptTotal + outputTokens,
     cachedContentTokenCount: cacheReadTokens,
+    ...(outputTokens !== undefined
+      ? {
+          candidatesTokenCount: outputTokens,
+          totalTokenCount: promptTotal + outputTokens,
+        }
+      : {}),
   };
   setGenAiUsageProvenance(usage, {
     cachedInputTokensReported: parts.cacheReadTokensReported === true,

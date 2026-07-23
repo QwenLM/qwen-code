@@ -32,6 +32,10 @@ describe('GenAI provider resolution', () => {
       'dashscope',
     ],
     ['https://idealab.alibaba-inc.com/api/openai/v1', 'dashscope'],
+    ['https://gateway.alibaba-inc.com/dashscope/v1', 'dashscope'],
+    ['https://model-gateway.aliyun-inc.com/dashscope/v1', 'dashscope'],
+    ['https://example.openai.azure.com/openai/v1', 'azure.ai.openai'],
+    ['https://example.services.ai.azure.com/models/v1', 'azure.ai.openai'],
     ['https://api.deepseek.com/v1', 'deepseek'],
     ['https://api.x.ai/v1', 'x_ai'],
     ['https://api.mistral.ai/v1', 'mistral_ai'],
@@ -62,6 +66,18 @@ describe('GenAI provider resolution', () => {
       resolveGenAiProviderName({
         authType: 'openai',
         baseUrl: 'https://dashscope.aliyuncs.com.attacker.example/v1',
+      }),
+    ).toBe('openai');
+    expect(
+      resolveGenAiProviderName({
+        authType: 'openai',
+        baseUrl: 'https://gateway.alibaba-inc.com.attacker.example/v1',
+      }),
+    ).toBe('openai');
+    expect(
+      resolveGenAiProviderName({
+        authType: 'openai',
+        baseUrl: 'https://example.openai.azure.com.attacker.example/v1',
       }),
     ).toBe('openai');
   });

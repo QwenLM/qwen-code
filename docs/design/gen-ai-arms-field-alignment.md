@@ -54,8 +54,9 @@ from the model name.
 1. Qwen OAuth and an exact `DASHSCOPE_PROXY_BASE_URL` match resolve to
    `dashscope`.
 2. A boundary-safe hostname match recognizes Alibaba Model Studio endpoints and
-   the supported third-party endpoints (DeepSeek, xAI, Mistral, MiniMax, Z.AI,
-   ModelScope, MiMo, OpenRouter, and Requesty).
+   internal Alibaba gateways, Azure OpenAI, and the supported third-party
+   endpoints (DeepSeek, xAI, Mistral, MiniMax, Z.AI, ModelScope, MiMo,
+   OpenRouter, and Requesty).
 3. If the host is unknown, a known `apiKeyEnvKey` identifies the configured
    provider. Host identity wins on conflict.
 4. Unknown endpoints fall back to the protocol provider: `openai`,
@@ -79,7 +80,9 @@ OpenAI `response.model`/`chunk.model` and Anthropic message model are preserved
 as `modelVersion`. A missing provider model remains missing for tracing;
 request-model fallback remains limited to existing API logs and UI behavior.
 Stream merging carries the last known provider model and usage provenance into
-the terminal response.
+the terminal response. Anthropic `message_start` input and cache usage is
+attached to the first subsequent yielded chunk so partial stream failures retain
+provider-reported usage without synthesizing an output count.
 
 ## ARMS configuration
 

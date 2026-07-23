@@ -3459,6 +3459,66 @@ describe('AnthropicContentGenerator', () => {
       }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
     });
 
+    it('preserves message_start usage when the stream fails after content', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'msg-1',
+              model: 'claude-test',
+              usage: {
+                input_tokens: 2,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 4,
+              },
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'partial' },
+          };
+          throw new Error('stream interrupted');
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const chunk of stream) chunks.push(chunk);
+      }).rejects.toThrow('stream interrupted');
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.usageMetadata).toEqual({
+        promptTokenCount: 9,
+        cachedContentTokenCount: 3,
+      });
+      expect(getGenAiUsageProvenance(chunks[0]?.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 4,
+      });
+    });
+
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
       const { getGenAiUsageProvenance } = await import(
