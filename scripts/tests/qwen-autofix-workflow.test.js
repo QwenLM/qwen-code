@@ -737,6 +737,86 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('parses HANDOFF_HEAD from issue comments: latest bot marker wins, non-bot and markerless ignored', () => {
+    const assignment = reviewScanJob.match(
+      / {12}HANDOFF_HEAD="\$\(jq -r[\s\S]*?ic\.json"\)"\n/,
+    )?.[0];
+    expect(assignment).toBeTruthy();
+    const script = assignment.replace(/^ {12}/gm, '');
+
+    const run = (comments) => {
+      const dir = mkdtempSync(join(tmpdir(), 'handoff-jq-'));
+      writeFileSync(join(dir, 'ic.json'), JSON.stringify(comments));
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nAUTOFIX_BOT='bot'\nWORKDIR=${JSON.stringify(dir)}\n${script}\nprintf '%s' "$HANDOFF_HEAD"`,
+        ],
+        { encoding: 'utf8' },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return out;
+    };
+
+    // No comments → empty.
+    expect(run([])).toBe('');
+    // Bot comment with a handoff marker → the sha.
+    expect(
+      run([
+        {
+          user: { login: 'bot' },
+          body: 'handoff <!-- autofix-handoff head=abc123 -->',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ]),
+    ).toBe('abc123');
+    // Non-bot comment with the same marker → ignored.
+    expect(
+      run([
+        {
+          user: { login: 'human' },
+          body: '<!-- autofix-handoff head=abc123 -->',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ]),
+    ).toBe('');
+    // Multiple bot markers → latest by created_at wins.
+    expect(
+      run([
+        {
+          user: { login: 'bot' },
+          body: '<!-- autofix-handoff head=aaa111 -->',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+        {
+          user: { login: 'bot' },
+          body: '<!-- autofix-handoff head=bbb222 -->',
+          created_at: '2026-01-02T00:00:00Z',
+        },
+      ]),
+    ).toBe('bbb222');
+    // Bot comment without the marker → empty.
+    expect(
+      run([
+        {
+          user: { login: 'bot' },
+          body: 'just a regular comment',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ]),
+    ).toBe('');
+    // Missing user.login field → no crash, empty.
+    expect(
+      run([
+        {
+          body: '<!-- autofix-handoff head=abc123 -->',
+          created_at: '2026-01-01T00:00:00Z',
+        },
+      ]),
+    ).toBe('');
+  });
+
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
     // "failed since the watermark" made a still-failing PR invisible the
