@@ -406,6 +406,9 @@ function makeBridge(
     getSessionLastEventId() {
       return 41;
     },
+    getSessionEventEpoch() {
+      return 'fake-epoch';
+    },
     sendPrompt(
       sessionId: string,
       _req: unknown,
