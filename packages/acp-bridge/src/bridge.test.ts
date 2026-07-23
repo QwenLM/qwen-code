@@ -986,7 +986,7 @@ describe('createAcpSessionBridge', () => {
         'prompt.dispatch',
       ]),
     );
-    expect(handle.agent.initializeCalls[0]!._meta).toEqual({
+    expect(handle.agent.initializeCalls[0]!._meta).toMatchObject({
       [CHANNEL_STARTUP_PROFILE_META_KEY]: {
         v: CHANNEL_STARTUP_PROFILE_VERSION,
       },
@@ -1176,17 +1176,21 @@ describe('createAcpSessionBridge', () => {
     // inside each bridge — so each bridge's spawn factory sees
     // ITS own overrides, regardless of what other daemons did.
     const seenEnvs: Array<Record<string, string | undefined> | undefined> = [];
+    const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async (_cwd, env) => {
       // Snapshot the override map so later iterations don't
       // accidentally mutate the recorded value.
       seenEnvs.push(env ? { ...env } : env);
-      return makeChannel().channel;
+      const handle = makeChannel();
+      handles.push(handle);
+      return handle.channel;
     };
     const bridge1 = makeBridge({
       channelFactory: factory,
       childEnvOverrides: {
         QWEN_SERVE_MCP_CLIENT_BUDGET: '5',
         QWEN_SERVE_MCP_BUDGET_MODE: 'enforce',
+        QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'caller-must-not-win',
       },
     });
     const bridge2 = makeBridge({
@@ -1202,11 +1206,32 @@ describe('createAcpSessionBridge', () => {
     expect(seenEnvs[0]).toEqual({
       QWEN_SERVE_MCP_CLIENT_BUDGET: '5',
       QWEN_SERVE_MCP_BUDGET_MODE: 'enforce',
+      QWEN_CODE_PRIVATE_ACP_CAPABILITY:
+        expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
     });
     expect(seenEnvs[1]).toEqual({
       QWEN_SERVE_MCP_CLIENT_BUDGET: '20',
       QWEN_SERVE_MCP_BUDGET_MODE: 'warn',
+      QWEN_CODE_PRIVATE_ACP_CAPABILITY:
+        expect.stringMatching(/^[A-Za-z0-9_-]{43}$/u),
     });
+    const capabilities = seenEnvs.map(
+      (env) => env?.['QWEN_CODE_PRIVATE_ACP_CAPABILITY'],
+    );
+    expect(capabilities[0]).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(capabilities[0]).not.toBe('caller-must-not-win');
+    expect(capabilities[1]).toMatch(/^[A-Za-z0-9_-]{43}$/u);
+    expect(capabilities[1]).not.toBe(capabilities[0]);
+    expect(
+      handles[0]?.agent.initializeCalls[0]?._meta?.[
+        'qwen-code/private-parent-capability'
+      ],
+    ).toBe(capabilities[0]);
+    expect(
+      handles[1]?.agent.initializeCalls[0]?._meta?.[
+        'qwen-code/private-parent-capability'
+      ],
+    ).toBe(capabilities[1]);
     await bridge1.shutdown();
     await bridge2.shutdown();
   });
@@ -5129,6 +5154,64 @@ describe('createAcpSessionBridge', () => {
       });
       expect(result).toEqual({ stopReason: 'max_tokens' });
       expect(handles[0]?.agent.promptCalls).toHaveLength(1);
+
+      await bridge.shutdown();
+    });
+
+    it('rebuilds authoritative invocation metadata after client validation', async () => {
+      const handle = makeChannel();
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const forgedInvocation = {
+        version: 1,
+        sessionId: 'forged-session',
+        promptId: 'forged-prompt',
+        originatorClientId: 'forged-client',
+      };
+
+      expect(() =>
+        bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'rejected' }],
+            _meta: { 'qwen-code/invocation': forgedInvocation },
+          },
+          undefined,
+          { clientId: 'invalid-client', promptId: 'rejected-prompt' },
+        ),
+      ).toThrow(InvalidClientIdError);
+      expect(handle.agent.promptCalls).toHaveLength(0);
+
+      await bridge.sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'accepted' }],
+          _meta: {
+            keep: true,
+            'qwen-code/invocation': forgedInvocation,
+            'qwen-code/private-parent-capability': 'forged-capability',
+          },
+        },
+        undefined,
+        { clientId: session.clientId, promptId: 'server-prompt' },
+      );
+
+      expect(handle.agent.promptCalls[0]?._meta).toMatchObject({
+        keep: true,
+        'qwen-code/invocation': {
+          version: 1,
+          sessionId: session.sessionId,
+          promptId: 'server-prompt',
+          originatorClientId: session.clientId,
+        },
+      });
+      expect(
+        handle.agent.promptCalls[0]?._meta?.[
+          'qwen-code/private-parent-capability'
+        ],
+      ).toBeUndefined();
 
       await bridge.shutdown();
     });
