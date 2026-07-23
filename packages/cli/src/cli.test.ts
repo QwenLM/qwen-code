@@ -21,6 +21,7 @@ import {
 } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import nodeModule from 'node:module';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
@@ -401,6 +402,68 @@ describe('bootstrap import boundaries', () => {
     expect(source).toContain("hasFlag('--help', '-h')");
     expect(source).toContain("hasFlag('--version', '-v')");
     expect(source).toContain('UPDATE_COMPLETE_EXIT_CODE = 44');
+  });
+
+  it('publishes the daemon compile cache without overriding user policy', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-compile-cache-'));
+    const entryPath = path.join(tempDir, 'cli-entry.mjs');
+    const unsupportedEntryPath = path.join(
+      tempDir,
+      'unsupported-cli-entry.mjs',
+    );
+    try {
+      copyFileSync('../../scripts/cli-entry.js', entryPath);
+      writeFileSync(
+        unsupportedEntryPath,
+        readFileSync('../../scripts/cli-entry.js', 'utf8').replace(
+          "const { default: module } = await import('node:module');",
+          'const module = {};',
+        ),
+      );
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        'process.stdout.write(JSON.stringify({ cacheDir: process.env.NODE_COMPILE_CACHE }));\n',
+      );
+      const baseEnv = { ...process.env };
+      delete baseEnv['NODE_COMPILE_CACHE'];
+      delete baseEnv['NODE_DISABLE_COMPILE_CACHE'];
+      const runEntry = (
+        env: NodeJS.ProcessEnv,
+        args: string[] = ['serve'],
+        selectedEntryPath = entryPath,
+      ) =>
+        JSON.parse(
+          execFileSync(process.execPath, [selectedEntryPath, ...args], {
+            encoding: 'utf8',
+            env,
+          }),
+        );
+
+      if (typeof Reflect.get(nodeModule, 'enableCompileCache') === 'function') {
+        expect(runEntry(baseEnv).cacheDir).toBeTruthy();
+      } else {
+        expect(runEntry(baseEnv)).toEqual({});
+      }
+      expect(runEntry(baseEnv, ['serve'], unsupportedEntryPath)).toEqual({});
+      expect(runEntry(baseEnv, ['mcp', 'list'])).toEqual({});
+
+      const configuredCacheDir = path.join(tempDir, 'configured-cache');
+      expect(
+        runEntry({
+          ...baseEnv,
+          NODE_COMPILE_CACHE: configuredCacheDir,
+        }).cacheDir,
+      ).toBe(configuredCacheDir);
+
+      expect(
+        runEntry({
+          ...baseEnv,
+          NODE_DISABLE_COMPILE_CACHE: '1',
+        }),
+      ).toEqual({});
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
   });
 
   it('reloads the CLI through a stable shim after an update', () => {

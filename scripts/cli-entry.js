@@ -282,7 +282,15 @@ if (isTopLevelVersion) {
 
 if (isInProcessFastPath()) {
   const { default: module } = await import('node:module');
-  module.enableCompileCache?.();
+  const compileCache = module.enableCompileCache?.();
+  if (
+    cliArgs[0] === 'serve' &&
+    !process.env['NODE_COMPILE_CACHE'] &&
+    compileCache?.status === module.constants?.compileCacheStatus?.ENABLED &&
+    compileCache?.directory
+  ) {
+    process.env['NODE_COMPILE_CACHE'] = compileCache.directory;
+  }
   process.argv[1] = cliPath;
   await import(pathToFileURL(cliPath).href);
 } else {
