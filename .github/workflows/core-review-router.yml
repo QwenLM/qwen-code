@@ -27,6 +27,7 @@ jobs:
           ref: '${{ github.event.repository.default_branch }}'
           sparse-checkout: '.github/scripts/core-review-router.mjs'
           sparse-checkout-cone-mode: false
+          persist-credentials: false
 
       - name: 'Collect changed files'
         id: 'files'

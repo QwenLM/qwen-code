@@ -146,7 +146,7 @@ function pickDomainExpert(coreProdFiles) {
   let best = null;
   let bestScore = -1;
   for (const [owner, score] of scores) {
-    if (score > bestScore) {
+    if (score > bestScore || (score === bestScore && owner < best)) {
       best = owner;
       bestScore = score;
     }

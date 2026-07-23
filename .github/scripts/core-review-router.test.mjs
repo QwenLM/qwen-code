@@ -117,6 +117,29 @@ describe('classify', () => {
     assert.ok(result.reviewers.includes('LaZzyMan'));
   });
 
+  it('breaks domain-expert ties deterministically by lexicographic order', () => {
+    // permissions/ → LaZzyMan, models/ → yiliang114 — equal scores.
+    // LaZzyMan < yiliang114 lexicographically, so LaZzyMan must win
+    // regardless of file-listing order.
+    const forward = classify(
+      [
+        'packages/core/src/permissions/permission-manager.ts',
+        'packages/core/src/models/modelsConfig.ts',
+      ],
+      'someone',
+    );
+    const reversed = classify(
+      [
+        'packages/core/src/models/modelsConfig.ts',
+        'packages/core/src/permissions/permission-manager.ts',
+      ],
+      'someone',
+    );
+    assert.ok(forward.reviewers.includes('LaZzyMan'));
+    assert.ok(reversed.reviewers.includes('LaZzyMan'));
+    assert.deepEqual(forward.reviewers, reversed.reviewers);
+  });
+
   it('excludes the PR author from reviewers', () => {
     const result = classify(
       ['packages/core/src/models/modelsConfig.ts'],
