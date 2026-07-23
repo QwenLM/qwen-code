@@ -1852,7 +1852,10 @@ jobs:
               CMP_STATUS="$(gh api "repos/${REPO}/compare/${MAIN_HEAD}...${PR_HEAD_OID}" --jq '.status' 2> /dev/null || echo '')"
               if [[ "${CMP_STATUS}" == 'behind' || "${CMP_STATUS}" == 'diverged' ]]; then
                 RED_NAMES="$(jq -r 'join(", ")' <<< "${STALE_BASE_REDS}")"
-                if gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" > /dev/null 2>&1; then
+                # expected_head_sha makes this a compare-and-swap: if the author
+                # pushed between our compare read and this call, GitHub rejects it
+                # rather than merging main into an unverified head.
+                if gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${PR_HEAD_OID}" > /dev/null 2>&1; then
                   echo "🔀 #${PR}: red check(s) [${RED_NAMES}] pass on current main ${MAIN_HEAD:0:9} but fail here on a stale base — merged main in via update-branch; CI will re-run"
                   fleet_row "${PR}" 'base-updated' "stale-base red [${RED_NAMES}] — merged current main, CI re-running"
                 else

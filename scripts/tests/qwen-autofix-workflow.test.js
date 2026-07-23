@@ -494,6 +494,36 @@ describe('qwen-autofix workflow', () => {
     expect(
       run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], updateOk: false }),
     ).toEqual({ updated: true, continued: true });
+    // A Qwen Autofix check (not review-address) that fails on the PR and passes
+    // on main must NOT be treated as stale-base red — the exclusion filter keeps
+    // the workflow's own failing checks from triggering an update-branch. A logic
+    // inversion in that filter would pass the cases above (none set workflowName).
+    expect(
+      run({
+        prChecks: [
+          {
+            name: 'Build',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+        ],
+        mainGreen: ['Build'],
+      }),
+    ).toEqual({ updated: false, continued: false });
+    // ...but a review-address check IS eligible (it is the workflow's signal that
+    // the previous address round needs a fresh base), so it still updates.
+    expect(
+      run({
+        prChecks: [
+          {
+            name: 'review-address (1)',
+            conclusion: 'FAILURE',
+            workflowName: 'Qwen Autofix',
+          },
+        ],
+        mainGreen: ['review-address (1)'],
+      }),
+    ).toEqual({ updated: true, continued: true });
   });
 
   it('keeps a still-red check visible, but only once per head', () => {
