@@ -1032,6 +1032,29 @@ function translateCopyMessage(
   return message;
 }
 
+function isSameGitStatus(
+  current: DaemonWorkspaceGitStatus | undefined,
+  next: DaemonWorkspaceGitStatus | undefined,
+): boolean {
+  if (current === next) return true;
+  if (!current || !next) return false;
+  return (
+    current.v === next.v &&
+    current.workspaceCwd === next.workspaceCwd &&
+    current.branch === next.branch &&
+    current.detached === next.detached &&
+    current.staged === next.staged &&
+    current.unstaged === next.unstaged &&
+    current.untracked === next.untracked &&
+    current.conflicted === next.conflicted &&
+    current.hasUpstream === next.hasUpstream &&
+    current.ahead === next.ahead &&
+    current.behind === next.behind &&
+    current.stashCount === next.stashCount &&
+    current.operation === next.operation
+  );
+}
+
 /**
  * Read a model setting's value for the scope currently being edited. Model
  * pickers persist to `modelSettingScope`, so their "current" value reflects
@@ -1326,6 +1349,7 @@ export function App({
   const connection = useConnection();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const refreshWorkspaceCapabilities = workspace.refreshCapabilities;
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
     if (
@@ -1338,6 +1362,45 @@ export function App({
     }
     return capabilityWorkspaces;
   }, [lockedWorkspaceCapability, workspace.capabilities?.workspaces]);
+  const composerWorkspacesRef = useRef<
+    | Array<{
+        id: string;
+        cwd: string;
+        label: string;
+        primary: boolean;
+        trusted: boolean;
+      }>
+    | undefined
+  >(undefined);
+  const nextComposerWorkspaces = !lockedWorkspaceCwd
+    ? workspaces.map((entry) => ({
+        id: entry.id,
+        cwd: entry.cwd,
+        label: workspaceLabel(entry),
+        primary: entry.primary,
+        trusted: entry.trusted,
+      }))
+    : undefined;
+  const currentComposerWorkspaces = composerWorkspacesRef.current;
+  if (
+    currentComposerWorkspaces?.length !== nextComposerWorkspaces?.length ||
+    currentComposerWorkspaces?.some((current, index) => {
+      const next = nextComposerWorkspaces?.[index];
+      return (
+        !next ||
+        current.id !== next.id ||
+        current.cwd !== next.cwd ||
+        current.label !== next.label ||
+        current.primary !== next.primary ||
+        current.trusted !== next.trusted
+      );
+    })
+  ) {
+    composerWorkspacesRef.current = nextComposerWorkspaces;
+  }
+  const composerWorkspaces = composerWorkspacesRef.current;
+  const workspacesRef = useRef(workspaces);
+  workspacesRef.current = workspaces;
   const visibleWorkspaces = useMemo(
     () =>
       lockedWorkspaceCwd
@@ -1380,6 +1443,8 @@ export function App({
   const [workspaceMutationBusy, setWorkspaceMutationBusy] = useState(false);
   const workspaceMutationTokenRef = useRef<symbol | null>(null);
   const workspaceSwitchTokenRef = useRef<symbol | null>(null);
+  // Changes before async session clearing updates connection state.
+  const composerSourceVersionRef = useRef(0);
   type ScratchOutcomeState = 'clear' | 'refreshing' | 'awaiting-ack';
   const scratchOutcomeUnknownRef = useRef<ScratchOutcomeState>('clear');
   const committedScratchCwdRef = useRef<string | undefined>(undefined);
@@ -1409,6 +1474,7 @@ export function App({
       (entry) => entry.cwd === selectedWorkspaceCwd,
     );
     if (selected?.trusted) return;
+    composerSourceVersionRef.current += 1;
     selectedWorkspaceCwdRef.current = undefined;
     setSelectedWorkspaceCwd(undefined);
   }, [selectedWorkspaceCwd, workspace.capabilities, workspaces]);
@@ -1500,7 +1566,11 @@ export function App({
       void git
         .workspaceGit({ cwd: sessionWorktree?.path })
         .then((status) => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(status);
+          if (!cancelled) {
+            setSelectedWorkspaceGitStatus((current) =>
+              isSameGitStatus(current, status) ? current : status,
+            );
+          }
         })
         .catch(() => {
           if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
@@ -1516,7 +1586,11 @@ export function App({
         void git
           .workspaceGit({ wait: true })
           .then((status) => {
-            if (!cancelled) setSelectedWorkspaceGitStatus(status);
+            if (!cancelled) {
+              setSelectedWorkspaceGitStatus((current) =>
+                isSameGitStatus(current, status) ? current : status,
+              );
+            }
           })
           .catch((err) => {
             console.warn('[web-shell] git status fresh path failed:', err);
@@ -3147,6 +3221,16 @@ export function App({
   onSubmitBeforeRef.current = onSubmitBefore;
   const onSlashCommandRef = useRef(onSlashCommand);
   onSlashCommandRef.current = onSlashCommand;
+  const getComposerWorkspaceCwd = useCallback(() => {
+    if (connectionRef.current.sessionId) {
+      return connectionRef.current.workspaceCwd;
+    }
+    return (
+      lockedWorkspaceCwd ??
+      selectedWorkspaceCwdRef.current ??
+      workspacesRef.current.find((entry) => entry.primary)?.cwd
+    );
+  }, [lockedWorkspaceCwd]);
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
   const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -3200,6 +3284,13 @@ export function App({
       const previousLastSubmittedImages = lastSubmittedImagesRef.current;
       const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
       const previousShowRetryHint = showRetryHintRef.current;
+      const restoreCancelledSubmitState = () => {
+        setIsPreparingPrompt(false);
+        lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
+        lastSubmittedImagesRef.current = previousLastSubmittedImages;
+        retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
+        setShowRetryHint(previousShowRetryHint);
+      };
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
@@ -3208,10 +3299,13 @@ export function App({
       setShowRetryHint(false);
       const shouldShowPreparing = !connectionRef.current.sessionId;
       if (onSubmitBeforeRef.current) {
+        const sourceSessionId = connectionRef.current.sessionId;
+        const sourceWorkspaceCwd = getComposerWorkspaceCwd();
+        const sourceVersion = composerSourceVersionRef.current;
         setIsPreparingPrompt(true);
         try {
           await onSubmitBeforeRef.current({
-            sessionId: connectionRef.current.sessionId,
+            sessionId: sourceSessionId,
             prompt: text,
           });
         } catch (err) {
@@ -3219,13 +3313,17 @@ export function App({
             '[web-shell] onSubmitBefore rejected, prompt cancelled',
             err,
           );
-          setIsPreparingPrompt(false);
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
           // cancelled prompt.
-          lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
-          lastSubmittedImagesRef.current = previousLastSubmittedImages;
-          retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
-          setShowRetryHint(previousShowRetryHint);
+          restoreCancelledSubmitState();
+          return;
+        }
+        if (
+          connectionRef.current.sessionId !== sourceSessionId ||
+          getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
+          composerSourceVersionRef.current !== sourceVersion
+        ) {
+          restoreCancelledSubmitState();
           return;
         }
         // Only reset if session already exists; otherwise keep true and let
@@ -3278,6 +3376,7 @@ export function App({
     [
       clearFollowup,
       ensureSessionForPrompt,
+      getComposerWorkspaceCwd,
       scheduleDelayedSessionListReload,
       sessionActions,
     ],
@@ -3304,6 +3403,14 @@ export function App({
       setGitModeIntent({ mode: 'current' });
     }
   }, [gitModeEligible]);
+  const handleOpenGitDiff = useCallback(() => {
+    if (!gitDiffWorkspaceCwd) return;
+    setGitDialog({
+      workspaceCwd: gitDiffWorkspaceCwd,
+      gitCwd: sessionWorktree?.path,
+      view: 'diff',
+    });
+  }, [gitDiffWorkspaceCwd, sessionWorktree?.path]);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -3384,12 +3491,22 @@ export function App({
       inputAnnotations?: DaemonInputAnnotation[],
     ) => {
       if (onSubmitBeforeRef.current) {
+        const sourceSessionId = connectionRef.current.sessionId;
+        const sourceWorkspaceCwd = getComposerWorkspaceCwd();
+        const sourceVersion = composerSourceVersionRef.current;
         onSubmitBeforeRef
           .current({
-            sessionId: connectionRef.current.sessionId,
+            sessionId: sourceSessionId,
             prompt: text,
           })
           .then(() => {
+            if (
+              connectionRef.current.sessionId !== sourceSessionId ||
+              getComposerWorkspaceCwd() !== sourceWorkspaceCwd ||
+              composerSourceVersionRef.current !== sourceVersion
+            ) {
+              return;
+            }
             const result = rawEnqueuePrompt(
               text,
               images,
@@ -3403,11 +3520,10 @@ export function App({
                 editorRef.current?.clear();
               }
             }
-            const sessionId = connectionRef.current.sessionId;
-            if (sessionId && text.trim()) {
+            if (sourceSessionId && text.trim()) {
               dispatchSessionChangeRef.current?.({
                 type: 'submit',
-                sessionId,
+                sessionId: sourceSessionId,
                 prompt: text,
                 queued: true,
               });
@@ -3438,7 +3554,7 @@ export function App({
       }
       return result;
     },
-    [rawEnqueuePrompt],
+    [getComposerWorkspaceCwd, rawEnqueuePrompt],
   );
 
   useEffect(() => {
@@ -4323,6 +4439,7 @@ export function App({
       opts?: { keepView?: boolean },
     ) => {
       const targetWorkspaceCwd = lockedWorkspaceCwd ?? workspaceCwd;
+      composerSourceVersionRef.current += 1;
       selectedWorkspaceCwdRef.current = targetWorkspaceCwd;
       setSelectedWorkspaceCwd(targetWorkspaceCwd);
       // Starting a fresh chat drops any pending git mode intent so it never
@@ -4375,7 +4492,7 @@ export function App({
   const switchWorkspace = useCallback(
     async (
       workspaceCwd: string | undefined,
-      acceptedWorkspaces: readonly DaemonWorkspaceCapability[] = workspaces,
+      acceptedWorkspaces: readonly DaemonWorkspaceCapability[] = workspacesRef.current,
     ) => {
       if (workspaceSwitchTokenRef.current) return;
       const token = Symbol('workspace-switch');
@@ -4396,6 +4513,7 @@ export function App({
           await createNewSession(workspaceCwd);
           return;
         }
+        composerSourceVersionRef.current += 1;
         selectedWorkspaceCwdRef.current = workspaceCwd;
         setSelectedWorkspaceCwd(workspaceCwd);
       } finally {
@@ -4404,14 +4522,14 @@ export function App({
         }
       }
     },
-    [createNewSession, workspaces],
+    [createNewSession],
   );
 
   /** Refreshes once and switches only from the accepted capability snapshot. */
   const reconcileAddedWorkspace = useCallback(
     async (canonicalCwd: string): Promise<boolean> => {
       try {
-        const capabilities = await workspace.refreshCapabilities?.();
+        const capabilities = await refreshWorkspaceCapabilities?.();
         const acceptedWorkspaces = capabilities?.workspaces ?? [];
         const added = acceptedWorkspaces.find(
           (entry) => entry.cwd === canonicalCwd,
@@ -4428,7 +4546,7 @@ export function App({
         return false;
       }
     },
-    [reportError, switchWorkspace, workspace],
+    [refreshWorkspaceCapabilities, reportError, switchWorkspace],
   );
 
   /** Registers an existing directory through the shared mutation lane. */
@@ -4482,7 +4600,7 @@ export function App({
   const refreshScratchOutcome = useCallback(async () => {
     setScratchOutcome('refreshing');
     try {
-      const capabilities = await workspace.refreshCapabilities?.();
+      const capabilities = await refreshWorkspaceCapabilities?.();
       if (!capabilities) return;
       const acceptedWorkspaces = capabilities.workspaces ?? [];
       const committedCwd = committedScratchCwdRef.current;
@@ -4504,7 +4622,12 @@ export function App({
     } catch (error) {
       reportError(error, 'Failed to refresh the workspace list');
     }
-  }, [reportError, setScratchOutcome, switchWorkspace, workspace]);
+  }, [
+    reportError,
+    setScratchOutcome,
+    switchWorkspace,
+    refreshWorkspaceCapabilities,
+  ]);
 
   /**
    * Creates at most one scratch directory per intent and locks further POSTs
@@ -4552,6 +4675,18 @@ export function App({
     t,
     workspaceActions,
   ]);
+  const handleSelectComposerWorkspace = useCallback(
+    (cwd: string | undefined) => {
+      void switchWorkspace(cwd);
+    },
+    [switchWorkspace],
+  );
+  const handleCreateComposerScratchWorkspace = useCallback(() => {
+    void handleCreateScratchWorkspace();
+  }, [handleCreateScratchWorkspace]);
+  const handleOpenExistingWorkspace = useCallback(() => {
+    setShowAddWorkspaceDialog(true);
+  }, []);
   useEffect(
     () => () => {
       if (composerTextDebounceRef.current) {
@@ -5046,7 +5181,7 @@ export function App({
           !connectionRef.current.sessionId || deferComposerCommit;
         sendPrompt(text, images, {
           clearComposerOnPromptStart,
-          commitComposerAccepted: deferComposerCommit
+          commitComposerAccepted: clearComposerOnPromptStart
             ? opts?.commitComposerAccepted
             : undefined,
         }).catch((error: unknown) => {
@@ -5141,7 +5276,7 @@ export function App({
         sendPrompt(promptText, promptImages, {
           ...opts,
           clearComposerOnPromptStart,
-          commitComposerAccepted: deferComposerCommit
+          commitComposerAccepted: clearComposerOnPromptStart
             ? commitComposerAccepted
             : undefined,
         }).catch((error: unknown) => reportError(error, errorMessage));
@@ -5294,7 +5429,7 @@ export function App({
                   !connectionRef.current.sessionId || deferComposerCommit;
                 sendPrompt(`/language ui ${nextLanguage}`, undefined, {
                   clearComposerOnPromptStart,
-                  commitComposerAccepted: deferComposerCommit
+                  commitComposerAccepted: clearComposerOnPromptStart
                     ? commitComposerAccepted
                     : undefined,
                 })
@@ -6075,6 +6210,8 @@ export function App({
     ],
   );
 
+  const handleSubmitRef = useRef(handleSubmit);
+  handleSubmitRef.current = handleSubmit;
   const handleEditorSubmit = useCallback(
     (
       text: string,
@@ -6082,7 +6219,7 @@ export function App({
       commitComposerAccepted?: ComposerSubmitCommit,
       metadata?: { inputAnnotations?: DaemonInputAnnotation[] },
     ) => {
-      const accepted = handleSubmit(
+      const accepted = handleSubmitRef.current(
         text,
         images,
         commitComposerAccepted,
@@ -6093,7 +6230,7 @@ export function App({
       }
       return accepted;
     },
-    [handleSubmit, resumeChatBottomFollow],
+    [resumeChatBottomFollow],
   );
 
   const handleConfirm = useCallback(
@@ -8096,12 +8233,7 @@ export function App({
                           gitStatus={selectedWorkspaceGitStatus}
                           onOpenGitDiff={
                             gitDiffWorkspaceCwd
-                              ? () =>
-                                  setGitDialog({
-                                    workspaceCwd: gitDiffWorkspaceCwd,
-                                    gitCwd: sessionWorktree?.path,
-                                    view: 'diff',
-                                  })
+                              ? handleOpenGitDiff
                               : undefined
                           }
                           chatWidthMode={chatWidthMode}
@@ -8111,17 +8243,7 @@ export function App({
                           availableModels={availableModels}
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
-                          workspaces={
-                            !lockedWorkspaceCwd
-                              ? workspaces.map((entry) => ({
-                                    id: entry.id,
-                                    cwd: entry.cwd,
-                                    label: workspaceLabel(entry),
-                                    primary: entry.primary,
-                                    trusted: entry.trusted,
-                                  }))
-                              : undefined
-                          }
+                          workspaces={composerWorkspaces}
                           selectedWorkspaceCwd={
                             connection.sessionId
                               ? workspaces.find(
@@ -8140,9 +8262,7 @@ export function App({
                               : (selectedWorkspaceCwd ??
                                 workspaces.find((entry) => entry.primary)?.cwd))
                           }
-                          onSelectWorkspace={(cwd) => {
-                            void switchWorkspace(cwd);
-                          }}
+                          onSelectWorkspace={handleSelectComposerWorkspace}
                           scratchWorkspaceSupported={
                             scratchWorkspaceRegistrationSupported
                           }
@@ -8150,13 +8270,12 @@ export function App({
                             dynamicWorkspaceRegistrationSupported
                           }
                           workspaceMutationBusy={workspaceMutationBusy}
-                          onCreateScratchWorkspace={() => {
-                            void handleCreateScratchWorkspace();
-                          }}
-                          onOpenExistingWorkspace={() =>
-                            setShowAddWorkspaceDialog(true)
+                          onCreateScratchWorkspace={
+                            handleCreateComposerScratchWorkspace
                           }
+                          onOpenExistingWorkspace={handleOpenExistingWorkspace}
                           onChatWidthModeChange={handleChatWidthModeChange}
+                          sessionId={connection.sessionId}
                           sessionName={sessionDisplayName}
                           dialogOpen={
                             interactionBlocked || approvalOverlayActive

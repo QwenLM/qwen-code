@@ -173,6 +173,7 @@ interface ChatEditorProps {
   followupState?: UseDaemonFollowupSuggestionReturn['followupState'];
   onAcceptFollowup?: UseDaemonFollowupSuggestionReturn['onAcceptFollowup'];
   onDismissFollowup?: UseDaemonFollowupSuggestionReturn['onDismissFollowup'];
+  sessionId?: string;
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
@@ -1192,6 +1193,7 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
@@ -1228,6 +1230,7 @@ export const ChatEditor = memo(
       followupState,
       onAcceptFollowup,
       onDismissFollowup,
+      sessionId,
       sessionName,
       composerInput,
       composerInputVersion,
@@ -2051,6 +2054,7 @@ export const ChatEditor = memo(
                   className={styles.mobileTextarea}
                   value={core.mobileComposer.value}
                   onChange={core.mobileComposer.onChange}
+                  onBlur={core.mobileComposer.onBlur}
                   onPaste={core.mobileComposer.onPaste}
                   placeholder={core.mobileComposer.placeholder}
                   disabled={core.disabled}
