@@ -21,6 +21,12 @@ export const TOUCH_COMPOSER_QUERY = '(hover: none) and (pointer: coarse)';
  * `document.activeElement`, after which user taps may no longer fire a fresh
  * focus event — the keyboard never appears. That must stay suppressed even
  * when the user forces the CodeMirror path via `?composer=codemirror`.
+ *
+ * The media query alone decides — deliberately no `navigator.maxTouchPoints`
+ * requirement: Playwright's stock WebKit iPhone profiles (and some TV
+ * browsers) match the query while reporting zero touch points, and the
+ * textarea is a safe fallback wherever the primary pointer is coarse and
+ * cannot hover.
  */
 export function isCoarsePointerDevice(): boolean {
   if (
@@ -29,11 +35,7 @@ export function isCoarsePointerDevice(): boolean {
   ) {
     return false;
   }
-  return (
-    window.matchMedia(TOUCH_COMPOSER_QUERY).matches &&
-    typeof navigator !== 'undefined' &&
-    navigator.maxTouchPoints > 0
-  );
+  return window.matchMedia(TOUCH_COMPOSER_QUERY).matches;
 }
 
 function resolveTouchComposer(): boolean {

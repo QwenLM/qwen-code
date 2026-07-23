@@ -102,10 +102,14 @@ describe('useIsTouchComposer', () => {
     expect(renderHook().value()).toBe(true);
   });
 
-  it('returns false when the query matches but no touch points are reported', () => {
+  it('activates on coarse-pointer devices even without reported touch points', () => {
+    // Playwright's stock WebKit iPhone profiles match the media query but
+    // report maxTouchPoints === 0, and some TV browsers do the same. The
+    // media query alone decides: the textarea is a safe fallback wherever
+    // the primary pointer is coarse and cannot hover.
     installMatchMedia({ [TOUCH_COMPOSER_QUERY]: true });
     setMaxTouchPoints(0);
-    expect(renderHook().value()).toBe(false);
+    expect(renderHook().value()).toBe(true);
   });
 
   it('returns false on hover-capable touch devices (touch laptops)', () => {
