@@ -145,9 +145,12 @@ export class SessionReferenceService {
       // (functionCall on the assistant record) is intentionally NOT summarized
       // to avoid a duplicate, always-"ok" line. Never includes result bodies.
       for (const name of this.functionResponseNames(rec.message)) {
+        const raw = rec.toolCallResult?.status;
         const status = rec.toolCallResult?.error
           ? 'error'
-          : (rec.toolCallResult?.status ?? 'ok');
+          : raw === 'success'
+            ? 'ok'
+            : (raw ?? 'ok');
         out.push(`[tool: ${name} — ${status}]`);
       }
       // system records contribute nothing

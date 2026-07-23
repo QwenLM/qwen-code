@@ -119,6 +119,25 @@ describe('SessionReferenceService', () => {
     expect(res.text).not.toContain('[tool: read_file — ok]');
   });
 
+  it('maps a successful tool call status to the ok display label', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'tool_result',
+          toolCallResult: { callId: 'c1', status: 'success' },
+          message: {
+            role: 'user',
+            parts: [{ functionResponse: { name: 'read_file', response: {} } }],
+          },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.text).toContain('[tool: read_file — ok]');
+    expect(res.text).not.toContain('success');
+  });
+
   it('surfaces an error tool_result that has no functionResponse parts', async () => {
     const svc = makeSvc(
       fakeResumed([

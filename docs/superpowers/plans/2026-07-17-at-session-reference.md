@@ -352,8 +352,9 @@ export class SessionReferenceService {
           'tool';
         const status = rec.toolCallResult?.status ?? 'ok';
         out.push(`[tool: ${name} — ${status}]`);
-        continue;
       }
+      // Emit user/assistant text separately (before the tool summary block)
+      // to avoid dropping assistant reasoning on tool-calling turns.
       if (rec.type === 'user') {
         const text = this.visibleText(rec.message);
         if (text) out.push(`User: ${text}`);
@@ -694,7 +695,10 @@ Expected: FAIL — `Cannot find module './session-completion.js'`.
 // packages/cli/src/ui/hooks/session-completion.ts
 import { SessionService } from '@qwen-code/qwen-code-core';
 import type { Suggestion } from '../components/SuggestionsDisplay.js';
-import { buildSessionRef } from './session-mention-ref.js';
+import {
+  buildSessionRef,
+  SESSION_MENTION_PREFIX,
+} from './session-mention-ref.js';
 
 const MAX_SESSION_SUGGESTIONS = 20;
 
