@@ -7,7 +7,7 @@
 import { Box, Static } from 'ink';
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
-import { isHistoryItemVisibleAfterRestore } from '../types.js';
+import { isHistoryItemVisibleAfterRestore, StreamingState } from '../types.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ShowMoreLines } from './ShowMoreLines.js';
 import { Notifications } from './Notifications.js';
@@ -21,7 +21,12 @@ import {
   type MarkdownSourceCopyIndexOffsets,
 } from '../utils/MarkdownDisplay.js';
 import { buildThoughtHeadIdMap } from '../utils/historyUtils.js';
-import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
+import {
+  ScrollableList,
+  SCROLL_TO_ITEM_END,
+  type ScrollableListRef,
+} from './shared/ScrollableList.js';
+import { TextSelectionController } from '../selection/use-text-selection.js';
 
 // Limit Gemini messages to a very high number of lines to mitigate performance
 // issues in the worst case if we somehow get an enormous response from Gemini.
@@ -107,6 +112,7 @@ const virtualIsStaticItem = (item: VpItem) =>
 export const MainContent = () => {
   const { version } = useAppContext();
   const uiState = useUIState();
+  const streamingState = uiState.streamingState;
   const showScrollbar = uiState.showScrollbar ?? true;
   const {
     pendingHistoryItems,
@@ -130,6 +136,7 @@ export const MainContent = () => {
   // state still computes because it lives at the top of the component, but
   // useMemo keeps it cheap when nothing changes.
   const useVirtualScroll = uiState.useTerminalBuffer;
+  const scrollRef = useRef<ScrollableListRef<VpItem>>(null);
 
   const { historyItemsWithSourceCopyOffsets, pendingStartSourceCopyOffsets } =
     useMemo(() => {
@@ -149,7 +156,9 @@ export const MainContent = () => {
           return { item, sourceCopyIndexOffsets: offsets };
         }
 
-        if (item.type === 'user') {
+        // Steer items (sentToModel === false) are mid-turn injections, not turn
+        // boundaries; don't reset code-block copy numbering on them.
+        if (item.type === 'user' && item.sentToModel !== false) {
           runningOffsets = createEmptySourceCopyOffsets();
         }
 
@@ -179,7 +188,9 @@ export const MainContent = () => {
         return { item, sourceCopyIndexOffsets: offsets };
       }
 
-      if (item.type === 'user') {
+      // Steer items (sentToModel === false) are mid-turn injections, not turn
+      // boundaries; don't reset code-block copy numbering on them.
+      if (item.type === 'user' && item.sentToModel !== false) {
         runningOffsets = createEmptySourceCopyOffsets();
       }
 
@@ -409,6 +420,7 @@ export const MainContent = () => {
     return (
       <OverflowProvider>
         <ScrollableList
+          ref={scrollRef}
           hasFocus={!uiState.dialogsVisible}
           data={allVirtualItems}
           renderItem={renderVirtualItem}
@@ -420,6 +432,20 @@ export const MainContent = () => {
           isStaticItem={virtualIsStaticItem}
           containerHeight={scrollContainerHeight}
           showScrollbar={showScrollbar}
+        />
+        <TextSelectionController
+          isActive={!uiState.dialogsVisible}
+          getViewportRect={() => scrollRef.current?.getViewportRect() ?? null}
+          getScrollState={() =>
+            scrollRef.current?.getScrollState() ?? {
+              scrollTop: 0,
+              scrollHeight: 0,
+              innerHeight: 0,
+            }
+          }
+          hitTestScrollbar={(location) =>
+            scrollRef.current?.hitTestScrollbar(location) ?? false
+          }
         />
         <ShowMoreLines constrainHeight={uiState.constrainHeight} />
       </OverflowProvider>
@@ -476,11 +502,26 @@ export const MainContent = () => {
             so the clamp is a no-op there and only engages on residual overflow.
             ShowMoreLines stays OUTSIDE the clamp; it only renders while
             constrained (so the clamp is inert) and must not be clipped.
+
+            The clamp engages while constrained OR while the model is actively
+            streaming (Responding) — i.e. the case that trips the scroll-to-top
+            lock. It is deliberately dropped in "show more lines" mode
+            (constrainHeight off) once streaming has settled to a static
+            confirmation (WaitingForConfirmation): a tall edit/write_file diff
+            preview must render every row so the user can scroll the terminal
+            scrollback and review the full change before approving (#6809). A
+            static confirmation is a single render, so it does not trip Ink's
+            from-top full-redraw path the way a streaming table does.
           */}
           <Box
             flexDirection="column"
             flexShrink={0}
-            maxHeight={availableTerminalHeight || undefined}
+            maxHeight={
+              uiState.constrainHeight ||
+              streamingState === StreamingState.Responding
+                ? availableTerminalHeight || undefined
+                : undefined
+            }
             overflow="hidden"
           >
             {pendingHistoryItemsWithSourceCopyOffsets.map(

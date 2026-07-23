@@ -49,19 +49,67 @@ export function isAbortError(error: unknown): boolean {
  *     IPv4 `127.0.0.1`): its own `message` is empty, so unwrap `.errors[]`.
  *   - a plain `Error` with a Node `code` (e.g. `ECONNREFUSED`) but possibly an
  *     empty message — prefer `code`, combine with message when both add signal.
+ *   - nested `.cause` chains: walk through opaque wrappers to the deepest code.
  *   - any other value — stringify.
  */
 function describeErrorCause(cause: unknown): string | undefined {
   if (cause == null) return undefined;
+  return (
+    describeCodedCause(cause, 0, new Set<object>()) ??
+    describeCauseFallback(cause)
+  );
+}
+
+function describeCauseFallback(cause: unknown): string | undefined {
   if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
     const inner = cause.errors
-      .map((e) => describeSingleError(e))
-      .filter((s): s is string => Boolean(s));
+      .map((error) => describeSingleError(error))
+      .filter((detail): detail is string => Boolean(detail));
     if (inner.length > 0) {
       return [...new Set(inner)].join('; ');
     }
   }
   return describeSingleError(cause);
+}
+
+function describeCodedCause(
+  cause: unknown,
+  depth: number,
+  visited: Set<object>,
+): string | undefined {
+  if (
+    cause == null ||
+    depth >= 8 ||
+    typeof cause !== 'object' ||
+    visited.has(cause)
+  ) {
+    return undefined;
+  }
+
+  visited.add(cause);
+
+  if (cause instanceof AggregateError && Array.isArray(cause.errors)) {
+    const inner = cause.errors
+      .map((error) => describeCodedCause(error, depth + 1, visited))
+      .filter((detail): detail is string => Boolean(detail));
+    if (inner.length > 0) {
+      return [...new Set(inner)].join('; ');
+    }
+  }
+
+  const nested = describeCodedCause(
+    (cause as { cause?: unknown }).cause,
+    depth + 1,
+    visited,
+  );
+  if (nested) {
+    return nested;
+  }
+
+  const code = (cause as { code?: unknown }).code;
+  return typeof code === 'string' && code
+    ? describeSingleError(cause)
+    : undefined;
 }
 
 function describeSingleError(err: unknown): string | undefined {

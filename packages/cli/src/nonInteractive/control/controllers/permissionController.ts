@@ -35,9 +35,7 @@ import type {
   PermissionSuggestion,
 } from '../../types.js';
 import { BaseController } from './baseController.js';
-
-// Import ToolCallConfirmationDetails types for type alignment
-type ToolConfirmationType = 'edit' | 'exec' | 'mcp' | 'info' | 'plan';
+import { buildPermissionSuggestions } from '../../../utils/permission-suggestions.js';
 
 const DEFAULT_CAN_USE_TOOL_TIMEOUT_MS = 60_000;
 
@@ -251,117 +249,7 @@ export class PermissionController extends BaseController {
   buildPermissionSuggestions(
     confirmationDetails: unknown,
   ): PermissionSuggestion[] | null {
-    if (
-      !confirmationDetails ||
-      typeof confirmationDetails !== 'object' ||
-      !('type' in confirmationDetails)
-    ) {
-      return null;
-    }
-
-    const details = confirmationDetails as Record<string, unknown>;
-    const type = String(details['type'] ?? '');
-    const title =
-      typeof details['title'] === 'string' ? details['title'] : undefined;
-
-    // Ensure type matches ToolCallConfirmationDetails union
-    const confirmationType = type as ToolConfirmationType;
-
-    switch (confirmationType) {
-      case 'exec': // ToolExecuteConfirmationDetails
-        return [
-          {
-            type: 'allow',
-            label: 'Allow Command',
-            description: `Execute: ${details['command']}`,
-          },
-          {
-            type: 'deny',
-            label: 'Deny',
-            description: 'Block this command execution',
-          },
-        ];
-
-      case 'edit': // ToolEditConfirmationDetails
-        return [
-          {
-            type: 'allow',
-            label: 'Allow Edit',
-            description: `Edit file: ${details['fileName']}`,
-          },
-          {
-            type: 'deny',
-            label: 'Deny',
-            description: 'Block this file edit',
-          },
-          ...(details['hideModify'] === true
-            ? []
-            : [
-                {
-                  type: 'modify' as const,
-                  label: 'Review Changes',
-                  description: 'Review the proposed changes before applying',
-                },
-              ]),
-        ];
-
-      case 'plan': // ToolPlanConfirmationDetails
-        return [
-          {
-            type: 'allow',
-            label: 'Approve Plan',
-            description: title || 'Execute the proposed plan',
-          },
-          {
-            type: 'deny',
-            label: 'Reject Plan',
-            description: 'Do not execute this plan',
-          },
-        ];
-
-      case 'mcp': // ToolMcpConfirmationDetails
-        return [
-          {
-            type: 'allow',
-            label: 'Allow MCP Call',
-            description: `${details['serverName']}: ${details['toolName']}`,
-          },
-          {
-            type: 'deny',
-            label: 'Deny',
-            description: 'Block this MCP server call',
-          },
-        ];
-
-      case 'info': // ToolInfoConfirmationDetails
-        return [
-          {
-            type: 'allow',
-            label: 'Allow Info Request',
-            description: title || 'Allow information request',
-          },
-          {
-            type: 'deny',
-            label: 'Deny',
-            description: 'Block this information request',
-          },
-        ];
-
-      default:
-        // Fallback for unknown types
-        return [
-          {
-            type: 'allow',
-            label: 'Allow',
-            description: title || `Allow ${type} operation`,
-          },
-          {
-            type: 'deny',
-            label: 'Deny',
-            description: `Block ${type} operation`,
-          },
-        ];
-    }
+    return buildPermissionSuggestions(confirmationDetails);
   }
 
   /**
@@ -462,7 +350,9 @@ export class PermissionController extends BaseController {
           tool_name: event.toolName,
           tool_use_id: callId,
           input: event.toolInput,
-          permission_suggestions: [],
+          permission_suggestions: buildPermissionSuggestions(
+            event.confirmationDetails,
+          ),
           blocked_path: null,
         } as CLIControlPermissionRequest,
         undefined,
@@ -541,6 +431,12 @@ export class PermissionController extends BaseController {
   private async handleOutgoingPermissionRequest(
     toolCall: WaitingToolCall,
   ): Promise<void> {
+    const requiresUserInteraction =
+      toolCall.invocation?.requiresUserInteraction?.() === true;
+    const interactionUnavailableMessage =
+      toolCall.request.name === ToolNames.EXIT_PLAN_MODE
+        ? 'The host could not present plan-exit approval. Use the host mode selector or /plan exit to leave plan mode.'
+        : `The host could not present the required approval for "${toolCall.request.name}".`;
     try {
       // Check if already aborted
       if (this.context.abortSignal?.aborted) {
@@ -552,8 +448,16 @@ export class PermissionController extends BaseController {
 
       const inputFormat = this.context.config.getInputFormat?.();
       const isStreamJsonMode = inputFormat === InputFormat.STREAM_JSON;
-
       if (!isStreamJsonMode) {
+        if (requiresUserInteraction) {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.Cancel,
+            {
+              cancelMessage: interactionUnavailableMessage,
+            },
+          );
+          return;
+        }
         // No SDK available - use local permission check
         const modeCheck = this.checkPermissionMode();
         const outcome = modeCheck.allowed
@@ -585,6 +489,11 @@ export class PermissionController extends BaseController {
       if (response.subtype !== 'success') {
         await toolCall.confirmationDetails.onConfirm(
           ToolConfirmationOutcome.Cancel,
+          requiresUserInteraction
+            ? {
+                cancelMessage: interactionUnavailableMessage,
+              }
+            : undefined,
         );
         return;
       }
@@ -593,6 +502,12 @@ export class PermissionController extends BaseController {
       const behavior = String(payload['behavior'] || '').toLowerCase();
 
       if (behavior === 'allow') {
+        if (requiresUserInteraction) {
+          await toolCall.confirmationDetails.onConfirm(
+            ToolConfirmationOutcome.ProceedOnce,
+          );
+          return;
+        }
         // Handle updated input if provided. The SDK's `can_use_tool`
         // callback returns `updatedInput` — the (possibly sanitised)
         // tool args the host wants executed. For most tools this simply
@@ -644,7 +559,14 @@ export class PermissionController extends BaseController {
       // On error, pass error message as cancel message
       // Only pass payload for exec and mcp types that support it
       const confirmationType = toolCall.confirmationDetails.type;
-      if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
+      if (requiresUserInteraction) {
+        await toolCall.confirmationDetails.onConfirm(
+          ToolConfirmationOutcome.Cancel,
+          {
+            cancelMessage: interactionUnavailableMessage,
+          },
+        );
+      } else if (['edit', 'exec', 'mcp'].includes(confirmationType)) {
         const execOrMcpDetails = toolCall.confirmationDetails as
           | ToolExecuteConfirmationDetails
           | ToolMcpConfirmationDetails;

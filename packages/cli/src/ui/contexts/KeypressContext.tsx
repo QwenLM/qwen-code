@@ -470,11 +470,11 @@ export function KeypressProvider({
       //    The colon-separated fields (shifted key, base key, event type, text)
       //    are optional extensions that some terminals send.
       const csiUPrefix = new RegExp(
-        `^${ESC}\\[(\\d+)(?::\\d+)*(?:;(\\d+)(?::\\d+)*)?(?:;\\d+)?([u~])`,
+        `^${ESC}\\[(\\d+)(?::\\d+)*(?:;(\\d+)(?::\\d+)*)?(?:;(\\d+))?([u~])`,
       );
       m = buffer.match(csiUPrefix);
       if (m) {
-        const keyCode = parseInt(m[1], 10);
+        let keyCode = parseInt(m[1], 10);
         let modifiers = m[2] ? parseInt(m[2], 10) : KITTY_MODIFIER_BASE;
         if (modifiers >= KITTY_MODIFIER_EVENT_TYPES_OFFSET) {
           modifiers -= KITTY_MODIFIER_EVENT_TYPES_OFFSET;
@@ -484,7 +484,17 @@ export function KeypressProvider({
           (modifierBits & MODIFIER_SHIFT_BIT) === MODIFIER_SHIFT_BIT;
         const alt = (modifierBits & MODIFIER_ALT_BIT) === MODIFIER_ALT_BIT;
         const ctrl = (modifierBits & MODIFIER_CTRL_BIT) === MODIFIER_CTRL_BIT;
-        const terminator = m[3];
+        const terminator = m[4];
+
+        // xterm "modifyOtherKeys" (formatOtherKeys=0): ESC [ 27 ; <mods> ; <key> ~
+        // Here the leading 27 is a fixed marker, not the key — the real key code
+        // is the third parameter. Terminals such as Ghostty emit this form for
+        // modified keys (e.g. Shift+Enter → ESC [ 27 ; 2 ; 13 ~) when the Kitty
+        // protocol is not active, so decode the third parameter as the key code
+        // rather than mistaking the marker 27 for Escape.
+        if (keyCode === CHAR_CODE_ESC && terminator === '~' && m[3]) {
+          keyCode = parseInt(m[3], 10);
+        }
 
         // Tilde-coded functional keys (Delete, Insert, PageUp/Down, Home/End)
         if (terminator === '~') {
@@ -937,7 +947,21 @@ export function KeypressProvider({
       // Ctrl+C is handled earlier, above the paste-state branches, so
       // that it remains an escape hatch even when paste mode is stuck.
 
-      if (kittyProtocolEnabled) {
+      // Reassemble xterm modifyOtherKeys sequences (ESC [ 27 ; … ~) even when
+      // the Kitty protocol was not negotiated. readline shreds them into a
+      // partial CSI event plus stray digit/`~` keypresses, so without buffering
+      // the tail (e.g. "13~") leaks as literal input. Terminals like Ghostty
+      // emit this form for Shift/Ctrl/Alt+Enter by default, and parseKittyPrefix
+      // decodes it. Only the 27-marker prefix opts in, so ordinary keys that
+      // readline already parses cleanly are left untouched.
+      const isModifyOtherKeysSequence =
+        key.sequence?.startsWith(`${ESC}[27`) ?? false;
+
+      if (
+        kittyProtocolEnabled ||
+        kittySequenceBufferRef.current ||
+        isModifyOtherKeysSequence
+      ) {
         if (
           kittySequenceBufferRef.current ||
           (key.sequence.startsWith(`${ESC}[`) &&

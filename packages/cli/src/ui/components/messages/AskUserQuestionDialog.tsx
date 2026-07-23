@@ -16,11 +16,39 @@ import { theme } from '../../semantic-colors.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { keyMatchers, Command } from '../../keyMatchers.js';
 import { TextInput } from '../shared/TextInput.js';
+import {
+  getCachedStringWidth,
+  truncateToWidth,
+} from '../../utils/textUtils.js';
 import { t } from '../../../i18n/index.js';
+
+// Largest per-chip display width (cells) such that every header, clipped to it,
+// lets the tab row fit within `available`. Headers narrower than the cap keep
+// their full width and their slack is reclaimed for the longer ones (water-
+// filling), so a header is clipped only when the row genuinely cannot fit it.
+// Returns a very large number when every header already fits at natural width.
+export function computeHeaderCap(
+  headerWidths: number[],
+  available: number,
+): number {
+  const ascending = [...headerWidths].sort((a, b) => a - b);
+  let remaining = available;
+  for (let i = 0; i < ascending.length; i++) {
+    const cap = Math.floor(remaining / (ascending.length - i));
+    if (ascending[i] > cap) {
+      return Math.max(0, cap);
+    }
+    remaining -= ascending[i];
+  }
+  return Number.MAX_SAFE_INTEGER;
+}
 
 interface AskUserQuestionDialogProps {
   confirmationDetails: ToolAskUserQuestionConfirmationDetails;
   isFocused?: boolean;
+  /** Width (cells) of the box the dialog is rendered into; sizes the header
+   * tab row. */
+  availableWidth: number;
   onConfirm: (
     outcome: ToolConfirmationOutcome,
     payload?: ToolConfirmationPayload,
@@ -30,6 +58,7 @@ interface AskUserQuestionDialogProps {
 export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
   confirmationDetails,
   isFocused = true,
+  availableWidth,
   onConfirm,
 }) => {
   const [currentQuestionIndex, setCurrentQuestionIndex] = useState(0);
@@ -98,6 +127,31 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
     }
     return selectedOptions[idx];
   };
+
+  // Headers render as chips in a horizontal tab row. The 12-char schema limit is
+  // only guidance to the model, so at display time each header is shown in full
+  // whenever the row has room and clipped with an ellipsis only when the headers
+  // would otherwise overflow.
+  const numHeaders = confirmationDetails.questions.length;
+  const answeredHeaders = confirmationDetails.questions.filter(
+    (_, idx) => getAnswerForQuestion(idx) !== undefined,
+  ).length;
+  // Cells the row spends outside the header text, matching what it renders.
+  // Recomputed each render, so answering a question re-fits the row.
+  const dialogPadding = 2;
+  // "▸ " when the Submit tab is active, a single leading space otherwise, plus
+  // the (locale-dependent) label.
+  const submitChipWidth =
+    (isSubmitTab ? 2 : 1) + getCachedStringWidth(t('Submit'));
+  const chipGaps = numHeaders; // gap={1} between each chip and the Submit chip
+  const headerPrefixes = 2 * numHeaders; // "▸ " or "  " before each header
+  const answeredMarks = 2 * answeredHeaders; // " ✓" after answered headers
+  const rowOverhead =
+    dialogPadding + submitChipWidth + chipGaps + headerPrefixes + answeredMarks;
+  const headerCap = computeHeaderCap(
+    confirmationDetails.questions.map((q) => getCachedStringWidth(q.header)),
+    availableWidth - rowOverhead,
+  );
 
   const handleSubmit = async () => {
     const answers: Record<string, string> = {};
@@ -322,8 +376,8 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
             return (
               <Box key={idx}>
                 <Text dimColor>
-                  {isAnswered ? '  ' : '  '}
-                  {q.header}
+                  {'  '}
+                  {truncateToWidth(q.header, headerCap)}
                   {isAnswered ? ' ✓' : ''}
                 </Text>
               </Box>
@@ -413,7 +467,7 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
                   dimColor={idx !== currentQuestionIndex}
                 >
                   {idx === currentQuestionIndex ? '▸ ' : '  '}
-                  {q.header}
+                  {truncateToWidth(q.header, headerCap)}
                   {isAnswered ? ' ✓' : ''}
                 </Text>
               </Box>

@@ -1,5 +1,6 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Bot } from 'grammy';
@@ -44,6 +45,9 @@ export class TelegramChannel extends ChannelBase {
   private botUsername: string = '';
   private hasConnectedOnce = false;
   private signalHandlersRegistered = false;
+  private readonly inboundRoute = new AsyncLocalStorage<{
+    threadId?: string;
+  }>();
 
   constructor(
     name: string,
@@ -341,8 +345,34 @@ export class TelegramChannel extends ChannelBase {
     super.onSessionDied(sessionId);
   }
 
+  override async handleInbound(envelope: Envelope): Promise<void> {
+    const route =
+      envelope.threadId === undefined ? {} : { threadId: envelope.threadId };
+    await this.inboundRoute.run(route, () => super.handleInbound(envelope));
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
-    await this.sendTelegramMessage(chatId, text);
+    await this.sendTelegramMessage(
+      chatId,
+      text,
+      this.inboundRoute.getStore()?.threadId,
+    );
+  }
+
+  protected override async sendResponseMessage(
+    chatId: string,
+    text: string,
+    sessionId: string,
+  ): Promise<void> {
+    const inboundRoute = this.inboundRoute.getStore();
+    const target = this.router.getTarget(sessionId);
+    const threadId =
+      inboundRoute !== undefined
+        ? inboundRoute.threadId
+        : target?.channelName === this.name && target.chatId === chatId
+          ? target.threadId
+          : undefined;
+    await this.sendTelegramMessage(chatId, text, threadId);
   }
 
   protected override async pushProactive(
@@ -391,7 +421,7 @@ export class TelegramChannel extends ChannelBase {
   private buildEnvelope(
     msg: {
       from: { id: number; first_name: string; last_name?: string };
-      chat: { id: number; type: string };
+      chat: { id: number; type: string; title?: string };
       message_thread_id?: number;
       reply_to_message?: { from?: { id: number }; text?: string };
     },
@@ -436,6 +466,7 @@ export class TelegramChannel extends ChannelBase {
         msg.from.first_name +
         (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
       chatId: String(msg.chat.id),
+      ...(isGroup && msg.chat.title ? { chatName: msg.chat.title } : {}),
       threadId:
         typeof msg.message_thread_id === 'number'
           ? String(msg.message_thread_id)

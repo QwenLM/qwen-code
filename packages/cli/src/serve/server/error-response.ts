@@ -12,6 +12,7 @@ import {
   SessionTranscriptPageTooLargeError,
   SessionTranscriptSnapshotUnavailableError,
   SessionTranscriptTooLargeError,
+  SessionWriterError,
   TrustGateError,
 } from '@qwen-code/qwen-code-core';
 import type { Response } from 'express';
@@ -66,6 +67,15 @@ export type SendBridgeError = (
   err: unknown,
   ctx?: BridgeErrorContext,
 ) => void;
+
+const SESSION_WRITER_ERROR_MESSAGES = {
+  session_writer_conflict:
+    'This session is already open in another Qwen process.',
+  session_writer_lost: 'Write ownership for this session was lost.',
+  session_transcript_changed:
+    'The session transcript changed outside its active writer.',
+  session_writer_unavailable: 'Session write ownership could not be verified.',
+} as const;
 
 function bridgeErrorExtraContext(
   ctx: BridgeErrorContext | undefined,
@@ -158,6 +168,14 @@ export function sendBridgeError(
   ctx?: BridgeErrorContext,
   daemonLog?: DaemonLogger,
 ): void {
+  if (err instanceof SessionWriterError) {
+    res.status(err.httpStatus).json({
+      error: err.message,
+      code: err.errorKind,
+      errorKind: err.errorKind,
+    });
+    return;
+  }
   if (err instanceof WorkspaceSkillNotFoundError) {
     res.status(404).json({
       error: err.message,
@@ -169,7 +187,10 @@ export function sendBridgeError(
   if (err instanceof WorkspaceSkillNotToggleableError) {
     res.status(409).json({
       error: err.message,
-      code: 'skill_not_toggleable',
+      code:
+        err.reason === 'inactive_extension'
+          ? 'skill_inactive_extension'
+          : 'skill_not_toggleable',
       skillName: err.skillName,
       reason: err.reason,
       ...(err.lockedScope ? { lockedScope: err.lockedScope } : {}),
@@ -387,17 +408,17 @@ export function sendBridgeError(
     return;
   }
   if (err instanceof WorkspaceMismatchError) {
-    // Single-workspace mode: the daemon binds to one workspace at
-    // boot; cross-workspace POSTs are rejected here.
-    // 400 (not 404 — the daemon is "fine", the client just picked
-    // the wrong daemon for their workspace). Body includes both
-    // paths so orchestrator-aware clients can route to the right
-    // daemon / spawn a new one.
+    // Each bridge binds to one workspace runtime; a cross-workspace POST that
+    // reaches the selected bridge is rejected here.
+    // 400 (not 404 — the daemon is "fine", but the client selected an
+    // unregistered runtime or reached a mismatched bridge). Body includes both
+    // paths so clients can refresh the registry, register the workspace, or
+    // select the right runtime.
     //
     // Operator log line: unlike SessionNotFoundError (per-session
     // 404 with rich URL context), workspace_mismatch indicates an
-    // orchestration / deployment drift (operator booted with the
-    // wrong workspace, or client is routing to the wrong daemon).
+    // orchestration / deployment drift (the workspace was not registered, or
+    // runtime selection and bridge dispatch disagree).
     // Without a breadcrumb the daemon's log looks healthy while
     // every client request silently 400s. Limited to authenticated
     // requests by the upstream bearer-token gate, so probing-DoS
@@ -417,7 +438,7 @@ export function sendBridgeError(
     // readability.
     writeStderrLine(
       `qwen serve: workspace_mismatch (POST /session): ` +
-        `daemon bound to ${JSON.stringify(err.bound)}, ` +
+        `runtime bound to ${JSON.stringify(err.bound)}, ` +
         `rejected ${JSON.stringify(err.requested)}`,
     );
     res.status(400).json({
@@ -543,6 +564,26 @@ export function sendBridgeError(
     const data = (err as { data?: unknown }).data;
     if (data && typeof data === 'object') {
       const kind = (data as { errorKind?: unknown }).errorKind;
+      if (
+        kind === 'session_writer_conflict' ||
+        kind === 'session_writer_lost' ||
+        kind === 'session_transcript_changed'
+      ) {
+        res.status(409).json({
+          error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
+      if (kind === 'session_writer_unavailable') {
+        res.status(503).json({
+          error: SESSION_WRITER_ERROR_MESSAGES[kind],
+          code: kind,
+          errorKind: kind,
+        });
+        return;
+      }
       if (kind === 'mcp_budget_would_exceed') {
         const d = data as { serverName?: string };
         res.status(409).json({
@@ -647,6 +688,23 @@ export function sendBridgeError(
           ...(d.sessionId ? { sessionId: d.sessionId } : {}),
           ...(typeof d.snapshotSize === 'number'
             ? { snapshotSize: d.snapshotSize }
+            : {}),
+          ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
+        });
+        return;
+      }
+      if (kind === 'transcript_page_too_large') {
+        const d = data as {
+          sessionId?: string;
+          pageBytes?: number;
+          maxBytes?: number;
+        };
+        res.status(413).json({
+          error: errorMessage(err),
+          code: 'transcript_page_too_large',
+          ...(d.sessionId ? { sessionId: d.sessionId } : {}),
+          ...(typeof d.pageBytes === 'number'
+            ? { pageBytes: d.pageBytes }
             : {}),
           ...(typeof d.maxBytes === 'number' ? { maxBytes: d.maxBytes } : {}),
         });

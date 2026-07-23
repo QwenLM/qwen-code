@@ -194,6 +194,7 @@ export default {
   'toolDisplayName.CronDelete': '刪除定時任務',
   'toolDisplayName.LoopWakeup': '循環喚醒',
   'toolDisplayName.CreateSubSession': '建立子會話',
+  'toolDisplayName.ListAgents': '列出 Agent',
   'toolDisplayName.TaskCreate': '建立任務',
   'toolDisplayName.TaskUpdate': '更新任務',
   'toolDisplayName.TaskList': '任務列表',
@@ -716,6 +717,7 @@ export default {
   'Folder Trust': '檔案夾信任',
   'Tool Schema Compliance': 'Tool Schema 兼容性',
   'Auto (detect from system)': '自動（從系統檢測）',
+  'Auto (follow user input)': '自動（跟隨使用者輸入）',
   'Auto (detect terminal theme)': '自動（檢測終端主題）',
   Auto: '自動',
   Text: '文本',
@@ -868,7 +870,7 @@ export default {
     '請將要卸載的擴展名稱作為位置參數。',
   'Enables an extension.': '啟用擴展。',
   'The name of the extension to enable.': '要啟用的擴展名稱。',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     '啟用擴展的作用域。如果未設置，將在所有作用域中啟用。',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     '擴展 "{{name}}" 已在作用域 "{{scope}}" 中啟用。',
@@ -878,7 +880,7 @@ export default {
     '無效的作用域：{{scope}}。請使用 {{scopes}} 之一。',
   'Disables an extension.': '禁用擴展。',
   'The name of the extension to disable.': '要禁用的擴展名稱。',
-  'The scope to disable the extenison in.': '禁用擴展的作用域。',
+  'The scope to disable the extension in.': '禁用擴展的作用域。',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     '擴展 "{{name}}" 已在作用域 "{{scope}}" 中禁用。',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1614,7 +1616,11 @@ export default {
   'Press Ctrl+C again to exit.': '再次按 Ctrl+C 退出',
   'Press Ctrl+D again to exit.': '再次按 Ctrl+D 退出',
   'Press Esc again to clear.': '再次按 Esc 清除',
-  'Press ↑ to edit queued messages': '按 ↑ 編輯排隊消息',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q 排到下一輪 · ↑ 編輯排隊消息',
+  'Enter to steer · Ctrl+Q to queue':
+    'Enter 追加到目前任務 · Ctrl+Q 排到下一輪',
+  'Queue message for the next turn': '將消息排到下一輪',
   'No MCP servers configured.': '未配置 MCP servers',
   '◌ MCP servers are starting up ({{count}} initializing)...':
     '◌ MCP servers 正在啟動（{{count}} 個正在初始化）...',
@@ -1826,6 +1832,7 @@ export default {
   'Press Ctrl+Y to retry': '按 Ctrl+Y 重試。',
   'No failed request to retry.': '沒有可重試的失敗請求。',
   'to retry last request': '重試上一次請求',
+  'to queue for the next turn': '排到下一輪',
   'API key cannot be empty.': 'API Key 不能為空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '無效的 API Key，Coding Plan API Key 均以 "sk-sp-" 開頭，請檢查',
@@ -2192,8 +2199,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code 有新版本可用！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    '檢查更新失敗。請檢查網路或 registry 設定。',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    '檢查更新失敗（{{reason}}）。請檢查網路或 registry 設定。',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    '已略過更新檢查（{{reason}}）— 可執行 /update 重試。',
+  'registry did not respond within {{seconds}}s':
+    'registry 在 {{seconds}} 秒內未回應',
+  'registry unreachable': 'registry 無法連線',
+  'registry error': 'registry 錯誤',
   'Unable to check for updates: {{reason}}': '無法檢查更新：{{reason}}',
   'Update successful! The new version will be used on your next run.':
     '更新成功！新版本將在下次執行時生效。',

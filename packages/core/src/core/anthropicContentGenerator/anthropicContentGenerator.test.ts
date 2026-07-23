@@ -87,6 +87,13 @@ describe('AnthropicContentGenerator', () => {
   beforeEach(async () => {
     vi.clearAllMocks();
     vi.resetModules();
+    // The generator's constructor builds undici-backed fetch options
+    // synchronously; production code preloads undici in
+    // createContentGenerator, and resetModules() clears that state.
+    const { preloadRuntimeFetchModule } = await import(
+      '../../utils/runtimeFetchOptions.js'
+    );
+    await preloadRuntimeFetchModule();
     savedMaxOutputTokensEnv = process.env[MAX_OUTPUT_TOKENS_ENV];
     delete process.env[MAX_OUTPUT_TOKENS_ENV];
 
@@ -3452,8 +3459,71 @@ describe('AnthropicContentGenerator', () => {
       }).rejects.toThrow('connect ECONNREFUSED <redacted>@proxy.local:8080');
     });
 
+    it('preserves message_start usage when the stream fails after content', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: {
+              id: 'msg-1',
+              model: 'claude-test',
+              usage: {
+                input_tokens: 2,
+                cache_read_input_tokens: 3,
+                cache_creation_input_tokens: 4,
+              },
+            },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'partial' },
+          };
+          throw new Error('stream interrupted');
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-test',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 100 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      await expect(async () => {
+        for await (const chunk of stream) chunks.push(chunk);
+      }).rejects.toThrow('stream interrupted');
+
+      expect(chunks).toHaveLength(1);
+      expect(chunks[0]?.usageMetadata).toEqual({
+        promptTokenCount: 9,
+        cachedContentTokenCount: 3,
+      });
+      expect(getGenAiUsageProvenance(chunks[0]?.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 4,
+      });
+    });
+
     it('requests stream=true and converts streamed events into Gemini chunks', async () => {
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3582,12 +3652,19 @@ describe('AnthropicContentGenerator', () => {
 
       // Usage/finish chunks exist; check the last one.
       const last = chunks[chunks.length - 1]!;
+      expect(
+        chunks.every((chunk) => chunk.modelVersion === 'claude-test'),
+      ).toBe(true);
       expect(last.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
       expect(last.usageMetadata).toEqual({
         cachedContentTokenCount: 7,
         promptTokenCount: 9, // input(2) + cached(7) — Anthropic-true (input < cache_read)
         candidatesTokenCount: 5,
         totalTokenCount: 14,
+      });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: undefined,
       });
     });
 
@@ -3601,6 +3678,9 @@ describe('AnthropicContentGenerator', () => {
       // dropped from the displayed total and the Footer under-reports by
       // exactly that many tokens.
       const { AnthropicContentGenerator } = await importGenerator();
+      const { getGenAiUsageProvenance } = await import(
+        '../../telemetry/gen-ai-usage.js'
+      );
       anthropicState.createImpl.mockResolvedValue(
         (async function* () {
           yield {
@@ -3666,6 +3746,55 @@ describe('AnthropicContentGenerator', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(last.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the requested model when a stream omits it', async () => {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue(
+        (async function* () {
+          yield {
+            type: 'message_start',
+            message: { id: 'msg-1', usage: { input_tokens: 1 } },
+          };
+          yield {
+            type: 'content_block_delta',
+            index: 0,
+            delta: { type: 'text_delta', text: 'ok' },
+          };
+          yield {
+            type: 'message_delta',
+            delta: { stop_reason: 'end_turn' },
+            usage: { output_tokens: 1 },
+          };
+        })(),
+      );
+
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'requested-model',
+          apiKey: 'test-key',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 123 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+      const stream = await generator.generateContentStream({
+        model: 'models/ignored',
+        contents: 'Hello',
+      } as unknown as GenerateContentParameters);
+
+      const chunks: GenerateContentResponse[] = [];
+      for await (const chunk of stream) chunks.push(chunk);
+      expect(chunks).not.toHaveLength(0);
+      expect(chunks.every((chunk) => chunk.modelVersion === undefined)).toBe(
+        true,
+      );
     });
 
     it('falls back to non-streaming when the stream is empty and surfaces provider errors', async () => {
@@ -3758,6 +3887,89 @@ describe('AnthropicContentGenerator', () => {
         { text: 'fallback ok' },
       ]);
       expect(chunks[0]?.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    });
+  });
+
+  describe('tool_choice mapping from Gemini toolConfig', () => {
+    async function sendWithToolConfig(
+      mode: string | undefined,
+      hasTools = true,
+    ) {
+      const { AnthropicContentGenerator } = await importGenerator();
+      anthropicState.createImpl.mockResolvedValue({
+        id: 'msg-1',
+        model: 'claude-opus-4-6',
+        content: [{ type: 'text', text: 'ok' }],
+      });
+      const generator = new AnthropicContentGenerator(
+        {
+          model: 'claude-opus-4-6',
+          apiKey: 'test-key',
+          baseUrl: 'https://api.anthropic.com',
+          timeout: 10_000,
+          maxRetries: 2,
+          samplingParams: { max_tokens: 500 },
+          schemaCompliance: 'auto',
+        },
+        mockConfig,
+      );
+
+      const tools = hasTools
+        ? [
+            {
+              functionDeclarations: [
+                {
+                  name: 'respond_in_schema',
+                  description: 'test',
+                  parameters: {
+                    type: 'object' as const,
+                    properties: {
+                      shouldBlock: { type: 'boolean' as const },
+                    },
+                  },
+                },
+              ],
+            },
+          ]
+        : undefined;
+
+      await generator.generateContent({
+        model: 'models/ignored',
+        contents: [{ role: 'user', parts: [{ text: 'test' }] }],
+        config: {
+          tools,
+          ...(mode !== undefined && {
+            toolConfig: { functionCallingConfig: { mode } },
+          }),
+        },
+      } as unknown as GenerateContentParameters);
+
+      return anthropicState.lastCreateArgs?.[0] as Record<string, unknown>;
+    }
+
+    it('sets tool_choice=any when mode is ANY', async () => {
+      const req = await sendWithToolConfig('ANY');
+      expect(req['tool_choice']).toEqual({ type: 'any' });
+    });
+
+    it('omits tool_choice when mode is NONE (Anthropic has no none type)', async () => {
+      const req = await sendWithToolConfig('NONE');
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when mode is AUTO', async () => {
+      const req = await sendWithToolConfig('AUTO');
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when no toolConfig is set', async () => {
+      const req = await sendWithToolConfig(undefined);
+      expect(req['tool_choice']).toBeUndefined();
+    });
+
+    it('omits tool_choice when there are no tools even with mode ANY', async () => {
+      const req = await sendWithToolConfig('ANY', false);
+      expect(req['tool_choice']).toBeUndefined();
     });
   });
 });

@@ -69,6 +69,8 @@ export function createDaemonTranscriptStore(
     reset(nextSeed: Partial<DaemonTranscriptState> = {}) {
       state = createState({
         maxBlocks: nextSeed.maxBlocks ?? state.maxBlocks,
+        retainSubagentBlocks:
+          nextSeed.retainSubagentBlocks ?? state.retainSubagentBlocks,
         ...nextSeed,
       });
       scheduleNotify();
@@ -139,20 +141,20 @@ function createState(
     ...seed,
     blocks,
     blockIndexById: rebuildDaemonTranscriptBlockIndex(blocks),
-    toolBlockByCallId: { ...(seed.toolBlockByCallId ?? {}) },
-    trimmedToolNotificationByCallId: {
-      ...(seed.trimmedToolNotificationByCallId ?? {}),
-    },
-    permissionBlockByRequestId: {
-      ...(seed.permissionBlockByRequestId ?? {}),
-    },
-    toolProgress: { ...(seed.toolProgress ?? {}) },
-    activeAssistantBlockByParent: {
-      ...(seed.activeAssistantBlockByParent ?? {}),
-    },
-    activeThoughtBlockByParent: {
-      ...(seed.activeThoughtBlockByParent ?? {}),
-    },
+    toolBlockByCallId: createNullIndex(seed.toolBlockByCallId),
+    trimmedToolNotificationByCallId: createNullIndex(
+      seed.trimmedToolNotificationByCallId,
+    ),
+    permissionBlockByRequestId: createNullIndex(
+      seed.permissionBlockByRequestId,
+    ),
+    toolProgress: createNullIndex(seed.toolProgress),
+    activeAssistantBlockByParent: createNullIndex(
+      seed.activeAssistantBlockByParent,
+    ),
+    activeThoughtBlockByParent: createNullIndex(
+      seed.activeThoughtBlockByParent,
+    ),
     lastResyncRequired:
       seed.lastResyncRequired !== undefined
         ? { ...seed.lastResyncRequired }
@@ -162,4 +164,10 @@ function createState(
         ? { ...seed.lastFollowupSuggestion }
         : undefined,
   };
+}
+
+function createNullIndex<T>(
+  source?: Readonly<Record<string, T>>,
+): Record<string, T> {
+  return Object.assign(Object.create(null) as Record<string, T>, source);
 }

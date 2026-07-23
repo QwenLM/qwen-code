@@ -14,8 +14,8 @@ import {
 
 export interface OtherWorkspaceSessionsResult {
   /**
-   * Live sessions from every non-primary, trusted registered workspace, merged
-   * into one flat list. Each summary already carries its own `workspaceCwd`.
+   * Active sessions from every non-primary, trusted registered workspace,
+   * merged into one flat list. Each summary carries its own `workspaceCwd`.
    */
   sessions: DaemonSessionSummary[];
   /** Re-fetch every target workspace. Stable identity (safe in effect deps). */
@@ -25,17 +25,19 @@ export interface OtherWorkspaceSessionsResult {
 const EMPTY: DaemonSessionSummary[] = [];
 
 /**
- * Collect the *live* sessions of the daemon's other workspaces so the split
+ * Collect the active sessions of the daemon's other workspaces so the split
  * view and session overview can list and open sessions that are not in the
  * primary workspace. The primary workspace's own sessions still come from
  * `useSessions()`; callers merge the two (see `mergeSessionsById`).
  *
  * Scope & guarantees:
  * - Targets only `capabilities.workspaces` entries that are non-primary **and**
- *   trusted — an untrusted workspace can't be listed (the daemon 403s it) and
- *   the primary is already covered by `useSessions`.
- * - Non-primary workspaces are live-only on the daemon (Phase 2a), so this asks
- *   for `archiveState: 'active'` and never for the organized/persisted view.
+ *   trusted. Untrusted workspaces expose a persisted read-only catalog, but
+ *   those rows are not openable and therefore do not belong in this hook; the
+ *   primary is already covered by `useSessions`.
+ * - Trusted non-primary active lists merge persisted rows with matching live
+ *   summaries. This hook asks for `archiveState: 'active'`; archived and
+ *   organized views are handled by their dedicated surfaces.
  * - Fans out with `Promise.allSettled`: one workspace failing (e.g. transiently
  *   unreachable) drops only its own rows, never the others'.
  * - Returns an empty, stable list on a single-workspace daemon (no
@@ -60,7 +62,7 @@ export function useOtherWorkspaceSessions(
 
   const [sessions, setSessions] = useState<DaemonSessionSummary[]>(EMPTY);
 
-  // Fetch + merge the target workspaces' live sessions. Returns the stable
+  // Fetch + merge the target workspaces' active sessions. Returns the stable
   // EMPTY sentinel when there is nothing to fetch or every list came back
   // empty, so `setSessions` is a reference-equal no-op re-render in that case.
   const fetchSessions = useCallback(async (): Promise<

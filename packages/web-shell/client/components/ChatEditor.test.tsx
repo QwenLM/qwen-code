@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, createRef } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -11,7 +11,10 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
-import type { SlashMenuState } from '../hooks/useComposerCore';
+import type {
+  MobileComposerBackend,
+  SlashMenuState,
+} from '../hooks/useComposerCore';
 import { ChatEditor, type ComposerToolbarAction } from './ChatEditor';
 import { WebShellPortalRootContext } from '../portalRoot';
 
@@ -28,6 +31,8 @@ const composerCoreState = vi.hoisted(() => ({
   slashMenu: null as SlashMenuState | null,
   focus: vi.fn(),
   closeSlashMenu: vi.fn(),
+  mobileComposer: null as unknown,
+  openHistorySearch: vi.fn(),
 }));
 
 Object.defineProperty(window, 'matchMedia', {
@@ -48,6 +53,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
     useComposerCore: () => ({
       containerRef: React.createRef<HTMLDivElement>(),
       viewRef: { current: null },
+      mobileComposer: composerCoreState.mobileComposer,
       focus: composerCoreState.focus,
       submitText: vi.fn(),
       clearText: vi.fn(),
@@ -88,7 +94,7 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
         searchActiveIndex: 0,
         searchInputRef: React.createRef<HTMLInputElement>(),
         searchUiRef: React.createRef<HTMLDivElement>(),
-        openHistorySearch: vi.fn(),
+        openHistorySearch: composerCoreState.openHistorySearch,
         closeSearch: vi.fn(),
         submitSearchMatch: vi.fn(),
         handleSearchKeyDown: vi.fn(),
@@ -118,6 +124,10 @@ vi.mock('../hooks/useComposerCore', async (importOriginal) => {
   };
 });
 
+vi.mock('../voice/VoiceButton', () => ({
+  VoiceButton: () => <span data-testid="voice-button" />,
+}));
+
 const mounted: Array<{
   root: Root;
   container: HTMLDivElement;
@@ -128,6 +138,8 @@ afterEach(() => {
   composerCoreState.slashMenu = null;
   composerCoreState.focus.mockReset();
   composerCoreState.closeSlashMenu.mockReset();
+  composerCoreState.mobileComposer = null;
+  composerCoreState.openHistorySearch.mockReset();
   for (const { root, container, portalRoot } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
@@ -138,6 +150,7 @@ afterEach(() => {
 });
 
 function renderChatEditor(props: {
+  composerTags?: WebShellComposerTag[];
   gitBranch?: string;
   workspaceName?: string;
   workspaceTitle?: string;
@@ -152,11 +165,15 @@ function renderChatEditor(props: {
   customization?: WebShellCustomization;
 }) {
   const {
+    composerTags,
     customization,
     renderComposerTagTooltip,
     onComposerTagClick,
     ...chatEditorProps
   } = props;
+  if (composerTags) {
+    mockComposerCoreState.composerTags = composerTags;
+  }
   const container = document.createElement('div');
   container.dataset.webShellRoot = '';
   const portalRoot = document.createElement('div');
@@ -193,6 +210,60 @@ function renderChatEditor(props: {
 
   return container;
 }
+
+describe('ChatEditor voice toolbar integration', () => {
+  it('mounts voice only when the host toolbar allows it', () => {
+    expect(
+      renderChatEditor({}).querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: ['voice'],
+      }).querySelector('[data-testid="voice-button"]'),
+    ).not.toBeNull();
+    expect(
+      renderChatEditor({
+        visibleToolbarActions: [],
+      }).querySelector('[data-testid="voice-button"]'),
+    ).toBeNull();
+  });
+});
+
+describe('ChatEditor composer tag icons', () => {
+  it('renders built-in icons for top composer tags', () => {
+    const kinds = ['extension', 'file', 'mcp', 'skill'] as const;
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      composerTags: kinds.map((kind) => ({
+        id: `${kind}:reference`,
+        kind,
+        value: kind,
+      })),
+    });
+
+    expect(
+      container.querySelectorAll('[style*="--composer-tag-icon-url"]'),
+    ).toHaveLength(kinds.length);
+  });
+
+  it('rejects unsafe custom icon URLs for top composer tags', () => {
+    const container = renderChatEditor({
+      visibleToolbarActions: [],
+      composerTags: [
+        {
+          id: 'custom:reference',
+          value: 'reference',
+          icon: 'javascript:alert(1)',
+        },
+      ],
+    });
+
+    expect(container.innerHTML).not.toContain('javascript:alert');
+    expect(
+      container.querySelector('[style*="--composer-tag-icon-url"]'),
+    ).toBeNull();
+  });
+});
 
 describe('ChatEditor git branch toolbar integration', () => {
   it('shows the git branch indicator when the branch action is visible', () => {
@@ -549,6 +620,21 @@ describe('ChatEditor toolbar popovers', () => {
     expect(onSelectModel).toHaveBeenCalledWith('qwen-max');
   });
 
+  it('displays the model label instead of an opaque route id', () => {
+    const routeId = 'qwen-route:v1:abcdefghijklmnop';
+    const container = renderChatEditor({
+      visibleToolbarActions: ['model'],
+      currentModel: routeId,
+      availableModels: [{ id: routeId, label: 'Provider One' }],
+    });
+
+    const button = container.querySelector<HTMLButtonElement>(
+      '[data-web-shell-model-button]',
+    );
+    expect(button?.textContent).toContain('Provider One');
+    expect(button?.textContent).not.toContain(routeId);
+  });
+
   it('switches between sibling toolbar popovers without dismissing the target', async () => {
     const container = renderChatEditor({
       visibleToolbarActions: ['approvalMode', 'model'],
@@ -647,5 +733,90 @@ describe('ChatEditor slash command popovers', () => {
       detail?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
     });
     expect(composerCoreState.closeSlashMenu).not.toHaveBeenCalled();
+  });
+});
+
+describe('ChatEditor mobile composer quick actions', () => {
+  const originalMaxTouchPoints = Object.getOwnPropertyDescriptor(
+    Navigator.prototype,
+    'maxTouchPoints',
+  );
+
+  function withTouchDevice(run: () => void) {
+    Object.defineProperty(navigator, 'maxTouchPoints', {
+      value: 5,
+      configurable: true,
+    });
+    try {
+      run();
+    } finally {
+      if (originalMaxTouchPoints) {
+        Object.defineProperty(
+          Navigator.prototype,
+          'maxTouchPoints',
+          originalMaxTouchPoints,
+        );
+      } else {
+        delete (navigator as unknown as Record<string, unknown>)[
+          'maxTouchPoints'
+        ];
+      }
+    }
+  }
+
+  function mobileComposerStub(): MobileComposerBackend {
+    return {
+      textareaRef: createRef<HTMLTextAreaElement>(),
+      value: '',
+      onChange: vi.fn(),
+      onPaste: vi.fn(),
+      placeholder: '',
+    };
+  }
+
+  function openQuickActions(container: HTMLElement) {
+    const toggle = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="more actions"]',
+    );
+    expect(toggle).not.toBeNull();
+    act(() => toggle!.click());
+  }
+
+  it('maps the history quick action to the search UI on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const container = renderChatEditor({});
+      openQuickActions(container);
+
+      const historyButton = Array.from(
+        container.querySelectorAll('button'),
+      ).find((button) => button.textContent === 'Question history');
+      expect(historyButton).not.toBeUndefined();
+      act(() => historyButton!.click());
+
+      expect(composerCoreState.openHistorySearch).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('hides the keyboard shortcut hints grid on the mobile composer', () => {
+    withTouchDevice(() => {
+      composerCoreState.mobileComposer = mobileComposerStub();
+      const mobileContainer = renderChatEditor({});
+      openQuickActions(mobileContainer);
+      expect(
+        Array.from(mobileContainer.querySelectorAll('button')).some(
+          (button) => button.textContent === 'Tab',
+        ),
+      ).toBe(false);
+
+      composerCoreState.mobileComposer = null;
+      const desktopContainer = renderChatEditor({});
+      openQuickActions(desktopContainer);
+      expect(
+        Array.from(desktopContainer.querySelectorAll('button')).some(
+          (button) => button.textContent === 'Tab',
+        ),
+      ).toBe(true);
+    });
   });
 });

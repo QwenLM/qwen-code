@@ -1,11 +1,13 @@
 import { PROMPT_UNSAFE_INVISIBLES } from './sanitize.js';
 
 export type ChannelMemoryIntent =
-  | { kind: 'remember'; text: string }
+  | { kind: 'remember'; texts: string[] }
   | { kind: 'list'; page: number }
   | { kind: 'inspect'; id: string }
   | { kind: 'remove'; id: string }
   | { kind: 'update'; id: string; text: string }
+  | { kind: 'update_confirm' }
+  | { kind: 'remove_confirm' }
   | { kind: 'clear_request' }
   | { kind: 'clear_confirm' };
 
@@ -68,6 +70,16 @@ const CLEAR_CONFIRM_PATTERNS: RegExp[] = [
   /^confirm clear memory$/iu,
 ];
 
+const UPDATE_CONFIRM_PATTERNS: RegExp[] = [
+  /^确认更新记忆$/u,
+  /^confirm memory update$/iu,
+];
+
+const REMOVE_CONFIRM_PATTERNS: RegExp[] = [
+  /^确认删除记忆$/u,
+  /^confirm memory removal$/iu,
+];
+
 export function parseChannelMemoryIntent(
   text: string,
 ): ChannelMemoryIntent | null {
@@ -76,6 +88,16 @@ export function parseChannelMemoryIntent(
     return null;
   }
 
+  for (const pattern of UPDATE_CONFIRM_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { kind: 'update_confirm' };
+    }
+  }
+  for (const pattern of REMOVE_CONFIRM_PATTERNS) {
+    if (pattern.test(trimmed)) {
+      return { kind: 'remove_confirm' };
+    }
+  }
   for (const pattern of CLEAR_CONFIRM_PATTERNS) {
     if (pattern.test(trimmed)) {
       return { kind: 'clear_confirm' };
@@ -124,7 +146,7 @@ export function parseChannelMemoryIntent(
     const match = trimmed.match(pattern);
     const remembered = match?.[1]?.replace(PROMPT_UNSAFE_INVISIBLES, '').trim();
     if (remembered) {
-      return { kind: 'remember', text: remembered };
+      return { kind: 'remember', texts: [remembered] };
     }
   }
 

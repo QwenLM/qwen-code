@@ -13,6 +13,11 @@
       "type": "object",
       "additionalProperties": true
     },
+    "serve": {
+      "description": "Persistent qwen serve settings.",
+      "type": "object",
+      "additionalProperties": true
+    },
     "modelProviders": {
       "description": "Model providers configuration keyed by provider id (a built-in AuthType such as \"openai\" or \"gemini\", or a custom id mapped via providerProtocol). Each entry is an array of model configurations.",
       "type": "object",
@@ -154,7 +159,7 @@
           "default": "auto"
         },
         "outputLanguage": {
-          "description": "The language for LLM output. Use \"auto\" to detect from system settings, or set a specific language.",
+          "description": "The language for LLM output. Use \"auto\" to follow the user input language, or set a specific language.",
           "type": "string",
           "default": "auto"
         },
@@ -375,7 +380,7 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled. Drag to select text in the viewport (double/triple click selects a word/line), copied on release. To use the terminal’s own selection instead, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
           "default": false
         },
@@ -641,7 +646,7 @@
           "default": true
         },
         "maxToolCallsPerTurn": {
-          "description": "Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "description": "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to both the interactive TUI and non-interactive (-p / JSON / stream-JSON) core-client runs; the daemon/ACP path always treats the value as a hard cap. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
           "type": "integer",
           "default": 100
         },
@@ -882,6 +887,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "directories": {
+          "description": "Additional directories to scan for skills (SKILL.md files). Entries should be absolute paths or ~-prefixed; relative paths resolve against the working directory. Each directory is scanned one level deep for subdirectories containing a SKILL.md file. Skills from these directories are loaded at user level, after the default user skill directories; a custom skill with the same name as one in the default user directories will not override it. Only point this at trusted locations, since skills can define hooks and commands.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
         }
       }
     },
@@ -1013,6 +1025,26 @@
         "sandboxImage": {
           "description": "Sandbox image URI used by Docker/Podman when --sandbox-image and QWEN_SANDBOX_IMAGE are not set.",
           "type": "string"
+        },
+        "webSearch": {
+          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). Opt-in: requires enabled=true and a search model. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
+          "type": "object",
+          "properties": {
+            "enabled": {
+              "description": "Enable the built-in web_search tool. Also requires tools.webSearch.model. Env override: ENABLE_WEB_SEARCH.",
+              "type": "boolean",
+              "default": false
+            },
+            "model": {
+              "description": "Model selector for the search side request, resolved against modelProviders like fastModel (\"modelId\" or \"authType:modelId\"). Must resolve to a DashScope-compatible entry with an envKey. Recommended: qwen3.6-plus. Env override: WEB_SEARCH_MODEL.",
+              "type": "string"
+            },
+            "webExtractor": {
+              "description": "Let the search agent open and read result pages (DashScope web_extractor) for better-grounded answers. Billed separately by DashScope. Env override: WEB_SEARCH_EXTRACTOR.",
+              "type": "boolean",
+              "default": true
+            }
+          }
         },
         "toolSearch": {
           "description": "Settings for the ToolSearch discovery mechanism.",
@@ -1148,7 +1180,7 @@
           "default": 1000
         },
         "toolOutputBatchBudget": {
-          "description": "Per-message budget (characters) for the combined output of one batch of tool calls; the largest results are offloaded to disk when exceeded. Set to -1 to disable.",
+          "description": "Per-message character budget for the combined text output of one batch of tool calls. Oversized batches are reduced deterministically and recoverable output is persisted when possible. Set to -1 to disable.",
           "type": "number",
           "default": 200000
         },
@@ -1336,7 +1368,15 @@
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,
-          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Per-model limits are not supported yet."
+          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit."
+        },
+        "maxParallelAgentsByModel": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { \"qwen3-max\": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit."
         },
         "displayMode": {
           "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
@@ -2950,6 +2990,11 @@
           "type": "boolean",
           "default": true
         },
+        "todoStopGuard": {
+          "description": "Allow daemon and ACP sessions to continue an unfinished top-level Todo list for at most two consecutive primary-model calls without new user input. Mid-turn user input starts a fresh two-attempt stage. Disabled in safe, bare, and Approval plan modes.",
+          "type": "boolean",
+          "default": false
+        },
         "cronRecurringMaxAgeDays": {
           "type": "number",
           "minimum": 0,
@@ -2962,9 +3007,9 @@
           "default": false
         },
         "artifact": {
-          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.",
+          "description": "Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.",
           "type": "boolean",
-          "default": false
+          "default": true
         },
         "emitToolUseSummaries": {
           "description": "Generate a short LLM-based label after each tool batch completes. For a completed tool group the label replaces the generic `Tool × N` header; when the group is force-expanded it appears as a dim `● <label>` line below the tool group. Requires a fast model to be configured; runs in parallel with the next API call so latency is hidden. Currently affects interactive CLI rendering only — SDK / non-interactive emission of the `tool_use_summary` message is not yet wired (the message factory is exported for a follow-up PR). Can be overridden with QWEN_CODE_EMIT_TOOL_USE_SUMMARIES=0 or =1.",
@@ -2974,7 +3019,7 @@
       }
     },
     "artifact": {
-      "description": "Configuration for the experimental Artifact tool (enable it via experimental.artifact). Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
+      "description": "Configuration for artifact publishing. Selects the publish backend and, for the host backend, the upload command and shareable URL template.",
       "type": "object",
       "properties": {
         "autoOpen": {

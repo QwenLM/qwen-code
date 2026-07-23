@@ -146,6 +146,38 @@ describe('SessionTranscriptReader', () => {
     expect(page.lastUpdated).toMatch(ISO_8601);
   });
 
+  it('retains content with an invalid record timestamp', async () => {
+    const invalidTimestamp = record('u1', null, 'kept content');
+    invalidTimestamp.timestamp = 'not-a-date';
+    await writeRecords([invalidTimestamp]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records).toHaveLength(1);
+    expect(page.records[0]).toMatchObject({ uuid: 'u1' });
+    expect(page.records[0]?.timestamp).toBeUndefined();
+    expect(Number.isFinite(new Date(page.startTime).getTime())).toBe(true);
+  });
+
+  it('does not select a trailing artifact record as the active leaf', async () => {
+    const root = record('u1', null, 'conversation');
+    const artifact: ChatRecord = {
+      ...record('artifact', 'u1', 'side channel'),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      message: undefined,
+    };
+    await writeRecords([root, artifact]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u1']);
+  });
+
   it.each([0, -1, SESSION_TRANSCRIPT_MAX_LIMIT + 1, 1.5])(
     'rejects invalid page limit %s',
     async (limit) => {
@@ -241,6 +273,179 @@ describe('SessionTranscriptReader', () => {
     expect(second.records.map((r) => r.uuid)).toEqual(['u2-new', 'a2-new']);
     expect(second.hasMore).toBe(false);
     expect(second.nextCursorState).toBeUndefined();
+  });
+
+  it('pages backward before an exclusive active record boundary', async () => {
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+      record('u3', 'a2', 'third prompt'),
+      record('a3', 'u3', 'third answer'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const first = await reader.readPage(sessionId, {
+      beforeRecordId: 'u3',
+      limit: 2,
+    });
+    const second = await reader.readPage(sessionId, {
+      cursor: encodeCursor(first.nextCursorState!),
+      limit: 2,
+    });
+
+    expect(first.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+    expect(first.direction).toBe('backward');
+    expect(first.hasMore).toBe(true);
+    expect(first.nextCursorState).toMatchObject({
+      position: 2,
+      direction: 'backward',
+    });
+    expect(second.records.map((item) => item.uuid)).toEqual(['u1', 'a1']);
+    expect(second.hasMore).toBe(false);
+  });
+
+  it('starts backward paging at the persisted tail', async () => {
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+    ]);
+
+    const reader = new SessionTranscriptReader(workspaceDir);
+    const page = await reader.readPage(sessionId, {
+      direction: 'backward',
+      limit: 2,
+    });
+
+    expect(page.records.map((item) => item.uuid)).toEqual(['u2', 'a2']);
+    expect(page.direction).toBe('backward');
+    expect(page.hasMore).toBe(true);
+    expect(page.nextCursorState).toMatchObject({
+      position: 2,
+      direction: 'backward',
+    });
+  });
+
+  it('includes leading session metadata with the first backward page', async () => {
+    const sessionSource = {
+      ...record('source', null, 'session source'),
+      type: 'system' as const,
+      subtype: 'session_source' as const,
+    };
+    await writeRecords([
+      sessionSource,
+      record('u1', 'source', 'first prompt'),
+      record('a1', 'u1', 'first answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { direction: 'backward', limit: 100 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'source',
+      'u1',
+      'a1',
+    ]);
+    expect(page.hasMore).toBe(false);
+    expect(page.nextCursorState).toBeUndefined();
+  });
+
+  it('keeps backward pages within a normal user turn boundary', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    await writeRecords([
+      record('u1', null, 'first prompt'),
+      toolCall,
+      toolResult,
+      record('a1', 't1', 'first answer'),
+      record('u2', 'a1', 'second prompt'),
+      record('a2', 'u2', 'second answer'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u2', limit: 4 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a1',
+    ]);
+  });
+
+  it('keeps a long user turn complete when it exceeds the record limit', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      toolCall,
+      toolResult,
+      record('a-final', 't1', 'final answer'),
+      record('u2', 'a-final', 'next prompt'),
+    ]);
+
+    const page = await new SessionTranscriptReader(workspaceDir).readPage(
+      sessionId,
+      { beforeRecordId: 'u2', limit: 2 },
+    );
+
+    expect(page.records.map((item) => item.uuid)).toEqual([
+      'u1',
+      'a-tool',
+      't1',
+      'a-final',
+    ]);
+    expect(page.hasMore).toBe(false);
+  });
+
+  it('rejects a backward turn that exceeds maxBytes after alignment', async () => {
+    const toolCall = record('a-tool', 'u1', 'call tool');
+    const toolResult = {
+      ...record('t1', 'a-tool', 'tool result'),
+      type: 'tool_result' as const,
+    };
+    const finalAnswer = record('a-final', 't1', 'final answer');
+    await writeRecords([
+      record('u1', null, 'prompt'),
+      toolCall,
+      toolResult,
+      finalAnswer,
+      record('u2', 'a-final', 'next prompt'),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        beforeRecordId: 'u2',
+        limit: 2,
+        maxBytes: Buffer.byteLength(JSON.stringify(finalAnswer)),
+      }),
+    ).rejects.toBeInstanceOf(SessionTranscriptPageTooLargeError);
+  });
+
+  it('rejects a backward boundary outside the active chain', async () => {
+    await writeRecords([
+      record('u1', null, 'root'),
+      record('a1', 'u1', 'answer'),
+    ]);
+
+    await expect(
+      new SessionTranscriptReader(workspaceDir).readPage(sessionId, {
+        beforeRecordId: 'missing',
+      }),
+    ).rejects.toBeInstanceOf(InvalidSessionTranscriptCursorError);
   });
 
   it('continues a frozen snapshot after new records are appended', async () => {

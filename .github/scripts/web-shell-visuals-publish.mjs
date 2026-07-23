@@ -17,7 +17,7 @@
  * `buildComment`) are exported and tested. The file also runs as a CLI for the
  * workflow:
  *   node web-shell-visuals-publish.mjs stage   <screenshotsDir> <gifsDir> <stageDir>
- *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile>
+ *   node web-shell-visuals-publish.mjs comment <stageDir> <rawBase> <shortSha> <runUrl> <bodyFile> [changedPathsFile] [renderStatusFile]
  */
 
 import {
@@ -26,6 +26,7 @@ import {
   mkdirSync,
   openSync,
   readdirSync,
+  readFileSync,
   readSync,
   statSync,
   writeFileSync,
@@ -115,6 +116,60 @@ export function selectImages(candidates, opts = {}) {
   return { accepted, warnings };
 }
 
+/**
+ * Directories that feed the rendered bundle. Kept in sync with the `paths:`
+ * trigger in .github/workflows/web-shell-visuals.yml — that trigger decides
+ * whether we render at all; this decides whether a "nothing changed" RESULT
+ * deserves a second look.
+ */
+const RENDER_SHAPING_PREFIXES = [
+  'packages/web-shell/client/',
+  'packages/webui/src/',
+];
+
+/**
+ * Extensions that change what a view LOOKS like. Deliberately narrow: a `.ts`
+ * hook/util/type edit routinely lands with no visual delta, and flagging those
+ * would train everyone to ignore the prompt. `.css` covers `.module.css`; every
+ * `.svg` under the render surface is a bundled UI icon (client/assets/icons),
+ * so a changed icon that moves no pixel is the same coverage signal.
+ */
+const RENDER_SHAPING_EXT = /\.(tsx|css|svg)$/i;
+
+/** Test + scenario code DRIVES the preview; it is not the UI under preview. */
+const NOT_PRODUCT_UI =
+  /(^|\/)(__tests__|__mocks__|e2e)\/|\.(test|spec)\.[jt]sx?$/i;
+
+/** How many paths to name before collapsing the rest into a count. */
+export const MAX_LISTED_PATHS = 8;
+
+/**
+ * Pick the changed paths that shape rendering, from the PR's full file list.
+ * Returns `{ files, total }` — `files` capped at `maxListed`, `total` the full
+ * count, so the caller can say "and N more" without re-deriving it.
+ *
+ * This exists because "no view changed" is ambiguous: it means either "this
+ * change genuinely has no visual effect" or "no scenario renders this UI at
+ * all". The second is a COVERAGE gap that has shipped silently three times
+ * (#7035 primary label, #7221 worktree badge, #7365 empty-state toggle), each
+ * time caught only because a human happened to notice the missing image.
+ */
+export function selectRenderShapingFiles(paths, opts = {}) {
+  const maxListed = opts.maxListed ?? MAX_LISTED_PATHS;
+  const matched = [];
+  for (const raw of paths ?? []) {
+    const p = String(raw).trim();
+    if (!p) continue;
+    if (!RENDER_SHAPING_PREFIXES.some((prefix) => p.startsWith(prefix)))
+      continue;
+    if (!RENDER_SHAPING_EXT.test(p)) continue;
+    if (NOT_PRODUCT_UI.test(p)) continue;
+    matched.push(p);
+  }
+  matched.sort();
+  return { files: matched.slice(0, maxListed), total: matched.length };
+}
+
 /** Self-defending HTML escaping for interpolated values. */
 export const esc = (s) =>
   String(s)
@@ -127,14 +182,29 @@ export const pretty = (s) =>
   s.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
 
 /**
+ * Render a path inside a code span without letting it escape. Backticks would
+ * close the span (and let the rest of the path inject markdown/HTML), so they
+ * go; `esc` then neutralises the remainder. Both are no-ops for real paths.
+ */
+const codePath = (p) => `\`${esc(String(p).replace(/[`\r\n]/g, ''))}\``;
+
+/**
  * Pure comment builder. `files` is the list of staged filenames (png + gif).
- * `ctx` is `{ rawBase, shortSha, runUrl }`. Returns the markdown body.
+ * `ctx` is `{ rawBase, shortSha, runUrl, changedPaths, renderIncomplete }`:
+ * `changedPaths` is the PR's full changed-file list (used only to triage an
+ * empty preview), and `renderIncomplete` is true when >=1 scenario failed to
+ * render on the PR head — in which case a missing view may be a render failure,
+ * not "no change", and the comment must say so instead of a clean bill of
+ * health. Returns the markdown body.
  */
 export function buildComment(files, ctx = {}) {
   const rawBase = ctx.rawBase ?? '';
   const shortSha = ctx.shortSha ?? '';
   const runUrl = ctx.runUrl ?? '';
+  const renderIncomplete = ctx.renderIncomplete === true;
   const url = (name) => `${rawBase}/${encodeURIComponent(name)}`;
+  // A "see the run" pointer for the render-failure notes (omitted if unknown).
+  const runLink = runUrl ? ` — see the [workflow run](${esc(runUrl)})` : '';
 
   // Screenshots are before/after COMPOSITES (`<view>-<theme>.png`), one per
   // changed view+theme. The compositor already dropped unchanged views, so an
@@ -154,15 +224,56 @@ export function buildComment(files, ctx = {}) {
   out.push('#### Screenshots · before / after');
   out.push('');
   if (shots.length > 0) {
+    // Some views rendered. If others FAILED, say so first: the set below is
+    // partial, and a view a reviewer expects but doesn't see may have crashed
+    // rather than stayed unchanged.
+    if (renderIncomplete) {
+      out.push(
+        `⚠️ _One or more scenarios failed to render_ on this head, so this preview may be missing views${runLink}. The composites below are the scenarios that did render.`,
+      );
+      out.push('');
+    }
     for (const f of shots) {
       out.push(
         `<img src="${url(f)}" width="900" alt="${esc(f.replace(/\.png$/i, ''))} before/after">`,
       );
       out.push('');
     }
-  } else {
-    out.push('✅ _No screenshot changes against the PR base._');
+  } else if (renderIncomplete) {
+    // No composites AND the render failed: this is NOT "no visual change". A
+    // scenario that times out or throws produces no image, so treat the empty
+    // set as a render failure — never the reassuring green check or the
+    // coverage-gap prompt, both of which would imply the render actually ran.
+    out.push(
+      `⚠️ _No preview: one or more scenarios failed to render_ on this head${runLink}. This is not "no visual change" — a scenario that times out or throws produces no image. Fix the failing scenario (or a genuine regression it caught) and the preview returns on the next push.`,
+    );
     out.push('');
+  } else {
+    // An empty preview is ambiguous, so say WHICH of the two things it means.
+    // "No view changed" is only a clean bill of health if nothing that shapes a
+    // view was touched; when render-shaping files DID change, the same result
+    // may instead mean no scenario renders them — a coverage gap that reads as
+    // reassurance if we print a bare green check (see selectRenderShapingFiles).
+    const shaping = selectRenderShapingFiles(ctx.changedPaths);
+    if (shaping.total > 0) {
+      const noun = shaping.total === 1 ? 'file' : 'files';
+      out.push(
+        `ℹ️ _No screenshot changed against the PR base_ — but this PR edits ${shaping.total} render-shaping ${noun}:`,
+      );
+      out.push('');
+      for (const f of shaping.files) out.push(`- ${codePath(f)}`);
+      if (shaping.total > shaping.files.length) {
+        out.push(`- _…and ${shaping.total - shaping.files.length} more._`);
+      }
+      out.push('');
+      out.push(
+        'Either the change has no visual effect (logic, plumbing, a state the scenarios never reach), or **no scenario renders this UI** — in which case the preview cannot see it, and an empty result is a coverage gap rather than a clean bill of health. To make it visible, add a scenario to `packages/web-shell/client/e2e/visuals/screenshots.spec.ts` that seeds whatever state the UI is gated on; it then appears here as a head-only (NEW) capture.',
+      );
+      out.push('');
+    } else {
+      out.push('✅ _No screenshot changes against the PR base._');
+      out.push('');
+    }
   }
 
   if (gifs.length > 0) {
@@ -246,14 +357,53 @@ function stageCli(screenshotsDir, gifsDir, stageDir) {
   process.stdout.write(`${accepted.length}\n`);
 }
 
-function commentCli(stageDir, rawBase, shortSha, runUrl, bodyFile) {
+function commentCli(
+  stageDir,
+  rawBase,
+  shortSha,
+  runUrl,
+  bodyFile,
+  pathsFile,
+  renderStatusFile,
+) {
   let files = [];
   try {
     files = readdirSync(stageDir);
   } catch {
     // Missing stage dir → empty preview body.
   }
-  const body = buildComment(files, { rawBase, shortSha, runUrl });
+  // Newline-delimited changed paths, via a file rather than argv: a PR can
+  // change thousands of files, and paths are attacker-influenced (fork PRs).
+  // Best-effort — if the workflow's API call failed the file is absent/empty,
+  // and the comment falls back to the plain "no screenshot changes" line.
+  let changedPaths = [];
+  if (pathsFile) {
+    try {
+      changedPaths = readFileSync(pathsFile, 'utf8').split('\n');
+    } catch {
+      // Unreadable → treat as "unknown", not as "nothing changed".
+    }
+  }
+  // Render status written by the capture job. Anything other than the literal
+  // 'success' is treated as incomplete; a MISSING/empty file (older run, no arg)
+  // means "unknown" and defaults to complete so this never fabricates a failure
+  // warning on a preview that actually rendered fine.
+  let renderIncomplete = false;
+  if (renderStatusFile) {
+    try {
+      renderIncomplete =
+        readFileSync(renderStatusFile, 'utf8').trim() !== 'success';
+    } catch {
+      // Unreadable → leave complete (fail open toward the normal preview).
+    }
+  }
+  const body = buildComment(files, {
+    rawBase,
+    shortSha,
+    runUrl,
+    changedPaths,
+    renderIncomplete,
+  });
   writeFileSync(bodyFile, body);
   process.stderr.write(`Comment body: ${body.split('\n').length} lines.\n`);
 }
@@ -263,7 +413,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   if (cmd === 'stage') {
     stageCli(rest[0], rest[1], rest[2]);
   } else if (cmd === 'comment') {
-    commentCli(rest[0], rest[1], rest[2], rest[3], rest[4]);
+    commentCli(rest[0], rest[1], rest[2], rest[3], rest[4], rest[5], rest[6]);
   } else {
     process.stderr.write(`unknown command: ${cmd ?? '(none)'}\n`);
     process.exit(2);

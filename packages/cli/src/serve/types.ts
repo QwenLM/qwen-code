@@ -18,10 +18,12 @@ import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): one `qwen --acp` child per daemon (the
- *   daemon binds to ONE workspace at boot). Multiple
- *   sessions multiplex onto that child via the agent's native
- *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
+ * `http-bridge` (Stage 1): production attempts to preheat the primary
+ *   `qwen --acp` child and retries on first use after failure; trusted
+ *   secondaries start one on demand, while untrusted secondaries do not.
+ *   Multiple sessions in one runtime multiplex onto its child via the
+ *   agent's native `connection.newSession()` (see
+ *   `acp-integration/acpAgent.ts:194`),
  *   sharing the child's process / OAuth / file-cache / hierarchy-memory
  *   parse. The daemon pipes ACP NDJSON over HTTP/SSE. Same-session
  *   multi-client requests serialize through the bridge's per-session
@@ -53,7 +55,8 @@ export interface ServeOptions {
   token?: string;
   mode: ServeMode;
   /**
-   * Cap on concurrent live sessions. Once `bridge.sessionCount` reaches
+   * Per-workspace cap on concurrent live sessions. Once a runtime's
+   * `bridge.sessionCount` reaches
    * this, new `POST /session` requests that would spawn fresh sessions
    * return 503. Attaching to an existing session (same workspace under
    * `sessionScope: 'single'`) still works — so an idle daemon doesn't
@@ -65,8 +68,10 @@ export interface ServeOptions {
   maxSessions?: number;
   /**
    * Non-negative integer cap on concurrent live sessions across all workspace
-   * runtimes. Defaults to unlimited until multi-workspace sessions are ungated.
-   * `0` or `Infinity` disables the cap.
+   * runtimes. `runQwenServe` derives a default once from the per-workspace cap
+   * and startup workspace count when several startup/restored workspaces are
+   * present; direct embeds may leave it unlimited. Dynamic registration does
+   * not recompute it. `0` or `Infinity` disables the cap.
    */
   maxTotalSessions?: number;
   /**
@@ -106,10 +111,9 @@ export interface ServeOptions {
   compactedReplayMaxBytes?: number;
   /**
    * Absolute workspace path this daemon binds as its primary workspace.
-   * The CLI parser accepts repeated `--workspace` values for
-   * sessions-only multi-workspace mode, but this public option remains the
-   * primary workspace string so existing embeds do not need to understand
-   * the internal runtime registry.
+   * The CLI parser accepts repeated `--workspace` values to register isolated
+   * runtimes, but this public option remains the primary workspace string so
+   * existing embeds do not need to understand the internal runtime registry.
    *
    * `POST /session` calls whose `cwd` doesn't canonicalize to this
    * path, or to another registered runtime's canonical workspace, are
@@ -218,6 +222,12 @@ export interface ServeOptions {
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
   /**
+   * ACP child request timeout, including the `initialize` handshake,
+   * in ms. Must be a positive
+   * integer. Default: 10000 (10 s).
+   */
+  initializeTimeoutMs?: number;
+  /**
    * Wall-clock timeout in ms for a single human permission /
    * ask_user_question response in daemon (ACP) mode. 0 = disabled
    * (wait forever). Default: 300000 (5 min).
@@ -308,10 +318,11 @@ export interface CapabilitiesEnvelope {
    * current server code always populates it.
    */
   workspaceCwd?: string;
-  /** Registered session runtimes. Older single-workspace daemons may omit it. */
+  /** Registered workspace runtimes. Older single-workspace daemons may omit it. */
   workspaces?: Array<{
     id: string;
     cwd: string;
+    displayName?: string;
     primary: boolean;
     trusted: boolean;
     removable?: boolean;

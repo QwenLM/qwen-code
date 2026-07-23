@@ -190,14 +190,8 @@
 }
 
 :global([data-web-shell-slash-menu]) {
-  width: min(
-    max(
-      240px,
-      calc(
-        var(--slash-command-col) + var(--slash-desc-col) +
-          var(--slash-column-gap) + 20px
-      )
-    ),
+  width: 620px;
+  max-width: min(
     calc(var(--radix-popover-trigger-width) - 32px),
     var(--radix-popover-content-available-width),
     calc(100vw - 24px)
@@ -208,11 +202,7 @@
 
 :global([data-web-shell-slash-detail]) {
   z-index: calc(var(--web-shell-popover-z-index, 1000) + 1);
-  width: min(
-    320px,
-    var(--radix-popover-content-available-width),
-    calc(100vw - 24px)
-  );
+  width: min(320px, calc(100vw - 24px));
   max-height: min(200px, var(--radix-popover-content-available-height));
   overflow: hidden;
 }
@@ -303,8 +293,8 @@
   width: 100%;
   min-width: 0;
   grid-template-columns:
-    minmax(0, 2fr)
-    minmax(0, 3fr);
+    minmax(0, 220px)
+    minmax(0, 1fr);
   column-gap: 8px;
   align-items: baseline;
   padding: 5px 8px;
@@ -379,6 +369,7 @@
   font-size: 12px;
   font-weight: 400;
   line-height: 20px;
+  text-align: right;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -695,18 +686,6 @@
   font-size: 12px;
 }
 
-@container (max-width: 699px) {
-  .slashList {
-    width: 100%;
-  }
-
-  .slashItem {
-    width: 100%;
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: 2px;
-  }
-}
-
 .attachments {
   display: flex;
   min-height: 0;
@@ -880,6 +859,37 @@
   line-height: 1.6;
 }
 
+/* Touch-device textarea backend (#5958). Mirrors the CodeMirror look; the
+   16px font size is mandatory: iOS Safari auto-zooms the page when focusing
+   any input with a smaller font. */
+.mobileTextarea {
+  width: 100%;
+  min-height: var(--chat-editor-input-min-height, 44px);
+  max-height: var(--chat-editor-input-max-height, 300px);
+  padding: 0;
+  border: none;
+  outline: none;
+  background: transparent;
+  resize: none;
+  color: var(--chat-editor-text-primary, #e0e0e0);
+  caret-color: var(--chat-editor-accent-color, #4a9eff);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 16px;
+  line-height: 1.6;
+}
+
+.mobileTextarea::placeholder {
+  color: var(--chat-editor-text-dimmed, #666);
+}
+
+/* As .editorArea's last child the textarea would inherit `overflow: clip`
+   from the rule above, pinning scrollTop to 0 — content beyond the height
+   cap would become unreachable. The extra `textarea` type wins that
+   specificity. */
+.editorArea > textarea.mobileTextarea {
+  overflow-y: auto;
+}
+
 .editorArea .cm-scroller {
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
@@ -951,6 +961,26 @@
   line-height: 1;
 }
 
+/* When the chip opens the Changes dialog it renders as a <button>; reset the
+   UA button chrome so it looks identical to the read-only <output> chip. */
+.gitBranchChipButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+
+.gitBranchChipButton:hover {
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
+}
+
+.gitBranchChipButton:focus-visible {
+  outline: 2px solid var(--chat-editor-accent-color);
+  outline-offset: -2px;
+}
+
 .gitBranchIcon {
   display: inline-flex;
   width: 16px;
@@ -968,6 +998,110 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.gitBranchChip[data-detached='true'] .gitBranchText {
+  color: var(--warning-color);
+}
+
+.gitBranchChip[data-worktree='true'] {
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.gitBranchIconWrap {
+  position: relative;
+  display: inline-flex;
+  flex: 0 0 16px;
+}
+
+/* Compact (icon-only) chip: a single severity dot on the branch icon so the
+   working-tree state is still glanceable without the text + inline indicators. */
+.gitBranchBadgeDot {
+  position: absolute;
+  top: -2px;
+  right: -3px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color);
+  box-shadow: 0 0 0 1.5px var(--chat-editor-bg-primary, transparent);
+}
+
+.gitBranchBadgeDot[data-tone='warning'] {
+  background: var(--warning-color);
+}
+
+.gitBranchBadgeDot[data-tone='error'] {
+  background: var(--error-color);
+}
+
+.gitBranchIndicators {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex: 0 0 auto;
+}
+
+.gitBranchDirtyDot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--chat-editor-accent-color);
+  display: inline-block;
+}
+
+.gitBranchAheadBehind {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchStash {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchStash svg {
+  width: 13px;
+  height: 13px;
+}
+
+.gitBranchConflicted {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  color: var(--error-color);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.gitBranchConflicted svg {
+  width: 13px;
+  height: 13px;
+}
+
+.gitBranchOperation {
+  color: var(--warning-color);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.gitBranchTooltip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.gitBranchTooltipTitle {
+  font-weight: 600;
+}
+
+.gitBranchTooltipRow {
+  opacity: 0.85;
 }
 
 /* Which workspace a split-view pane's session lives in — parallel to the git
@@ -1337,7 +1471,7 @@
   display: inline-flex;
   align-items: center;
   color: var(--agent-gray-500);
-  line-height: 1;
+  line-height: 1.4;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

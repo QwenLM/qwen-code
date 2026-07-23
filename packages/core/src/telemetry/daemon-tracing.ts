@@ -40,6 +40,9 @@ interface CapturedDaemonContext {
 export interface DaemonRequestSpanOptions {
   method: string;
   route: string;
+  startTime?: Date;
+  deferredRuntimeWaitMs?: number;
+  deferredRuntimePath?: 'started_on_request' | 'joined';
   workspaceHash?: string;
   sessionId?: string;
   clientId?: string;
@@ -82,31 +85,44 @@ export async function withDaemonSpan<T>(
   name: string,
   attributes: DaemonAttributes,
   fn: (span: Span) => Promise<T>,
-  options: { autoOkOnSuccess?: boolean } = {},
+  options: {
+    autoOkOnSuccess?: boolean;
+    parentContext?: Context;
+    startTime?: Date;
+  } = {},
 ): Promise<T> {
   if (!isTelemetrySdkInitialized()) {
     return await fn(undefined as unknown as Span);
   }
   const autoOkOnSuccess = options.autoOkOnSuccess ?? true;
   const tracer = trace.getTracer(SERVICE_NAME);
-  return await tracer.startActiveSpan(
-    name,
-    { kind: SpanKind.INTERNAL, attributes },
-    async (span) => {
-      try {
-        const result = await fn(span);
-        if (autoOkOnSuccess) {
-          span.setStatus({ code: SpanStatusCode.OK });
-        }
-        return result;
-      } catch (error) {
-        recordDaemonError(span, error);
-        throw error;
-      } finally {
-        span.end();
+  const spanOptions = {
+    kind: SpanKind.INTERNAL,
+    attributes,
+    ...(options.startTime ? { startTime: options.startTime } : {}),
+  };
+  const run = async (span: Span): Promise<T> => {
+    try {
+      const result = await fn(span);
+      if (autoOkOnSuccess) {
+        span.setStatus({ code: SpanStatusCode.OK });
       }
-    },
-  );
+      return result;
+    } catch (error) {
+      recordDaemonError(span, error);
+      throw error;
+    } finally {
+      span.end();
+    }
+  };
+  return options.parentContext
+    ? await tracer.startActiveSpan(
+        name,
+        spanOptions,
+        options.parentContext,
+        run,
+      )
+    : await tracer.startActiveSpan(name, spanOptions, run);
 }
 
 export async function withDaemonRequestSpan<T>(
@@ -130,9 +146,17 @@ export async function withDaemonRequestSpan<T>(
               options.permissionRequestId,
           }
         : {}),
+      ...(options.deferredRuntimeWaitMs !== undefined
+        ? {
+            'qwen-code.daemon.runtime.wait_ms': options.deferredRuntimeWaitMs,
+          }
+        : {}),
+      ...(options.deferredRuntimePath
+        ? { 'qwen-code.daemon.runtime.path': options.deferredRuntimePath }
+        : {}),
     },
     fn,
-    { autoOkOnSuccess: false },
+    { autoOkOnSuccess: false, startTime: options.startTime },
   );
 }
 
@@ -338,6 +362,7 @@ export function createDaemonBridgeTelemetry(): {
     attributes: DaemonAttributes,
     fn: () => Promise<T>,
   ): Promise<T>;
+  setActiveSpanAttributes?(attributes: DaemonAttributes): void;
   event(name: string, attributes: DaemonAttributes): void;
   injectPromptContext<T extends object>(request: T): T;
   metrics?: DaemonBridgeTelemetryMetrics;
@@ -346,6 +371,14 @@ export function createDaemonBridgeTelemetry(): {
     captureContext: captureDaemonTelemetryContext,
     runWithContext: runWithDaemonTelemetryContext,
     withSpan: withDaemonBridgeSpan,
+    setActiveSpanAttributes(attributes) {
+      if (!isTelemetrySdkInitialized()) return;
+      try {
+        trace.getSpan(otelContext.active())?.setAttributes(attributes);
+      } catch {
+        // Telemetry must not affect bridge behavior.
+      }
+    },
     event(name, attributes) {
       if (!isTelemetrySdkInitialized()) return;
       try {

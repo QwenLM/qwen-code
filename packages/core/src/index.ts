@@ -58,10 +58,29 @@ export * from './output/types.js';
 
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
+export {
+  getRuntimeContentGenerator,
+  runWithRuntimeContentGenerator,
+  type RuntimeContentGeneratorView,
+  runOutsideAgentContext,
+} from './agents/runtime/agent-context.js';
 export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
+/** @internal */
+export {
+  type PlanModeShellDecision,
+  evaluatePlanModeShellPolicy,
+  validatePlanModeShellContext,
+  decoratePlanModeShellConfirmation,
+  validatePlanModeShellApproval,
+} from './core/plan-mode-shell-policy.js';
+/** @internal */
+export {
+  PLAN_MODE_ENTRY_SIBLING_SKIP_MESSAGE,
+  findPlanModeEntryBatchBoundaryIndex,
+} from './core/plan-mode-entry-policy.js';
 export * from './core/geminiChat.js';
 export * from './core/geminiRequest.js';
 export * from './core/inlineMediaLimit.js';
@@ -171,7 +190,16 @@ export type {
   TodoWriteParams,
 } from './tools/todoWrite.js';
 export type { WebFetchTool, WebFetchToolParams } from './tools/web-fetch.js';
+export type {
+  WebSearchTool,
+  WebSearchToolParams,
+  WebSearchSettings,
+} from './tools/web-search.js';
 export type { WriteFileTool, WriteFileToolParams } from './tools/write-file.js';
+// Exported for the cross-package contract test in packages/cli (see the
+// function's own doc comment) — the daemon's file-read route must resolve the
+// workspacePath this produces.
+export { buildRecordArtifactReminder } from './tools/write-file.js';
 export type {
   ArtifactTool,
   ArtifactToolParams,
@@ -234,6 +262,7 @@ export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
+export * from './services/session-writer-lease.js';
 export {
   decodeSessionTranscriptCursor,
   encodeSessionTranscriptCursor,
@@ -242,6 +271,7 @@ export {
   SESSION_TRANSCRIPT_DEFAULT_LIMIT,
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SESSION_TRANSCRIPT_MAX_LIMIT,
+  SESSION_TRANSCRIPT_MAX_PAGE_BYTES,
   SessionTranscriptCursorCodec,
   SessionTranscriptReader,
   SessionTranscriptPageTooLargeError,
@@ -254,6 +284,8 @@ export type {
   SessionTranscriptRecordPage,
 } from './services/session-transcript-reader.js';
 export * from './utils/conversation-chain.js';
+export * from './utils/transcript-records.js';
+export * from './utils/conversation-branches.js';
 export * from './services/sessionTitle.js';
 export * from './services/sleepInhibitor.js';
 // Named exports keep @internal test helpers out of the barrel.
@@ -306,6 +338,7 @@ export * from './services/usageHistoryService.js';
 export * from './services/usage-dashboard-service.js';
 export * from './utils/bareMode.js';
 export * from './utils/safe-mode.js';
+export * from './utils/sanitize-child-env.js';
 export * from './utils/toolResultDisplayCompaction.js';
 
 // ============================================================================
@@ -473,6 +506,7 @@ export * from './utils/gitDirect.js';
 export * from './utils/gitIgnoreParser.js';
 export * from './utils/gitUtils.js';
 export * from './utils/ignorePatterns.js';
+export * from './utils/invocation-context.js';
 export {
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   QwenIgnoreParser,
@@ -508,6 +542,7 @@ export {
   detectRuntime,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
 } from './utils/runtimeFetchOptions.js';
 export * from './utils/runtimeStatus.js';
@@ -523,6 +558,7 @@ export * from './utils/textUtils.js';
 export * from './utils/thoughtUtils.js';
 export * from './utils/toml-to-markdown-converter.js';
 export * from './utils/tool-utils.js';
+export { finalizeToolResponses } from './utils/tool-response-finalizer.js';
 export * from './utils/workspaceContext.js';
 export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';

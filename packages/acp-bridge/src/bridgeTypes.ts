@@ -94,6 +94,8 @@ export interface BridgeSpawnRequest {
   /** Optional source-specific identifier. Valid only with `sourceType`. */
   sourceId?: string;
   approvalMode?: ApprovalMode;
+  /** Worktree isolation metadata, set by the daemon route before spawn. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeSession {
@@ -126,6 +128,8 @@ export interface BridgeSession {
   sourceId?: string;
   /** True iff the source metadata was durably written to the transcript. */
   sourcePersisted?: boolean;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
 }
 
 export interface BridgeRestoreSessionRequest {
@@ -137,6 +141,8 @@ export interface BridgeRestoreSessionRequest {
   clientId?: string;
   /** Internal replay transport for `session/load`; defaults to bulk response. */
   historyReplay?: 'stream' | 'response';
+  /** Optional newest persisted-record page requested for response replay. */
+  historyPageSize?: number;
   approvalMode?: ApprovalMode;
   /**
    * Persisted parent lineage recovered from the transcript by the caller (the
@@ -154,12 +160,49 @@ export interface BridgeRestoreSessionRequest {
 
 export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
 export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
+export const LOAD_REPLAY_PAGE_SIZE_META_KEY = 'qwen.session.loadReplayPageSize';
 export const LOAD_REPLAY_BULK_MODE = 'bulk';
 export const LOAD_REPLAY_VERSION = 1 as const;
+
+export const CHANNEL_STARTUP_PROFILE_META_KEY =
+  'qwen.daemon.channelStartupProfile';
+export const CHANNEL_STARTUP_PROFILE_VERSION = 1 as const;
+
+export interface ChannelStartupProfileV1 {
+  v: typeof CHANNEL_STARTUP_PROFILE_VERSION;
+  complete: boolean;
+  responseBuiltAtEpochMs?: number;
+  processToResponseMs?: number;
+  phases: {
+    processToProfilerReadyMs?: number;
+    geminiImportMs?: number;
+    argsParseMs?: number;
+    settingsLoadMs?: number;
+    configConstructionMs?: number;
+    appInitializationMs?: number;
+    acpImportMs?: number;
+    bootstrapConfigInitializationMs?: number;
+    transportSetupMs?: number;
+    initializeHandlerMs?: number;
+    unattributedMs?: number;
+  };
+  config: {
+    extensionsInitialMs?: number;
+    hooksMs?: number;
+    skillsMs?: number;
+    extensionsFinalMs?: number;
+    hierarchicalMemoryMs?: number;
+    toolRegistryMs?: number;
+    ripgrepProbeMs?: number;
+    toolWarmupMs?: number;
+    otherMs?: number;
+  };
+}
 
 export interface BridgeLoadReplayEnvelope {
   v: typeof LOAD_REPLAY_VERSION;
   updates: SessionUpdate[];
+  hasMore?: boolean;
   partial?: true;
   replayError?: string;
 }
@@ -185,13 +228,31 @@ export interface BridgeRestoredSession extends BridgeSession {
   compactedReplay?: BridgeEvent[];
   /** Raw events since last turn boundary (current incomplete turn). */
   liveJournal?: BridgeEvent[];
+  /** True when persisted records exist before the returned replay page. */
+  historyHasMore?: boolean;
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
+  /**
+   * Epoch token of the session's event bus. Clients echo it (with
+   * `lastEventId`) on SSE subscribe so a daemon restart between this
+   * response and the subscribe is detected deterministically instead of
+   * via the numeric heuristic.
+   */
+  eventEpoch?: string;
+  /**
+   * True when the compaction engine failed at some point, so
+   * `compactedReplay`/`liveJournal` may silently miss events. Clients
+   * should prefer the full transcript over this replay.
+   */
+  replayDegraded?: boolean;
 }
 
 export interface BridgeSessionTranscriptPageRequest {
   sessionId: string;
   cursor?: string;
+  beforeRecordId?: string;
+  /** Internal newest-page read used to refresh an attached session's UI. */
+  direction?: 'backward';
   limit?: number;
 }
 
@@ -224,6 +285,14 @@ export interface BridgeForkAgentResult {
 
 export interface ChangeSessionCwdRequest {
   path: string;
+  /**
+   * Server-controlled containment roots. When present, the agent-side
+   * sessionCd handler verifies (after its own realpath) that the
+   * canonical target is under one of these roots. Only set by the
+   * daemon's worktree create/restore paths; direct user cd omits this
+   * field, preserving existing behavior.
+   */
+  allowedRoots?: string[];
 }
 
 export interface ChangeSessionCwdResult {
@@ -364,6 +433,26 @@ export interface BridgeSessionSummary {
   groupId?: string | null;
   /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
   color?: SessionGroupPresetColor | null;
+  /** Present when the session was created with worktree isolation. */
+  worktree?: { slug: string; path: string; branch: string };
+}
+
+/**
+ * A session's live `/goal` state, as reported by the `qwen --acp` child.
+ *
+ * Only the active goal crosses the bridge. The child also caches the most
+ * recent goal that ended on its own, but nothing on this side reads it, so it
+ * is not part of the wire shape — add it back alongside the first consumer.
+ */
+export interface BridgeSessionGoal {
+  active: {
+    condition: string;
+    /** Judge turns completed so far; 0 before the first stop-hook evaluation. */
+    iterations: number;
+    setAt: number;
+    /** The judge's verdict on the most recent turn, when it has run. */
+    lastReason?: string;
+  } | null;
 }
 
 export interface SessionMetadataUpdate {
@@ -373,7 +462,11 @@ export interface SessionMetadataUpdate {
 export interface CloseSessionOpts {
   /** Override the default `'client_close'` reason in the `session_closed` event. */
   reason?: string;
-  /** Require the ACP child to acknowledge session close before resolving. */
+  /**
+   * Require pending recorder writes to flush successfully. All closes await
+   * the ACP child acknowledgement and may cancel in-flight turns even when
+   * the close attempt ultimately fails.
+   */
   requireAgentClose?: boolean;
 }
 
@@ -394,9 +487,10 @@ export interface BridgeClientRequestContext {
   fromLoopback?: boolean;
   /**
    * Caller-generated correlation id for non-blocking prompt mode.
-   * When present, the bridge stamps `turn_complete` / `turn_error` events
-   * with this id so the SDK's `prompt()` can match the SSE event to the
-   * pending HTTP 202 request.
+   * When present, the bridge stamps turn-scoped event envelopes with this id.
+   * The legacy `turn_complete.data.promptId` / `turn_error.data.promptId`
+   * fields remain populated so the SDK's `prompt()` can match the terminal
+   * SSE event to the pending HTTP 202 request.
    */
   promptId?: string;
   /**
@@ -406,6 +500,14 @@ export interface BridgeClientRequestContext {
    * smuggle a continuation through the prompt path.
    */
   continue?: boolean;
+  /**
+   * Absolute wallclock budget (ms) for this prompt, measured from admission
+   * (the 202 semantic point) and covering queue wait. When exceeded, the
+   * bridge publishes a `turn_error{code:'prompt_deadline_exceeded'}` terminal,
+   * releases the FIFO, and best-effort cancels the agent. Populated by the
+   * REST prompt route from `resolvePromptDeadlineMs(serverMs, requestMs)`.
+   */
+  deadlineMs?: number;
 }
 
 /**
@@ -441,9 +543,23 @@ export interface BridgeHeartbeatState {
  * silently desync them into a runtime `-32601 methodNotFound` (which would
  * latch the drain off for the session). The desktop ACP client answers the same
  * method from its own in-memory queue; in `qwen serve` the daemon answers it
- * from `SessionEntry.midTurnMessageQueue`.
+ * from `SessionEntry.midTurnMessageQueue`. Responses may also carry
+ * `hasQueuedPrompt` so an armed daemon Todo guard yields to complete FIFO
+ * prompts; older clients can omit it.
  */
 export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
+/**
+ * Parent-to-agent request reporting that the daemon FIFO no longer contains the
+ * complete prompt an active Todo Stop Guard yielded to. The child clears the
+ * old guard instead of letting background work revive it or leaving unrelated
+ * automatic turns blocked forever.
+ */
+export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
+  'craft/todoStopGuardQueueReleased';
+
+/** Parent-to-agent request that acknowledges prompt cancellation handling. */
+export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
 
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
@@ -495,6 +611,27 @@ export interface PendingPromptEntry {
   text: string;
   abortController: AbortController;
   state: 'queued' | 'running';
+  /**
+   * Exactly-once latch for the prompt's formal terminal event
+   * (`turn_complete` / `turn_error`). Set by `publishPromptTerminal`;
+   * later publish attempts for the same prompt are suppressed.
+   */
+  terminalPublished?: boolean;
+  /** Cancellation handshake; duplicate callers await rather than resend it. */
+  cancelForwardInitial?: Promise<void>;
+  /** Full cancellation handshake, used to fence the next FIFO dispatch. */
+  cancelForwardDrain?: Promise<void>;
+  /** Releases the cancellation fence when the prompt deadline expires. */
+  cancelForwardDeadline?: Promise<void>;
+  /** True after the prompt request has been handed to the ACP connection. */
+  dispatched?: boolean;
+  /**
+   * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
+   * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until
+   * the prompt settles, so the teardown flush can still publish its
+   * terminal if the session closes before the agent cooperates.
+   */
+  removed?: boolean;
 }
 
 /**
@@ -594,6 +731,37 @@ export type BridgeGenerationNotificationEvent = Exclude<
   { type: 'done' }
 >;
 
+export type BridgeWorkspaceGenerationStreamEvent =
+  | {
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+    }
+  | {
+      type: 'thinking';
+      requestId: string;
+    }
+  | {
+      type: 'delta';
+      requestId: string;
+      seq: number;
+      text: string;
+    }
+  | {
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
+  BridgeWorkspaceGenerationStreamEvent,
+  { type: 'done' }
+>;
+
 export interface AcpSessionBridge {
   /** Read-only daemon diagnostics for status endpoints. */
   getDaemonStatusSnapshot(): BridgeDaemonStatusSnapshot;
@@ -644,6 +812,17 @@ export interface AcpSessionBridge {
     req: ChangeSessionCwdRequest,
     context?: BridgeClientRequestContext,
   ): Promise<ChangeSessionCwdResult>;
+
+  /**
+   * Set worktree metadata on an existing session entry. Used when
+   * restoring a worktree session after daemon restart — the sidecar
+   * file provides the metadata, and this populates the in-memory entry
+   * so `getSessionSummary` returns it.
+   */
+  setSessionWorktree(
+    sessionId: string,
+    worktree: { slug: string; path: string; branch: string },
+  ): void;
 
   /**
    * Forward a prompt to the agent. Concurrent prompts against the same
@@ -713,6 +892,13 @@ export interface AcpSessionBridge {
    * start SSE replay so no events are missed.
    */
   getSessionLastEventId(sessionId: string): number;
+
+  /**
+   * Return the epoch token of this session's event bus. Regenerated on
+   * every bus construction (daemon restart), never persisted. Throws
+   * `SessionNotFoundError` when the id is unknown.
+   */
+  getSessionEventEpoch(sessionId: string): string;
 
   /**
    * Return the current compacted replay snapshot for a loaded session, when
@@ -894,7 +1080,10 @@ export interface AcpSessionBridge {
   initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
 
   /** Reload persisted MCP settings into workspace and active session configs. */
-  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+  reloadWorkspaceMcp(options?: {
+    forceReconnectAll?: boolean;
+    forceReconnectWhich?: string[];
+  }): Promise<{ accepted: boolean }>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.
@@ -964,6 +1153,13 @@ export interface AcpSessionBridge {
   ): Promise<{ cleared: boolean; condition?: string }>;
 
   /**
+   * Read a live session's goal state. Throws `SessionNotFoundError` when the
+   * session is not resident — goals live in the child's memory, so a
+   * non-resident session has no goal to report.
+   */
+  getSessionGoal(sessionId: string): Promise<BridgeSessionGoal>;
+
+  /**
    * Resume a live session's unfinished previous turn — an interrupted prompt
    * (model never answered) or a turn left with dangling tool calls — without
    * injecting a synthetic "continue" user message. Idempotent no-op when the
@@ -980,11 +1176,19 @@ export interface AcpSessionBridge {
      * Replay cursor + correlation id for an accepted continuation, mirroring
      * the `POST /session/:id/prompt` 202 body. Present only when `accepted` —
      * the continuation runs as a tracked async turn, so clients use `promptId`
-     * to correlate `turn_complete` / `turn_error` and `lastEventId` to replay
-     * events emitted before they (re)attach the SSE stream.
+     * to correlate turn-scoped events, including `turn_complete` /
+     * `turn_error`, while `lastEventId` resumes events emitted before they
+     * (re)attach the SSE stream.
      */
     promptId?: string;
     lastEventId?: number;
+    /**
+     * Epoch token of the event bus that produced `lastEventId`, mirroring
+     * the `POST /session/:id/prompt` 202 envelope: a client seeding its SSE
+     * resume position from an accepted continuation must also learn the bus
+     * epoch so a daemon restart in between is detected (DAEMON-001).
+     */
+    eventEpoch?: string;
   }>;
 
   /** Read structured session usage stats (tokens, tools, files). */
@@ -1235,6 +1439,13 @@ export interface AcpSessionBridge {
     description: string;
     systemPrompt: string;
   }>;
+
+  /** Run stateless, tool-free generation in the resolved workspace runtime. */
+  generateWorkspaceContent?(
+    prompt: string,
+    signal: AbortSignal,
+    originatorClientId: string | undefined,
+  ): AsyncIterable<BridgeWorkspaceGenerationStreamEvent>;
 
   /**
    * Tear down a session — kill the child, drop from maps, publish

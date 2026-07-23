@@ -16,6 +16,7 @@ import {
   captureScreenshot,
   completeReplay,
   fillComposer,
+  gotoNewSession,
   gotoSession,
   installScenario,
   resolveBaseURL,
@@ -266,12 +267,16 @@ for (const theme of THEMES) {
 
       // Restore the tiled layout (#6951): the solo pane returns to the split and
       // the hidden pane reappears — so the maximize control is back on both
-      // panes. Captures the restore path so a regression there is caught too.
+      // panes. Assert the restore path (behavioral coverage) but do NOT capture
+      // a screenshot: the restored layout is visually identical to the tiled
+      // `split view` shot above, and the reappearing pane re-renders its content
+      // just after this click, so the capture is byte-nondeterministic between
+      // identical runs — a flaky, redundant view that surfaces false-positive
+      // "changed" previews unrelated to the PR under review.
       await page.getByRole('button', { name: 'Restore pane' }).click();
       await expect(
         page.getByRole('button', { name: 'Maximize pane' }).first(),
       ).toBeVisible();
-      await captureScreenshot(page, `split-view-restored-${theme}`);
     });
 
     test(`sidebar attention`, async ({ page }, testInfo) => {
@@ -335,6 +340,92 @@ for (const theme of THEMES) {
       await expect(sidebar.getByText('Run test suite')).toBeVisible();
       await expect(sidebar.getByText('Draft release notes')).toBeVisible();
       await captureScreenshot(page, `sidebar-attention-${theme}`);
+    });
+
+    test(`workspace sidebar`, async ({ page }, testInfo) => {
+      // Two workspaces make the sidebar group sessions per workspace.
+      //
+      // Pin the primary workspace cwd and its loaded session name explicitly,
+      // rather than leaning on createWebShellDaemonScenario's defaults: the
+      // basename ("qwen-web-shell-e2e") and the settle-wait below both depend on
+      // them, so a rename of those defaults in mockDaemon.ts would otherwise
+      // turn this into a cryptic "not visible" failure.
+      const primaryCwd = '/tmp/qwen-web-shell-e2e';
+      const primarySessionName = 'Run auth migration';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd: primaryCwd,
+        displayName: primarySessionName,
+        capabilities: {
+          workspaces: [
+            {
+              id: 'ws-primary',
+              cwd: primaryCwd,
+              primary: true,
+              trusted: true,
+            },
+            {
+              id: 'ws-api',
+              cwd: '/tmp/qwen-api-service',
+              primary: false,
+              trusted: true,
+            },
+          ],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      // Each workspace renders a section headed by its basename.
+      const sidebar = page.getByRole('complementary');
+      await expect(
+        sidebar.getByText('qwen-web-shell-e2e', { exact: true }),
+      ).toBeVisible();
+      await expect(
+        sidebar.getByText('qwen-api-service', { exact: true }),
+      ).toBeVisible();
+      // The primary workspace auto-expands and streams its session rows in via a
+      // per-workspace fetch. Wait for the loaded session's row before capturing
+      // so the async load has settled — otherwise the row list races the
+      // screenshot and the capture differs between runs.
+      await expect(sidebar.getByText(primarySessionName)).toBeVisible();
+      await captureScreenshot(page, `workspace-sidebar-${theme}`);
+    });
+
+    test(`worktree empty state`, async ({ page }, testInfo) => {
+      // The new-session empty state offers worktree isolation only when the
+      // workspace the next session would use is trusted AND a git repo (the
+      // daemon rejects worktree creation otherwise). Every other scenario lands
+      // on /session/:id, so this is the suite's only view of the empty state —
+      // without it the toggle is invisible to the before/after preview.
+      const workspaceCwd = '/tmp/qwen-web-shell-e2e';
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        capabilities: {
+          workspaces: [
+            { id: 'primary', cwd: workspaceCwd, primary: true, trusted: true },
+          ],
+        },
+        gitStatus: { v: 2, workspaceCwd, branch: 'main' },
+      });
+      await installScenario(page, scenario, resolveBaseURL(testInfo));
+      await gotoNewSession(page, theme);
+
+      const toggle = page.locator('[data-testid="worktree-welcome-toggle"]');
+      await expect(toggle).toBeVisible();
+      await captureScreenshot(page, `worktree-empty-state-${theme}`);
+
+      // Enabling it swaps the toggle for the pending-worktree badge — the state
+      // the next session would be created in — with a cancel affordance. Assert
+      // the swap so a regression that drops the enabled state fails here, not
+      // only in the (visually reviewed) screenshot.
+      await toggle.click();
+      await expect(
+        page.locator('[data-testid="worktree-welcome-cancel"]'),
+      ).toBeVisible();
+      await captureScreenshot(page, `worktree-empty-state-enabled-${theme}`);
     });
 
     test(`slash menu`, async ({ page }, testInfo) => {

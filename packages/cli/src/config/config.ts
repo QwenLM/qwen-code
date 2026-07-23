@@ -30,12 +30,14 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isTruthy,
   isSafeModeEnv,
   isToolEnabled,
   isTlsVerificationDisabled,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  type WebSearchSettings,
   MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
@@ -1227,6 +1229,50 @@ function resolveModelFallbacks(
 }
 
 /**
+ * Resolve the built-in WebSearch tool settings, with env overrides taking
+ * precedence over `tools.webSearch` (mirroring the QWEN_SANDBOX_IMAGE
+ * pattern): ENABLE_WEB_SEARCH for the flag, WEB_SEARCH_MODEL for the model
+ * selector, WEB_SEARCH_EXTRACTOR for page reading.
+ *
+ * Env-only backend: WEB_SEARCH_BASE_URL mirrors a modelProviders entry's
+ * baseUrl for environments that cannot write settings.json; the API key
+ * comes from WEB_SEARCH_API_KEY, falling back to DASHSCOPE_API_KEY. When
+ * set, it takes precedence over modelProviders resolution in the gate.
+ */
+function resolveWebSearchSettings(
+  settings: Settings,
+): WebSearchSettings | undefined {
+  const webSearch = settings.tools?.webSearch;
+  // A set-but-empty env var is "unset", not an override: dotenv templates and
+  // CI wrappers export empty values, which must not clobber a valid
+  // settings.json config (same rule as WEB_SEARCH_BASE_URL below).
+  const envEnabled = process.env['ENABLE_WEB_SEARCH']?.trim() || undefined;
+  const enabled =
+    envEnabled !== undefined ? isTruthy(envEnabled) : webSearch?.enabled;
+  const model = process.env['WEB_SEARCH_MODEL']?.trim() || webSearch?.model;
+  const envExtractor = process.env['WEB_SEARCH_EXTRACTOR']?.trim() || undefined;
+  const webExtractor =
+    envExtractor !== undefined
+      ? isTruthy(envExtractor)
+      : webSearch?.webExtractor;
+  const baseUrl = process.env['WEB_SEARCH_BASE_URL']?.trim() || undefined;
+  const apiKeyEnv = baseUrl
+    ? process.env['WEB_SEARCH_API_KEY']?.trim()
+      ? 'WEB_SEARCH_API_KEY'
+      : 'DASHSCOPE_API_KEY'
+    : undefined;
+  if (
+    enabled === undefined &&
+    model === undefined &&
+    webExtractor === undefined &&
+    baseUrl === undefined
+  ) {
+    return undefined;
+  }
+  return { enabled, model, webExtractor, baseUrl, apiKeyEnv };
+}
+
+/**
  * Resolves the wall-clock budget for a run. Returns seconds (`-1` =
  * unlimited). Order of precedence: `--max-wall-time` flag, then
  * `model.maxWallTimeSeconds` from settings, else unlimited.
@@ -1529,7 +1575,9 @@ export async function loadCliConfig(
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
   // Pass cwd so that relative paths like ".qwen" resolve per-project.
-  Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
+  if (!Storage.hasRuntimeBaseDirContext()) {
+    Storage.setRuntimeBaseDir(settings.advanced?.runtimeOutputDir, cwd);
+  }
 
   const ideMode = settings.ide?.enabled ?? false;
 
@@ -2024,6 +2072,17 @@ export async function loadCliConfig(
         false,
       );
     },
+    customSkillDirs:
+      bareMode || safeMode
+        ? undefined
+        : (Array.isArray(settings.skills?.directories)
+            ? settings.skills.directories
+            : []
+          )
+            .filter(
+              (d): d is string => typeof d === 'string' && d.trim().length > 0,
+            )
+            .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).
@@ -2077,12 +2136,11 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
-    // Ordinary interactive TUI defers telemetry until after first paint. Auth
-    // events emitted before the deferred init are an accepted startup-latency
-    // tradeoff. This intentionally differs from IDE deferral: `qwen -i
-    // "prompt"` must await IDE context before auto-submit, but telemetry can
-    // still initialize after render unless an initial prompt is present.
-    deferTelemetryInitialization: interactive && !isAcpMode && !question,
+    // Ordinary interactive TUI defers telemetry until after first paint; ACP
+    // defers it until after the initialize response is written. Events emitted
+    // before deferred init are an accepted startup-latency tradeoff. `qwen -i
+    // "prompt"` still initializes eagerly because it auto-submits after render.
+    deferTelemetryInitialization: isAcpMode || (interactive && !question),
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
@@ -2111,7 +2169,7 @@ export async function loadCliConfig(
     cronEnabled: settings.experimental?.cron ?? true,
     cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
-    artifactEnabled: settings.experimental?.artifact ?? false,
+    artifactEnabled: settings.experimental?.artifact ?? true,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
     artifactPublisher: settings.artifact?.publisher ?? 'local',
     artifactHost: settings.artifact?.host
@@ -2162,6 +2220,7 @@ export async function loadCliConfig(
     providerProtocolConfig,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
+    initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,
     warnings: resolvedCliConfig.warnings,
     bareMode,
     safeMode,
@@ -2221,6 +2280,8 @@ export async function loadCliConfig(
         : (settings.memory?.autoSkillConfirm ?? true),
     memoryAgentTimeoutMinutes: settings.memory?.agentTimeoutMinutes,
     fastModel: settings.fastModel || undefined,
+    webSearch:
+      bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(
@@ -2264,6 +2325,7 @@ export async function loadCliConfig(
               }
             : undefined,
           maxParallelAgents: settings.agents.maxParallelAgents,
+          maxParallelAgentsByModel: settings.agents.maxParallelAgentsByModel,
           displayMode: settings.agents.displayMode,
           arena: settings.agents.arena
             ? {

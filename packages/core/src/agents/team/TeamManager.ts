@@ -74,6 +74,7 @@ import { buildTeammatePromptAddendum } from './promptAddendum.js';
 import { runWithTeammateIdentity } from './identity.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { ToolConfig } from '../runtime/agent-types.js';
+import { runOutsideAgentContext } from '../runtime/agent-context.js';
 
 const debug = createDebugLogger('AGENTS_TEAM_MANAGER');
 
@@ -763,7 +764,9 @@ export class TeamManager {
   setLeaderMessageCallback(
     cb: ((message: string, display: string) => void) | null,
   ): void {
-    this.leaderMessageCallback = cb;
+    this.leaderMessageCallback = cb
+      ? (message, display) => runOutsideAgentContext(() => cb(message, display))
+      : null;
   }
 
   requestPlanApproval(
@@ -1559,6 +1562,7 @@ export class TeamManager {
       // fileDiff}`), which doesn't match what permission policies
       // expect to see (e.g. `{file_path, content}`).
       toolInput: event.args ?? {},
+      confirmationDetails: event.confirmationDetails,
       respond: event.respond,
       timestamp: Date.now(),
     };

@@ -26,6 +26,7 @@ const ROUTE = 'POST /workspace/setup-github';
 interface RegisterDeps {
   boundWorkspace: string;
   bridge: AcpSessionBridge;
+  env: Readonly<NodeJS.ProcessEnv>;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
   parseClientId: (req: Request, res: Response) => string | undefined | null;
   safeBody: (req: Request) => Record<string, unknown>;
@@ -70,7 +71,7 @@ async function handleSetupGithub(
     const result = await setupGithub({
       cwd: deps.boundWorkspace,
       workspaceRoot: deps.boundWorkspace,
-      proxy: resolveSetupGithubProxy(deps.boundWorkspace),
+      proxy: resolveSetupGithubProxy(deps.boundWorkspace, deps.env),
       abortSignal: requestAbortSignal(req, res),
       fileOps: createSetupGithubFileOps(factory, ROUTE, originatorClientId),
     });
@@ -339,6 +340,7 @@ export function setupGithubEventData(
 
 export function resolveSetupGithubProxy(
   boundWorkspace: string,
+  env: Readonly<NodeJS.ProcessEnv>,
 ): string | undefined {
   const settings = loadSettings(boundWorkspace, { skipLoadEnvironment: true });
   const trustState = getWorkspaceTrustStatus(
@@ -353,10 +355,10 @@ export function resolveSetupGithubProxy(
         settings.systemDefaults.settings.proxy;
   return (
     settingsProxy ||
-    process.env['HTTPS_PROXY'] ||
-    process.env['https_proxy'] ||
-    process.env['HTTP_PROXY'] ||
-    process.env['http_proxy']
+    env['HTTPS_PROXY'] ||
+    env['https_proxy'] ||
+    env['HTTP_PROXY'] ||
+    env['http_proxy']
   );
 }
 

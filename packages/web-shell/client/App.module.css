@@ -85,6 +85,39 @@
   background: transparent;
 }
 
+.artifactPanelDock {
+  flex: 0 0 var(--artifact-panel-dock-width);
+  width: var(--artifact-panel-dock-width);
+  min-width: 0;
+  display: flex;
+  animation: artifactPanelDockOpen 200ms cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+.artifactPanelClip {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  overflow: hidden;
+}
+
+@keyframes artifactPanelDockOpen {
+  from {
+    flex-basis: 0;
+    width: 0;
+  }
+
+  to {
+    flex-basis: var(--artifact-panel-dock-width);
+    width: var(--artifact-panel-dock-width);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .artifactPanelDock {
+    animation: none;
+  }
+}
+
 /* Positioning context so the scheduled-tasks page (position:absolute) covers
    exactly the chat pane. Only applied while the page is shown, so normal chat
    layout is untouched. */
@@ -305,32 +338,6 @@
   overflow-y: auto;
 }
 
-.app,
-.app * {
-  box-sizing: border-box;
-  scrollbar-width: thin;
-  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-
-.app *::-webkit-scrollbar-track {
-  background: var(--scrollbar-track);
-}
-
-.app *::-webkit-scrollbar-thumb {
-  border: 2px solid var(--scrollbar-track);
-  border-radius: 999px;
-  background: var(--scrollbar-thumb);
-}
-
-.app *::-webkit-scrollbar-thumb:hover {
-  background: var(--scrollbar-thumb-hover);
-}
-
 .themeDark {
   --background: #0d0d0d;
   --foreground: #fafafa;
@@ -482,6 +489,173 @@
 .appChatEmpty .content {
   flex: 0 0 auto;
   overflow: visible;
+}
+
+.worktreeWelcomeToggle {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 18px auto 0;
+  padding: 9px 18px 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--card, transparent);
+  color: var(--foreground);
+  font-family: inherit;
+  text-align: left;
+  cursor: pointer;
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04);
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    transform 160ms ease;
+  animation: worktreeWelcomeIn 220ms ease-out;
+}
+
+.worktreeWelcomeToggle:hover {
+  border-color: var(--color-accent-border, rgba(139, 92, 246, 0.5));
+  box-shadow: 0 6px 20px var(--color-accent-bg, rgba(139, 92, 246, 0.16));
+  transform: translateY(-1px);
+}
+
+.worktreeWelcomeToggle:active {
+  transform: translateY(0) scale(0.99);
+  transition-duration: 60ms;
+}
+
+.worktreeToggleIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: var(--color-accent-bg, rgba(139, 92, 246, 0.1));
+  color: var(--color-accent-fg, #8b5cf6);
+  transition:
+    transform 220ms cubic-bezier(0.34, 1.56, 0.64, 1),
+    background 160ms ease;
+}
+
+.worktreeWelcomeToggle:hover .worktreeToggleIcon {
+  transform: rotate(-10deg) scale(1.08);
+  background: var(--color-accent-bg, rgba(139, 92, 246, 0.16));
+}
+
+.worktreeToggleText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.worktreeToggleLabel {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--foreground);
+}
+
+.worktreeToggleHint {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted-foreground);
+}
+
+.worktreeWelcomeBadge {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: fit-content;
+  max-width: 100%;
+  margin: 18px auto 0;
+  padding: 10px 40px 10px 10px;
+  border: 1px solid var(--color-accent-border, rgba(139, 92, 246, 0.25));
+  border-radius: 14px;
+  background: var(--color-accent-bg, rgba(139, 92, 246, 0.06));
+  color: var(--foreground);
+  text-align: left;
+  box-shadow: 0 2px 14px var(--color-accent-bg, rgba(139, 92, 246, 0.12));
+  animation: worktreeWelcomeIn 220ms ease-out;
+}
+
+.worktreeBadgeIcon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: var(--color-accent-fg, #8b5cf6);
+  color: #fff;
+  box-shadow: 0 3px 10px var(--color-accent-border, rgba(139, 92, 246, 0.45));
+}
+
+.worktreeBadgeText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.worktreeWelcomeTitle {
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.35;
+  color: var(--color-accent-fg, #8b5cf6);
+}
+
+.worktreeWelcomeDesc {
+  font-size: 11.5px;
+  line-height: 1.35;
+  color: var(--muted-foreground);
+}
+
+.worktreeWelcomeCancel {
+  position: absolute;
+  top: 7px;
+  right: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  opacity: 0.55;
+  transition:
+    opacity 140ms ease,
+    background 140ms ease,
+    color 140ms ease,
+    transform 180ms ease;
+}
+
+.worktreeWelcomeCancel:hover {
+  opacity: 1;
+  background: var(--color-accent-border, rgba(139, 92, 246, 0.2));
+  color: var(--color-accent-fg, #8b5cf6);
+  transform: rotate(90deg);
+}
+
+@keyframes worktreeWelcomeIn {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
 }
 
 .missingSessionState {
@@ -663,7 +837,7 @@
   right: 20px;
   bottom: calc(100% + 8px);
   left: 20px;
-  z-index: 6;
+  z-index: calc(var(--web-shell-dialog-backdrop-z-index, 50) + 10);
   pointer-events: auto;
 }
 
@@ -741,6 +915,10 @@
   margin-bottom: 8px;
 }
 
+.chatHeader {
+  flex-shrink: 0;
+}
+
 .customFooter {
   flex-shrink: 0;
 }
@@ -752,6 +930,72 @@
   padding: 4px 0;
   font-size: 13px;
   color: var(--muted-foreground);
+}
+
+.composerActionTip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.composerActionTipIcon {
+  color: color-mix(in srgb, var(--streaming-label-color) 78%, transparent);
+  font-size: 11px;
+  line-height: 1;
+  transform: translateY(-0.5px);
+}
+
+.composerActionTipText {
+  min-width: 0;
+  color: var(--streaming-label-color);
+  font-weight: 500;
+  letter-spacing: -0.01em;
+}
+
+.composerActionTipActions {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 4px;
+}
+
+.composerActionTipButton {
+  border: 1px solid transparent;
+  border-radius: 6px;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.15;
+  font-weight: 500;
+  cursor: pointer;
+  padding: 3px 8px;
+  white-space: nowrap;
+  transition:
+    border-color 120ms ease,
+    background-color 120ms ease,
+    color 120ms ease,
+    transform 120ms ease;
+}
+
+.composerActionTipButtonPrimary {
+  border-color: color-mix(in srgb, var(--primary) 14%, var(--border));
+  background: color-mix(in srgb, var(--primary) 5%, transparent);
+  color: color-mix(in srgb, var(--foreground) 94%, var(--primary));
+}
+
+.composerActionTipButton:hover,
+.composerActionTipButton:focus-visible {
+  outline: none;
+  transform: translateY(-0.5px);
+}
+
+.composerActionTipButtonPrimary:hover,
+.composerActionTipButtonPrimary:focus-visible {
+  border-color: color-mix(in srgb, var(--primary) 28%, var(--border));
+  background: color-mix(in srgb, var(--primary) 10%, transparent);
+  color: var(--foreground);
 }
 
 .emptyWelcomeFooter {

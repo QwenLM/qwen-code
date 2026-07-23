@@ -86,10 +86,23 @@ describe('shellAstParser lazy runtime', () => {
   it('loads web-tree-sitter on first use and deduplicates initialization', async () => {
     const runtimeLoaded = vi.fn();
     const init = vi.fn(async () => undefined);
+    let releaseLanguage!: () => void;
+    const languageReady = new Promise<void>((resolve) => {
+      releaseLanguage = resolve;
+    });
+    const constructed = vi.fn();
+    const loadLanguage = vi.fn(async () => {
+      await languageReady;
+      return {};
+    });
 
     class ParserMock {
       static init = init;
-      static Language = { load: vi.fn(async () => ({})) };
+      static Language = { load: loadLanguage };
+
+      constructor() {
+        constructed();
+      }
 
       setLanguage = vi.fn();
     }
@@ -101,27 +114,129 @@ describe('shellAstParser lazy runtime', () => {
 
     const parser = await import('./shellAstParser.js');
     expect(runtimeLoaded).not.toHaveBeenCalled();
+    const first = parser.initParser();
+    await vi.waitFor(() => expect(loadLanguage).toHaveBeenCalledTimes(1));
+    expect(constructed).not.toHaveBeenCalled();
 
-    await Promise.all([parser.initParser(), parser.initParser()]);
+    let secondResolved = false;
+    const second = parser.initParser().then(() => {
+      secondResolved = true;
+    });
+    await Promise.resolve();
+    expect(secondResolved).toBe(false);
 
+    releaseLanguage();
+    await Promise.all([first, second]);
     expect(runtimeLoaded).toHaveBeenCalledTimes(1);
     expect(init).toHaveBeenCalledTimes(1);
+    expect(loadLanguage).toHaveBeenCalledTimes(1);
+    expect(constructed).toHaveBeenCalledTimes(1);
   });
 
-  it('latches a runtime import failure and falls back without retrying', async () => {
-    const runtimeLoads = vi.fn();
-    vi.doMock('web-tree-sitter', () => {
-      runtimeLoads();
-      throw new Error('runtime chunk unavailable');
+  it('latches a language load failure', async () => {
+    const languageLoads = vi.fn(async () => {
+      throw new Error('bash language unavailable');
     });
 
+    class ParserMock {
+      static init = vi.fn(async () => undefined);
+      static Language = { load: languageLoads };
+
+      setLanguage = vi.fn();
+    }
+
+    vi.doMock('web-tree-sitter', () => ({ default: ParserMock }));
     const parser = await import('./shellAstParser.js');
+
+    expect(await parser.classifyShellCommandSafety('git status')).toBe(
+      'unknown',
+    );
     expect(await parser.isShellCommandReadOnlyAST('git status')).toBe(true);
     expect(await parser.isShellCommandReadOnlyAST('rm -rf temp')).toBe(false);
     await expect(parser.initParser()).rejects.toThrow(
       'tree-sitter WASM failed to initialise',
     );
-    expect(runtimeLoads).toHaveBeenCalledTimes(1);
+    expect(languageLoads).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps parser runtime exceptions without changing the legacy fallback', async () => {
+    const init = vi.fn(async () => undefined);
+    const deleteParser = vi.fn();
+    const parse = vi.fn(() => {
+      throw new Error('parser runtime failure');
+    });
+    const setLanguage = vi
+      .fn()
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => undefined)
+      .mockImplementationOnce(() => {
+        throw new Error('cannot configure replacement');
+      });
+    const constructed = vi.fn();
+
+    class ParserMock {
+      static init = init;
+      static Language = { load: vi.fn(async () => ({})) };
+
+      constructor() {
+        constructed();
+      }
+
+      delete = deleteParser;
+      parse = parse;
+      setLanguage = setLanguage;
+    }
+
+    vi.doMock('web-tree-sitter', () => ({ default: ParserMock }));
+    const parser = await import('./shellAstParser.js');
+
+    expect(await parser.classifyShellCommandSafety('git status')).toBe(
+      'unknown',
+    );
+    expect(await parser.isShellCommandReadOnlyAST('git status')).toBe(true);
+    await expect(parser.initParser()).rejects.toThrow(
+      'tree-sitter WASM failed to initialise',
+    );
+    expect(init).toHaveBeenCalledTimes(1);
+    expect(parse).toHaveBeenCalledTimes(2);
+    expect(constructed).toHaveBeenCalledTimes(3);
+    expect(setLanguage).toHaveBeenCalledTimes(3);
+    expect(deleteParser).toHaveBeenCalledTimes(3);
+  });
+
+  it('releases each parsed tree exactly once', async () => {
+    const deleteTree = vi.fn();
+    const parse = vi
+      .fn()
+      .mockReturnValueOnce({
+        rootNode: { namedChildCount: 0, hasError: false, namedChildren: [] },
+        delete: deleteTree,
+      })
+      .mockReturnValueOnce({
+        get rootNode() {
+          throw new Error('tree evaluation failure');
+        },
+        delete: deleteTree,
+      });
+
+    class ParserMock {
+      static init = vi.fn(async () => undefined);
+      static Language = { load: vi.fn(async () => ({})) };
+
+      parse = parse;
+      setLanguage = vi.fn();
+    }
+
+    vi.doMock('web-tree-sitter', () => ({ default: ParserMock }));
+    const parser = await import('./shellAstParser.js');
+
+    expect(await parser.classifyShellCommandSafety('git status')).toBe(
+      'unknown',
+    );
+    expect(await parser.classifyShellCommandSafety('git status')).toBe(
+      'unknown',
+    );
+    expect(deleteTree).toHaveBeenCalledTimes(2);
   });
 
   it('keeps the packaged runtime deferred and parses from emitted chunks', async () => {
@@ -130,7 +245,7 @@ describe('shellAstParser lazy runtime', () => {
     const entryPath = path.join(tempDir, 'entry.ts');
     writeFileSync(
       entryPath,
-      `export { _resetParser, isShellCommandReadOnlyAST, parseShellCommand } from ${JSON.stringify(
+      `export { _resetParser, classifyShellCommandSafety, isShellCommandReadOnlyAST, parseShellCommand } from ${JSON.stringify(
         path.join(repoRoot, 'packages/core/src/utils/shellAstParser.ts'),
       )};\n`,
     );
@@ -176,6 +291,9 @@ describe('shellAstParser lazy runtime', () => {
       }?test=${Date.now()}`
     )) as {
       _resetParser(): void;
+      classifyShellCommandSafety(
+        command: string,
+      ): Promise<'read-only' | 'write' | 'unknown'>;
       isShellCommandReadOnlyAST(command: string): Promise<boolean>;
       parseShellCommand(command: string): Promise<{
         rootNode: { type: string };
@@ -195,6 +313,15 @@ describe('shellAstParser lazy runtime', () => {
     );
     expect(await packagedParser.isShellCommandReadOnlyAST('rm -rf temp')).toBe(
       false,
+    );
+    expect(await packagedParser.classifyShellCommandSafety('rm -rf temp')).toBe(
+      'write',
+    );
+    await packagedParser.classifyShellCommandSafety(
+      'case x in x) rm target;; esac',
+    );
+    expect(await packagedParser.classifyShellCommandSafety('git status')).toBe(
+      'read-only',
     );
 
     packagedParser._resetParser();

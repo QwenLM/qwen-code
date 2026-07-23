@@ -523,6 +523,7 @@ export default {
   'Folder Trust': 'Confiance des dossiers',
   'Tool Schema Compliance': 'Conformité Tool Schema',
   'Auto (detect from system)': 'Auto (détecter depuis le système)',
+  'Auto (follow user input)': "Auto (suivre l'entrée utilisateur)",
   'Auto (detect terminal theme)': 'Auto (détecter le thème du terminal)',
   Text: 'Texte',
   JSON: 'JSON',
@@ -661,7 +662,7 @@ export default {
     "Veuillez inclure le nom de l'extension à désinstaller comme argument positionnel.",
   'Enables an extension.': 'Active une extension.',
   'The name of the extension to enable.': "Le nom de l'extension à activer.",
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     "La portée dans laquelle activer l'extension. Si non définie, sera activée dans toutes les portées.",
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" activée avec succès pour la portée "{{scope}}".',
@@ -672,7 +673,7 @@ export default {
   'Disables an extension.': 'Désactive une extension.',
   'The name of the extension to disable.':
     "Le nom de l'extension à désactiver.",
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     "La portée dans laquelle désactiver l'extension.",
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" désactivée avec succès pour la portée "{{scope}}".',
@@ -2147,8 +2148,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Une nouvelle version de Qwen Code est disponible ! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} est à jour !',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Échec de la vérification des mises à jour. Vérifiez votre réseau ou la configuration du registre.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Échec de la vérification des mises à jour ({{reason}}). Vérifiez votre réseau ou la configuration du registre.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Vérification des mises à jour ignorée ({{reason}}) — exécutez /update pour réessayer.',
+  'registry did not respond within {{seconds}}s':
+    "le registre n'a pas répondu en {{seconds}}s",
+  'registry unreachable': 'registre inaccessible',
+  'registry error': 'erreur du registre',
   'Unable to check for updates: {{reason}}':
     'Impossible de vérifier les mises à jour : {{reason}}',
   'Update successful! The new version will be used on your next run.':

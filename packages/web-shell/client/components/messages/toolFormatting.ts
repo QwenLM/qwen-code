@@ -35,6 +35,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
+  list_agents: 'ListAgents',
   send_message: 'SendMessage',
   structured_output: 'StructuredOutput',
   monitor: 'Monitor',
@@ -70,9 +71,13 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
  * collapse whitespace before rendering single-line labels.
  */
 // Matches bare C0/C1 control bytes but not `\n`/`\t` (mirrors the CLI's
-// MULTILINE_CONTROL_CHARS_REGEX).
-// eslint-disable-next-line no-control-regex
-const CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+// MULTILINE_CONTROL_CHARS_REGEX), plus the Unicode bidi embedding/isolate
+// controls (U+202A–202E, U+2066–2069) so a crafted filename can't visually
+// reorder or spoof its extension (bidi/"trojan source" style attacks).
+/* eslint-disable no-control-regex */
+const CONTROL_CHARS_REGEX =
+  /[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/g;
+/* eslint-enable no-control-regex */
 
 export function sanitizeControlChars(text: string): string {
   return text.replace(CONTROL_CHARS_REGEX, (ch) => {

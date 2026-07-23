@@ -100,6 +100,7 @@ export interface Envelope {
   senderId: string;
   senderName: string;
   chatId: string;
+  chatName?: string;
   text: string;
   threadId?: string;
   /** Platform-specific message ID for response correlation. */
@@ -133,6 +134,40 @@ export interface SessionTarget {
   chatId: string;
   threadId?: string;
   isGroup?: boolean;
+}
+
+export interface ObservedChannelIdentity {
+  id: string;
+  label: string;
+}
+
+export interface ObservedChannelContactObservation {
+  user: ObservedChannelIdentity;
+  group?: ObservedChannelIdentity;
+  topic?: ObservedChannelIdentity;
+}
+
+export interface ObservedChannelContact extends ObservedChannelIdentity {
+  channelName: string;
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelRelatedContact extends ObservedChannelIdentity {
+  lastObservedAt: string;
+}
+
+export interface ObservedChannelTopic extends ObservedChannelRelatedContact {
+  users: ObservedChannelRelatedContact[];
+}
+
+export interface ObservedChannelGroup extends ObservedChannelContact {
+  users: ObservedChannelRelatedContact[];
+  topics: ObservedChannelTopic[];
+}
+
+export interface ObservedChannelContactGraph {
+  users: ObservedChannelContact[];
+  groups: ObservedChannelGroup[];
 }
 
 export interface ChannelTaskLifecycleBase {
@@ -207,6 +242,7 @@ export interface ChannelMemoryEntry {
 
 export interface ChannelMemoryCallbacks {
   readChannelMemory(target: ChannelMemoryTarget): Promise<string>;
+  getChannelMemoryRevision?(target: ChannelMemoryTarget): Promise<string>;
   listChannelMemoryEntries(
     target: ChannelMemoryTarget,
   ): Promise<ChannelMemoryEntry[]>;
@@ -236,7 +272,18 @@ export interface ChannelMemoryCallbacks {
 }
 
 export type ChannelMemoryIntentClassifierResult =
-  | { intent: 'remember'; memory: string; confidence: number }
+  | {
+      intent: 'remember';
+      memory: string;
+      memories?: never;
+      confidence: number;
+    }
+  | {
+      intent: 'remember';
+      memory?: never;
+      memories: string[];
+      confidence: number;
+    }
   | { intent: 'list'; targetIds?: string[]; confidence: number }
   | { intent: 'inspect' | 'remove'; targetIds: string[]; confidence: number }
   | {
@@ -252,6 +299,27 @@ export interface ChannelMemoryIntentClassifier {
     text: string,
     entries?: readonly ChannelMemoryEntry[],
   ): Promise<ChannelMemoryIntentClassifierResult>;
+}
+
+export type ChannelConfigFieldKind =
+  | 'string'
+  | 'secret'
+  | 'boolean'
+  | 'number'
+  | 'enum';
+
+export interface ChannelConfigFieldDescriptor {
+  key: string;
+  label: string;
+  kind: ChannelConfigFieldKind;
+  required?: boolean;
+  envResolvable?: boolean;
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  description?: string;
+}
+
+export interface ChannelManagementDescriptor {
+  fields: readonly ChannelConfigFieldDescriptor[];
 }
 
 /**
@@ -274,6 +342,9 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Serializable metadata for safe configuration management. */
+  management?: ChannelManagementDescriptor;
 
   /** Create a channel adapter instance. */
   createChannel(

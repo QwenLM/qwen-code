@@ -149,6 +149,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpInitialize: 'qwen/control/workspace/mcp/initialize',
   workspaceMcpReload: 'qwen/control/workspace/mcp/reload',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  workspaceGenerationStart: 'qwen/control/workspace/generation/start',
+  workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
@@ -157,6 +159,13 @@ export const SERVE_CONTROL_EXT_METHODS = {
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionGoalClear: 'qwen/control/session/goal/clear',
+  /**
+   * Read a live session's `/goal` state. The active goal lives only in the
+   * child's in-memory store, so this is the sole authoritative source for the
+   * condition, its running turn count and the judge's last verdict. Params:
+   * `{ sessionId }`; result: `{ active: ActiveGoalView | null }`.
+   */
+  sessionGoalGet: 'qwen/control/session/goal/get',
   workspaceMcpRuntimeAdd: 'qwen/control/workspace/mcp/runtime-add',
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
@@ -312,10 +321,10 @@ export interface ServeWorkspaceMcpServerStatus extends ServeStatusCell {
 export type ServeMcpBudgetMode = 'enforce' | 'warn' | 'off';
 
 /**
- * Workspace-level budget status cell. Surfaced as one entry in
- * `ServeWorkspaceMcpStatus.budgets[]`. The list shape (vs a single
- * `budget?` field) is forward-compat for a future change that may
- * add a `scope: 'pool'` cell alongside without a schema bump.
+ * MCP budget status cell. Surfaced as one entry in
+ * `ServeWorkspaceMcpStatus.budgets[]`. Daemons advertising
+ * `mcp_workspace_pool` emit workspace-scoped accounting; the legacy no-pool
+ * fallback emits session-scoped accounting.
  *
  * Consumers MUST tolerate additional entries with unrecognized
  * `scope` values — drop them rather than failing.
@@ -325,22 +334,13 @@ export interface ServeMcpBudgetStatusCell extends ServeStatusCell {
   /**
    * Identifies which accounting scope this cell describes.
    *
-   * **The budget feature v1 emits `'session'`** because each ACP session creates
-   * its own `Config`/`McpClientManager` via `acpAgent.newSessionConfig()`
-   * — so the budget caps live MCP clients **per session**, not
-   * per-workspace. The snapshot reflects the bootstrap session's
-   * view; concurrent sessions each enforce their own copy of the
-   * cap independently. See `qwen-serve-protocol.md` "The budget feature v1
-   * scope: per-session" for the operator-facing rationale.
+   * `'workspace'` means sessions inside the selected runtime share an MCP pool
+   * and budget. `'session'` is the legacy per-session manager used when
+   * `mcp_workspace_pool` is absent.
    *
-   * Future PRs:
-   *   - A future shared MCP pool may introduce a workspace-scoped
-   *     manager and will emit `'workspace'` (or `'pool'`) cells.
-   *   - The `string & {}` widening keeps IDE autocomplete + literal
-   *     narrowing for known scopes while allowing unknown scopes
-   *     through without a compile-time break — the protocol contract
-   *     is "consumers MUST tolerate additional scope values, drop
-   *     don't fail."
+   * The `string & {}` widening keeps IDE autocomplete + literal narrowing for
+   * known scopes while allowing unknown scopes through without a compile-time
+   * break. Consumers drop unrecognized scopes rather than failing.
    */
   scope: 'session' | 'workspace' | (string & {});
   /** Live (CONNECTED) MCP client count at snapshot time. */
@@ -620,6 +620,8 @@ export interface ServeSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /** Tool call in the parent session that launched this agent. */
+  toolUseId?: string;
   /**
    * `id` of the agent task that spawned this one; absent for agents
    * launched by the top-level session. Mirrors `AgentTask.parentAgentId`
@@ -812,10 +814,17 @@ export interface ServeWorkspaceAgentSummary {
   isBuiltin: boolean;
   /** Whether this agent restricts the tool set via `tools:` frontmatter. */
   hasTools: boolean;
+  tools?: string[];
+  disallowedTools?: string[];
   model?: string;
   color?: string;
   background?: boolean;
   approvalMode?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  mcpServerNames?: string[];
+  hookEvents?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
   extensionName?: string;
   /** Absolute path to the file backing this agent (or sentinel for built-ins). */
   filePath?: string;
@@ -823,9 +832,8 @@ export interface ServeWorkspaceAgentSummary {
 
 export interface ServeWorkspaceAgentDetail extends ServeWorkspaceAgentSummary {
   systemPrompt: string;
-  tools?: string[];
-  disallowedTools?: string[];
-  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
 }
 
 export interface ServeWorkspaceAgentsStatus {

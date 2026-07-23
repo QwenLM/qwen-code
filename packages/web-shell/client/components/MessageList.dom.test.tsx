@@ -9,6 +9,7 @@ import {
   type WebShellCustomization,
 } from '../customization';
 import { I18nProvider } from '../i18n';
+import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
@@ -110,7 +111,7 @@ class ResizeObserverStub {
   unobserve() {}
   disconnect() {}
 }
-(globalThis as { ResizeObserver?: unknown }).ResizeObserver ??=
+(globalThis as { ResizeObserver?: unknown }).ResizeObserver =
   ResizeObserverStub;
 if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
@@ -199,7 +200,28 @@ function mount(
     hideSessionTimeline?: boolean;
     loadingTranscript?: boolean;
     catchingUp?: boolean;
+    hasOlderHistory?: boolean;
+    loadingOlderHistory?: boolean;
+    historyCapacityReached?: boolean;
+    onLoadOlderHistory?: () => Promise<void>;
+    transcriptBlockCount?: number;
+    transcriptActivity?: {
+      getSnapshot(): {
+        lastEventId?: number;
+        blocks?: { readonly length: number };
+      };
+      subscribe(listener: () => void): () => void;
+    };
+    onReloadTranscript?: (signal: AbortSignal) => Promise<void>;
     isResponding?: boolean;
+    hideFirstUserMessage?: boolean;
+    firstTurnMetrics?: {
+      durationMs?: number;
+      inputTokens?: number;
+      outputTokens?: number;
+      cachedTokens?: number;
+    };
+    includeSubagentToolUsageInMetrics?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
     customization?: WebShellCustomization;
   } = {},
@@ -218,7 +240,19 @@ function mount(
             hideSessionTimeline={opts.hideSessionTimeline}
             loadingTranscript={opts.loadingTranscript}
             catchingUp={opts.catchingUp}
+            hasOlderHistory={opts.hasOlderHistory}
+            loadingOlderHistory={opts.loadingOlderHistory}
+            historyCapacityReached={opts.historyCapacityReached}
+            onLoadOlderHistory={opts.onLoadOlderHistory}
+            transcriptBlockCount={opts.transcriptBlockCount}
+            transcriptActivity={opts.transcriptActivity}
+            onReloadTranscript={opts.onReloadTranscript}
             isResponding={opts.isResponding}
+            hideFirstUserMessage={opts.hideFirstUserMessage}
+            firstTurnMetrics={opts.firstTurnMetrics}
+            includeSubagentToolUsageInMetrics={
+              opts.includeSubagentToolUsageInMetrics
+            }
             onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
           />
         </WebShellCustomizationProvider>
@@ -264,9 +298,7 @@ const assistantActions = (c: HTMLElement, id: string) =>
     .querySelector(`[data-testid="msg-${id}"]`)
     ?.getAttribute('data-assistant-actions');
 const isCollapsed = (c: HTMLElement, id: string) =>
-  c
-    .querySelector(`[data-testid="msg-${id}"]`)
-    ?.closest('[data-collapsed="true"]') !== null;
+  c.querySelector(`[data-testid="msg-${id}"]`) === null;
 const queryToggle = (c: HTMLElement, turnId: string) =>
   c.querySelector(`[data-testid="toggle-${turnId}"]`) as HTMLElement | null;
 const toggle = (c: HTMLElement, turnId: string) =>
@@ -305,6 +337,111 @@ const simpleTurns = (count: number): Message[] =>
   }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
+  it('reloads an oversized transcript after 120 quiet seconds at the tail', async () => {
+    vi.useFakeTimers();
+    const onReloadTranscript = vi.fn().mockResolvedValue(undefined);
+    let lastEventId = 10;
+    let notifyActivity = () => undefined;
+    mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      transcriptActivity: {
+        getSnapshot: () => ({ lastEventId }),
+        subscribe: (listener) => {
+          notifyActivity = listener;
+          return () => undefined;
+        },
+      },
+      onReloadTranscript,
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000);
+      lastEventId++;
+      notifyActivity();
+      await vi.advanceTimersByTimeAsync(60_000);
+    });
+    expect(onReloadTranscript).not.toHaveBeenCalled();
+
+    await act(async () => vi.advanceTimersByTimeAsync(60_000));
+
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledOnce();
+
+    lastEventId++;
+    notifyActivity();
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(onReloadTranscript).toHaveBeenCalledTimes(2);
+  });
+
+  it('aborts an in-flight transcript reload when the reader leaves the tail', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    let resolveReload = () => undefined;
+    let reloadSignal: AbortSignal | undefined;
+    const onReloadTranscript = vi.fn((signal: AbortSignal) => {
+      reloadSignal = signal;
+      return new Promise<void>((resolve) => {
+        resolveReload = resolve;
+      });
+    });
+    const container = mount([userMsg('u1'), asstMsg('a1')], undefined, {
+      transcriptBlockCount: WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS + 1,
+      onReloadTranscript,
+    });
+
+    await act(async () => vi.advanceTimersByTimeAsync(120_000));
+    expect(reloadSignal?.aborted).toBe(false);
+
+    const list = container.firstElementChild as HTMLElement;
+    list.scrollTop = 400;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    expect(reloadSignal?.aborted).toBe(true);
+
+    await act(async () => resolveReload());
+  });
+
+  it('hides only the first user message and overrides first-turn metrics', () => {
+    const c = mount(
+      [
+        { ...userMsg('u1'), content: 'first prompt' },
+        toolMsg('g1'),
+        asstMsg('a1'),
+        { ...userMsg('u2'), content: 'second prompt' },
+        toolMsg('g2'),
+        asstMsg('a2'),
+      ],
+      undefined,
+      {
+        hideFirstUserMessage: true,
+        firstTurnMetrics: {
+          durationMs: 9_000,
+          inputTokens: 1_200,
+          outputTokens: 45,
+          cachedTokens: 800,
+        },
+      },
+    );
+
+    expect(has(c, 'u1')).toBe(false);
+    expect(has(c, 'u2')).toBe(true);
+    expect(c.textContent).toContain('9s');
+    expect(c.textContent).toContain('↑1.2k (800 cached, 67%) ↓45');
+  });
+
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
     const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')]);
     expect(has(c, 'u1')).toBe(true);
@@ -337,6 +474,28 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(text).toContain('1 thought');
     expect(text).not.toContain('1 step');
     expect(text.indexOf('↓5.1k')).toBeLessThan(text.indexOf('1 tool call'));
+  });
+
+  it('does not add tool summary usage when full transcript usage includes it', () => {
+    const agent = agentMsg('nested');
+    agent.tools[0]!.rawOutput = {
+      executionSummary: { inputTokens: 100, outputTokens: 20 },
+    };
+    const c = mount(
+      [
+        userMsg('u1'),
+        agent,
+        {
+          ...asstMsg('a1'),
+          usage: { inputTokens: 100, outputTokens: 20 },
+        },
+      ],
+      undefined,
+      { includeSubagentToolUsageInMetrics: false },
+    );
+
+    expect(c.textContent).toContain('↑100 ↓20');
+    expect(c.textContent).not.toContain('↑200 ↓40');
   });
 
   it('renders step-less metrics without a toggle', () => {
@@ -1134,6 +1293,291 @@ describe('MessageList — turn collapse (DOM)', () => {
     ).toBeNull();
   });
 
+  it('loads earlier history once when the transcript reaches the top', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector('[data-web-shell-message-list]');
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+
+    await act(async () => {
+      list?.dispatchEvent(new Event('scroll'));
+      list?.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves the scroll anchor after prepending earlier history', async () => {
+    let scrollHeight = 1200;
+    let scrollTop = 40;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    const onLoadOlderHistory = vi.fn(async () => {
+      scrollHeight = 1800;
+    });
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    scrollTop = 40;
+
+    await act(async () => {
+      list.dispatchEvent(new Event('scroll'));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    expect(scrollTop).toBe(640);
+  });
+
+  it('loads earlier history when the transcript does not overflow', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+
+    mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not auto-load again when an underfill page adds no content', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+    const render = (loadingOlderHistory: boolean) => {
+      root.render(
+        <I18nProvider language="en">
+          <MessageList
+            messages={[userMsg('u1')]}
+            pendingApproval={null}
+            hasOlderHistory
+            loadingOlderHistory={loadingOlderHistory}
+            onLoadOlderHistory={onLoadOlderHistory}
+          />
+        </I18nProvider>,
+      );
+    };
+
+    await act(async () => {
+      render(false);
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      render(true);
+      await Promise.resolve();
+    });
+    await act(async () => {
+      render(false);
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    const list = container.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('waits for another upward scroll intent before retrying a failed underfill load', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onLoadOlderHistory = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('temporary failure'))
+      .mockResolvedValueOnce(undefined);
+
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    Object.defineProperty(list, 'scrollTop', {
+      configurable: true,
+      writable: true,
+      value: 0,
+    });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      list.dispatchEvent(new WheelEvent('wheel', { deltaY: -1 }));
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(2);
+  });
+
+  it('loads earlier history when a resize removes the overflow', async () => {
+    let clientHeight = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      get: () => clientHeight,
+    });
+    const onLoadOlderHistory = vi.fn().mockResolvedValue(undefined);
+
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    const list = c.querySelector(
+      '[data-web-shell-message-list]',
+    ) as HTMLElement;
+    expect(onLoadOlderHistory).not.toHaveBeenCalled();
+    expect(list.scrollHeight).toBe(1200);
+    expect(list.clientHeight).toBe(600);
+
+    clientHeight = 1200;
+    expect(list.clientHeight).toBe(1200);
+    await act(async () => {
+      triggerResizeObservers();
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a status while loading earlier history', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      loadingOlderHistory: true,
+    });
+
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Loading earlier messages…',
+    );
+    expect(c.querySelector('button')).toBeNull();
+  });
+
+  it('suppresses the loading status during automatic pagination', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 300,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    let resolveLoad!: () => void;
+    const onLoadOlderHistory = vi.fn(
+      () => new Promise<void>((resolve) => (resolveLoad = resolve)),
+    );
+
+    const c = mount([userMsg('u1')], undefined, {
+      hasOlderHistory: true,
+      onLoadOlderHistory,
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(onLoadOlderHistory).toHaveBeenCalledTimes(1);
+    expect(c.querySelector('[role="status"]')).toBeNull();
+
+    await act(async () => {
+      resolveLoad();
+      await Promise.resolve();
+    });
+  });
+
+  it('shows when the history display limit is reached', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      historyCapacityReached: true,
+    });
+
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'History display limit reached. Earlier messages remain saved.',
+    );
+  });
+
   it('does not smooth-scroll when existing session history loads after an empty render', () => {
     const scrollTo = vi.fn();
     let scrollTop = 0;
@@ -1339,7 +1783,7 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
     ]);
 
-    expect(assistantActions(c, 'mid')).toBe('false');
+    expect(has(c, 'mid')).toBe(false);
     expect(assistantActions(c, 'a1')).toBe('true');
   });
 

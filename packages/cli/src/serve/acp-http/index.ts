@@ -47,7 +47,10 @@ import {
   parseInbound,
   type JsonRpcInbound,
 } from './json-rpc.js';
-import { parseLastEventId } from '../sse-last-event-id.js';
+import {
+  parseEventEpochHeader,
+  parseLastEventId,
+} from '../sse-last-event-id.js';
 import {
   ClientMcpWsConnection,
   type ClientMcpServerProvider,
@@ -202,6 +205,7 @@ function delay(ms: number): Promise<void> {
 function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
   hostname: string | undefined,
+  env: Readonly<NodeJS.ProcessEnv>,
 ): Record<string, unknown> | undefined {
   if (
     localPort === undefined ||
@@ -210,7 +214,7 @@ function buildChromeDevToolsMcpRuntimeConfig(
   ) {
     return undefined;
   }
-  const command = resolveCdpMcpCommand(process.env);
+  const command = resolveCdpMcpCommand(env);
   if (!command) {
     writeStderrLine(
       `qwen serve: set ${QWEN_CDP_MCP_COMMAND_ENV} to enable browser automation MCP (no adapter is bundled)`,
@@ -361,6 +365,8 @@ const MAX_INFLIGHT_MCP_DISPATCH = 8;
 
 export interface MountAcpHttpOptions {
   boundWorkspace: string;
+  /** Process-level fallback for embedded mounts and parent-process runtimes. */
+  daemonEnv?: Readonly<NodeJS.ProcessEnv>;
   workspace: DaemonWorkspaceService;
   fsFactory?: WorkspaceFileSystemFactory;
   deviceFlowRegistry?: DeviceFlowRegistry;
@@ -546,6 +552,17 @@ export interface AcpHttpHandle {
   attachServer(server: import('node:http').Server): void;
 }
 
+function runtimeEffectiveEnv(
+  runtime: WorkspaceRuntime,
+  daemonEnv: Readonly<NodeJS.ProcessEnv>,
+): Readonly<NodeJS.ProcessEnv> {
+  if (runtime.env.mode === 'runtime-overlay') {
+    // An empty overlay must stay isolated instead of inheriting daemon values.
+    return runtime.env.effectiveEnv ?? {};
+  }
+  return runtime.env.effectiveEnv ?? daemonEnv;
+}
+
 /**
  * Mount the official ACP Streamable HTTP transport (RFD #721) on an
  * existing Express app, backed by the shared `HttpAcpBridge`. Additive:
@@ -566,6 +583,10 @@ export function mountAcpHttp(
   const enabled = opts.enabled ?? resolveAcpHttpEnabled();
   if (!enabled) return undefined;
 
+  const daemonEnv = opts.daemonEnv ?? process.env;
+  const primaryEnv = opts.workspaceRegistry
+    ? runtimeEffectiveEnv(opts.workspaceRegistry.primary, daemonEnv)
+    : daemonEnv;
   const path = opts.path ?? '/acp';
   const dispatcherRef: { current?: AcpDispatcher } = {};
   // Lifecycle gate: once `dispose()` runs, late/in-flight HTTP requests get a
@@ -680,6 +701,7 @@ export function mountAcpHttp(
     const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(
       localPort,
       opts.hostname,
+      daemonEnv,
     );
     if (!runtimeConfig) {
       cdpMcpTerminalSkipLogged = true;
@@ -747,6 +769,7 @@ export function mountAcpHttp(
   const dispatcher = new AcpDispatcher(
     bridge,
     opts.boundWorkspace,
+    primaryEnv,
     opts.workspace,
     opts.workspaceRememberLane,
     opts.fsFactory,
@@ -1086,9 +1109,6 @@ export function mountAcpHttp(
       },
       () => conn.touch(),
     );
-    // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
-    // handshake precedes any buffered frames the attach flushes.
-    stream.open();
     // Resume cursor: an EventSource/SSE client auto-resends the last `id:` it
     // saw as `Last-Event-ID` on reconnect. Drives the EventBus ring replay so
     // content frames produced during a mid-turn proxy gap are recovered (§1.8).
@@ -1096,6 +1116,23 @@ export function mountAcpHttp(
       headerOf(req, 'last-event-id'),
       '/acp ',
     );
+    // Epoch token paired with the resume cursor (DAEMON-001). Invalid values
+    // degrade to "not provided" so the bus falls back to the numeric
+    // stale-cursor heuristic.
+    const eventEpoch = parseEventEpochHeader(
+      headerOf(req, 'x-qwen-event-epoch'),
+      '/acp ',
+    );
+    // Advertise the current bus epoch BEFORE `stream.open()` flushes headers
+    // so every subscription (including the first, cursor-less one) learns the
+    // epoch to pair with its resume cursor on later reconnects.
+    const busEpoch = mount.dispatcher.getSessionEventEpoch(sessionId);
+    if (busEpoch !== undefined) {
+      res.setHeader('X-Qwen-Event-Epoch', busEpoch);
+    }
+    // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
+    // handshake precedes any buffered frames the attach flushes.
+    stream.open();
     // Pass the resume cursor INTO attach: when resuming, attach skips flushing
     // id-bearing buffered frames because the ring replay below redelivers every
     // bus event after `lastEventId` exactly once — including any frame lost
@@ -1146,7 +1183,7 @@ export function mountAcpHttp(
       }
     };
     void mount.dispatcher
-      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
+      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId, eventEpoch)
       .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
           `qwen serve: ${mount.routeLabel} event pump error (${logSafe(sessionId)}, lastEventId=${
@@ -1201,6 +1238,7 @@ export function mountAcpHttp(
     const secondaryDispatcher = new AcpDispatcher(
       rt.bridge,
       rt.workspaceCwd,
+      runtimeEffectiveEnv(rt, daemonEnv),
       rt.workspaceService,
       workspaceRememberLane,
       rt.routeFileSystemFactory,

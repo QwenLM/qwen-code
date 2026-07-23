@@ -26,6 +26,9 @@ export interface ToolInvocation<
    */
   params: TParams;
 
+  /** Historical names accepted only when evaluating persisted permissions. */
+  readonly permissionAliases?: readonly string[];
+
   /**
    * Gets a pre-execution description of the tool operation.
    *
@@ -51,6 +54,13 @@ export interface ToolInvocation<
    * overridden by PermissionManager rules at L4.
    */
   getDefaultPermission(): Promise<PermissionDecision>;
+
+  /**
+   * Whether this invocation must be approved through an explicit host/user
+   * interaction. Permission rules and automatic approval modes cannot satisfy
+   * this requirement.
+   */
+  requiresUserInteraction?(): boolean;
 
   /**
    * Constructs the confirmation dialog details for this invocation.
@@ -99,6 +109,10 @@ export abstract class BaseToolInvocation<
    */
   getDefaultPermission(): Promise<PermissionDecision> {
     return Promise.resolve('allow');
+  }
+
+  requiresUserInteraction(): boolean {
+    return false;
   }
 
   /**
@@ -479,6 +493,18 @@ export interface ToolResult {
   llmContent: PartListUnion;
 
   /**
+   * Internal runtime metadata recording the producer persistence decision
+   * before final aggregation.
+   * `undefined` means no decision was made; `[]` means a decision was made but
+   * no reusable artifact exists; a non-empty array lists reusable producer
+   * artifact paths. Downstream finalization treats any defined value as a
+   * completed decision for this producer output and does not persist it again.
+   * Other artifact channels remain independent and may still be aggregated
+   * later.
+   */
+  persistedOutputFiles?: string[];
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be
@@ -766,8 +792,8 @@ export interface ToolEditConfirmationDetails {
   ) => Promise<void>;
   /**
    * When true, the UI should not show "Always allow" options (ProceedAlwaysProject/User).
-   * Set by coreToolScheduler when PM has an explicit 'ask' rule that would override
-   * any 'allow' rule the user might add.
+   * Set when an explicit interaction or PM 'ask' rule cannot be replaced by
+   * a persisted allow rule.
    */
   hideAlwaysAllow?: boolean;
   fileName: string;
@@ -778,6 +804,10 @@ export interface ToolEditConfirmationDetails {
   isModifying?: boolean;
   /** Hide UI affordances that let the user edit the proposed content. */
   hideModify?: boolean;
+  /** Skip opening or resolving an IDE diff for this confirmation. */
+  skipIdeDiff?: boolean;
+  /** Informational warnings to render alongside the proposed diff. */
+  warnings?: string[];
 }
 
 export interface ToolConfirmationPayload {
@@ -857,13 +887,22 @@ export interface ToolInfoConfirmationDetails {
   permissionRules?: string[];
 }
 
-export type ToolCallConfirmationDetails =
+export interface AutoModeFallbackConfirmation {
+  reason: 'classifier_unavailable';
+  message: string;
+}
+
+export type ToolCallConfirmationDetails = (
   | ToolEditConfirmationDetails
   | ToolExecuteConfirmationDetails
   | ToolMcpConfirmationDetails
   | ToolInfoConfirmationDetails
   | ToolPlanConfirmationDetails
-  | ToolAskUserQuestionConfirmationDetails;
+  | ToolAskUserQuestionConfirmationDetails
+) & {
+  /** Explains why an AUTO-mode call was routed to manual confirmation. */
+  autoModeFallback?: AutoModeFallbackConfirmation;
+};
 
 export interface ToolPlanConfirmationDetails {
   type: 'plan';
@@ -909,6 +948,8 @@ export interface ToolAskUserQuestionConfirmationDetails {
  */
 export enum ToolConfirmationOutcome {
   ProceedOnce = 'proceed_once',
+  /** Approve this call once and change the runtime session to Default mode. */
+  ProceedOnceAndSwitchToDefault = 'proceed_once_and_switch_to_default',
   ProceedAlways = 'proceed_always',
   /** @deprecated Use ProceedAlwaysProject or ProceedAlwaysUser instead. */
   ProceedAlwaysServer = 'proceed_always_server',

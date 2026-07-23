@@ -203,6 +203,7 @@ export default {
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
+  'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
@@ -758,6 +759,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
+  'Auto (follow user input)': 'Auto (follow user input)',
   'Auto (detect terminal theme)': 'Auto (detect terminal theme)',
   Auto: 'Auto',
   Text: 'Text',
@@ -929,8 +931,8 @@ export default {
   'Enables an extension.': 'Enables an extension.',
   'The name of the extension to enable.':
     'The name of the extension to enable.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
-    'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
+    'The scope to enable the extension in. If not set, will be enabled in all scopes.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully enabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully enabled in all scopes.':
@@ -940,8 +942,8 @@ export default {
   'Disables an extension.': 'Disables an extension.',
   'The name of the extension to disable.':
     'The name of the extension to disable.',
-  'The scope to disable the extenison in.':
-    'The scope to disable the extenison in.',
+  'The scope to disable the extension in.':
+    'The scope to disable the extension in.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully disabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1842,7 +1844,10 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
-  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q to queue · ↑ to edit queued messages',
+  'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
   // MCP Status
@@ -2229,6 +2234,7 @@ export default {
   'Press Ctrl+Y to retry': 'Press Ctrl+Y to retry',
   'No failed request to retry.': 'No failed request to retry.',
   'to retry last request': 'to retry last request',
+  'to queue for the next turn': 'to queue for the next turn',
 
   // ============================================================================
   // Coding Plan Authentication
@@ -2600,8 +2606,14 @@ export default {
     'A new version of Qwen Code is available! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} is up to date!',
-  'Failed to check for updates. Please check your network or registry configuration.':
-    'Failed to check for updates. Please check your network or registry configuration.',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update check skipped ({{reason}}) — run /update to retry.',
+  'registry did not respond within {{seconds}}s':
+    'registry did not respond within {{seconds}}s',
+  'registry unreachable': 'registry unreachable',
+  'registry error': 'registry error',
   'Unable to check for updates: {{reason}}':
     'Unable to check for updates: {{reason}}',
   'Update successful! The new version will be used on your next run.':

@@ -11,9 +11,9 @@ import {
   initializeTelemetry,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
-  resolveHttpOtlpUrl,
   refreshSessionContext,
 } from './sdk.js';
+import { resolveHttpOtlpUrl } from './otlp-urls.js';
 import { OTLPTraceExporter } from '@opentelemetry/exporter-trace-otlp-grpc';
 import { OTLPLogExporter } from '@opentelemetry/exporter-logs-otlp-grpc';
 import { OTLPMetricExporter } from '@opentelemetry/exporter-metrics-otlp-grpc';
@@ -158,8 +158,8 @@ describe('Telemetry SDK', () => {
     await shutdownTelemetry();
   });
 
-  it('should use gRPC exporters when protocol is grpc', () => {
-    initializeTelemetry(mockConfig);
+  it('should use gRPC exporters when protocol is grpc', async () => {
+    await initializeTelemetry(mockConfig);
 
     expect(OTLPTraceExporter).toHaveBeenCalledWith({
       url: 'http://localhost:4317',
@@ -177,6 +177,66 @@ describe('Telemetry SDK', () => {
     expect(NodeSDK).toHaveBeenCalledWith(
       expect.objectContaining({ autoDetectResources: false }),
     );
+  });
+
+  describe('lazy init lifecycle', () => {
+    it('shares a single in-flight init across concurrent callers', async () => {
+      await Promise.all([
+        initializeTelemetry(mockConfig),
+        initializeTelemetry(mockConfig),
+      ]);
+
+      expect(NodeSDK).toHaveBeenCalledTimes(1);
+      expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
+    });
+
+    it('clears the in-flight promise so a failed init can be retried', async () => {
+      vi.mocked(NodeSDK.prototype.start).mockImplementationOnce(() => {
+        throw new Error('start failed');
+      });
+
+      // A failed init must resolve (never reject) and leave telemetry off so a
+      // later call can retry rather than reusing a poisoned single-flight promise.
+      await expect(initializeTelemetry(mockConfig)).resolves.toBeUndefined();
+      expect(isTelemetrySdkInitialized()).toBe(false);
+
+      // The retry succeeds: reaching `initialized === true` requires the
+      // continuation to have run `sdk.start()` again on a fresh SDK.
+      await initializeTelemetry(mockConfig);
+      expect(isTelemetrySdkInitialized()).toBe(true);
+    });
+
+    it('waits for an in-flight init before shutting down', async () => {
+      // Regression guard for the shutdown/init race: shutdown must not no-op
+      // past a not-yet-set `telemetryInitialized` and leak a started SDK whose
+      // buffered spans/logs never flush.
+      const initPromise = initializeTelemetry(mockConfig);
+      const shutdownPromise = shutdownTelemetry();
+
+      await Promise.all([initPromise, shutdownPromise]);
+
+      expect(NodeSDK.prototype.start).toHaveBeenCalledTimes(1);
+      expect(NodeSDK.prototype.shutdown).toHaveBeenCalledTimes(1);
+      expect(isTelemetrySdkInitialized()).toBe(false);
+    });
+
+    it('clears the shutdown promise when it races an init that fails to start', async () => {
+      vi.mocked(NodeSDK.prototype.start).mockImplementationOnce(() => {
+        throw new Error('start failed');
+      });
+
+      const initPromise = initializeTelemetry(mockConfig);
+      const shutdownPromise = shutdownTelemetry();
+      await Promise.all([initPromise, shutdownPromise]);
+      expect(isTelemetrySdkInitialized()).toBe(false);
+
+      // The no-op shutdown above resolved without an SDK; it must not leave a
+      // stale shutdown promise that short-circuits a later real teardown.
+      await initializeTelemetry(mockConfig);
+      await shutdownTelemetry();
+      expect(NodeSDK.prototype.shutdown).toHaveBeenCalledTimes(1);
+      expect(isTelemetrySdkInitialized()).toBe(false);
+    });
   });
 
   it('should route OpenTelemetry diagnostics to debug log instead of console output', async () => {
@@ -251,14 +311,14 @@ describe('Telemetry SDK', () => {
     }
   });
 
-  it('should use HTTP exporters with signal-specific paths when protocol is http', () => {
+  it('should use HTTP exporters with signal-specific paths when protocol is http', async () => {
     vi.spyOn(mockConfig, 'getTelemetryEnabled').mockReturnValue(true);
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'http://localhost:4318',
     );
 
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     expect(OTLPTraceExporterHttp).toHaveBeenCalledWith({
       url: 'http://localhost:4318/v1/traces',
@@ -275,22 +335,22 @@ describe('Telemetry SDK', () => {
     );
   });
 
-  it('should parse gRPC endpoint correctly', () => {
+  it('should parse gRPC endpoint correctly', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'https://my-collector.com',
     );
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
     expect(OTLPTraceExporter).toHaveBeenCalledWith(
       expect.objectContaining({ url: 'https://my-collector.com' }),
     );
   });
 
-  it('should append signal paths to HTTP endpoint', () => {
+  it('should append signal paths to HTTP endpoint', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'https://my-collector.com',
     );
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
     expect(OTLPTraceExporterHttp).toHaveBeenCalledWith(
       expect.objectContaining({ url: 'https://my-collector.com/v1/traces' }),
     );
@@ -302,7 +362,7 @@ describe('Telemetry SDK', () => {
     );
   });
 
-  it('should use per-signal endpoint overrides when provided', () => {
+  it('should use per-signal endpoint overrides when provided', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
       'http://default-collector:4318',
@@ -311,7 +371,7 @@ describe('Telemetry SDK', () => {
       'http://traces-collector:4318/v1/traces',
     );
 
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     // Traces uses the per-signal override
     expect(OTLPTraceExporterHttp).toHaveBeenCalledWith({
@@ -326,7 +386,7 @@ describe('Telemetry SDK', () => {
     });
   });
 
-  it('should use per-signal overrides without base endpoint', () => {
+  it('should use per-signal overrides without base endpoint', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
     vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
@@ -337,7 +397,7 @@ describe('Telemetry SDK', () => {
     );
     // logs has no override and no base endpoint
 
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     // Traces and metrics use per-signal override
     expect(OTLPTraceExporterHttp).toHaveBeenCalledWith({
@@ -355,7 +415,7 @@ describe('Telemetry SDK', () => {
     expect(NodeSDK.prototype.start).toHaveBeenCalled();
   });
 
-  it('passes sensitive span attribute config to the log-to-span bridge', () => {
+  it('passes sensitive span attribute config to the log-to-span bridge', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
     vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
     vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
@@ -366,7 +426,7 @@ describe('Telemetry SDK', () => {
       'getTelemetryIncludeSensitiveSpanAttributes',
     ).mockReturnValue(true);
 
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     expect(LogToSpanProcessor).toHaveBeenCalledWith(
       expect.anything(),
@@ -391,7 +451,7 @@ describe('Telemetry SDK', () => {
       process.env['QWEN_DEBUG_LOG_FILE'] = '1';
       setDebugLogSession({ getSessionId: () => 'log-to-span-sink-test' });
 
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
 
       const call = vi.mocked(LogToSpanProcessor).mock.calls.at(-1);
       const opts = call?.[1] as { diagnosticsSink?: (m: string) => void };
@@ -427,7 +487,7 @@ describe('Telemetry SDK', () => {
     );
     vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(false);
 
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     const call = vi.mocked(LogToSpanProcessor).mock.calls.at(-1);
     const opts = call?.[1] as { diagnosticsSink?: (m: string) => void };
@@ -472,7 +532,7 @@ describe('Telemetry SDK', () => {
     }
   });
 
-  it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', () => {
+  it('should warn and skip startup for gRPC per-signal endpoints without base endpoint', async () => {
     const diagWarnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
     try {
       vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('grpc');
@@ -481,7 +541,7 @@ describe('Telemetry SDK', () => {
         'http://traces-host/token/api/otlp/traces',
       );
 
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
 
       expect(diagWarnSpy).toHaveBeenCalledWith(
         expect.stringContaining('Telemetry SDK startup was skipped'),
@@ -493,11 +553,11 @@ describe('Telemetry SDK', () => {
     }
   });
 
-  it('should not use OTLP exporters when telemetryOutfile is set', () => {
+  it('should not use OTLP exporters when telemetryOutfile is set', async () => {
     vi.spyOn(mockConfig, 'getTelemetryOutfile').mockReturnValue(
       path.join(os.tmpdir(), 'test.log'),
     );
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     expect(OTLPTraceExporter).not.toHaveBeenCalled();
     expect(OTLPLogExporter).not.toHaveBeenCalled();
@@ -511,10 +571,10 @@ describe('Telemetry SDK', () => {
     );
   });
 
-  it('should not register async process shutdown handlers', () => {
+  it('should not register async process shutdown handlers', async () => {
     const processOnSpy = vi.spyOn(process, 'on');
     try {
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
 
       expect(processOnSpy).not.toHaveBeenCalledWith(
         'SIGTERM',
@@ -534,15 +594,15 @@ describe('Telemetry SDK', () => {
   });
 
   it('should mark telemetry uninitialized after shutdown', async () => {
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     await shutdownTelemetry();
 
     expect(isTelemetrySdkInitialized()).toBe(false);
   });
 
-  it('should set service.version to the application version, not Node.js version', () => {
-    initializeTelemetry(mockConfig);
+  it('should set service.version to the application version, not Node.js version', async () => {
+    await initializeTelemetry(mockConfig);
 
     const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
     const resource = constructorCall.resource as {
@@ -559,7 +619,7 @@ describe('Telemetry SDK', () => {
       .mockReturnValue(new Promise<void>(() => {}));
     const diagWarnSpy = vi.spyOn(diag, 'warn').mockImplementation(() => {});
     try {
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
 
       const shutdownPromise = shutdownTelemetry();
 
@@ -584,7 +644,7 @@ describe('Telemetry SDK', () => {
       .spyOn(NodeSDK.prototype, 'shutdown')
       .mockResolvedValue();
     try {
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
 
       await shutdownTelemetry();
 
@@ -600,7 +660,7 @@ describe('Telemetry SDK', () => {
       .mockReturnValue(Promise.reject(new Error('shutdown failed')));
     const diagErrorSpy = vi.spyOn(diag, 'error').mockImplementation(() => {});
     try {
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
 
       await shutdownTelemetry();
 
@@ -615,9 +675,9 @@ describe('Telemetry SDK', () => {
     }
   });
 
-  it('should fall back to "unknown" when getCliVersion returns undefined', () => {
+  it('should fall back to "unknown" when getCliVersion returns undefined', async () => {
     vi.spyOn(mockConfig, 'getCliVersion').mockImplementation(() => undefined);
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
 
     const constructorCall = vi.mocked(NodeSDK).mock.calls[0]![0]!;
     const resource = constructorCall.resource as {
@@ -634,67 +694,67 @@ describe('Telemetry SDK', () => {
       ).attributes;
     }
 
-    it('does not place session.id on the Resource', () => {
-      initializeTelemetry(mockConfig);
+    it('does not place session.id on the Resource', async () => {
+      await initializeTelemetry(mockConfig);
       expect(getResourceAttributes()['session.id']).toBeUndefined();
     });
 
-    it('always sets service.name and service.version from runtime', () => {
-      initializeTelemetry(mockConfig);
+    it('always sets service.name and service.version from runtime', async () => {
+      await initializeTelemetry(mockConfig);
       const attrs = getResourceAttributes();
       expect(attrs['service.name']).toBe('qwen-code');
       expect(attrs['service.version']).toBe('1.0.0-test');
     });
 
-    it('attaches user-provided resource attributes', () => {
+    it('attaches user-provided resource attributes', async () => {
       vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
         team: 'platform',
         env: 'prod',
       });
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const attrs = getResourceAttributes();
       expect(attrs['team']).toBe('platform');
       expect(attrs['env']).toBe('prod');
     });
 
-    it('user-provided service.name wins over default', () => {
+    it('user-provided service.name wins over default', async () => {
       vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
         'service.name': 'qwen-code-ci',
       });
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       expect(getResourceAttributes()['service.name']).toBe('qwen-code-ci');
     });
 
-    it('user-provided service.version is ignored (runtime value wins)', () => {
+    it('user-provided service.version is ignored (runtime value wins)', async () => {
       vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
         'service.version': '99.0.0-fake',
       });
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       expect(getResourceAttributes()['service.version']).toBe('1.0.0-test');
     });
 
-    it('empty-string service.name from settings falls back to default', () => {
+    it('empty-string service.name from settings falls back to default', async () => {
       // Reviewer caught: `??` would let "" pass; `||` correctly falls back
       // so backends never see a blank service name.
       vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
         'service.name': '',
       });
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       expect(getResourceAttributes()['service.name']).toBe('qwen-code');
     });
 
-    it('whitespace-only service.name from settings falls back to default', () => {
+    it('whitespace-only service.name from settings falls back to default', async () => {
       // Reviewer caught: plain `||` lets `" "` through (truthy). The
       // `.trim() || SERVICE_NAME` fallback covers both empty and
       // whitespace-only values (env path can produce these via `%20`).
       vi.spyOn(mockConfig, 'getTelemetryResourceAttributes').mockReturnValue({
         'service.name': '   ',
       });
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       expect(getResourceAttributes()['service.name']).toBe('qwen-code');
     });
 
-    it('emits a console summary when resource-attribute warnings are present', () => {
+    it('emits a console summary when resource-attribute warnings are present', async () => {
       const consoleWarnSpy = vi
         .spyOn(console, 'warn')
         .mockImplementation(() => {});
@@ -706,7 +766,7 @@ describe('Telemetry SDK', () => {
           'OTEL_RESOURCE_ATTRIBUTES cannot override reserved key "service.version"; ignoring',
           'Skipping malformed OTEL_RESOURCE_ATTRIBUTES entry: "bogus"',
         ]);
-        initializeTelemetry(mockConfig);
+        await initializeTelemetry(mockConfig);
         const header = consoleWarnSpy.mock.calls[0]?.[0] ?? '';
         expect(header).toContain('2 resource attribute issue');
         expect(
@@ -719,19 +779,19 @@ describe('Telemetry SDK', () => {
       }
     });
 
-    it('no console output when warnings list is empty', () => {
+    it('no console output when warnings list is empty', async () => {
       const consoleWarnSpy = vi
         .spyOn(console, 'warn')
         .mockImplementation(() => {});
       try {
-        initializeTelemetry(mockConfig);
+        await initializeTelemetry(mockConfig);
         expect(consoleWarnSpy).not.toHaveBeenCalled();
       } finally {
         consoleWarnSpy.mockRestore();
       }
     });
 
-    it('user-provided session.id is stripped (defense-in-depth)', () => {
+    it('user-provided session.id is stripped (defense-in-depth)', async () => {
       // Simulates a caller that bypasses resolveTelemetrySettings() and feeds
       // raw user input straight into Config. Resource must still not carry
       // session.id, otherwise it would leak onto every metric data point.
@@ -739,7 +799,7 @@ describe('Telemetry SDK', () => {
         'session.id': 'spoofed',
         team: 'x',
       });
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const attrs = getResourceAttributes();
       expect(attrs['session.id']).toBeUndefined();
       expect(attrs['team']).toBe('x');
@@ -753,12 +813,12 @@ describe('Telemetry SDK', () => {
         .textMapPropagator;
     }
 
-    it('installs a no-op TextMapPropagator by default (propagateTraceContext=false)', () => {
+    it('installs a no-op TextMapPropagator by default (propagateTraceContext=false)', async () => {
       // Default behavior per PR #4390 R4 split: traceparent is NOT written
       // onto outbound wire. The propagator's inject() must be a no-op so
       // UndiciInstrumentation's `propagation.inject(carrier)` call writes
       // nothing into the outgoing request's headers.
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const propagator = getTextMapPropagator() as
         | { inject: (...args: unknown[]) => void; fields: () => string[] }
         | undefined;
@@ -775,12 +835,12 @@ describe('Telemetry SDK', () => {
       expect(carrier).toEqual({ existing: 'h' });
     });
 
-    it('uses the SDK default propagator when propagateTraceContext=true (operator opt-in)', () => {
+    it('uses the SDK default propagator when propagateTraceContext=true (operator opt-in)', async () => {
       vi.spyOn(
         mockConfig,
         'getOutboundCorrelationPropagateTraceContext',
       ).mockReturnValue(true);
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       // textMapPropagator is omitted from NodeSDK options → SDK installs
       // its default `CompositePropagator` (W3CTraceContextPropagator +
       // W3CBaggagePropagator). Test asserts the absence at the constructor
@@ -796,8 +856,8 @@ describe('Telemetry SDK', () => {
       return (constructorCall.instrumentations ?? []) as unknown[];
     }
 
-    it('registers both HttpInstrumentation and UndiciInstrumentation', () => {
-      initializeTelemetry(mockConfig);
+    it('registers both HttpInstrumentation and UndiciInstrumentation', async () => {
+      await initializeTelemetry(mockConfig);
       const instrumentations = getInstrumentations();
       // The mocks make HttpInstrumentation / UndiciInstrumentation auto-mocked
       // classes; instance-of checks against the mocked class still work.
@@ -809,12 +869,12 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('UndiciInstrumentation receives ignoreRequestHook that skips configured OTLP endpoints', () => {
+    it('UndiciInstrumentation receives ignoreRequestHook that skips configured OTLP endpoints', async () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -834,7 +894,7 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
-    it('ignoreRequestHook is a pure no-op when no OTLP endpoint is configured', () => {
+    it('ignoreRequestHook is a pure no-op when no OTLP endpoint is configured', async () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
       vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
         undefined,
@@ -846,7 +906,7 @@ describe('Telemetry SDK', () => {
         undefined,
       );
       vi.spyOn(mockConfig, 'getTelemetryOutfile').mockReturnValue('/tmp/x');
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -860,7 +920,7 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
-    it('ignoreRequestHook handles per-signal endpoint configuration', () => {
+    it('ignoreRequestHook handles per-signal endpoint configuration', async () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue('');
       vi.spyOn(mockConfig, 'getTelemetryOtlpTracesEndpoint').mockReturnValue(
@@ -869,7 +929,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpLogsEndpoint').mockReturnValue(
         'http://logs.example.com:4318/v1/logs',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -896,12 +956,12 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
-    it('ignoreRequestHook strips query string from incoming path for matching', () => {
+    it('ignoreRequestHook strips query string from incoming path for matching', async () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -915,12 +975,12 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('ignoreRequestHook strips #fragment from incoming path for matching', () => {
+    it('ignoreRequestHook strips #fragment from incoming path for matching', async () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -932,7 +992,7 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('ignoreRequestHook normalizes endpoint config quoted in settings.json', () => {
+    it('ignoreRequestHook normalizes endpoint config quoted in settings.json', async () => {
       // Defense against settings.json `"otlpEndpoint": "\"http://...\""` —
       // quoted strings would otherwise miss the prefix match and reintroduce
       // the feedback loop. Per PR review feedback.
@@ -940,7 +1000,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         '"http://collector.example.com:4318"',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -952,12 +1012,12 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('ignoreRequestHook strips #fragment from configured endpoint', () => {
+    it('ignoreRequestHook strips #fragment from configured endpoint', async () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318/v1/traces#anchor',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -969,7 +1029,7 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('ignoreRequestHook does NOT bleed across port boundary (4318 vs 43180)', () => {
+    it('ignoreRequestHook does NOT bleed across port boundary (4318 vs 43180)', async () => {
       // Defense against the URL prefix boundary collision: a naive
       // `url.startsWith(prefix)` would match `http://host:43180/...` against
       // prefix `http://host:4318`. Origin comparison is exact, so a
@@ -978,7 +1038,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -990,7 +1050,7 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
-    it('ignoreRequestHook does NOT bleed across hostname boundary (otlp vs otlp.evil)', () => {
+    it('ignoreRequestHook does NOT bleed across hostname boundary (otlp vs otlp.evil)', async () => {
       // Defense against the hostname suffix collision: prefix
       // `https://otlp.example.com` must NOT match
       // `https://otlp.example.com.evil.net`. Origin comparison is exact.
@@ -998,7 +1058,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'https://otlp.example.com',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -1010,13 +1070,13 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
-    it('ignoreRequestHook does NOT bleed across path-segment boundary (/v1 vs /v1foo)', () => {
+    it('ignoreRequestHook does NOT bleed across path-segment boundary (/v1 vs /v1foo)', async () => {
       // Prefix `http://host/v1` must NOT match `http://host/v1foo/x`.
       vi.spyOn(mockConfig, 'getTelemetryOtlpProtocol').mockReturnValue('http');
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318/v1',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -1035,7 +1095,7 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('normalizeOtlpPrefix rejects unparseable URLs entirely (no dangerous "http" fallback)', () => {
+    it('normalizeOtlpPrefix rejects unparseable URLs entirely (no dangerous "http" fallback)', async () => {
       // Critical fix: previously the catch fallback would let a typo like
       // `"http"` produce the prefix `"http"`, which startsWith-matches every
       // outbound HTTP request → silently disabled all instrumentation. The
@@ -1054,7 +1114,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpMetricsEndpoint').mockReturnValue(
         undefined,
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -1073,7 +1133,7 @@ describe('Telemetry SDK', () => {
       warnSpy.mockRestore();
     });
 
-    it('HttpInstrumentation also receives ignoreOutgoingRequestHook for OTLP exporter', () => {
+    it('HttpInstrumentation also receives ignoreOutgoingRequestHook for OTLP exporter', async () => {
       // The OTLP HTTP exporter uses node:http (patched by HttpInstrumentation,
       // NOT undici). Without this guard, every OTLP upload batch creates a
       // parasitic client span → feedback loop. PR #4390 review feedback.
@@ -1081,7 +1141,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
         .calls[0]![0]! as {
         ignoreOutgoingRequestHook: (req: {
@@ -1113,7 +1173,7 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
-    it('matches default-port requests against a portless prefix (URL.origin parity)', () => {
+    it('matches default-port requests against a portless prefix (URL.origin parity)', async () => {
       // Regression: `URL.origin` strips `:80` from `http://collector` to give
       // `http://collector`. The hook's manual `${proto}://${host}${portPart}`
       // reconstruction kept `:80`, so prefix and request origin diverged →
@@ -1122,7 +1182,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
         .calls[0]![0]! as {
         ignoreOutgoingRequestHook: (req: {
@@ -1144,7 +1204,7 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('fails open when req.protocol is missing (no silent HTTPS guard bypass)', () => {
+    it('fails open when req.protocol is missing (no silent HTTPS guard bypass)', async () => {
       // Regression: previous `|| 'http'` fallback silently mis-bucketed HTTPS
       // requests as HTTP when `req.protocol` was unset, so HTTPS OTLP
       // endpoints never matched their prefix → guard bypassed. Now: missing
@@ -1155,7 +1215,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'https://collector.example.com:4318',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
         .calls[0]![0]! as {
         ignoreOutgoingRequestHook: (req: {
@@ -1176,7 +1236,7 @@ describe('Telemetry SDK', () => {
       ).toBe(false);
     });
 
-    it('strips port from req.host fallback to avoid `host:port:port` URL reject', () => {
+    it('strips port from req.host fallback to avoid `host:port:port` URL reject', async () => {
       // Defensive: when `req.hostname` is absent and `req.host` already
       // includes `:port` (e.g. `"collector:4318"`), naively appending
       // `:${req.port}` produced `"http://collector:4318:4318"`, which
@@ -1188,7 +1248,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpEndpoint').mockReturnValue(
         'http://collector.example.com:4318',
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const httpInstrumentationConfig = vi.mocked(HttpInstrumentation).mock
         .calls[0]![0]! as {
         ignoreOutgoingRequestHook: (req: {
@@ -1210,7 +1270,7 @@ describe('Telemetry SDK', () => {
       ).toBe(true);
     });
 
-    it('normalizeOtlpPrefix strips asymmetric quotes for parity with parseOtlpEndpoint', () => {
+    it('normalizeOtlpPrefix strips asymmetric quotes for parity with parseOtlpEndpoint', async () => {
       // parseOtlpEndpoint (line 109) uses /^["']|["']$/g which strips
       // asymmetric leading/trailing quotes. Previously normalizeOtlpPrefix
       // only stripped symmetric quotes, so settings.json typos like
@@ -1230,7 +1290,7 @@ describe('Telemetry SDK', () => {
       vi.spyOn(mockConfig, 'getTelemetryOtlpMetricsEndpoint').mockReturnValue(
         undefined,
       );
-      initializeTelemetry(mockConfig);
+      await initializeTelemetry(mockConfig);
       const config = vi.mocked(UndiciInstrumentation).mock.calls[0]![0]! as {
         ignoreRequestHook: (req: { origin: string; path: string }) => boolean;
       };
@@ -1274,8 +1334,8 @@ describe('refreshSessionContext', () => {
     await shutdownTelemetry();
   });
 
-  it('should update session context when telemetry is initialized', () => {
-    initializeTelemetry(mockConfig);
+  it('should update session context when telemetry is initialized', async () => {
+    await initializeTelemetry(mockConfig);
 
     refreshSessionContext('new-session-id');
 
@@ -1294,8 +1354,8 @@ describe('refreshSessionContext', () => {
     expect(setSessionContext).not.toHaveBeenCalled();
   });
 
-  it('should not throw when refreshing session context fails', () => {
-    initializeTelemetry(mockConfig);
+  it('should not throw when refreshing session context fails', async () => {
+    await initializeTelemetry(mockConfig);
     vi.clearAllMocks();
     vi.mocked(createSessionRootContext).mockImplementationOnce(() => {
       throw new Error('session context failed');
@@ -1338,19 +1398,19 @@ describe('shell trace propagation wiring', () => {
     await shutdownTelemetry();
   });
 
-  it('sets shell trace propagation on init based on config', () => {
+  it('sets shell trace propagation on init based on config', async () => {
     const config = {
       ...mockConfig,
       getOutboundCorrelationPropagateTraceContext: () => true,
     } as unknown as Config;
 
-    initializeTelemetry(config);
+    await initializeTelemetry(config);
 
     expect(setShellTracePropagation).toHaveBeenCalledWith(true);
   });
 
   it('resets shell trace propagation on shutdown', async () => {
-    initializeTelemetry(mockConfig);
+    await initializeTelemetry(mockConfig);
     vi.mocked(setShellTracePropagation).mockClear();
 
     await shutdownTelemetry();

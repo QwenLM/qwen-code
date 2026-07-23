@@ -81,7 +81,7 @@ import {
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
-  getStickyTodoMaxVisibleItems,
+  getStickyTodoMaxVisibleItemsForMode,
   getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
@@ -118,6 +118,7 @@ const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
+import { useWakeRepaint } from './hooks/use-wake-repaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -202,6 +203,7 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { StreamingContext } from './contexts/StreamingContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
@@ -216,6 +218,7 @@ import {
 import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
 import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../utils/chat-recording-failure.js';
+import { buildPermissionSuggestions } from '../utils/permission-suggestions.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -242,6 +245,7 @@ import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  realUserPromptTexts,
 } from './utils/historyUtils.js';
 import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
@@ -656,8 +660,10 @@ export const AppContainer = (props: AppContainerProps) => {
     seedPromptCount,
   } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
-  const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
+  const branchName = useGitBranchName(
+    worktreeSession?.worktreePath ?? config.getTargetDir(),
+  );
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
   // P7-trigger: true while the current turn was steered toward the Workflow
   // tool by the `workflow` keyword (drives the Footer indicator). Set in
@@ -1076,15 +1082,9 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     const fetchUserMessages = async () => {
       const pastMessagesRaw = (await logger?.getPreviousUserMessages()) || [];
-      const currentSessionUserMessages = historyManager.history
-        .filter(
-          (item): item is HistoryItem & { type: 'user'; text: string } =>
-            item.type === 'user' &&
-            typeof item.text === 'string' &&
-            item.text.trim() !== '',
-        )
-        .map((item) => item.text)
-        .reverse();
+      const currentSessionUserMessages = realUserPromptTexts(
+        historyManager.history,
+      ).reverse();
       // Current-session messages are already newest-first; combining with past
       // messages gives a newest-first list. dedupeNewestFirst keeps the first
       // (newest) occurrence so resubmitting an old prompt promotes it to
@@ -1430,11 +1430,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isStatsDialogOpen, openStatsDialog, closeStatsDialog } =
     useStatsDialog();
 
-  // Ref bridge: the guarded openRewindSelector callback is defined later
-  // (after useDoublePress), but slashCommandActions needs it now. The ref
-  // lets the useMemo capture a stable function pointer whose implementation
-  // is swapped in once the real callback exists.
+  // Ref bridges: these callbacks are defined later, but slashCommandActions
+  // needs them now. The refs let the useMemo capture stable function pointers
+  // whose implementations are swapped in once the real callbacks exist.
   const openRewindSelectorRef = useRef<() => void>(() => {});
+  const cancelOngoingRequestRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
   // history-bound guard is needed, so the open/close handlers can live here
@@ -1557,6 +1557,11 @@ export const AppContainer = (props: AppContainerProps) => {
       openApprovalModeDialog,
       openEffortDialog,
       quit: (messages: HistoryItem[]) => {
+        try {
+          cancelOngoingRequestRef.current();
+        } catch (error) {
+          debugLogger.debug('Failed to cancel request while quitting:', error);
+        }
         setQuittingMessages(messages);
         // Signal the client to skip background memory tasks (extract, dream,
         // skill review) so the process can exit without spawning new agent
@@ -1859,6 +1864,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
+  const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
 
   const {
     streamingState,
@@ -1898,7 +1904,9 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     availableTerminalHeightRef,
     terminalWidthRef,
+    midTurnRestoreRef,
   );
+  cancelOngoingRequestRef.current = cancelOngoingRequest;
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -2008,6 +2016,7 @@ export const AppContainer = (props: AppContainerProps) => {
     messageQueue,
     addMessage,
     popAllMessages,
+    restoreMessages,
     drainQueue,
     popNextSegment,
   } = useMessageQueue();
@@ -2016,6 +2025,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // drainQueue reads the synchronous queueRef inside the hook, so it
   // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
+  midTurnRestoreRef.current = restoreMessages;
 
   // Connect remote input watcher to submitQuery for bidirectional sync.
   // When an external process writes a command to the input-file,
@@ -2064,6 +2074,8 @@ export const AppContainer = (props: AppContainerProps) => {
           tc.request.name,
           tc.request.callId,
           tc.request.args,
+          null,
+          buildPermissionSuggestions(tc.confirmationDetails),
         );
       }
     }
@@ -2145,7 +2157,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
-    (submittedValue: string) => {
+    (submittedValue: string, options?: { deferUntilIdle?: boolean }) => {
       // Route to active in-process agent if viewing a sub-agent tab.
       if (agentViewState.activeView !== 'main') {
         const agent = agentViewState.agents.get(agentViewState.activeView);
@@ -2157,6 +2169,25 @@ export const AppContainer = (props: AppContainerProps) => {
       // The user's raw text, captured before any `<system-reminder>` prefix is
       // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
+      // Quit must bypass reminders and the message queue so it can stop an
+      // active stream without consuming one-shot session state.
+      if (
+        ['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
+          userPromptText.trim(),
+        )
+      ) {
+        void handleSlashCommand('/quit');
+        return;
+      }
+      const recoveredAgentsNotice =
+        !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
+          ? config.consumePendingRecoveredAgentsNotice()
+          : null;
+      if (recoveredAgentsNotice) {
+        submittedValue =
+          `<system-reminder>\n${recoveredAgentsNotice}\n</system-reminder>\n\n` +
+          submittedValue;
+      }
       // Phase C: one-shot worktree restore reminder. Set during --resume
       // when the persisted sidecar names a live worktree. We only inject
       // on top-level user prompts (not btw-during-response, not slash
@@ -2193,21 +2224,15 @@ export const AppContainer = (props: AppContainerProps) => {
           `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
       }
+      if (options?.deferUntilIdle) {
+        addMessage(submittedValue, true);
+        return;
+      }
       if (
         streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
-        return;
-      }
-
-      // Handle bare exit/quit commands (without the / prefix)
-      if (
-        ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
-          submittedValue.trim(),
-        )
-      ) {
-        void handleSlashCommand('/quit');
         return;
       }
 
@@ -2450,11 +2475,10 @@ export const AppContainer = (props: AppContainerProps) => {
         buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
       }
 
-      // Auto-restore-on-cancel: if the user hit ESC immediately after submit
-      // (nothing meaningful was produced), pull the just-submitted prompt back
-      // into the input box and rewind the transcript so it doesn't show a
-      // stranded "user prompt + Request cancelled." pair. Mirrors claude-code
-      // (REPL.tsx auto-restore branch).
+      // Restore-on-cancel: pull the just-submitted prompt back into the input
+      // box when it is safe to do so. If nothing meaningful was produced,
+      // also rewind the stranded "user prompt + Request cancelled." pair. If
+      // output exists, keep the transcript and restore only the editable text.
       //
       // Guards (all required):
       //   - Buffer was empty before the queue drain (don't clobber typed-during-
@@ -2484,12 +2508,25 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
-      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
+
+      // The cancelled turn must have added a `user` history item itself —
+      // Cron / Notification / slash submit_prompt / Retry paths submit
+      // without pushing a user item, so they have no prompt to restore.
+      const cancelledTurnUserItem = info?.lastTurnUserItem;
+      if (cancelledTurnUserItem == null) {
         debugLogger.debug(
-          'auto-restore bail: pending stream item has meaningful content',
+          'auto-restore bail: cancelled turn did not add a user history item',
         );
         return;
       }
+
+      if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
+        debugLogger.debug(
+          'auto-restore bail: tool execution is pending or committed',
+        );
+        return;
+      }
+
       // Synchronous "did the turn produce any content event" flag from
       // useGeminiStream. Catches the race where the pre-cancel flush
       // committed gemini_content via addItem and a later thought event
@@ -2499,20 +2536,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // otherwise pass and we'd wrongly truncate the committed content.
       if (info?.turnProducedMeaningfulContent) {
         debugLogger.debug(
-          'auto-restore bail: turn produced meaningful content during stream/flush',
+          'auto-restore: preserving streamed output and restoring prompt text',
         );
+        buffer.setText(cancelledTurnUserItem.text);
         return;
       }
-
-      // The cancelled turn must have added a `user` history item itself —
-      // Cron / Notification / slash submit_prompt / Retry paths submit
-      // without pushing a user item, so an older user item that happens
-      // to be followed only by synthetic content must NOT be wrongly
-      // auto-restored on top of those turns.
-      const cancelledTurnUserItem = info?.lastTurnUserItem;
-      if (cancelledTurnUserItem == null) {
+      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
         debugLogger.debug(
-          'auto-restore bail: cancelled turn did not add a user history item',
+          'auto-restore bail: pending stream item has meaningful content',
         );
         return;
       }
@@ -2525,8 +2556,9 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) {
         debugLogger.debug(
-          'auto-restore bail: meaningful content committed after last user item',
+          'auto-restore: preserving committed output and restoring prompt text',
         );
+        buffer.setText(cancelledTurnUserItem.text);
         return;
       }
 
@@ -2968,10 +3000,12 @@ export const AppContainer = (props: AppContainerProps) => {
     stickyTodos !== null &&
     !dialogsVisible &&
     !isFeedbackDialogOpen &&
-    streamingState !== StreamingState.WaitingForConfirmation;
+    streamingState === StreamingState.Responding;
   const stickyTodoWidth = Math.min(mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems =
-    getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
+    terminalHeight,
+    useTerminalBuffer,
+  );
   const stickyTodosLayoutKey = shouldShowStickyTodos
     ? getStickyTodosLayoutKey(
         stickyTodos,
@@ -3012,6 +3046,16 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
+    // Composer and update notification height also shift with these; without
+    // them the footer isn't re-measured during a streaming turn and the VP
+    // viewport bottom clips.
+    // (elapsedTime/currentLoadingPhrase excluded: they tick without changing rows.)
+    streamingState,
+    updateInfo,
+    agentViewState.activeView,
+    embeddedShellFocused,
+    messageQueue.length,
+    isInputActive,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -3061,6 +3105,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Repaint static history on the trailing edge of a resize burst (#4891).
   useResizeSettleRepaint(terminalWidth, refreshStatic);
+
+  // Repaint after the process resumes from OS sleep / suspend (lid close,
+  // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but
+  // Ink's frame-diff state still reflects the pre-sleep output, so the next
+  // render strands border characters on screen.
+  useWakeRepaint(refreshStatic);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -3967,7 +4017,7 @@ export const AppContainer = (props: AppContainerProps) => {
     if (isTranscriptOpenRef.current) return;
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
-    const plainPrompts = drainQueue();
+    const plainPrompts = drainQueue(true);
     const submission =
       plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
     if (submission === null) return;
@@ -4496,10 +4546,19 @@ export const AppContainer = (props: AppContainerProps) => {
                 <TerminalOutputProvider value={writeRaw}>
                   <ShellFocusContext.Provider value={isFocused}>
                     {transcriptFreeze ? (
-                      <TranscriptView
-                        items={transcriptItems}
-                        useAlternateScreen={!useTerminalBuffer}
-                      />
+                      // TranscriptView renders as a sibling of <App/>, which
+                      // owns the StreamingContext.Provider — so the frozen
+                      // transcript subtree has no provider of its own. A
+                      // pending tool group captured in the snapshot can hold a
+                      // tool in the Executing state, whose spinner calls
+                      // useStreamingContext and would otherwise throw. Provide
+                      // the context here so the transcript renders.
+                      <StreamingContext.Provider value={streamingState}>
+                        <TranscriptView
+                          items={transcriptItems}
+                          useAlternateScreen={!useTerminalBuffer}
+                        />
+                      </StreamingContext.Provider>
                     ) : (
                       <App />
                     )}

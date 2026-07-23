@@ -21,6 +21,12 @@ vi.mock('../components/MainContent.js', () => ({
   MainContent: () => <Text>MainContent</Text>,
 }));
 
+vi.mock('../components/UpdateNotification.js', () => ({
+  UpdateNotification: ({ message }: { message: string }) => (
+    <Text>{`UpdateNotification: ${message}`}</Text>
+  ),
+}));
+
 vi.mock('../components/DialogManager.js', () => ({
   DialogManager: () => (
     <Text>
@@ -60,7 +66,7 @@ const baseUIState: Partial<UIState> = {
   terminalHeight: 24,
   staticExtraHeight: 0,
   constrainHeight: true,
-  streamingState: StreamingState.Idle,
+  streamingState: StreamingState.Responding,
   historyManager: {
     addItem: vi.fn(),
     history: [],
@@ -120,6 +126,43 @@ describe('ScreenReaderAppLayout', () => {
     expect(output).toContain('DialogManager 1');
   });
 
+  it('renders update notifications when no dialog is visible', () => {
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      updateInfo: {
+        message: 'Update successful!',
+        update: {
+          latest: '0.20.0',
+          current: '0.19.12',
+          type: 'latest',
+          name: '@qwen-code/qwen-code',
+        },
+      },
+    });
+
+    expect(lastFrame() ?? '').toContain(
+      'UpdateNotification: Update successful!',
+    );
+  });
+
+  it('does not render update notifications when dialogs are visible', () => {
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      dialogsVisible: true,
+      updateInfo: {
+        message: 'Update successful!',
+        update: {
+          latest: '0.20.0',
+          current: '0.19.12',
+          type: 'latest',
+          name: '@qwen-code/qwen-code',
+        },
+      },
+    });
+
+    expect(lastFrame() ?? '').not.toContain('UpdateNotification');
+  });
+
   it('keeps a tall dialog within the terminal frame when constrained', () => {
     dialogManagerMockState.lineCount = 20;
     const terminalHeight = 8;
@@ -157,6 +200,17 @@ describe('ScreenReaderAppLayout', () => {
     const { lastFrame } = renderLayout({
       ...baseUIState,
       streamingState: StreamingState.WaitingForConfirmation,
+    });
+
+    const output = lastFrame() ?? '';
+    expect(output).not.toContain('StickyTodoList');
+    expect(output).toContain('Composer');
+  });
+
+  it('does not render sticky todo list when agent is idle', () => {
+    const { lastFrame } = renderLayout({
+      ...baseUIState,
+      streamingState: StreamingState.Idle,
     });
 
     const output = lastFrame() ?? '';

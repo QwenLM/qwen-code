@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import * as path from 'node:path';
+import {
+  MAX_WORKSPACE_PATH_LENGTH,
+  translateAndCheckAbsoluteWorkspacePath,
+} from '@qwen-code/acp-bridge/workspacePaths';
 import type { Request, Response } from 'express';
 import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';
-import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { WorkspaceRequestContext } from '../workspace-service/index.js';
 
@@ -72,6 +74,33 @@ export const CLIENT_ID_RE = /^[A-Za-z0-9._:-]+$/;
 const INVALID_PERMISSION_OUTCOME_ERROR =
   '`outcome` must be `{ outcome: "cancelled" }` or `{ outcome: "selected", optionId: string }`';
 
+export interface DeferredRuntimeRequestTiming {
+  startedAt: Date;
+  path: 'started_on_request' | 'joined';
+  waitMs?: number;
+}
+
+const deferredRuntimeTimingKey: unique symbol = Symbol(
+  'deferredRuntimeRequestTiming',
+);
+
+type DeferredRuntimeTimedRequest = Request & {
+  [deferredRuntimeTimingKey]?: DeferredRuntimeRequestTiming;
+};
+
+export function setDeferredRuntimeRequestTiming(
+  req: Request,
+  timing: DeferredRuntimeRequestTiming,
+): void {
+  (req as DeferredRuntimeTimedRequest)[deferredRuntimeTimingKey] = timing;
+}
+
+export function getDeferredRuntimeRequestTiming(
+  req: Request,
+): DeferredRuntimeRequestTiming | undefined {
+  return (req as DeferredRuntimeTimedRequest)[deferredRuntimeTimingKey];
+}
+
 type PermissionVoteResponse = Parameters<
   AcpSessionBridge['respondToPermission']
 >[1];
@@ -116,8 +145,12 @@ export function parseOptionalWorkspaceCwd(
     });
     return undefined;
   }
-  const cwd = hasCwd ? (body['cwd'] as string) : boundWorkspace;
-  if (!path.isAbsolute(cwd)) {
+  // #7139: the shared helper maps a Windows-shaped cwd to its container
+  // bind mount before the absolute-path check.
+  const cwd = translateAndCheckAbsoluteWorkspacePath(
+    hasCwd ? (body['cwd'] as string) : boundWorkspace,
+  );
+  if (cwd === null) {
     res
       .status(400)
       .json({ error: '`cwd` must be an absolute path when provided' });

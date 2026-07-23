@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 /**
  * @license
  * Copyright 2025 Qwen
@@ -110,6 +111,16 @@ const env = {
   CLI_VERSION: pkg.version,
   NODE_ENV: 'development',
   NODE_OPTIONS: `${existingNodeOptions} --expose-gc ${importFlag}`.trim(),
+  // The entry a `qwen …` subprocess should call to reach THIS build — without
+  // it, a skill that shells out to `qwen` gets whatever PATH resolves, which on
+  // a dev machine is routinely an older global install. Assignment, not `??` or
+  // `||=`: an inherited value is another session's CLI (a dev CLI started from
+  // inside an outer qwen session's shell — the usual dogfooding flow), and
+  // honouring it re-points every subprocess at the outer build — the same skew,
+  // one level up, and silent. Each entry stamps itself; nested sessions each
+  // call their own build. This one line also covers `npm run dev:daemon`, which
+  // launches serve through this file.
+  QWEN_CODE_CLI: fileURLToPath(import.meta.url),
 };
 
 // On Windows, use tsx.cmd; on Unix, use tsx directly
@@ -147,12 +158,25 @@ child.on('error', (err) => {
   process.exit(1);
 });
 
-child.on('close', (code) => {
+child.on('close', (code, signal) => {
   // Cleanup temp directory
   try {
     rmSync(tmpDir, { recursive: true, force: true });
   } catch {
     // Ignore cleanup errors
   }
-  process.exit(code ?? 0);
+  // A signal-killed child reports `code === null`, and `code ?? 0` read that as
+  // success. This launcher is a QWEN_CODE_CLI entry now: a review gate command
+  // OOM-killed mid-run must not come back green. Re-raise the signal the way
+  // cli-entry.js does, so the caller sees the same death; fall back to a
+  // non-zero exit if the signal cannot be re-raised.
+  if (signal) {
+    try {
+      process.kill(process.pid, signal);
+      return;
+    } catch {
+      process.exit(1);
+    }
+  }
+  process.exit(code ?? 1);
 });

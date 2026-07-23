@@ -35,6 +35,7 @@ vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
       data-session={props.sessionId}
       data-clientid={props.clientId}
       data-workspace={props.workspaceCwd}
+      data-restart-sse={props.restartEventStreamOnPrompt ? 'true' : 'false'}
     >
       {props.children}
     </div>
@@ -70,6 +71,8 @@ vi.mock('./ChatPane', () => ({
         data-testid="chat-pane"
         data-pane-workspace={props.workspaceCwd}
         data-maximized={props.isMaximized ? 'true' : 'false'}
+        data-pane-restart-sse={props.restartSseOnPrompt ? 'true' : 'false'}
+        data-slash-handler={props.onSlashCommand ? 'true' : 'false'}
       >
         <span data-testid="pane-title">{props.title}</span>
         {props.onToggleMaximize && (
@@ -185,6 +188,33 @@ describe('SplitView', () => {
     const s2ClientId = providers[1].getAttribute('data-clientid') ?? '';
     const nonce = clientId.slice('split-pane:'.length, -':s1'.length);
     expect(s2ClientId).toBe(`split-pane:${nonce}:s2`);
+  });
+
+  it('passes the prompt SSE restart option to pane providers', () => {
+    render({ sessionIds: ['s1'], restartSseOnPrompt: true });
+    expect(
+      container!
+        .querySelector('[data-session="s1"]')
+        ?.getAttribute('data-restart-sse'),
+    ).toBe('true');
+    expect(
+      container!
+        .querySelector('[data-session="s1"] [data-testid="chat-pane"]')
+        ?.getAttribute('data-pane-restart-sse'),
+    ).toBe('true');
+  });
+
+  it('passes the host slash command handler to every pane', () => {
+    render({
+      sessionIds: ['s1', 's2'],
+      onSlashCommand: vi.fn(),
+    });
+
+    expect(
+      panes().every(
+        (pane) => pane.getAttribute('data-slash-handler') === 'true',
+      ),
+    ).toBe(true);
   });
 
   it('seeds with the current session when no session ids are given', () => {
@@ -713,7 +743,13 @@ describe('SplitView', () => {
     workspaceCwd: '/w',
     workspaces: [
       { id: 'w0', cwd: '/w', primary: true, trusted: true },
-      { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      {
+        id: 'w1',
+        cwd: '/wsB',
+        displayName: 'Payments API',
+        primary: false,
+        trusted: true,
+      },
     ],
   };
 
@@ -729,10 +765,13 @@ describe('SplitView', () => {
     const options = pickerOptions();
     // Primary sessions are still listed…
     expect(options.some((o) => o.includes('Two'))).toBe(true);
-    // …plus the non-primary session, tagged with its workspace basename.
-    expect(options.some((o) => o.includes('Beta') && o.includes('wsB'))).toBe(
-      true,
-    );
+    // …plus the non-primary session, tagged with its workspace display name.
+    expect(
+      options.some((o) => o.includes('Beta') && o.includes('Payments API')),
+    ).toBe(true);
+    // Primary-workspace sessions show their own basename too, not a "Primary"
+    // tag — the redundant label was removed from the picker.
+    expect(options.some((o) => o.includes('Primary'))).toBe(false);
   });
 
   it('attaches an added other-workspace pane under its own workspace cwd', async () => {

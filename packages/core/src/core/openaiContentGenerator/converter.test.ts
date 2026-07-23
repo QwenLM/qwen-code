@@ -23,6 +23,7 @@ import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 import { getToolCallPreparations } from '../tool-call-preparation.js';
 import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -150,6 +151,15 @@ describe('OpenAIContentConverter', () => {
       expect(ctx1).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx2).toBeInstanceOf(StreamingToolCallParser);
       expect(ctx1).not.toBe(ctx2);
+    });
+
+    it('preserves the provider model from stream chunks', () => {
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('model', { content: 'ok' }),
+        withStreamParser(),
+      );
+
+      expect(response.modelVersion).toBe('test');
     });
 
     it('isolates two contexts so writes to one do not leak into the other', () => {
@@ -504,6 +514,146 @@ describe('OpenAIContentConverter', () => {
       expect(() =>
         converter.convertOpenAIChunkToGemini(
           streamChunk('content', { content: 'the result\n</think>\n' }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it('rejects the recorded content-only nested thinking-tag leak', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const opening = converter.convertOpenAIChunkToGemini(
+        streamChunk('opening', { content: '<think>\n\n' }),
+        stream,
+      );
+      const repeatedOpening = converter.convertOpenAIChunkToGemini(
+        streamChunk('repeated-opening', { content: '</think><thi' }),
+        stream,
+      );
+
+      expect(opening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(repeatedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      const nestedOpening = converter.convertOpenAIChunkToGemini(
+        streamChunk('nested-opening', { content: 'nk>9<think>-3' }),
+        stream,
+      );
+
+      expect(nestedOpening.candidates?.[0]?.content?.parts).toEqual([]);
+      expect(() => finishStream(stream)).toThrowError(
+        expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }),
+      );
+    });
+
+    it.each([
+      ['split literal block', ['<thi', 'nk>literal</think>']],
+      ['empty block with a separate finish chunk', ['<think>\n\n</think>', '']],
+      [
+        'two split valid blocks',
+        ['<think>\n\n', '</think><thi', 'nk>literal</think>'],
+      ],
+    ])('preserves content-only %s', (_name, chunks) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            `literal-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+      expect(parts.every((part) => part.thought !== true)).toBe(true);
+    });
+
+    it('releases a long undecided prefix before the stream finishes', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const text = `<think>${' '.repeat(257)}`;
+
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal', { content: text }),
+        stream,
+      );
+      const continuation = converter.convertOpenAIChunkToGemini(
+        streamChunk('continuation', { content: 'literal' }, 'stop'),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+      expect(continuation.candidates?.[0]?.content?.parts).toEqual([
+        { text: 'literal' },
+      ]);
+    });
+
+    it('preserves a leak-shaped literal without provider provenance', () => {
+      const stream = withStreamParser();
+      const text = '<think>\n\n</think><think>9<think>-3';
+      const response = converter.convertOpenAIChunkToGemini(
+        streamChunk('literal', { content: text }, 'stop'),
+        stream,
+      );
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual([{ text }]);
+    });
+
+    it.each([
+      [
+        'at the start of the stream',
+        ['<think></think><think>outer <think>literal', '</think></think>'],
+      ],
+      [
+        'after visible content',
+        [
+          'Explanation: ',
+          '<think></think><think>outer <think>literal</think></think>',
+        ],
+      ],
+    ])('preserves balanced nested literals %s', (_name, chunks) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const parts = chunks.flatMap((content, index) => {
+        const response = converter.convertOpenAIChunkToGemini(
+          streamChunk(
+            `balanced-${index}`,
+            { content },
+            index === chunks.length - 1 ? 'stop' : null,
+          ),
+          stream,
+        );
+        return response.candidates?.[0]?.content?.parts ?? [];
+      });
+
+      expect(parts.map((part) => part.text).join('')).toBe(chunks.join(''));
+    });
+
+    it('fails closed when a suspicious prefix exceeds the buffer limit', () => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+      const content = '<think></think><think>9<think>' + 'x'.repeat(257);
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('long-leak', { content }),
+          stream,
+        ),
+      ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
+    });
+
+    it.each([
+      '<thinking></thinking><thinking>9<thinking>-3',
+      '<think ></think ><think >9<think >-3',
+    ])('rejects provider-tag grammar variant %s', (content) => {
+      const stream = withStreamParser();
+      stream.responseParsingOptions = { contentOnlyThinkingTagLeaks: true };
+
+      expect(() =>
+        converter.convertOpenAIChunkToGemini(
+          streamChunk('variant', { content }, 'stop'),
           stream,
         ),
       ).toThrowError(expect.objectContaining({ type: 'PROTOCOL_TAG_LEAK' }));
@@ -1074,6 +1224,48 @@ describe('OpenAIContentConverter', () => {
         contents,
       };
     };
+
+    it('normalizes legacy dotted MCP names before sending history', () => {
+      const request: GenerateContentParameters = {
+        model: 'models/test',
+        contents: [
+          {
+            role: 'model',
+            parts: [
+              {
+                functionCall: {
+                  id: 'call_legacy_mcp',
+                  name: 'mcp__zybio__literature.search_pubmed',
+                  args: { query: 'IVD' },
+                },
+              },
+            ],
+          },
+          {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'call_legacy_mcp',
+                  name: 'mcp__zybio__literature.search_pubmed',
+                  response: { output: 'ok' },
+                },
+              },
+            ],
+          },
+        ],
+      };
+
+      const messages = converter.convertGeminiRequestToOpenAI(
+        request,
+        requestContext,
+      );
+      const assistant = messages.find(hasOpenAIToolCalls);
+      const name = assistant?.tool_calls[0]?.function.name;
+
+      expect(name).toMatch(/^[A-Za-z][A-Za-z0-9_-]*$/);
+      expect(name).not.toContain('.');
+    });
 
     it('preserves ordered multi-part startup reminder user content', () => {
       const request: GenerateContentParameters = {
@@ -3435,12 +3627,10 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(response.candidates).toEqual([]);
+      expect(response.modelVersion).toBe('test-model');
     });
 
-    it('keeps the estimated prompt/completion split summing to total tokens', () => {
-      // When a provider reports only total_tokens, the 70/30 estimate must
-      // still add back up to the total instead of rounding each half on its
-      // own (5 would otherwise become 4 + 2 = 6).
+    it('omits the input/output breakdown when only total tokens are reported', () => {
       const response = converter.convertOpenAIResponseToGemini(
         {
           object: 'chat.completion',
@@ -3462,10 +3652,394 @@ describe('OpenAIContentConverter', () => {
 
       const usage = response.usageMetadata;
       expect(usage?.totalTokenCount).toBe(5);
-      expect(
-        (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
-      ).toBe(5);
+      expect(usage?.promptTokenCount).toBeUndefined();
+      expect(usage?.candidatesTokenCount).toBeUndefined();
+      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+        cachedInputTokensReported: false,
+      });
     });
+
+    it('omits the streaming input/output breakdown when only total tokens are reported', () => {
+      const response = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 5 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        withStreamParser(),
+      );
+
+      const usage = response.usageMetadata;
+      expect(usage?.totalTokenCount).toBe(5);
+      expect(usage?.promptTokenCount).toBeUndefined();
+      expect(usage?.candidatesTokenCount).toBeUndefined();
+      expect(getGenAiUsageProvenance(usage)).toMatchObject({
+        cachedInputTokensReported: false,
+      });
+    });
+
+    it('distinguishes an absent cache field from an explicitly reported zero', () => {
+      const base = {
+        object: 'chat.completion',
+        id: 'chatcmpl-cache',
+        created: 123,
+        model: 'provider-model',
+        choices: [],
+      } as const;
+      const absent = converter.convertOpenAIResponseToGemini(
+        {
+          ...base,
+          usage: { prompt_tokens: 3, completion_tokens: 1, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+      const zero = converter.convertOpenAIResponseToGemini(
+        {
+          ...base,
+          usage: {
+            prompt_tokens: 3,
+            completion_tokens: 1,
+            total_tokens: 4,
+            prompt_tokens_details: { cached_tokens: 0 },
+          },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(absent.modelVersion).toBe('provider-model');
+      expect(
+        getGenAiUsageProvenance(absent.usageMetadata)
+          ?.cachedInputTokensReported,
+      ).toBe(false);
+      expect(
+        getGenAiUsageProvenance(zero.usageMetadata)?.cachedInputTokensReported,
+      ).toBe(true);
+    });
+
+    it('estimates missing reasoning tokens from non-streaming content', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'answer',
+                reasoning_content: '先仔细想',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
+    });
+
+    it('estimates missing reasoning tokens from non-streaming reasoning field', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-reasoning-field-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'answer',
+                reasoning: '先仔细想',
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
+    });
+
+    it('clamps estimated non-streaming reasoning tokens to completion tokens', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-reasoning-clamped-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: 'assistant',
+                content: 'answer',
+                reasoning_content: '想'.repeat(10),
+              },
+              finish_reason: 'stop',
+              logprobs: null,
+            },
+          ],
+          usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(3);
+    });
+
+    it.each([0, 42])(
+      'preserves provider reasoning tokens for non-streaming content: %s',
+      (reasoningTokens) => {
+        const response = converter.convertOpenAIResponseToGemini(
+          {
+            object: 'chat.completion',
+            id: 'chatcmpl-provider-reasoning-usage',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                message: {
+                  role: 'assistant',
+                  content: 'answer',
+                  reasoning_content: '先仔细想',
+                },
+                finish_reason: 'stop',
+                logprobs: null,
+              },
+            ],
+            usage: {
+              prompt_tokens: 1,
+              completion_tokens: 10,
+              total_tokens: 11,
+              completion_tokens_details: {
+                reasoning_tokens: reasoningTokens,
+              },
+            },
+          } as unknown as OpenAI.Chat.ChatCompletion,
+          requestContext,
+        );
+
+        expect(response.usageMetadata?.thoughtsTokenCount).toBe(
+          reasoningTokens,
+        );
+      },
+    );
+
+    it('estimates reasoning tokens past the streaming detection window', () => {
+      const context = withStreamParser();
+      const reasoningChunk = (id: string, reasoning_content: string) =>
+        ({
+          object: 'chat.completion.chunk',
+          id,
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      converter.convertOpenAIChunkToGemini(
+        reasoningChunk('chunk-reasoning-1', '想'.repeat(1024)),
+        context,
+      );
+      converter.convertOpenAIChunkToGemini(
+        reasoningChunk('chunk-reasoning-2', '想'),
+        context,
+      );
+      const response = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: {
+            prompt_tokens: 1,
+            completion_tokens: 1200,
+            total_tokens: 1201,
+          },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(1128);
+    });
+
+    it('estimates reasoning tokens for short streaming content', () => {
+      const context = withStreamParser();
+      const reasoningChunk = (id: string, reasoning_content: string) =>
+        ({
+          object: 'chat.completion.chunk',
+          id,
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        }) as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      converter.convertOpenAIChunkToGemini(
+        reasoningChunk('chunk-short-reasoning-1', '先'),
+        context,
+      );
+      converter.convertOpenAIChunkToGemini(
+        reasoningChunk('chunk-short-reasoning-2', '仔细想'),
+        context,
+      );
+      const response = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-short-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 10, total_tokens: 11 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(5);
+    });
+
+    it('estimates normalized cumulative reasoning without a completion count', () => {
+      const context = withStreamParser();
+      for (const reasoning_content of ['先仔细想', '先仔细想再检查']) {
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-cumulative-reasoning',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+      }
+      const response = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-cumulative-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 0, total_tokens: 1 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(8);
+    });
+
+    it('clamps estimated streaming reasoning tokens to completion tokens', () => {
+      const context = withStreamParser();
+      converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-clamped-reasoning',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: { reasoning_content: '想'.repeat(10) },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+      const response = converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: 'chunk-clamped-reasoning-usage',
+          created: 123,
+          model: 'test-model',
+          choices: [],
+          usage: { prompt_tokens: 1, completion_tokens: 3, total_tokens: 4 },
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        context,
+      );
+
+      expect(response.usageMetadata?.thoughtsTokenCount).toBe(3);
+    });
+
+    it.each([0, 42])(
+      'preserves provider reasoning tokens for streaming content: %s',
+      (reasoningTokens) => {
+        const context = withStreamParser();
+        converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-provider-reasoning',
+            created: 123,
+            model: 'test-model',
+            choices: [
+              {
+                index: 0,
+                delta: { reasoning_content: '先仔细想' },
+                finish_reason: null,
+                logprobs: null,
+              },
+            ],
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+        const response = converter.convertOpenAIChunkToGemini(
+          {
+            object: 'chat.completion.chunk',
+            id: 'chunk-provider-reasoning-usage',
+            created: 123,
+            model: 'test-model',
+            choices: [],
+            usage: {
+              prompt_tokens: 1,
+              completion_tokens: 10,
+              total_tokens: 11,
+              completion_tokens_details: {
+                reasoning_tokens: reasoningTokens,
+              },
+            },
+          } as unknown as OpenAI.Chat.ChatCompletionChunk,
+          context,
+        );
+
+        expect(response.usageMetadata?.thoughtsTokenCount).toBe(
+          reasoningTokens,
+        );
+      },
+    );
   });
 
   describe('OpenAI -> Gemini reasoning content', () => {
@@ -5139,6 +5713,66 @@ describe('OpenAIContentConverter', () => {
           },
         },
       });
+    });
+
+    // Regression for #7315: the wire schema must not carry
+    // additionalProperties:false on levels with optional properties —
+    // OpenAI-compatible gateways promote every property to required,
+    // forcing mutually exclusive optional fields (Agent working_dir vs
+    // isolation) into every call.
+    it('relaxes additionalProperties:false for schemas with optional fields', async () => {
+      const agentLikeTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'agent',
+              description: 'Launch a new agent',
+              parametersJsonSchema: {
+                $schema: 'http://json-schema.org/draft-07/schema#',
+                type: 'object',
+                properties: {
+                  description: { type: 'string' },
+                  prompt: { type: 'string' },
+                  working_dir: { type: 'string' },
+                  isolation: { type: 'string', enum: ['worktree'] },
+                },
+                required: ['description', 'prompt'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToOpenAI(agentLikeTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBeUndefined();
+      expect(params['$schema']).toBeUndefined();
+      // Required stays exactly as authored — optional fields remain optional.
+      expect(params['required']).toEqual(['description', 'prompt']);
+    });
+
+    it('keeps additionalProperties:false when every property is required', async () => {
+      const strictTools = [
+        {
+          functionDeclarations: [
+            {
+              name: 'strict_tool',
+              description: 'All fields required',
+              parametersJsonSchema: {
+                type: 'object',
+                properties: { path: { type: 'string' } },
+                required: ['path'],
+                additionalProperties: false,
+              },
+            },
+          ],
+        },
+      ] as Tool[];
+
+      const result = await converter.convertGeminiToolsToOpenAI(strictTools);
+      const params = result[0]!.function.parameters as Record<string, unknown>;
+      expect(params['additionalProperties']).toBe(false);
     });
 
     it('should convert MCP tools with parametersJsonSchema field', async () => {
