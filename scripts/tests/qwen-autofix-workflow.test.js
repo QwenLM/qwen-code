@@ -4183,8 +4183,29 @@ describe('qwen-autofix workflow', () => {
     expect(decision).toBeTruthy();
     const SENTINEL = '9999-12-31T23:59:59Z';
     const NEWEST = '2026-07-20T10:00:00Z';
-    const run = (env) =>
-      execFileSync(
+    const run = (env) => {
+      // The gate-rejection branch (OUTCOME=failed, no crash/timeout) now probes
+      // whether the PR is behind main and, if so, updates the base — so stub gh:
+      // commits/<main> → a SHA, compare → CMP_STATUS_STUB (default 'ahead', i.e.
+      // NOT behind, so the existing rejection cases still hand off), and
+      // update-branch → UPDATE_OK_STUB (default success).
+      const dir = mkdtempSync(join(tmpdir(), 'decision-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'for a in "$@"; do case "$a" in',
+          "  */commits/main) printf 'mainsha123'; exit 0;;",
+          '  */compare/*) printf \'%s\' "${CMP_STATUS_STUB:-ahead}"; exit 0;;',
+          '  */update-branch) [ "${UPDATE_OK_STUB:-1}" = 1 ] && exit 0 || exit 1;;',
+          'esac; done',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
         'bash',
         [
           '-c',
@@ -4193,6 +4214,10 @@ describe('qwen-autofix workflow', () => {
         {
           env: {
             ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            REPO: 'o/r',
+            PR: '1',
+            REPORT_HEAD: 'prhead123',
             NEWEST,
             WATERMARK: '2026-07-20T09:00:00Z',
             ROUND: '1',
@@ -4206,11 +4231,40 @@ describe('qwen-autofix workflow', () => {
           encoding: 'utf8',
         },
       );
+      rmSync(dir, { recursive: true, force: true });
+      return out;
+    };
 
-    // Declared rejection: the agent was judged -> advance the watermark.
+    // Declared rejection, PR up to date ('ahead') -> a genuine fix failure ->
+    // advance the watermark and hand off to a human.
     const rejected = run({ OUTCOME: 'failed' });
     expect(rejected.split('|')[0]).toBe(NEWEST);
     expect(rejected).toContain('Could not address the latest feedback');
+
+    // #7471: the gate rejected the fix, but the PR was BEHIND main — the build
+    // failed on a stale base (a dependency main already removed), not the fix.
+    // Update the base and retry (sentinel keeps the feedback live) instead of
+    // advancing to a human handoff.
+    const staleBehind = run({ OUTCOME: 'failed', CMP_STATUS_STUB: 'behind' });
+    expect(staleBehind.split('|')[0]).toBe(SENTINEL);
+    expect(staleBehind).toContain('updated a stale base');
+    expect(staleBehind).toContain('will retry on the next scan');
+    // 'diverged' (ahead AND behind) also merges main in.
+    const staleDiverged = run({
+      OUTCOME: 'failed',
+      CMP_STATUS_STUB: 'diverged',
+    });
+    expect(staleDiverged.split('|')[0]).toBe(SENTINEL);
+    expect(staleDiverged).toContain('updated a stale base');
+    // Behind but update-branch FAILS (a merge conflict) -> no retry; fall
+    // through to the human handoff so the conflict is not silently swallowed.
+    const staleConflict = run({
+      OUTCOME: 'failed',
+      CMP_STATUS_STUB: 'behind',
+      UPDATE_OK_STUB: '0',
+    });
+    expect(staleConflict.split('|')[0]).toBe(NEWEST);
+    expect(staleConflict).toContain('Could not address the latest feedback');
 
     // Gate crash (no verdict): keep the feedback live and retry.
     const crashed = run({ OUTCOME: '' });
@@ -4412,7 +4466,7 @@ describe('qwen-autofix workflow', () => {
     expect(cap).toBeLessThan(takeoverCap);
 
     const block = reviewAddressReportStep.match(
-      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
+      /if \[\[ "\$\{MARK_ROUND\}" != "\$\{MAX_ROUNDS\}" \]\] && \[\[ "\$\{PREPARE_OUTCOME\}" == 'success' \|\| "\$\{PREPARE_OUTCOME\}" == 'failure' \]\] && \[\[ "\$\{STALE_BASE_RETRY:-false\}" != 'true' \]\] && \{ \[\[ -z "\$\{API_ERROR_DETAIL\}" \]\] \|\| \[\[ "\$\{API_ERROR_KIND\}" == 'auth' \]\]; \}; then\n {14}CONSEC_FAIL=1\n[\s\S]*?\n {14}fi\n {12}fi\n/,
     )?.[0];
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
@@ -4428,6 +4482,8 @@ describe('qwen-autofix workflow', () => {
       '🤖 AutoFix could not start — reached the round cap (100) because a setup step (base install/build) kept failing.';
     const CRASH_TERMINAL =
       '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
+    const STALE_BASE =
+      '🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind `main`, so it merged current main in via update-branch and will retry on the next scan.';
 
     const run = (
       priorHeadlines,
@@ -4437,6 +4493,7 @@ describe('qwen-autofix workflow', () => {
         apiErrorDetail = '',
         apiErrorKind = '',
         prepareOutcome = 'success',
+        staleBaseRetry = false,
       } = {},
     ) => {
       const dir = mkdtempSync(join(tmpdir(), 'consec-'));
@@ -4465,7 +4522,7 @@ describe('qwen-autofix workflow', () => {
         'bash',
         [
           '-c',
-          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
+          `set -uo pipefail\nWORKDIR='${dir}'\nMARK_ROUND=${markRound}\nMAX_ROUNDS=100\nCONSECUTIVE_FAILURE_CAP=${cap}\nCONSEC_FAIL=0\nREPO=o/r\nPR=1\nAUTOFIX_BOT=qwen-code-dev-bot\nRETRY_COMMAND='@qwen-code /retry'\nAPI_ERROR_DETAIL='${apiErrorDetail}'\nAPI_ERROR_KIND='${apiErrorKind}'\nPREPARE_OUTCOME='${prepareOutcome}'\nSTALE_BASE_RETRY='${staleBaseRetry}'\n${window !== undefined ? `WINDOW='${window}'\n` : ''}HEADLINE=orig\n${script}\nprintf '%s|%s|%s' "$MARK_ROUND" "${'${CONSEC_FAIL}'}" "$HEADLINE"`,
         ],
         {
           env: { ...process.env, PATH: `${bin}:${process.env.PATH}` },
@@ -4557,6 +4614,19 @@ describe('qwen-autofix workflow', () => {
       consec: cap,
       terminal: true,
     });
+    // A prior stale-base retry is not the PR's fault either (the base was
+    // updated, not the fix rejected), so it resets the streak like the infra
+    // headlines above.
+    expect(run([FAIL, FAIL, STALE_BASE, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    // The CURRENT round being a stale-base retry is exempt from the breaker
+    // entirely — the base was just updated and the next round builds fresh, so
+    // cap-1 prior failures must not trip it.
+    expect(
+      run(Array(cap - 1).fill(FAIL), { staleBaseRetry: true }),
+    ).toMatchObject({ terminal: false, headline: 'orig' });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,

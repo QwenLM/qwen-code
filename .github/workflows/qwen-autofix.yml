@@ -3438,7 +3438,39 @@ jobs:
                   MARK_ROUND="${MAX_ROUNDS}"
                 fi
               else
-                HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+                # The gate ran and rejected the agent's fix (a build/test
+                # failure). Before handing to a human, check whether the PR is
+                # merely BEHIND main: a build that fails on something main
+                # already changed — e.g. #7471's update-notifier, removed by
+                # #7515, left its import unresolved on a stale branch — is a
+                # stale-base failure, NOT the fix. If behind, merge main in and
+                # retry: the next round builds against current main. After the
+                # update the PR is current, so a genuine fix-failure next round
+                # is no longer "behind" and falls through to the handoff below —
+                # which self-limits this to ONE base-update. update-branch is a
+                # CAS on the checked-out head; any API failure is fail-safe (fall
+                # through to the handoff). This is the agent-gate sibling of the
+                # scan's stale-base auto-update, which only sees PR status
+                # checks, never the gate's own build.
+                STALE_BASE_RETRY=false
+                MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
+                if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
+                  CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
+                  if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
+                    && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
+                    STALE_BASE_RETRY=true
+                  fi
+                fi
+                if [[ "${STALE_BASE_RETRY}" == 'true' ]]; then
+                  # Feedback stays live (sentinel ts) so the retry re-reads it
+                  # against the freshly-merged base; the incremented round still
+                  # bounds it, and the consecutive-failure exemption below keeps
+                  # this not-the-PR's-fault round from counting toward the cap.
+                  MARK_TS='9999-12-31T23:59:59Z'
+                  HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
+                else
+                  HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+                fi
               fi
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
               # NEWEST is empty because Prepare never RAN TO A VERDICT — an
@@ -3507,8 +3539,11 @@ jobs:
             # crash is not the PR's fault, self-heals, and hits the whole scan
             # batch at once — the exact scenario the retry path above exists to
             # prevent. The round cap + sentinel-ts /retry recovery already
-            # bounds a persistently broken base.
-            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+            # bounds a persistently broken base. A stale-base retry (the gate
+            # rejected the fix but the PR was behind main, so the base was just
+            # updated) is exempt for the same reason — it is not the PR's fault
+            # and self-limits to one round (after the update the PR is current).
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && [[ "${STALE_BASE_RETRY:-false}" != 'true' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
               CONSEC_FAIL=1
               if [[ -f "${WORKDIR}/ic.json" ]]; then
                 COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
@@ -3525,7 +3560,7 @@ jobs:
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
-                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* ]]; then
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* ]]; then
                   CONSEC_FAIL=1
                 else
                   CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))
