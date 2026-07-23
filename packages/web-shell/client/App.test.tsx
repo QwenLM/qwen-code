@@ -3512,7 +3512,7 @@ describe('App session callbacks', () => {
     ).toBe('true');
   });
 
-  it('shadow-isolates only the plugin manager body when plugins is enabled', async () => {
+  it('shadow-isolates the unified plugin manager body when plugins is enabled', async () => {
     const { container } = renderApp({
       shadowDom: {
         plugins: true,
@@ -3545,6 +3545,45 @@ describe('App session callbacks', () => {
       document.querySelector('[data-web-shell-portal-root]'),
     ).not.toBeNull();
   });
+
+  it.each([
+    ['/extensions manage', 'Manage Extensions'],
+    ['/mcp', 'MCP Servers'],
+    ['/skills details', 'Skills'],
+  ])(
+    'shadow-isolates the %s compatibility page when plugins is enabled',
+    async (command, panelLabel) => {
+      mockWorkspaceActions.loadMcpStatus.mockResolvedValue({
+        initialized: true,
+        discoveryState: 'completed',
+        servers: [],
+      });
+      const { container } = renderApp({
+        shadowDom: {
+          plugins: true,
+          portals: false,
+        },
+      });
+      await flush();
+
+      testState.prompt = command;
+      await clickSubmit(container);
+      await flush();
+
+      const panel = container.querySelector('[data-testid="inline-panel"]');
+      const host = panel?.querySelector<HTMLElement>(
+        '[data-web-shell-shadow-host="plugins"]',
+      );
+      expect(panel?.getAttribute('aria-label')).toBe(panelLabel);
+      expect(host?.shadowRoot).not.toBeNull();
+      expect(
+        host?.shadowRoot?.querySelector(
+          '[data-web-shell-shadow-root="plugins"]',
+        ),
+      ).not.toBeNull();
+      expect(panel?.querySelector('button')).toBeNull();
+    },
+  );
 
   it('uses one shadow root for all portals without moving plugin content', async () => {
     const { container } = renderApp({
