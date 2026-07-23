@@ -239,6 +239,8 @@ describe('SessionReferenceService', () => {
     expect(res.text).not.toContain('BODY');
   });
 
+> **Implementation note:** `ToolCallResponseInfo` has no `displayName` field in production. The shipped `session-reference-service.ts` derives tool names from `functionResponse` parts instead.
+
   it('tail-trims to budget and marks truncated', async () => {
     const many = Array.from({ length: 50 }, (_, i) => ({
       type: 'user',
@@ -388,6 +390,8 @@ export class SessionReferenceService {
     );
   }
 
+> **Implementation note:** The shipped implementation matches only `functionResponse` parts (not `functionCall`), because call-side records produce duplicate always-'ok' summaries before the result arrives.
+
   private functionName(message?: Content): string | undefined {
     const p = message?.parts?.find(
       (x: Part) =>
@@ -536,6 +540,8 @@ if (sessionRef) {
     } catch {
       // emit error card and continue
     }
+
+> **Implementation note:** The shipped code emits a proper error card (`addItem` with `MessageType.INFO`) inside this `catch` before `continue`, rather than falling through to `resolve(sessionId!)` with `sessionId` still `undefined`.
   }
   try {
     const ref = await new SessionReferenceService(
@@ -901,6 +907,8 @@ const visible =
 
 Use `visible` in place of `suggestions` for the existing `scrollOffset`/`MAX_SUGGESTIONS_TO_SHOW` slice.
 
+> **Implementation note:** The shipped implementation consolidates category filtering inside `useCompletion` (filtering `rawSuggestions` into the exposed `suggestions` memo) so that `activeSuggestionIndex` always addresses the same visible list. The split described here between Tasks 5 and 6 would misalign the highlight index.
+
 - Render a tab bar (mirror `StatsTabs` in `StatsDialog.tsx`) above the list, only when `(availableCategories?.length ?? 0) > 2`:
 
 ```tsx
@@ -1033,6 +1041,8 @@ const switchCategory = useCallback(
   [availableCategories],
 );
 ```
+
+> **Implementation note:** The shipped code adds `if (idx === -1) return 'all';` before the modular arithmetic to guard against a stale category during React state batching.
 
 Return `activeCategory`, `availableCategories`, `switchCategory` from the hook.
 

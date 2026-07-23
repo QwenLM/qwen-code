@@ -272,6 +272,30 @@ describe('useCompletion', () => {
       expect(result.current.activeSuggestionIndex).toBe(0);
     });
 
+    it('cycles backwards with direction -1 and wraps from all to last', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      // availableCategories = ['all', 'file', 'session']
+      act(() => result.current.switchCategory(-1)); // 'all' -> 'session' (wrap)
+      expect(result.current.activeCategory).toBe('session');
+      expect(result.current.activeSuggestionIndex).toBe(0);
+    });
+
+    it('wraps around backwards through all categories', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions(mixed);
+      });
+      act(() => result.current.switchCategory(-1)); // 'all' -> 'session'
+      expect(result.current.activeCategory).toBe('session');
+      act(() => result.current.switchCategory(-1)); // 'session' -> 'file'
+      expect(result.current.activeCategory).toBe('file');
+      act(() => result.current.switchCategory(-1)); // 'file' -> 'all'
+      expect(result.current.activeCategory).toBe('all');
+    });
+
     it('filters the exposed suggestions to the active category', () => {
       const { result } = renderHook(() => useCompletion());
       act(() => {
