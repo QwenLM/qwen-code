@@ -43,6 +43,8 @@ const {
   mockGetReviewComment,
   mockMarkThreadAsRead,
   mockGetAuthenticatedUser,
+  mockListComments,
+  mockListReviewComments,
 } = vi.hoisted(() => ({
   mockListNotifications: vi.fn(),
   mockCreateComment: vi.fn(),
@@ -53,6 +55,8 @@ const {
   mockGetReviewComment: vi.fn(),
   mockMarkThreadAsRead: vi.fn(),
   mockGetAuthenticatedUser: vi.fn(),
+  mockListComments: vi.fn(),
+  mockListReviewComments: vi.fn(),
 }));
 
 const mockPaginate = vi.fn();
@@ -69,10 +73,12 @@ vi.mock('@octokit/rest', () => ({
         create: mockCreateIssue,
         get: mockGetIssue,
         getComment: mockGetComment,
+        listComments: mockListComments,
       },
       pulls: {
         get: mockGetPullRequest,
         getReviewComment: mockGetReviewComment,
+        listReviewComments: mockListReviewComments,
       },
       users: {
         getAuthenticated: mockGetAuthenticatedUser,
@@ -100,6 +106,8 @@ describe('GithubChannel', () => {
     mockMarkThreadAsRead.mockClear();
     mockPaginate.mockClear();
     mockGetAuthenticatedUser.mockClear();
+    mockListComments.mockClear();
+    mockListReviewComments.mockClear();
     mockGetAuthenticatedUser.mockResolvedValue({ data: { login: 'bot' } });
     savePollCursor('test', '2025-01-01T00:00:00Z');
   });
@@ -124,33 +132,48 @@ describe('GithubChannel', () => {
     expect(mockPaginate).toHaveBeenCalled();
   });
 
-  it('resolves sender from latest_comment_url', async () => {
+  it('resolves sender from comment enumeration', async () => {
     const bridge = mockBridge();
     const promptFn = vi.fn().mockResolvedValue(undefined);
     (bridge as Record<string, unknown>).prompt = promptFn;
 
-    mockPaginate.mockResolvedValueOnce([
-      {
-        id: '1',
-        reason: 'mention',
-        unread: true,
-        subject: {
-          title: 'Bug report',
-          url: 'https://api.github.com/repos/owner/repo/issues/42',
-          latest_comment_url:
-            'https://api.github.com/repos/owner/repo/issues/comments/999',
-          type: 'Issue',
-        },
-        repository: {
-          full_name: 'owner/repo',
-          html_url: 'https://github.com/owner/repo',
-        },
-        updated_at: '2026-01-01T00:00:00Z',
+    mockPaginate.mockImplementation(
+      (route: unknown, _params: unknown, callback?: unknown) => {
+        if (route === mockListNotifications) {
+          return Promise.resolve([
+            {
+              id: '1',
+              reason: 'mention',
+              unread: true,
+              subject: {
+                title: 'Bug report',
+                url: 'https://api.github.com/repos/owner/repo/issues/42',
+                type: 'Issue',
+              },
+              repository: {
+                full_name: 'owner/repo',
+                html_url: 'https://github.com/owner/repo',
+              },
+              updated_at: '2026-01-01T00:00:00Z',
+              last_read_at: '2025-12-31T00:00:00Z',
+            },
+          ]);
+        }
+        if (route === mockListComments) {
+          const data = [
+            {
+              id: 999,
+              user: { login: 'commenter' },
+              body: 'Please fix this @bot',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          ];
+          if (typeof callback === 'function') callback({ data }, () => {});
+          return Promise.resolve(data);
+        }
+        return Promise.resolve([]);
       },
-    ]);
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'commenter' }, body: 'Please fix this @bot' },
-    });
+    );
     mockMarkThreadAsRead.mockResolvedValueOnce({});
 
     const channel = new GithubChannel('test', baseConfig, bridge);
@@ -160,11 +183,6 @@ describe('GithubChannel', () => {
     });
     channel.disconnect();
 
-    expect(mockGetComment).toHaveBeenCalledWith({
-      owner: 'owner',
-      repo: 'repo',
-      comment_id: 999,
-    });
     expect(mockMarkThreadAsRead).toHaveBeenCalledWith({ thread_id: 1 });
     expect(promptFn).toHaveBeenCalled();
   });
@@ -213,53 +231,58 @@ describe('GithubChannel', () => {
     expect(promptFn).toHaveBeenCalled();
   });
 
-  it('falls back to issue creator when getComment fails', async () => {
+  it('resolves sender from enumerated comments when last_read_at is set', async () => {
     const bridge = mockBridge();
     const promptFn = vi.fn().mockResolvedValue(undefined);
     (bridge as Record<string, unknown>).prompt = promptFn;
 
-    mockPaginate.mockResolvedValueOnce([
-      {
-        id: '3',
-        reason: 'mention',
-        unread: true,
-        subject: {
-          title: 'Bug report',
-          url: 'https://api.github.com/repos/owner/repo/issues/42',
-          latest_comment_url:
-            'https://api.github.com/repos/owner/repo/issues/comments/123',
-          type: 'Issue',
-        },
-        repository: {
-          full_name: 'owner/repo',
-          html_url: 'https://github.com/owner/repo',
-        },
-        updated_at: '2026-01-01T00:00:00Z',
+    mockPaginate.mockImplementation(
+      (route: unknown, _params: unknown, callback?: unknown) => {
+        if (route === mockListNotifications) {
+          return Promise.resolve([
+            {
+              id: '3',
+              reason: 'mention',
+              unread: true,
+              subject: {
+                title: 'Bug report',
+                url: 'https://api.github.com/repos/owner/repo/issues/42',
+                type: 'Issue',
+              },
+              repository: {
+                full_name: 'owner/repo',
+                html_url: 'https://github.com/owner/repo',
+              },
+              updated_at: '2026-01-01T00:00:00Z',
+              last_read_at: '2025-12-31T00:00:00Z',
+            },
+          ]);
+        }
+        if (route === mockListComments) {
+          const data = [
+            {
+              id: 123,
+              user: { login: 'creator' },
+              body: '@bot Fallback issue body',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          ];
+          if (typeof callback === 'function') callback({ data }, () => {});
+          return Promise.resolve(data);
+        }
+        return Promise.resolve([]);
       },
-    ]);
-    mockGetComment.mockRejectedValueOnce(new Error('not found'));
-    mockGetIssue.mockResolvedValueOnce({
-      data: { user: { login: 'creator' }, body: '@bot Fallback issue body' },
-    });
+    );
     mockMarkThreadAsRead.mockResolvedValueOnce({});
 
     const channel = new GithubChannel('test', baseConfig, bridge);
     await channel.connect();
-    await vi.waitFor(() => expect(mockGetIssue).toHaveBeenCalled(), {
+    await vi.waitFor(() => expect(promptFn).toHaveBeenCalled(), {
       timeout: 2000,
     });
     channel.disconnect();
 
-    expect(mockGetComment).toHaveBeenCalledWith({
-      owner: 'owner',
-      repo: 'repo',
-      comment_id: 123,
-    });
-    expect(mockGetIssue).toHaveBeenCalledWith({
-      owner: 'owner',
-      repo: 'repo',
-      issue_number: 42,
-    });
+    expect(mockGetIssue).not.toHaveBeenCalled();
     expect(promptFn).toHaveBeenCalled();
   });
 
@@ -288,10 +311,8 @@ describe('GithubChannel', () => {
       data: {
         head: { ref: 'feature-branch' },
         body: 'PR description @reviewer',
+        user: { login: 'pr-author' },
       },
-    });
-    mockGetIssue.mockResolvedValueOnce({
-      data: { user: { login: 'pr-author' }, body: '' },
     });
     mockMarkThreadAsRead.mockResolvedValueOnce({});
 
@@ -333,28 +354,43 @@ describe('GithubChannel', () => {
   it('includes metadata for slash command comments', async () => {
     const bridge = mockBridge();
 
-    mockPaginate.mockResolvedValueOnce([
-      {
-        id: '10',
-        reason: 'mention',
-        unread: true,
-        subject: {
-          title: 'Add feature',
-          url: 'https://api.github.com/repos/owner/repo/issues/7',
-          latest_comment_url:
-            'https://api.github.com/repos/owner/repo/issues/comments/99',
-          type: 'Issue',
-        },
-        repository: {
-          full_name: 'owner/repo',
-          html_url: 'https://github.com/owner/repo',
-        },
-        updated_at: '2026-01-01T00:00:00Z',
+    mockPaginate.mockImplementation(
+      (route: unknown, _params: unknown, callback?: unknown) => {
+        if (route === mockListNotifications) {
+          return Promise.resolve([
+            {
+              id: '10',
+              reason: 'mention',
+              unread: true,
+              subject: {
+                title: 'Add feature',
+                url: 'https://api.github.com/repos/owner/repo/issues/7',
+                type: 'Issue',
+              },
+              repository: {
+                full_name: 'owner/repo',
+                html_url: 'https://github.com/owner/repo',
+              },
+              updated_at: '2026-01-01T00:00:00Z',
+              last_read_at: '2025-12-31T00:00:00Z',
+            },
+          ]);
+        }
+        if (route === mockListComments) {
+          const data = [
+            {
+              id: 99,
+              user: { login: 'commenter' },
+              body: '/review please',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          ];
+          if (typeof callback === 'function') callback({ data }, () => {});
+          return Promise.resolve(data);
+        }
+        return Promise.resolve([]);
       },
-    ]);
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'commenter' }, body: '/review please' },
-    });
+    );
     mockMarkThreadAsRead.mockResolvedValueOnce({});
 
     const channel = new GithubChannel('test', baseConfig, bridge);
@@ -427,29 +463,47 @@ describe('GithubChannel', () => {
     expect(mockCreateComment).not.toHaveBeenCalled();
   });
 
-  it('resolves sender from PR review comment when issues.getComment fails', async () => {
-    mockGetComment.mockRejectedValueOnce(new Error('Not Found'));
-    mockGetReviewComment.mockResolvedValueOnce({
-      data: { user: { login: 'reviewer' }, body: 'LGTM' },
-    });
-    mockPaginate.mockResolvedValue([
-      {
-        id: '1',
-        reason: 'review_requested',
-        subject: {
-          type: 'PullRequest',
-          title: 'Fix bug',
-          url: 'https://api.github.com/repos/owner/repo/pulls/7',
-          latest_comment_url:
-            'https://api.github.com/repos/owner/repo/pulls/comments/999',
-        },
-        repository: {
-          full_name: 'owner/repo',
-          html_url: 'https://github.com/owner/repo',
-        },
-        updated_at: '2026-01-01T00:00:00Z',
+  it('resolves sender from PR review comment via listReviewComments', async () => {
+    mockPaginate.mockImplementation(
+      (route: unknown, _params: unknown, callback?: unknown) => {
+        if (route === mockListNotifications) {
+          return Promise.resolve([
+            {
+              id: '1',
+              reason: 'review_requested',
+              subject: {
+                type: 'PullRequest',
+                title: 'Fix bug',
+                url: 'https://api.github.com/repos/owner/repo/pulls/7',
+              },
+              repository: {
+                full_name: 'owner/repo',
+                html_url: 'https://github.com/owner/repo',
+              },
+              updated_at: '2026-01-01T00:00:00Z',
+              last_read_at: '2025-12-31T00:00:00Z',
+            },
+          ]);
+        }
+        if (route === mockListComments) {
+          return Promise.resolve([]);
+        }
+        if (route === mockListReviewComments) {
+          const data = [
+            {
+              id: 999,
+              user: { login: 'reviewer' },
+              body: 'LGTM',
+              created_at: '2026-01-01T00:00:00Z',
+              updated_at: '2026-01-01T00:00:00Z',
+            },
+          ];
+          if (typeof callback === 'function') callback({ data }, () => {});
+          return Promise.resolve(data);
+        }
+        return Promise.resolve([]);
       },
-    ]);
+    );
 
     const envelopes: unknown[] = [];
     const channel = new GithubChannel('test', baseConfig, mockBridge());
@@ -473,27 +527,42 @@ describe('GithubChannel', () => {
   });
 
   it('sets isMentioned true when body contains @bot', async () => {
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'alice' }, body: '@bot help' },
-    });
-    mockPaginate.mockResolvedValue([
-      {
-        id: '1',
-        reason: 'mention',
-        subject: {
-          type: 'Issue',
-          title: 'Question',
-          url: 'https://api.github.com/repos/owner/repo/issues/1',
-          latest_comment_url:
-            'https://api.github.com/repos/owner/repo/issues/comments/100',
-        },
-        repository: {
-          full_name: 'owner/repo',
-          html_url: 'https://github.com/owner/repo',
-        },
-        updated_at: '2026-01-01T00:00:00Z',
+    mockPaginate.mockImplementation(
+      (route: unknown, _params: unknown, callback?: unknown) => {
+        if (route === mockListNotifications) {
+          return Promise.resolve([
+            {
+              id: '1',
+              reason: 'mention',
+              subject: {
+                type: 'Issue',
+                title: 'Question',
+                url: 'https://api.github.com/repos/owner/repo/issues/1',
+              },
+              repository: {
+                full_name: 'owner/repo',
+                html_url: 'https://github.com/owner/repo',
+              },
+              updated_at: '2026-01-01T00:00:00Z',
+              last_read_at: '2025-12-31T00:00:00Z',
+            },
+          ]);
+        }
+        if (route === mockListComments) {
+          const data = [
+            {
+              id: 100,
+              user: { login: 'alice' },
+              body: '@bot help',
+              created_at: '2026-01-01T00:00:00Z',
+            },
+          ];
+          if (typeof callback === 'function') callback({ data }, () => {});
+          return Promise.resolve(data);
+        }
+        return Promise.resolve([]);
       },
-    ]);
+    );
 
     const envelopes: unknown[] = [];
     const channel = new GithubChannel('test', baseConfig, mockBridge());
@@ -876,42 +945,45 @@ describe('GithubChannel', () => {
 
   it('restores cursor from disk on construction', async () => {
     const cursorDir = join(tempDir, 'channels');
-    savePollCursor('test', '2024-01-01T00:00:00Z', new Set(['1']), cursorDir);
+    savePollCursor('test', '2024-06-01T00:00:00Z', cursorDir);
 
-    mockPaginate.mockResolvedValue([
-      {
-        id: '1',
-        reason: 'mention',
-        unread: true,
-        subject: {
-          title: 'Old notification',
-          type: 'Issue',
-          url: 'https://api.github.com/repos/owner/repo/issues/1',
-          latest_comment_url: null,
-        },
-        repository: {
-          full_name: 'owner/repo',
-          html_url: 'https://github.com/owner/repo',
-        },
-        updated_at: '2024-01-01T00:00:00Z',
-      },
-      {
-        id: '2',
-        reason: 'mention',
-        unread: true,
-        subject: {
-          title: 'New notification',
-          type: 'Issue',
-          url: 'https://api.github.com/repos/owner/repo/issues/2',
-          latest_comment_url: null,
-        },
-        repository: {
-          full_name: 'owner/repo',
-          html_url: 'https://github.com/owner/repo',
-        },
-        updated_at: '2024-06-01T00:00:00Z',
-      },
-    ]);
+    mockPaginate.mockImplementation((route: unknown) => {
+      if (route === mockListNotifications) {
+        return Promise.resolve([
+          {
+            id: '1',
+            reason: 'mention',
+            unread: true,
+            subject: {
+              title: 'Old notification',
+              type: 'Issue',
+              url: 'https://api.github.com/repos/owner/repo/issues/1',
+            },
+            repository: {
+              full_name: 'owner/repo',
+              html_url: 'https://github.com/owner/repo',
+            },
+            updated_at: '2024-01-01T00:00:00Z',
+          },
+          {
+            id: '2',
+            reason: 'mention',
+            unread: true,
+            subject: {
+              title: 'New notification',
+              type: 'Issue',
+              url: 'https://api.github.com/repos/owner/repo/issues/2',
+            },
+            repository: {
+              full_name: 'owner/repo',
+              html_url: 'https://github.com/owner/repo',
+            },
+            updated_at: '2024-07-01T00:00:00Z',
+          },
+        ]);
+      }
+      return Promise.resolve([]);
+    });
     mockGetIssue.mockResolvedValue({
       data: { user: { login: 'author' }, body: 'text' },
     });
@@ -929,12 +1001,12 @@ describe('GithubChannel', () => {
     );
     channel.disconnect();
 
-    // id=1 should be skipped (already in cursor), only id=2 dispatched
+    // id=1 should be skipped (updated_at before cursor), only id=2 dispatched
     expect(mockMarkThreadAsRead).toHaveBeenCalledWith({ thread_id: 2 });
     expect(mockMarkThreadAsRead).not.toHaveBeenCalledWith({ thread_id: 1 });
 
     // Verify cursor was updated
     const cursor = loadPollCursor('test', cursorDir);
-    expect(cursor.timestamp).toBe('2024-06-01T00:00:00Z');
+    expect(cursor.timestamp).toBe('2024-07-01T00:00:00Z');
   });
 });

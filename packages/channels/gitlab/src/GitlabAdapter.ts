@@ -35,7 +35,6 @@ export class GitlabChannel extends ChannelBase {
   private abortController: AbortController | null = null;
   private pollGeneration = 0;
   private lastProcessedAt: string;
-  private processedIdsAtCursor: Set<string> = new Set();
   private readonly pollIntervalMs: number;
   private botUsername: string | null = null;
 
@@ -48,7 +47,6 @@ export class GitlabChannel extends ChannelBase {
     super(name, config, bridge, options);
     const cursor = loadPollCursor(name);
     this.lastProcessedAt = cursor.timestamp || new Date().toISOString();
-    this.processedIdsAtCursor = cursor.processedIds;
     this.gitlab = new Gitlab({
       host: (config['baseUrl'] as string) || 'https://gitlab.com',
       token: this.config.token,
@@ -178,14 +176,8 @@ export class GitlabChannel extends ChannelBase {
     );
     for (const todo of todos) {
       const updatedAt = todo.updated_at ?? '';
-      const tid = String(todo.id);
       if (!updatedAt) continue;
       if (updatedAt < this.lastProcessedAt) continue;
-      if (
-        updatedAt === this.lastProcessedAt &&
-        this.processedIdsAtCursor.has(tid)
-      )
-        continue;
       let envelope: Envelope | null = null;
       try {
         envelope = this.buildEnvelope(todo);
@@ -212,7 +204,7 @@ export class GitlabChannel extends ChannelBase {
           }
         }
       }
-      this.advanceCursor(updatedAt, tid);
+      this.advanceCursor(updatedAt);
       try {
         await this.gitlab.TodoLists.done({ todoId: todo.id });
       } catch (err) {
@@ -223,15 +215,12 @@ export class GitlabChannel extends ChannelBase {
     }
   }
 
-  private advanceCursor(timestamp: string, id: string): void {
+  private advanceCursor(timestamp: string): void {
     if (!timestamp) return;
     if (timestamp > this.lastProcessedAt) {
       this.lastProcessedAt = timestamp;
-      this.processedIdsAtCursor = new Set([id]);
-    } else {
-      this.processedIdsAtCursor.add(id);
     }
-    savePollCursor(this.name, this.lastProcessedAt, this.processedIdsAtCursor);
+    savePollCursor(this.name, this.lastProcessedAt);
   }
 
   private buildEnvelope(todo: TodoSchema): Envelope | null {

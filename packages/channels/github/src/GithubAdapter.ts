@@ -4,7 +4,6 @@ import {
   parseChatId,
   parseIssueThreadId,
   extractFromSubjectUrl,
-  extractCommentIdFromUrl,
   loadPollCursor,
   savePollCursor,
   stripBotMention,
@@ -19,12 +18,18 @@ import type {
 
 const DEFAULT_POLL_INTERVAL_MS = 60_000;
 
+interface NotificationComment {
+  id: number;
+  user: { login: string } | null;
+  body: string;
+  created_at: string;
+}
+
 export class GithubChannel extends ChannelBase {
   private octokit: Octokit;
   private abortController: AbortController | null = null;
   private pollGeneration = 0;
   private lastProcessedAt: string;
-  private processedIdsAtCursor: Set<string> = new Set();
   private readonly pollIntervalMs: number;
   private botUsername: string | null = null;
 
@@ -37,7 +42,6 @@ export class GithubChannel extends ChannelBase {
     super(name, config, bridge, options);
     const cursor = loadPollCursor(name);
     this.lastProcessedAt = cursor.timestamp || new Date().toISOString();
-    this.processedIdsAtCursor = cursor.processedIds;
     this.octokit = new Octokit({
       auth: this.config.token,
       baseUrl: (config['baseUrl'] as string) || undefined,
@@ -67,7 +71,7 @@ export class GithubChannel extends ChannelBase {
       const { data: user } = await this.octokit.rest.users.getAuthenticated();
       this.botUsername = user.login ?? null;
     } catch {
-      // bot username unavailable — isReplyToBot will be conservative
+      // bot username unavailable — isMentioned will be conservative
     }
     const gen = ++this.pollGeneration;
     this.runPollLoop(signal, gen).catch((err) => {
@@ -173,87 +177,228 @@ export class GithubChannel extends ChannelBase {
       const updatedAt = notification.updated_at;
       if (!updatedAt) continue;
       if (updatedAt < this.lastProcessedAt) continue;
-      if (
-        updatedAt === this.lastProcessedAt &&
-        this.processedIdsAtCursor.has(nid)
-      )
-        continue;
-      let envelope: Envelope | undefined;
+
+      const lastReadAt = notification.last_read_at ?? '';
+      const extracted = extractFromSubjectUrl(notification.subject.url);
+      const repoName = notification.repository.full_name;
+      const [repoOwner, repoNamePart] = repoName.split('/');
+
       try {
-        envelope = await this.buildEnvelope(notification);
-      } catch (err) {
-        process.stderr.write(
-          `[GitHub:${this.name}] error building envelope for ${nid}: ${err instanceof Error ? err.message : err}\n`,
-        );
-        this.advanceCursor(updatedAt, nid);
+        if (lastReadAt && extracted && repoOwner && repoNamePart) {
+          // Existing notification — enumerate comments since last_read_at
+          const comments = await this.enumerateComments(
+            extracted,
+            repoOwner,
+            repoNamePart,
+            notification.subject.type,
+            lastReadAt,
+          );
+
+          if (comments.length === 0) {
+            // No new comments (push/label/etc.) — skip
+            this.advanceCursor(updatedAt);
+            continue;
+          }
+
+          for (const comment of comments) {
+            const envelope = this.buildEnvelopeFromComment(
+              comment,
+              notification,
+              extracted,
+              repoName,
+            );
+            try {
+              await this.handleInbound(envelope);
+            } catch (err) {
+              process.stderr.write(
+                `[GitHub:${this.name}] error processing comment ${comment.id} in ${nid}: ${err instanceof Error ? err.message : err}\n`,
+              );
+              try {
+                await this.sendThreadMessage(
+                  envelope.chatId,
+                  envelope.threadId,
+                  'Sorry, something went wrong processing your message.',
+                );
+              } catch {
+                // best effort
+              }
+            }
+          }
+        } else {
+          // First encounter (no last_read_at) — feed PR/issue body
+          const envelope = await this.buildEnvelopeFromBody(
+            notification,
+            extracted,
+            repoName,
+          );
+          try {
+            await this.handleInbound(envelope);
+          } catch (err) {
+            process.stderr.write(
+              `[GitHub:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
+            );
+            try {
+              await this.sendThreadMessage(
+                envelope.chatId,
+                envelope.threadId,
+                'Sorry, something went wrong processing your message.',
+              );
+            } catch {
+              // best effort
+            }
+          }
+        }
+      } finally {
+        this.advanceCursor(updatedAt);
         try {
           await this.octokit.rest.activity.markThreadAsRead({
             thread_id: Number(nid),
           });
-        } catch {
-          /* best effort */
-        }
-        continue;
-      }
-      try {
-        await this.handleInbound(envelope);
-      } catch (err) {
-        process.stderr.write(
-          `[GitHub:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
-        );
-        try {
-          await this.sendThreadMessage(
-            envelope.chatId,
-            envelope.threadId,
-            'Sorry, something went wrong processing your message.',
+        } catch (err) {
+          process.stderr.write(
+            `[GitHub:${this.name}] failed to mark notification ${nid} as read: ${err instanceof Error ? err.message : err}\n`,
           );
-        } catch {
-          // best effort
         }
       }
-      this.advanceCursor(updatedAt, nid);
+    }
+  }
+
+  private async enumerateComments(
+    extracted: { type: string; owner: string; repo: string; number: number },
+    repoOwner: string,
+    repoNamePart: string,
+    subjectType: string,
+    since: string,
+  ): Promise<NotificationComment[]> {
+    const comments: NotificationComment[] = [];
+
+    // Issue / PR regular comments
+    try {
+      await this.octokit.paginate(
+        this.octokit.rest.issues.listComments,
+        {
+          owner: repoOwner,
+          repo: repoNamePart,
+          issue_number: extracted.number,
+          since,
+          per_page: 100,
+        },
+        (response, done) => {
+          const items = response.data.map((c) => ({
+            id: c.id,
+            user: c.user ? { login: c.user.login ?? 'ghost' } : null,
+            body: c.body ?? '',
+            created_at: c.created_at ?? '',
+          }));
+          comments.push(...items);
+          if (response.data.length < 100) done();
+          return items;
+        },
+      );
+    } catch {
+      // comments unavailable
+    }
+
+    // PR review comments (diff-line comments)
+    if (subjectType === 'PullRequest') {
       try {
-        await this.octokit.rest.activity.markThreadAsRead({
-          thread_id: Number(nid),
-        });
-      } catch (err) {
-        process.stderr.write(
-          `[GitHub:${this.name}] failed to mark notification ${nid} as read: ${err instanceof Error ? err.message : err}\n`,
+        await this.octokit.paginate(
+          this.octokit.rest.pulls.listReviewComments,
+          {
+            owner: repoOwner,
+            repo: repoNamePart,
+            pull_number: extracted.number,
+            per_page: 100,
+          },
+          (response, done) => {
+            const items = response.data
+              .filter((c) => (c.updated_at ?? c.created_at ?? '') > since)
+              .map((c) => ({
+                id: c.id,
+                user: c.user ? { login: c.user.login ?? 'ghost' } : null,
+                body: c.body ?? '',
+                created_at: c.created_at ?? '',
+              }));
+            comments.push(...items);
+            if (response.data.length < 100) done();
+            return items;
+          },
         );
+      } catch {
+        // review comments unavailable
       }
     }
+
+    comments.sort((a, b) => a.created_at.localeCompare(b.created_at));
+    return comments;
   }
 
-  private advanceCursor(timestamp: string, id: string): void {
-    if (!timestamp) return;
-    if (timestamp > this.lastProcessedAt) {
-      this.lastProcessedAt = timestamp;
-      this.processedIdsAtCursor = new Set([id]);
-    } else {
-      this.processedIdsAtCursor.add(id);
-    }
-    savePollCursor(this.name, this.lastProcessedAt, this.processedIdsAtCursor);
-  }
-
-  private async buildEnvelope(notification: {
-    id: string;
-    reason: string;
-    subject: {
-      title: string;
-      url: string | null;
-      latest_comment_url: string | null;
+  private buildEnvelopeFromComment(
+    comment: NotificationComment,
+    notification: {
+      id: string;
+      reason: string;
+      subject: { title: string; url: string | null; type: string };
+      repository: { full_name: string; html_url: string };
+    },
+    extracted: {
       type: string;
-    };
-    repository: { full_name: string; html_url: string };
-    updated_at: string;
-  }): Promise<Envelope> {
-    const extracted = extractFromSubjectUrl(notification.subject.url);
-    const repoName = notification.repository.full_name;
-    const [repoOwner, repoNamePart] = repoName.split('/');
+      owner: string;
+      repo: string;
+      number: number;
+    } | null,
+    repoName: string,
+  ): Envelope {
+    const body = comment.body ?? '';
+    const content =
+      body && this.botUsername ? stripBotMention(body, this.botUsername) : body;
 
-    let prBranch: string | undefined;
+    const metadata = [
+      `Type: ${notification.subject.type}`,
+      `Title: ${notification.subject.title}`,
+      `Reason: ${notification.reason}`,
+      ...(extracted
+        ? [
+            `URL: https://${new URL(notification.repository.html_url).host}/${extracted.owner}/${extracted.repo}/${extracted.type === 'pr' ? 'pull' : 'issues'}/${extracted.number}`,
+          ]
+        : []),
+    ].join('\n');
+
+    return {
+      channelName: this.name,
+      senderId: comment.user?.login ?? 'ghost',
+      senderName: comment.user?.login ?? 'ghost',
+      chatId: repoName,
+      threadId: extracted ? `${extracted.type}:${extracted.number}` : undefined,
+      messageId: String(comment.id),
+      text: content,
+      metadata,
+      isGroup: true,
+      isMentioned: content !== body,
+      isReplyToBot: false,
+    };
+  }
+
+  private async buildEnvelopeFromBody(
+    notification: {
+      id: string;
+      reason: string;
+      subject: { title: string; url: string | null; type: string };
+      repository: { full_name: string; html_url: string };
+      updated_at: string;
+    },
+    extracted: {
+      type: string;
+      owner: string;
+      repo: string;
+      number: number;
+    } | null,
+    repoName: string,
+  ): Promise<Envelope> {
     let body = '';
-    let prSender: string | undefined;
+    let senderLogin = repoName;
+    let prBranch: string | undefined;
+
     if (
       notification.subject.type === 'PullRequest' &&
       extracted?.type === 'pr'
@@ -266,61 +411,24 @@ export class GithubChannel extends ChannelBase {
         });
         prBranch = pr.head?.ref;
         body = pr.body ?? '';
-        prSender = pr.user?.login;
+        senderLogin = pr.user?.login ?? repoName;
       } catch {
-        // branch info unavailable
+        // unavailable
       }
-    }
-
-    let senderLogin: string = prSender ?? repoName;
-    let commentSenderResolved = false;
-    const commentId = extractCommentIdFromUrl(
-      notification.subject.latest_comment_url,
-    );
-    if (commentId && repoOwner && repoNamePart) {
-      let commentResolved = false;
-      try {
-        const { data: comment } = await this.octokit.rest.issues.getComment({
-          owner: repoOwner,
-          repo: repoNamePart,
-          comment_id: commentId,
-        });
-        senderLogin = comment.user?.login ?? 'ghost';
-        body = comment.body ?? '';
-        commentResolved = true;
-        commentSenderResolved = true;
-      } catch {
-        // not an issue comment — try PR review comment
-      }
-      if (!commentResolved) {
-        try {
-          const { data: reviewComment } =
-            await this.octokit.rest.pulls.getReviewComment({
-              owner: repoOwner,
-              repo: repoNamePart,
-              comment_id: commentId,
-            });
-          senderLogin = reviewComment.user?.login ?? 'ghost';
-          body = reviewComment.body ?? '';
-          commentSenderResolved = true;
-        } catch {
-          // fall through to issue fallback
-        }
-      }
-    }
-    if (!commentSenderResolved && senderLogin === repoName && extracted) {
+    } else if (extracted) {
       try {
         const { data: issue } = await this.octokit.rest.issues.get({
           owner: extracted.owner,
           repo: extracted.repo,
           issue_number: extracted.number,
         });
+        body = issue.body ?? '';
         senderLogin = issue.user?.login ?? repoName;
-        if (!body) body = issue.body ?? '';
       } catch {
-        // fallback to repo name
+        // unavailable
       }
     }
+
     if (senderLogin === repoName) {
       process.stderr.write(
         `[GitHub:${this.name}] could not resolve sender for ${repoName}, using repo name as fallback\n`,
@@ -338,6 +446,7 @@ export class GithubChannel extends ChannelBase {
           ]
         : []),
     ].join('\n');
+
     const content =
       body && this.botUsername
         ? stripBotMention(body, this.botUsername)
@@ -356,5 +465,13 @@ export class GithubChannel extends ChannelBase {
       isMentioned: content !== body,
       isReplyToBot: false,
     };
+  }
+
+  private advanceCursor(timestamp: string): void {
+    if (!timestamp) return;
+    if (timestamp > this.lastProcessedAt) {
+      this.lastProcessedAt = timestamp;
+    }
+    savePollCursor(this.name, this.lastProcessedAt);
   }
 }

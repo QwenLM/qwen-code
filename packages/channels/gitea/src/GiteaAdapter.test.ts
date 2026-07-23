@@ -42,6 +42,7 @@ const {
   mockGetIssue,
   mockRepoGetPullRequest,
   mockUserGetCurrent,
+  mockIssueGetComments,
 } = vi.hoisted(() => ({
   mockNotifyGetList: vi.fn(),
   mockNotifyReadThread: vi.fn(),
@@ -51,6 +52,7 @@ const {
   mockGetIssue: vi.fn(),
   mockRepoGetPullRequest: vi.fn(),
   mockUserGetCurrent: vi.fn(),
+  mockIssueGetComments: vi.fn(),
 }));
 
 vi.mock('gitea-js', () => ({
@@ -64,6 +66,7 @@ vi.mock('gitea-js', () => ({
       issueCreateIssue: mockCreateIssue,
       issueGetIssue: mockGetIssue,
       issueGetComment: mockGetComment,
+      issueGetComments: mockIssueGetComments,
       repoGetPullRequest: mockRepoGetPullRequest,
     },
     user: {
@@ -90,6 +93,8 @@ describe('GiteaChannel', () => {
     mockRepoGetPullRequest.mockClear();
     mockUserGetCurrent.mockClear();
     mockUserGetCurrent.mockResolvedValue({ data: { login: 'bot' } });
+    mockIssueGetComments.mockClear();
+    mockIssueGetComments.mockResolvedValue({ data: [] });
     savePollCursor('test', '2025-01-01T00:00:00Z');
   });
 
@@ -113,7 +118,7 @@ describe('GiteaChannel', () => {
     expect(mockNotifyGetList).toHaveBeenCalled();
   });
 
-  it('resolves sender from latest_comment_url', async () => {
+  it('resolves sender from enumerated comments', async () => {
     const bridge = mockBridge();
     const promptFn = vi.fn().mockResolvedValue(undefined);
     (bridge as Record<string, unknown>).prompt = promptFn;
@@ -140,8 +145,15 @@ describe('GiteaChannel', () => {
         },
       ],
     });
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'commenter' }, body: 'Please fix @bot' },
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 42,
+          user: { login: 'commenter' },
+          body: 'Please fix @bot',
+          created_at: '2025-06-01T00:00:00Z',
+        },
+      ],
     });
     mockNotifyReadThread.mockResolvedValueOnce({});
 
@@ -152,12 +164,14 @@ describe('GiteaChannel', () => {
     });
     channel.disconnect();
 
-    expect(mockGetComment).toHaveBeenCalledWith('owner', 'repo', 42);
+    expect(mockIssueGetComments).toHaveBeenCalledWith('owner', 'repo', 1, {
+      since: expect.any(String),
+    });
     expect(mockNotifyReadThread).toHaveBeenCalledWith('1');
     expect(promptFn).toHaveBeenCalled();
   });
 
-  it('falls back to issue creator when latest_comment_url is null', async () => {
+  it('dispatches notification via comment enumeration on first run', async () => {
     const bridge = mockBridge();
     const promptFn = vi.fn().mockResolvedValue(undefined);
     (bridge as Record<string, unknown>).prompt = promptFn;
@@ -179,12 +193,19 @@ describe('GiteaChannel', () => {
             full_name: 'owner/repo',
             html_url: 'https://gitea.com/owner/repo',
           },
-          updated_at: '2026-01-01T00:00:00Z',
+          updated_at: '2027-01-01T00:00:00Z',
         },
       ],
     });
-    mockGetIssue.mockResolvedValueOnce({
-      data: { user: { login: 'creator' }, body: 'Please fix this @bot' },
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 42,
+          user: { login: 'creator' },
+          body: 'Please fix this @bot',
+          created_at: '2027-01-01T00:00:00Z',
+        },
+      ],
     });
     mockNotifyReadThread.mockResolvedValueOnce({});
 
@@ -195,12 +216,13 @@ describe('GiteaChannel', () => {
     });
     channel.disconnect();
 
-    expect(mockGetComment).not.toHaveBeenCalled();
-    expect(mockGetIssue).toHaveBeenCalledWith('owner', 'repo', 1);
+    expect(mockIssueGetComments).toHaveBeenCalledWith('owner', 'repo', 1, {
+      since: expect.any(String),
+    });
     expect(promptFn).toHaveBeenCalled();
   });
 
-  it('includes branch in text for pull request notifications', async () => {
+  it('dispatches pull request notifications via comments', async () => {
     const bridge = mockBridge();
 
     mockNotifyGetList.mockResolvedValueOnce({
@@ -220,16 +242,19 @@ describe('GiteaChannel', () => {
             full_name: 'owner/repo',
             html_url: 'https://gitea.com/owner/repo',
           },
-          updated_at: '2026-01-01T00:00:00Z',
+          updated_at: '2027-01-01T00:00:00Z',
         },
       ],
     });
-    mockRepoGetPullRequest.mockResolvedValueOnce({
-      data: {
-        head: { ref: 'feature-branch' },
-        body: 'PR body @reviewer',
-        user: { login: 'pr-author' },
-      },
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 10,
+          user: { login: 'pr-author' },
+          body: 'PR comment @reviewer',
+          created_at: '2027-01-01T00:00:00Z',
+        },
+      ],
     });
     mockNotifyReadThread.mockResolvedValueOnce({});
 
@@ -255,19 +280,22 @@ describe('GiteaChannel', () => {
     });
     channel.disconnect();
 
-    expect(mockRepoGetPullRequest).toHaveBeenCalledWith('owner', 'repo', 5);
+    expect(mockIssueGetComments).toHaveBeenCalledWith('owner', 'repo', 5, {
+      since: expect.any(String),
+    });
     const env = envelopes[0] as {
       text: string;
       metadata?: string;
       senderId: string;
       senderName: string;
+      threadId: string;
     };
-    expect(env.text).toContain('PR body');
+    expect(env.text).toContain('PR comment');
     expect(env.text).toContain('@reviewer');
     expect(env.metadata).toContain('URL: https://gitea.com/owner/repo/pulls/5');
-    expect(env.metadata).toContain('Branch: feature-branch');
     expect(env.senderId).toBe('pr-author');
     expect(env.senderName).toBe('pr-author');
+    expect(env.threadId).toBe('pr:5');
   });
 
   it('includes metadata for slash command comments', async () => {
@@ -293,8 +321,15 @@ describe('GiteaChannel', () => {
         },
       ],
     });
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'commenter' }, body: '/review please' },
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 99,
+          user: { login: 'commenter' },
+          body: '/review please',
+          created_at: '2025-06-01T00:00:00Z',
+        },
+      ],
     });
     mockNotifyReadThread.mockResolvedValueOnce({});
 
@@ -409,8 +444,15 @@ describe('GiteaChannel', () => {
         },
       ],
     });
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'commenter' }, body: '@bot please fix' },
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 42,
+          user: { login: 'commenter' },
+          body: '@bot please fix',
+          created_at: '2025-06-01T00:00:00Z',
+        },
+      ],
     });
     mockNotifyReadThread.mockResolvedValueOnce({});
 
@@ -488,8 +530,15 @@ describe('GiteaChannel', () => {
         },
       ],
     });
-    mockGetComment.mockResolvedValueOnce({
-      data: { user: { login: 'commenter' }, body: '@mybot please review' },
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 42,
+          user: { login: 'commenter' },
+          body: '@mybot please review',
+          created_at: '2025-06-01T00:00:00Z',
+        },
+      ],
     });
     mockNotifyReadThread.mockResolvedValueOnce({});
 
@@ -536,10 +585,20 @@ describe('GiteaChannel', () => {
         full_name: 'owner/repo',
         html_url: 'https://gitea.com/owner/repo',
       },
-      updated_at: '2026-01-01T00:00:00Z',
+      updated_at: '2027-01-01T00:00:00Z',
     };
 
     mockNotifyGetList.mockResolvedValueOnce({ data: [notification] });
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 10,
+          user: { login: 'author' },
+          body: 'Fix bug',
+          created_at: '2027-01-01T00:00:00Z',
+        },
+      ],
+    });
 
     const channel = new GiteaChannel(
       'test',
@@ -563,7 +622,7 @@ describe('GiteaChannel', () => {
       body: 'Sorry, something went wrong processing your message.',
     });
     const cursor = loadPollCursor('test', join(tempDir, 'channels'));
-    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
+    expect(cursor.timestamp).toBe('2027-01-01T00:00:00Z');
   });
 
   it('fetches all pages of notifications', async () => {
@@ -706,28 +765,10 @@ describe('GiteaChannel', () => {
   }, 50_000);
 
   it('restores cursor from disk on construction', async () => {
-    const cursorDir = join(tempDir, 'channels');
-    savePollCursor('test', '2024-01-01T00:00:00Z', new Set(['1']), cursorDir);
+    savePollCursor('test', '2027-06-01T00:00:00Z');
 
     mockNotifyGetList.mockResolvedValueOnce({
       data: [
-        {
-          id: 1,
-          reason: 'mention',
-          unread: true,
-          subject: {
-            title: 'Old notification',
-            type: 'issue',
-            url: 'https://gitea.com/api/v1/repos/owner/repo/issues/1',
-            latest_comment_url: null,
-            html_url: 'https://gitea.com/owner/repo/issues/1',
-          },
-          repository: {
-            full_name: 'owner/repo',
-            html_url: 'https://gitea.com/owner/repo',
-          },
-          updated_at: '2024-01-01T00:00:00Z',
-        },
         {
           id: 2,
           reason: 'mention',
@@ -743,32 +784,36 @@ describe('GiteaChannel', () => {
             full_name: 'owner/repo',
             html_url: 'https://gitea.com/owner/repo',
           },
-          updated_at: '2024-06-01T00:00:00Z',
+          updated_at: '2027-07-01T00:00:00Z',
         },
       ],
     });
-    mockGetIssue.mockResolvedValue({
-      data: { user: { login: 'author' }, body: 'text' },
+    mockIssueGetComments.mockResolvedValueOnce({
+      data: [
+        {
+          id: 10,
+          user: { login: 'commenter' },
+          body: '@bot new comment',
+          created_at: '2027-07-01T00:00:00Z',
+        },
+      ],
     });
-    mockNotifyReadThread.mockResolvedValue({});
+    mockNotifyReadThread.mockResolvedValueOnce({});
 
     const bridge = mockBridge();
-    const promptFn = vi.fn().mockResolvedValue('done');
-    (bridge as Record<string, unknown>).prompt = promptFn;
-
     const channel = new GiteaChannel('test', baseConfig, bridge);
     await channel.connect();
-    await vi.waitFor(
-      () => expect(mockNotifyReadThread).toHaveBeenCalledWith('2'),
-      { timeout: 2000 },
-    );
+    await vi.waitFor(() => expect(mockNotifyReadThread).toHaveBeenCalled(), {
+      timeout: 2000,
+    });
     channel.disconnect();
 
-    // id=1 should be skipped (already in cursor), only id=2 dispatched
     expect(mockNotifyReadThread).toHaveBeenCalledWith('2');
-    expect(mockNotifyReadThread).not.toHaveBeenCalledWith('1');
+    expect(mockIssueGetComments).toHaveBeenCalledWith('owner', 'repo', 2, {
+      since: expect.any(String),
+    });
 
-    const cursor = loadPollCursor('test', cursorDir);
-    expect(cursor.timestamp).toBe('2024-06-01T00:00:00Z');
+    const cursor = loadPollCursor('test');
+    expect(cursor.timestamp).toBe('2027-07-01T00:00:00Z');
   });
 });

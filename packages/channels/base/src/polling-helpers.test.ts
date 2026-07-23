@@ -165,43 +165,25 @@ describe('loadPollCursor / savePollCursor', () => {
   it('returns empty cursor when no cursor file exists', () => {
     const cursor = loadPollCursor('github', tmpDir);
     expect(cursor.timestamp).toBe('');
-    expect(cursor.processedIds.size).toBe(0);
   });
 
   it('saves and loads cursor value', () => {
-    savePollCursor('github', '2026-01-01T00:00:00Z', undefined, tmpDir);
+    savePollCursor('github', '2026-01-01T00:00:00Z', tmpDir);
     const cursor = loadPollCursor('github', tmpDir);
     expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
-    expect(cursor.processedIds.size).toBe(0);
-  });
-
-  it('saves and loads cursor with processed IDs', () => {
-    const ids = new Set(['100', '200', '300']);
-    savePollCursor('github', '2026-01-01T00:00:00Z', ids, tmpDir);
-    const cursor = loadPollCursor('github', tmpDir);
-    expect(cursor.timestamp).toBe('2026-01-01T00:00:00Z');
-    expect(cursor.processedIds).toEqual(new Set(['100', '200', '300']));
-  });
-
-  it('round-trips empty timestamp with processed IDs', () => {
-    const ids = new Set(['100', '200']);
-    savePollCursor('github', '', ids, tmpDir);
-    const cursor = loadPollCursor('github', tmpDir);
-    expect(cursor.timestamp).toBe('');
-    expect(cursor.processedIds).toEqual(new Set(['100', '200']));
   });
 
   it('overwrites previous cursor value', () => {
-    savePollCursor('github', '2026-01-01T00:00:00Z', undefined, tmpDir);
-    savePollCursor('github', '2026-01-02T00:00:00Z', undefined, tmpDir);
+    savePollCursor('github', '2026-01-01T00:00:00Z', tmpDir);
+    savePollCursor('github', '2026-01-02T00:00:00Z', tmpDir);
     expect(loadPollCursor('github', tmpDir).timestamp).toBe(
       '2026-01-02T00:00:00Z',
     );
   });
 
   it('isolates cursors by channel name', () => {
-    savePollCursor('github', '2026-01-01T00:00:00Z', undefined, tmpDir);
-    savePollCursor('gitlab', '2026-01-02T00:00:00Z', undefined, tmpDir);
+    savePollCursor('github', '2026-01-01T00:00:00Z', tmpDir);
+    savePollCursor('gitlab', '2026-01-02T00:00:00Z', tmpDir);
     expect(loadPollCursor('github', tmpDir).timestamp).toBe(
       '2026-01-01T00:00:00Z',
     );
@@ -210,7 +192,7 @@ describe('loadPollCursor / savePollCursor', () => {
     );
   });
 
-  it('reads legacy single-line cursor files with empty IDs', () => {
+  it('reads legacy single-line cursor files', () => {
     writeFileSync(
       join(tmpDir, 'github-poll-cursor.txt'),
       'stale-legacy-value',
@@ -218,7 +200,6 @@ describe('loadPollCursor / savePollCursor', () => {
     );
     const cursor = loadPollCursor('github', tmpDir);
     expect(cursor.timestamp).toBe('stale-legacy-value');
-    expect(cursor.processedIds.size).toBe(0);
   });
 
   it('returns fresh cursor when file is unreadable', () => {
@@ -226,19 +207,18 @@ describe('loadPollCursor / savePollCursor', () => {
     mkdirSync(cursorFile);
     const cursor = loadPollCursor('github', tmpDir);
     expect(cursor.timestamp).toBe('');
-    expect(cursor.processedIds.size).toBe(0);
   });
 
   it('creates directory if missing', () => {
     const nested = join(tmpDir, 'channels');
-    savePollCursor('test-channel', '2026-06-15T12:00:00Z', undefined, nested);
+    savePollCursor('test-channel', '2026-06-15T12:00:00Z', nested);
     expect(existsSync(nested)).toBe(true);
     const cursor = loadPollCursor('test-channel', nested);
     expect(cursor.timestamp).toBe('2026-06-15T12:00:00Z');
   });
 
   it('survives reload from same path', () => {
-    savePollCursor('github', '2026-07-14T22:00:00Z', undefined, tmpDir);
+    savePollCursor('github', '2026-07-14T22:00:00Z', tmpDir);
     expect(loadPollCursor('github', tmpDir).timestamp).toBe(
       '2026-07-14T22:00:00Z',
     );

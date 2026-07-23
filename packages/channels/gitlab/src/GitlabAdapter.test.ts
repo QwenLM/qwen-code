@@ -74,7 +74,7 @@ describe('GitlabChannel', () => {
     mockIssuesCreate.mockClear();
     mockShowCurrentUser.mockClear();
     mockShowCurrentUser.mockResolvedValue({ username: 'bot' });
-    savePollCursor('test', '2025-01-01T00:00:00Z');
+    savePollCursor('test', '2025-01-01T00:00:00Z', join(tempDir, 'channels'));
   });
 
   afterEach(() => {
@@ -622,7 +622,7 @@ describe('GitlabChannel', () => {
 
   it('restores cursor from disk on construction', async () => {
     const cursorDir = join(tempDir, 'channels');
-    savePollCursor('test', '2024-01-01T00:00:00Z', new Set(['1']), cursorDir);
+    savePollCursor('test', '2024-01-01T00:00:01Z', cursorDir);
 
     mockTodosAll.mockResolvedValue([
       {

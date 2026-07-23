@@ -1,11 +1,10 @@
 import { giteaApi } from 'gitea-js';
-import type { NotificationThread } from 'gitea-js';
+import type { Comment, NotificationThread } from 'gitea-js';
 import {
   ChannelBase,
   parseChatId,
   parseIssueThreadId,
   extractFromSubjectUrl,
-  extractCommentIdFromUrl,
   loadPollCursor,
   savePollCursor,
   stripBotMention,
@@ -25,7 +24,6 @@ export class GiteaChannel extends ChannelBase {
   private abortController: AbortController | null = null;
   private pollGeneration = 0;
   private lastProcessedAt: string;
-  private processedIdsAtCursor: Set<string> = new Set();
   private readonly pollIntervalMs: number;
   private botUsername: string | null = null;
 
@@ -38,7 +36,6 @@ export class GiteaChannel extends ChannelBase {
     super(name, config, bridge, options);
     const cursor = loadPollCursor(name);
     this.lastProcessedAt = cursor.timestamp || new Date().toISOString();
-    this.processedIdsAtCursor = cursor.processedIds;
     const baseUrl = (config['baseUrl'] as string) || 'https://gitea.com';
     this.client = giteaApi(baseUrl, { token: this.config.token });
     this.pollIntervalMs =
@@ -66,7 +63,7 @@ export class GiteaChannel extends ChannelBase {
       const { data: user } = await this.client.user.userGetCurrent();
       this.botUsername = user.login ?? null;
     } catch {
-      // bot username unavailable — isReplyToBot will be conservative
+      // bot username unavailable — isMentioned will be conservative
     }
     const gen = ++this.pollGeneration;
     this.runPollLoop(signal, gen).catch((err) => {
@@ -148,15 +145,16 @@ export class GiteaChannel extends ChannelBase {
   }
 
   private async pollNotifications(): Promise<void> {
+    const oldCursor = this.lastProcessedAt;
+
+    // Fetch all notifications since cursor
     const notifications: NotificationThread[] = [];
     let page = 1;
     while (true) {
       let apiSince: string | undefined;
-      if (this.lastProcessedAt) {
-        const parsed = new Date(this.lastProcessedAt).getTime();
-        if (Number.isNaN(parsed)) {
-          this.lastProcessedAt = '';
-        } else {
+      if (oldCursor) {
+        const parsed = new Date(oldCursor).getTime();
+        if (!Number.isNaN(parsed)) {
           apiSince = new Date(parsed - 1000).toISOString();
         }
       }
@@ -169,86 +167,193 @@ export class GiteaChannel extends ChannelBase {
       if (batch.length === 0) break;
       page++;
     }
+
+    if (notifications.length === 0) return;
+
     notifications.sort((a, b) =>
       (a.updated_at ?? '').localeCompare(b.updated_at ?? ''),
     );
+
+    // Pass 1: find max_updated_at across all notifications
+    let maxUpdatedAt = '';
+    for (const n of notifications) {
+      const ua = n.updated_at ?? '';
+      if (ua > maxUpdatedAt) maxUpdatedAt = ua;
+    }
+
+    // Pass 2: for each notification, enumerate comments in (oldCursor, maxUpdatedAt]
     for (const notification of notifications) {
       const nid = String(notification.id);
       const updatedAt = notification.updated_at ?? '';
       if (!updatedAt) continue;
-      if (updatedAt < this.lastProcessedAt) continue;
-      if (
-        updatedAt === this.lastProcessedAt &&
-        this.processedIdsAtCursor.has(nid)
-      )
-        continue;
-      let envelope: Envelope | undefined;
+      if (updatedAt < oldCursor) continue;
+
+      const extracted = extractFromSubjectUrl(notification.subject?.url);
+      const repoName = notification.repository?.full_name ?? 'unknown';
+
       try {
-        envelope = await this.buildEnvelope(notification);
-      } catch (err) {
-        process.stderr.write(
-          `[Gitea:${this.name}] error building envelope for ${nid}: ${err instanceof Error ? err.message : err}\n`,
-        );
-        this.advanceCursor(updatedAt, nid);
+        if (oldCursor && extracted) {
+          // Existing cursor — enumerate comments since oldCursor
+          const [repoOwner, repoNamePart] = repoName.split('/');
+          if (!repoOwner || !repoNamePart) continue;
+
+          const comments = await this.enumerateComments(
+            repoOwner,
+            repoNamePart,
+            extracted.number,
+            oldCursor,
+            maxUpdatedAt,
+          );
+
+          if (comments.length === 0) continue;
+
+          for (const comment of comments) {
+            const envelope = this.buildEnvelopeFromComment(
+              comment,
+              notification,
+              extracted,
+              repoName,
+            );
+            try {
+              await this.handleInbound(envelope);
+            } catch (err) {
+              process.stderr.write(
+                `[Gitea:${this.name}] error processing comment ${comment.id} in ${nid}: ${err instanceof Error ? err.message : err}\n`,
+              );
+              try {
+                await this.sendThreadMessage(
+                  envelope.chatId,
+                  envelope.threadId,
+                  'Sorry, something went wrong processing your message.',
+                );
+              } catch {
+                // best effort
+              }
+            }
+          }
+        } else {
+          // First encounter (no cursor) — feed issue/PR body
+          const envelope = await this.buildEnvelopeFromBody(
+            notification,
+            extracted,
+            repoName,
+          );
+          try {
+            await this.handleInbound(envelope);
+          } catch (err) {
+            process.stderr.write(
+              `[Gitea:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
+            );
+            try {
+              await this.sendThreadMessage(
+                envelope.chatId,
+                envelope.threadId,
+                'Sorry, something went wrong processing your message.',
+              );
+            } catch {
+              // best effort
+            }
+          }
+        }
+      } finally {
         try {
           await this.client.notifications.notifyReadThread(nid);
-        } catch {
-          /* best effort */
-        }
-        continue;
-      }
-      try {
-        await this.handleInbound(envelope);
-      } catch (err) {
-        process.stderr.write(
-          `[Gitea:${this.name}] error processing notification ${nid}: ${err instanceof Error ? err.message : err}\n`,
-        );
-        try {
-          await this.sendThreadMessage(
-            envelope.chatId,
-            envelope.threadId,
-            'Sorry, something went wrong processing your message.',
+        } catch (err) {
+          process.stderr.write(
+            `[Gitea:${this.name}] failed to mark notification ${nid} as read: ${err instanceof Error ? err.message : err}\n`,
           );
-        } catch {
-          // best effort
         }
       }
-      this.advanceCursor(updatedAt, nid);
-      try {
-        await this.client.notifications.notifyReadThread(nid);
-      } catch (err) {
-        process.stderr.write(
-          `[Gitea:${this.name}] failed to mark notification ${nid} as read: ${err instanceof Error ? err.message : err}\n`,
-        );
+    }
+
+    // Advance cursor to max_updated_at
+    this.advanceCursor(maxUpdatedAt);
+  }
+
+  private async enumerateComments(
+    owner: string,
+    repo: string,
+    issueNumber: number,
+    since: string,
+    maxUpdatedAt: string,
+  ): Promise<Comment[]> {
+    const comments: Comment[] = [];
+    try {
+      const { data } = await this.client.repos.issueGetComments(
+        owner,
+        repo,
+        issueNumber,
+        { since },
+      );
+      // Filter: old_cursor < created_at <= max_updated_at
+      for (const c of data) {
+        const createdAt = c.created_at ?? '';
+        if (createdAt > since && createdAt <= maxUpdatedAt) {
+          comments.push(c);
+        }
       }
+    } catch {
+      // comments unavailable
     }
+    comments.sort((a, b) =>
+      (a.created_at ?? '').localeCompare(b.created_at ?? ''),
+    );
+    return comments;
   }
 
-  private advanceCursor(timestamp: string, id: string): void {
-    if (!timestamp) return;
-    if (timestamp > this.lastProcessedAt) {
-      this.lastProcessedAt = timestamp;
-      this.processedIdsAtCursor = new Set([id]);
-    } else {
-      this.processedIdsAtCursor.add(id);
-    }
-    savePollCursor(this.name, this.lastProcessedAt, this.processedIdsAtCursor);
-  }
-
-  private async buildEnvelope(
+  private buildEnvelopeFromComment(
+    comment: Comment,
     notification: NotificationThread,
+    extracted: {
+      type: string;
+      owner: string;
+      repo: string;
+      number: number;
+    } | null,
+    repoName: string,
+  ): Envelope {
+    const body = comment.body ?? '';
+    const content =
+      body && this.botUsername ? stripBotMention(body, this.botUsername) : body;
+
+    const metadata = [
+      `Type: ${notification.subject?.type ?? 'unknown'}`,
+      `Title: ${notification.subject?.title ?? ''}`,
+      ...(notification.subject?.html_url
+        ? [`URL: ${notification.subject.html_url}`]
+        : []),
+    ].join('\n');
+
+    return {
+      channelName: this.name,
+      senderId: comment.user?.login ?? 'unknown',
+      senderName: comment.user?.login ?? 'unknown',
+      chatId: repoName,
+      threadId: extracted ? `${extracted.type}:${extracted.number}` : undefined,
+      messageId: String(comment.id),
+      text: content,
+      metadata,
+      isGroup: true,
+      isMentioned: content !== body,
+      isReplyToBot: false,
+    };
+  }
+
+  private async buildEnvelopeFromBody(
+    notification: NotificationThread,
+    extracted: {
+      type: string;
+      owner: string;
+      repo: string;
+      number: number;
+    } | null,
+    repoName: string,
   ): Promise<Envelope> {
-    const repoName = notification.repository?.full_name ?? 'unknown';
-    const rawSubjectType = notification.subject?.type ?? 'unknown';
-    const subjectType = rawSubjectType.toLowerCase();
-    const subjectTitle = notification.subject?.title ?? '';
-    const subjectUrl = notification.subject?.url;
-
-    const extracted = extractFromSubjectUrl(subjectUrl);
-
-    let prBranch: string | undefined;
     let body = '';
-    let prSender: string | undefined;
+    let senderUsername = repoName;
+    let prBranch: string | undefined;
+    const subjectType = (notification.subject?.type ?? '').toLowerCase();
+
     if (subjectType === 'pull' && extracted?.type === 'pr') {
       try {
         const { data: pr } = await this.client.repos.repoGetPullRequest(
@@ -258,44 +363,24 @@ export class GiteaChannel extends ChannelBase {
         );
         prBranch = pr.head?.ref;
         body = pr.body ?? '';
-        prSender = pr.user?.login;
+        senderUsername = pr.user?.login ?? repoName;
       } catch {
-        // branch info unavailable
+        // unavailable
       }
-    }
-
-    let senderUsername = prSender ?? repoName;
-    let commentSenderResolved = false;
-    const commentId = extractCommentIdFromUrl(
-      notification.subject?.latest_comment_url,
-    );
-    if (commentId && extracted) {
-      try {
-        const { data: comment } = await this.client.repos.issueGetComment(
-          extracted.owner,
-          extracted.repo,
-          commentId,
-        );
-        senderUsername = comment.user?.login ?? repoName;
-        body = comment.body ?? '';
-        commentSenderResolved = true;
-      } catch {
-        // fall through to issue fallback
-      }
-    }
-    if (!commentSenderResolved && senderUsername === repoName && extracted) {
+    } else if (extracted) {
       try {
         const { data: issue } = await this.client.repos.issueGetIssue(
           extracted.owner,
           extracted.repo,
           extracted.number,
         );
+        body = issue.body ?? '';
         senderUsername = issue.user?.login ?? repoName;
-        if (!body) body = issue.body ?? '';
       } catch {
-        // fallback to repo name
+        // unavailable
       }
     }
+
     if (senderUsername === repoName) {
       process.stderr.write(
         `[Gitea:${this.name}] could not resolve sender for ${repoName}, using repo name as fallback\n`,
@@ -304,12 +389,13 @@ export class GiteaChannel extends ChannelBase {
 
     const metadata = [
       `Type: ${subjectType === 'pull' ? 'PullRequest' : subjectType === 'issue' ? 'Issue' : subjectType}`,
-      `Title: ${subjectTitle}`,
+      `Title: ${notification.subject?.title ?? ''}`,
       ...(notification.subject?.html_url
         ? [`URL: ${notification.subject.html_url}`]
         : []),
       ...(prBranch ? [`Branch: ${prBranch}`] : []),
     ].join('\n');
+
     const content =
       body && this.botUsername
         ? stripBotMention(body, this.botUsername)
@@ -328,5 +414,13 @@ export class GiteaChannel extends ChannelBase {
       isMentioned: content !== body,
       isReplyToBot: false,
     };
+  }
+
+  private advanceCursor(timestamp: string): void {
+    if (!timestamp) return;
+    if (timestamp > this.lastProcessedAt) {
+      this.lastProcessedAt = timestamp;
+    }
+    savePollCursor(this.name, this.lastProcessedAt);
   }
 }

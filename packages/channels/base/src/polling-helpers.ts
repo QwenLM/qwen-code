@@ -78,40 +78,29 @@ function defaultCursorDir(): string {
 
 export interface PollCursor {
   timestamp: string;
-  processedIds: Set<string>;
 }
 
 export function loadPollCursor(channelName: string, dir?: string): PollCursor {
   const p = join(dir ?? defaultCursorDir(), cursorFileName(channelName));
-  if (!existsSync(p)) return { timestamp: '', processedIds: new Set() };
+  if (!existsSync(p)) return { timestamp: '' };
   try {
-    const lines = readFileSync(p, 'utf-8').split('\n');
-    const timestamp = (lines[0] ?? '').trim();
-    const idsLine = (lines[1] ?? '').trim();
-    const processedIds = idsLine
-      ? new Set(idsLine.split(',').filter(Boolean))
-      : new Set<string>();
-    return { timestamp, processedIds };
+    const timestamp = readFileSync(p, 'utf-8').split('\n')[0]?.trim() ?? '';
+    return { timestamp };
   } catch {
-    return { timestamp: '', processedIds: new Set() };
+    return { timestamp: '' };
   }
 }
 
 export function savePollCursor(
   channelName: string,
   timestamp: string,
-  processedIds?: Set<string>,
   dir?: string,
 ): void {
   const d = dir ?? defaultCursorDir();
   mkdirSync(d, { recursive: true });
-  const idsLine =
-    processedIds && processedIds.size > 0
-      ? `\n${[...processedIds].join(',')}`
-      : '';
   const target = join(d, cursorFileName(channelName));
   const tmp = `${target}.tmp`;
-  writeFileSync(tmp, `${timestamp}${idsLine}`, 'utf-8');
+  writeFileSync(tmp, timestamp, 'utf-8');
   renameSync(tmp, target);
 }
 
