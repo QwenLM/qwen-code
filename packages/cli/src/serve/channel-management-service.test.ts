@@ -246,6 +246,28 @@ describe('createChannelManagementService', () => {
     expect(manager.reloadWorkspace).toHaveBeenCalledWith(WORKSPACE, 'bot');
   });
 
+  it('clears a stale runtime diagnostic after a successful replacement', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    manager.reloadWorkspace.mockRejectedValueOnce(new Error('stale failure'));
+
+    await expect(service.restart('bot')).rejects.toThrow('stale failure');
+    expect((await service.list()).instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'stale failure',
+    });
+
+    const result = await service.upsert('bot', {
+      expectedRevision: 'rev-1',
+      config: {
+        type: 'dingtalk',
+        clientId: 'client-id',
+        senderPolicy: 'pairing',
+      },
+    });
+
+    expect(result.instance.runtime).toEqual({ state: 'connected' });
+  });
+
   it('does not delete config when worker stop is unconfirmed', async () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['bot'],
