@@ -172,6 +172,11 @@ describe('handleAtCommand @session:', () => {
     expect(JSON.stringify(result.processedQuery)).toContain(
       '@session:Ambiguous',
     );
+    const card = result.toolDisplays?.find(
+      (d) => d.name === 'Referenced Session',
+    );
+    expect(card).toBeDefined();
+    expect(card!.resultDisplay).toContain('ambiguous');
   });
 
   it('survives a filesystem error during title lookup', async () => {
