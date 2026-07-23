@@ -154,7 +154,7 @@ def validate_query_options(options: QueryOptions) -> None:
         not _is_int(options.max_subagent_depth)
         or not (1 <= options.max_subagent_depth <= 100)
     ):
-        raise ValidationError("max_subagent_depth must be between 1 and 100")
+        raise ValidationError("max_subagent_depth must be an integer between 1 and 100")
 
     if options.agents:
         for i, agent in enumerate(options.agents):
