@@ -689,5 +689,52 @@ describe('serve-bridge', () => {
         'At least one field to update must be provided',
       );
     });
+
+    it('should forward advanced agents_manage update fields', async () => {
+      const { state, calls } = makeMockState({
+        defaultSessionId: 'test-session',
+        fetchReply: () =>
+          jsonResponse(200, {
+            ok: true,
+            agent: {
+              kind: 'agent',
+              name: 'test-agent',
+              description: 'test',
+              level: 'project',
+              isBuiltin: false,
+              hasTools: true,
+              systemPrompt: 'test',
+            },
+          }),
+      });
+      state.allowGlobalScope = true;
+      const { workspaceWriteTools } = await import(
+        '../../src/daemon-mcp/serve-bridge/tools/workspaceWrite.js'
+      );
+      const agentsTool = workspaceWriteTools(state).find(
+        (tool: { name: string }) => tool.name === 'workspace_agents_manage',
+      );
+
+      await agentsTool.handler(
+        {
+          action: 'update',
+          agent_type: 'test-agent',
+          approval_mode: 'bubble',
+          max_turns: 6,
+          color: 'cyan',
+          mcp_servers: { github: { type: 'http' } },
+          hooks: { PreToolUse: [] },
+        },
+        {},
+      );
+
+      expect(JSON.parse(calls[0]?.body ?? '{}')).toMatchObject({
+        approvalMode: 'bubble',
+        maxTurns: 6,
+        color: 'cyan',
+        mcpServers: { github: { type: 'http' } },
+        hooks: { PreToolUse: [] },
+      });
+    });
   });
 });

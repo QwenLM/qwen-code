@@ -5811,6 +5811,24 @@ describe('DaemonClient', () => {
       expect(calls[0]?.url).toBe('http://daemon/workspace/agents/with%2Fslash');
     });
 
+    it('getWorkspaceAgent forwards the optional scope query', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          name: 'reviewer',
+          description: 'user reviewer',
+          level: 'user',
+          systemPrompt: 'review globally',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.getWorkspaceAgent('reviewer', { scope: 'global' });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/agents/reviewer?scope=global',
+      );
+    });
+
     it('streams stateless workspace generation with the session envelope', async () => {
       const { fetch } = recordingFetch(() =>
         sseResponse(

@@ -245,6 +245,13 @@ export function workspaceWriteTools(state: BridgeState): any[] {
           .optional()
           .describe('Disallowed tool names.'),
         model: z.string().optional().describe('Model ID for the agent.'),
+        approval_mode: z.string().optional().describe('Approval mode.'),
+        permission_mode: z.string().optional().describe('Permission mode.'),
+        max_turns: z.number().int().positive().optional(),
+        color: z.string().optional(),
+        mcp_servers: z.record(z.string(), z.unknown()).optional(),
+        hooks: z.record(z.string(), z.unknown()).optional(),
+        background: z.boolean().optional(),
       },
       handler(async (args) => handleAgentsManage(state, args)),
     ),
@@ -314,6 +321,13 @@ async function handleAgentCreate(state: BridgeState, args: any): Promise<any> {
       tools: args.tools,
       disallowedTools: args.disallowed_tools,
       model: args.model,
+      approvalMode: args.approval_mode,
+      permissionMode: args.permission_mode,
+      maxTurns: args.max_turns,
+      color: args.color,
+      mcpServers: args.mcp_servers,
+      hooks: args.hooks,
+      background: args.background,
     }),
   );
 }
@@ -327,10 +341,17 @@ async function handleAgentUpdate(state: BridgeState, args: any): Promise<any> {
     args.system_prompt !== undefined ||
     args.tools !== undefined ||
     args.disallowed_tools !== undefined ||
-    args.model !== undefined;
+    args.model !== undefined ||
+    args.approval_mode !== undefined ||
+    args.permission_mode !== undefined ||
+    args.max_turns !== undefined ||
+    args.color !== undefined ||
+    args.mcp_servers !== undefined ||
+    args.hooks !== undefined ||
+    args.background !== undefined;
   if (!hasField) {
     return formatToolError(
-      'At least one field to update must be provided (description, system_prompt, tools, disallowed_tools, or model).',
+      'At least one field to update must be provided (description, system_prompt, tools, disallowed_tools, model, approval_mode, permission_mode, max_turns, color, mcp_servers, hooks, or background).',
     );
   }
   return formatJsonResult(
@@ -342,6 +363,13 @@ async function handleAgentUpdate(state: BridgeState, args: any): Promise<any> {
         tools: args.tools,
         disallowedTools: args.disallowed_tools,
         model: args.model,
+        approvalMode: args.approval_mode,
+        permissionMode: args.permission_mode,
+        maxTurns: args.max_turns,
+        color: args.color,
+        mcpServers: args.mcp_servers,
+        hooks: args.hooks,
+        background: args.background,
       },
       { scope: args.scope },
     ),

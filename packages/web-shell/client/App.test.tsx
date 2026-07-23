@@ -823,7 +823,7 @@ mockComponent(
   'ReleaseSessionDialog',
 );
 mockComponent('./components/dialogs/RewindDialog', 'RewindDialog');
-mockComponent('./components/messages/AgentsMessage', 'AgentsMessage');
+mockComponent('./components/agents/AgentsManagerPage', 'AgentsManagerPage');
 mockComponent('./components/messages/MemoryMessage', 'MemoryMessage');
 mockComponent('./components/messages/AuthMessage', 'AuthMessage');
 // Record keyboardActive so app-level tests can assert the overlay is told to
@@ -3466,6 +3466,7 @@ describe('App session callbacks', () => {
       'Extensions',
       'MCP',
       'Skills',
+      'Agents',
     ]);
     expect(extensionsTab?.getAttribute('aria-selected')).toBe('true');
     expect(document.activeElement).toBe(extensionsTab);
