@@ -203,6 +203,10 @@ describe('useGeminiStream', () => {
   let mockCancelAllToolCalls: Mock;
   let mockMarkToolsAsSubmitted: Mock;
   let mockBackgroundShellRegistry: { setNotificationCallback: Mock };
+  let mockMonitorRegistry: {
+    setNotificationCallback: Mock;
+    get: Mock;
+  };
   let handleAtCommandSpy: MockInstance;
 
   beforeEach(() => {
@@ -234,6 +238,10 @@ describe('useGeminiStream', () => {
     };
     mockBackgroundShellRegistry = {
       setNotificationCallback: vi.fn(),
+    };
+    mockMonitorRegistry = {
+      setNotificationCallback: vi.fn(),
+      get: vi.fn().mockReturnValue({ status: 'running' }),
     };
 
     mockConfig = {
@@ -288,9 +296,7 @@ describe('useGeminiStream', () => {
         setNotificationCallback: vi.fn(),
       })),
       getBackgroundShellRegistry: vi.fn(() => mockBackgroundShellRegistry),
-      getMonitorRegistry: vi.fn(() => ({
-        setNotificationCallback: vi.fn(),
-      })),
+      getMonitorRegistry: vi.fn(() => mockMonitorRegistry),
     } as unknown as Config;
     mockOnDebugMessage = vi.fn();
     mockHandleSlashCommand = vi.fn().mockResolvedValue(false);
@@ -6970,6 +6976,41 @@ describe('useGeminiStream', () => {
         expect(
           mockSendMessageStream.mock.calls[0][3].modelOverride,
         ).toBeUndefined();
+      });
+
+      it('drops a queued running monitor event after cancellation', async () => {
+        let monitorStatus = 'running';
+        mockMonitorRegistry.get.mockImplementation(() => ({
+          status: monitorStatus,
+        }));
+        renderTestHook();
+
+        const callback = mockMonitorRegistry.setNotificationCallback.mock
+          .calls[0][0] as (
+          displayText: string,
+          modelText: string,
+          meta: {
+            monitorId: string;
+            status: string;
+          },
+        ) => void;
+        mockSendMessageStream.mockClear();
+        mockAddItem.mockClear();
+
+        await act(async () => {
+          callback(
+            'Monitor "logs" event #1: ready',
+            '<task-notification>running</task-notification>',
+            { monitorId: 'mon_1', status: 'running' },
+          );
+          monitorStatus = 'cancelled';
+        });
+
+        expect(mockSendMessageStream).not.toHaveBeenCalled();
+        expect(mockAddItem).not.toHaveBeenCalledWith(
+          expect.objectContaining({ type: 'notification' }),
+          expect.any(Number),
+        );
       });
 
       // Regression for #7156: progress setState calls issued from inside a

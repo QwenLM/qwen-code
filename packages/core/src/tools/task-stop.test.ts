@@ -233,6 +233,8 @@ describe('TaskStopTool', () => {
   describe('monitor support', () => {
     it('cancels a running monitor', async () => {
       const ac = new AbortController();
+      const notificationCallback = vi.fn();
+      monitorRegistry.setNotificationCallback(notificationCallback);
       monitorRegistry.register({
         monitorId: 'mon_123',
         command: 'tail -f app.log',
@@ -259,6 +261,7 @@ describe('TaskStopTool', () => {
       expect(result.returnDisplay).toContain('watch app log');
       expect(monitorRegistry.get('mon_123')!.status).toBe('cancelled');
       expect(ac.signal.aborted).toBe(true);
+      expect(notificationCallback).not.toHaveBeenCalled();
     });
 
     it('returns NOT_RUNNING when the monitor already completed', async () => {

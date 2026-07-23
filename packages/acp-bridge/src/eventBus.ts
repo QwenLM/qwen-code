@@ -19,10 +19,19 @@
  *     Aborting the supplied AbortSignal closes the iterator promptly.
  */
 
+import { randomUUID } from 'node:crypto';
+
 export interface SessionReplaySnapshot {
   compactedTurns: BridgeEvent[];
   liveJournal: BridgeEvent[];
   lastEventId: number;
+  /**
+   * Present (and `true`) once the compaction engine threw during
+   * `ingest`/`seedReplayEvents` for this bus. The snapshot may be
+   * silently missing events from that point on; consumers should
+   * prefer a full transcript reload over trusting it.
+   */
+  degraded?: true;
 }
 
 export interface CompactionEngine {
@@ -73,6 +82,13 @@ export interface SubscribeOptions {
    * are replayed before live events flow.
    */
   lastEventId?: number;
+  /**
+   * Bus epoch token the consumer's `lastEventId` was minted under. When
+   * provided and it doesn't match this bus's `epoch`, the cursor belongs
+   * to a dead epoch (daemon restart rebuilt the bus) and a full resync is
+   * forced regardless of the numeric heuristic below.
+   */
+  epoch?: string;
   /** Aborts the subscription cleanly. */
   signal?: AbortSignal;
   /**
@@ -84,6 +100,13 @@ export interface SubscribeOptions {
 
 export interface EventBusOptions {
   maxQueuedBytes?: number;
+  /**
+   * Invoked once, on the FIRST compaction failure (`ingest` /
+   * `seedReplayEvents` throw). The bus itself doesn't know its session,
+   * so the creator injects context-aware diagnostics here. Subsequent
+   * failures only keep the degraded flag set, silently.
+   */
+  onCompactionError?: (err: unknown) => void;
 }
 
 const DEFAULT_MAX_QUEUED = 256;
@@ -250,6 +273,14 @@ export class SubscriberLimitExceededError extends Error {
 // https://github.com/QwenLM/qwen-code/pull/3889#issuecomment-4427773706
 export class EventBus {
   private nextId = 1;
+  /**
+   * Identity token for this bus instance. Regenerated on every construction
+   * (daemon restart / bus rebuild), never persisted — a cursor minted under
+   * a different epoch is provably stale no matter its numeric value.
+   */
+  readonly epoch: string = randomUUID();
+  private compactionDegraded = false;
+  private readonly onCompactionError?: (err: unknown) => void;
   private readonly ring: BridgeEvent[] = [];
   private readonly subs = new Set<InternalSub>();
   private readonly maxQueuedBytes: number;
@@ -262,10 +293,26 @@ export class EventBus {
     opts: EventBusOptions = {},
   ) {
     this.maxQueuedBytes = normalizeMaxQueuedBytes(opts.maxQueuedBytes);
+    this.onCompactionError = opts.onCompactionError;
   }
 
   snapshotReplay(): SessionReplaySnapshot | undefined {
-    return this.compactionEngine?.snapshot();
+    const snapshot = this.compactionEngine?.snapshot();
+    if (snapshot && this.compactionDegraded) {
+      return { ...snapshot, degraded: true };
+    }
+    return snapshot;
+  }
+
+  private markCompactionDegraded(err: unknown): void {
+    if (this.compactionDegraded) return;
+    this.compactionDegraded = true;
+    try {
+      this.onCompactionError?.(err);
+    } catch {
+      // Diagnostics callback must not break publish()'s never-throws
+      // contract.
+    }
   }
 
   /** Most recent id ever assigned by `publish`. 0 if no events published. */
@@ -300,9 +347,11 @@ export class EventBus {
     }
     try {
       this.compactionEngine?.seedReplayEvents(events);
-    } catch {
+    } catch (err) {
       // CompactionEngine is best-effort; mirror publish()'s never-throws
-      // contract for bulk replay seeding.
+      // contract for bulk replay seeding. Mark the snapshot degraded so
+      // consumers stop trusting it silently (DAEMON-008).
+      this.markCompactionDegraded(err);
     }
 
     // Seeded replay frames intentionally do not enter the reconnect ring. A
@@ -353,9 +402,11 @@ export class EventBus {
     this.ring.push(event);
     try {
       this.compactionEngine?.ingest(event);
-    } catch {
+    } catch (err) {
       // CompactionEngine is best-effort; a throw must not break the
-      // publish() never-throws contract (never-throws).
+      // publish() never-throws contract (never-throws). Mark the snapshot
+      // degraded so consumers stop trusting it silently (DAEMON-008).
+      this.markCompactionDegraded(err);
     }
     // Eviction-by-shift is O(n) once the ring is full. At the current
     // default `ringSize=8000` (the target) the per-publish shift work
@@ -585,13 +636,22 @@ export class EventBus {
       // a bare `replay_complete{replayedCount:0}` — a false "you're caught
       // up" while its accumulated reducer state is stale data from the dead
       // epoch. Emit `state_resync_required` (reason `epoch_reset`) first.
-      const epochReset = opts.lastEventId >= this.nextId;
+      //
+      // The numeric heuristic alone is defeated once the new epoch's event
+      // count catches up with the stale cursor. When the consumer also
+      // presents the epoch token it minted the cursor under, a mismatch
+      // forces the same resync deterministically (DAEMON-001); `detail`
+      // lets operators tell the two triggers apart.
+      const epochMismatch =
+        opts.epoch !== undefined && opts.epoch !== this.epoch;
+      const epochReset = epochMismatch || opts.lastEventId >= this.nextId;
       if (epochReset) {
         queue.forcePush({
           v: EVENT_SCHEMA_VERSION,
           type: 'state_resync_required',
           data: {
             reason: 'epoch_reset',
+            ...(epochMismatch ? { detail: 'epoch_mismatch' } : {}),
             lastDeliveredId: opts.lastEventId,
             // Ring is typically empty right after a restart; fall back to
             // `nextId` (the first id this epoch will assign) so the field
