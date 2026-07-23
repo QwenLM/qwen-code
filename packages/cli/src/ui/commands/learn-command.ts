@@ -58,16 +58,6 @@ export const learnCommand: SlashCommand = {
     const video = parseLearnVideoInput(rawInput);
 
     if (video) {
-      if (video.kind === 'youtube') {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            'YouTube page URLs cannot be sent as native video input. Download the video and pass a local video file to /learn.',
-          ),
-        };
-      }
-
       const authType = config.getContentGeneratorConfig().authType;
       const supportsVideoTransport =
         authType === AuthType.USE_OPENAI || authType === AuthType.QWEN_OAUTH;
@@ -84,15 +74,21 @@ export const learnCommand: SlashCommand = {
         };
       }
 
+      if (video.kind === 'youtube') {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'YouTube page URLs cannot be sent as native video input. Download the video and pass a local video file to /learn.',
+          ),
+        };
+      }
+
       let localVideoPart: Part | undefined;
       if (video.kind === 'local') {
+        let parts: Array<string | Part>;
         try {
-          const parts = await readPathFromWorkspace(video.source, config);
-          localVideoPart = parts.find(
-            (part): part is Part =>
-              typeof part !== 'string' &&
-              part.inlineData?.mimeType?.startsWith('video/') === true,
-          );
+          parts = await readPathFromWorkspace(video.source, config);
         } catch (error) {
           const reason = error instanceof Error ? error.message : String(error);
           return {
@@ -104,11 +100,34 @@ export const learnCommand: SlashCommand = {
           };
         }
 
+        localVideoPart = parts.find(
+          (part): part is Part =>
+            typeof part !== 'string' &&
+            part.inlineData?.mimeType?.startsWith('video/') === true,
+        );
+        // mime/lite may not recognise the extension (e.g. .m4v → video/x-m4v
+        // lives in otherTypes only). Fall back to the parser's own mapping.
         if (!localVideoPart) {
+          const rawPart = parts.find(
+            (part): part is Part =>
+              typeof part !== 'string' && part.inlineData != null,
+          );
+          if (rawPart?.inlineData) {
+            rawPart.inlineData.mimeType = video.mimeType;
+            localVideoPart = rawPart;
+          }
+        }
+
+        if (!localVideoPart) {
+          const errorDetail = parts
+            .filter((p): p is string => typeof p === 'string')
+            .join(' ');
           return {
             type: 'message',
             messageType: 'error',
-            content: t('The local video could not be attached for /learn.'),
+            content: errorDetail
+              ? `${t('The local video could not be attached for /learn.')} ${errorDetail}`
+              : t('The local video could not be attached for /learn.'),
           };
         }
       }

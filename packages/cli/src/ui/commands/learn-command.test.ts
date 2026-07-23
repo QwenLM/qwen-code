@@ -20,6 +20,21 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+function createVideoCapableContext() {
+  return createMockCommandContext({
+    services: {
+      config: {
+        getProjectRoot: () => '/tmp/test-project',
+        getEffectiveInputModalities: () => ({ video: true }),
+        getContentGeneratorConfig: () => ({
+          authType: AuthType.USE_OPENAI,
+        }),
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any,
+    },
+  });
+}
+
 describe('learnCommand', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -113,16 +128,7 @@ describe('learnCommand', () => {
   );
 
   it('attaches a local video through the video-specific /learn path', async () => {
-    const ctx = createMockCommandContext({
-      services: {
-        config: {
-          getProjectRoot: () => '/tmp/test-project',
-          getEffectiveInputModalities: () => ({ video: true }),
-          getContentGeneratorConfig: () => ({ authType: AuthType.USE_OPENAI }),
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any,
-      },
-    });
+    const ctx = createVideoCapableContext();
     const result = await learnCommand.action!(
       ctx,
       './tutorial.mp4 focus on the hover animation',
@@ -141,15 +147,44 @@ describe('learnCommand', () => {
     });
   });
 
-  it('rejects a YouTube page URL with local-file guidance', async () => {
-    const ctx = createMockCommandContext({
-      services: {
-        config: {
-          getProjectRoot: () => '/tmp/test-project',
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        } as any,
+  it('falls back to the parser MIME type when mime/lite does not recognise the extension', async () => {
+    mockReadPathFromWorkspace.mockResolvedValueOnce([
+      {
+        inlineData: {
+          data: 'BBBB',
+          mimeType: 'application/octet-stream',
+          displayName: 'tutorial.m4v',
+        },
       },
+    ]);
+    const ctx = createVideoCapableContext();
+    const result = await learnCommand.action!(ctx, './tutorial.m4v');
+
+    expect(result).toMatchObject({
+      type: 'submit_prompt',
+      content: [
+        { inlineData: { mimeType: 'video/x-m4v', data: 'BBBB' } },
+        { text: expect.stringContaining('references/source.md') },
+      ],
     });
+  });
+
+  it('surfaces text diagnostics when the read succeeds but returns no video part', async () => {
+    mockReadPathFromWorkspace.mockResolvedValueOnce([
+      'File exceeds the 10MB data URI limit after base64 encoding (12.34MB encoded).',
+    ]);
+    const ctx = createVideoCapableContext();
+    const result = await learnCommand.action!(ctx, './large-video.mp4');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('10MB data URI limit'),
+    });
+  });
+
+  it('rejects a YouTube page URL with local-file guidance', async () => {
+    const ctx = createVideoCapableContext();
     const result = await learnCommand.action!(ctx, 'https://youtu.be/abc123');
 
     expect(result).toMatchObject({
@@ -159,20 +194,33 @@ describe('learnCommand', () => {
     });
   });
 
-  it('rejects a local video that cannot be attached', async () => {
-    mockReadPathFromWorkspace.mockRejectedValueOnce(
-      new Error('Absolute path is outside of the allowed workspace'),
-    );
+  it('rejects a YouTube URL with the capability error on a text-only model', async () => {
     const ctx = createMockCommandContext({
       services: {
         config: {
           getProjectRoot: () => '/tmp/test-project',
-          getEffectiveInputModalities: () => ({ video: true }),
-          getContentGeneratorConfig: () => ({ authType: AuthType.USE_OPENAI }),
+          getEffectiveInputModalities: () => ({ video: false }),
+          getContentGeneratorConfig: () => ({
+            authType: AuthType.USE_OPENAI,
+          }),
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } as any,
       },
     });
+    const result = await learnCommand.action!(ctx, 'https://youtu.be/abc123');
+
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringMatching(/native video input/i),
+    });
+  });
+
+  it('rejects a local video that cannot be attached', async () => {
+    mockReadPathFromWorkspace.mockRejectedValueOnce(
+      new Error('Absolute path is outside of the allowed workspace'),
+    );
+    const ctx = createVideoCapableContext();
     const result = await learnCommand.action!(ctx, '/tmp/tutorial.mp4');
 
     expect(result).toMatchObject({

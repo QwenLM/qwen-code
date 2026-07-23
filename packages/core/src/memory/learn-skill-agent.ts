@@ -105,6 +105,15 @@ export function parseLearnVideoInput(rawInput: string): LearnVideoInput | null {
   };
 }
 
+async function buildSkillContext(projectRoot: string): Promise<{
+  skillsRoot: string;
+  existingNames: string[];
+}> {
+  const skillsRoot = getProjectSkillsRoot(projectRoot);
+  const existingNames = await listExistingSkillDirNames(projectRoot);
+  return { skillsRoot, existingNames };
+}
+
 /**
  * Build a prompt that instructs the main model to create a skill from the
  * given knowledge source. Used by the `/learn` slash command via
@@ -116,12 +125,11 @@ export async function buildLearnSkillPrompt(
   rawInput: string,
   projectRoot: string,
 ): Promise<string> {
-  const skillsRoot = getProjectSkillsRoot(projectRoot);
-  const existing = await listExistingSkillDirNames(projectRoot);
+  const { skillsRoot, existingNames } = await buildSkillContext(projectRoot);
   const existingLine =
-    existing.length === 0
+    existingNames.length === 0
       ? ''
-      : `\nExisting skill directories (do NOT reuse these names): ${existing.join(', ')}\n`;
+      : `\nExisting skill directories (do NOT reuse these names): ${existingNames.join(', ')}\n`;
 
   return [
     'Create a reusable skill from the following knowledge source.',
@@ -171,12 +179,11 @@ export async function buildLearnVideoSkillRequest(
     throw new Error('YouTube page URLs are not native video files.');
   }
 
-  const skillsRoot = getProjectSkillsRoot(projectRoot);
-  const existing = await listExistingSkillDirNames(projectRoot);
+  const { skillsRoot, existingNames } = await buildSkillContext(projectRoot);
   const existingLine =
-    existing.length === 0
+    existingNames.length === 0
       ? ''
-      : `Existing skill directories (do NOT reuse these names): ${existing.join(', ')}`;
+      : `Existing skill directories (do NOT reuse these names): ${existingNames.join(', ')}`;
   const focus =
     video.focus ??
     'No focus was provided. Distill the primary workflow demonstrated in the video.';
