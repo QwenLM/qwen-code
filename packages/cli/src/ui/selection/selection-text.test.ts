@@ -14,8 +14,6 @@ const cell = (value: string, fullWidth = false): FrameCell => ({
   value,
   fullWidth,
   styles: [],
-  selectable: true,
-  flowId: 1,
 });
 
 /** Build a frame from plain strings, expanding wide glyphs into cell + spacer. */
@@ -34,12 +32,7 @@ function frameFromLines(lines: string[]): ReadonlyFrame {
     return row;
   });
   const width = Math.max(0, ...cells.map((r) => r.length));
-  return {
-    width,
-    height: cells.length,
-    cells,
-    boundaries: cells.map(() => Array.from({ length: width }, () => null)),
-  };
+  return { width, height: cells.length, cells };
 }
 
 describe('SelectionState', () => {

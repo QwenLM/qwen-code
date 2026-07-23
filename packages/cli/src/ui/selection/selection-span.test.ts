@@ -13,8 +13,6 @@ const cell = (value: string, fullWidth = false): FrameCell => ({
   value,
   fullWidth,
   styles: [],
-  selectable: true,
-  flowId: 1,
 });
 
 function frameFromLines(lines: string[]): ReadonlyFrame {
@@ -31,12 +29,7 @@ function frameFromLines(lines: string[]): ReadonlyFrame {
     return row;
   });
   const width = Math.max(0, ...cells.map((r) => r.length));
-  return {
-    width,
-    height: cells.length,
-    cells,
-    boundaries: cells.map(() => Array.from({ length: width }, () => null)),
-  };
+  return { width, height: cells.length, cells };
 }
 
 describe('wordSpanAt', () => {
