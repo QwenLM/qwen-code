@@ -7869,7 +7869,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                     purpose: 'text',
                   },
                 ),
-                MCP_RESTART_TIMEOUT_MS,
+                SESSION_GENERATION_TIMEOUT_MS,
                 SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart,
               ),
               getChannelClosedReject(channelInfo),
