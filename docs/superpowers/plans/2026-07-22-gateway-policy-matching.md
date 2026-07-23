@@ -19,7 +19,8 @@
 - **The enforcer's existing security contract is untouched** (`enforcer.ts:38-54`): fail-closed on empty policy, fail-safe with no `requestId`/approve option, never throws, one-time `allow_once` votes only, audit detail never carries args/paths/prompt.
 - **`policy explain` and `policy lint` must keep working.** They build contexts from CLI flags, not frames, and stay daemon-free.
 - **Scope exclusions:** `originScope`/`sessionTag` are NOT populated by this arc (no source exists — see the design). No daemon field, no remote approval-mode surface, no runtime "why", no sandboxing, no credential filtering.
-- **Spec-artifact note (decide at handoff, not silently):** this arc is fork-only; it does not create an OpenSpec change in `qwen-code-remote`. The policy _file schema_ does change (new `match.operation`, `match.tool` alias semantics), so an OpenSpec delta against the `policy-engine` capability is a reasonable follow-up if that schema is to be normative.
+- **Two repos.** Task 0 authors an OpenSpec change in `/home/evan/projects/qwen-code-remote` (on a new branch `fix-policy-frame-matching`, PR'd to `main` like prior features). Tasks 1–9 are implementation in the `qwen-code` fork on `add-remote-control-spec`. Spec first, per the repo's convention.
+- **Never write a partial-content `## MODIFIED Requirements` fragment.** If a MODIFIED block is used it MUST carry the _complete_ requirement text (header + every scenario); a fragment causes archive-time data loss. This footgun has recurred in prior changes — see Task 0.
 - **Commit after every task.** Pre-commit hooks run prettier/eslint on staged files; let them reformat.
 
 ---
@@ -39,6 +40,88 @@
 - `packages/rc-gateway/src/policy/enforcer.test.ts` — migrate to real frame shapes.
 - `packages/rc-gateway/src/policy/evaluator.test.ts`, `loader.test.ts`, `explain.ts`/its test — follow the widened context.
 - `packages/rc-gateway/docs/walkthrough.md` — correct the policy path and document the behavior change.
+
+---
+
+## Task 0: OpenSpec change (qwen-code-remote)
+
+**Files (all in `/home/evan/projects/qwen-code-remote`):**
+
+- Create: `openspec/changes/fix-policy-frame-matching/proposal.md`
+- Create: `openspec/changes/fix-policy-frame-matching/design.md`
+- Create: `openspec/changes/fix-policy-frame-matching/tasks.md`
+- Create: `openspec/changes/fix-policy-frame-matching/specs/policy-engine/spec.md`
+- Possibly modify: the authoritative `policy-engine` spec (see Step 1)
+
+**Interfaces:**
+
+- Produces: the normative record of the corrected matching semantics + the new `operation` dimension. No code depends on it; Tasks 1–9 implement it.
+
+- [ ] **Step 1: Establish where the authoritative policy-engine spec lives, and the repo's precedent**
+
+Run:
+
+```bash
+cd /home/evan/projects/qwen-code-remote
+git checkout -b fix-policy-frame-matching
+ls openspec/changes/ | head -30
+ls openspec/changes/archive/ 2>/dev/null | head -20
+sed -n '1,60p' openspec/changes/add-policy-engine/specs/policy-engine/spec.md
+cat openspec/config.yaml
+```
+
+Determine: is `add-policy-engine` still a pending change or archived? The
+authoritative `policy-engine` requirements live wherever that resolves to.
+Then follow the repo's established precedent — recent changes corrected
+shared/authoritative content by **direct edit** to the authoritative file and
+used their own change dir only for genuinely _new_ requirements. Record what
+you find in your report before writing anything.
+
+**Hard rule:** a `## MODIFIED Requirements` block, if you use one, MUST contain
+the COMPLETE requirement (its `### Requirement:` header, full RFC-2119 prose,
+and ALL its `#### Scenario:` blocks). Never a fragment — a partial MODIFIED
+file causes archive-time data loss, and this exact footgun has recurred here.
+Verify at the end: `grep -rn "MODIFIED Requirements" openspec/changes/fix-policy-frame-matching` and confirm any hit is a complete requirement.
+
+- [ ] **Step 2: Write `proposal.md`**
+
+Mirror the structure of a recent change (`# <name>` → `## Why` → `## What Changes`). The Why is the verified defect: the gateway policy engine reads `toolCall.name`/`toolCall.input`, but real ACP frames carry `{toolCallId, title, kind, rawInput}`, so `tool` degrades to the humanized title and `candidatePaths` always returns `[]` — every `tool:` and `pathGlob:` rule has been dead, and the enforcer's tests encode the bug via a synthetic `{name, input}` shape. What Changes: kind-based `tool` matching with tool-name aliases, path candidates from real parameter keys plus shell-derived paths, core-backed picomatch path matching, and a new `match.operation` dimension.
+
+- [ ] **Step 3: Write `design.md`**
+
+Copy the fork's design doc, `/home/evan/projects/qwen-code/docs/superpowers/specs/2026-07-22-gateway-policy-matching-design.md`, changing only the top heading to `# Design — fix-policy-frame-matching`. It already contains the Alternatives and Threat-model sections `openspec/config.yaml` requires.
+
+- [ ] **Step 4: Write the spec delta**
+
+In `specs/policy-engine/spec.md`, write requirements with RFC-2119 keywords, each with at least one `#### Scenario:` (GIVEN/WHEN/THEN). Cover:
+
+1. **Requirement: Permission-frame extraction** — the engine SHALL derive the matched tool from the ACP `toolCall.kind` and the matched arguments from `toolCall.rawInput`. Scenarios: a real execute frame matches a `tool: execute` rule; a real edit frame's `rawInput.file_path` supplies a path candidate; a malformed `toolCall` yields no match and falls through to the policy default.
+2. **Requirement: Tool-name aliases** — `match.tool` SHALL accept an ACP kind or a known tool name, normalizing the latter to its kind at load; an unknown value SHALL be a load error. Scenarios: `run_shell_command` normalizes to `execute`; `write_file` and `edit` both normalize to `edit`; `not_a_tool` fails to load.
+3. **Requirement: Path candidates and matching** — path candidates SHALL be collected from the call's real path parameters and, for `kind: execute`, from the file operations the shell command implies; `pathGlob` SHALL match with path normalization so equivalent spellings cannot bypass a rule. Scenarios: `cat .env` matches a `**/.env*` deny; `sub/../.env` matches the same rule.
+4. **Requirement: Operation dimension** — `match.operation` SHALL narrow a rule to `read`, `write`, or `execute`. Scenarios: a write to a protected path is denied while a read of it is not; an unknown operation value fails to load.
+5. **Requirement: Activation advisory** — because matching was previously inert, `policy lint` SHALL report allow rules as newly effective and SHALL warn when an `allow` rule uses a tool-name alias whose kind covers other tools. Scenarios: an `allow write_file` rule produces a widening warning; a `deny write_file` rule does not.
+
+Also state as a documented limitation that `originScope`/`sessionTag` remain unpopulated (no source exists) — matching the fork design, so spec and code agree.
+
+- [ ] **Step 5: Write `tasks.md`**
+
+Mirror a recent change's `tasks.md`: phase headers, each task a `- [ ] **N.M Title**` checkbox with nested `- **Status:** not-started` and a `- **Prompt:** >` blockquote. Summarize Tasks 0–9 of this plan.
+
+- [ ] **Step 6: Validate and commit**
+
+Run:
+
+```bash
+cd /home/evan/projects/qwen-code-remote && npx openspec validate fix-policy-frame-matching 2>&1 | tail -20
+grep -rn "MODIFIED Requirements" openspec/changes/fix-policy-frame-matching || echo "no MODIFIED blocks"
+```
+
+Expected: validation passes; any MODIFIED block is a complete requirement.
+
+```bash
+git add openspec/changes/fix-policy-frame-matching openspec/changes/add-policy-engine 2>/dev/null
+git commit -m "spec(fix-policy-frame-matching): correct policy matching semantics + operation dimension"
+```
 
 ---
 
@@ -1404,7 +1487,7 @@ git commit -m "docs(rc-gateway): correct policy path; document kind matching and
 
 ## Self-review checklist (run before the final review)
 
-- Spec coverage: frameContext (T1, T2) · picomatch pathGlob + ctx.paths (T3) · `match.operation` (T4) · tool aliases + operation schema (T5) · lint warnings (T6) · enforcer + real-frame tests (T7) · explain/lint still work (T8) · docs + activation note (T9). The design's `originScope`/`sessionTag` exclusion is pinned by a test in T7.
+- Spec coverage: OpenSpec change (T0) · frameContext (T1, T2) · picomatch pathGlob + ctx.paths (T3) · `match.operation` (T4) · tool aliases + operation schema (T5) · lint warnings (T6) · enforcer + real-frame tests (T7) · explain/lint still work (T8) · docs + activation note (T9). The design's `originScope`/`sessionTag` exclusion is pinned by a test in T7 and stated in T0's spec delta.
 - No placeholders; every code step shows real code.
 - Type consistency: `FrameContext`/`PolicyOperation`/`PATH_PARAM_KEYS` (T1) are used unchanged in T2/T3/T7; `TOOL_ALIAS_TO_KIND`/`POLICY_OPERATIONS` (T5) are used unchanged in T6.
 - No `packages/core` or `packages/cli` edits anywhere.
