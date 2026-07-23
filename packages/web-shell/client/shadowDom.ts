@@ -15,6 +15,18 @@ export interface ResolvedWebShellShadowDomOptions {
   styles?: string;
 }
 
+const PLUGIN_SHADOW_PANELS = new Set([
+  'plugins',
+  'extensions',
+  'mcp',
+  'skills',
+  'agents',
+]);
+
+export function isPluginShadowPanel(panel: string | null): boolean {
+  return panel !== null && PLUGIN_SHADOW_PANELS.has(panel);
+}
+
 export function resolveWebShellShadowDom(
   value: WebShellShadowDom | undefined,
 ): ResolvedWebShellShadowDomOptions {

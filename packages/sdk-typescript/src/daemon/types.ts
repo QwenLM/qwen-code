@@ -1721,10 +1721,17 @@ export interface DaemonWorkspaceAgentSummary {
   level: DaemonAgentLevel;
   isBuiltin: boolean;
   hasTools: boolean;
+  tools?: string[];
+  disallowedTools?: string[];
   model?: string;
   color?: string;
   background?: boolean;
   approvalMode?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  mcpServerNames?: string[];
+  hookEvents?: string[];
+  runConfig?: { max_time_minutes?: number; max_turns?: number };
   extensionName?: string;
   filePath?: string;
 }
@@ -1732,9 +1739,8 @@ export interface DaemonWorkspaceAgentSummary {
 export interface DaemonWorkspaceAgentDetail
   extends DaemonWorkspaceAgentSummary {
   systemPrompt: string;
-  tools?: string[];
-  disallowedTools?: string[];
-  runConfig?: { max_time_minutes?: number; max_turns?: number };
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
 }
 
 export interface DaemonWorkspaceAgentsStatus {
@@ -1760,6 +1766,10 @@ export interface DaemonCreateAgentRequest {
   runConfig?: { max_time_minutes?: number; max_turns?: number };
   color?: string;
   approvalMode?: string;
+  permissionMode?: string;
+  maxTurns?: number;
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
   background?: boolean;
 }
 
@@ -1783,10 +1793,14 @@ export interface DaemonUpdateAgentRequest {
   systemPrompt?: string;
   tools?: string[];
   disallowedTools?: string[];
-  model?: string;
+  model?: string | null;
   runConfig?: { max_time_minutes?: number; max_turns?: number };
-  color?: string;
-  approvalMode?: string;
+  color?: string | null;
+  approvalMode?: string | null;
+  permissionMode?: string | null;
+  maxTurns?: number | null;
+  mcpServers?: Record<string, unknown>;
+  hooks?: Record<string, unknown>;
   background?: boolean;
 }
 
