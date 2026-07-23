@@ -218,6 +218,34 @@ export const FleetView: React.FC<FleetViewProps> = ({
     }, 3000);
   }, []);
 
+  const deletePendingIdRef = useRef(deletePendingId);
+  deletePendingIdRef.current = deletePendingId;
+  const onDeleteRef = useRef(onDelete);
+  onDeleteRef.current = onDelete;
+
+  const handleDeleteRequest = useCallback(
+    (entry: FleetSessionEntry, fromPeek: boolean) => {
+      if (deletePendingIdRef.current === entry.sessionId) {
+        if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+        setDeletePendingId(null);
+        if (fromPeek) setViewMode('list');
+        const deleted = onDeleteRef.current(entry.sessionId);
+        showStatus(
+          deleted ? 'Session deleted' : 'Cannot delete the active session',
+        );
+      } else {
+        setDeletePendingId(entry.sessionId);
+        showStatus('Press Ctrl+X again to confirm deletion');
+        if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
+        deleteTimerRef.current = setTimeout(() => {
+          setDeletePendingId(null);
+          deleteTimerRef.current = null;
+        }, 2000);
+      }
+    },
+    [showStatus],
+  );
+
   const groups = useMemo(
     () =>
       groupMode === 'directory'
@@ -286,6 +314,10 @@ export const FleetView: React.FC<FleetViewProps> = ({
           setRenameValue((prev) => prev.slice(0, -1));
           return;
         }
+        if (key.paste) {
+          setRenameValue((prev) => prev + key.sequence);
+          return;
+        }
         if (
           key.sequence &&
           key.sequence.length === 1 &&
@@ -318,23 +350,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
           return;
         }
         if (key.ctrl && key.name === 'x' && selectedEntry) {
-          if (deletePendingId === selectedEntry.sessionId) {
-            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-            setDeletePendingId(null);
-            setViewMode('list');
-            const deleted = onDelete(selectedEntry.sessionId);
-            showStatus(
-              deleted ? 'Session deleted' : 'Cannot delete the active session',
-            );
-          } else {
-            setDeletePendingId(selectedEntry.sessionId);
-            showStatus('Press Ctrl+X again to confirm deletion');
-            if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-            deleteTimerRef.current = setTimeout(() => {
-              setDeletePendingId(null);
-              deleteTimerRef.current = null;
-            }, 2000);
-          }
+          handleDeleteRequest(selectedEntry, true);
           return;
         }
         return;
@@ -403,25 +419,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
           onClose();
         }
       } else if (key.ctrl && key.name === 'x' && selectedEntry) {
-        // Ctrl+X: delete on second press within 2s
-        if (deletePendingId === selectedEntry.sessionId) {
-          // Second press — confirm deletion
-          if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-          setDeletePendingId(null);
-          const deleted = onDelete(selectedEntry.sessionId);
-          showStatus(
-            deleted ? 'Session deleted' : 'Cannot delete the active session',
-          );
-        } else {
-          // First press — arm deletion
-          setDeletePendingId(selectedEntry.sessionId);
-          showStatus('Press Ctrl+X again to confirm deletion');
-          if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
-          deleteTimerRef.current = setTimeout(() => {
-            setDeletePendingId(null);
-            deleteTimerRef.current = null;
-          }, 2000);
-        }
+        handleDeleteRequest(selectedEntry, false);
       } else if (key.ctrl && key.name === 's') {
         onCycleGroupMode();
       } else if (key.ctrl && key.name === 'r') {
@@ -441,17 +439,16 @@ export const FleetView: React.FC<FleetViewProps> = ({
       clampedIndex,
       flatEntries.length,
       selectedEntry,
-      deletePendingId,
       onSelect,
       onAttach,
       onClose,
-      onDelete,
       onCreateNew,
       onCycleGroupMode,
       onDispatch,
       sessionService,
       onRefresh,
       showStatus,
+      handleDeleteRequest,
     ],
   );
 
@@ -528,7 +525,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
             <Box paddingX={1} paddingY={1}>
               <Text color={theme.text.secondary}>
                 {onDispatch
-                  ? 'No sessions. Type a task below and press Enter to start one.'
+                  ? 'No sessions found. Type a message below and press Enter to send.'
                   : 'No sessions found.'}
               </Text>
             </Box>
@@ -599,7 +596,7 @@ export const FleetView: React.FC<FleetViewProps> = ({
                 <Text
                   color={inputValue ? theme.text.primary : theme.text.secondary}
                 >
-                  {inputValue || 'describe a task for a new session'}
+                  {inputValue || 'type a message to send'}
                 </Text>
               )}
             </Box>

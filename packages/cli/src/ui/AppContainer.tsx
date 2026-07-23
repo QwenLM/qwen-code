@@ -3651,9 +3651,11 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleGlobalKeypress = useCallback(
     (key: Key) => {
-      // Fleet View owns all input while open; QUIT/EXIT close the view (not the app).
+      // Fleet View owns all input while open. Ctrl+D (EXIT) force-closes the
+      // view; Ctrl+C is left to FleetView's own handler (clears dispatch input
+      // or closes the view) so typed text isn't silently discarded.
       if (isFleetViewOpen) {
-        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
+        if (keyMatchers[Command.EXIT](key)) {
           setIsFleetViewOpen(false);
           setFleetDoubleTapPending(false);
         }
