@@ -105,6 +105,7 @@ describe('useCompletion', () => {
       expect(result.current.isPerfectMatch).toBe(false);
       expect(result.current.activeSuggestionIndex).toBe(-1);
       expect(result.current.visibleStartIndex).toBe(0);
+      expect(result.current.activeCategory).toBe('all');
     });
 
     it('does NOT reset skipNextClearRef, preserving the fix for Enter-accept', () => {
@@ -315,6 +316,26 @@ describe('useCompletion', () => {
       expect(result.current.activeCategory).toBe('all');
       expect(result.current.activeSuggestionIndex).toBe(0);
       expect(result.current.visibleStartIndex).toBe(0);
+    });
+
+    it('clamps activeSuggestionIndex when the suggestion list shrinks', () => {
+      const { result } = renderHook(() => useCompletion());
+      act(() => {
+        result.current.setSuggestions([
+          { label: 'a', value: 'a', category: 'file' as const },
+          { label: 'b', value: 'b', category: 'file' as const },
+          { label: 'c', value: 'c', category: 'file' as const },
+        ]);
+        result.current.setActiveSuggestionIndex(2);
+      });
+      expect(result.current.activeSuggestionIndex).toBe(2);
+
+      act(() => {
+        result.current.setSuggestions([
+          { label: 'a', value: 'a', category: 'file' as const },
+        ]);
+      });
+      expect(result.current.activeSuggestionIndex).toBe(0);
     });
   });
 });

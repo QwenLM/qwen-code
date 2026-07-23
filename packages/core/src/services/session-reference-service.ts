@@ -34,6 +34,10 @@ interface ThoughtPart {
   thought?: boolean;
 }
 
+interface CustomTitlePayload {
+  customTitle?: string;
+}
+
 /**
  * Loads a prior chat session and turns it into a deterministically slimmed,
  * read-only text block suitable for injecting into the current context as
@@ -73,19 +77,27 @@ export class SessionReferenceService {
 
     const title = opts.title ?? this.deriveTitle(records) ?? sessionId;
     const header = `--- Referenced session "${title}" (slimmed, read-only) ---`;
-    // Budget for the header and potential truncation marker so the final
-    // injected text stays within the caller's budget.
     const overhead = this.estimate([header, '[earlier turns omitted]']);
 
-    const kept = [...lines];
-    let truncated = false;
-    // Tail-retention: drop the oldest lines first until under budget, but
-    // always keep at least the newest line so an over-budget final turn still
-    // yields content (rather than collapsing to just the omission marker).
-    while (kept.length > 1 && this.estimate(kept) + overhead > budget) {
-      kept.shift();
-      truncated = true;
+    // Single-pass tail-retention: estimate each line once, then accumulate
+    // from the newest line backward until the budget is reached. Avoids the
+    // O(N²) cost of re-joining and re-scanning all remaining lines per
+    // dropped line (which dominated resolve() time for long sessions).
+    const perLine = lines.map((l) => this.estimate([l]));
+    let total = overhead;
+    let start = lines.length;
+    while (start > 0 && total + perLine[start - 1] <= budget) {
+      total += perLine[start - 1];
+      start--;
     }
+    // Always keep at least the newest line so an over-budget final turn
+    // still yields content (rather than collapsing to just the marker).
+    if (start === lines.length && lines.length > 0) {
+      start = lines.length - 1;
+    }
+    const kept = lines.slice(start);
+    const truncated = start > 0;
+
     const body =
       (truncated ? '[earlier turns omitted]\n' : '') + kept.join('\n');
     const text =
@@ -99,7 +111,7 @@ export class SessionReferenceService {
         sessionId,
         title,
         messageCount: records.length,
-        approxTokens: this.estimate(kept),
+        approxTokens: this.estimate(kept) + overhead,
       },
       truncated,
     };
@@ -152,6 +164,15 @@ export class SessionReferenceService {
   private static readonly TITLE_MAX_LENGTH = 80;
 
   private deriveTitle(records: ChatRecord[]): string | undefined {
+    // Prefer the user's explicitly set session title (custom_title system
+    // record) over the first user message, so a renamed session shows its
+    // chosen name rather than the original prompt.
+    for (const rec of records) {
+      if (rec.type === 'system' && rec.subtype === 'custom_title') {
+        const payload = rec.systemPayload as CustomTitlePayload | undefined;
+        if (payload?.customTitle) return payload.customTitle;
+      }
+    }
     for (const rec of records) {
       if (rec.type !== 'user') continue;
       const text = this.visibleText(rec.message);

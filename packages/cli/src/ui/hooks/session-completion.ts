@@ -34,9 +34,14 @@ export async function getSessionSuggestions(
     return [];
   }
 
+  // Strip the `session:` prefix when present. A bare `@session` (no colon)
+  // is treated as an empty filter so the user sees all sessions rather than
+  // filtering by the literal word "session".
   const stripped = pattern.startsWith(SESSION_MENTION_PREFIX)
     ? pattern.slice(SESSION_MENTION_PREFIX.length)
-    : pattern;
+    : pattern.toLowerCase() === 'session'
+      ? ''
+      : pattern;
   const needle = stripped.trim().toLowerCase();
   return items
     .map((s) => {

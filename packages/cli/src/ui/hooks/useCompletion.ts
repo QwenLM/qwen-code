@@ -107,6 +107,16 @@ export function useCompletion(
     }
   }, [availableCategories, activeCategory]);
 
+  // Clamp the active index when the filtered suggestion list shrinks within
+  // a still-existing category (e.g. async search returns fewer items).
+  useEffect(() => {
+    setActiveSuggestionIndex((prev) =>
+      prev >= suggestions.length && suggestions.length > 0
+        ? suggestions.length - 1
+        : prev,
+    );
+  }, [suggestions.length]);
+
   const switchCategory = useCallback(
     (direction: 1 | -1) => {
       setActiveCategory((cur) => {

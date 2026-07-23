@@ -240,6 +240,23 @@ describe('SessionReferenceService', () => {
     expect(res.text).toContain('(no textual content)');
     expect(res.truncated).toBe(false);
   });
+
+  it('includes header overhead in approxTokens', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1', { title: 'Test' });
+    if ('notFound' in res) throw new Error('unexpected');
+    // approxTokens must account for the header + omission marker overhead,
+    // not just the body lines.
+    const bodyOnly = svc['estimate'](['User: hello']);
+    expect(res.meta.approxTokens).toBeGreaterThan(bodyOnly);
+  });
 });
 
 describe('title derivation', () => {
@@ -260,6 +277,26 @@ describe('title derivation', () => {
     if ('notFound' in res) throw new Error('unexpected');
     expect(res.meta.title).toBe('Fix the auth bug');
     expect(res.text).toContain('Referenced session "Fix the auth bug"');
+  });
+
+  it('prefers a custom_title system record over the first user message', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'Auth bug investigation' },
+          message: undefined,
+        },
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Fix the auth bug' }] },
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('Auth bug investigation');
   });
 
   it('truncates a long first user message to 80 chars', async () => {

@@ -2564,7 +2564,7 @@ describe('InputPrompt', () => {
       ],
       activeSuggestionIndex: 0,
       isPerfectMatch: false,
-      availableCategories: ['all', 'file'],
+      availableCategories: ['all'],
       switchCategory,
     });
     props.buffer.setText('@file');

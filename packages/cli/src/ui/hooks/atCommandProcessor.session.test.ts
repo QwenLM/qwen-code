@@ -24,6 +24,7 @@ vi.mock('@qwen-code/qwen-code-core', async (orig) => {
 });
 
 import { handleAtCommand } from './atCommandProcessor.js';
+import { ToolCallStatus } from '../types.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
   FileDiscoveryService,
@@ -149,7 +150,8 @@ describe('handleAtCommand @session:', () => {
     // an error card explains the miss
     expect(
       result.toolDisplays?.some(
-        (d) => d.name === 'Referenced Session' && d.status !== undefined,
+        (d) =>
+          d.name === 'Referenced Session' && d.status === ToolCallStatus.Error,
       ),
     ).toBe(true);
   });

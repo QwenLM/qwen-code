@@ -96,6 +96,28 @@ describe('getSessionSuggestions', () => {
     expect(out[0].value).toBe('session:id-1');
   });
 
+  it('treats bare "session" (no colon) as an empty filter', async () => {
+    mockListSessions.mockResolvedValue({
+      items: [
+        {
+          sessionId: 'id-1',
+          customTitle: 'Fix auth bug',
+          prompt: 'fix auth',
+          mtime: 2,
+        },
+        {
+          sessionId: 'id-2',
+          customTitle: undefined,
+          prompt: 'add tests',
+          mtime: 1,
+        },
+      ],
+      hasMore: false,
+    });
+    const out = await getSessionSuggestions('/proj', 'session');
+    expect(out).toHaveLength(2);
+  });
+
   it('returns [] when listSessions throws (I/O failure)', async () => {
     mockListSessions.mockRejectedValue(new Error('disk gone'));
     const out = await getSessionSuggestions('/proj', '');

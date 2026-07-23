@@ -285,6 +285,25 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
+    // Session reference (`@session:<id|title>`): detected BEFORE MCP and
+    // filesystem resolution so the ':' in the token isn't mistaken for a path
+    // or intercepted by an MCP server literally named "session". Resolution
+    // (load + slim) happens after the loop; here we only collect and keep the
+    // token verbatim in the prompt text.
+    const sessionRef = parseSessionRef(pathName);
+    if (sessionRef) {
+      if (
+        !sessionMentions.some(
+          (m) =>
+            (m.ref.id ?? m.ref.title) === (sessionRef.id ?? sessionRef.title),
+        )
+      ) {
+        sessionMentions.push({ originalAtPath, ref: sessionRef });
+      }
+      atPathToResolvedSpecMap.set(originalAtPath, pathName);
+      continue;
+    }
+
     // MCP resource reference (`@server:uri`): detected BEFORE filesystem
     // resolution so a resource URI containing ':' / '//' isn't mistaken for
     // a path. Only matches when `server` is a configured MCP server; all
@@ -322,24 +341,6 @@ export async function resolveAtCommandQuery({
         `MCP server "${mcpServerRef.name}" not found among configured MCP servers. ` +
           `Available: ${Object.keys(config.getMcpServers() || {}).join(', ') || '(none)'}`,
       );
-      continue;
-    }
-
-    // Session reference (`@session:<id|title>`): detected BEFORE filesystem
-    // resolution so the ':' in the token isn't mistaken for a path. Resolution
-    // (load + slim) happens after the loop; here we only collect and keep the
-    // token verbatim in the prompt text.
-    const sessionRef = parseSessionRef(pathName);
-    if (sessionRef) {
-      if (
-        !sessionMentions.some(
-          (m) =>
-            (m.ref.id ?? m.ref.title) === (sessionRef.id ?? sessionRef.title),
-        )
-      ) {
-        sessionMentions.push({ originalAtPath, ref: sessionRef });
-      }
-      atPathToResolvedSpecMap.set(originalAtPath, pathName);
       continue;
     }
 
