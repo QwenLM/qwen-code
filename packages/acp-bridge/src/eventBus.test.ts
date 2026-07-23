@@ -1276,6 +1276,84 @@ describe('EventBus', () => {
     });
   });
 
+  describe('replay budget (DAEMON-011)', () => {
+    const bigPayload = () => 'x'.repeat(100);
+
+    it('truncates an over-budget replay burst and demands a resync', async () => {
+      const bus = new EventBus(100, undefined, undefined, {
+        replayBudgetBytes: 400,
+      });
+      for (let i = 0; i < 5; i++) {
+        bus.publish({ type: 'payload', data: bigPayload() });
+      }
+
+      const abort = new AbortController();
+      const iter = bus.subscribe({ lastEventId: 0, signal: abort.signal });
+      const it = iter[Symbol.asyncIterator]();
+      const frames: BridgeEvent[] = [];
+      for (let i = 0; i < 4; i++) {
+        frames.push((await it.next()).value as BridgeEvent);
+      }
+
+      // Two ~190-byte frames fit the 400-byte budget; the third trips it.
+      expect(frames[0]?.id).toBe(1);
+      expect(frames[1]?.id).toBe(2);
+      expect(frames[2]?.type).toBe('state_resync_required');
+      expect(frames[2]?.data).toEqual({
+        reason: 'replay_budget_exceeded',
+        lastDeliveredId: 2,
+        earliestAvailableId: 3,
+      });
+      expect(frames[3]?.type).toBe('replay_complete');
+      expect((frames[3]?.data as { replayedCount: number }).replayedCount).toBe(
+        2,
+      );
+
+      // Truncation is NOT eviction: the subscription stays live.
+      const nextLive = it.next();
+      const live = bus.publish({ type: 'after', data: 1 });
+      expect(((await nextLive).value as BridgeEvent).id).toBe(live?.id);
+      abort.abort();
+    });
+
+    it('replays a single frame larger than the budget (first-item rule)', async () => {
+      const bus = new EventBus(100, undefined, undefined, {
+        replayBudgetBytes: 10,
+      });
+      bus.publish({ type: 'payload', data: bigPayload() });
+
+      const abort = new AbortController();
+      const frames = await collect(
+        bus.subscribe({ lastEventId: 0, signal: abort.signal }),
+        2,
+      );
+      expect(frames[0]?.id).toBe(1);
+      expect(frames[1]?.type).toBe('replay_complete');
+      abort.abort();
+    });
+
+    it('does not emit a resync frame when the replay fits the budget', async () => {
+      const bus = new EventBus();
+      for (let i = 0; i < 5; i++) {
+        bus.publish({ type: 'payload', data: bigPayload() });
+      }
+
+      const abort = new AbortController();
+      const frames = await collect(
+        bus.subscribe({ lastEventId: 0, signal: abort.signal }),
+        6,
+      );
+      expect(frames.some((e) => e.type === 'state_resync_required')).toBe(
+        false,
+      );
+      expect(frames[5]?.type).toBe('replay_complete');
+      expect((frames[5]?.data as { replayedCount: number }).replayedCount).toBe(
+        5,
+      );
+      abort.abort();
+    });
+  });
+
   describe('epoch token (DAEMON-001)', () => {
     it('exposes a stable per-instance epoch that differs across instances', () => {
       const a = new EventBus();

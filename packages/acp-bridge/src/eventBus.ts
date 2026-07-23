@@ -107,6 +107,20 @@ export interface SubscribeOptions {
 export interface EventBusOptions {
   maxQueuedBytes?: number;
   /**
+   * Total serialized-byte budget for the `Last-Event-ID` replay burst a
+   * single `subscribe()` may force-push (DAEMON-011). Replay frames bypass
+   * the per-subscriber live caps by design (dropping them would break the
+   * resume contract), so without this bound a reconnect against a large
+   * ring materializes the whole backlog into the queue at once — up to
+   * `maxSubscribers` times under concurrent reconnects. When the budget
+   * runs out mid-replay the remaining frames are dropped and the consumer
+   * gets a `state_resync_required` (`reason: 'replay_budget_exceeded'`)
+   * telling it to recover via `loadSession`. NOT named `maxReplayBytes`:
+   * that name is taken by the compaction engine's compacted-window budget
+   * and both appear in the same `createSessionEventBus` construction.
+   */
+  replayBudgetBytes?: number;
+  /**
    * Invoked once, on the FIRST compaction failure (`ingest` /
    * `seedReplayEvents` throw). The bus itself doesn't know its session,
    * so the creator injects context-aware diagnostics here. Subsequent
@@ -117,6 +131,7 @@ export interface EventBusOptions {
 
 const DEFAULT_MAX_QUEUED = 256;
 export const DEFAULT_MAX_QUEUED_BYTES = 2 * 1024 * 1024;
+export const DEFAULT_REPLAY_BUDGET_BYTES = 4 * DEFAULT_MAX_QUEUED_BYTES;
 /**
  * Default replay-ring depth per session. Sized for a 5-second
  * reconnect window over a chatty turn — a single long-running prompt
@@ -163,6 +178,14 @@ function normalizeMaxQueuedBytes(value: number | undefined): number {
   if (value === undefined) return DEFAULT_MAX_QUEUED_BYTES;
   if (!Number.isSafeInteger(value) || value < 1) {
     throw new TypeError('maxQueuedBytes must be a positive safe integer');
+  }
+  return value;
+}
+
+function normalizeReplayBudgetBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_REPLAY_BUDGET_BYTES;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError('replayBudgetBytes must be a positive safe integer');
   }
   return value;
 }
@@ -296,6 +319,7 @@ export class EventBus {
   private readonly ring: BridgeEvent[] = [];
   private readonly subs = new Set<InternalSub>();
   private readonly maxQueuedBytes: number;
+  private readonly replayBudgetBytes: number;
   private closed = false;
 
   constructor(
@@ -305,6 +329,7 @@ export class EventBus {
     opts: EventBusOptions = {},
   ) {
     this.maxQueuedBytes = normalizeMaxQueuedBytes(opts.maxQueuedBytes);
+    this.replayBudgetBytes = normalizeReplayBudgetBytes(opts.replayBudgetBytes);
     this.onCompactionError = opts.onCompactionError;
   }
 
@@ -724,10 +749,14 @@ export class EventBus {
       // cap. The cap protects against a slow live consumer; replay is
       // already historical and silently dropping it would undermine the
       // `Last-Event-ID` resume contract (the consumer would think they
-      // caught up). If the gap really is enormous, the queue will be
-      // primed with a long backlog the consumer drains at its own pace.
+      // caught up). The bypass is still bounded: `replayBudgetBytes` caps
+      // the total serialized bytes one replay burst may materialize
+      // (DAEMON-011) — past it the remaining frames are dropped and the
+      // consumer is told to recover via loadSession (resync frame below).
       let replayedCount = 0;
       let lastReplayedId: number | undefined;
+      let replayBytes = 0;
+      let budgetExceededAtId: number | undefined;
       for (const e of this.ring) {
         // The ring only ever contains live events (publish() always
         // assigns an id before pushing to ring), so `e.id` is never
@@ -735,10 +764,39 @@ export class EventBus {
         // BridgeEvent.id is optional for synthetic terminal frames.
         // Guard explicitly to keep narrow typing without runtime cost.
         if (e.id !== undefined && e.id > replayFrom) {
+          if (budgetExceededAtId !== undefined) continue;
+          // Ring events passed publish's serializability gate, so sizing
+          // cannot fail here; `?? 0` keeps the accounting total-ordered
+          // if it ever does. Sized lazily per frame — replay is a
+          // low-frequency path.
+          replayBytes += serializedBridgeEventByteLength(e) ?? 0;
+          if (replayBytes > this.replayBudgetBytes && replayedCount > 0) {
+            budgetExceededAtId = e.id;
+            continue;
+          }
           queue.forcePush(e);
           replayedCount += 1;
           lastReplayedId = e.id;
         }
+      }
+      // Budget exhausted mid-replay: the frames already pushed are the
+      // contiguous prefix from `replayFrom + 1`, so the consumer applied
+      // them safely — but everything past `budgetExceededAtId` was
+      // dropped. Tell the consumer its accumulated state is no longer
+      // trustworthy (recover via loadSession), exactly like the
+      // ring-eviction path. `replayedCount > 0` above guarantees at least
+      // one frame always fits so a single event larger than the budget
+      // still resumes (parity with the live byte cap's first-item rule).
+      if (budgetExceededAtId !== undefined) {
+        queue.forcePush({
+          v: EVENT_SCHEMA_VERSION,
+          type: 'state_resync_required',
+          data: {
+            reason: 'replay_budget_exceeded',
+            lastDeliveredId: lastReplayedId ?? opts.lastEventId,
+            earliestAvailableId: budgetExceededAtId,
+          },
+        });
       }
       // Emit a `replay_complete` sentinel so consumers can deterministically
       // drop catch-up indicators. Fires both when replay actually
