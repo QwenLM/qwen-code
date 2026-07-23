@@ -21,6 +21,8 @@ import {
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
+  taskHasLegacyCondition,
+  taskHasLegacyRunMode,
   updateCronTasks,
 } from './cronTasksFile.js';
 import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
@@ -257,6 +259,13 @@ export class CronScheduler {
   // the live job away (or clear its pendingRemoval guard) as if it had
   // been deleted on disk.
   private pendingAdd = new Set<string>();
+  // Ids of legacy tasks (a pre-removal `isolated` task with a `condition`
+  // precondition) already reported as skipped, so the fail-closed remediation
+  // breadcrumb is logged once per task rather than on every file reload.
+  private warnedLegacyConditionIds = new Set<string>();
+  // Ids of bare `runMode: 'isolated'` legacy tasks already warned about — they
+  // still run (no safety gate), so this is a one-time behavior-change notice.
+  private warnedLegacyRunModeIds = new Set<string>();
   // Durable ids whose lastFiredAt persist is in flight after a fire — the tick
   // (on-time) OR a catch-up delivery. A reload racing that async write reads the
   // stale disk stamp, so it must not re-detect and re-fire the same slot. Only
@@ -298,6 +307,11 @@ export class CronScheduler {
   private fileWatcher: fsSync.FSWatcher | null = null;
   private lockProbeTimer: ReturnType<typeof setInterval> | null = null;
   private debounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Test-only auto-fire timers (QWEN_CODE_TEST_CRON_FAST). Each timer
+  // fires its job via forceFireJob after a short delay so integration
+  // tests don't wait for the wall-clock minute boundary. Cleared on
+  // stop()/destroy() so a session teardown never leaks a pending fire.
+  private testFireTimers = new Map<string, ReturnType<typeof setTimeout>>();
   // Catch-up work detected before start() installed onFire — flushed
   // through onFire as soon as it exists.
   private pendingFires: PendingFire[] = [];
@@ -356,6 +370,27 @@ export class CronScheduler {
     };
 
     this.jobs.set(id, job);
+
+    // Test seam: when QWEN_CODE_TEST_CRON_FAST is set, schedule an
+    // auto-fire for newly created session-only jobs so integration tests
+    // don't wait up to 60s for the wall-clock minute boundary. The timer
+    // fires once after the configured delay (default 5s), then the normal
+    // tick takes over for subsequent fires of recurring jobs. Timers are
+    // tracked in testFireTimers and cleared on stop()/destroy().
+    if (process.env['QWEN_CODE_TEST_CRON_FAST'] === '1' && !job.durable) {
+      const delayMs =
+        Number(process.env['QWEN_CODE_TEST_CRON_DELAY_MS']) || 5000;
+      const timer = setTimeout(() => {
+        this.testFireTimers.delete(id);
+        this.forceFireJob(id);
+      }, delayMs);
+      timer.unref();
+      this.testFireTimers.set(id, timer);
+      debugLogger.debug(
+        `Test seam: auto-fire scheduled for job ${id} in ${delayMs}ms`,
+      );
+    }
+
     return job;
   }
 
@@ -710,9 +745,44 @@ export class CronScheduler {
     // is no longer in this filtered set, so toggling off removes the job,
     // and toggling on reinstalls it on the next watcher reload. Absent
     // `enabled` counts as enabled, so tool-created tasks keep firing.
-    const tasks = read.filter(
-      (t) => hasParseableCron(t) && t.enabled !== false,
-    );
+    // Legacy safety gate — FAIL CLOSED. A task written by an older version as
+    // `runMode: 'isolated'` with a `condition` precondition only fired when the
+    // guard evaluated YES. That mode is gone, and `durableTaskToJob` no longer
+    // carries `condition`, so such a task would now fire inline and
+    // UNCONDITIONALLY — silently changing a safety gate ("only run if X") into
+    // "always run", with no user edit. Skip these entirely (left on disk, like
+    // an unparseable-cron entry) so the removal can never turn a guarded task
+    // into a runaway one; the user re-creates it if they still want it.
+    const tasks = read.filter((t) => {
+      if (!hasParseableCron(t) || t.enabled === false) return false;
+      if (taskHasLegacyCondition(t)) {
+        if (!this.warnedLegacyConditionIds.has(t.id)) {
+          this.warnedLegacyConditionIds.add(t.id);
+          // eslint-disable-next-line no-console -- operator-facing remediation breadcrumb for a silently-disabled task
+          console.warn(
+            `CronScheduler: scheduled task ${t.id} carries a legacy precondition ` +
+              `(isolated run mode was removed) and will NOT fire — recreate it if ` +
+              `you still want it to run.`,
+          );
+        }
+        return false;
+      }
+      // A bare `runMode: 'isolated'` task (no precondition) has no safety gate,
+      // so it still fires — but no longer in a fresh per-run session; it now
+      // accumulates history in its bound session. It runs, but warn once so an
+      // operator who relied on the clean slate knows why runs now differ.
+      if (taskHasLegacyRunMode(t) && !this.warnedLegacyRunModeIds.has(t.id)) {
+        this.warnedLegacyRunModeIds.add(t.id);
+        // eslint-disable-next-line no-console -- operator-facing behavior-change breadcrumb
+        console.warn(
+          `CronScheduler: scheduled task ${t.id} was created with the removed ` +
+            `'isolated' run mode; it now runs in its bound session (history ` +
+            `accumulates across runs). Recreate it and call create_sub_session ` +
+            `from the prompt for per-run isolation.`,
+        );
+      }
+      return true;
+    });
 
     const now = Date.now();
     const missedOneShots: DurableCronTask[] = [];
@@ -920,8 +990,14 @@ export class CronScheduler {
         // "defer to the owning session" path).
         for (const id of skipped) this.pendingRemoval.delete(id);
         if (runnable.length > 0) {
+          // The carrier is SYNTHETIC: its prompt is a notification about every
+          // task in `runnable`, not the command of any one of them.
+          const carrier = durableTaskToJob(
+            runnable[0]!,
+            this.recurringMaxAgeMs,
+          );
           onFire({
-            ...durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs),
+            ...carrier,
             prompt: buildMissedCronNotification(runnable),
             missed: true,
           });
@@ -1099,6 +1175,22 @@ export class CronScheduler {
   }
 
   /**
+   * Immediately fires a job by ID, bypassing the cron schedule check.
+   * Sets lastFiredAt to prevent the normal tick from re-firing the same
+   * minute slot. Returns true if the job existed and was fired, false
+   * otherwise. Primarily a test seam (see QWEN_CODE_TEST_CRON_FAST in
+   * create()); also useful for manual debug triggers.
+   */
+  forceFireJob(id: string): boolean {
+    const job = this.jobs.get(id);
+    if (!job || !this.onFire) return false;
+    job.lastFiredAt = Date.now();
+    debugLogger.debug(`forceFireJob: firing ${id} (${job.cronExpr})`);
+    this.onFire(job);
+    return true;
+  }
+
+  /**
    * Starts the scheduler tick. Calls `onFire` when a job is due.
    * Only fires when called — does not auto-fire missed intervals.
    */
@@ -1144,6 +1236,10 @@ export class CronScheduler {
       clearTimeout(this.debounceTimer);
       this.debounceTimer = null;
     }
+    // Clear any pending test-seam auto-fire timers so a torn-down
+    // scheduler never leaks a late forceFireJob call.
+    for (const timer of this.testFireTimers.values()) clearTimeout(timer);
+    this.testFireTimers.clear();
     if (this.wakeups.size > 0) {
       debugLogger.debug(`stop() discarding ${this.wakeups.size} wakeup(s)`);
       this.wakeups.clear();

@@ -20,14 +20,23 @@
  * the same capability class as `POST /session/:id/prompt` (both enqueue a
  * prompt that runs with tool access), and that route is non-strict too, so a
  * loopback web-shell without a token can manage its own schedule.
+ *
+ * The same CRUD handlers are mounted twice: once unqualified (`/scheduled-tasks`,
+ * bound to the primary workspace) and once workspace-qualified
+ * (`/workspaces/:workspace/scheduled-tasks`, resolving the cron file + session
+ * bridge of any registered workspace). Both share {@link
+ * registerScheduledTaskCrudRoutes}; they differ only in how the target
+ * workspace and its bridge are resolved per request, so a multi-workspace Web
+ * Shell manages each project's schedule against that project's own file.
  */
 
-import type { Application, Request, RequestHandler } from 'express';
+import type { Application, Request, RequestHandler, Response } from 'express';
 import {
   readCronTasks,
   updateCronTasks,
   generateCronTaskId,
   appendCronRun,
+  taskHasLegacyCondition,
   parseCron,
   nextFireTime,
   nextDurableFireMs,
@@ -38,6 +47,11 @@ import {
   type CronTaskRun,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import type { WorkspaceRegistry } from '../workspace-registry.js';
+import {
+  requireTrustedWorkspaceRuntime,
+  resolveWorkspaceRuntimeFromParam,
+} from '../workspace-route-runtime.js';
 
 // The per-file create cap, shared with the scheduler's MAX_JOBS. The scheduler
 // caps DURABLE loads against a durable-only budget of MAX_JOBS (independent of
@@ -57,6 +71,8 @@ export interface ScheduledTasksSessionBridge {
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   /** Give the task's session a readable name so it's recognizable in the
@@ -100,6 +116,36 @@ export function scheduledTaskSessionName(label: string): string {
   return `⏰ ${short}`;
 }
 
+/**
+ * The workspace a scheduled-task request operates on: the cron file lives under
+ * `workspaceCwd`, and `bridge` mints/tears down the task's bound session. A
+ * missing bridge means tasks are created unbound (shared per-project
+ * durable-owner firing) — the same fallback a bridge-less embedding gets.
+ */
+interface ScheduledTaskTarget {
+  workspaceCwd: string;
+  bridge?: ScheduledTasksSessionBridge;
+}
+
+/**
+ * Resolves the target workspace for one request. Returns null when it can't be
+ * resolved (unknown or untrusted `:workspace`), in which case the resolver has
+ * ALREADY sent the error response and the handler must just return.
+ */
+type ResolveScheduledTaskTarget = (
+  req: Request,
+  res: Response,
+) => ScheduledTaskTarget | null;
+
+interface RegisterScheduledTaskCrudRoutesDeps {
+  /** Path prefix the five routes mount under: `''` for the primary
+   * (unqualified) surface, `'/workspaces/:workspace'` for the qualified one. */
+  prefix: string;
+  resolveTarget: ResolveScheduledTaskTarget;
+  mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  safeBody: (req: Request) => Record<string, unknown>;
+}
+
 interface RegisterScheduledTasksRoutesDeps {
   boundWorkspace: string;
   mutate: (opts?: { strict?: boolean }) => RequestHandler;
@@ -110,6 +156,21 @@ interface RegisterScheduledTasksRoutesDeps {
    * fall back to the shared per-project durable-owner firing model.
    */
   bridge?: ScheduledTasksSessionBridge;
+}
+
+interface RegisterWorkspaceQualifiedScheduledTasksRoutesDeps {
+  workspaceRegistry: WorkspaceRegistry;
+  mutate: (opts?: { strict?: boolean }) => RequestHandler;
+  safeBody: (req: Request) => Record<string, unknown>;
+  /**
+   * When true, a task created through a qualified route binds to a dedicated
+   * session in the target workspace (its bridge mints one). Must mirror the
+   * primary surface's `bridge` gate — the daemon only keeps bound sessions
+   * resident + rehydrated when scheduled-task session management is on, so
+   * binding without it would leave the task firing in a session nothing
+   * revives. Off → tasks are created unbound (shared-owner firing).
+   */
+  manageScheduledTaskSessions: boolean;
 }
 
 /** On-the-wire task shape — normalizes the optional on-disk fields so the
@@ -150,10 +211,15 @@ function toView(task: DurableCronTask): ScheduledTaskView {
     prompt: task.prompt,
     recurring: task.recurring,
     // Absent enabled defaults to enabled — tool-created tasks never write it.
-    enabled: task.enabled !== false,
+    // A legacy guarded task (isolated run mode + precondition, both removed) is
+    // reported as NOT runnable — `enabled: false` with no `nextRunAt` — so the
+    // management UI never shows it as active or offers a Run affordance for a
+    // task the scheduler refuses to fire. Fail closed on the read path too, not
+    // just the tick. `POST /:id/run` rejects it as a second guard.
+    enabled: task.enabled !== false && !taskHasLegacyCondition(task),
     createdAt: task.createdAt,
     lastFiredAt: task.lastFiredAt,
-    nextRunAt: computeNextRunAt(task),
+    nextRunAt: taskHasLegacyCondition(task) ? null : computeNextRunAt(task),
     // The task's bound session (its run-history transcript), or null for an
     // unbound tool-created/legacy task.
     sessionId:
@@ -207,23 +273,26 @@ function canonicalCron(cron: string): string | null {
   }
 }
 
-export function registerScheduledTasksRoutes(
+function registerScheduledTaskCrudRoutes(
   app: Application,
-  deps: RegisterScheduledTasksRoutesDeps,
+  deps: RegisterScheduledTaskCrudRoutesDeps,
 ): void {
-  const { boundWorkspace, mutate, safeBody, bridge } = deps;
+  const { prefix, resolveTarget, mutate, safeBody } = deps;
+  const base = `${prefix}/scheduled-tasks`;
 
   // ── List ──────────────────────────────────────────────────────────
-  app.get('/scheduled-tasks', async (_req, res) => {
+  app.get(base, async (req, res) => {
+    const target = resolveTarget(req, res);
+    if (!target) return;
     try {
-      const tasks = await readCronTasks(boundWorkspace);
+      const tasks = await readCronTasks(target.workspaceCwd);
       res.status(200).json({ v: 1, tasks: tasks.map(toView) });
     } catch (err) {
       // A malformed/corrupt file throws (fix-or-delete contract) rather than
       // reading as empty — surface it instead of hiding the user's tasks
       // behind a silent [].
       writeStderrLine(
-        `qwen serve: GET /scheduled-tasks failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: GET ${base} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
         error: 'Failed to read scheduled tasks (the tasks file may be corrupt)',
@@ -233,7 +302,10 @@ export function registerScheduledTasksRoutes(
   });
 
   // ── Create ────────────────────────────────────────────────────────
-  app.post('/scheduled-tasks', mutate(), async (req, res) => {
+  app.post(base, mutate(), async (req, res) => {
+    const target = resolveTarget(req, res);
+    if (!target) return;
+    const { workspaceCwd, bridge } = target;
     const body = safeBody(req);
 
     const cron = typeof body['cron'] === 'string' ? body['cron'].trim() : '';
@@ -297,8 +369,14 @@ export function registerScheduledTasksRoutes(
       });
       return;
     }
+    const removedField = findRemovedTaskField(body);
+    if (removedField) {
+      res.status(400).json(removedFieldError(removedField));
+      return;
+    }
     const recurring = body['recurring'] !== false;
     const enabled = body['enabled'] !== false;
+    const taskId = generateCronTaskId();
 
     // Mint the task's dedicated session up front. The task is BOUND to it and
     // fires only inside it — its transcript becomes the task's run history, and
@@ -320,9 +398,7 @@ export function registerScheduledTasksRoutes(
       // an orphan with no owning task. Best-effort — the write-lock cap check
       // below stays authoritative for the concurrent-create race.
       try {
-        if (
-          (await readCronTasks(boundWorkspace)).length >= MAX_SCHEDULED_TASKS
-        ) {
+        if ((await readCronTasks(workspaceCwd)).length >= MAX_SCHEDULED_TASKS) {
           res.status(409).json({
             error: `Maximum number of scheduled tasks (${MAX_SCHEDULED_TASKS}) reached`,
             code: 'max_tasks_reached',
@@ -334,8 +410,10 @@ export function registerScheduledTasksRoutes(
       }
       try {
         const session = await bridge.spawnOrAttach({
-          workspaceCwd: boundWorkspace,
+          workspaceCwd,
           sessionScope: 'thread',
+          sourceType: 'scheduled_task',
+          sourceId: taskId,
         });
         boundSessionId = session.sessionId;
         // Name the session after the task so it's recognizable in the session
@@ -349,7 +427,7 @@ export function registerScheduledTasksRoutes(
         }
       } catch (err) {
         writeStderrLine(
-          `qwen serve: POST /scheduled-tasks failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
+          `qwen serve: POST ${base} failed to create the task's session: ${err instanceof Error ? err.message : String(err)}`,
         );
         res.status(500).json({
           error: "Failed to create the task's session",
@@ -361,7 +439,7 @@ export function registerScheduledTasksRoutes(
 
     const now = Date.now();
     const task: DurableCronTask = {
-      id: generateCronTaskId(),
+      id: taskId,
       cron,
       prompt,
       recurring,
@@ -383,7 +461,7 @@ export function registerScheduledTasksRoutes(
     const rollbackSession = async () => {
       if (boundSessionId !== undefined && bridge) {
         await bridge.closeSession(boundSessionId).catch(() => {});
-        await new SessionService(boundWorkspace)
+        await new SessionService(workspaceCwd)
           .removeSession(boundSessionId)
           .catch(() => {});
       }
@@ -391,7 +469,7 @@ export function registerScheduledTasksRoutes(
 
     let overCap = false;
     try {
-      await updateCronTasks(boundWorkspace, (tasks) => {
+      await updateCronTasks(workspaceCwd, (tasks) => {
         // Cap check under the write lock so two concurrent creates can't both
         // slip past a stale count. Returning the input unchanged is a no-op
         // (no write), which the flag below turns into a 409.
@@ -404,7 +482,7 @@ export function registerScheduledTasksRoutes(
     } catch (err) {
       await rollbackSession();
       writeStderrLine(
-        `qwen serve: POST /scheduled-tasks failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: POST ${base} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
         error: 'Failed to create scheduled task',
@@ -424,7 +502,10 @@ export function registerScheduledTasksRoutes(
   });
 
   // ── Update (name / enabled / cron / prompt / recurring) ────────────
-  app.patch('/scheduled-tasks/:id', mutate(), async (req, res) => {
+  app.patch(`${base}/:id`, mutate(), async (req, res) => {
+    const target = resolveTarget(req, res);
+    if (!target) return;
+    const { workspaceCwd, bridge } = target;
     const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
     if (id.length === 0) {
       res
@@ -439,6 +520,12 @@ export function registerScheduledTasksRoutes(
     // would mean holding the lock to reject a bad request.
     const patch: Partial<DurableCronTask> = {};
     let clearName = false;
+
+    const removedPatchField = findRemovedTaskField(body);
+    if (removedPatchField) {
+      res.status(400).json(removedFieldError(removedPatchField));
+      return;
+    }
 
     if ('cron' in body) {
       const cron = typeof body['cron'] === 'string' ? body['cron'].trim() : '';
@@ -500,7 +587,6 @@ export function registerScheduledTasksRoutes(
       }
       patch.enabled = body['enabled'];
     }
-
     if (Object.keys(patch).length === 0 && !clearName) {
       res.status(400).json({
         error: 'No updatable fields provided',
@@ -512,12 +598,23 @@ export function registerScheduledTasksRoutes(
     let found = false;
     let updated: DurableCronTask | undefined;
     let blockedByArchive = false;
+    let blockedLegacy = false;
     try {
-      await updateCronTasks(boundWorkspace, (tasks) => {
+      await updateCronTasks(workspaceCwd, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A legacy guarded task (isolated + precondition, both removed) can't be
+        // enabled: `toView` reports it disabled, so the only PATCH the Web Shell
+        // sends for it is the Enable toggle — which would 200 here and then read
+        // back disabled again, an Enable control that can never succeed with no
+        // error explaining why. Reject the enable with the recreate remediation
+        // instead of acknowledging an update that changes nothing runnable.
+        if (patch.enabled === true && taskHasLegacyCondition(current)) {
+          blockedLegacy = true;
+          return tasks; // no write
+        }
         // A task disabled BY archiving its session (`disabledByArchive`) can't
         // be re-enabled through this generic PATCH: its bound session is still
         // archived and can't fire, so flipping `enabled: true` here would show
@@ -583,11 +680,19 @@ export function registerScheduledTasksRoutes(
       });
     } catch (err) {
       writeStderrLine(
-        `qwen serve: PATCH /scheduled-tasks/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: PATCH ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
         error: 'Failed to update scheduled task',
         code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (blockedLegacy) {
+      res.status(409).json({
+        error:
+          'This task uses the removed isolated run mode with a precondition and can no longer be enabled or run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+        code: 'task_legacy_unsupported',
       });
       return;
     }
@@ -626,7 +731,10 @@ export function registerScheduledTasksRoutes(
   });
 
   // ── Delete ────────────────────────────────────────────────────────
-  app.delete('/scheduled-tasks/:id', mutate(), async (req, res) => {
+  app.delete(`${base}/:id`, mutate(), async (req, res) => {
+    const target = resolveTarget(req, res);
+    if (!target) return;
+    const { workspaceCwd, bridge } = target;
     const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
     if (id.length === 0) {
       res
@@ -641,7 +749,7 @@ export function registerScheduledTasksRoutes(
     let boundSessionId: string | undefined;
     let removed = false;
     try {
-      await updateCronTasks(boundWorkspace, (tasks) => {
+      await updateCronTasks(workspaceCwd, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
         if (idx === -1) return tasks; // not found → no write
         const match = tasks[idx]!.sessionId;
@@ -653,7 +761,7 @@ export function registerScheduledTasksRoutes(
       });
     } catch (err) {
       writeStderrLine(
-        `qwen serve: DELETE /scheduled-tasks/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: DELETE ${base}/${id} failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
         error: 'Failed to delete scheduled task',
@@ -678,7 +786,10 @@ export function registerScheduledTasksRoutes(
   // prompt itself is executed by the client in the task's bound session; this
   // route only records that a run happened, keeping manual and scheduled runs
   // consistent in the history.
-  app.post('/scheduled-tasks/:id/run', mutate(), async (req, res) => {
+  app.post(`${base}/:id/run`, mutate(), async (req, res) => {
+    const target = resolveTarget(req, res);
+    if (!target) return;
+    const { workspaceCwd } = target;
     const id = typeof req.params['id'] === 'string' ? req.params['id'] : '';
     if (id.length === 0) {
       res
@@ -694,13 +805,24 @@ export function registerScheduledTasksRoutes(
     const now = Date.now();
     let found = false;
     let blockedDisabled = false;
+    let blockedLegacy = false;
     let updated: DurableCronTask | undefined;
     try {
-      await updateCronTasks(boundWorkspace, (tasks) => {
+      await updateCronTasks(workspaceCwd, (tasks) => {
         const idx = tasks.findIndex((t) => t.id === id);
         if (idx === -1) return tasks; // not found → no write
         found = true;
         const current = tasks[idx]!;
+        // A legacy guarded task (isolated + precondition, both removed) must not
+        // run from ANY path. The scheduler already skips it and the list view
+        // reports it disabled; reject a direct `/run` too — its on-disk
+        // `enabled` may still be true, so the disabled check below is not enough.
+        // Executing it here would run the prompt with its safety gate ignored,
+        // which is exactly what the removal must never allow.
+        if (taskHasLegacyCondition(current)) {
+          blockedLegacy = true;
+          return tasks; // no write
+        }
         // A disabled task must not record a manual run: it's paused (and if it
         // was disabled by archiving its session, that session can't even fire),
         // so stamping lastFiredAt + a 'manual' entry would write a phantom "ran"
@@ -731,11 +853,19 @@ export function registerScheduledTasksRoutes(
       });
     } catch (err) {
       writeStderrLine(
-        `qwen serve: POST /scheduled-tasks/${id}/run failed: ${err instanceof Error ? err.message : String(err)}`,
+        `qwen serve: POST ${base}/${id}/run failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({
         error: 'Failed to record scheduled task run',
         code: 'scheduled_tasks_write_failed',
+      });
+      return;
+    }
+    if (blockedLegacy) {
+      res.status(409).json({
+        error:
+          'This task uses the removed isolated run mode with a precondition and can no longer run. Recreate it (and call the `create_sub_session` tool from the prompt if you need per-run isolation).',
+        code: 'task_legacy_unsupported',
       });
       return;
     }
@@ -759,6 +889,83 @@ export function registerScheduledTasksRoutes(
     if (!updated.recurring) view.nextRunAt = null;
     res.status(200).json(view);
   });
+}
+
+/**
+ * The primary (unqualified) `/scheduled-tasks` surface, bound to the daemon's
+ * primary workspace. Every request resolves to the same fixed workspace + bridge.
+ */
+export function registerScheduledTasksRoutes(
+  app: Application,
+  deps: RegisterScheduledTasksRoutesDeps,
+): void {
+  const { boundWorkspace, mutate, safeBody, bridge } = deps;
+  registerScheduledTaskCrudRoutes(app, {
+    prefix: '',
+    resolveTarget: () => ({ workspaceCwd: boundWorkspace, bridge }),
+    mutate,
+    safeBody,
+  });
+}
+
+/**
+ * The workspace-qualified `/workspaces/:workspace/scheduled-tasks` surface. Each
+ * request resolves `:workspace` (a workspace id or absolute path) to a
+ * registered runtime, requiring it be trusted before any read or write — the
+ * same gate the other qualified routes use — then targets that workspace's cron
+ * file and, when session management is on, its bridge. Lets a multi-workspace
+ * Web Shell manage every registered project's schedule, not just the primary's.
+ */
+export function registerWorkspaceQualifiedScheduledTasksRoutes(
+  app: Application,
+  deps: RegisterWorkspaceQualifiedScheduledTasksRoutesDeps,
+): void {
+  const { workspaceRegistry, mutate, safeBody, manageScheduledTaskSessions } =
+    deps;
+  registerScheduledTaskCrudRoutes(app, {
+    prefix: '/workspaces/:workspace',
+    resolveTarget: (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime) return null;
+      if (!requireTrustedWorkspaceRuntime(runtime, res)) return null;
+      return {
+        workspaceCwd: runtime.workspaceCwd,
+        // Mirror the primary surface: only bind a session when management is on,
+        // so a bound task always has something to keep it resident + rehydrate it.
+        bridge: manageScheduledTaskSessions ? runtime.bridge : undefined,
+      };
+    },
+    mutate,
+    safeBody,
+  });
+}
+
+/**
+ * Fields that a previous version accepted but this one has removed (the
+ * isolated run mode and its precondition). A body that still carries one comes
+ * from a stale SDK, a cached Web Shell, or a hand-written client that believes
+ * it is installing a per-run / guarded task. Left unvalidated they would be
+ * ignored as unknown keys and the caller would silently get a plain,
+ * unconditional shared task — a materially different task from the one it asked
+ * for. Detected on both POST and PATCH so those clients fail closed.
+ */
+const REMOVED_TASK_FIELDS = ['runMode', 'condition'] as const;
+
+function findRemovedTaskField(
+  body: Record<string, unknown>,
+): (typeof REMOVED_TASK_FIELDS)[number] | undefined {
+  return REMOVED_TASK_FIELDS.find((field) => field in body);
+}
+
+function removedFieldError(field: string): { error: string; code: string } {
+  return {
+    error: `\`${field}\` is no longer supported: the isolated scheduled-task run mode was removed. Every task now runs in its bound session; call the \`create_sub_session\` tool from the task prompt for per-run isolation.`,
+    code: 'unsupported_field',
+  };
 }
 
 /**

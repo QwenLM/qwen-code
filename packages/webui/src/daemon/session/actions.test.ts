@@ -154,6 +154,110 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection()).toMatchObject({ sessionId: 'session-b' });
   });
 
+  it('forwards options.workspaceCwd to the detached create branch', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession({ workspaceCwd: '/ws/secondary' });
+
+    expect(createDetachedSession).toHaveBeenCalledWith('/ws/secondary', {});
+  });
+
+  it('omits the workspaceCwd override on the detached branch by default', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession();
+
+    expect(createDetachedSession).toHaveBeenCalledWith(undefined, {});
+  });
+
+  it('forwards options.approvalMode to the detached create branch', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession({ approvalMode: 'yolo' });
+
+    expect(createDetachedSession).toHaveBeenCalledWith(undefined, {
+      approvalMode: 'yolo',
+    });
+  });
+
+  it('forwards options.sourceType to the detached create branch', async () => {
+    const nextSession = createMockSession('session-b');
+    const createDetachedSession = vi.fn(async () => nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+    });
+
+    await actions.createSession({ sourceType: 'default' });
+
+    expect(createDetachedSession).toHaveBeenCalledWith(undefined, {
+      sourceType: 'default',
+    });
+  });
+
+  it('merges options.workspaceCwd into the active session request', async () => {
+    const existingSession = createMockSession('session-a');
+    const nextSession = createMockSession('session-b');
+    existingSession.client.createOrAttachSession.mockResolvedValue(nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: existingSession,
+    });
+
+    await actions.createSession({ workspaceCwd: '/ws/secondary' });
+
+    expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceCwd: '/ws/secondary' }),
+    );
+  });
+
+  it('folds options.approvalMode into the active session request', async () => {
+    const existingSession = createMockSession('session-a');
+    const nextSession = createMockSession('session-b');
+    existingSession.client.createOrAttachSession.mockResolvedValue(nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: existingSession,
+    });
+
+    await actions.createSession({ approvalMode: 'yolo' });
+
+    expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalMode: 'yolo' }),
+    );
+  });
+
+  it('folds options.sourceType into the active session request', async () => {
+    const existingSession = createMockSession('session-a');
+    const nextSession = createMockSession('session-b');
+    existingSession.client.createOrAttachSession.mockResolvedValue(nextSession);
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: existingSession,
+    });
+
+    await actions.createSession({ sourceType: 'default' });
+
+    expect(existingSession.client.createOrAttachSession).toHaveBeenCalledWith(
+      expect.objectContaining({ sourceType: 'default' }),
+    );
+  });
+
   it('does not restore a detached session after the session was cleared', async () => {
     const nextSession = createMockSession('session-b');
     const deferred = createDeferred<DaemonSessionClient>();
@@ -197,6 +301,118 @@ describe('createDaemonSessionActions', () => {
       catchingUp: undefined,
     });
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+  });
+
+  it('detaches the old same-session attachment after its replacement loads', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+
+    const loadPromise = actions.loadSession('session-a');
+
+    expect(existingSession.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(existingSession);
+    expect(store.reset).not.toHaveBeenCalled();
+    expect(getConnection()).toEqual({
+      status: 'connected',
+      sessionId: 'session-a',
+    });
+
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.resolve();
+    await loadPromise;
+    expect(existingSession.detach).toHaveBeenCalledOnce();
+  });
+
+  it('keeps the old same-session attachment when its replacement fails', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, pendingSessionLoadRef, sessionRef } = createActionsHarness(
+      {
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      },
+    );
+
+    const loadPromise = actions.loadSession('session-a');
+    const pendingLoad = pendingSessionLoadRef.current;
+    pendingSessionLoadRef.current = undefined;
+    clearTimeout(pendingLoad?.timeout);
+    pendingLoad?.reject(new Error('load failed'));
+
+    await expect(loadPromise).rejects.toThrow('load failed');
+    expect(existingSession.detach).not.toHaveBeenCalled();
+    expect(sessionRef.current).toBe(existingSession);
+  });
+
+  it('does not start a session reload with an aborted signal', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, pendingSessionLoadRef, sessionRef, store } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      actions.reloadSession(controller.signal),
+    ).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(pendingSessionLoadRef.current).toBeUndefined();
+    expect(sessionRef.current).toBe(existingSession);
+    expect(existingSession.detach).not.toHaveBeenCalled();
+    expect(store.reset).not.toHaveBeenCalled();
+  });
+
+  it('keeps the reload abort signal with the pending load', () => {
+    const controller = new AbortController();
+    const { actions, pendingSessionLoadRef } = createActionsHarness({
+      connection: { status: 'connected', sessionId: 'session-a' },
+      session: createMockSession('session-a'),
+    });
+
+    void actions.reloadSession(controller.signal).catch(() => undefined);
+
+    expect(pendingSessionLoadRef.current?.signal).toBe(controller.signal);
+    clearTimeout(pendingSessionLoadRef.current?.timeout);
+    pendingSessionLoadRef.current?.reject(
+      new DOMException('Test cleanup', 'AbortError'),
+    );
+    pendingSessionLoadRef.current = undefined;
+  });
+
+  it('keeps the active workspace when a session load omits one', () => {
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: {
+        status: 'connected',
+        workspaceCwd: '/workspace/secondary',
+      },
+      setRestoreWorkspaceCwd,
+    });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
+  });
+
+  it('forwards the workspace when resuming a session', () => {
+    const setRestoreWorkspaceCwd = vi.fn();
+    const { actions } = createActionsHarness({
+      connection: { status: 'connected', workspaceCwd: '/workspace/primary' },
+      setRestoreWorkspaceCwd,
+    });
+
+    void actions
+      .resumeSession('session-b', { workspaceCwd: '/workspace/secondary' })
+      .catch(() => undefined);
+
+    expect(setRestoreWorkspaceCwd).toHaveBeenCalledWith('/workspace/secondary');
   });
 
   it('clears transcript loading when a session switch fails', async () => {
@@ -333,6 +549,41 @@ describe('createDaemonSessionActions', () => {
     );
     expect(pendingSessionLoadRef.current).toBeUndefined();
   });
+
+  it('restarts the event stream after prompt admission', async () => {
+    const restartEventStream = vi.fn();
+    const session = createMockSession('session-a');
+    const { actions } = createActionsHarness({
+      restartEventStream,
+      session,
+    });
+
+    const prompt = actions.sendPrompt('hello');
+
+    await vi.waitFor(() => {
+      expect(restartEventStream).toHaveBeenCalledWith('session-a');
+    });
+    await actions.cancel();
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+  });
+
+  it('does not restart the event stream when the admitted prompt is stale', async () => {
+    const restartEventStream = vi.fn();
+    const session = createMockSession('session-a');
+    const accepted = createDeferred<{ promptId: string }>();
+    session.submitPrompt.mockReturnValueOnce(accepted.promise);
+    const { actions, activePromptsRef } = createActionsHarness({
+      restartEventStream,
+      session,
+    });
+
+    const prompt = actions.sendPrompt('hello');
+    activePromptsRef.current.clear();
+    accepted.resolve({ promptId: 'prompt-1' });
+
+    await expect(prompt).resolves.toEqual({ stopReason: 'cancelled' });
+    expect(restartEventStream).not.toHaveBeenCalled();
+  });
 });
 
 function createActionsHarness(
@@ -343,8 +594,10 @@ function createActionsHarness(
     createDetachedSession?: ReturnType<typeof vi.fn>;
     manualSessionClearRef?: { current: boolean };
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
+    restartEventStream?: ReturnType<typeof vi.fn>;
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
+    setRestoreWorkspaceCwd?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   let connection: DaemonConnectionState = opts.connection ?? {
@@ -362,12 +615,13 @@ function createActionsHarness(
     ({ current: undefined } as {
       current: PendingSessionLoad | undefined;
     });
+  const store = {
+    reset: vi.fn(),
+    appendLocalUserMessage: vi.fn(),
+    dispatch: vi.fn(),
+  };
   const actions = createDaemonSessionActions({
-    store: {
-      reset: vi.fn(),
-      appendLocalUserMessage: vi.fn(),
-      dispatch: vi.fn(),
-    } as never,
+    store: store as never,
     sessionRef,
     activePromptsRef,
     settledPromptsRef: { current: new Map<string, SettledPrompt>() },
@@ -388,12 +642,14 @@ function createActionsHarness(
     getConnection: () => connection,
     hasSessionActivePrompt: () => false,
     resetCurrentSessionActivePrompt: vi.fn(),
+    restartEventStream: opts.restartEventStream ?? vi.fn(),
     addNotice: opts.addNotice ?? vi.fn(),
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
     setPromptStatus: vi.fn(),
     setRestoreSessionId: vi.fn(),
+    setRestoreWorkspaceCwd: opts.setRestoreWorkspaceCwd ?? vi.fn(),
     setRestoreMode: vi.fn(),
     setRestoreSessionNonce: vi.fn(),
     setAttachSessionNonce: opts.setAttachSessionNonce ?? vi.fn(),
@@ -401,9 +657,11 @@ function createActionsHarness(
   });
   return {
     actions,
+    activePromptsRef,
     getConnection: () => connection,
     pendingSessionLoadRef,
     sessionRef,
+    store,
   };
 }
 
@@ -418,7 +676,9 @@ function createMockSession(sessionId: string) {
       listWorkspaceSessions: vi.fn(),
       closeSession: vi.fn(),
     },
+    cancel: vi.fn(async () => undefined),
     detach: vi.fn(async () => undefined),
+    submitPrompt: vi.fn(async () => ({ promptId: 'prompt-1' })),
   };
 }
 

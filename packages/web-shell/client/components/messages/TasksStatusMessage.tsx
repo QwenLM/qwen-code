@@ -15,12 +15,19 @@ import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
-import { localizeToolDisplayName } from './toolFormatting';
+import {
+  localizeToolDisplayName,
+  sanitizeControlChars,
+} from './toolFormatting';
 import styles from './TasksStatusMessage.module.css';
 
 const ACTIVE_EVENT = 'web-shell:tasks-panel-active';
 const REFRESH_INTERVAL_MS = 3000;
 const LIST_MAX_ROWS = 8;
+// Compact web panel budget — intentionally smaller than core's
+// MAX_RECENT_ACTIVITIES (10) retention cap, which the CLI's full-height
+// detail dialog renders in full.
+const MAX_DISPLAYED_ACTIVITIES = 5;
 
 export interface SerializedTasksMessage {
   snapshot: DaemonSessionTasksStatus;
@@ -219,9 +226,12 @@ function formatActivityLabel(
   const singleLineDescription = description
     ? description.replace(/\s*\n\s*/g, ' ').trim()
     : '';
-  return singleLineDescription
+  const label = singleLineDescription
     ? `${display}(${singleLineDescription})`
     : display;
+  // The description is LLM-generated; strip bare control bytes so a stray
+  // \r/BEL/ESC can't garble the panel (matches the CLI surfaces).
+  return sanitizeControlChars(label);
 }
 
 export function TasksStatusMessage({
@@ -710,7 +720,7 @@ function detailTitle(
 ): string {
   switch (task.kind) {
     case 'agent':
-      return `${task.subagentType ?? 'Agent'} › ${task.label}`;
+      return `${task.subagentType ?? t('common.agent')} › ${task.label}`;
     case 'shell':
       return `${t('tasks.kind.shell')} › ${task.command}`;
     case 'monitor':
@@ -922,21 +932,23 @@ function TaskDetail({
               {t('tasks.detail.progress')}
             </div>
             <div className={styles.detailContent}>
-              {task.recentActivities.slice(-5).map((a, i, arr) => {
-                const isLast = i === arr.length - 1;
-                const desc = formatActivityLabel(a.name, a.description, t);
-                return (
-                  <div
-                    key={`${a.at}-${i}`}
-                    className={
-                      isLast ? styles.activityCurrent : styles.activityPast
-                    }
-                  >
-                    {isLast ? '> ' : '  '}
-                    {desc}
-                  </div>
-                );
-              })}
+              {task.recentActivities
+                .slice(-MAX_DISPLAYED_ACTIVITIES)
+                .map((a, i, arr) => {
+                  const isLast = i === arr.length - 1;
+                  const desc = formatActivityLabel(a.name, a.description, t);
+                  return (
+                    <div
+                      key={`${a.at}-${i}`}
+                      className={
+                        isLast ? styles.activityCurrent : styles.activityPast
+                      }
+                    >
+                      {isLast ? '> ' : '  '}
+                      {desc}
+                    </div>
+                  );
+                })}
             </div>
           </div>
         )}

@@ -33,6 +33,7 @@ interface MockToolOptions {
   maxOutputChars?: number;
   truncateKeep?: 'head' | 'tail' | 'both';
   getDefaultPermission?: () => Promise<PermissionDecision>;
+  requiresUserInteraction?: () => boolean;
   getConfirmationDetails?: (
     signal: AbortSignal,
   ) => Promise<ToolCallConfirmationDetails>;
@@ -70,6 +71,10 @@ class MockToolInvocation extends BaseToolInvocation<
     return this.tool.getDefaultPermission();
   }
 
+  override requiresUserInteraction(): boolean {
+    return this.tool.requiresUserInteraction();
+  }
+
   override getConfirmationDetails(
     abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
@@ -89,6 +94,7 @@ export class MockTool extends BaseDeclarativeTool<
   ToolResult
 > {
   getDefaultPermission: () => Promise<PermissionDecision>;
+  requiresUserInteraction: () => boolean;
   getConfirmationDetails: (
     signal: AbortSignal,
   ) => Promise<ToolCallConfirmationDetails>;
@@ -132,6 +138,9 @@ export class MockTool extends BaseDeclarativeTool<
       this.getDefaultPermission = () =>
         Promise.resolve('allow' as PermissionDecision);
     }
+
+    this.requiresUserInteraction =
+      options.requiresUserInteraction ?? (() => false);
 
     if (options.getConfirmationDetails) {
       this.getConfirmationDetails = options.getConfirmationDetails;
@@ -226,7 +235,7 @@ export class MockModifiableTool
   extends BaseDeclarativeTool<Record<string, unknown>, ToolResult>
   implements ModifiableDeclarativeTool<Record<string, unknown>>
 {
-  // Should be overrided in test file. Functionality will be updated in follow
+  // Should be overridden in test file. Functionality will be updated in follow
   // up PR which has MockModifiableTool expect MockTool
   executeFn: (params: Record<string, unknown>) => ToolResult | undefined = () =>
     undefined;

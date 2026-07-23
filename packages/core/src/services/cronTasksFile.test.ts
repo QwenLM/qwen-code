@@ -223,6 +223,25 @@ describe('cronTasksFile', () => {
       );
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
+
+    it('round-trips a run entry with the legacy withheld marker', async () => {
+      const task = makeTask({
+        lastFiredAt: 1718000300000,
+        runs: [{ at: 1718000300000, kind: 'scheduled', withheld: true }],
+      });
+      await writeCronTasks(tmpDir, [task]);
+      expect(await readCronTasks(tmpDir)).toEqual([task]);
+    });
+
+    it('rejects a run entry whose withheld is not a boolean', async () => {
+      await seedTasksFile(
+        tmpDir,
+        JSON.stringify([
+          { ...makeTask(), runs: [{ at: 1718000240000, withheld: 'yes' }] },
+        ]),
+      );
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
   });
 
   describe('appendCronRun', () => {

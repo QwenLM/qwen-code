@@ -179,6 +179,37 @@ describe('SettingsSchema', () => {
       expect(voiceModel.showInDialog).toBe(false);
     });
 
+    it('should define the built-in Explore model setting', () => {
+      const exploreModel =
+        getSettingsSchema().agents.properties.builtin.properties.exploreModel;
+
+      expect(exploreModel.type).toBe('string');
+      expect(exploreModel.category).toBe('Model');
+      expect(exploreModel.default).toBe('inherit');
+      expect(exploreModel.requiresRestart).toBe(true);
+      expect(exploreModel.showInDialog).toBe(false);
+    });
+
+    it('should define visionBridgeTimeoutMs as a restart-required bounded integer', () => {
+      const timeout = getSettingsSchema().visionBridgeTimeoutMs;
+
+      expect(timeout).toBeDefined();
+      expect(timeout.type).toBe('integer');
+      expect(timeout.category).toBe('Model');
+      expect(timeout.default).toBeUndefined();
+      expect(timeout.minimum).toBe(1);
+      expect(timeout.maximum).toBe(2_147_483_647);
+      expect(timeout.requiresRestart).toBe(true);
+      expect(timeout.showInDialog).toBe(false);
+    });
+
+    it('should define count-based model limits as integers', () => {
+      const model = getSettingsSchema().model.properties;
+
+      expect(model.maxSessionTurns.type).toBe('integer');
+      expect(model.maxToolCallsPerTurn.type).toBe('integer');
+    });
+
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
       expect(
         getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,

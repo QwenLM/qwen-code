@@ -5,6 +5,7 @@
  */
 
 import type React from 'react';
+import { useRef } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import {
@@ -58,6 +59,11 @@ interface ThinkMessageProps {
   availableTerminalHeight?: number;
   contentWidth: number;
   durationMs?: number;
+  /**
+   * VP mode only: the collapsed line is mouse-clickable, so the hint advertises
+   * "click" in addition to the keyboard toggle. Non-VP has no click handler.
+   */
+  clickable?: boolean;
 }
 
 interface ThinkMessageContentProps {
@@ -264,12 +270,13 @@ export const AssistantMessageContent: React.FC<
 );
 
 const MAX_STREAMING_THINKING_VISUAL_LINES = 4;
+const BRIEF_THOUGHT_THRESHOLD_MS = 1_000;
 
 function tailVisualLines(
   text: string,
   width: number,
   maxLines: number,
-): string {
+): string[] {
   const charBudget = maxLines * width * 2;
   let sliceStart = Math.max(0, text.length - charBudget);
   if (sliceStart > 0) {
@@ -279,109 +286,49 @@ function tailVisualLines(
     }
   }
   const lines = wrapToVisualLines(text.slice(sliceStart), width);
-  return lines.slice(-maxLines).join('\n');
+  return lines.slice(-maxLines);
 }
 
-export const ThinkMessage: React.FC<ThinkMessageProps> = ({
-  text,
-  isPending,
-  expanded = false,
-  availableTerminalHeight,
-  contentWidth,
-  durationMs,
-}) => {
-  const durationSuffix =
-    durationMs != null ? ` ${formatDuration(durationMs)}` : '';
-
-  if (!isPending && !expanded) {
-    const label =
-      durationMs != null
-        ? `${t('Thought for')} ${formatDuration(durationMs)}`
-        : t('Thinking');
-    return (
-      <Text dimColor italic>
-        {THINKING_ICON}
-        {label} {t('({{keyHint}} to expand)', { keyHint: toggleKeyHint })}
-      </Text>
-    );
+const ThinkBody: React.FC<{
+  text: string;
+  isPending: boolean;
+  expanded: boolean;
+  availableTerminalHeight?: number;
+  contentWidth: number;
+}> = ({ text, isPending, expanded, availableTerminalHeight, contentWidth }) => {
+  // Grow-only height tracker for the streaming window: the rendered block never
+  // shrinks below the tallest it has already reached for this thought, so a
+  // blank paragraph separator (`\n\n`) transiently entering/leaving the tail
+  // window can't make the block jump 2→3→5 rows and flicker. Reset when the
+  // block stops streaming or when the buffer shrinks (a new thought replaced it).
+  const maxSeenLinesRef = useRef(0);
+  const prevTextLenRef = useRef(0);
+  if (!isPending || text.length < prevTextLenRef.current) {
+    maxSeenLinesRef.current = 0;
   }
+  prevTextLenRef.current = text.length;
 
-  if (isPending) {
+  if (!isPending && !expanded) return null;
+
+  if (isPending && !expanded) {
     const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
-    return (
-      <Box flexDirection="column">
-        <Text dimColor italic>
-          {THINKING_ICON_PENDING}
-          {t('Thinking')}…{durationSuffix}
-        </Text>
-        <Box paddingLeft={2}>
-          <Text dimColor wrap="truncate">
-            {display}
-          </Text>
-        </Box>
-      </Box>
-    );
-  }
-
-  const expandedLabel =
-    durationMs != null
-      ? `${t('Thought for')} ${formatDuration(durationMs)}`
-      : `${t('Thinking')}…`;
-  return (
-    <Box flexDirection="column">
-      <Text dimColor italic>
-        {THINKING_ICON}
-        {expandedLabel}{' '}
-        {t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}
-      </Text>
-      <Box paddingLeft={2} flexDirection="column">
-        <MarkdownDisplay
-          text={text}
-          isPending={false}
-          availableTerminalHeight={availableTerminalHeight}
-          contentWidth={contentWidth - 2}
-          textColor={theme.text.secondary}
-        />
-      </Box>
-    </Box>
-  );
-};
-
-export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
-  text,
-  isPending,
-  expanded = false,
-  availableTerminalHeight,
-  contentWidth,
-}) => {
-  if (!isPending && !expanded) {
-    return null;
-  }
-
-  if (isPending) {
-    const innerWidth = Math.max(contentWidth - 2, 20);
-    const maxLines =
-      availableTerminalHeight != null
-        ? Math.max(
-            1,
-            Math.min(
-              MAX_STREAMING_THINKING_VISUAL_LINES,
-              Math.floor(availableTerminalHeight / 3),
-            ),
-          )
-        : MAX_STREAMING_THINKING_VISUAL_LINES;
-    const display = tailVisualLines(text, innerWidth, maxLines);
+    // Use a constant window height rather than deriving it from
+    // availableTerminalHeight. While a thought streams the terminal keeps
+    // constrainHeight on, so availableTerminalHeight (and therefore a derived
+    // maxLines) drifts up and down as sibling pending content grows — which
+    // reintroduced the very height flicker this block is meant to remove. The
+    // window is at most a few lines, so a fixed cap can't meaningfully overflow
+    // (VP scrolls anyway), and it keeps the height stable.
+    const maxLines = MAX_STREAMING_THINKING_VISUAL_LINES;
+    const lines = tailVisualLines(text, innerWidth, maxLines);
+    const target = Math.max(lines.length, maxSeenLinesRef.current);
+    maxSeenLinesRef.current = target;
+    // Pad at the top so the newest line stays pinned to the bottom.
+    const padded =
+      lines.length < target
+        ? [...new Array(target - lines.length).fill(''), ...lines]
+        : lines;
+    const display = padded.join('\n');
     return (
       <Box paddingLeft={2}>
         <Text dimColor wrap="truncate">
@@ -395,7 +342,7 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
     <Box paddingLeft={2} flexDirection="column">
       <MarkdownDisplay
         text={text}
-        isPending={false}
+        isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth - 2}
         textColor={theme.text.secondary}
@@ -403,3 +350,76 @@ export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
     </Box>
   );
 };
+
+export const ThinkMessage: React.FC<ThinkMessageProps> = ({
+  text,
+  isPending,
+  expanded = false,
+  availableTerminalHeight,
+  contentWidth,
+  durationMs,
+  clickable = false,
+}) => {
+  const durationSuffix =
+    durationMs != null ? ` ${formatDuration(durationMs)}` : '';
+  const completedLabel =
+    durationMs == null
+      ? null
+      : durationMs < BRIEF_THOUGHT_THRESHOLD_MS
+        ? t('Thought briefly')
+        : `${t('Thought for')} ${formatDuration(durationMs)}`;
+
+  if (!isPending && !expanded) {
+    const label = completedLabel ?? t('Thinking');
+    const hint = clickable
+      ? t('(click or {{keyHint}} to expand)', { keyHint: toggleKeyHint })
+      : t('({{keyHint}} to expand)', { keyHint: toggleKeyHint });
+    return (
+      <Text dimColor italic>
+        {THINKING_ICON}
+        {label} {hint}
+      </Text>
+    );
+  }
+
+  const label = isPending
+    ? `${t('Thinking')}…${durationSuffix}`
+    : (completedLabel ?? `${t('Thinking')}…`);
+  const collapseHint =
+    !isPending && expanded
+      ? ` ${t('({{keyHint}} to collapse)', { keyHint: toggleKeyHint })}`
+      : '';
+
+  return (
+    <Box flexDirection="column">
+      <Text dimColor italic>
+        {isPending ? THINKING_ICON_PENDING : THINKING_ICON}
+        {label}
+        {collapseHint}
+      </Text>
+      <ThinkBody
+        text={text}
+        isPending={isPending}
+        expanded={expanded}
+        availableTerminalHeight={availableTerminalHeight}
+        contentWidth={contentWidth}
+      />
+    </Box>
+  );
+};
+
+export const ThinkMessageContent: React.FC<ThinkMessageContentProps> = ({
+  text,
+  isPending,
+  expanded = false,
+  availableTerminalHeight,
+  contentWidth,
+}) => (
+  <ThinkBody
+    text={text}
+    isPending={isPending}
+    expanded={expanded}
+    availableTerminalHeight={availableTerminalHeight}
+    contentWidth={contentWidth}
+  />
+);

@@ -23,10 +23,10 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { EnvHttpProxyAgent, fetch as undiciFetch } from 'undici';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { IDE_REQUEST_TIMEOUT_MS } from './constants.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { loadUndici } from '../utils/runtimeFetchOptions.js';
 
 const debugLogger = createDebugLogger('IDE');
 
@@ -892,10 +892,21 @@ export class IdeClient {
     // server even when HTTP_PROXY is set
     const existingNoProxy = process.env['NO_PROXY'] || '';
     const noProxyHosts = [existingNoProxy, ideHost];
-    const agent = new EnvHttpProxyAgent({
-      noProxy: noProxyHosts.filter(Boolean).join(','),
-    });
+    // undici loads behind a dynamic import to keep it out of the eager
+    // startup closure (issue #7264); the agent is built once on first use.
+    const undiciReady = loadUndici().then(
+      ({ EnvHttpProxyAgent, fetch: undiciFetch }) => ({
+        agent: new EnvHttpProxyAgent({
+          noProxy: noProxyHosts.filter(Boolean).join(','),
+        }),
+        undiciFetch,
+      }),
+    );
+    // Swallow an early rejection so it cannot become an unhandledRejection
+    // before the first fetch call awaits (and surfaces) it.
+    undiciReady.catch(() => {});
     return async (url: string | URL, init?: RequestInit): Promise<Response> => {
+      const { agent, undiciFetch } = await undiciReady;
       const fetchOptions: RequestInit & { dispatcher?: unknown } = {
         ...init,
         dispatcher: agent,
@@ -976,7 +987,7 @@ export class IdeClient {
       },
     );
 
-    // For backwards compatability. Newer extension versions will only send
+    // For backwards compatibility. Newer extension versions will only send
     // IdeDiffRejectedNotificationSchema.
     this.client.setNotificationHandler(
       IdeDiffClosedNotificationSchema,

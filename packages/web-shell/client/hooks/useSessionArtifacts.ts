@@ -1,0 +1,118 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  useActions,
+  useConnection,
+  usePromptStatus,
+  useWorkspaceEventSignals,
+} from '@qwen-code/webui/daemon-react-sdk';
+import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+
+const SESSION_ARTIFACTS_FEATURE = 'session_artifacts';
+
+export interface SessionArtifactsState {
+  artifacts: DaemonSessionArtifact[];
+  artifactById: ReadonlyMap<string, DaemonSessionArtifact>;
+  loading: boolean;
+  error: string | null;
+  refresh: () => Promise<void>;
+}
+
+export function useSessionArtifacts(): SessionArtifactsState {
+  const actions = useActions();
+  const connection = useConnection();
+  const promptStatus = usePromptStatus();
+  const workspaceEventSignals = useWorkspaceEventSignals();
+  const artifactsVersion = workspaceEventSignals?.artifactsVersion;
+  const isConnected = connection.status === 'connected';
+  const supportsArtifacts =
+    connection.capabilities?.features?.includes(SESSION_ARTIFACTS_FEATURE) ??
+    false;
+  const sessionId = connection.sessionId;
+  const [artifacts, setArtifacts] = useState<DaemonSessionArtifact[]>([]);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
+  const loadedSessionIdRef = useRef<string | undefined>(undefined);
+  const previousPromptStatusRef = useRef(promptStatus);
+  const previousArtifactsVersionRef = useRef(artifactsVersion);
+
+  const refresh = useCallback(async () => {
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+    if (!sessionId) {
+      loadedSessionIdRef.current = undefined;
+      setArtifacts([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    if (!isConnected) {
+      loadedSessionIdRef.current = undefined;
+      setArtifacts([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    if (!supportsArtifacts) {
+      loadedSessionIdRef.current = undefined;
+      setArtifacts([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
+    if (
+      loadedSessionIdRef.current !== undefined &&
+      loadedSessionIdRef.current !== sessionId
+    ) {
+      setArtifacts([]);
+    }
+    setLoading(true);
+    try {
+      const result = await actions.loadArtifacts();
+      if (requestIdRef.current !== requestId) return;
+      loadedSessionIdRef.current = sessionId;
+      setArtifacts(result.artifacts);
+      setError(null);
+    } catch {
+      if (requestIdRef.current !== requestId) return;
+      setError(null);
+    } finally {
+      if (requestIdRef.current === requestId) {
+        setLoading(false);
+      }
+    }
+  }, [actions, isConnected, sessionId, supportsArtifacts]);
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    const previous = previousPromptStatusRef.current;
+    previousPromptStatusRef.current = promptStatus;
+    if (previous !== 'idle' && promptStatus === 'idle') {
+      void refreshRef.current();
+    }
+  }, [promptStatus]);
+
+  useEffect(() => {
+    const previous = previousArtifactsVersionRef.current;
+    previousArtifactsVersionRef.current = artifactsVersion;
+    if (
+      previous !== undefined &&
+      artifactsVersion !== undefined &&
+      artifactsVersion !== previous
+    ) {
+      void refreshRef.current();
+    }
+  }, [artifactsVersion]);
+
+  const artifactById = useMemo(
+    () => new Map(artifacts.map((artifact) => [artifact.id, artifact])),
+    [artifacts],
+  );
+
+  return { artifacts, artifactById, loading, error, refresh };
+}

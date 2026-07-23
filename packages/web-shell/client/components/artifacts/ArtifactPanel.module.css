@@ -1,0 +1,882 @@
+.panel {
+  flex: 0 0 min(420px, 36vw);
+  min-width: 320px;
+  border-left: 1px solid var(--border);
+  background: var(--background);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.panelDrawer {
+  border-left: 0;
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
+}
+
+.header {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 14px 0 14px;
+}
+
+.title {
+  min-width: 0;
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+}
+
+.tabs {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+}
+
+.tabItem {
+  appearance: none;
+  border: 1px solid transparent;
+  background: color-mix(in srgb, var(--accent) 45%, transparent);
+  color: var(--foreground);
+  border-radius: 6px;
+  flex: 0 0 180px;
+  width: 180px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.tab {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  flex: 1 1 auto;
+  font: inherit;
+  font-size: 13px;
+  min-width: 0;
+  padding: 5px 4px 5px 8px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tabTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tabIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 16px;
+  height: 16px;
+  opacity: 0.7;
+}
+
+.tabIconSvg {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.tabItem:hover .tabIcon,
+.tabActive .tabIcon {
+  opacity: 1;
+}
+
+.tabItem:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.tabActive {
+  background: var(--accent);
+  border-color: var(--border);
+  color: var(--foreground);
+}
+
+.tabCloseButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  padding: 0;
+  border-radius: 5px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.tabItem:hover .tabCloseButton,
+.tabItem:focus-within .tabCloseButton,
+.tabActive .tabCloseButton {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tabCloseButton:hover {
+  color: var(--foreground);
+}
+
+.tabCloseIcon {
+  width: 13px;
+  height: 13px;
+  display: block;
+}
+
+.iconButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--foreground);
+  border-radius: 6px;
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+}
+
+.iconButton:hover {
+  background: var(--accent);
+}
+
+.iconButtonActive {
+  background: var(--accent);
+}
+
+.toolbarIcon {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 12px;
+}
+
+.empty {
+  color: var(--muted-foreground);
+  font-size: 13px;
+  padding: 16px 4px;
+}
+
+.list {
+  display: grid;
+  gap: 6px;
+}
+
+.row {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--foreground);
+  border-radius: 6px;
+  padding: 8px;
+  display: grid;
+  gap: 4px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.row:hover,
+.rowActive {
+  background: var(--accent);
+}
+
+.rowTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 500;
+}
+
+.rowMeta,
+.meta {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.detail {
+  display: grid;
+  gap: 12px;
+}
+
+.section {
+  display: grid;
+  gap: 6px;
+}
+
+.sectionTitle {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+
+.description {
+  white-space: pre-wrap;
+}
+
+.actionsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+.fieldGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 4px;
+  font-size: 13px;
+}
+
+.fieldLabel {
+  color: var(--muted-foreground);
+  margin-top: 8px;
+}
+
+.fieldLabel:first-child {
+  margin-top: 0;
+}
+
+.fieldValue {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.link {
+  color: var(--link-color, #2563eb);
+  text-decoration: none;
+}
+
+.link:hover {
+  text-decoration: underline;
+}
+
+.review {
+  min-height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 12px;
+}
+
+.reviewToolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  color: var(--foreground);
+  font-weight: 600;
+}
+
+.reviewToolbarTitle {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.reviewToolbarActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reviewTotalsButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0;
+  font-size: 13px;
+  font-weight: 500;
+}
+
+.reviewTotalsButton:hover {
+  color: var(--foreground);
+}
+
+.reviewContent {
+  min-height: 0;
+  display: grid;
+  grid-template-columns:
+    minmax(180px, var(--review-list-width, 520px))
+    8px minmax(0, 1fr);
+  border-top: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.reviewContentListOnly {
+  grid-template-columns: 1fr;
+}
+
+.reviewContentStacked {
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);
+}
+
+.reviewList {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.reviewListWithExpanded {
+  overflow: hidden;
+}
+
+.reviewContentListOnly .reviewList {
+  border-right: 0;
+}
+
+.reviewContentStacked .reviewList {
+  border-bottom: 1px solid var(--border);
+  max-height: none;
+}
+
+.reviewSplitHandle {
+  min-width: 8px;
+  cursor: col-resize;
+  position: relative;
+  touch-action: none;
+  border-left: 1px solid var(--border);
+}
+
+.reviewSplitHandle::after {
+  content: '';
+  position: absolute;
+  inset: 0 3px;
+  background: transparent;
+}
+
+.reviewItem {
+  min-width: 0;
+  flex: 0 0 auto;
+}
+
+.reviewItemExpanded {
+  min-height: 0;
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.reviewRow {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  cursor: pointer;
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto;
+  gap: 8px;
+  align-items: center;
+  padding: 8px 10px;
+  text-align: left;
+  position: relative;
+}
+
+.reviewRow:hover {
+  background: var(--accent);
+}
+
+.reviewRowToggle {
+  appearance: none;
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+}
+
+.reviewRowToggle:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
+.reviewRow > :not(.reviewRowToggle) {
+  position: relative;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.reviewFileName {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.reviewOpenButton {
+  appearance: none;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  cursor: pointer;
+  flex: 0 0 auto;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 7px;
+  pointer-events: auto;
+}
+
+.reviewOpenButton:hover {
+  background: var(--accent);
+}
+
+.fileIcon {
+  min-width: 24px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: var(--muted-foreground);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 4px;
+  font-size: 10px;
+  font-weight: 700;
+}
+
+.reviewPath,
+.treeName {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.reviewPath {
+  display: inline-flex;
+  width: 100%;
+  max-width: 100%;
+}
+
+.treeName {
+  text-overflow: ellipsis;
+}
+
+.pathPrefix {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: var(--muted-foreground);
+}
+
+.pathFileName {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lineStats {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 13px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.additions {
+  color: #16a34a;
+}
+
+.deletions {
+  color: #dc2626;
+}
+
+.chevron {
+  color: var(--muted-foreground);
+  display: inline-flex;
+  transition: transform 120ms ease;
+}
+
+.chevronOpen {
+  transform: rotate(90deg);
+}
+
+.chevronIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.diffPreview {
+  border: 1px solid var(--border);
+  overflow: hidden;
+  background: var(--muted, rgba(0, 0, 0, 0.03));
+  min-height: 0;
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.codeMirrorDiff {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  overflow: auto;
+  background: var(--background);
+}
+
+.codeMirrorDiffWrap {
+  min-width: 0;
+  min-height: 0;
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.diffError {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--border);
+  background: var(--background);
+}
+
+.codeMirrorDiff :global(.cm-editor) {
+  font-size: 12px;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.codeMirrorDiff :global(.cm-mergeView) {
+  min-width: max-content;
+}
+
+.codeMirrorDiff :global(.cm-scroller) {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+}
+
+.codeMirrorDiff :global(.cm-gutters),
+.codeMirrorFile :global(.cm-gutters) {
+  background: var(--background);
+  border-right: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+
+.codeMirrorDiff :global(.cm-gutter),
+.codeMirrorFile :global(.cm-gutter),
+.codeMirrorDiff :global(.cm-lineNumbers .cm-gutterElement),
+.codeMirrorFile :global(.cm-lineNumbers .cm-gutterElement) {
+  background: transparent;
+  color: var(--muted-foreground);
+}
+
+.codeMirrorDiff :global(.cm-activeLineGutter),
+.codeMirrorFile :global(.cm-activeLineGutter) {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.codeMirrorDiff :global(.cm-collapsedLines),
+.codeMirrorFile :global(.cm-collapsedLines) {
+  background: var(--muted);
+  border-color: var(--border);
+  color: var(--muted-foreground);
+}
+
+.codeMirrorDiff :global(.cm-collapsedLines:hover),
+.codeMirrorFile :global(.cm-collapsedLines:hover) {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.codeMirrorDiff :global(.cm-mergeView .cm-editor) {
+  min-width: 0;
+}
+
+.codeMirrorDiff :global(.cm-line),
+.codeMirrorDiff :global(.cm-deletedLine) {
+  position: relative;
+  padding-left: 18px;
+}
+
+.codeMirrorDiff :global(.cm-line::before),
+.codeMirrorDiff :global(.cm-deletedLine::before) {
+  content: '';
+  position: absolute;
+  left: 4px;
+  font-weight: 700;
+}
+
+.codeMirrorDiff :global(.cm-merge-a .cm-line.cm-changedLine::before),
+.codeMirrorDiff :global(.cm-deletedLine::before) {
+  content: '-';
+  color: #dc2626;
+}
+
+.codeMirrorDiff :global(.cm-merge-b .cm-line.cm-changedLine::before) {
+  content: '+';
+  color: #16a34a;
+}
+
+.codeMirrorDiff :global(.cm-merge-b .cm-changedText) {
+  background: transparent;
+}
+
+.diffEmpty {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+}
+
+.tree {
+  min-width: 0;
+  overflow: auto;
+  padding: 8px 0;
+}
+
+.treeNode {
+  position: relative;
+}
+
+.treeChildren {
+  position: relative;
+}
+
+.treeChildren::before {
+  content: '';
+  position: absolute;
+  top: -2px;
+  bottom: 8px;
+  left: var(--tree-children-line-left);
+  border-left: 1px dashed var(--border);
+  pointer-events: none;
+}
+
+.treeRow {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  width: 100%;
+  min-width: 0;
+  height: 32px;
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  padding-right: 10px;
+  color: var(--foreground);
+  position: relative;
+}
+
+.treeRow:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.treeRow[data-depth]:not([data-depth='0'])::before {
+  content: '';
+  position: absolute;
+  left: var(--tree-row-line-left);
+  top: 50%;
+  width: 9px;
+  border-top: 1px dashed var(--border);
+  pointer-events: none;
+}
+
+.treeFolder {
+  color: var(--foreground);
+}
+
+.treeFile {
+  color: var(--muted-foreground);
+}
+
+button.treeRow {
+  cursor: pointer;
+  color: var(--foreground);
+}
+
+.treeTwisty {
+  color: inherit;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 20px;
+  line-height: 1;
+}
+
+.treeChevronIcon {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.treeChevron {
+  display: inline-flex;
+  transition: transform 120ms ease;
+}
+
+.treeChevronClosed {
+  transform: rotate(-90deg);
+}
+
+.treeContent {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: inherit;
+}
+
+.treeRow .treeName {
+  color: inherit;
+}
+
+.treeFile:not(:hover) .treeName,
+.treeFile:not(:hover) .treeContent,
+.treeFile:not(:hover) .treeTwisty,
+.treeFile:not(:hover) .treeChevron {
+  color: var(--muted-foreground);
+}
+
+button.treeRow:hover {
+  color: var(--foreground);
+}
+
+.reviewBadge {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 6px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.treeRow:hover .reviewBadge,
+.treeRow:hover .fileIcon {
+  color: var(--foreground);
+}
+
+.htmlPreviewWrap {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.markdownPreviewWrap {
+  min-height: 100%;
+  padding: 4px 8px 24px;
+  overflow-wrap: anywhere;
+}
+
+.htmlPreview {
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 520px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #fff;
+  display: block;
+}
+
+.previewError {
+  margin-top: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.filePreviewWrap {
+  min-height: 100%;
+  display: flex;
+  flex-direction: column;
+}
+
+.codeMirrorFile {
+  min-width: 0;
+  flex: 1 1 auto;
+  min-height: 520px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+}
+
+.codeMirrorFile :global(.cm-editor) {
+  min-height: 520px;
+  font-size: 12px;
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.codeMirrorFile :global(.cm-scroller) {
+  font-family:
+    ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono',
+    'Courier New', monospace;
+}
+
+@media (max-width: 900px) {
+  .panel:not(.panelDrawer) {
+    position: fixed;
+    inset: env(safe-area-inset-top) 0 env(safe-area-inset-bottom) auto;
+    z-index: 60;
+    width: min(420px, 100vw);
+    max-width: 100vw;
+    box-shadow: -12px 0 30px rgba(0, 0, 0, 0.18);
+  }
+
+  .reviewContent {
+    grid-template-columns: 1fr !important;
+  }
+
+  .reviewSplitHandle {
+    display: none;
+  }
+
+  .reviewList {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+    max-height: 220px;
+  }
+
+  .reviewContentListOnly .reviewList {
+    border-bottom: 0;
+    max-height: none;
+  }
+}

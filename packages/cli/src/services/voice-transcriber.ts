@@ -72,6 +72,7 @@ interface TranscribeVoiceAudioArgs extends ResolveVoiceTranscriptionConfigArgs {
   fetchFn?: typeof fetch;
   lookupHost?: VoiceHostLookup;
   abortSignal?: AbortSignal;
+  onEgress?: () => void;
 }
 
 type VoiceHostLookup = (
@@ -209,6 +210,7 @@ async function defaultLookupHost(
 export async function assertVoiceBaseUrlNetworkAllowed(
   voiceConfig: VoiceTranscriptionConfig,
   lookupHost?: VoiceHostLookup,
+  abortSignal?: AbortSignal,
 ): Promise<void> {
   const hostname = normalizeHostname(new URL(voiceConfig.baseUrl).hostname);
   if (isLoopbackHost(hostname)) {
@@ -223,12 +225,33 @@ export async function assertVoiceBaseUrlNetworkAllowed(
     return;
   }
   let result: { address: string } | Array<{ address: string }>;
+  let onAbort: (() => void) | undefined;
   try {
-    result = await (lookupHost ?? defaultLookupHost)(hostname);
+    if (abortSignal?.aborted) {
+      throw abortSignal.reason;
+    }
+    const lookup = (lookupHost ?? defaultLookupHost)(hostname);
+    result = abortSignal
+      ? await Promise.race([
+          lookup,
+          new Promise<never>((_resolve, reject) => {
+            onAbort = () => reject(abortSignal.reason);
+            if (abortSignal.aborted) onAbort();
+            else abortSignal.addEventListener('abort', onAbort, { once: true });
+          }),
+        ])
+      : await lookup;
   } catch {
+    if (abortSignal?.aborted) {
+      throw abortSignal.reason instanceof Error
+        ? abortSignal.reason
+        : new Error('Voice request was aborted.');
+    }
     throw new Error(
       `Voice model '${voiceConfig.model}': DNS lookup failed for ${hostname}. Cannot verify network safety.`,
     );
+  } finally {
+    if (onAbort) abortSignal?.removeEventListener('abort', onAbort);
   }
   const records = Array.isArray(result) ? result : [result];
   if (records.some((record) => isPrivateNetworkIp(record.address))) {
@@ -444,7 +467,7 @@ export function isKeytermEcho(
 
 // Qwen-ASR caps each audio file at 10 MB / 5 minutes. Our 16 kHz mono 16-bit WAV
 // is ~32 KB/s, so guard before encoding to give a clear error on overlong holds.
-const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
+export const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 const MAX_TRANSCRIPTION_ERROR_LENGTH = 200;
 
 function escapeRegExp(value: string): string {
@@ -502,6 +525,7 @@ async function transcribeViaQwenAsr(
     language?: string;
     keytermsContext?: string;
     abortSignal?: AbortSignal;
+    onEgress?: () => void;
   },
   fetchFn: typeof fetch,
 ): Promise<string> {
@@ -546,6 +570,7 @@ async function transcribeViaQwenAsr(
 
   let response: Response;
   try {
+    options.onEgress?.();
     response = await fetchFn(
       `${trimTrailingSlashes(voiceConfig.baseUrl)}/chat/completions`,
       {
@@ -613,7 +638,11 @@ export async function transcribeVoiceAudio(
   args: TranscribeVoiceAudioArgs,
 ): Promise<string> {
   const voiceConfig = resolveVoiceTranscriptionConfig(args);
-  await assertVoiceBaseUrlNetworkAllowed(voiceConfig, args.lookupHost);
+  await assertVoiceBaseUrlNetworkAllowed(
+    voiceConfig,
+    args.lookupHost,
+    args.abortSignal,
+  );
   const fetchFn = args.fetchFn ?? fetch;
   const language = resolveLanguageCode(readVoiceLanguage(args.settings));
   const keytermsContext = buildKeytermsContext(args.settings);
@@ -624,7 +653,12 @@ export async function transcribeVoiceAudio(
       return transcribeViaQwenAsr(
         audio,
         voiceConfig,
-        { language, keytermsContext, abortSignal: args.abortSignal },
+        {
+          language,
+          keytermsContext,
+          abortSignal: args.abortSignal,
+          ...(args.onEgress ? { onEgress: args.onEgress } : {}),
+        },
         fetchFn,
       );
     case 'qwen-asr-realtime':

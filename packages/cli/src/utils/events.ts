@@ -25,6 +25,10 @@ export enum AppEvent {
    */
   McpPendingApprovalChanged = 'mcp-pending-approval-changed',
   LspStatusChanged = 'lsp-status-changed',
+  ExtensionContentChanged = 'extension-content-changed',
+  ExtensionRefreshNeeded = 'extension-refresh-needed',
+  ExtensionsReloadStarted = 'extensions-reload-started',
+  ExtensionsReloaded = 'extensions-reloaded',
   StartupIdeConnectionStatusChanged = 'startup-ide-connection-status-changed',
 }
 

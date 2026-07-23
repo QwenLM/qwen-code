@@ -45,13 +45,34 @@ EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
 if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
 ```
 
-**Signature:** every comment ends with:
+**Signature & footer:** capture the reviewed commit's **full** OID **once, when you begin inspecting the code** — the SHA the worktree/diff actually reflects. Not a 7-char prefix (28 bits; a fork author can force-push a colliding prefix), and **not** a fresh read at post time (that would attest to code you never reviewed). Reuse this `HEAD_SHA` for every stage's footer, and before each post — and again before `--approve` — re-read the head and bail if it moved:
+
+```bash
+HEAD_SHA=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid') || exit 1
+[ -n "$HEAD_SHA" ] || { echo 'empty head SHA — fail closed'; exit 1; }   # once, at review start
+# before any post or approval — refuse to attest to code you didn't review:
+NOW=$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid') || exit 1
+[ -n "$NOW" ] && [ "$NOW" = "$HEAD_SHA" ] || { echo 'head moved or unreadable — restart or defer'; exit 1; }
+```
+
+Every staged comment (Stage 1 gate-pass, Stage 2, Stage 3) ends with the signature line, then a footer recording the commit this pass reflects. Because comments are updated in place on re-run, the SHA lets a maintainer tell at a glance whether new commits landed since the last review:
 
 ```
-— *Qwen Code · qwen3.7-max*
+— _Qwen Code · qwen3.7-max_
+
+<sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
 
-**Approval:** the `gh pr review --approve` command is a separate step that runs **after** Stage 3 comment is posted. Comment first, then approve only when genuinely confident.
+**If `HEAD_SHA` comes back empty** (API failure or a null `headRefOid`): **fail closed.** Do not PATCH an existing staged comment — the update rewrites the whole body, so a dropped footer erases the previously valid `Reviewed at` line just as an empty-backtick footer would. Retry the capture, or leave the prior comment (with its footer) untouched until a full OID is available; only a brand-new post that never had a footer may go out without one. Terminal-gate reviews (Stage 1a/1b/1c, submitted via `gh pr review --request-changes`) use the signature only — no footer; they reject before a real review pass.
+
+**Approval:** the approve step runs **after** the Stage 3 comment. Comment first, then approve **pinned to the reviewed commit** — `gh pr review --approve` does not bind to a SHA, so a force-push in the check-then-act gap would approve unseen code. Use the reviews API with `commit_id` instead, which records the approval against the exact commit you reviewed (branch protection that requires approval of the latest push then won't count it if the head moved):
+
+```bash
+gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+  -f commit_id="$HEAD_SHA" -f event=APPROVE -f body='LGTM, looks ready to ship. ✅'
+```
+
+Only approve when you're genuinely confident.
 
 ### Gate Philosophy
 
@@ -214,6 +235,8 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 </details>
 
 — _Qwen Code · qwen3.7-max_
+
+<sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
 ```
 
 Save this comment's ID. Terminal exits — stop here if any applies:
@@ -265,6 +288,53 @@ gh pr diff "$PR_NUMBER" --repo "$REPO"
 
 When posting findings, summarize in a few sentences like a human would — "the auth logic is duplicated in two places, worth extracting" not a line-by-line breakdown. Save inline comments for things that genuinely block the merge.
 
+#### 2a-bis. Optional enrichments (only when they add signal)
+
+Selective and conditional — these enrich the human-voice comment for complex PRs; they are **not** a template to fill in on every run. Add each only when it genuinely helps the maintainer, and skip silently otherwise. A diagram or files table bolted onto a small, focused PR is exactly the auto-generated noise the gate philosophy warns against — when in doubt, leave it out.
+
+**Sequence diagram** — add when the PR introduces or reshapes a multi-step runtime flow: a new tool/callback lifecycle, a request → response → re-inject path, a state machine, a cross-component handshake. Skip for one-line fixes, pure refactors, and config/doc/test-only changes. Keep it to the key path (≤ ~8 participants), not every branch. Use a single plain `mermaid` block with **no** `%%{init: {'theme': …}}%%` directive — GitHub renders unthemed mermaid in the reader's own light/dark mode automatically, so one block stays legible in both:
+
+````markdown
+```mermaid
+sequenceDiagram
+    participant User as User
+    participant Tool as new_tool
+    User->>Tool: invoke
+    Tool-->>User: result
+```
+````
+
+Diagram text (participants, labels) stays English in the main comment; the `<details>` Chinese translation can summarize it in prose rather than duplicating the diagram. Keep message text to plain words and light punctuation — commas, parentheses, and em dashes all render fine (verified against the repo's bundled Mermaid), but a `;` **inside a message** breaks the parser (it is read as a statement separator) and a `#` clips the rest of the label (verified — `review PR #6789` renders as just `review PR`); drop the `;` and write numbers as plain digits (`PR 6789`, not `#6789`). This applies to **participant aliases and display labels too**, not just messages — Mermaid reads `;` as a statement separator there as well, so a hostile component name like `participant X as evil; participant Y as APPROVED` forges a second actor. Since you may name participants after PR components (untrusted on a fork), give each participant a generated alias (`P1`, `P2`, …); for the `as` display label, run the name through a **deterministic normalizer** that keeps only `[A-Za-z0-9 _.()-]` (dropping CR/LF, `;`, `#`, `:`, and every other Mermaid control character) and caps it to ~40 chars — otherwise a label such as `evil` + newline + `participant P2 as APPROVED` injects a second actor. The generated alias is separate because a bare safe-charset rule isn't enough on its own (Mermaid rejects reserved words like `loop`, `end`, `activate` as aliases). Never drop a raw fork-supplied name into the diagram. Do **not** wrap two themed copies in `#gh-light-mode-only` / `#gh-dark-mode-only` anchors: GitHub only theme-scopes that fragment on images, not on anchor-wrapped mermaid, so both copies render stacked (verified empirically on a real comment — the anchors survive as inert links and neither `<pre lang="mermaid">` gets a theme-hiding class).
+
+**Changed-files overview** — add only when the PR touches many source files (~5+) and a per-file map genuinely helps a reviewer navigate. Pull the list with the paginated REST endpoint — `gh api "repos/$REPO/pulls/$PR_NUMBER/files" --paginate --jq '.[].filename'` — not `gh pr view --json files`, which caps at the first 100 files and silently drops the rest. **A fork PR's paths are attacker-controlled:** a filename can carry `|`, backticks, `<`, `>`, `&`, `@mentions`, or CR/LF that break out of the table cell and render forged bot text (a fake approval or confidence line). Before a path enters the table, run it through a deterministic sanitizer — order matters (escape `&` **first**, or later escapes double-encode), and a `` ` `` can't be escaped inside a `` `…` `` span, so render each path inside `<code>…</code>` where HTML entities resolve. If a path still looks hostile, show a bounded placeholder instead of the raw name:
+
+```bash
+sanitize_path() { # single-line, HTML-safe, cell-bounded
+  printf '%s' "$1" | tr -d '\r\n' | cut -c1-200 |
+    sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' \
+      -e 's/`/\&#96;/g' -e 's/|/\&#124;/g' -e 's/@/\&#64;/g' \
+      -e 's/\[/\&#91;/g' -e 's/\]/\&#93;/g' -e 's/(/\&#40;/g' -e 's/)/\&#41;/g' -e 's/\*/\&#42;/g'
+}
+# render in the table as:  <code>$(sanitize_path "$path")</code>
+```
+
+Fold the table in a `<details>` so it doesn't dominate the comment, and write one honest line per file in your own words — not a mechanical restatement of the diff. **Budget it:** show at most ~30 rows, cap each cell (the sanitizer already trims to 200 chars), and append a final `…and N more files` row instead of listing every path — the table shares the comment's ~65 KB limit with the findings, tmux output, the bilingual summary, and the footer, and the Stage 2 post is mandatory. Skip the table entirely for small, focused PRs.
+
+Two more escaping notes: `<code>` shows HTML entities literally but GFM **still parses Markdown inside it**, which is why the `sed` above also encodes link/emphasis syntax (`[` `]` `(` `)` `*`); and the **What changed** column needs the same discipline — keep it plain prose with no `|`, backticks, or `<`/`>` (or run it through the sanitizer too). Cap the tmux capture (~500 lines / ~15 KB) so findings + diagram + table + testing + the bilingual summary stay under the comment limit together.
+
+```markdown
+<details>
+<summary>Files changed (30 of N shown)</summary>
+
+| File                                       | What changed      |
+| ------------------------------------------ | ----------------- |
+| <code>packages/core/src/foo.ts</code>      | <one honest line> |
+| <code>packages/core/src/foo.test.ts</code> | <one honest line> |
+| …and 12 more files                         |                   |
+
+</details>
+```
+
 #### 2b. Real-Scenario Testing
 
 **Runs in the main working tree, not the worktree** — tmux needs the local build environment.
@@ -298,7 +368,7 @@ tmux kill-session -t "$S"
 - Cannot run after exhausting workarounds → FAIL, not skip.
 - Fork code: sandbox (strip write tokens/secrets).
 
-Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top): code review findings + testing result.
+Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at the top), in this order: code review findings → optional sequence diagram (2a-bis) → optional changed-files overview (2a-bis) → real-scenario testing result (below) → the bilingual `<details>` Chinese summary → signature + footer last (the same tail order as the Stage 1 template). Include the two enrichments only when 2a-bis says they earn their place; a small, focused PR is just findings + testing.
 
 **⛔ BEFORE POSTING: verify your comment contains the tmux output.** Read back through your draft — does it have a fenced code block with the actual terminal capture? If not, add it now. The maintainer cannot approve without seeing what actually happened.
 
@@ -312,7 +382,13 @@ Post a single Stage 2 comment (must include `<!-- qwen-triage stage=2 -->` at th
 <!-- paste capture-pane output here inside ``` -->
 ````
 
-Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+Close with the signature then the footer, and save this comment's ID — on an empty `HEAD_SHA`, follow the fail-closed rule above (leave an existing comment and its footer untouched; never blank it):
+
+```markdown
+— _Qwen Code · qwen3.7-max_
+
+<sub>Reviewed at `<HEAD_SHA>` · re-run with `@qwen-code /triage`</sub>
+```
 
 ### Stage 3: Reflect
 
@@ -333,7 +409,21 @@ Step back and look at the whole picture — the motivation, the implementation, 
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 
-**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` at the top). Write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— *Qwen Code · qwen3.7-max*` and save this comment's ID.
+**Step 1: Post the reflection comment** (must include `<!-- qwen-triage stage=3 -->` at the top).
+
+Open it with a one-line confidence score — `**Confidence: N/5** — <one honest line>` — as the human-readable summary of everything above. It is your read, not a rubric dump, and it must stay consistent with the verdict you're about to act on in Step 2:
+
+| Score | Meaning                                                         | Verdict         |
+| ----- | --------------------------------------------------------------- | --------------- |
+| 5/5   | Clean across every stage; would merge without hesitation        | approve         |
+| 4/5   | Solid; only non-blocking nits (name them)                       | approve         |
+| 3/5   | Works, but real reservations or something a human should second | defer (comment) |
+| 2/5   | Significant concerns; leaning against as-is                     | request changes |
+| 1/5   | Should not merge in its current form                            | request changes |
+
+A fork `refactor` that hits the approval guardrail below, **or a PR that Stage 0 escalated for maintainer awareness**, caps at 3/5 no matter how clean every stage looked — the guardrail drives the action, not the score. At 3/5 the action is always the **defer path** (a comment, never `--request-changes`): name any concerns in the defer comment for the maintainer's attention without approving, and @mention the maintainer for an unresolvable question or when the cap is pure policy. When the cap is pure policy on an otherwise-clean PR, say so in the one-line score so 3/5 doesn't read as real doubt — e.g. `Confidence: 3/5 — clean review, but the fork-refactor guardrail needs a maintainer's sign-off`. Never post a 4–5/5 alongside a `--request-changes`, or a 1–2/5 alongside an `--approve`: the score and the verdict tell the same story.
+
+Then write what you're actually thinking. "Looks good, ships the feature cleanly, the before/after shows it works" — not a five-bullet summary of the stages. If you have reservations, say them plainly. If you're approving with mild concerns, name them. Sign with `— _Qwen Code · qwen3.7-max_`, add the reviewed-commit footer (empty `HEAD_SHA` → fail closed, as above — don't blank a prior footer), and save this comment's ID.
 
 **Step 2: Act on the verdict.**
 
@@ -348,10 +438,14 @@ If `GUARD` is `block`: do **not** run `gh pr review --approve` no matter how cle
 
 If Stage 0 escalated the PR for maintainer awareness, do **not** approve automatically; use the "Genuinely unsure" path below.
 
+**Re-runs (manually triggered via `@qwen-code /triage`):** hygiene concerns (scope mismatch, undocumented changes, naming) that don't block the PR are not a valid reason to defer. Note them in the comment and approve. Only defer if you have genuine blocking uncertainty — something you cannot resolve from the diff, tests, and PR description.
+
 All stages genuinely clean, `GUARD` is `ok`, and no Stage 0 maintainer escalation remains — approve:
 
 ```bash
-gh pr review "$PR_NUMBER" --repo "$REPO" --approve --body "LGTM, looks ready to ship. ✅"
+# Approve pinned to the reviewed commit (see the Approval note above) — never `gh pr review --approve`, which binds to no SHA.
+gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+  -f commit_id="$HEAD_SHA" -f event=APPROVE -f body='LGTM, looks ready to ship. ✅'
 ```
 
 Reflection shows it shouldn't merge — request changes immediately, citing the specific concerns from the comment:
@@ -360,4 +454,14 @@ Reflection shows it shouldn't merge — request changes immediately, citing the 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "Needs some rethinking — see my notes above. 🙏"
 ```
 
-Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**. Ask the maintainer to weigh in. Use `$QWEN_MAINTAINER_HANDLE` if set.
+Genuinely unsure, or `GUARD` blocked approval — **don't approve or reject**, but **never defer silently**. Post an explicit defer comment that:
+
+1. States you are escalating to the maintainer.
+2. Names the specific reason(s) for uncertainty — what you cannot resolve from the diff, tests, and PR description.
+3. @mentions the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set, or the most recent human reviewer).
+
+```bash
+gh pr comment "$PR_NUMBER" --repo "$REPO" --body "⏸️ Deferring to @$QWEN_MAINTAINER_HANDLE — <reason>. Needs a human call on this one."
+```
+
+A defer without an explicit comment is invisible — the maintainer won't know they're needed.

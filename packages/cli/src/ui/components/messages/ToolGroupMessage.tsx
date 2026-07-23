@@ -13,6 +13,7 @@ import { ToolMessage } from './ToolMessage.js';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import {
   CompactToolGroupDisplay,
+  estimateCompactToolGroupHeight,
   isCollapsibleTool,
 } from './CompactToolGroupDisplay.js';
 import { InlineParallelAgentsDisplay } from './InlineParallelAgentsDisplay.js';
@@ -147,6 +148,14 @@ interface ToolGroupMessageProps {
   /** Pre-computed count of read ops from managed-auto-memory files. */
   memoryReadCount?: number;
   isUserInitiated?: boolean;
+  /**
+   * Transcript full-detail mode (Ctrl+O). When true, force `forceExpandAll`
+   * (skip the type-based partition so every tool renders individually), pass
+   * `forceShowResult=true` to each `ToolMessage`, and lift the per-tool
+   * terminal-height truncation. Default false (main view keeps the #5661
+   * type-based partition baseline).
+   */
+  fullDetail?: boolean;
 }
 
 // Main component maps the tools using ToolMessage
@@ -161,6 +170,7 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   memoryWriteCount,
   memoryReadCount,
   isUserInitiated,
+  fullDetail = false,
 }) => {
   const config = useConfig();
 
@@ -271,7 +281,14 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   // live frame and keeps it under the viewport. `totalAgentCount` keeps the
   // header's "N · done/N" honest, and `availableTerminalHeight` is a hard cap
   // backstop for degenerate cases (many agents finishing at once).
-  if (isPureParallelAgentGroup(toolCalls) && !hasSubagentPendingConfirmation) {
+  //
+  // Skipped in transcript full-detail mode (fullDetail) so every agent
+  // falls through to its own full ToolMessage instead of the dense panel.
+  if (
+    !fullDetail &&
+    isPureParallelAgentGroup(toolCalls) &&
+    !hasSubagentPendingConfirmation
+  ) {
     // `isPureParallelAgentGroup` already guarantees every entry is a subagent,
     // so `inlineToolCalls` (a subset) and `toolCalls.length` need no further
     // `isSubagentToolEntry` filtering here.
@@ -314,8 +331,11 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Memory-only groups get their own compact rendering with read/write
   // counts. Check BEFORE the partition logic so they aren't routed through
-  // the collapsible/non-collapsible split.
+  // the collapsible/non-collapsible split. Skipped in transcript full-detail
+  // mode (fullDetail) so each memory op renders as its own full ToolMessage
+  // rather than collapsing to the "Recalled/Wrote N memories" badge.
   const allMemOpsComplete =
+    !fullDetail &&
     isMemoryOnlyGroup &&
     !hasErrorTool &&
     toolCalls.every((t) => t.status === ToolCallStatus.Success);
@@ -346,9 +366,12 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
 
   // Force-expand ALL tools individually when the user must interact or
   // must see full details: confirmation prompts, errors, user-initiated
-  // batches, focused shells, terminal subagents.
+  // batches, focused shells, terminal subagents. Transcript full-detail
+  // mode (fullDetail) also forces it so every tool renders individually
+  // instead of collapsing read/search into a partition summary.
   const hasTerminalSubagent = inlineToolCalls.some(isTerminalSubagentTool);
   const forceExpandAll =
+    fullDetail ||
     hasConfirmingTool ||
     hasSubagentPendingConfirmation ||
     hasErrorTool ||
@@ -410,7 +433,10 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
 
   // Full expanded view for non-collapsible tools
-  const collapsibleSummaryHeight = collapsibleTools.length > 0 ? 1 : 0;
+  const collapsibleSummaryHeight = estimateCompactToolGroupHeight(
+    collapsibleTools,
+    contentWidth,
+  );
   const memoryBadgeHeight = hasMemoryBadge ? 1 : 0;
   const staticHeight =
     /* marginBottom */ 1 + collapsibleSummaryHeight + memoryBadgeHeight;
@@ -424,15 +450,19 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
   }
   const countOneLineToolCalls =
     nonCollapsibleTools.length - countToolCallsWithResults;
-  const availableTerminalHeightPerToolMessage = availableTerminalHeight
-    ? Math.max(
-        Math.floor(
-          (availableTerminalHeight - staticHeight - countOneLineToolCalls) /
-            Math.max(1, countToolCallsWithResults),
-        ),
-        1,
-      )
-    : undefined;
+  // In transcript full-detail mode, lift the per-tool height truncation so
+  // each tool's output renders in full (combined with forceShowResult below).
+  const availableTerminalHeightPerToolMessage = fullDetail
+    ? undefined
+    : availableTerminalHeight
+      ? Math.max(
+          Math.floor(
+            (availableTerminalHeight - staticHeight - countOneLineToolCalls) /
+              Math.max(1, countToolCallsWithResults),
+          ),
+          1,
+        )
+      : undefined;
 
   return (
     <Box flexDirection="column" width={contentWidth} gap={0}>
@@ -467,7 +497,9 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
                 activeShellPtyId={activeShellPtyId}
                 embeddedShellFocused={embeddedShellFocused}
                 config={config}
+                fullDetail={fullDetail}
                 forceShowResult={
+                  fullDetail ||
                   isUserInitiated ||
                   tool.status === ToolCallStatus.Confirming ||
                   tool.status === ToolCallStatus.Error ||

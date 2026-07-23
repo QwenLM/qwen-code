@@ -671,15 +671,41 @@ export class ContentRetryEvent implements BaseTelemetryEvent {
   }
 }
 
+export class ProtocolTagSanitizedEvent implements BaseTelemetryEvent {
+  'event.name': 'protocol_tag_sanitized';
+  'event.timestamp': string;
+  model: string;
+  prompt_id?: string;
+  response_id?: string;
+  tag_name: 'think' | 'thinking';
+  tool_call_count: number;
+
+  constructor(opts: {
+    model: string;
+    promptId?: string;
+    responseId?: string;
+    tagName: 'think' | 'thinking';
+    toolCallCount: number;
+  }) {
+    this['event.name'] = 'protocol_tag_sanitized';
+    this['event.timestamp'] = new Date().toISOString();
+    this.model = opts.model;
+    this.prompt_id = opts.promptId;
+    this.response_id = opts.responseId;
+    this.tag_name = opts.tagName;
+    this.tool_call_count = opts.toolCallCount;
+  }
+}
+
 /**
  * Phase 4b — HTTP-status retry telemetry. Emitted by `retryWithBackoff` (via
  * the `onRetry` callback opt-in) for HTTP 429 / 5xx retries at LLM call sites.
  *
  * Distinct from {@link ContentRetryEvent}, which is emitted by `geminiChat`'s
- * for-loop for `InvalidStreamError` retries that go through a SEPARATE retry
- * budget (`INVALID_CONTENT_RETRY_OPTIONS`, NOT `retryWithBackoff`). A single
- * user prompt may fire BOTH event types; sum across event types to count total
- * retries per prompt_id.
+ * for-loop for `InvalidStreamError` retries that use
+ * `INVALID_STREAM_RETRY_CONFIG`, not `retryWithBackoff`. A single user prompt
+ * may fire BOTH event types; sum across event types to count total retries per
+ * prompt_id.
  */
 export class ApiRetryEvent implements BaseTelemetryEvent {
   'event.name': 'api_retry';
@@ -1075,6 +1101,7 @@ export type TelemetryEvent =
   | FileOperationEvent
   | InvalidChunkEvent
   | ContentRetryEvent
+  | ProtocolTagSanitizedEvent
   | ContentRetryFailureEvent
   | ApiRetryEvent
   | SubagentExecutionEvent
@@ -1435,5 +1462,44 @@ export class MemoryRecallEvent implements BaseTelemetryEvent {
     this.docs_selected = params.docs_selected;
     this.strategy = params.strategy;
     this.duration_ms = params.duration_ms;
+  }
+}
+
+export type MemoryRecallDeliveryPhase = 'fast' | 'refined';
+export type MemoryRecallDeliveryPoint = 'initial' | 'tool_result' | 'discarded';
+export type MemoryRecallDiscardReason =
+  | 'no_safe_delivery_point'
+  | 'new_query'
+  | 'reset'
+  | 'abort'
+  | 'shutdown'
+  | 'no_relevant_results';
+
+export class MemoryRecallDeliveryEvent implements BaseTelemetryEvent {
+  'event.name': 'qwen-code.memory.recall.delivery';
+  'event.timestamp': string;
+  phase: MemoryRecallDeliveryPhase;
+  delivery_point: MemoryRecallDeliveryPoint;
+  discard_reason?: MemoryRecallDiscardReason;
+  strategy: 'none' | 'heuristic' | 'model';
+  docs_selected: number;
+  latency_ms: number;
+
+  constructor(params: {
+    phase: MemoryRecallDeliveryPhase;
+    delivery_point: MemoryRecallDeliveryPoint;
+    discard_reason?: MemoryRecallDiscardReason;
+    strategy: 'none' | 'heuristic' | 'model';
+    docs_selected: number;
+    latency_ms: number;
+  }) {
+    this['event.name'] = 'qwen-code.memory.recall.delivery';
+    this['event.timestamp'] = new Date().toISOString();
+    this.phase = params.phase;
+    this.delivery_point = params.delivery_point;
+    this.discard_reason = params.discard_reason;
+    this.strategy = params.strategy;
+    this.docs_selected = params.docs_selected;
+    this.latency_ms = params.latency_ms;
   }
 }

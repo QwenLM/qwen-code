@@ -21,6 +21,8 @@ export default {
 
   'User level': 'User level',
   'Project level': 'Project level',
+  'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
+    'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -199,6 +201,8 @@ export default {
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
+  'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
+  'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
   'toolDisplayName.TaskCreate': 'toolDisplayName.TaskCreate',
   'toolDisplayName.TaskUpdate': 'toolDisplayName.TaskUpdate',
   'toolDisplayName.TaskList': 'toolDisplayName.TaskList',
@@ -232,6 +236,8 @@ export default {
   'Shell mode': 'Shell mode',
   'YOLO mode': 'YOLO mode',
   'Auto mode': 'Auto mode',
+  'auto_mode.entry_notice':
+    'Auto mode enabled.\n   An LLM classifier evaluates each tool call — safe actions auto-approve,\n   risky ones are blocked. Exit: Shift+Tab or /approval-mode default.',
   'plan mode': 'plan mode',
   'auto-accept edits': 'auto-accept edits',
   'Accepting edits': 'Accepting edits',
@@ -266,7 +272,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to toggle compact mode': 'to toggle compact mode',
+  'to view transcript': 'to view transcript',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -474,6 +480,8 @@ export default {
     'Manage existing subagents (view, edit, delete).',
   'Create a new subagent with guided setup.':
     'Create a new subagent with guided setup.',
+  'Create a reusable skill from a knowledge source (file, URL, conversation, or text).':
+    'Create a reusable skill from a knowledge source (file, URL, conversation, or text).',
 
   // ============================================================================
   // Agents - Management Dialog
@@ -486,6 +494,42 @@ export default {
   'Delete {{name}}': 'Delete {{name}}',
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
+  Transcript: 'Transcript',
+  'to close': 'to close',
+  'to scroll': 'to scroll',
+  'Failed to render transcript.': 'Failed to render transcript.',
+  'Read {{count}} file': 'Read {{count}} file',
+  'Read {{count}} files': 'Read {{count}} files',
+  'Reading {{count}} file': 'Reading {{count}} file',
+  'Reading {{count}} files': 'Reading {{count}} files',
+  'Edited {{count}} file': 'Edited {{count}} file',
+  'Edited {{count}} files': 'Edited {{count}} files',
+  'Editing {{count}} file': 'Editing {{count}} file',
+  'Editing {{count}} files': 'Editing {{count}} files',
+  'Wrote {{count}} file': 'Wrote {{count}} file',
+  'Wrote {{count}} files': 'Wrote {{count}} files',
+  'Writing {{count}} file': 'Writing {{count}} file',
+  'Writing {{count}} files': 'Writing {{count}} files',
+  'Searched {{count}} pattern': 'Searched {{count}} pattern',
+  'Searched {{count}} patterns': 'Searched {{count}} patterns',
+  'Searching {{count}} pattern': 'Searching {{count}} pattern',
+  'Searching {{count}} patterns': 'Searching {{count}} patterns',
+  'Listed {{count}} directory': 'Listed {{count}} directory',
+  'Listed {{count}} directories': 'Listed {{count}} directories',
+  'Listing {{count}} directory': 'Listing {{count}} directory',
+  'Listing {{count}} directories': 'Listing {{count}} directories',
+  'Ran {{count}} command': 'Ran {{count}} command',
+  'Ran {{count}} commands': 'Ran {{count}} commands',
+  'Running {{count}} command': 'Running {{count}} command',
+  'Running {{count}} commands': 'Running {{count}} commands',
+  'Ran {{count}} agent': 'Ran {{count}} agent',
+  'Ran {{count}} agents': 'Ran {{count}} agents',
+  'Running {{count}} agent': 'Running {{count}} agent',
+  'Running {{count}} agents': 'Running {{count}} agents',
+  'Used {{count}} tool': 'Used {{count}} tool',
+  'Used {{count}} tools': 'Used {{count}} tools',
+  'Using {{count}} tool': 'Using {{count}} tool',
+  'Using {{count}} tools': 'Using {{count}} tools',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter to select, ↑↓ to navigate, Esc to close',
   'Esc to go back': 'Esc to go back',
@@ -714,6 +758,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema Compliance',
   // Settings enum options
   'Auto (detect from system)': 'Auto (detect from system)',
+  'Auto (follow user input)': 'Auto (follow user input)',
   'Auto (detect terminal theme)': 'Auto (detect terminal theme)',
   Auto: 'Auto',
   Text: 'Text',
@@ -885,8 +930,8 @@ export default {
   'Enables an extension.': 'Enables an extension.',
   'The name of the extension to enable.':
     'The name of the extension to enable.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
-    'The scope to enable the extenison in. If not set, will be enabled in all scopes.',
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
+    'The scope to enable the extension in. If not set, will be enabled in all scopes.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully enabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully enabled in all scopes.':
@@ -896,8 +941,8 @@ export default {
   'Disables an extension.': 'Disables an extension.',
   'The name of the extension to disable.':
     'The name of the extension to disable.',
-  'The scope to disable the extenison in.':
-    'The scope to disable the extenison in.',
+  'The scope to disable the extension in.':
+    'The scope to disable the extension in.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Extension "{{name}}" successfully disabled for scope "{{scope}}".',
   'Extension "{{name}}" successfully updated: {{oldVersion}} → {{newVersion}}.':
@@ -1798,7 +1843,10 @@ export default {
   'Press Ctrl+C again to exit.': 'Press Ctrl+C again to exit.',
   'Press Ctrl+D again to exit.': 'Press Ctrl+D again to exit.',
   'Press Esc again to clear.': 'Press Esc again to clear.',
-  'Press ↑ to edit queued messages': 'Press ↑ to edit queued messages',
+  'Ctrl+Q to queue · ↑ to edit queued messages':
+    'Ctrl+Q to queue · ↑ to edit queued messages',
+  'Enter to steer · Ctrl+Q to queue': 'Enter to steer · Ctrl+Q to queue',
+  'Queue message for the next turn': 'Queue message for the next turn',
 
   // ============================================================================
   // MCP Status
@@ -1865,8 +1913,6 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Add a QWEN.md file to give Qwen Code persistent project context.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -2187,6 +2233,7 @@ export default {
   'Press Ctrl+Y to retry': 'Press Ctrl+Y to retry',
   'No failed request to retry.': 'No failed request to retry.',
   'to retry last request': 'to retry last request',
+  'to queue for the next turn': 'to queue for the next turn',
 
   // ============================================================================
   // Coding Plan Authentication
@@ -2378,10 +2425,6 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2552,4 +2595,116 @@ export default {
   reqs: 'reqs',
   in: 'in',
   out: 'out',
+
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Check for Qwen Code updates and install if available',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code update available! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'A new version of Qwen Code is available! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} is up to date!',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update check skipped ({{reason}}) — run /update to retry.',
+  'registry did not respond within {{seconds}}s':
+    'registry did not respond within {{seconds}}s',
+  'registry unreachable': 'registry unreachable',
+  'registry error': 'registry error',
+  'Unable to check for updates: {{reason}}':
+    'Unable to check for updates: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Update successful! The new version will be used on your next run.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Update downloaded. It will be applied after you exit this session.',
+  'Update failed: {{error}}': 'Update failed: {{error}}',
+  'Downloading update...': 'Downloading update...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.',
+  'Automatic update failed. Please try updating manually.':
+    'Automatic update failed. Please try updating manually.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatic update failed: {{error}}. Re-run the installer to update manually.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Running from a local git clone. Please update with "git pull".',
+  'Running via npx, update not applicable.':
+    'Running via npx, update not applicable.',
+  'Running via pnpx, update not applicable.':
+    'Running via pnpx, update not applicable.',
+  'Running via bunx, update not applicable.':
+    'Running via bunx, update not applicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Installed via Homebrew. Please update with "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    "Locally installed. Please update via your project's package.json.",
+  'Update requires sudo. Please run:': 'Update requires sudo. Please run:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Standalone install detected. Attempting to automatically update now...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Standalone install detected. Please rerun the standalone installer to update:',
+  'Run the following to update:': 'Run the following to update:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Unable to auto-update this standalone installation. Please reinstall from:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Manual update required. Please reinstall Qwen Code.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Update Qwen Code on the host, then restart the sandbox.',
+  'The update will be installed after you exit this session.':
+    'The update will be installed after you exit this session.',
+  'Run /update to install the update on the host.':
+    'Run /update to install the update on the host.',
+  'Run /update to install the update.': 'Run /update to install the update.',
+  '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.':
+    '⚠️ History gap: earlier conversation was lost before this point (storage interruption) and could not be recovered.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Precondition check': 'Precondition check',
+  'Precondition not met — this scheduled run was skipped.':
+    'Precondition not met — this scheduled run was skipped.',
+  'The precondition check was cancelled — this scheduled run was skipped.':
+    'The precondition check was cancelled — this scheduled run was skipped.',
+  'The precondition check was interrupted — this scheduled run was skipped.':
+    'The precondition check was interrupted — this scheduled run was skipped.',
+  'The precondition check failed — this scheduled run was skipped.':
+    'The precondition check failed — this scheduled run was skipped.',
+  'Running this scheduled task in a new session: {{link}}':
+    'Running this scheduled task in a new session: {{link}}',
+  'This scheduled run could not be started: {{error}}':
+    'This scheduled run could not be started: {{error}}',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.',
 };

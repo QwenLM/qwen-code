@@ -64,6 +64,63 @@ describe('DualOutputBridge', () => {
   });
 
   describe('--json-file output', () => {
+    it('emits recording failures for the affected session and unsubscribes on shutdown', async () => {
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      const unsubscribe = vi.fn();
+      config = {
+        ...createMockConfig(),
+        onChatRecordingFailure: vi.fn((nextListener) => {
+          listener = nextListener;
+          return unsubscribe;
+        }),
+      } as unknown as Config;
+      bridge = new DualOutputBridge(config, { filePath: target });
+
+      listener?.({ sessionId: 'affected-session', error: new Error('EACCES') });
+      await bridge.shutdown();
+
+      expect(readJsonl(target)).toContainEqual(
+        expect.objectContaining({
+          type: 'system',
+          subtype: 'session_recording_degraded',
+          session_id: 'affected-session',
+          data: expect.objectContaining({
+            session_id: 'affected-session',
+            reason: 'write_failed',
+          }),
+        }),
+      );
+      expect(unsubscribe).toHaveBeenCalledOnce();
+
+      listener?.({ sessionId: 'late-session', error: new Error('ENOSPC') });
+      expect(readJsonl(target)).not.toContainEqual(
+        expect.objectContaining({ session_id: 'late-session' }),
+      );
+    });
+
+    it('disables dual output when recording failure reporting throws', () => {
+      let listener:
+        | ((event: { sessionId: string; error: Error }) => void)
+        | undefined;
+      config = {
+        ...createMockConfig(),
+        onChatRecordingFailure: vi.fn((nextListener) => {
+          listener = nextListener;
+          return vi.fn();
+        }),
+      } as unknown as Config;
+      bridge = new DualOutputBridge(config, { filePath: target });
+      vi.spyOn(bridge['adapter'], 'emitMessage').mockImplementation(() => {
+        throw new Error('sidecar disconnected');
+      });
+
+      listener?.({ sessionId: 'affected-session', error: new Error('ENOSPC') });
+
+      expect(bridge.isConnected).toBe(false);
+    });
+
     it('creates the file automatically when it does not exist (ENOENT fallback)', async () => {
       const newFile = path.join(tmpDir, 'does-not-exist.jsonl');
       // newFile is NOT pre-created — tests the ENOENT fallback path
@@ -160,7 +217,20 @@ describe('DualOutputBridge', () => {
 
     it('routes permission requests + responses through the adapter', async () => {
       bridge = new DualOutputBridge(config, { filePath: target });
-      bridge.emitPermissionRequest('req-1', 'shell', 'tu-1', { cmd: 'ls' });
+      bridge.emitPermissionRequest(
+        'req-1',
+        'shell',
+        'tu-1',
+        { cmd: 'ls' },
+        null,
+        [
+          {
+            type: 'allow',
+            label: 'Allow Command',
+            description: 'Exact one-off approval required',
+          },
+        ],
+      );
       bridge.emitControlResponse('req-1', false);
       await bridge.shutdown();
 
@@ -175,6 +245,13 @@ describe('DualOutputBridge', () => {
           tool_name: 'shell',
           tool_use_id: 'tu-1',
           input: { cmd: 'ls' },
+          permission_suggestions: [
+            {
+              type: 'allow',
+              label: 'Allow Command',
+              description: 'Exact one-off approval required',
+            },
+          ],
           blocked_path: null,
         },
       });

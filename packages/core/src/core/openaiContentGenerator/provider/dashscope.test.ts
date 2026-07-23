@@ -111,6 +111,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  it('enables content-only thinking-tag leak detection', () => {
+    expect(provider.getResponseParsingOptions()).toEqual({
+      contentOnlyThinkingTagLeaks: true,
+    });
+  });
+
   describe('isDashScopeProvider', () => {
     it('should return true for QWEN_OAUTH auth type', () => {
       const config = {
@@ -138,6 +144,17 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const config = {
         authType: AuthType.USE_OPENAI,
         baseUrl: 'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',
+      } as ContentGeneratorConfig;
+
+      const result =
+        DashScopeOpenAICompatibleProvider.isDashScopeProvider(config);
+      expect(result).toBe(true);
+    });
+
+    it('should return true for DashScope US regional URL', () => {
+      const config = {
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://dashscope-us.aliyuncs.com/compatible-mode/v1',
       } as ContentGeneratorConfig;
 
       const result =

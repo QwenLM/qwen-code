@@ -24,7 +24,12 @@ import type {
   McpToolProgressData,
   FileDiff,
 } from '@qwen-code/qwen-code-core';
-import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core';
+import {
+  formatVisionBridgeNoticeDisplay,
+  isVisionBridgeNoticeDisplay,
+  ToolNames,
+  ToolNamesMigration,
+} from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
@@ -38,9 +43,12 @@ import type { LoadedSettings } from '../../../config/settings.js';
 
 import {
   escapeAnsiCtrlCodes,
+  sanitizeTerminalText,
   getCachedStringWidth,
+  sanitizeMultilineForDisplay,
   toCodePoints,
 } from '../../utils/textUtils.js';
+import { TOOL_DISPLAY_BY_NAME } from '../../utils/tool-display-map.js';
 
 import {
   ToolStatusIndicator,
@@ -59,6 +67,11 @@ const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
     .map(([legacy]) => legacy),
 ]);
 
+// How many of the subagent's prior tool calls to list above an approval
+// prompt — enough to show what led up to the request without pushing the
+// confirmation itself off-screen.
+const APPROVAL_CONTEXT_CALLS = 3;
+
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
 const MIN_LINES_SHOWN = 2; // show at least this many lines
@@ -67,6 +80,7 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
+
 export type TextEmphasis = 'high' | 'medium' | 'low';
 type DiffResultDisplay = Pick<
   FileDiff,
@@ -81,7 +95,11 @@ function sliceTextForMaxHeight(
   text: string,
   maxHeight: number | undefined,
   maxWidth: number,
-): { text: string; hiddenLinesCount: number } {
+): {
+  text: string;
+  hiddenLinesCount: number;
+  sourceBoundaries?: Array<{ kind: 'soft' | 'hard'; joiner: string }>;
+} {
   if (maxHeight === undefined) {
     return { text, hiddenLinesCount: 0 };
   }
@@ -89,41 +107,49 @@ function sliceTextForMaxHeight(
   const targetMaxHeight = Math.max(Math.round(maxHeight), MINIMUM_MAX_HEIGHT);
   const visibleContentHeight = targetMaxHeight - 1;
   const visualWidth = Math.max(1, Math.floor(maxWidth));
-  const visibleLines: string[] = [];
+  const visibleLines: Array<{
+    text: string;
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null;
+  }> = [];
   let visualLineCount = 0;
   let currentLine = '';
   let currentLineWidth = 0;
 
-  const appendVisibleLine = (line: string) => {
+  const appendVisibleLine = (
+    line: string,
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
     visualLineCount += 1;
-    visibleLines.push(line);
+    visibleLines.push({ text: line, breakAfter });
     if (visibleLines.length > visibleContentHeight) {
       visibleLines.shift();
     }
   };
 
-  const flushCurrentLine = () => {
-    appendVisibleLine(currentLine);
+  const flushCurrentLine = (
+    breakAfter: { kind: 'soft' | 'hard'; joiner: string } | null,
+  ) => {
+    appendVisibleLine(currentLine, breakAfter);
     currentLine = '';
     currentLineWidth = 0;
   };
 
   for (const char of toCodePoints(text)) {
     if (char === '\n') {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'hard', joiner: '\n' });
       continue;
     }
 
     const charWidth = Math.max(getCachedStringWidth(char), 1);
     if (currentLineWidth > 0 && currentLineWidth + charWidth > visualWidth) {
-      flushCurrentLine();
+      flushCurrentLine({ kind: 'soft', joiner: '' });
     }
 
     currentLine += char;
     currentLineWidth += charWidth;
   }
 
-  flushCurrentLine();
+  flushCurrentLine(null);
 
   if (visualLineCount <= targetMaxHeight) {
     return { text, hiddenLinesCount: 0 };
@@ -131,8 +157,11 @@ function sliceTextForMaxHeight(
 
   const hiddenLinesCount = visualLineCount - visibleContentHeight;
   return {
-    text: visibleLines.join('\n'),
+    text: visibleLines.map((line) => line.text).join('\n'),
     hiddenLinesCount,
+    sourceBoundaries: visibleLines
+      .slice(0, -1)
+      .map((line) => line.breakAfter ?? { kind: 'hard', joiner: '\n' }),
   };
 }
 
@@ -281,6 +310,61 @@ const PlanResultRenderer: React.FC<{
 );
 
 /**
+ * The subagent's most recent tool calls that lead up to a parked
+ * permission request (excluding the call awaiting approval itself,
+ * newest last, capped at `APPROVAL_CONTEXT_CALLS`). Each renders as one
+ * line above the confirmation prompt, so the caller also uses the count
+ * to reserve height for the confirmation.
+ */
+const priorApprovalCalls = (
+  data: AgentResultDisplay,
+): NonNullable<AgentResultDisplay['toolCalls']> =>
+  (data.toolCalls ?? [])
+    .filter((call) => call.status !== 'awaiting_approval')
+    .slice(-APPROVAL_CONTEXT_CALLS);
+
+/**
+ * The last few tool calls the subagent made before parking a permission
+ * request — rendered between the "Approval requested by" header and the
+ * confirmation prompt so the user can judge WHY the agent wants to run
+ * this call instead of approving an isolated command blind (the
+ * permission-context ask of issue #6569).
+ */
+const SubagentApprovalContext: React.FC<{
+  data: AgentResultDisplay;
+}> = ({ data }) => {
+  const priorCalls = priorApprovalCalls(data);
+  if (priorCalls.length === 0) return null;
+  return (
+    <Box flexDirection="column">
+      {priorCalls.map((call) => {
+        const glyph =
+          call.status === 'failed'
+            ? '✖'
+            : call.status === 'success'
+              ? '✔'
+              : '○';
+        const displayName = localizeToolDisplayName(
+          TOOL_DISPLAY_BY_NAME[call.name] ?? call.name,
+        );
+        const desc = (call.description ?? '').replace(/\s*\n\s*/g, ' ').trim();
+        const label = desc ? `${displayName} ${desc}` : displayName;
+        return (
+          <Box key={call.callId}>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {/* sanitizeMultilineForDisplay: bare C0 controls (\r, BS,
+                  BEL) pass through the ANSI-sequence escape and this
+                  line informs an allow/deny decision. */}
+              {`  ${glyph} ${sanitizeMultilineForDisplay(label)}`}
+            </Text>
+          </Box>
+        );
+      })}
+    </Box>
+  );
+};
+
+/**
  * Component to render subagent execution results.
  *
  * The verbose inline frame has been retired. Three surfaces remain:
@@ -325,6 +409,21 @@ const SubagentExecutionRenderer: React.FC<{
     // ANSI control sequences; escape before rendering into Ink Text
     // (matches LiveAgentPanel + SubagentScrollbackSummary).
     const agentLabel = escapeAnsiCtrlCodes(data.subagentName || 'agent');
+    // Reserve height for everything this component renders above the
+    // confirmation prompt — the "Approval requested by" header (1 line)
+    // plus one sibling line per prior call — out of the confirmation's
+    // budget, so the question and its options never get clipped off-screen
+    // in a short terminal. Approving blind is the exact failure this context
+    // is meant to prevent, so the confirmation prompt must always win.
+    const HEADER_LINES = 1;
+    const contextLines = priorApprovalCalls(data).length;
+    const confirmationHeight =
+      availableHeight !== undefined
+        ? Math.max(
+            MINIMUM_MAX_HEIGHT,
+            availableHeight - contextLines - HEADER_LINES,
+          )
+        : availableHeight;
     return (
       <Box flexDirection="column" paddingLeft={1}>
         <Box>
@@ -334,10 +433,11 @@ const SubagentExecutionRenderer: React.FC<{
           </Text>
           <Text color={theme.text.secondary}>:</Text>
         </Box>
+        <SubagentApprovalContext data={data} />
         <ToolConfirmationMessage
           confirmationDetails={data.pendingConfirmation}
           isFocused={isFocused}
-          availableTerminalHeight={availableHeight}
+          availableTerminalHeight={confirmationHeight}
           contentWidth={childWidth - 2}
           compactMode={true}
           config={config}
@@ -495,6 +595,7 @@ const StringResultRenderer: React.FC<{
       maxHeight={availableHeight}
       maxWidth={childWidth}
       additionalHiddenLinesCount={sliced.hiddenLinesCount}
+      sourceBoundaries={sliced.sourceBoundaries}
     >
       <Box>
         <Text wrap="wrap" color={theme.text.primary}>
@@ -552,6 +653,15 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   config?: Config;
   forceShowResult?: boolean;
   /**
+   * Transcript (Ctrl+O) full-detail mode. When true AND this is a collapsible
+   * tool (read/search/list) that carries a `detailedDisplay`, the renderer
+   * switches its DATA SOURCE from the summary `resultDisplay` to the full
+   * `detailedDisplay` (§4.9). Kept separate from `forceShowResult`, which only
+   * controls unfold/height — so main-view force scenarios (user-initiated,
+   * error, confirming) still render the summary, never the full output.
+   */
+  fullDetail?: boolean;
+  /**
    * Whether this subagent owns keyboard input for the inline approval
    * surface — when true the focus-holder banner renders and the
    * underlying ToolConfirmationMessage receives keystrokes; when false
@@ -576,6 +686,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  detailedDisplay,
   status,
   availableTerminalHeight,
   contentWidth,
@@ -586,6 +697,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   ptyId,
   config,
   forceShowResult,
+  fullDetail,
   isFocused,
   isPending,
   executionStartTime,
@@ -690,7 +802,54 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
+  // §4.9: in transcript full-detail mode, collapsible tools (read/search/list)
+  // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
+  // from the persisted functionResponse. Only a non-empty string detail
+  // qualifies; everything else (and all main-view rendering) keeps the summary.
+  const usingDetailedDisplay =
+    fullDetail &&
+    isCollapsibleTool(name) &&
+    typeof detailedDisplay === 'string' &&
+    detailedDisplay.length > 0;
+  // `detailedDisplay` is RAW, un-sanitized tool output (file contents, grep
+  // hits, directory listings). A malicious repo could embed terminal control
+  // codes that execute when the transcript renders the full content unfiltered.
+  // Run it through the shared `sanitizeTerminalText` pipeline (ANSI escape + C0
+  // strip + bidi strip), memoized since the content can be ~25K chars and this
+  // runs on every render.
+  const sanitizedDetailedDisplay = React.useMemo(
+    () =>
+      usingDetailedDisplay && typeof detailedDisplay === 'string'
+        ? sanitizeTerminalText(detailedDisplay)
+        : detailedDisplay,
+    [detailedDisplay, usingDetailedDisplay],
+  );
+  const visionBridgeNoticeDisplay = isVisionBridgeNoticeDisplay(resultDisplay)
+    ? resultDisplay
+    : undefined;
+  const visionBridgeNoticeText = visionBridgeNoticeDisplay
+    ? sanitizeTerminalText(
+        formatVisionBridgeNoticeDisplay(visionBridgeNoticeDisplay),
+      )
+    : undefined;
+  const effectiveResultDisplay = usingDetailedDisplay
+    ? sanitizedDetailedDisplay
+    : visionBridgeNoticeDisplay
+      ? undefined
+      : resultDisplay;
+
+  // detailedDisplay is RAW tool output (file content, grep hits, directory
+  // listings). Render it as plain text — Markdown formatting would turn the
+  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
+  // `if (availableHeight)` guard above doesn't catch this because fullDetail
+  // lifts the height cap (availableTerminalHeight is undefined in transcript).
+  if (usingDetailedDisplay) {
+    renderOutputAsMarkdown = false;
+  }
+
+  const effectiveDisplayRenderer = useResultDisplayRenderer(
+    effectiveResultDisplay,
+  );
 
   // Collapse text/ANSI output for completed collapsible tools (read/search/list)
   // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)
@@ -727,6 +886,15 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
+      {visionBridgeNoticeText && (
+        <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
+          <StringResultRenderer
+            data={visionBridgeNoticeText}
+            renderAsMarkdown={false}
+            childWidth={innerWidth}
+          />
+        </Box>
+      )}
       {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">

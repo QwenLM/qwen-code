@@ -1,3 +1,8 @@
+import type {
+  RequestPermissionRequest,
+  RequestPermissionResponse,
+} from '@agentclientprotocol/sdk';
+
 export interface AvailableCommand {
   name: string;
   description: string;
@@ -47,16 +52,42 @@ export interface SessionDiedEvent {
   reason?: string;
 }
 
+export interface PermissionRequestEvent {
+  requestId: string;
+  sessionId: string;
+  request: RequestPermissionRequest;
+}
+
+export interface PermissionResolvedEvent {
+  requestId: string;
+  outcome?: RequestPermissionResponse['outcome'];
+}
+
 interface ChannelAgentBridgeEventMap {
   sessionDied: [SessionDiedEvent];
   textChunk: [sessionId: string, chunk: string];
+  backgroundResponse: [sessionId: string, text: string];
+  responseBoundary: [sessionId: string];
   toolCall: [ToolCallEvent];
+  permissionRequest: [PermissionRequestEvent];
+  permissionResolved: [PermissionResolvedEvent];
 }
 
 export interface BridgeSessionInfo {
   sessionId: string;
   workspaceCwd: string;
   hasActivePrompt: boolean;
+}
+
+export interface ChannelAgentBridgeSessionOptions {
+  approvalMode?: string;
+  /**
+   * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
+   * on **new** sessions — creation-time attribution paired with
+   * `sourceType: 'channel'`. Ignored by `loadSession`: loading an existing
+   * session never re-stamps its creation attribution.
+   */
+  sourceId?: string;
 }
 
 export interface ChannelAgentBridge {
@@ -70,14 +101,32 @@ export interface ChannelAgentBridge {
     eventName: K,
     listener: (...args: ChannelAgentBridgeEventMap[K]) => void,
   ): unknown;
-  newSession(cwd: string): Promise<string>;
-  loadSession(sessionId: string, cwd: string): Promise<string>;
+  newSession(
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
+  loadSession(
+    sessionId: string,
+    cwd: string,
+    options?: ChannelAgentBridgeSessionOptions,
+    bindingToken?: object,
+  ): Promise<string>;
   prompt(
     sessionId: string,
     text: string,
     options?: { imageBase64?: string; imageMimeType?: string },
   ): Promise<string>;
   cancelSession(sessionId: string): Promise<void>;
+  /** Release a bridge-owned session that will not be routed to a caller. */
+  discardSession?(
+    sessionId: string,
+    expectedBindingToken?: object,
+  ): Promise<void>;
+  respondToPermission?(
+    requestId: string,
+    response: RequestPermissionResponse,
+  ): Promise<boolean>;
   shellCommand?(
     sessionId: string,
     command: string,

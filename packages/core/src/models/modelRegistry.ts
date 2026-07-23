@@ -229,6 +229,9 @@ export class ModelRegistry {
       // always defined on `ResolvedModelConfig` — no fallback needed here.
       modalities: model.generationConfig.modalities,
       baseUrl: model.baseUrl,
+      ...(model.registryBaseUrl !== undefined
+        ? { registryBaseUrl: model.registryBaseUrl }
+        : {}),
       envKey: model.envKey,
       fastOnly: model.fastOnly,
       voiceOnly: model.voiceOnly,
@@ -237,20 +240,25 @@ export class ModelRegistry {
 
   /**
    * Get model configuration by authType and modelId.
-   * When baseUrl is provided, looks up by the exact composite key (id+baseUrl).
+   * When baseUrl is provided, looks up the exact composite key, then a plain
+   * entry whose resolved default baseUrl matches.
    * When baseUrl is omitted, tries the plain id first (backward compatible),
    * then scans all entries for the first match by model id.
    */
   getModel(
     authType: AuthType,
     modelId: string,
-    baseUrl?: string,
+    baseUrl?: string | null,
   ): ResolvedModelConfig | undefined {
     const models = this.modelsByAuthType.get(authType);
     if (!models) return undefined;
 
-    if (baseUrl) {
-      return models.get(modelRegistryKey(modelId, baseUrl));
+    if (baseUrl !== undefined) {
+      const exact = models.get(modelRegistryKey(modelId, baseUrl ?? undefined));
+      if (exact) return exact;
+      if (baseUrl === null) return undefined;
+      const plain = models.get(modelId);
+      return plain?.baseUrl === baseUrl ? plain : undefined;
     }
 
     // Try plain id key first (models registered without explicit baseUrl)
@@ -266,7 +274,7 @@ export class ModelRegistry {
 
   /**
    * Check if model exists for given authType.
-   * When baseUrl is provided, checks the exact composite key.
+   * When baseUrl is provided, checks the exact endpoint or matching default.
    * When baseUrl is omitted, checks plain id and scans by model id.
    */
   hasModel(authType: AuthType, modelId: string, baseUrl?: string): boolean {
@@ -315,6 +323,7 @@ export class ModelRegistry {
       authType,
       name: config.name || config.id,
       baseUrl: config.baseUrl || this.getDefaultBaseUrl(authType),
+      ...(config.baseUrl ? { registryBaseUrl: config.baseUrl } : {}),
       generationConfig,
       capabilities: config.capabilities || {},
     };

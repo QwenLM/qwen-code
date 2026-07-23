@@ -22,11 +22,105 @@ export enum PackageManager {
   UNKNOWN = 'unknown',
 }
 
+export function getNpmCliPath(
+  nodePath = process.execPath,
+  platform = process.platform,
+): string {
+  if (platform === 'win32') {
+    return path.win32.join(
+      path.win32.dirname(nodePath),
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
+  }
+  // Prefer the npm symlink that sits next to the node binary and resolve it to
+  // the real npm-cli.js. On split layouts where npm is not adjacent to node,
+  // fall back to the conventional `<prefix>/lib/node_modules/npm` location
+  // instead of throwing synchronously — getNpmCliPath is called from a
+  // non-async site (handleAutoUpdate), and a returned best-effort path lets the
+  // downstream spawn surface any failure through its 'error' handler.
+  const adjacentNpm = path.join(path.dirname(nodePath), 'npm');
+  try {
+    return fs.realpathSync(adjacentNpm);
+  } catch {
+    return path.join(
+      path.dirname(nodePath),
+      '..',
+      'lib',
+      'node_modules',
+      'npm',
+      'bin',
+      'npm-cli.js',
+    );
+  }
+}
+
 const debugLogger = createDebugLogger('INSTALLATION_INFO');
 const STANDALONE_UNIX_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.sh';
 const STANDALONE_WINDOWS_INSTALLER =
   'https://qwen-code-assets.oss-cn-hangzhou.aliyuncs.com/installation/install-qwen-standalone.ps1';
+
+function getStandaloneInstallerUrl(): string {
+  return process.platform === 'win32'
+    ? STANDALONE_WINDOWS_INSTALLER
+    : STANDALONE_UNIX_INSTALLER;
+}
+
+export function resolveUpdateCommand(
+  updateCommand: string,
+  latestVersion: string,
+): string {
+  const isNightly = latestVersion.includes('nightly');
+  return updateCommand.replace(
+    '@latest',
+    isNightly ? '@nightly' : `@${latestVersion}`,
+  );
+}
+
+export function formatUpdateInstructions(
+  installationInfo: InstallationInfo,
+  latestVersion: string,
+): string[] {
+  const lines: string[] = [];
+
+  if (installationInfo.updateMessage && !installationInfo.updateCommand) {
+    lines.push(
+      ...formatUpdateMessage(installationInfo.updateMessage, latestVersion),
+    );
+  }
+
+  if (installationInfo.updateCommand) {
+    const updateCmd = resolveUpdateCommand(
+      installationInfo.updateCommand,
+      latestVersion,
+    );
+    lines.push('Run the following to update:', `  ${updateCmd}`);
+  } else if (!installationInfo.updateMessage) {
+    lines.push('Manual update required. Please reinstall Qwen Code.');
+  }
+
+  return lines;
+}
+
+function formatUpdateMessage(
+  updateMessage: string,
+  latestVersion: string,
+): string[] {
+  const message = resolveUpdateCommand(updateMessage, latestVersion);
+
+  const sudoPrefix = 'Update requires sudo. Please run: ';
+  if (message.startsWith(sudoPrefix)) {
+    return [
+      'Update requires sudo. Please run:',
+      `  ${message.slice(sudoPrefix.length)}`,
+    ];
+  }
+
+  return [message];
+}
 
 export interface InstallationInfo {
   packageManager: PackageManager;
@@ -242,10 +336,11 @@ function getStandaloneInstallInfo(
     return null;
   }
 
+  const installerUrl = getStandaloneInstallerUrl();
   const updateCommand =
     process.platform === 'win32'
-      ? `powershell -ExecutionPolicy Bypass -c "irm ${STANDALONE_WINDOWS_INSTALLER} | iex"`
-      : `curl -fsSL ${STANDALONE_UNIX_INSTALLER} | bash`;
+      ? `powershell -ExecutionPolicy Bypass -c "irm ${installerUrl} | iex"`
+      : `curl -fsSL ${installerUrl} | bash`;
 
   return {
     packageManager: PackageManager.STANDALONE,

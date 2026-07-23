@@ -317,6 +317,36 @@ describe('ShellExecutionService', () => {
     return { result, handle, abortController };
   };
 
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the pty child env while keeping user vars and third-party credentials', async () => {
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
+
+      await simulateExecution('echo hi', (pty) => {
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null });
+      });
+
+      const spawnEnv = (
+        mockPtySpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
+
   describe('Successful Execution', () => {
     it('should execute a command and capture output', async () => {
       const { result, handle } = await simulateExecution('ls -l', (pty) => {
@@ -2253,6 +2283,37 @@ describe('ShellExecutionService child_process fallback', () => {
     return { result, handle, abortController };
   };
 
+  describe('child environment sanitization (#6601)', () => {
+    it('strips Qwen-internal daemon secrets from the child_process env while keeping user vars and third-party credentials', async () => {
+      // Replace (not mutate in place): this file restores process.env by
+      // reference in afterEach, so in-place keys would leak to later tests.
+      process.env = {
+        ...originalProcessEnv,
+        QWEN_SERVER_TOKEN: 'serve-secret',
+        QWEN_DAEMON_TOKEN: 'daemon-secret',
+        GH_TOKEN: 'gh-abc',
+        PATH: '/usr/bin',
+      };
+
+      await simulateExecution('echo hi', (cp) => {
+        cp.emit('exit', 0, null);
+        cp.emit('close', 0, null);
+      });
+
+      const spawnEnv = (
+        mockCpSpawn.mock.calls[0][2] as { env: NodeJS.ProcessEnv }
+      ).env;
+      // Internal daemon secrets must not leak into agent-run commands.
+      expect(spawnEnv['QWEN_SERVER_TOKEN']).toBeUndefined();
+      expect(spawnEnv['QWEN_DAEMON_TOKEN']).toBeUndefined();
+      // Benign vars + third-party credentials user commands rely on are kept.
+      expect(spawnEnv['PATH']).toContain('/usr/bin');
+      expect(spawnEnv['GH_TOKEN']).toBe('gh-abc');
+      // The shell tool's own marker is still applied on top.
+      expect(spawnEnv['QWEN_CODE']).toBe('1');
+    });
+  });
+
   describe('Successful Execution', () => {
     it('should execute a command and capture stdout and stderr', async () => {
       const { result, handle } = await simulateExecution('ls -l', (cp) => {
@@ -3362,6 +3423,86 @@ describe('ShellExecutionService execution method selection', () => {
     });
     mockCpSpawn.mockReturnValue(mockChildProcess);
   });
+
+  it.each([
+    { shouldUseNodePty: true, label: 'PTY' },
+    { shouldUseNodePty: false, label: 'child_process' },
+  ])(
+    'does not spawn through $label when the signal is already aborted',
+    async ({ shouldUseNodePty }) => {
+      const abortController = new AbortController();
+      abortController.abort();
+
+      const handle = await ShellExecutionService.execute(
+        'test command',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        shouldUseNodePty,
+        shellExecutionConfig,
+      );
+      const result = await handle.result;
+
+      expect(handle.pid).toBeUndefined();
+      expect(result).toMatchObject({
+        aborted: true,
+        pid: undefined,
+        executionMethod: 'none',
+        output: '',
+      });
+      expect(mockGetPty).not.toHaveBeenCalled();
+      expect(mockPtySpawn).not.toHaveBeenCalled();
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['resolve', 'reject'] as const)(
+    'returns on abort while getPty is pending and ignores its late %s',
+    async (settlement) => {
+      let resolvePty: ((value: null) => void) | undefined;
+      let rejectPty: ((reason: Error) => void) | undefined;
+      mockGetPty.mockReturnValue(
+        new Promise((resolve, reject) => {
+          resolvePty = resolve;
+          rejectPty = reject;
+        }),
+      );
+      const abortController = new AbortController();
+      const removeAbortListener = vi.spyOn(
+        abortController.signal,
+        'removeEventListener',
+      );
+      const handlePromise = ShellExecutionService.execute(
+        'test command',
+        '/test/dir',
+        onOutputEventMock,
+        abortController.signal,
+        true,
+        shellExecutionConfig,
+      );
+
+      abortController.abort();
+      const handle = await handlePromise;
+      expect((await handle.result).executionMethod).toBe('none');
+      expect(removeAbortListener).toHaveBeenCalledWith(
+        'abort',
+        expect.any(Function),
+      );
+      expect(mockPtySpawn).not.toHaveBeenCalled();
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+
+      if (settlement === 'resolve') {
+        resolvePty?.(null);
+      } else {
+        rejectPty?.(new Error('late PTY failure'));
+      }
+      await Promise.resolve();
+      await Promise.resolve();
+
+      expect(mockPtySpawn).not.toHaveBeenCalled();
+      expect(mockCpSpawn).not.toHaveBeenCalled();
+    },
+  );
 
   it('should use node-pty when shouldUseNodePty is true and pty is available', async () => {
     const abortController = new AbortController();

@@ -66,6 +66,9 @@ export type {
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
   DaemonStatusTranscriptBlock,
+  DaemonInputAnnotation,
+  DaemonInputReference,
+  DaemonInputReferenceAnnotation,
   DaemonTextTranscriptBlock,
   DaemonTextDeltaMeta,
   DaemonToolPreview,
@@ -115,6 +118,7 @@ export type {
   DaemonUiMcpChildRefusedEvent,
   DaemonUiMcpServerRestartedEvent,
   DaemonUiMcpServerRestartRefusedEvent,
+  DaemonUiMcpServerChangedEvent,
   // Auth device-flow events
   DaemonUiAuthDeviceFlowEvent,
   DaemonUiAuthDeviceFlowStartedEvent,

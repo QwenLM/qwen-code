@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act } from 'react';
+import { act, forwardRef, useImperativeHandle } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
 
@@ -17,20 +17,84 @@ let connectionState: any;
 let streamingStateValue: string;
 let pendingPermission: any;
 let latestOnSubmit:
-  | ((text: string, images?: unknown, commit?: () => void) => boolean)
+  | ((
+      text: string,
+      images?: unknown,
+      commit?: () => void,
+      metadata?: unknown,
+    ) => boolean)
   | undefined;
-let sendPromptResolve: (() => void) | undefined;
-let sendPromptReject: ((e: unknown) => void) | undefined;
+let latestChatEditorProps: any;
+let latestFollowupAccept: ((suggestion: string) => void) | undefined;
 let sendPromptAdmit: (() => void) | undefined;
+const clearFollowup = vi.fn();
+const insertText = vi.fn();
+const transcriptDispatch = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
 const submitPermission = vi.fn(async () => {});
 const cancel = vi.fn(async () => {});
+const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
+const setModel = vi.fn(async () => ({}) as any);
+const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
+const daemonActions = {
+  sendPrompt,
+  submitPermission,
+  cancel,
+  setApprovalMode,
+  setModel,
+  loadArtifacts,
+};
+const enqueuePrompt = vi.fn(() => true);
+const removeQueuedPrompt = vi.fn();
+const insertQueuedPrompt = vi.fn();
+const editQueuedPrompt = vi.fn();
+const editLastQueuedPrompt = vi.fn(() => false);
+const clearQueuedPrompts = vi.fn(() => false);
+let queuedPromptsMock: any[] = [];
+let queuedTextsMock: string[] = [];
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
-  useActions: () => ({ sendPrompt, submitPermission, cancel }),
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
+  useActions: () => daemonActions,
   useConnection: () => connectionState,
+  useDaemonFollowupSuggestion: (options: any) => {
+    latestFollowupAccept = options?.onAccept;
+    return {
+      followupState: { suggestion: 'next idea', isVisible: true },
+      onAcceptFollowup: vi.fn(),
+      onDismissFollowup: vi.fn(),
+      clear: clearFollowup,
+    };
+  },
   useStreamingState: () => streamingStateValue,
   useTranscriptBlocks: () => [],
+  useTranscriptHistory: () => ({
+    hasMore: false,
+    loading: false,
+    capacityReached: false,
+    loadMore: vi.fn(),
+    release: vi.fn(),
+  }),
+  useTranscriptStore: () => ({
+    dispatch: transcriptDispatch,
+  }),
+  usePromptStatus: () => 'idle',
+  useWorkspaceActions: () => ({}),
+  useWorkspace: () => ({ capabilities: connectionState.capabilities }),
+  useWorkspaceEventSignals: () => ({ artifactsVersion: 0 }),
+}));
+
+vi.mock('../hooks/useQueuedPrompts', () => ({
+  useQueuedPrompts: () => ({
+    queuedPrompts: queuedPromptsMock,
+    queuedTexts: queuedTextsMock,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  }),
 }));
 
 let messagesState: any[];
@@ -64,8 +128,12 @@ vi.mock('./StreamingStatus', () => ({
   ),
 }));
 vi.mock('./ChatEditor', () => ({
-  ChatEditor: (props: any) => {
+  ChatEditor: forwardRef(function MockChatEditor(props: any, ref: any) {
     latestOnSubmit = props.onSubmit;
+    latestChatEditorProps = props;
+    useImperativeHandle(ref, () => ({
+      insertText,
+    }));
     return (
       <div>
         <button
@@ -77,11 +145,51 @@ vi.mock('./ChatEditor', () => ({
         <button data-testid="pane-cancel" onClick={props.onCancel}>
           cancel
         </button>
+        <button
+          data-testid="pane-pick-mode"
+          onClick={() => props.onSelectMode?.('yolo')}
+        >
+          mode
+        </button>
+        <button
+          data-testid="pane-pick-badmode"
+          onClick={() => props.onSelectMode?.('totally-bogus')}
+        >
+          badmode
+        </button>
+        <button
+          data-testid="pane-pick-model"
+          onClick={() => props.onSelectModel?.('gpt-x')}
+        >
+          model
+        </button>
         <span data-testid="pane-running">{String(props.isRunning)}</span>
         <span data-testid="pane-dialogopen">{String(props.dialogOpen)}</span>
+        <span data-testid="pane-toolbar">
+          {JSON.stringify(props.visibleToolbarActions ?? null)}
+        </span>
+        <span data-testid="pane-commands">
+          {String((props.commands ?? []).length)}
+        </span>
+        <span data-testid="pane-mode">{String(props.currentMode)}</span>
+        <span data-testid="pane-model">{String(props.currentModel)}</span>
+        <span data-testid="pane-models">
+          {JSON.stringify(props.availableModels ?? null)}
+        </span>
+        <span data-testid="pane-queued-messages">
+          {JSON.stringify(props.queuedMessages ?? null)}
+        </span>
+        <span data-testid="pane-followup">
+          {String(props.followupState?.suggestion ?? '')}
+        </span>
       </div>
     );
-  },
+  }),
+}));
+vi.mock('./QueuedPromptDisplay', () => ({
+  QueuedPromptDisplay: (props: any) => (
+    <div data-testid="pane-queue">{String(props.prompts.length)}</div>
+  ),
 }));
 vi.mock('./messages/ToolApproval', () => ({
   ToolApproval: (props: any) => (
@@ -98,6 +206,7 @@ vi.mock('./messages/AskUserQuestion', () => ({
   AskUserQuestion: (props: any) => (
     <button
       data-testid="ask-approval"
+      data-keyboard-active={String(props.keyboardActive)}
       onClick={() => props.onConfirm(props.request.id, 'opt')}
     >
       ask
@@ -112,6 +221,7 @@ let container: HTMLDivElement | null = null;
 
 beforeEach(() => {
   connectionState = {
+    status: 'connected',
     sessionId: 'sess-1',
     displayName: 'Refactor core',
     workspaceCwd: '/w',
@@ -122,21 +232,32 @@ beforeEach(() => {
   pendingPermission = null;
   messagesState = [{ id: 'm1', role: 'user', content: 'hi' }];
   latestOnSubmit = undefined;
-  sendPrompt.mockReset();
-  // Each sendPrompt returns a promise the test controls, so we can assert the
-  // draft is committed on admission (onAdmitted) rather than on turn completion
-  // (promise resolution). `sendPromptAdmit` captures the options.onAdmitted hook.
+  latestChatEditorProps = undefined;
+  latestFollowupAccept = undefined;
   sendPromptAdmit = undefined;
-  sendPrompt.mockImplementation(
-    (_text?: string, options?: { onAdmitted?: () => void }) =>
-      new Promise<unknown>((resolve, reject) => {
-        sendPromptAdmit = options?.onAdmitted;
-        sendPromptResolve = () => resolve({});
-        sendPromptReject = (e) => reject(e);
-      }),
-  );
+  queuedPromptsMock = [];
+  queuedTextsMock = [];
+  sendPrompt.mockReset();
+  loadArtifacts.mockReset();
+  loadArtifacts.mockResolvedValue({ artifacts: [] });
+  sendPrompt.mockImplementation(async (_text: string, options?: any) => {
+    sendPromptAdmit = options?.onAdmitted;
+    return {} as any;
+  });
+  clearFollowup.mockClear();
+  insertText.mockClear();
   submitPermission.mockClear();
   cancel.mockClear();
+  setApprovalMode.mockClear();
+  setModel.mockClear();
+  enqueuePrompt.mockClear();
+  enqueuePrompt.mockReturnValue(true);
+  removeQueuedPrompt.mockClear();
+  insertQueuedPrompt.mockClear();
+  editQueuedPrompt.mockClear();
+  editLastQueuedPrompt.mockClear();
+  clearQueuedPrompts.mockClear();
+  transcriptDispatch.mockClear();
 });
 
 afterEach(() => {
@@ -170,6 +291,97 @@ describe('ChatPane', () => {
     expect(container!.textContent).toContain('Refactor core');
   });
 
+  it('adds no workspace toolbar chip on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(latestChatEditorProps.visibleToolbarActions).not.toContain(
+      'workspace',
+    );
+    expect(latestChatEditorProps.workspaceName).toBeUndefined();
+  });
+
+  it('shows the pane workspace as a toolbar chip on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    // The split view hands each pane its own workspace explicitly.
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    expect(latestChatEditorProps.visibleToolbarActions).toContain('workspace');
+    expect(latestChatEditorProps.workspaceName).toBe('Payments API');
+    expect(latestChatEditorProps.workspaceTitle).toBe('/work/api');
+    // The chip carries the pane's stable accent color (api is the 2nd workspace
+    // → the 2nd palette color) so it stays distinct when it collapses to an icon.
+    expect(latestChatEditorProps.workspaceColor).toBe('green');
+  });
+
+  it('surfaces the workspace in the pane header on a multi-workspace daemon', () => {
+    connectionState.capabilities = {
+      features: [],
+      workspaceCwd: '/work/web-shell',
+      workspaces: [
+        { id: 'w0', cwd: '/work/web-shell', primary: true, trusted: true },
+        {
+          id: 'w1',
+          cwd: '/work/api',
+          displayName: 'Payments API',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    render({ title: 'Add pagination', workspaceCwd: '/work/api' });
+    // The header tag (always visible at the top, unlike the composer chip that
+    // collapses on a narrow split) names the workspace and carries its full cwd
+    // in a hover tooltip.
+    const tag = container!.querySelector('[data-web-shell-pane-workspace]');
+    expect(tag).not.toBeNull();
+    expect(tag!.textContent).toContain('Payments API');
+    expect(tag!.getAttribute('title')).toBe('/work/api');
+  });
+
+  it('omits the header workspace tag on a single-workspace daemon', () => {
+    render({ title: 'Refactor core', workspaceCwd: '/w' });
+    expect(
+      container!.querySelector('[data-web-shell-pane-workspace]'),
+    ).toBeNull();
+  });
+
+  it('reports loaded pane artifacts to the outer panel owner', async () => {
+    const onPaneArtifactsChange = vi.fn();
+    connectionState.capabilities = { features: ['session_artifacts'] };
+    const artifact = {
+      id: 'artifact-1',
+      title: 'Report',
+      kind: 'html',
+      storage: 'workspace',
+      workspacePath: 'reports/a.html',
+      updatedAt: '2026-07-10T00:00:00Z',
+    };
+    loadArtifacts.mockResolvedValueOnce({ artifacts: [artifact] });
+
+    render({ onPaneArtifactsChange });
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(onPaneArtifactsChange).toHaveBeenLastCalledWith(
+      'sess-1',
+      [artifact],
+      expect.any(Object),
+    );
+  });
+
   it('suppresses the rotating loading phrase in its compact status', () => {
     render();
     expect(testid('pane-streaming')?.getAttribute('data-show-phrase')).toBe(
@@ -177,7 +389,7 @@ describe('ChatPane', () => {
     );
   });
 
-  it('sends a prompt to its own session on submit', () => {
+  it('sends an idle prompt directly so the pane enters loading immediately', () => {
     render();
     act(() =>
       testid('pane-submit')!.dispatchEvent(
@@ -185,70 +397,244 @@ describe('ChatPane', () => {
       ),
     );
     expect(sendPrompt).toHaveBeenCalledTimes(1);
-    expect((sendPrompt.mock.calls[0] as unknown[])[0]).toBe('hello there');
+    expect(sendPrompt).toHaveBeenCalledWith('hello there', {
+      onAdmitted: expect.any(Function),
+    });
+    expect(clearFollowup).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
-  it('commits the draft on admission, without waiting for the turn to finish', async () => {
+  it('lets the host handle a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+    let returned: boolean | undefined;
+
+    act(() => {
+      returned = latestOnSubmit!('/deploy production');
+    });
+
+    expect(returned).toBe(true);
+    expect(onSlashCommand).toHaveBeenCalledWith({
+      command: 'deploy',
+      args: 'production',
+      input: '/deploy production',
+    });
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards a slash command the host does not handle', () => {
+    const onSlashCommand = vi.fn();
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('lets the host handle a slash command while the pane is disconnected', () => {
+    connectionState.status = 'disconnected';
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onSlashCommand).toHaveBeenCalledTimes(1);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reports a host slash command error and continues default handling', () => {
+    const error = new Error('host handler exploded');
+    const onSlashCommand = vi.fn(() => {
+      throw error;
+    });
+    const onError = vi.fn();
+    render({ onSlashCommand, onError });
+
+    act(() => {
+      latestOnSubmit!('/deploy staging');
+    });
+
+    expect(onError).toHaveBeenCalledWith(
+      error,
+      'onSlashCommand callback failed',
+    );
+    expect(sendPrompt).toHaveBeenCalledWith('/deploy staging', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('does not treat an absolute path as a slash command', () => {
+    const onSlashCommand = vi.fn(() => true);
+    render({ onSlashCommand });
+
+    act(() => {
+      latestOnSubmit!('/usr/local/bin/tool');
+    });
+
+    expect(onSlashCommand).not.toHaveBeenCalled();
+    expect(sendPrompt).toHaveBeenCalledWith('/usr/local/bin/tool', {
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('commits an idle prompt only after daemon admission', () => {
     render();
     const commit = vi.fn();
     let returned: boolean | undefined;
     act(() => {
       returned = latestOnSubmit!('hi', undefined, commit);
     });
-    // Returns false (keep the draft) and does NOT commit before admission.
     expect(returned).toBe(false);
     expect(commit).not.toHaveBeenCalled();
-    // The daemon admits the prompt (onAdmitted). The draft clears now, even
-    // though the turn promise is still pending — a long response must not strand
-    // the sent text in the composer until the turn ends.
-    await act(async () => {
-      sendPromptAdmit!();
-      await Promise.resolve();
-    });
+    act(() => sendPromptAdmit!());
     expect(commit).toHaveBeenCalledTimes(1);
-    // The turn finishing later must NOT commit again — guards against regressing
-    // to committing on promise resolution (turn end) instead of admission.
-    await act(async () => {
-      sendPromptResolve!();
-      await Promise.resolve();
-    });
-    expect(commit).toHaveBeenCalledTimes(1);
+    expect(clearFollowup).toHaveBeenCalledTimes(1);
   });
 
-  it('does not commit (preserves the draft) when the prompt is rejected', async () => {
+  it('forwards images with an idle prompt', () => {
+    const images = [{ data: 'image-data', media_type: 'image/png' }];
+    render();
+    act(() => {
+      latestOnSubmit!('with image', images);
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('with image', {
+      images,
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('forwards composer annotations with an idle prompt', () => {
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('check @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(sendPrompt).toHaveBeenCalledWith('check @.husky/', {
+      inputAnnotations,
+      onAdmitted: expect.any(Function),
+    });
+  });
+
+  it('queues a prompt while the pane is already running', () => {
+    streamingStateValue = 'responding';
     render();
     const commit = vi.fn();
+    let returned: boolean | undefined;
     act(() => {
-      latestOnSubmit!('hi', undefined, commit);
+      returned = latestOnSubmit!('queued next', undefined, commit);
     });
+    expect(returned).toBe(true);
+    expect(enqueuePrompt).toHaveBeenCalledWith('queued next', undefined);
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards composer annotations with a queued prompt', () => {
+    streamingStateValue = 'responding';
+    const inputAnnotations = [
+      {
+        start: 6,
+        end: 14,
+        text: '@.husky/',
+        type: 'file',
+        data: { path: '.husky/' },
+      },
+    ];
+    render();
+    act(() => {
+      latestOnSubmit!('queue @.husky/', undefined, undefined, {
+        inputAnnotations,
+      });
+    });
+    expect(enqueuePrompt).toHaveBeenCalledWith(
+      'queue @.husky/',
+      undefined,
+      undefined,
+      inputAnnotations,
+    );
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('forwards images with a queued prompt', () => {
+    streamingStateValue = 'responding';
+    const images = [{ data: 'image-data', media_type: 'image/png' }];
+    render();
+    act(() => {
+      latestOnSubmit!('queued image', images);
+    });
+    expect(enqueuePrompt).toHaveBeenCalledWith('queued image', images);
+  });
+
+  it('does not submit while the pane is disconnected', () => {
+    connectionState.status = 'disconnected';
+    render();
+    let returned: boolean | undefined;
+    act(() => {
+      returned = latestOnSubmit!('hi');
+    });
+    expect(returned).toBe(false);
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('submits while disconnected when prompt SSE restart is enabled', () => {
+    connectionState.status = 'disconnected';
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).toHaveBeenCalledWith(
+      'hi',
+      expect.objectContaining({ onAdmitted: expect.any(Function) }),
+    );
+  });
+
+  it('does not submit without a recoverable disconnected session', () => {
+    connectionState.status = 'disconnected';
+    connectionState.sessionId = undefined;
+    render({ restartSseOnPrompt: true });
+
+    act(() => {
+      latestOnSubmit!('hi');
+    });
+
+    expect(sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('reports an idle prompt failure to the pane error handler', async () => {
+    const onError = vi.fn();
+    sendPrompt.mockRejectedValueOnce(new Error('disconnected'));
+    render({ onError });
+    const commit = vi.fn();
     await act(async () => {
-      sendPromptReject!(new Error('session busy'));
+      latestOnSubmit!('hi', undefined, commit);
       await Promise.resolve();
     });
     expect(commit).not.toHaveBeenCalled();
-  });
-
-  it('keeps the draft cleared and still reports the error when the turn fails after admission', async () => {
-    const onError = vi.fn();
-    render({ onError });
-    const commit = vi.fn();
-    act(() => {
-      latestOnSubmit!('hi', undefined, commit);
-    });
-    // Admission clears the draft.
-    await act(async () => {
-      sendPromptAdmit!();
-      await Promise.resolve();
-    });
-    expect(commit).toHaveBeenCalledTimes(1);
-    // The turn then fails mid-flight: the draft stays cleared (no second commit)
-    // and the failure is still surfaced to onError.
-    await act(async () => {
-      sendPromptReject!(new Error('turn crashed'));
-      await Promise.resolve();
-    });
-    expect(commit).toHaveBeenCalledTimes(1);
-    expect(onError).toHaveBeenCalled();
+    expect(clearFollowup).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(
+      expect.any(Error),
+      'Failed to send prompt',
+    );
   });
 
   it('keeps pane approvals click-only (no global keyboard shortcuts)', () => {
@@ -290,6 +676,12 @@ describe('ChatPane', () => {
     };
     render();
     expect(testid('ask-approval')).not.toBeNull();
+    // Like the tool-approval path, a pane's question must not auto-grab focus —
+    // several panes can show at once and stealing focus would yank it from the
+    // pane the user is in.
+    expect(testid('ask-approval')?.getAttribute('data-keyboard-active')).toBe(
+      'false',
+    );
     // AskUserQuestion is not a tool approval, so MessageList gets no inline one.
     expect(testid('pane-messages')?.getAttribute('data-approval')).toBe('no');
   });
@@ -302,6 +694,36 @@ describe('ChatPane', () => {
       closeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
     );
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('renders no maximize toggle without onToggleMaximize', () => {
+    render({ onClose: () => {} });
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
+    expect(container!.querySelector('[aria-label="Restore pane"]')).toBeNull();
+  });
+
+  it('invokes onToggleMaximize from the header maximize button', () => {
+    const onToggleMaximize = vi.fn();
+    render({ onToggleMaximize });
+    const maximizeBtn = container!.querySelector(
+      '[aria-label="Maximize pane"]',
+    );
+    expect(maximizeBtn).not.toBeNull();
+    // A toggle button always exposes its pressed state; not maximized here.
+    expect(maximizeBtn!.getAttribute('aria-pressed')).toBe('false');
+    act(() =>
+      maximizeBtn!.dispatchEvent(new MouseEvent('click', { bubbles: true })),
+    );
+    expect(onToggleMaximize).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the restore affordance while maximized', () => {
+    render({ onToggleMaximize: () => {}, isMaximized: true });
+    const restoreBtn = container!.querySelector('[aria-label="Restore pane"]');
+    expect(restoreBtn).not.toBeNull();
+    expect(restoreBtn!.getAttribute('aria-pressed')).toBe('true');
+    // The label flips to "restore" — no stale "maximize" affordance remains.
+    expect(container!.querySelector('[aria-label="Maximize pane"]')).toBeNull();
   });
 
   it('cancels the active turn via the composer cancel action', () => {
@@ -322,19 +744,31 @@ describe('ChatPane', () => {
     });
     expect(returned).toBe(false);
     expect(sendPrompt).not.toHaveBeenCalled();
+    expect(enqueuePrompt).not.toHaveBeenCalled();
   });
 
-  it('routes send failures to the onError prop', async () => {
-    const onError = vi.fn();
-    render({ onError });
-    act(() => {
-      latestOnSubmit!('hi', undefined, vi.fn());
-    });
-    await act(async () => {
-      sendPromptReject!(new Error('disconnected'));
-      await Promise.resolve();
-    });
-    expect(onError).toHaveBeenCalled();
+  it('passes queued prompts and queue editing controls to the pane editor', () => {
+    queuedPromptsMock = [{ id: 1, text: 'queued next' }];
+    queuedTextsMock = ['queued next'];
+    render();
+    expect(testid('pane-queue')?.textContent).toBe('1');
+    expect(testid('pane-queued-messages')?.textContent).toBe(
+      JSON.stringify(['queued next']),
+    );
+    expect(latestChatEditorProps.onPopQueuedMessages()).toBe(false);
+    expect(latestChatEditorProps.onClearQueuedMessages()).toBe(false);
+    expect(editLastQueuedPrompt).toHaveBeenCalledTimes(1);
+    expect(clearQueuedPrompts).toHaveBeenCalledTimes(1);
+  });
+
+  it('passes follow-up suggestions to the pane editor', () => {
+    render();
+    expect(testid('pane-followup')?.textContent).toBe('next idea');
+    expect(latestChatEditorProps.onAcceptFollowup).toBeTypeOf('function');
+    expect(latestChatEditorProps.onDismissFollowup).toBeTypeOf('function');
+    expect(latestFollowupAccept).toBeTypeOf('function');
+    act(() => latestFollowupAccept!('test suggestion'));
+    expect(insertText).toHaveBeenCalledWith('test suggestion');
   });
 
   it('surfaces a connection-loss banner when the pane connection drops', () => {
@@ -369,5 +803,128 @@ describe('ChatPane', () => {
     expect(testid('pane-streaming')?.getAttribute('data-started-at')).toBe(
       'none',
     );
+  });
+
+  it('enables the interactive composer controls (approval mode, model, voice)', () => {
+    render();
+    expect(testid('pane-toolbar')?.textContent).toBe(
+      JSON.stringify(['approvalMode', 'model', 'voice']),
+    );
+  });
+
+  it("lists the pane session's own commands in the slash menu", () => {
+    connectionState.commands = [
+      { name: 'clear', description: 'Clear', source: 'builtin-command' },
+      { name: 'compress', description: 'Compress', source: 'builtin-command' },
+    ];
+    render();
+    // Local commands are merged with daemon commands; 'clear' is deduplicated,
+    // 'compress' is daemon-only — so the count is localCount + 1.
+    const count = Number(testid('pane-commands')?.textContent);
+    expect(count).toBeGreaterThan(30);
+  });
+
+  it('hides internal composer models and labels the rest', () => {
+    connectionState.models = [
+      { id: 'coder-model(qwen-oauth)', label: 'Coder' },
+      { id: 'qwen-max', label: 'qwen-max' },
+    ];
+    render();
+    const models = JSON.parse(testid('pane-models')!.textContent!);
+    expect(models.map((m: { id: string }) => m.id)).toEqual(['qwen-max']);
+  });
+
+  it("drives THIS pane's approval mode when one is picked", () => {
+    render();
+    act(() =>
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+  });
+
+  it("switches THIS pane's model when one is picked", () => {
+    render();
+    act(() =>
+      testid('pane-pick-model')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(setModel).toHaveBeenCalledWith('gpt-x');
+  });
+
+  it("reflects the pane session's current mode and model", () => {
+    connectionState.currentMode = 'auto-edit';
+    connectionState.currentModel = 'qwen-max';
+    render();
+    expect(testid('pane-mode')?.textContent).toBe('auto-edit');
+    expect(testid('pane-model')?.textContent).toBe('qwen-max');
+  });
+
+  it('falls back to the default mode and empty model when unset', () => {
+    render();
+    expect(testid('pane-mode')?.textContent).toBe('default');
+    expect(testid('pane-model')?.textContent).toBe('');
+  });
+
+  it('reports a failed model switch to onError', async () => {
+    const onError = vi.fn();
+    setModel.mockRejectedValueOnce(new Error('switch failed'));
+    render({ onError });
+    await act(async () => {
+      testid('pane-pick-model')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it('reports a failed approval mode switch to onError', async () => {
+    const onError = vi.fn();
+    setApprovalMode.mockRejectedValueOnce(new Error('mode switch failed'));
+    render({ onError });
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it('rejects an invalid approval mode without calling the daemon', () => {
+    const onError = vi.fn();
+    render({ onError });
+    act(() =>
+      testid('pane-pick-badmode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      ),
+    );
+    expect(setApprovalMode).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalled();
+  });
+
+  it('auto-approves a pending tool call when the pane switches to yolo', async () => {
+    pendingPermission = {
+      id: 'perm-yolo',
+      toolName: 'write_file',
+      toolKind: 'edit',
+      options: [{ id: 'allow-1', label: 'Allow once', kind: 'allow_once' }],
+      rawInput: {},
+    };
+    render();
+    await act(async () => {
+      testid('pane-pick-mode')!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(setApprovalMode).toHaveBeenCalledWith('yolo');
+    expect(submitPermission).toHaveBeenCalledWith('perm-yolo', 'allow-1');
   });
 });

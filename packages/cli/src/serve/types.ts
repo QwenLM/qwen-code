@@ -18,10 +18,12 @@ import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
 /**
  * Stage 1 daemon mode shape.
  *
- * `http-bridge` (Stage 1): one `qwen --acp` child per daemon (the
- *   daemon binds to ONE workspace at boot). Multiple
- *   sessions multiplex onto that child via the agent's native
- *   `connection.newSession()` (see `acp-integration/acpAgent.ts:194`),
+ * `http-bridge` (Stage 1): production attempts to preheat the primary
+ *   `qwen --acp` child and retries on first use after failure; trusted
+ *   secondaries start one on demand, while untrusted secondaries do not.
+ *   Multiple sessions in one runtime multiplex onto its child via the
+ *   agent's native `connection.newSession()` (see
+ *   `acp-integration/acpAgent.ts:194`),
  *   sharing the child's process / OAuth / file-cache / hierarchy-memory
  *   parse. The daemon pipes ACP NDJSON over HTTP/SSE. Same-session
  *   multi-client requests serialize through the bridge's per-session
@@ -36,6 +38,12 @@ export type ServeChannelSelection =
   | { mode: 'all' }
   | { mode: 'names'; names: string[] };
 
+export interface ChannelWebhookConfigSource {
+  workspaceCwd: string;
+  channelNames?: readonly string[];
+  env?: Readonly<Record<string, string | undefined>>;
+}
+
 export interface ServeOptions {
   hostname: string;
   port: number;
@@ -47,7 +55,8 @@ export interface ServeOptions {
   token?: string;
   mode: ServeMode;
   /**
-   * Cap on concurrent live sessions. Once `bridge.sessionCount` reaches
+   * Per-workspace cap on concurrent live sessions. Once a runtime's
+   * `bridge.sessionCount` reaches
    * this, new `POST /session` requests that would spawn fresh sessions
    * return 503. Attaching to an existing session (same workspace under
    * `sessionScope: 'single'`) still works — so an idle daemon doesn't
@@ -59,8 +68,10 @@ export interface ServeOptions {
   maxSessions?: number;
   /**
    * Non-negative integer cap on concurrent live sessions across all workspace
-   * runtimes. Defaults to unlimited until multi-workspace sessions are ungated.
-   * `0` or `Infinity` disables the cap.
+   * runtimes. `runQwenServe` derives a default once from the per-workspace cap
+   * and startup workspace count when several startup/restored workspaces are
+   * present; direct embeds may leave it unlimited. Dynamic registration does
+   * not recompute it. `0` or `Infinity` disables the cap.
    */
   maxTotalSessions?: number;
   /**
@@ -93,21 +104,21 @@ export interface ServeOptions {
    */
   eventRingSize?: number;
   /**
-   * Absolute workspace path this daemon binds to. The daemon is
-   * **1 daemon = 1 workspace × N sessions**: one bound
-   * workspace at boot, sessions multiplexed on the single
-   * `qwen --acp` child via `connection.newSession()`.
+   * Per-session in-memory compacted replay snapshot byte cap. Threaded into
+   * `BridgeOptions.compactedReplayMaxBytes`. Defaults to 4 MiB. Must be a
+   * positive safe integer; there is no unlimited sentinel.
+   */
+  compactedReplayMaxBytes?: number;
+  /**
+   * Absolute workspace path this daemon binds as its primary workspace.
+   * The CLI parser accepts repeated `--workspace` values to register isolated
+   * runtimes, but this public option remains the primary workspace string so
+   * existing embeds do not need to understand the internal runtime registry.
    *
    * `POST /session` calls whose `cwd` doesn't canonicalize to this
-   * path are rejected with `400 workspace_mismatch`. Clients may
-   * also omit `cwd` — the route falls back to this bound path.
-   *
-   * Multi-workspace deployments use **multiple daemon processes**
-   * (one per workspace, each on its own port), supervised by
-   * systemd / docker-compose / k8s / `qwen-coordinator` reference
-   * orchestrator. There is no intra-daemon multi-workspace mode
-   * (the previous Stage 1 `byWorkspaceChannel` routing layer was
-   * removed in the design revision).
+   * path, or to another registered runtime's canonical workspace, are
+   * rejected with `400 workspace_mismatch`. Clients may also omit `cwd` —
+   * the route falls back to this primary path.
    *
    * Defaults to `process.cwd()` when omitted.
    */
@@ -211,6 +222,12 @@ export interface ServeOptions {
   /** Session idle timeout in ms. 0 = disabled. Default: 1800000 (30 min). */
   sessionIdleTimeoutMs?: number;
   /**
+   * ACP child request timeout, including the `initialize` handshake,
+   * in ms. Must be a positive
+   * integer. Default: 10000 (10 s).
+   */
+  initializeTimeoutMs?: number;
+  /**
    * Wall-clock timeout in ms for a single human permission /
    * ask_user_question response in daemon (ACP) mode. 0 = disabled
    * (wait forever). Default: 300000 (5 min).
@@ -285,12 +302,14 @@ export interface CapabilitiesEnvelope {
    */
   modelServices: string[];
   /**
-   * Absolute workspace path this daemon is bound to
-   * (`1 daemon = 1 workspace`). Clients use this to:
-   *   - Detect mismatch before posting `/session` (vs. waiting for
-   *     400 workspace_mismatch from the bridge).
+   * Absolute primary workspace path. Clients use this to:
+   *   - Preserve single-workspace compatibility.
    *   - Omit `cwd` on `POST /session` — the route falls back to this
    *     path when the body has no `cwd` field.
+   *
+   * Newer daemons list every registered runtime in `workspaces[]`, including
+   * the primary runtime when `multi_workspace_sessions` is absent.
+   * `workspaceCwd` remains the primary entry for old clients.
    *
    * Optional at the type level (matches the SDK's `DaemonCapabilities`
    * type) because the field is an additive extension of the v=1
@@ -299,6 +318,15 @@ export interface CapabilitiesEnvelope {
    * current server code always populates it.
    */
   workspaceCwd?: string;
+  /** Registered workspace runtimes. Older single-workspace daemons may omit it. */
+  workspaces?: Array<{
+    id: string;
+    cwd: string;
+    displayName?: string;
+    primary: boolean;
+    trusted: boolean;
+    removable?: boolean;
+  }>;
   /**
    * Transport families this daemon supports. Always includes `'rest'`;
    * future builds may add `'acp-http'` and/or `'acp-ws'`. SDK clients
@@ -330,6 +358,8 @@ export interface CapabilitiesEnvelope {
    */
   limits?: {
     maxPendingPromptsPerSession?: number | null;
+    maxSessionsPerWorkspace?: number | null;
+    maxTotalSessions?: number | null;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

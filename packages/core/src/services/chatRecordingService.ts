@@ -8,14 +8,13 @@ import { type Config } from '../config/config.js';
 import path from 'node:path';
 import fs from 'node:fs';
 import { randomUUID } from 'node:crypto';
-import {
-  type PartListUnion,
-  type Content,
-  type FunctionDeclaration,
-  type GenerateContentResponseUsageMetadata,
-  createUserContent,
-  createModelContent,
+import type {
+  PartListUnion,
+  Content,
+  FunctionDeclaration,
+  GenerateContentResponseUsageMetadata,
 } from '@google/genai';
+import { createModelContent, createUserContent } from '../core/genai-compat.js';
 import * as jsonl from '../utils/jsonl-utils.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -34,6 +33,16 @@ import type {
   SerializedFileHistorySnapshot,
 } from './fileHistoryService.js';
 import { serializeSnapshot } from './fileHistoryService.js';
+import type {
+  SessionArtifactEventRecordPayload,
+  SessionArtifactSnapshotRecordPayload,
+} from './session-artifact-persistence.js';
+import {
+  SessionTranscriptChangedError,
+  SessionWriterLostError,
+  SessionWriterUnavailableError,
+  type SessionWriterLease,
+} from './session-writer-lease.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -248,10 +257,15 @@ export interface ChatRecord {
     | 'cron'
     | 'mid_turn_user_message'
     | 'custom_title'
+    | 'parent_session'
+    | 'session_source'
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
-    | 'file_history_snapshot';
+    | 'file_history_snapshot'
+    | 'user_text_elements'
+    | 'session_artifact_event'
+    | 'session_artifact_snapshot';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -281,7 +295,7 @@ export interface ChatRecord {
    * Tool call metadata for UI recovery.
    * Contains enriched info (displayName, status, result, etc.) not in API format.
    */
-  toolCallResult?: Partial<ToolCallResponseInfo>;
+  toolCallResult?: Partial<ToolCallResponseInfo> & { status?: Status };
 
   /**
    * Payload for records that need non-API metadata. For chat compression, this
@@ -295,10 +309,15 @@ export interface ChatRecord {
     | AtCommandRecordPayload
     | AttributionSnapshotPayload
     | CustomTitleRecordPayload
+    | ParentSessionRecordPayload
+    | SessionSourceRecordPayload
     | NotificationRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
-    | FileHistorySnapshotRecordPayload;
+    | FileHistorySnapshotRecordPayload
+    | UserTextElementsRecordPayload
+    | SessionArtifactEventRecordPayload
+    | SessionArtifactSnapshotRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -308,6 +327,10 @@ export interface ChatRecord {
   agentColor?: string;
   /** True for records produced by a subagent (a sidechain off the parent session). */
   isSidechain?: boolean;
+  /** Writer execution that produced this subagent round. */
+  agentRunId?: string;
+  /** Round number within agentRunId. */
+  agentRound?: number;
   /** Source kind for injected external input records. */
   externalInputKind?: 'message' | 'notification';
 
@@ -423,6 +446,23 @@ export interface CustomTitleRecordPayload {
 }
 
 /**
+ * Stored payload recording the session that spawned this one (a
+ * `create_sub_session` caller). Immutable — written once, near the start of the
+ * transcript. Lets a management UI link a sub-session back to its parent, and
+ * survives a daemon restart via the session-list transcript scan.
+ */
+export interface ParentSessionRecordPayload {
+  /** Id of the session that spawned this one. */
+  parentSessionId: string;
+}
+
+/** Immutable attribution describing which integration created the session. */
+export interface SessionSourceRecordPayload {
+  sourceType: string;
+  sourceId?: string;
+}
+
+/**
  * Stored payload for UI telemetry replay.
  */
 export interface UiTelemetryRecordPayload {
@@ -453,6 +493,20 @@ export interface FileHistorySnapshotRecordPayload {
   snapshots: SerializedFileHistorySnapshot[];
 }
 
+export interface UserTextElementsRecordPayload {
+  content: string;
+  textElements: unknown[];
+}
+
+export interface ChatRecordingFailureEvent {
+  sessionId: string;
+  error: Error;
+}
+
+export type ChatRecordingFailureListener = (
+  event: ChatRecordingFailureEvent,
+) => void | Promise<void>;
+
 /**
  * Service for recording the current chat session to disk.
  *
@@ -463,9 +517,9 @@ export interface FileHistorySnapshotRecordPayload {
  * - Assistant thoughts and reasoning
  *
  * **API Design:**
- * - `recordUserMessage()` - Records a user message (immediate write)
- * - `recordAssistantTurn()` - Records an assistant turn with all data (immediate write)
- * - `recordToolResult()` - Records tool results (immediate write)
+ * - `recordUserMessage()` - Queues a user message for recording
+ * - `recordAssistantTurn()` - Queues an assistant turn with all data
+ * - `recordToolResult()` - Queues tool results for recording
  *
  * **Storage Format:** JSONL files with tree-structured records.
  * Each record has uuid/parentUuid fields enabling:
@@ -478,7 +532,7 @@ export interface FileHistorySnapshotRecordPayload {
  * For session management (list, load, remove), use SessionService.
  */
 export class ChatRecordingService {
-  /** UUID of the last written record in the chain */
+  /** UUID of the active logical tail, including records queued for writing. */
   private lastRecordUuid: string | null = null;
   private readonly config: Config;
   /**
@@ -487,26 +541,32 @@ export class ChatRecordingService {
    * rewound messages end up on a dead branch in the tree, making
    * `reconstructHistory()` skip them automatically on resume.
    *
-   * Index `i` holds the UUID of the last record written before the (i+1)th
-   * user message was appended. For example, `turnParentUuids[0]` is the UUID
-   * right before the very first user message (often `null` or the startup
-   * context record).
+   * Index `i` holds the active tail UUID observed before the (i+1)th user
+   * message was queued. For example, `turnParentUuids[0]` is the UUID right
+   * before the very first user message (often `null` or the startup context
+   * record).
    */
   private turnParentUuids: Array<string | null> = [];
-  /**
-   * Cached chats-dir / conversation-file path so per-record appendRecord
-   * doesn't re-stat them on every write. The first call performs the
-   * mkdir / wx-create; subsequent calls short-circuit.
-   */
   private chatsDirEnsured = false;
   private cachedConversationFile: string | undefined;
-  /**
-   * Serialized async write queue for appendRecord. We update lastRecordUuid
-   * synchronously so the next createBaseRecord sees the right parentUuid,
-   * but the actual fs write runs in this chain so the event loop is not
-   * blocked. Must be flushed before process exit (see {@link flush}).
-   */
-  private writeChain: Promise<void> = Promise.resolve();
+  private state:
+    | 'inactive'
+    | 'active'
+    | 'closing'
+    | 'closed'
+    | 'integrity_failed' = 'inactive';
+  private binding:
+    | {
+        readonly sessionId: string;
+        readonly lease: SessionWriterLease;
+      }
+    | undefined;
+  /** Serializes appends and authoritative read barriers. Always settles. */
+  private operationTail: Promise<void> = Promise.resolve();
+  /** First async JSONL write failure; permanently degrades this recorder. */
+  private writeFailure: Error | undefined;
+  private integrityFailure: Error | undefined;
+  private readonly writerLeaseRequired: boolean;
   /** In-memory cache of the current session's custom title (for re-append on exit) */
   private currentCustomTitle: string | undefined;
   /**
@@ -515,6 +575,13 @@ export class ChatRecordingService {
    * (safe default) without rewriting the persisted record.
    */
   private currentTitleSource: TitleSource | undefined;
+  /** Parent session id once recorded, so {@link recordParentSession} is
+   * idempotent — a bridge retry (after a failed response) must not append a
+   * second `parent_session` record for the same immutable lineage. */
+  private currentParentSessionId: string | undefined;
+  /** Immutable creator attribution once recorded. */
+  private currentSourceType: string | undefined;
+  private currentSourceId: string | undefined;
   /**
    * How many auto-title attempts have been made this process.
    *
@@ -536,10 +603,14 @@ export class ChatRecordingService {
    * it burn tokens after the session has already moved on.
    */
   private autoTitleController: AbortController | undefined;
+  /** Explicit title writes waiting to settle; background auto-title defers. */
+  private pendingExplicitTitleWrites = 0;
+  /** Title writes whose durable result and final cached value are unresolved. */
+  private pendingTitleWrites = 0;
 
   /**
-   * JSON-serialized form of the most recent attribution snapshot we
-   * wrote, used to deduplicate identical writes on every non-retry
+   * JSON-serialized form of the most recent attribution snapshot accepted for
+   * recording, used to deduplicate identical writes on every non-retry
    * turn. Without this, sessions that touch many files would write a
    * full duplicate of the entire snapshot to the JSONL on every turn,
    * inflating the on-disk session and making `/resume` slower to
@@ -551,8 +622,8 @@ export class ChatRecordingService {
     | undefined;
 
   /**
-   * Approximate bytes of JSONL content appended since the last
-   * `custom_title` record landed in this file. Used by the title
+   * Approximate bytes of JSONL content accepted after the last
+   * `custom_title` record in the ordered writer queue. Used by the title
    * re-anchor invariant: once enough non-title content accumulates
    * past the last anchor, {@link appendRecord} re-appends a fresh
    * `custom_title` to EOF so the picker's tail-window scan
@@ -566,34 +637,39 @@ export class ChatRecordingService {
   private bytesSinceTitleAnchor = 0;
   private hasNonTitleContentSinceTitleAnchor = false;
 
-  constructor(config: Config) {
+  constructor(
+    config: Config,
+    private readonly onWriteFailure?: ChatRecordingFailureListener,
+    writerLeaseRequired = config.getExperimentalZedIntegration?.() ?? true,
+  ) {
     this.config = config;
-    this.lastRecordUuid =
-      config.getResumedSessionData()?.lastCompletedUuid ?? null;
+    this.writerLeaseRequired = writerLeaseRequired;
+    const resumed = config.getResumedSessionData();
+    if (writerLeaseRequired) {
+      this.lastRecordUuid = resumed?.lastCompletedUuid ?? null;
+    } else {
+      this.state = 'active';
+      this.restoreSessionState(
+        resumed
+          ? {
+              conversation: resumed.conversation ?? { messages: [] },
+              lastCompletedUuid: resumed.lastCompletedUuid,
+            }
+          : undefined,
+        resumed ? this.readPersistedTitleInfo() : undefined,
+      );
+    }
+  }
 
-    // On resume, load the cached custom title AND its source from the
-    // session file. Preserving the persisted source is load-bearing: the
-    // SessionPicker dim-styling depends on it, and hardcoding `'manual'`
-    // would silently downgrade auto-titled sessions every time they get
-    // resumed. Legacy records (no `titleSource` field) stay `undefined` —
-    // treated as manual for safety without rewriting the JSONL.
-    //
-    // Do not re-append during construction: loading/resuming a session is a
-    // read operation from the user's perspective, and touching the JSONL mtime
-    // would make session lists treat it as fresh activity.
-    if (config.getResumedSessionData()) {
-      try {
-        const sessionService = config.getSessionService();
-        const info = sessionService.getSessionTitleInfo(config.getSessionId());
-        this.currentCustomTitle = info.title;
-        this.currentTitleSource = info.source;
-        if (info.title) {
-          // Prime the threshold so the first real content write re-anchors.
-          this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
-        }
-      } catch {
-        // Best-effort — don't block construction
-      }
+  private readPersistedTitleInfo():
+    | { title?: string; source?: TitleSource }
+    | undefined {
+    try {
+      return this.config
+        .getSessionService()
+        .getSessionTitleInfo(this.config.getSessionId());
+    } catch {
+      return undefined;
     }
   }
 
@@ -619,64 +695,103 @@ export class ChatRecordingService {
    * @returns The session ID.
    */
   private getSessionId(): string {
-    return this.config.getSessionId();
+    return this.binding?.sessionId ?? this.config.getSessionId();
   }
 
-  /**
-   * Ensures the chats directory exists, creating it if it doesn't exist.
-   * @returns The path to the chats directory.
-   * @throws Error if the directory cannot be created.
-   */
   private ensureChatsDir(): string {
-    const projectDir = this.config.storage.getProjectDir();
-    const chatsDir = path.join(projectDir, 'chats');
-
-    if (this.chatsDirEnsured) {
-      return chatsDir;
-    }
+    const chatsDir = path.join(this.config.storage.getProjectDir(), 'chats');
+    if (this.chatsDirEnsured) return chatsDir;
     try {
       fs.mkdirSync(chatsDir, { recursive: true });
-      // Only cache success — keep transient mkdir failures self-healing.
       this.chatsDirEnsured = true;
     } catch {
-      // ignored
+      // The file creation below reports the actionable error.
     }
     return chatsDir;
   }
 
-  /**
-   * Ensures the conversation file exists, creating it if it doesn't exist.
-   * Uses atomic file creation to avoid race conditions. Result is cached so
-   * subsequent appendRecord calls skip the wx-create entirely.
-   * @returns The path to the conversation file.
-   * @throws Error if the file cannot be created or accessed.
-   */
   private ensureConversationFile(): string {
-    if (this.cachedConversationFile) {
-      return this.cachedConversationFile;
-    }
-    const chatsDir = this.ensureChatsDir();
-    const sessionId = this.getSessionId();
-    const safeFilename = `${sessionId}.jsonl`;
-    const conversationFile = path.join(chatsDir, safeFilename);
-
+    if (this.cachedConversationFile) return this.cachedConversationFile;
+    const conversationFile = path.join(
+      this.ensureChatsDir(),
+      `${this.getSessionId()}.jsonl`,
+    );
     try {
-      // Use 'wx' flag for exclusive creation - atomic operation that fails if
-      // the file already exists. EEXIST is the expected steady-state path on
-      // resume; we treat it as success.
       fs.writeFileSync(conversationFile, '', { flag: 'wx', encoding: 'utf8' });
     } catch (error) {
-      const nodeError = error as NodeJS.ErrnoException;
-      if (nodeError.code !== 'EEXIST') {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(
           `Failed to create conversation file at ${conversationFile}: ${message}`,
         );
       }
     }
-
     this.cachedConversationFile = conversationFile;
     return conversationFile;
+  }
+
+  private restoreSessionState(
+    sessionData?: {
+      conversation: { messages: ChatRecord[] };
+      lastCompletedUuid: string | null;
+    },
+    persistedTitleInfo?: { title?: string; source?: TitleSource },
+  ): void {
+    this.lastRecordUuid = sessionData?.lastCompletedUuid ?? null;
+    this.currentCustomTitle = undefined;
+    this.currentTitleSource = undefined;
+    this.currentParentSessionId = undefined;
+    this.currentSourceType = undefined;
+    this.currentSourceId = undefined;
+    if (!sessionData) return;
+    this.rebuildTurnBoundaries(sessionData.conversation.messages);
+    for (const record of sessionData.conversation.messages) {
+      if (record.type !== 'system') continue;
+      if (record.subtype === 'custom_title') {
+        const payload = record.systemPayload as
+          | CustomTitleRecordPayload
+          | undefined;
+        this.currentCustomTitle = payload?.customTitle;
+        this.currentTitleSource = payload?.titleSource;
+      } else if (record.subtype === 'parent_session') {
+        this.currentParentSessionId = (
+          record.systemPayload as ParentSessionRecordPayload | undefined
+        )?.parentSessionId;
+      } else if (record.subtype === 'session_source') {
+        const payload = record.systemPayload as
+          | SessionSourceRecordPayload
+          | undefined;
+        this.currentSourceType = payload?.sourceType;
+        this.currentSourceId = payload?.sourceId;
+      }
+    }
+    if (persistedTitleInfo !== undefined) {
+      this.currentCustomTitle = persistedTitleInfo.title;
+      this.currentTitleSource = persistedTitleInfo.source;
+    }
+    if (this.currentCustomTitle) {
+      this.bytesSinceTitleAnchor = TITLE_REANCHOR_BYTES;
+    }
+  }
+
+  activate(
+    lease: SessionWriterLease,
+    sessionData?: {
+      conversation: { messages: ChatRecord[] };
+      lastCompletedUuid: string | null;
+    },
+    persistedTitleInfo?: { title?: string; source?: TitleSource },
+  ): void {
+    if (
+      !this.writerLeaseRequired ||
+      this.state !== 'inactive' ||
+      lease.sessionId !== this.config.getSessionId()
+    ) {
+      throw new SessionWriterUnavailableError();
+    }
+    this.binding = { sessionId: lease.sessionId, lease };
+    this.restoreSessionState(sessionData, persistedTitleInfo);
+    this.state = 'active';
   }
 
   /**
@@ -705,77 +820,134 @@ export class ChatRecordingService {
     return this.cachedGitBranch.branch;
   }
 
+  private enterWriteFailure(
+    cause: unknown,
+    sessionId: string,
+    operation = 'append',
+  ): Error {
+    const failure = cause instanceof Error ? cause : new Error(String(cause));
+    if (
+      !this.integrityFailure &&
+      (failure instanceof SessionWriterLostError ||
+        failure instanceof SessionTranscriptChangedError ||
+        failure instanceof SessionWriterUnavailableError)
+    ) {
+      this.integrityFailure = failure;
+      this.state = 'integrity_failed';
+      debugLogger.error(
+        `Session writer failure sessionId=${sessionId} operation=${operation} errorKind=${failure.errorKind}`,
+      );
+    }
+    if (!this.writeFailure) {
+      this.writeFailure = failure;
+      debugLogger.error('Chat recording failure:', this.writeFailure);
+      try {
+        const notification = this.onWriteFailure?.({
+          sessionId,
+          error: this.writeFailure,
+        });
+        if (notification) {
+          void notification.catch((error) => {
+            debugLogger.debug(
+              'Chat recording failure listener rejected:',
+              error,
+            );
+          });
+        }
+      } catch (error) {
+        debugLogger.debug('Chat recording failure listener threw:', error);
+      }
+    }
+    return this.integrityFailure ?? this.writeFailure;
+  }
+
+  private enqueueRecordWrite(
+    record: ChatRecord,
+    legacyConversationFile?: string,
+  ): Promise<void> {
+    const pendingWrite = this.operationTail.then(async () => {
+      if (this.writeFailure) throw this.writeFailure;
+      try {
+        const lease = this.binding?.lease;
+        if (lease) {
+          await lease.appendJsonLine(record);
+        } else if (!this.writerLeaseRequired && legacyConversationFile) {
+          await jsonl.writeLine(legacyConversationFile, record);
+        } else {
+          throw new SessionWriterUnavailableError();
+        }
+      } catch (error) {
+        throw this.enterWriteFailure(error, record.sessionId);
+      }
+    });
+    this.operationTail = pendingWrite.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pendingWrite;
+  }
+
   /**
-   * Appends a record to the session file and updates lastRecordUuid.
-   *
-   * lastRecordUuid is updated synchronously so the next createBaseRecord sees
-   * the correct parentUuid without waiting for the previous write. The actual
-   * fs write is enqueued on {@link writeChain} and runs async; per-file
-   * mutex inside {@link jsonl.writeLine} preserves on-disk ordering.
-   *
-   * **Known tradeoff (parentUuid chain integrity on write failure):** if the
-   * enqueued write rejects (e.g., disk full, permission dropped), the error
-   * is logged but subsequent records still claim the failed record's uuid
-   * as their parent. On resume, readers that walk parentUuid (e.g.
-   * sessionService.reconstructHistory) will silently drop records whose
-   * ancestor is missing on disk. This matches the sync version's behavior
-   * when its own throw was caught and logged by the caller — under normal
-   * local-disk writes failures are rare enough to accept the fire-and-forget
-   * simplification.
-   */
-  /**
-   * Fire-and-forget: queues a JSONL write on the internal writeChain
-   * and swallows async failures (logs them via debugLogger). All
-   * existing call sites — recordUserMessage, recordAssistantTurn,
-   * etc. — invoke this synchronously without awaiting, so the
-   * internal swallow keeps an unhandled-promise-rejection from
-   * surfacing on a single transient writeLine failure.
-   *
-   * Callers that need to react to per-record write FAILURE (e.g. the
-   * snapshot dedup-key rollback in `recordAttributionSnapshot`) pass
-   * an `onError` callback, which fires after the write rejects (and
-   * after the rejection has been logged + the chain re-armed). Sync
-   * throws still propagate so the caller's outer try/catch can roll
-   * back optimistic state — see the synchronous-failure test.
+   * Fire-and-forget: queues a JSONL write on the internal operation tail.
+   * A failed write permanently degrades this recorder; already-queued
+   * descendants are skipped and later fire-and-forget calls become no-ops.
    */
   private appendRecord(
     record: ChatRecord,
-    onError?: (err: unknown) => void,
     options?: { updateActiveTail?: boolean },
   ): void {
-    let conversationFile: string;
-    try {
-      conversationFile = this.ensureConversationFile();
-    } catch (error) {
-      debugLogger.error('Error appending record:', error);
-      throw error;
-    }
+    if (this.writeFailure || this.state !== 'active') return;
+    const legacyConversationFile = this.writerLeaseRequired
+      ? undefined
+      : this.ensureConversationFile();
     if (options?.updateActiveTail !== false) {
       this.lastRecordUuid = record.uuid;
     }
-    this.writeChain = this.writeChain
-      .catch(() => {})
-      .then(() => jsonl.writeLine(conversationFile, record))
-      .catch((err) => {
-        debugLogger.error('Error appending record (async):', err);
-        if (onError) {
-          try {
-            onError(err);
-          } catch (cbErr) {
-            debugLogger.error('appendRecord onError callback threw:', cbErr);
-          }
-        }
-      });
+    this.enqueueRecordWrite(record, legacyConversationFile);
     this.updateTitleAnchorTracking(record);
+  }
+
+  private async appendRecordStrict(
+    record: ChatRecord,
+    options?: { updateActiveTail?: boolean },
+  ): Promise<void> {
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.state !== 'active') throw new SessionWriterUnavailableError();
+
+    const previousLastRecordUuid = this.lastRecordUuid;
+    const updateActiveTail = options?.updateActiveTail !== false;
+    const legacyConversationFile = this.writerLeaseRequired
+      ? undefined
+      : this.ensureConversationFile();
+    if (updateActiveTail) {
+      this.lastRecordUuid = record.uuid;
+    }
+    const pendingWrite = this.enqueueRecordWrite(
+      record,
+      legacyConversationFile,
+    );
+    // Keep anchor accounting in logical queue order, matching appendRecord.
+    // Once accepted, a failed write permanently stops this recorder, so no
+    // rollback of this bookkeeping is needed on rejection.
+    this.updateTitleAnchorTracking(record);
+
+    try {
+      await pendingWrite;
+    } catch (error) {
+      if (updateActiveTail && this.lastRecordUuid === record.uuid) {
+        this.lastRecordUuid = previousLastRecordUuid;
+      }
+      throw error;
+    }
   }
 
   /**
    * Maintain the "title is always in the tail window" invariant by
-   * counting bytes appended since the last `custom_title` record and
+   * counting bytes accepted since the last `custom_title` record and
    * re-anchoring once enough non-title content has been written.
    *
    * - A `custom_title` record IS the new anchor — reset the counter.
-   * - Without a current title (never set), the counter is irrelevant.
+   * - Without a current or pending title, the counter is irrelevant.
    * - Otherwise accumulate this record's serialized size; if the
    *   running total breaches the threshold, re-append a fresh
    *   `custom_title` to EOF. The recursive `appendRecord` call will
@@ -800,12 +972,23 @@ export class ChatRecordingService {
       this.hasNonTitleContentSinceTitleAnchor = false;
       return;
     }
-    if (!this.currentCustomTitle) return;
+    if (!this.currentCustomTitle && this.pendingTitleWrites === 0) return;
     this.hasNonTitleContentSinceTitleAnchor = true;
+    let serializedRecord: string;
+    try {
+      serializedRecord = JSON.stringify(record);
+    } catch {
+      // Anchor bookkeeping must not change the writer's success contract.
+      // The real serializer will surface the failure through writeChain.
+      return;
+    }
     // +1 for the trailing newline jsonl.writeLine appends.
     this.bytesSinceTitleAnchor +=
-      Buffer.byteLength(JSON.stringify(record), 'utf8') + 1;
-    if (this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES) {
+      Buffer.byteLength(serializedRecord, 'utf8') + 1;
+    if (
+      this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+      this.pendingTitleWrites === 0
+    ) {
       this.reanchorTitle();
     }
   }
@@ -831,7 +1014,7 @@ export class ChatRecordingService {
             : {}),
         },
       };
-      this.appendRecord(record, undefined, { updateActiveTail: false });
+      this.appendRecord(record, { updateActiveTail: false });
     } catch (error) {
       // Reset the counter even on failure: otherwise every subsequent
       // appendRecord re-fires reanchorTitle (counter still ≥ threshold)
@@ -848,7 +1031,88 @@ export class ChatRecordingService {
    * teardown to ensure no records are dropped.
    */
   async flush(): Promise<void> {
-    await this.writeChain;
+    await this.operationTail;
+    if (this.writeFailure) throw this.writeFailure;
+  }
+
+  async runWithWriteBarrier<T>(operation: () => Promise<T>): Promise<T> {
+    if (this.writeFailure) throw this.writeFailure;
+    if (this.state !== 'active') throw new SessionWriterUnavailableError();
+    const pending = this.operationTail.then(async () => {
+      if (this.writeFailure) throw this.writeFailure;
+      if (this.state !== 'active') throw new SessionWriterUnavailableError();
+      const lease = this.binding?.lease;
+      try {
+        if (lease) {
+          await lease.assertOwnedAndUnchanged();
+        } else if (this.writerLeaseRequired) {
+          throw new SessionWriterUnavailableError();
+        }
+        const result = await operation();
+        await lease?.assertOwnedAndUnchanged();
+        return result;
+      } catch (error) {
+        if (
+          error instanceof SessionWriterLostError ||
+          error instanceof SessionTranscriptChangedError ||
+          error instanceof SessionWriterUnavailableError
+        ) {
+          throw this.enterWriteFailure(
+            error,
+            this.getSessionId(),
+            'read_barrier',
+          );
+        }
+        throw error;
+      }
+    });
+    this.operationTail = pending.then(
+      () => undefined,
+      () => undefined,
+    );
+    return pending;
+  }
+
+  async assertCanStartTurn(): Promise<void> {
+    try {
+      await this.runWithWriteBarrier(async () => undefined);
+    } catch (error) {
+      if (this.integrityFailure) throw this.integrityFailure;
+      if (this.writeFailure) {
+        throw new SessionWriterUnavailableError({ cause: this.writeFailure });
+      }
+      throw error;
+    }
+  }
+
+  async close(): Promise<void> {
+    if (this.state === 'closed') return;
+    this.autoTitleController?.abort();
+    if (this.state === 'active') this.state = 'closing';
+    let flushFailure: unknown;
+    try {
+      await this.flush();
+    } catch (error) {
+      flushFailure = error;
+    }
+    try {
+      await this.binding?.lease.release();
+      this.binding = undefined;
+      this.state = 'closed';
+    } catch (error) {
+      if (error instanceof SessionWriterLostError) {
+        this.binding = undefined;
+        this.state = 'closed';
+      } else {
+        this.state = 'integrity_failed';
+      }
+      throw error;
+    }
+    if (flushFailure !== undefined) throw flushFailure;
+  }
+
+  hasWriteOwnership(): boolean {
+    return this.binding !== undefined;
   }
 
   /**
@@ -857,13 +1121,16 @@ export class ChatRecordingService {
    * resolve the JSONL path through the updated Config.storage.
    */
   resetStoragePaths(): void {
+    if (this.writerLeaseRequired && this.state === 'active') {
+      throw new SessionWriterUnavailableError();
+    }
     this.chatsDirEnsured = false;
     this.cachedConversationFile = undefined;
   }
 
   /**
    * Records a user message.
-   * Writes immediately to disk.
+   * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object as used with the API
    */
@@ -943,7 +1210,7 @@ export class ChatRecordingService {
 
   /**
    * Records an assistant turn with all available data.
-   * Writes immediately to disk.
+   * Queues the write immediately on the serialized async writer.
    *
    * @param data.message The raw PartListUnion object from the model response
    * @param data.model The model name
@@ -998,6 +1265,8 @@ export class ChatRecordingService {
    */
   private maybeTriggerAutoTitle(): void {
     if (this.currentCustomTitle) return;
+    if (this.writeFailure) return;
+    if (this.pendingExplicitTitleWrites > 0) return;
     if (this.autoTitleController) return;
     if (this.autoTitleAttempts >= AUTO_TITLE_ATTEMPT_CAP) return;
     // Opt-out env var — lets users silence auto-titling without having to
@@ -1031,9 +1300,11 @@ export class ChatRecordingService {
         );
         if (!outcome.ok) return;
         if (controller.signal.aborted) return;
-        // Re-check in case a /rename landed while the LLM call was in flight —
-        // manual wins. In-process is the common path.
-        if (this.currentTitleSource === 'manual') return;
+        // Any explicit title, including `/rename --auto`, wins over this
+        // background attempt even while its durable write is still pending.
+        if (this.currentCustomTitle) return;
+        if (this.pendingExplicitTitleWrites > 0) return;
+        if (this.writeFailure) return;
         // Cross-process guard: another CLI tab writing to the same JSONL
         // could have renamed (manually) since we started. Re-read the file's
         // latest title record before we append so we don't clobber it.
@@ -1054,7 +1325,11 @@ export class ChatRecordingService {
           // Best-effort — if the re-read fails for any reason, fall through
           // to the in-process check (which already passed) and proceed.
         }
-        this.recordCustomTitle(outcome.title, 'auto');
+        if (controller.signal.aborted) return;
+        if (this.currentCustomTitle) return;
+        if (this.pendingExplicitTitleWrites > 0) return;
+        if (this.writeFailure) return;
+        await this.persistCustomTitle(outcome.title, 'auto');
       } catch (err) {
         // Don't permanently disable: transient failures (network blips, rate
         // limits, bad UTF-16 in one turn's history) should still allow a
@@ -1075,7 +1350,7 @@ export class ChatRecordingService {
 
   /**
    * Records tool results (function responses) sent back to the model.
-   * Writes immediately to disk.
+   * Queues the write immediately on the serialized async writer.
    *
    * @param message The raw PartListUnion object with functionResponse parts
    * @param toolCallResult Optional tool call result info for UI recovery
@@ -1266,11 +1541,16 @@ export class ChatRecordingService {
   private titleRecordedCallback?: (
     customTitle: string,
     titleSource: TitleSource,
+    sessionId: string,
   ) => void;
 
   setTitleRecordedCallback(
     callback:
-      | ((customTitle: string, titleSource: TitleSource) => void)
+      | ((
+          customTitle: string,
+          titleSource: TitleSource,
+          sessionId: string,
+        ) => void)
       | undefined,
   ): void {
     this.titleRecordedCallback = callback;
@@ -1282,25 +1562,43 @@ export class ChatRecordingService {
    * title changes without replacing an existing ACP notification callback).
    */
   getTitleRecordedCallback():
-    | ((customTitle: string, titleSource: TitleSource) => void)
+    | ((
+        customTitle: string,
+        titleSource: TitleSource,
+        sessionId: string,
+      ) => void)
     | undefined {
     return this.titleRecordedCallback;
   }
 
   /**
-   * Records a custom title for the session.
-   * Appended as a system record so it persists with the session data.
-   * Also caches the title in memory for re-append on shutdown.
+   * Durably records an explicit custom title for the session. Explicit title
+   * requests take priority over the best-effort background auto-title task.
    *
    * @param customTitle The title text.
    * @param titleSource Where the title came from — defaults to `'manual'`
    *   so existing `/rename` call sites keep their behavior unchanged.
-   * @returns true if the record was written successfully, false on I/O error.
+   * @returns true once the record is written, false on any I/O failure.
    */
-  recordCustomTitle(
+  async recordCustomTitle(
     customTitle: string,
     titleSource: TitleSource = 'manual',
-  ): boolean {
+  ): Promise<boolean> {
+    this.pendingExplicitTitleWrites++;
+    this.autoTitleController?.abort();
+    try {
+      return await this.persistCustomTitle(customTitle, titleSource);
+    } finally {
+      this.pendingExplicitTitleWrites--;
+    }
+  }
+
+  private async persistCustomTitle(
+    customTitle: string,
+    titleSource: TitleSource,
+  ): Promise<boolean> {
+    this.pendingTitleWrites++;
+    let persisted = false;
     try {
       const record: ChatRecord = {
         ...this.createBaseRecord('system'),
@@ -1309,17 +1607,103 @@ export class ChatRecordingService {
         systemPayload: { customTitle, titleSource },
       };
 
-      this.appendRecord(record);
+      await this.appendRecordStrict(record);
       this.currentCustomTitle = customTitle;
       this.currentTitleSource = titleSource;
       try {
-        this.titleRecordedCallback?.(customTitle, titleSource);
+        this.titleRecordedCallback?.(
+          customTitle,
+          titleSource,
+          record.sessionId,
+        );
       } catch {
         // Observer errors must never break title recording.
       }
+      persisted = true;
       return true;
     } catch (error) {
-      debugLogger.error('Error saving custom title record:', error);
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving custom title record:', error);
+      }
+      return false;
+    } finally {
+      this.pendingTitleWrites--;
+      if (
+        persisted &&
+        this.pendingTitleWrites === 0 &&
+        this.bytesSinceTitleAnchor >= TITLE_REANCHOR_BYTES &&
+        !this.writeFailure
+      ) {
+        this.reanchorTitle();
+      }
+    }
+  }
+
+  /**
+   * Records the session that spawned this one (a `create_sub_session` caller).
+   * Appended as a system record near the start of the transcript so the parent
+   * lineage persists with the session and survives a daemon restart (the
+   * session list rehydrates it by scanning the transcript). Immutable — written
+   * once when the sub-session is created.
+   *
+   * @param parentSessionId Id of the spawning session.
+   * @returns true once the record is durably written, false on I/O error.
+   *   AWAITS the write (via the strict append path) rather than the
+   *   fire-and-forget `appendRecord`, whose failure is only observable through
+   *   a later `flush()` and cannot determine this call's return value.
+   */
+  async recordParentSession(parentSessionId: string): Promise<boolean> {
+    // Idempotent: the lineage is immutable and written once. A bridge retry
+    // (the write succeeded but its response was lost) must not append a second
+    // record — the session would then carry two `parent_session` entries.
+    if (this.currentParentSessionId === parentSessionId) return true;
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'parent_session',
+        systemPayload: { parentSessionId },
+      };
+      await this.appendRecordStrict(record);
+      this.currentParentSessionId = parentSessionId;
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving parent session record:', error);
+      }
+      return false;
+    }
+  }
+
+  /** Persist immutable creator attribution near the start of the transcript. */
+  async recordSessionSource(
+    sourceType: string,
+    sourceId?: string,
+  ): Promise<boolean> {
+    if (this.currentSourceType !== undefined) {
+      return (
+        this.currentSourceType === sourceType &&
+        this.currentSourceId === sourceId
+      );
+    }
+    try {
+      const record: ChatRecord = {
+        ...this.createBaseRecord('system'),
+        type: 'system',
+        subtype: 'session_source',
+        systemPayload: {
+          sourceType,
+          ...(sourceId !== undefined ? { sourceId } : {}),
+        },
+      };
+      await this.appendRecordStrict(record);
+      this.currentSourceType = sourceType;
+      this.currentSourceId = sourceId;
+      return true;
+    } catch (error) {
+      if (error !== this.writeFailure) {
+        debugLogger.error('Error saving session source:', error);
+      }
       return false;
     }
   }
@@ -1343,6 +1727,12 @@ export class ChatRecordingService {
       } catch {
         // best-effort
       }
+    }
+    // A pending explicit rename owns the next title anchor. Re-appending the
+    // previous cached title behind it would make the JSONL tail revert after
+    // the rename succeeds.
+    if (this.pendingExplicitTitleWrites > 0) {
+      return;
     }
     if (!this.currentCustomTitle) {
       return;
@@ -1397,11 +1787,10 @@ export class ChatRecordingService {
    * duplicate of the entire snapshot to the JSONL on every turn, even
    * when nothing changed — inflating session size and slowing /resume.
    *
-   * Set the dedup key optimistically and roll it back if the write
-   * fails. Synchronous identical calls (common during a tool-driven
-   * turn) all dedup correctly, but a transient write failure clears
-   * the key so the next identical snapshot retries the write rather
-   * than being permanently suppressed.
+   * Set the dedup key optimistically so synchronous identical calls (common
+   * during a tool-driven turn) dedup correctly. A synchronous setup failure
+   * rolls the key back; an async write failure permanently degrades this
+   * recorder, so the current instance never retries it.
    */
   recordAttributionSnapshot(snapshot: AttributionSnapshot): void {
     let json: string | undefined;
@@ -1419,22 +1808,11 @@ export class ChatRecordingService {
       };
 
       this.lastAttributionSnapshotJson = json;
-      this.appendRecord(record, () => {
-        // Async write failed — only roll back if the key still
-        // belongs to our snapshot (a later distinct write may have
-        // overwritten it).
-        if (this.lastAttributionSnapshotJson === json) {
-          this.lastAttributionSnapshotJson = undefined;
-        }
-      });
+      this.appendRecord(record);
     } catch (error) {
-      // appendRecord (and createBaseRecord/JSON.stringify) can throw
-      // synchronously — e.g. ensureConversationFile() fails because
-      // the project temp dir isn't writable. The .catch() handler
-      // attached to the promise never runs in that case, so we'd
-      // otherwise leave the dedup key set without a write ever
-      // having landed and permanently suppress identical retries.
-      // Roll back here too.
+      // Synchronous setup failures happen before an async write is queued and
+      // do not degrade the recorder, so roll back the optimistic dedup key to
+      // let the next identical snapshot retry.
       if (json !== undefined && this.lastAttributionSnapshotJson === json) {
         this.lastAttributionSnapshotJson = undefined;
       }
@@ -1462,6 +1840,18 @@ export class ChatRecordingService {
     }
   }
 
+  async recordUserTextElements(
+    payload: UserTextElementsRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'user_text_elements',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record);
+  }
+
   private appendSerializedFileHistorySnapshotBatch(
     snapshots: SerializedFileHistorySnapshot[],
   ): void {
@@ -1476,5 +1866,29 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving file history snapshot batch:', error);
     }
+  }
+
+  async recordSessionArtifactEvent(
+    payload: SessionArtifactEventRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, { updateActiveTail: false });
+  }
+
+  async recordSessionArtifactSnapshot(
+    payload: SessionArtifactSnapshotRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_artifact_snapshot',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record, { updateActiveTail: false });
   }
 }

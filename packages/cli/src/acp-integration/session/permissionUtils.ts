@@ -7,7 +7,10 @@
 import type { ToolCallConfirmationDetails } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core';
 import type {
+  AgentSideConnection,
   PermissionOption,
+  RequestPermissionRequest,
+  RequestPermissionResponse,
   ToolCallContent,
 } from '@agentclientprotocol/sdk';
 
@@ -40,11 +43,28 @@ function filterAlwaysAllowOptions(
 ): PermissionOption[] {
   const hideAlwaysAllow =
     forceHideAlwaysAllow ||
+    confirmation.autoModeFallback !== undefined ||
     (supportsHideAlwaysAllow(confirmation) &&
       confirmation.hideAlwaysAllow === true);
-  return hideAlwaysAllow
+  const visibleOptions = hideAlwaysAllow
     ? options.filter((option) => option.kind !== 'allow_always')
     : options;
+  if (!confirmation.autoModeFallback) return visibleOptions;
+
+  const switchOption: PermissionOption = {
+    optionId: ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault,
+    name: 'Switch to Default Mode and allow once (recommended)',
+    kind: 'allow_once',
+  };
+  const rejectIndex = visibleOptions.findIndex(
+    (option) => option.kind === 'reject_once',
+  );
+  if (rejectIndex === -1) return [...visibleOptions, switchOption];
+  return [
+    ...visibleOptions.slice(0, rejectIndex),
+    switchOption,
+    ...visibleOptions.slice(rejectIndex),
+  ];
 }
 
 function formatExecPermissionScopeLabel(
@@ -68,10 +88,43 @@ function formatExecPermissionScopeLabel(
   return confirmation.rootCommand;
 }
 
+/** Metadata that lets daemon session polling distinguish questions from tools. */
+export function interactionMetaFields(
+  confirmation: ToolCallConfirmationDetails,
+): Record<string, unknown> {
+  return confirmation.type === 'ask_user_question'
+    ? {
+        qwenInteractionKind: 'user_question',
+        qwenQuestions: confirmation.questions,
+      }
+    : {};
+}
+
 export function buildPermissionRequestContent(
   confirmation: ToolCallConfirmationDetails,
 ): ToolCallContent[] {
   const content: ToolCallContent[] = [];
+
+  if (confirmation.autoModeFallback) {
+    content.push({
+      type: 'content',
+      content: {
+        type: 'text',
+        text: confirmation.autoModeFallback.message,
+      },
+    });
+  }
+
+  const warnings =
+    confirmation.type === 'exec' || confirmation.type === 'edit'
+      ? (confirmation.warnings ?? [])
+      : [];
+  for (const warning of warnings) {
+    content.push({
+      type: 'content',
+      content: { type: 'text', text: warning },
+    });
+  }
 
   if (confirmation.type === 'edit') {
     content.push({
@@ -93,6 +146,70 @@ export function buildPermissionRequestContent(
   }
 
   return content;
+}
+
+function permissionAbortError(signal: AbortSignal): Error {
+  return signal.reason instanceof Error
+    ? signal.reason
+    : new Error('Permission request was aborted.');
+}
+
+export function requestPermissionWithAbort(
+  client: Pick<AgentSideConnection, 'requestPermission'>,
+  params: RequestPermissionRequest,
+  signal: AbortSignal,
+): Promise<RequestPermissionResponse> {
+  if (signal.aborted) {
+    return Promise.reject(permissionAbortError(signal));
+  }
+
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener('abort', onAbort);
+      callback();
+    };
+    const onAbort = () => finish(() => reject(permissionAbortError(signal)));
+
+    signal.addEventListener('abort', onAbort, { once: true });
+    let request: Promise<RequestPermissionResponse>;
+    try {
+      request = client.requestPermission(params);
+    } catch (error) {
+      finish(() => reject(error));
+      return;
+    }
+    request.then(
+      (response) => finish(() => resolve(response)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
+}
+
+export function resolvePermissionOutcome(
+  response: RequestPermissionResponse,
+  offeredOptions: readonly PermissionOption[],
+): ToolConfirmationOutcome {
+  if (response.outcome.outcome === 'cancelled') {
+    return ToolConfirmationOutcome.Cancel;
+  }
+
+  const optionId = response.outcome.optionId;
+  if (!offeredOptions.some((option) => option.optionId === optionId)) {
+    throw new Error(
+      `Permission response selected unoffered option: ${optionId}`,
+    );
+  }
+  if (
+    !Object.values(ToolConfirmationOutcome).includes(
+      optionId as ToolConfirmationOutcome,
+    )
+  ) {
+    throw new Error(`Permission response selected invalid option: ${optionId}`);
+  }
+  return optionId as ToolConfirmationOutcome;
 }
 
 export function toPermissionOptions(

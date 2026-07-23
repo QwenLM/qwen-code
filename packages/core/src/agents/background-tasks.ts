@@ -26,6 +26,7 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 import { parsePositiveIntegerEnv } from '../utils/env.js';
 import { escapeXml } from '../utils/xml.js';
 import { patchAgentMeta } from './agent-transcript.js';
+import { runOutsideAgentContext } from './runtime/agent-context.js';
 import {
   AgentEventType,
   type AgentApprovalRequestEvent,
@@ -38,13 +39,20 @@ import type { TaskBase, TaskRegistration, TaskStatus } from './tasks/types.js';
 const debugLogger = createDebugLogger('BACKGROUND_TASKS');
 
 const MAX_DESCRIPTION_LENGTH = 40;
-const MAX_RECENT_ACTIVITIES = 5;
+/**
+ * Cap on each agent's rolling `recentActivities` buffer. Exported so UI
+ * consumers that render the buffer (e.g. the detail dialog's Progress
+ * section) can bound their display to the same value instead of
+ * hardcoding a coincidentally-equal number.
+ */
+export const MAX_RECENT_ACTIVITIES = 10;
 export const DEFAULT_MAX_CONCURRENT_BACKGROUND_AGENTS = 10;
 export const BACKGROUND_AGENT_CONCURRENCY_ENV =
   'QWEN_CODE_MAX_BACKGROUND_AGENTS';
 
 function normalizeBackgroundApprovalOutcome(
   outcome: Parameters<BackgroundApproval['respond']>[0],
+  confirmationDetails: BackgroundApproval['confirmationDetails'],
 ): Parameters<BackgroundApproval['respond']>[0] {
   if (
     outcome === ToolConfirmationOutcome.ProceedAlways ||
@@ -53,7 +61,13 @@ function normalizeBackgroundApprovalOutcome(
     outcome === ToolConfirmationOutcome.ProceedAlwaysServer ||
     outcome === ToolConfirmationOutcome.ProceedAlwaysTool
   ) {
-    return ToolConfirmationOutcome.ProceedOnce;
+    if (
+      confirmationDetails.type === 'plan' &&
+      outcome === ToolConfirmationOutcome.ProceedAlways
+    ) {
+      return outcome;
+    }
+    return ToolConfirmationOutcome.Cancel;
   }
   return outcome;
 }
@@ -82,6 +96,38 @@ export function resolveMaxConcurrentBackgroundAgents(
 
 export const MAX_CONCURRENT_BACKGROUND_AGENTS =
   resolveMaxConcurrentBackgroundAgents();
+
+/**
+ * Normalize the `agents.maxParallelAgentsByModel` setting into a clean
+ * model-ID → cap map. Drops entries whose key is blank or whose value is not
+ * a positive integer (mirrors the validation the global cap goes through) so
+ * a malformed settings file degrades to "no per-model cap" rather than
+ * throwing at construction.
+ */
+function normalizePerModelConcurrency(
+  raw: ReadonlyMap<string, number> | Record<string, number> | undefined,
+): Map<string, number> {
+  const result = new Map<string, number>();
+  if (!raw) {
+    return result;
+  }
+  const entries = raw instanceof Map ? raw.entries() : Object.entries(raw);
+  for (const [model, value] of entries) {
+    const key = model?.trim();
+    if (!key) {
+      continue;
+    }
+    if (!Number.isInteger(value) || value < 1) {
+      debugLogger.warn(
+        `Invalid maxParallelAgentsByModel[${JSON.stringify(model)}]=` +
+          `${JSON.stringify(value)}; ignoring (must be a positive integer).`,
+      );
+      continue;
+    }
+    result.set(key, value);
+  }
+  return result;
+}
 
 /**
  * Cap on how many fully-finalized terminal entries (those that have
@@ -228,6 +274,13 @@ export interface AgentTask extends TaskBase {
    */
   agentId: string;
   subagentType?: string;
+  /**
+   * Concrete model ID this agent runs with (resolved from the subagent's
+   * model selector at launch time). Used to enforce per-model concurrency
+   * caps (`agents.maxParallelAgentsByModel`); undefined when the model
+   * could not be resolved, in which case only the global cap applies.
+   */
+  model?: string;
   /**
    * AgentId of the sub-agent that spawned this one; null when launched
    * from the top-level session. Drives the nested-agent tree display in
@@ -384,18 +437,46 @@ export type BackgroundActivityChangeCallback = (entry: AgentTask) => void;
  */
 export type BackgroundApprovalChangeCallback = (entry: AgentTask) => void;
 
+/**
+ * Session-scoped handle for a background agent whose runtime remains alive
+ * after a completed turn. The handle is deliberately not part of AgentTask:
+ * task state is serializable, while the live runtime is process-local.
+ */
+export interface ResidentBackgroundAgent {
+  continue(message: string): boolean;
+  dispose(): void;
+}
+
 type MessageWaiter = () => void;
 
 export interface BackgroundTaskRegistryOptions {
   maxConcurrentBackgroundAgents?: number;
+  /**
+   * Per-model concurrency caps keyed by concrete model ID. Each value is the
+   * maximum number of background sub-agents that may run concurrently on that
+   * model. A model not present here is bounded only by the global
+   * `maxConcurrentBackgroundAgents` cap. Useful when a model has a lower
+   * concurrency capacity than the rest of the fleet.
+   */
+  maxConcurrentBackgroundAgentsByModel?:
+    | ReadonlyMap<string, number>
+    | Record<string, number>;
 }
 
 export interface BackgroundSlotReservation {
   readonly id: symbol;
+  /**
+   * Concrete model ID the slot was reserved for; undefined when the launch
+   * path could not resolve a model. Carried so the per-model cap can be
+   * checked consistently across reserve → consume → release.
+   */
+  readonly model?: string;
 }
 
 interface BackgroundSlotWaiter {
   readonly signal?: AbortSignal;
+  /** Concrete model ID the waiter needs a slot for (per-model cap check). */
+  readonly model?: string;
   readonly resolve: (reservation: BackgroundSlotReservation) => void;
   readonly reject: (error: Error) => void;
   readonly onAbort: () => void;
@@ -406,10 +487,27 @@ const BACKGROUND_SLOT_WAIT_CANCELLED =
 
 export class BackgroundTaskRegistry {
   private readonly agents = new Map<string, AgentTask>();
+  private readonly residentAgents = new Map<string, ResidentBackgroundAgent>();
   private readonly messageWaiters = new Map<string, Set<MessageWaiter>>();
+  private readonly finishingAgents = new Set<string>();
+  private readonly finishingWaiters = new Map<
+    string,
+    Set<(settled: boolean) => void>
+  >();
   private readonly waitQueue: BackgroundSlotWaiter[] = [];
-  private readonly reservedBackgroundSlots = new Set<symbol>();
+  // Maps each outstanding slot reservation to the concrete model ID it was
+  // reserved for (undefined when unresolved). A Map rather than a Set so the
+  // per-model cap can count reservations against the same model the running
+  // agents are tallied under.
+  private readonly reservedBackgroundSlots = new Map<
+    symbol,
+    string | undefined
+  >();
   private readonly maxConcurrentBackgroundAgents: number;
+  // Per-model concurrency caps keyed by concrete model ID. Empty when no
+  // `agents.maxParallelAgentsByModel` is configured, in which case only the
+  // global cap is enforced.
+  private readonly maxConcurrentBackgroundAgentsByModel: Map<string, number>;
   private notificationCallback?: BackgroundNotificationCallback;
   private registerCallback?: BackgroundRegisterCallback;
   private statusChangeCallback?: BackgroundStatusChangeCallback;
@@ -423,15 +521,37 @@ export class BackgroundTaskRegistry {
       Number.isInteger(configured) && configured >= 1
         ? configured
         : MAX_CONCURRENT_BACKGROUND_AGENTS;
-  }
-
-  canStartBackgroundAgent(): boolean {
-    return (
-      this.getClaimedBackgroundSlotCount() < this.maxConcurrentBackgroundAgents
+    this.maxConcurrentBackgroundAgentsByModel = normalizePerModelConcurrency(
+      options.maxConcurrentBackgroundAgentsByModel,
     );
   }
 
-  assertCanStartBackgroundAgent(): void {
+  /**
+   * Whether a new background agent may start. Always bounded by the global
+   * cap; when `model` is given and a per-model cap is configured for it, the
+   * per-model cap must also have room.
+   */
+  canStartBackgroundAgent(model?: string): boolean {
+    if (
+      this.getClaimedBackgroundSlotCount() >= this.maxConcurrentBackgroundAgents
+    ) {
+      return false;
+    }
+    const perModelCap = this.resolvePerModelCap(model);
+    if (
+      perModelCap !== undefined &&
+      this.getClaimedBackgroundSlotCount(model) >= perModelCap
+    ) {
+      return false;
+    }
+    return true;
+  }
+
+  getMaxConcurrentBackgroundAgents(): number {
+    return this.maxConcurrentBackgroundAgents;
+  }
+
+  assertCanStartBackgroundAgent(model?: string): void {
     const claimed = this.getClaimedBackgroundSlotCount();
     if (claimed >= this.maxConcurrentBackgroundAgents) {
       debugLogger.warn(
@@ -445,15 +565,40 @@ export class BackgroundTaskRegistry {
           `agent first.`,
       );
     }
+    const perModelCap = this.resolvePerModelCap(model);
+    if (perModelCap !== undefined) {
+      const claimedForModel = this.getClaimedBackgroundSlotCount(model);
+      if (claimedForModel >= perModelCap) {
+        debugLogger.warn(
+          `Background agent per-model concurrency cap reached for ` +
+            `${JSON.stringify(model)}: ${claimedForModel}/${perModelCap}. ` +
+            `Refusing new background agent.`,
+        );
+        throw new Error(
+          `Cannot start background agent: maximum concurrent background agents ` +
+            `for model "${model}" (${perModelCap}) reached. Stop an existing ` +
+            `agent on that model first.`,
+        );
+      }
+    }
+  }
+
+  /** Configured per-model cap for `model`, or undefined when none applies. */
+  private resolvePerModelCap(model?: string): number | undefined {
+    if (model === undefined) {
+      return undefined;
+    }
+    return this.maxConcurrentBackgroundAgentsByModel.get(model);
   }
 
   async waitForBackgroundSlot(
     signal?: AbortSignal,
+    model?: string,
   ): Promise<BackgroundSlotReservation> {
     if (signal?.aborted) {
       throw new Error(BACKGROUND_SLOT_WAIT_CANCELLED);
     }
-    const reservation = this.tryReserveBackgroundSlot();
+    const reservation = this.tryReserveBackgroundSlot(model);
     if (reservation) {
       return reservation;
     }
@@ -468,6 +613,7 @@ export class BackgroundTaskRegistry {
       };
       const waiter: BackgroundSlotWaiter = {
         signal,
+        model,
         resolve,
         reject,
         onAbort,
@@ -477,11 +623,13 @@ export class BackgroundTaskRegistry {
     });
   }
 
-  tryReserveBackgroundSlot(): BackgroundSlotReservation | undefined {
-    if (!this.canStartBackgroundAgent()) {
+  tryReserveBackgroundSlot(
+    model?: string,
+  ): BackgroundSlotReservation | undefined {
+    if (!this.canStartBackgroundAgent(model)) {
       return undefined;
     }
-    return this.reserveBackgroundSlot();
+    return this.reserveBackgroundSlot(model);
   }
 
   getQueuedCount(): number {
@@ -507,9 +655,12 @@ export class BackgroundTaskRegistry {
         if (options.slotReservation) {
           this.consumeBackgroundSlot(options.slotReservation);
         } else {
-          this.assertCanStartBackgroundAgent();
+          this.assertCanStartBackgroundAgent(registration.model);
         }
       }
+    }
+    if (existing && existing !== registration) {
+      this.disposeResidentAgent(registration.agentId);
     }
 
     // Mutate the registration in place to graduate it to an `AgentTask`.
@@ -535,6 +686,7 @@ export class BackgroundTaskRegistry {
       entry.parentName = this.agents.get(entry.parentAgentId)?.subagentType;
     }
     this.agents.set(entry.agentId, entry);
+    this.releaseFinishingWaiters(entry.agentId, true);
     debugLogger.info(`Registered background agent: ${entry.agentId}`);
     if (
       wasRunningBackground &&
@@ -564,6 +716,87 @@ export class BackgroundTaskRegistry {
     return entry;
   }
 
+  /**
+   * Restart a completed background task for another turn while preserving its
+   * resident runtime. Capacity is checked before mutating the entry so a
+   * rejected restart leaves the completed task intact.
+   */
+  restartCompletedAgent(
+    agentId: string,
+    abortController: AbortController,
+  ): AgentTask | undefined {
+    const entry = this.agents.get(agentId);
+    if (!entry || !entry.isBackgrounded || entry.status !== 'completed') {
+      return undefined;
+    }
+
+    this.assertCanStartBackgroundAgent(entry.model);
+
+    entry.status = 'running';
+    entry.startTime = Date.now();
+    entry.endTime = undefined;
+    entry.abortController = abortController;
+    entry.result = undefined;
+    entry.error = undefined;
+    entry.resumeBlockedReason = undefined;
+    entry.stats = undefined;
+    entry.recentActivities = [];
+    entry.pendingApprovals = [];
+    entry.persistedCancellationStatus = undefined;
+
+    return this.register(entry);
+  }
+
+  registerResidentAgent(
+    agentId: string,
+    resident: ResidentBackgroundAgent,
+  ): void {
+    const existing = this.residentAgents.get(agentId);
+    if (existing === resident) return;
+    if (existing) {
+      this.disposeResidentAgent(agentId, existing);
+    }
+    this.residentAgents.set(agentId, resident);
+  }
+
+  continueResidentAgent(agentId: string, message: string): boolean {
+    const entry = this.agents.get(agentId);
+    const resident = this.residentAgents.get(agentId);
+    if (!resident || entry?.status !== 'completed') return false;
+    return resident.continue(message);
+  }
+
+  unregisterResidentAgent(
+    agentId: string,
+    resident?: ResidentBackgroundAgent,
+  ): boolean {
+    const current = this.residentAgents.get(agentId);
+    if (!current || (resident && current !== resident)) return false;
+    return this.residentAgents.delete(agentId);
+  }
+
+  disposeResidentAgent(
+    agentId: string,
+    resident?: ResidentBackgroundAgent,
+  ): boolean {
+    const current = this.residentAgents.get(agentId);
+    if (!current || (resident && current !== resident)) return false;
+    this.residentAgents.delete(agentId);
+    try {
+      current.dispose();
+    } catch (error) {
+      debugLogger.error(
+        `Failed to dispose resident background agent ${agentId}:`,
+        error,
+      );
+    }
+    return true;
+  }
+
+  disposeResidentAgents(): void {
+    this.disposeAllResidentAgents();
+  }
+
   // Transition a still-running entry to 'completed' and emit the terminal
   // notification. No-op if the entry is already terminal *and* has been
   // notified — protects against duplicate emission when cancel aborts the
@@ -582,13 +815,18 @@ export class BackgroundTaskRegistry {
     if (entry.status !== 'running' && entry.status !== 'cancelled') return;
     if (entry.notified) return;
 
+    const wasCancelled = entry.status === 'cancelled';
     entry.status = 'completed';
     entry.endTime = Date.now();
     entry.result = result;
     entry.stats = stats;
+    this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Background agent completed: ${agentId}`);
 
     this.rejectPendingApprovals(entry);
+    if (wasCancelled) {
+      this.disposeResidentAgent(agentId);
+    }
     this.emitNotification(entry);
     this.emitStatusChange(entry);
     this.drainWaitQueue();
@@ -621,7 +859,7 @@ export class BackgroundTaskRegistry {
     // complete/fail/cancel/finalize ordering on purpose — those
     // keep the entry around (terminal state) so callbacks can inspect
     // it on re-read; unregister removes it outright.
-    this.agents.delete(agentId);
+    this.deleteAgent(agentId);
     this.emitStatusChange(entry);
     debugLogger.info(`Unregistered foreground agent: ${agentId}`);
     this.drainWaitQueue();
@@ -638,11 +876,13 @@ export class BackgroundTaskRegistry {
     entry.endTime = Date.now();
     entry.error = error;
     entry.stats = stats;
+    this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Background agent failed: ${agentId}`);
 
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -679,6 +919,8 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     entry.persistedCancellationStatus = persistedStatus;
+    this.releaseFinishingWaiters(agentId, true);
+    this.disposeResidentAgent(agentId);
     if (entry.metaPath) {
       patchAgentMeta(entry.metaPath, {
         status: persistedStatus,
@@ -721,9 +963,11 @@ export class BackgroundTaskRegistry {
     entry.status = 'cancelled';
     entry.endTime = Date.now();
     entry.notified = true;
+    this.releaseFinishingWaiters(agentId, true);
     debugLogger.info(`Abandoned paused background agent: ${agentId}`);
     this.rejectPendingApprovals(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -746,9 +990,11 @@ export class BackgroundTaskRegistry {
     entry.endTime ??= Date.now();
     if (partialResult) entry.result = partialResult;
     entry.stats = stats;
+    this.releaseFinishingWaiters(agentId, true);
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -768,6 +1014,7 @@ export class BackgroundTaskRegistry {
     this.rejectPendingApprovals(entry);
     this.emitNotification(entry);
     this.emitStatusChange(entry);
+    this.disposeResidentAgent(agentId);
     this.drainWaitQueue();
   }
 
@@ -835,9 +1082,13 @@ export class BackgroundTaskRegistry {
     );
     this.emitApprovalChange(entry);
     try {
+      const normalizedOutcome = normalizeBackgroundApprovalOutcome(
+        outcome,
+        approval.confirmationDetails,
+      );
       await approval.respond(
-        normalizeBackgroundApprovalOutcome(outcome),
-        payload,
+        normalizedOutcome,
+        normalizedOutcome === outcome ? payload : undefined,
       );
     } catch (error) {
       debugLogger.error(
@@ -939,23 +1190,50 @@ export class BackgroundTaskRegistry {
     return Array.from(this.agents.values());
   }
 
-  private getRunningBackgroundCount(): number {
-    return Array.from(this.agents.values()).filter(
-      (entry) =>
+  // Counts backgrounded agents that still occupy a slot: running, or
+  // cancelled-but-not-yet-finalized. When `model` is given, only agents on
+  // that model are counted (per-model cap); otherwise all of them (global).
+  private getRunningBackgroundCount(model?: string): number {
+    let count = 0;
+    for (const entry of this.agents.values()) {
+      const occupiesSlot =
         entry.isBackgrounded &&
         (entry.status === 'running' ||
-          (entry.status === 'cancelled' && !entry.notified)),
-    ).length;
+          (entry.status === 'cancelled' && !entry.notified));
+      if (!occupiesSlot) {
+        continue;
+      }
+      if (model === undefined || entry.model === model) {
+        count++;
+      }
+    }
+    return count;
   }
 
-  private getClaimedBackgroundSlotCount(): number {
-    return this.getRunningBackgroundCount() + this.reservedBackgroundSlots.size;
+  private getReservedBackgroundSlotCount(model?: string): number {
+    if (model === undefined) {
+      return this.reservedBackgroundSlots.size;
+    }
+    let count = 0;
+    for (const slotModel of this.reservedBackgroundSlots.values()) {
+      if (slotModel === model) {
+        count++;
+      }
+    }
+    return count;
   }
 
-  private reserveBackgroundSlot(): BackgroundSlotReservation {
-    const reservation = { id: Symbol('background-slot') };
-    this.reservedBackgroundSlots.add(reservation.id);
-    return reservation;
+  private getClaimedBackgroundSlotCount(model?: string): number {
+    return (
+      this.getRunningBackgroundCount(model) +
+      this.getReservedBackgroundSlotCount(model)
+    );
+  }
+
+  private reserveBackgroundSlot(model?: string): BackgroundSlotReservation {
+    const id = Symbol('background-slot');
+    this.reservedBackgroundSlots.set(id, model);
+    return { id, model };
   }
 
   private consumeBackgroundSlot(reservation: BackgroundSlotReservation): void {
@@ -967,14 +1245,29 @@ export class BackgroundTaskRegistry {
   }
 
   private drainWaitQueue(): void {
-    while (this.waitQueue.length > 0 && this.canStartBackgroundAgent()) {
-      const waiter = this.waitQueue.shift()!;
+    for (let i = 0; i < this.waitQueue.length; ) {
+      // Once the global cap is hit no remaining waiter can be served,
+      // regardless of model — bail out instead of scanning the rest.
+      if (
+        this.getClaimedBackgroundSlotCount() >=
+        this.maxConcurrentBackgroundAgents
+      ) {
+        break;
+      }
+      const waiter = this.waitQueue[i]!;
+      // A waiter whose model is at its per-model cap stays queued even while
+      // a different model's waiter behind it can still be served.
+      if (!this.canStartBackgroundAgent(waiter.model)) {
+        i++;
+        continue;
+      }
+      this.waitQueue.splice(i, 1);
       waiter.signal?.removeEventListener('abort', waiter.onAbort);
       if (waiter.signal?.aborted) {
         waiter.reject(new Error(BACKGROUND_SLOT_WAIT_CANCELLED));
         continue;
       }
-      waiter.resolve(this.reserveBackgroundSlot());
+      waiter.resolve(this.reserveBackgroundSlot(waiter.model));
     }
   }
 
@@ -1009,6 +1302,26 @@ export class BackgroundTaskRegistry {
   }
 
   /**
+   * True while any background entry is still actually executing. Unlike
+   * `hasUnfinalizedTasks()`, a `cancelled`-but-not-yet-finalized entry
+   * does NOT count: its work has already been aborted and only the
+   * terminal task-notification is outstanding. Session-switch gates
+   * (/clear, /resume) key off this instead — they abort-and-reset the
+   * registry right after passing the gate, which suppresses that very
+   * notification, so blocking on it made the command silently no-op
+   * when the user cleared immediately after cancelling (issue #5949).
+   * Headless holdback loops must keep using `hasUnfinalizedTasks()` so
+   * every task_started still pairs with a task_notification.
+   */
+  hasRunningTasks(): boolean {
+    for (const entry of this.agents.values()) {
+      if (!entry.isBackgrounded) continue;
+      if (entry.status === 'running') return true;
+    }
+    return false;
+  }
+
+  /**
    * Drops every in-memory entry without touching sidecar state.
    *
    * Used only when switching to a different session after the caller has
@@ -1021,6 +1334,8 @@ export class BackgroundTaskRegistry {
       | AgentTask
       | undefined;
     if (!firstEntry) {
+      this.releaseAllFinishingWaiters(false);
+      this.disposeAllResidentAgents();
       this.rejectWaitQueue();
       return;
     }
@@ -1034,7 +1349,9 @@ export class BackgroundTaskRegistry {
       this.wakeMessageWaiters(entry.agentId);
     }
     this.rejectWaitQueue();
+    this.releaseAllFinishingWaiters(false);
     this.agents.clear();
+    this.disposeAllResidentAgents();
     this.emitStatusChange(firstEntry);
   }
 
@@ -1053,7 +1370,13 @@ export class BackgroundTaskRegistry {
    */
   queueExternalInput(agentId: string, input: AgentExternalInput): boolean {
     const entry = this.agents.get(agentId);
-    if (!entry || entry.status !== 'running') return false;
+    if (
+      !entry ||
+      entry.status !== 'running' ||
+      this.finishingAgents.has(agentId)
+    ) {
+      return false;
+    }
     const queue = entry.pendingMessages!;
     queue.push(input);
     debugLogger.info(
@@ -1061,6 +1384,40 @@ export class BackgroundTaskRegistry {
     );
     this.wakeMessageWaiters(agentId);
     return true;
+  }
+
+  /** Close the input queue after its final drain but before async teardown. */
+  beginFinishing(agentId: string): boolean {
+    const entry = this.agents.get(agentId);
+    if (!entry || entry.status !== 'running') return false;
+    this.finishingAgents.add(agentId);
+    return true;
+  }
+
+  isFinishing(agentId: string): boolean {
+    return this.finishingAgents.has(agentId);
+  }
+
+  /** Wait until a finishing task publishes its terminal state. */
+  waitForFinishing(agentId: string, signal: AbortSignal): Promise<boolean> {
+    if (!this.finishingAgents.has(agentId)) return Promise.resolve(true);
+    if (signal.aborted) return Promise.resolve(false);
+
+    return new Promise<boolean>((resolve) => {
+      const settle = (settled: boolean) => {
+        signal.removeEventListener('abort', onAbort);
+        const waiters = this.finishingWaiters.get(agentId);
+        waiters?.delete(settle);
+        if (waiters?.size === 0) this.finishingWaiters.delete(agentId);
+        resolve(settled);
+      };
+      const onAbort = () => settle(false);
+      const waiters = this.finishingWaiters.get(agentId) ?? new Set();
+      waiters.add(settle);
+      this.finishingWaiters.set(agentId, waiters);
+      signal.addEventListener('abort', onAbort, { once: true });
+      if (signal.aborted) onAbort();
+    });
   }
 
   /**
@@ -1173,6 +1530,7 @@ export class BackgroundTaskRegistry {
       // notification here to honour the one-notification-per-agent contract.
       this.finalizeCancellationIfPending(entry.agentId);
     }
+    this.disposeAllResidentAgents();
     debugLogger.info('Aborted all background agents');
   }
 
@@ -1246,7 +1604,18 @@ export class BackgroundTaskRegistry {
     };
 
     try {
-      this.notificationCallback(displayLine, xmlParts.join('\n'), meta);
+      // The terminal transition (complete/fail/cancel) that reaches this
+      // point runs inside the finished agent's AsyncLocalStorage frame, and
+      // ALS context follows every async continuation the callback starts —
+      // including the React state update that drains the notification into
+      // a new conversation turn. Without exiting the frame here, that turn
+      // resolves Config.getModel() to the SUBAGENT's model and the main
+      // session's history can overflow its smaller context window (#7156).
+      // A notification is main-session-owned, so emit it with no agent
+      // frame at all.
+      runOutsideAgentContext(() =>
+        this.notificationCallback!(displayLine, xmlParts.join('\n'), meta),
+      );
     } catch (error) {
       debugLogger.error('Failed to emit background notification:', error);
     }
@@ -1301,8 +1670,34 @@ export class BackgroundTaskRegistry {
     while (evictable.length > MAX_RETAINED_TERMINAL_AGENTS) {
       const oldest = evictable.shift();
       if (oldest) {
-        this.agents.delete(oldest.agentId);
+        this.deleteAgent(oldest.agentId);
       }
+    }
+  }
+
+  private deleteAgent(agentId: string): boolean {
+    this.releaseFinishingWaiters(agentId, false);
+    this.disposeResidentAgent(agentId);
+    return this.agents.delete(agentId);
+  }
+
+  private releaseFinishingWaiters(agentId: string, settled: boolean): void {
+    this.finishingAgents.delete(agentId);
+    const waiters = this.finishingWaiters.get(agentId);
+    if (!waiters) return;
+    this.finishingWaiters.delete(agentId);
+    for (const resolve of waiters) resolve(settled);
+  }
+
+  private releaseAllFinishingWaiters(settled: boolean): void {
+    for (const agentId of Array.from(this.finishingAgents)) {
+      this.releaseFinishingWaiters(agentId, settled);
+    }
+  }
+
+  private disposeAllResidentAgents(): void {
+    for (const agentId of Array.from(this.residentAgents.keys())) {
+      this.disposeResidentAgent(agentId);
     }
   }
 

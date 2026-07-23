@@ -14,6 +14,7 @@ import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
+import { DEFAULT_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
@@ -100,6 +101,7 @@ interface ServeArgs {
   'max-pending-prompts-per-session': number;
   'max-connections': number;
   'event-ring-size': number;
+  'compacted-replay-max-bytes': number;
   workspace?: string | string[];
   'require-auth': boolean;
   'enable-session-shell': boolean;
@@ -118,6 +120,7 @@ interface ServeArgs {
   'prompt-deadline-ms'?: number;
   'writer-idle-timeout-ms'?: number;
   'channel-idle-timeout-ms'?: number;
+  'initialize-timeout-ms'?: number;
   'session-reap-interval-ms'?: number;
   'session-idle-timeout-ms'?: number;
   'permission-response-timeout-ms'?: number;
@@ -184,11 +187,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         array: true,
         requiresArg: true,
         description:
-          'Absolute workspace path this daemon binds to. ' +
+          'Absolute workspace path to register with this daemon. ' +
           'POST /session requests with a mismatched cwd return 400 workspace_mismatch. ' +
           'Defaults to process.cwd() when omitted. ' +
-          'For multi-workspace deployments, run one `qwen serve` per workspace ' +
-          'on separate ports (or behind an external orchestrator).',
+          'Repeat to register isolated workspace runtimes; the first is primary.',
       })
       .option('max-connections', {
         type: 'number',
@@ -266,14 +268,22 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'headroom at the cost of a few hundred KB extra RAM per session. ' +
           'Must be a positive finite integer.',
       })
+      .option('compacted-replay-max-bytes', {
+        type: 'number',
+        default: DEFAULT_COMPACTED_REPLAY_MAX_BYTES,
+        description:
+          'Per-session in-memory compacted replay snapshot byte cap for ' +
+          '`POST /session/:id/load` late attaches. Larger = more recent ' +
+          'history in load snapshots at higher heap cost. Must be a positive ' +
+          'safe integer no larger than 256 MiB.',
+      })
       .option('http-bridge', {
         type: 'boolean',
         default: true,
         description:
-          'Stage 1 mode: one `qwen --acp` child per daemon (the daemon binds to ' +
-          'one workspace at boot, multiplexing N sessions onto that child via ' +
-          "the agent's native `newSession()`). Stage 2 native in-process mode " +
-          'is not yet implemented; this flag will become opt-in then.',
+          'HTTP bridge mode: attempt to preheat one primary `qwen --acp` child; trusted ' +
+          'secondaries start one on demand. Stage 2 native in-process mode is ' +
+          'not yet implemented; this flag will become opt-in then.',
       })
       .option('mcp-client-budget', {
         type: 'number',
@@ -325,6 +335,12 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Milliseconds to keep ACP child alive after last session closes. ' +
           '0 or unset = immediate kill (default).',
+      })
+      .option('initialize-timeout-ms', {
+        type: 'number',
+        description:
+          'ACP child request timeout, including the initialize handshake (ms). ' +
+          'Default: 10000 (10 s).',
       })
       .option('session-reap-interval-ms', {
         type: 'number',
@@ -555,6 +571,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         maxPendingPromptsPerSession,
         maxConnections: argv['max-connections'],
         eventRingSize: argv['event-ring-size'],
+        compactedReplayMaxBytes: argv['compacted-replay-max-bytes'],
         workspace: argv.workspace,
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
@@ -577,6 +594,9 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           : {}),
         ...(argv['channel-idle-timeout-ms'] !== undefined
           ? { channelIdleTimeoutMs: argv['channel-idle-timeout-ms'] }
+          : {}),
+        ...(argv['initialize-timeout-ms'] !== undefined
+          ? { initializeTimeoutMs: argv['initialize-timeout-ms'] }
           : {}),
         ...(argv['session-reap-interval-ms'] !== undefined
           ? { sessionReapIntervalMs: argv['session-reap-interval-ms'] }

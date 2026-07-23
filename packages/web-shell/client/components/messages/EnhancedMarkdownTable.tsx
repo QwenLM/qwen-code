@@ -19,6 +19,34 @@ import {
   type TouchEvent as ReactTouchEvent,
 } from 'react';
 import { useI18n } from '../../i18n';
+import { useInteractionBlocker } from '../../interactionBlockContext';
+import { Button } from '../ui/button';
+import { Checkbox } from '../ui/checkbox';
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '../ui/dialog';
+import { Input } from '../ui/input';
+import { Label } from '../ui/label';
+import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from '../ui/popover';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '../ui/select';
+import { XIcon } from 'lucide-react';
 import styles from './EnhancedMarkdownTable.module.css';
 
 type TableElement = ReactElement<{
@@ -32,11 +60,13 @@ type TextFilterOperator =
   | 'startsWith'
   | 'endsWith';
 type NumberFilterOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'between';
+type TableDensity = 'standard' | 'compact' | 'comfortable';
 
 export interface EnhancedTableCell {
   key: string;
   content: ReactNode;
   text: string;
+  rawText?: string;
   isHeader: boolean;
   textAlign?: CSSProperties['textAlign'];
 }
@@ -64,6 +94,18 @@ interface SelectionRange {
   focusCol: number;
 }
 
+interface SelectionStatistics {
+  selectedCount: number;
+  nonEmptyCount: number;
+  numericCount: number;
+  sum: number;
+  average: number;
+  min: number;
+  max: number;
+  format: 'number' | 'percent' | 'currency';
+  currencySymbol?: string;
+}
+
 interface ColumnFilter {
   selectedValues?: string[];
   textFilter?: {
@@ -79,6 +121,9 @@ interface ColumnFilter {
 
 interface OpenFilterMenu {
   columnIndex: number;
+}
+
+interface ColumnContextMenu {
   left: number;
   top: number;
 }
@@ -87,6 +132,11 @@ interface ColumnResizeState {
   columnIndex: number;
   startX: number;
   startWidth: number;
+}
+
+interface CellDialogState {
+  rowKey: string;
+  columnIndex: number;
 }
 
 interface FilterOption {
@@ -118,23 +168,20 @@ const MIN_COLUMN_WIDTH = 80;
 const MAX_COLUMN_WIDTH = 640;
 const KEYBOARD_COLUMN_RESIZE_STEP = 16;
 const COLUMN_DRAG_MIME = 'application/x-qwen-web-shell-table-column';
+const LONG_CELL_TEXT_LENGTH = 60;
+const LONG_CELL_LINE_COUNT = 3;
+const DENSITY_ORDER: TableDensity[] = ['standard', 'compact', 'comfortable'];
 const DEFAULT_COLUMN_STYLE: CSSProperties = {
   width: DEFAULT_COLUMN_WIDTH,
   minWidth: DEFAULT_COLUMN_WIDTH,
   maxWidth: DEFAULT_COLUMN_WIDTH,
 };
+const COMPACT_AUTO_COLUMN_STYLE: CSSProperties = {
+  width: 'auto',
+};
 
 function clampColumnWidth(width: number): number {
   return Math.min(MAX_COLUMN_WIDTH, Math.max(MIN_COLUMN_WIDTH, width));
-}
-
-const FOCUSABLE_FILTER_MENU_SELECTOR =
-  'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
-
-function getFocusableFilterMenuElements(container: HTMLElement): HTMLElement[] {
-  return Array.from(
-    container.querySelectorAll<HTMLElement>(FOCUSABLE_FILTER_MENU_SELECTOR),
-  ).filter((element) => !element.hasAttribute('hidden'));
 }
 
 function isInteractiveSelectionTarget(target: EventTarget | null): boolean {
@@ -161,6 +208,30 @@ function normalizeText(value: string): string {
   return value.replace(/\s+/g, ' ').trim();
 }
 
+function isLongCellText(value: string): boolean {
+  return (
+    value.length > LONG_CELL_TEXT_LENGTH ||
+    value.split(/\r\n|\r|\n/).length > LONG_CELL_LINE_COUNT
+  );
+}
+
+function nextDensity(current: TableDensity): TableDensity {
+  const index = DENSITY_ORDER.indexOf(current);
+  return DENSITY_ORDER[(index + 1) % DENSITY_ORDER.length] ?? 'standard';
+}
+
+function densityClassName(density: TableDensity): string {
+  switch (density) {
+    case 'compact':
+      return styles.densityCompact;
+    case 'comfortable':
+      return styles.densityComfortable;
+    case 'standard':
+    default:
+      return styles.densityStandard;
+  }
+}
+
 function getTextContent(node: ReactNode): string {
   if (node === null || node === undefined || typeof node === 'boolean') {
     return '';
@@ -183,6 +254,7 @@ function emptyCell(rowKey: string, columnIndex: number): EnhancedTableCell {
     key: `${rowKey}-empty-${columnIndex}`,
     content: '',
     text: '',
+    rawText: '',
     isHeader: false,
   };
 }
@@ -193,13 +265,17 @@ function parseRow(rowNode: TableElement, rowKey: string): EnhancedTableRow {
   );
   return {
     key: rowKey,
-    cells: cellNodes.map((cellNode, cellIndex) => ({
-      key: `${rowKey}-${cellIndex}`,
-      content: cellNode.props.children,
-      text: normalizeText(getTextContent(cellNode.props.children)),
-      isHeader: cellNode.type === 'th',
-      textAlign: cellNode.props.style?.textAlign,
-    })),
+    cells: cellNodes.map((cellNode, cellIndex) => {
+      const rawText = getTextContent(cellNode.props.children);
+      return {
+        key: `${rowKey}-${cellIndex}`,
+        content: cellNode.props.children,
+        text: normalizeText(rawText),
+        rawText,
+        isHeader: cellNode.type === 'th',
+        textAlign: cellNode.props.style?.textAlign,
+      };
+    }),
   };
 }
 
@@ -268,6 +344,7 @@ function parseTable(
       key: `header-${columnIndex}`,
       content: label,
       text: label,
+      rawText: label,
       isHeader: true,
     };
   });
@@ -286,6 +363,7 @@ function parseNumber(value: string): number | null {
   const normalized = numericText.replace(/[$€£¥₹,\s]/g, '');
   if (!/^-?(\d+(\.\d+)?|\.\d+)$/.test(normalized)) return null;
   const parsed = Number(normalized);
+  if (!Number.isFinite(parsed)) return null;
   return isPercent ? parsed / 100 : parsed;
 }
 
@@ -322,11 +400,36 @@ function getSelectedColumnIndexes(
 }
 
 function sanitizeForClipboard(value: string): string {
-  const inspectedValue = value.replace(
-    /[\u200B-\u200D\u2060\u00AD\uFEFF]/g,
-    '',
-  );
+  const inspectedValue = value
+    .replace(/[\u200B-\u200D\u2060\u00AD\uFEFF]/g, '')
+    .trimStart();
   return /^[=+\-@]/.test(inspectedValue) ? `'${value}` : value;
+}
+
+function cellClipboardText(cell: EnhancedTableCell | undefined): string {
+  return (cell?.rawText ?? cell?.text ?? '').replace(/[\r\n\t]+/g, ' ');
+}
+
+function cellReadableText(cell: EnhancedTableCell): string {
+  return cell.rawText || cell.text;
+}
+
+function applyColumnWidth(
+  current: Record<number, number>,
+  columnIndex: number,
+  nextWidth: number,
+): Record<number, number> {
+  const currentWidth = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+  if (currentWidth === nextWidth) return current;
+  if (nextWidth === DEFAULT_COLUMN_WIDTH) {
+    const next = { ...current };
+    delete next[columnIndex];
+    return next;
+  }
+  return {
+    ...current,
+    [columnIndex]: nextWidth,
+  };
 }
 
 function getSelectionText(
@@ -346,7 +449,7 @@ function getSelectionText(
     lines.push(
       selectedColumns
         .map((columnIndex) =>
-          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+          sanitizeForClipboard(cellClipboardText(row.cells[columnIndex])),
         )
         .join('\t'),
     );
@@ -363,13 +466,13 @@ function getVisibleTableText(
   const lines = [
     visibleColumnIndexes
       .map((columnIndex) =>
-        sanitizeForClipboard(headers[columnIndex]?.text ?? ''),
+        sanitizeForClipboard(cellClipboardText(headers[columnIndex])),
       )
       .join('\t'),
     ...rows.map((row) =>
       visibleColumnIndexes
         .map((columnIndex) =>
-          sanitizeForClipboard(row.cells[columnIndex]?.text ?? ''),
+          sanitizeForClipboard(cellClipboardText(row.cells[columnIndex])),
         )
         .join('\t'),
     ),
@@ -377,17 +480,98 @@ function getVisibleTableText(
   return lines.join('\n');
 }
 
-function selectionSize(
+function getSelectionStatistics(
   range: SelectionRange | null,
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
-): number {
-  if (!range) return 0;
+): SelectionStatistics | null {
+  if (!range) return null;
   const { minRow, maxRow } = getSelectionRowBounds(range);
-  const selectedColumnCount = getSelectedColumnIndexes(
-    range,
-    visibleColumnIndexes,
-  ).length;
-  return (maxRow - minRow + 1) * selectedColumnCount;
+  const selectedColumns = getSelectedColumnIndexes(range, visibleColumnIndexes);
+  if (selectedColumns.length === 0) return null;
+
+  let selectedCount = 0;
+  let nonEmptyCount = 0;
+  let numericCount = 0;
+  let sum = 0;
+  let min = Infinity;
+  let max = -Infinity;
+  let allPercent = true;
+  let allCurrency = true;
+  let currencySymbol: string | undefined;
+
+  for (let rowIndex = minRow; rowIndex <= maxRow; rowIndex++) {
+    const row = rows[rowIndex];
+    if (!row) continue;
+    selectedColumns.forEach((columnIndex) => {
+      const cell = row.cells[columnIndex];
+      if (!cell) return;
+      selectedCount += 1;
+      const value = cell.text.trim();
+      if (!value) return;
+      nonEmptyCount += 1;
+      const numericValue = parseNumber(value);
+      if (numericValue === null) return;
+
+      numericCount += 1;
+      sum += numericValue;
+      min = Math.min(min, numericValue);
+      max = Math.max(max, numericValue);
+      allPercent = allPercent && value.endsWith('%');
+
+      const symbols = value.match(/[$€£¥₹]/g);
+      const currentSymbol = symbols?.length === 1 ? symbols[0] : undefined;
+      if (!currentSymbol) {
+        allCurrency = false;
+      } else if (currencySymbol === undefined) {
+        currencySymbol = currentSymbol;
+      } else if (currencySymbol !== currentSymbol) {
+        allCurrency = false;
+      }
+    });
+  }
+
+  if (selectedCount === 0) return null;
+  const format =
+    numericCount > 0 && allPercent
+      ? 'percent'
+      : numericCount > 0 && allCurrency && currencySymbol
+        ? 'currency'
+        : 'number';
+  return {
+    selectedCount,
+    nonEmptyCount,
+    numericCount,
+    sum,
+    average: numericCount > 0 ? sum / numericCount : 0,
+    min: numericCount > 0 ? min : 0,
+    max: numericCount > 0 ? max : 0,
+    format,
+    currencySymbol,
+  };
+}
+
+function formatSelectionStatistic(
+  value: number,
+  statistics: SelectionStatistics,
+  language: string,
+): string {
+  const normalizedValue = Object.is(value, -0) ? 0 : value;
+  const locale = language === 'en' ? 'en-US' : language;
+  if (statistics.format === 'percent') {
+    return new Intl.NumberFormat(locale, {
+      style: 'percent',
+      maximumFractionDigits: 6,
+    }).format(normalizedValue);
+  }
+
+  const formatted = new Intl.NumberFormat(locale, {
+    maximumFractionDigits: 6,
+  }).format(Math.abs(normalizedValue));
+  if (statistics.format === 'currency' && statistics.currencySymbol) {
+    return `${normalizedValue < 0 ? '-' : ''}${statistics.currencySymbol}${formatted}`;
+  }
+  return normalizedValue < 0 ? `-${formatted}` : formatted;
 }
 
 function moveColumn(order: number[], fromColumn: number, toColumn: number) {
@@ -412,11 +596,7 @@ function moveVisibleColumn(
   const visibleColumns = order.filter(
     (columnIndex) => !hiddenColumns.has(columnIndex),
   );
-  const nextVisibleColumns = moveColumn(
-    visibleColumns,
-    fromColumn,
-    toColumn,
-  );
+  const nextVisibleColumns = moveColumn(visibleColumns, fromColumn, toColumn);
   if (nextVisibleColumns === visibleColumns) return order;
   let visibleIndex = 0;
   return order.map((columnIndex) => {
@@ -637,32 +817,38 @@ function SortMenuSection({
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterMenuSection}>
-      <button
-        className={`${styles.filterMenuAction} ${
-          sortedThisColumn?.direction === 'asc' ? styles.activeAction : ''
+    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        className={`w-full justify-start text-xs ${
+          sortedThisColumn?.direction === 'asc' ? 'bg-muted text-primary' : ''
         }`}
         type="button"
         onClick={() => onSort(columnIndex, 'asc')}
       >
         {t('markdownTable.sort.asc')}
-      </button>
-      <button
-        className={`${styles.filterMenuAction} ${
-          sortedThisColumn?.direction === 'desc' ? styles.activeAction : ''
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className={`w-full justify-start text-xs ${
+          sortedThisColumn?.direction === 'desc' ? 'bg-muted text-primary' : ''
         }`}
         type="button"
         onClick={() => onSort(columnIndex, 'desc')}
       >
         {t('markdownTable.sort.desc')}
-      </button>
-      <button
-        className={styles.filterMenuAction}
+      </Button>
+      <Button
+        variant="ghost"
+        size="sm"
+        className="w-full justify-start text-xs"
         type="button"
         onClick={() => onSort(columnIndex, null)}
       >
         {t('markdownTable.sort.clear')}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -671,14 +857,16 @@ function VisibilityMenuSection({ onHideColumn }: { onHideColumn: () => void }) {
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterMenuSection}>
-      <button
-        className={styles.filterMenuAction}
+    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
+      <Button
+        variant="ghost"
+        size="sm"
+        className="w-full justify-start text-xs"
         type="button"
         onClick={onHideColumn}
       >
         {t('markdownTable.hideColumn')}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -711,10 +899,10 @@ function ValueFilterSection({
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterMenuSection}>
-      <input
+    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
+      <Input
         ref={searchInputRef}
-        className={styles.filterSearch}
+        className="h-7 text-xs"
         value={search}
         onChange={(event) => onSearchChange(event.currentTarget.value)}
         placeholder={t('markdownTable.filter.searchPlaceholder')}
@@ -723,40 +911,53 @@ function ValueFilterSection({
           column: columnName,
         })}
       />
-      <label className={styles.filterOption}>
-        <input
-          type="checkbox"
+      <Label
+        htmlFor={`markdown-table-filter-all-${columnIndex}`}
+        className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+      >
+        <Checkbox
+          id={`markdown-table-filter-all-${columnIndex}`}
           name={`markdown-table-filter-all-${columnIndex}`}
+          data-name={`markdown-table-filter-all-${columnIndex}`}
           checked={allFilteredSelected}
-          onChange={(event) =>
-            onFilteredSelectionChange(event.currentTarget.checked)
+          onCheckedChange={(checked) =>
+            onFilteredSelectionChange(checked === true)
           }
         />
         <span>{t('markdownTable.filter.selectVisible')}</span>
-        <span className={styles.optionCount}>{filteredOptions.length}</span>
-      </label>
-      <div className={styles.filterOptionList}>
+        <span className="ml-auto text-muted-foreground tabular-nums">
+          {filteredOptions.length}
+        </span>
+      </Label>
+      <div className="max-h-[170px] overflow-auto rounded-md border bg-muted/50">
         {visibleOptions.map((option, optionIndex) => (
-          <label key={option.value} className={styles.filterOption}>
-            <input
-              type="checkbox"
+          <Label
+            key={option.value}
+            htmlFor={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
+            className="min-h-7 cursor-pointer gap-2 px-1.5 py-1 text-xs font-normal hover:bg-muted"
+          >
+            <Checkbox
+              id={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
               name={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
+              data-name={`markdown-table-filter-option-${columnIndex}-${optionIndex}`}
               checked={selectedValues.has(option.value)}
-              onChange={() => onToggleValue(option.value)}
+              onCheckedChange={() => onToggleValue(option.value)}
             />
-            <span className={styles.optionLabel}>{option.label}</span>
-            <span className={styles.optionCount}>{option.count}</span>
-          </label>
+            <span className="min-w-0 flex-1 truncate">{option.label}</span>
+            <span className="ml-auto text-muted-foreground tabular-nums">
+              {option.count}
+            </span>
+          </Label>
         ))}
         {filteredOptions.length > visibleOptions.length && (
-          <div className={styles.optionLimitHint}>
+          <div className="p-2 text-center text-muted-foreground">
             {t('markdownTable.filter.optionLimit', {
               count: visibleOptions.length,
             })}
           </div>
         )}
         {filteredOptions.length === 0 && (
-          <div className={styles.optionLimitHint}>
+          <div className="p-2 text-center text-muted-foreground">
             {t('markdownTable.filter.noOptions')}
           </div>
         )}
@@ -766,6 +967,7 @@ function ValueFilterSection({
 }
 
 function CustomFilterSection({
+  overlayId,
   columnIndex,
   columnName,
   isNumeric,
@@ -780,6 +982,7 @@ function CustomFilterSection({
   onNumberValueChange,
   onNumberValueToChange,
 }: {
+  overlayId: string;
   columnIndex: number;
   columnName: string;
   isNumeric: boolean;
@@ -797,36 +1000,50 @@ function CustomFilterSection({
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterMenuSection}>
-      <div className={styles.conditionTitle}>
+    <div className="flex flex-col gap-1.5 border-b px-2.5 py-2">
+      <div className="font-semibold text-muted-foreground">
         {t('markdownTable.filter.custom')}
       </div>
       {isNumeric ? (
         <>
-          <select
-            className={styles.conditionSelect}
+          <Select
             value={numberOperator}
             name={`markdown-table-number-operator-${columnIndex}`}
-            onChange={(event) =>
-              onNumberOperatorChange(
-                event.currentTarget.value as NumberFilterOperator,
-              )
+            onValueChange={(value) =>
+              onNumberOperatorChange(value as NumberFilterOperator)
             }
-            aria-label={t('markdownTable.filter.numberAria', {
-              column: columnName,
-            })}
           >
-            {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
-              ([value, labelKey]) => (
-                <option key={value} value={value}>
-                  {t(labelKey)}
-                </option>
-              ),
-            )}
-          </select>
-          <div className={styles.conditionInputs}>
-            <input
-              className={styles.conditionInput}
+            <SelectTrigger
+              size="sm"
+              className="w-full text-xs"
+              data-name={`markdown-table-number-operator-${columnIndex}`}
+              aria-label={t('markdownTable.filter.numberAria', {
+                column: columnName,
+              })}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent
+              data-markdown-table-filter-owner={overlayId}
+              className="z-[calc(var(--web-shell-popover-z-index,1000)+1)]"
+            >
+              {Object.entries(NUMBER_FILTER_LABEL_KEYS).map(
+                ([value, labelKey]) => (
+                  <SelectItem
+                    key={value}
+                    value={value}
+                    data-value={value}
+                    className="text-xs"
+                  >
+                    {t(labelKey)}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+          <div className="flex gap-1.5">
+            <Input
+              className="h-7 text-xs"
               value={numberValue}
               onChange={(event) =>
                 onNumberValueChange(event.currentTarget.value)
@@ -835,8 +1052,8 @@ function CustomFilterSection({
               name={`markdown-table-number-filter-${columnIndex}`}
             />
             {numberOperator === 'between' && (
-              <input
-                className={styles.conditionInput}
+              <Input
+                className="h-7 text-xs"
                 value={numberValueTo}
                 onChange={(event) =>
                   onNumberValueToChange(event.currentTarget.value)
@@ -849,27 +1066,43 @@ function CustomFilterSection({
         </>
       ) : (
         <>
-          <select
-            className={styles.conditionSelect}
+          <Select
             value={textOperator}
             name={`markdown-table-text-operator-${columnIndex}`}
-            onChange={(event) =>
-              onTextOperatorChange(
-                event.currentTarget.value as TextFilterOperator,
-              )
+            onValueChange={(value) =>
+              onTextOperatorChange(value as TextFilterOperator)
             }
-            aria-label={t('markdownTable.filter.textAria', {
-              column: columnName,
-            })}
           >
-            {Object.entries(TEXT_FILTER_LABEL_KEYS).map(([value, labelKey]) => (
-              <option key={value} value={value}>
-                {t(labelKey)}
-              </option>
-            ))}
-          </select>
-          <input
-            className={styles.conditionInput}
+            <SelectTrigger
+              size="sm"
+              className="w-full text-xs"
+              data-name={`markdown-table-text-operator-${columnIndex}`}
+              aria-label={t('markdownTable.filter.textAria', {
+                column: columnName,
+              })}
+            >
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent
+              data-markdown-table-filter-owner={overlayId}
+              className="z-[calc(var(--web-shell-popover-z-index,1000)+1)]"
+            >
+              {Object.entries(TEXT_FILTER_LABEL_KEYS).map(
+                ([value, labelKey]) => (
+                  <SelectItem
+                    key={value}
+                    value={value}
+                    data-value={value}
+                    className="text-xs"
+                  >
+                    {t(labelKey)}
+                  </SelectItem>
+                ),
+              )}
+            </SelectContent>
+          </Select>
+          <Input
+            className="h-7 text-xs"
             value={textValue}
             onChange={(event) => onTextValueChange(event.currentTarget.value)}
             placeholder={t('markdownTable.filter.textPlaceholder')}
@@ -893,25 +1126,17 @@ function FilterMenuFooter({
   const { t } = useI18n();
 
   return (
-    <div className={styles.filterFooter}>
-      <button
-        className={styles.secondaryButton}
-        type="button"
-        onClick={onClear}
-      >
+    <div className="flex items-center gap-1.5 px-2.5 py-2">
+      <Button variant="outline" size="sm" type="button" onClick={onClear}>
         {t('markdownTable.filter.reset')}
-      </button>
-      <span className={styles.footerSpacer} />
-      <button
-        className={styles.secondaryButton}
-        type="button"
-        onClick={onClose}
-      >
+      </Button>
+      <span className="flex-1" />
+      <Button variant="outline" size="sm" type="button" onClick={onClose}>
         {t('markdownTable.filter.cancel')}
-      </button>
-      <button className={styles.primaryButton} type="button" onClick={onApply}>
+      </Button>
+      <Button size="sm" type="button" onClick={onApply}>
         {t('markdownTable.filter.confirm')}
-      </button>
+      </Button>
     </div>
   );
 }
@@ -924,8 +1149,6 @@ function ColumnFilterMenu({
   isNumeric,
   options,
   sort,
-  style,
-  menuRef,
   canHideColumn,
   onApply,
   onClose,
@@ -939,8 +1162,6 @@ function ColumnFilterMenu({
   isNumeric: boolean;
   options: FilterOption[];
   sort: SortState | null;
-  style?: CSSProperties;
-  menuRef: RefObject<HTMLDivElement | null>;
   canHideColumn: boolean;
   onApply: (columnIndex: number, filter: ColumnFilter | undefined) => void;
   onClose: () => void;
@@ -1043,17 +1264,29 @@ function ColumnFilterMenu({
   const sortedThisColumn = sort?.columnIndex === columnIndex ? sort : null;
 
   return (
-    <div
-      ref={menuRef}
+    <PopoverContent
       id={id}
-      className={styles.filterMenu}
-      style={style}
+      data-markdown-table-filter-owner={id}
+      align="end"
+      sideOffset={2}
+      collisionPadding={6}
+      onCloseAutoFocus={(event) => {
+        if (
+          document.activeElement &&
+          document.activeElement !== document.body
+        ) {
+          event.preventDefault();
+        }
+      }}
+      className="max-h-[min(430px,calc(100vh-16px))] w-[300px] max-w-[80vw] gap-0 overflow-auto p-0 text-xs"
       role="dialog"
       aria-labelledby={`${id}-title`}
     >
-      <div id={`${id}-title`} className={styles.filterMenuTitle}>
-        {columnName}
-      </div>
+      <PopoverHeader className="border-b px-2.5 py-2">
+        <PopoverTitle id={`${id}-title`} className="truncate text-xs font-bold">
+          {columnName}
+        </PopoverTitle>
+      </PopoverHeader>
       <SortMenuSection
         columnIndex={columnIndex}
         sortedThisColumn={sortedThisColumn}
@@ -1076,6 +1309,7 @@ function ColumnFilterMenu({
         onToggleValue={toggleValue}
       />
       <CustomFilterSection
+        overlayId={id}
         columnIndex={columnIndex}
         columnName={columnName}
         isNumeric={isNumeric}
@@ -1095,7 +1329,7 @@ function ColumnFilterMenu({
         onClose={onClose}
         onApply={applyDraft}
       />
-    </div>
+    </PopoverContent>
   );
 }
 
@@ -1138,7 +1372,8 @@ export function EnhancedTable({
   table: EnhancedTableData;
   toolbarExtra?: ReactNode;
 }) {
-  const { t } = useI18n();
+  const { language, t } = useI18n();
+  const registerInteractionBlocker = useInteractionBlocker();
   const tableId = useId();
   const [sort, setSort] = useState<SortState | null>(null);
   const [filters, setFilters] = useState<Record<number, ColumnFilter>>({});
@@ -1146,6 +1381,8 @@ export function EnhancedTable({
   const [openFilterMenu, setOpenFilterMenu] = useState<OpenFilterMenu | null>(
     null,
   );
+  const [columnContextMenu, setColumnContextMenu] =
+    useState<ColumnContextMenu | null>(null);
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(
     () => new Set(),
   );
@@ -1158,9 +1395,13 @@ export function EnhancedTable({
   const [resizingColumn, setResizingColumn] =
     useState<ColumnResizeState | null>(null);
   const [detailRowKey, setDetailRowKey] = useState<string | null>(null);
+  const [cellDialog, setCellDialog] = useState<CellDialogState | null>(null);
+  const [longTextExpanded, setLongTextExpanded] = useState(false);
+  const [density, setDensity] = useState<TableDensity>('standard');
   const [isDragging, setIsDragging] = useState(false);
   const [copiedVisible, setCopiedVisible] = useState(false);
   const [copiedSelection, setCopiedSelection] = useState(false);
+  const [copiedCellDialog, setCopiedCellDialog] = useState(false);
   const draggingRef = useRef(false);
   const copiedVisibleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
@@ -1168,19 +1409,25 @@ export function EnhancedTable({
   const copiedSelectionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
     null,
   );
+  const copiedCellDialogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
   const copiedVisibleGenRef = useRef(0);
   const copiedSelectionGenRef = useRef(0);
+  const copiedCellDialogGenRef = useRef(0);
   const mountedRef = useRef(true);
   const shellRef = useRef<HTMLDivElement | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
-  const filterMenuRef = useRef<HTMLDivElement | null>(null);
-  const filterTriggerRef = useRef<HTMLButtonElement | null>(null);
-  const focusReturnFrameRef = useRef(0);
+  const columnContextMenuRef = useRef<HTMLDivElement | null>(null);
+  const cellDialogRef = useRef<HTMLDivElement | null>(null);
+  const cellDialogFocusReturnRef = useRef<HTMLElement | null>(null);
   const pendingSelectionRef = useRef<{
     rowIndex: number;
     columnIndex: number;
   } | null>(null);
   const selectionFrameRef = useRef(0);
+  const resizeFrameRef = useRef(0);
+  const pendingResizeWidthRef = useRef<number | null>(null);
   const draggingColumnRef = useRef<number | null>(null);
   const tableStructureKey = useMemo(
     () =>
@@ -1189,21 +1436,9 @@ export function EnhancedTable({
   );
   const tableStructureKeyRef = useRef(tableStructureKey);
 
-  const focusFilterTrigger = useCallback(() => {
-    if (focusReturnFrameRef.current) {
-      cancelAnimationFrame(focusReturnFrameRef.current);
-    }
-    focusReturnFrameRef.current = requestAnimationFrame(() => {
-      focusReturnFrameRef.current = 0;
-      const trigger = filterTriggerRef.current;
-      if (trigger?.isConnected) trigger.focus();
-    });
-  }, []);
-
   const closeFilterMenu = useCallback(() => {
     setOpenFilterMenu(null);
-    focusFilterTrigger();
-  }, [focusFilterTrigger]);
+  }, []);
 
   const resetCopiedVisible = useCallback(() => {
     copiedVisibleGenRef.current += 1;
@@ -1221,6 +1456,15 @@ export function EnhancedTable({
       copiedSelectionTimerRef.current = null;
     }
     setCopiedSelection(false);
+  }, []);
+
+  const resetCopiedCellDialog = useCallback(() => {
+    copiedCellDialogGenRef.current += 1;
+    if (copiedCellDialogTimerRef.current) {
+      clearTimeout(copiedCellDialogTimerRef.current);
+      copiedCellDialogTimerRef.current = null;
+    }
+    setCopiedCellDialog(false);
   }, []);
 
   const flushPendingSelection = useCallback(() => {
@@ -1262,9 +1506,6 @@ export function EnhancedTable({
       if (selectionFrameRef.current) {
         cancelAnimationFrame(selectionFrameRef.current);
       }
-      if (focusReturnFrameRef.current) {
-        cancelAnimationFrame(focusReturnFrameRef.current);
-      }
     };
   }, [stopDragging]);
 
@@ -1275,6 +1516,7 @@ export function EnhancedTable({
     setFilters({});
     setSelection(null);
     setOpenFilterMenu(null);
+    setColumnContextMenu(null);
     setHiddenColumns(new Set());
     setColumnWidths({});
     setColumnOrder(initialColumnOrder(table.columnCount));
@@ -1282,13 +1524,18 @@ export function EnhancedTable({
     setFreezeFirstColumn(false);
     setResizingColumn(null);
     setDetailRowKey(null);
+    setCellDialog(null);
+    setLongTextExpanded(false);
+    setDensity('standard');
     resetCopiedVisible();
     resetCopiedSelection();
+    resetCopiedCellDialog();
     draggingRef.current = false;
     draggingColumnRef.current = null;
     setIsDragging(false);
   }, [
     resetCopiedSelection,
+    resetCopiedCellDialog,
     resetCopiedVisible,
     table.columnCount,
     tableStructureKey,
@@ -1312,70 +1559,97 @@ export function EnhancedTable({
         clearTimeout(copiedSelectionTimerRef.current);
         copiedSelectionTimerRef.current = null;
       }
+      if (copiedCellDialogTimerRef.current) {
+        clearTimeout(copiedCellDialogTimerRef.current);
+        copiedCellDialogTimerRef.current = null;
+      }
     };
   }, []);
 
   useEffect(() => {
     if (!openFilterMenu) return;
-    const closeMenu = (event: MouseEvent) => {
-      const target = event.target as Node;
-      if (
-        !filterMenuRef.current?.contains(target) &&
-        !filterTriggerRef.current?.contains(target)
-      ) {
-        setOpenFilterMenu(null);
-      }
-    };
-    const handleMenuKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') {
-        closeFilterMenu();
-        return;
-      }
-      if (event.key !== 'Tab') return;
-      const menu = filterMenuRef.current;
-      const activeElement = document.activeElement;
-      if (
-        !menu ||
-        !(activeElement instanceof Node) ||
-        !menu.contains(activeElement)
-      ) {
-        return;
-      }
-      const focusableElements = getFocusableFilterMenuElements(menu);
-      if (focusableElements.length === 0) return;
-      const currentIndex =
-        activeElement instanceof HTMLElement
-          ? focusableElements.indexOf(activeElement)
-          : -1;
-      const nextIndex = event.shiftKey
-        ? currentIndex <= 0
-          ? focusableElements.length - 1
-          : currentIndex - 1
-        : currentIndex === -1 || currentIndex === focusableElements.length - 1
-          ? 0
-          : currentIndex + 1;
-      event.preventDefault();
-      focusableElements[nextIndex]?.focus();
-    };
+    const filterOwnerId = `${tableId}-filter-${openFilterMenu.columnIndex}`;
     const closeOnScroll = (event: Event) => {
-      const target = event.target;
-      if (target instanceof Node && filterMenuRef.current?.contains(target)) {
-        return;
+      if (event.target instanceof Element) {
+        const owner = event.target.closest(
+          '[data-markdown-table-filter-owner]',
+        );
+        if (
+          owner?.getAttribute('data-markdown-table-filter-owner') ===
+          filterOwnerId
+        ) {
+          return;
+        }
       }
       setOpenFilterMenu(null);
     };
     const closeOnResize = () => setOpenFilterMenu(null);
-    document.addEventListener('mousedown', closeMenu);
-    document.addEventListener('keydown', handleMenuKeyDown);
     document.addEventListener('scroll', closeOnScroll, true);
     window.addEventListener('resize', closeOnResize);
     return () => {
-      document.removeEventListener('mousedown', closeMenu);
-      document.removeEventListener('keydown', handleMenuKeyDown);
       document.removeEventListener('scroll', closeOnScroll, true);
       window.removeEventListener('resize', closeOnResize);
     };
-  }, [closeFilterMenu, openFilterMenu]);
+  }, [openFilterMenu, tableId]);
+
+  useEffect(() => {
+    if (!columnContextMenu) return;
+    const closeMenu = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (!columnContextMenuRef.current?.contains(target)) {
+        setColumnContextMenu(null);
+      }
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setColumnContextMenu(null);
+      }
+    };
+    const closeOnScrollOrResize = () => setColumnContextMenu(null);
+    document.addEventListener('mousedown', closeMenu);
+    document.addEventListener('keydown', closeOnEscape);
+    document.addEventListener('scroll', closeOnScrollOrResize, true);
+    window.addEventListener('resize', closeOnScrollOrResize);
+    return () => {
+      document.removeEventListener('mousedown', closeMenu);
+      document.removeEventListener('keydown', closeOnEscape);
+      document.removeEventListener('scroll', closeOnScrollOrResize, true);
+      window.removeEventListener('resize', closeOnScrollOrResize);
+    };
+  }, [columnContextMenu]);
+
+  useEffect(() => {
+    const clearActiveColumnOnOutsideMouseDown = (event: MouseEvent) => {
+      const target = event.target;
+      if (
+        target instanceof Node &&
+        !shellRef.current?.contains(target) &&
+        !columnContextMenuRef.current?.contains(target)
+      ) {
+        setActiveColumn(null);
+      }
+    };
+    const clearActiveColumnOnEscape = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        openFilterMenu ||
+        cellDialog ||
+        columnContextMenu
+      )
+        return;
+      if (event.key === 'Escape') setActiveColumn(null);
+    };
+    document.addEventListener('mousedown', clearActiveColumnOnOutsideMouseDown);
+    document.addEventListener('keydown', clearActiveColumnOnEscape);
+    return () => {
+      document.removeEventListener(
+        'mousedown',
+        clearActiveColumnOnOutsideMouseDown,
+      );
+      document.removeEventListener('keydown', clearActiveColumnOnEscape);
+    };
+  }, [cellDialog, columnContextMenu, openFilterMenu]);
 
   const filteredRows = useMemo(
     () => applyFilters(table.rows, filters),
@@ -1385,6 +1659,14 @@ export function EnhancedTable({
     () => sortRows(filteredRows, sort),
     [filteredRows, sort],
   );
+  useEffect(() => {
+    setSelection((current) => {
+      if (!current) return current;
+      return getSelectionRowBounds(current).maxRow < visibleRows.length
+        ? current
+        : null;
+    });
+  }, [visibleRows.length]);
   const openFilterOptions = useMemo(() => {
     if (!openFilterMenu) return [];
     const columnIndex = openFilterMenu.columnIndex;
@@ -1411,42 +1693,58 @@ export function EnhancedTable({
   const frozenColumnIndex = freezeFirstColumn
     ? orderedVisibleColumnIndexes[0]
     : undefined;
-
+  const currentCellDialogCell = useMemo(() => {
+    if (!cellDialog) return null;
+    const row = visibleRows.find((item) => item.key === cellDialog.rowKey);
+    return row?.cells[cellDialog.columnIndex] ?? null;
+  }, [cellDialog, visibleRows]);
+  const currentCellDialogText = currentCellDialogCell?.text;
   useEffect(() => {
     resetCopiedVisible();
   }, [resetCopiedVisible, orderedVisibleColumnIndexes, visibleRows]);
 
   useEffect(() => {
     if (!resizingColumn) return;
+    const applyPendingResize = () => {
+      const nextWidth = pendingResizeWidthRef.current;
+      pendingResizeWidthRef.current = null;
+      if (resizeFrameRef.current) {
+        cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = 0;
+      }
+      if (nextWidth === null) return;
+      setColumnWidths((current) =>
+        applyColumnWidth(current, resizingColumn.columnIndex, nextWidth),
+      );
+    };
     const resizeColumn = (event: MouseEvent) => {
-      const nextWidth = clampColumnWidth(
+      pendingResizeWidthRef.current = clampColumnWidth(
         resizingColumn.startWidth + event.clientX - resizingColumn.startX,
       );
-      setColumnWidths((current) => {
-        const currentWidth =
-          current[resizingColumn.columnIndex] ?? DEFAULT_COLUMN_WIDTH;
-        if (currentWidth === nextWidth) return current;
-        if (nextWidth === DEFAULT_COLUMN_WIDTH) {
-          const next = { ...current };
-          delete next[resizingColumn.columnIndex];
-          return next;
-        }
-        return {
-          ...current,
-          [resizingColumn.columnIndex]: nextWidth,
-        };
-      });
+      if (resizeFrameRef.current) return;
+      resizeFrameRef.current = requestAnimationFrame(applyPendingResize);
     };
-    const stopResize = () => setResizingColumn(null);
+    const stopResize = () => {
+      applyPendingResize();
+      setResizingColumn(null);
+    };
+    const stopResizeWhenHidden = () => {
+      if (document.hidden) stopResize();
+    };
     window.addEventListener('mousemove', resizeColumn);
     window.addEventListener('mouseup', stopResize);
     window.addEventListener('blur', stopResize);
-    document.addEventListener('visibilitychange', stopResize);
+    document.addEventListener('visibilitychange', stopResizeWhenHidden);
     return () => {
       window.removeEventListener('mousemove', resizeColumn);
       window.removeEventListener('mouseup', stopResize);
       window.removeEventListener('blur', stopResize);
-      document.removeEventListener('visibilitychange', stopResize);
+      document.removeEventListener('visibilitychange', stopResizeWhenHidden);
+      if (resizeFrameRef.current) {
+        cancelAnimationFrame(resizeFrameRef.current);
+        resizeFrameRef.current = 0;
+      }
+      pendingResizeWidthRef.current = null;
     };
   }, [resizingColumn]);
 
@@ -1454,7 +1752,35 @@ export function EnhancedTable({
     if (detailRowKey && !visibleRows.some((row) => row.key === detailRowKey)) {
       setDetailRowKey(null);
     }
-  }, [detailRowKey, visibleRows]);
+    if (
+      cellDialog &&
+      !visibleRows.some(
+        (row) =>
+          row.key === cellDialog.rowKey && row.cells[cellDialog.columnIndex],
+      )
+    ) {
+      setCellDialog(null);
+    }
+  }, [cellDialog, detailRowKey, visibleRows]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    return registerInteractionBlocker();
+  }, [cellDialog, registerInteractionBlocker]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    resetCopiedCellDialog();
+  }, [cellDialog, currentCellDialogText, resetCopiedCellDialog]);
+
+  useEffect(() => {
+    if (!cellDialog) return;
+    return () => {
+      const focusReturn = cellDialogFocusReturnRef.current;
+      cellDialogFocusReturnRef.current = null;
+      if (focusReturn?.isConnected) focusReturn.focus();
+    };
+  }, [cellDialog]);
 
   const setColumnFilter = (
     columnIndex: number,
@@ -1496,34 +1822,17 @@ export function EnhancedTable({
     });
   };
 
-  const toggleFilterMenu = (
-    event: ReactMouseEvent<HTMLButtonElement>,
-    columnIndex: number,
-  ) => {
+  const setFilterMenuOpen = (columnIndex: number, open: boolean) => {
+    if (!open) {
+      setOpenFilterMenu((current) =>
+        current?.columnIndex === columnIndex ? null : current,
+      );
+      return;
+    }
     setSelection(null);
     setActiveColumn(columnIndex);
-    filterTriggerRef.current = event.currentTarget;
-    const buttonRect = event.currentTarget.getBoundingClientRect();
-    const menuWidth = 300;
-    const menuHeight = 430;
-    const nextMenu = {
-      columnIndex,
-      left: Math.max(
-        6,
-        Math.min(
-          buttonRect.right - menuWidth,
-          window.innerWidth - menuWidth - 6,
-        ),
-      ),
-      top:
-        window.innerHeight - buttonRect.bottom < menuHeight
-          ? Math.max(8, buttonRect.top - menuHeight - 2)
-          : buttonRect.bottom + 2,
-    };
-
-    setOpenFilterMenu((current) =>
-      current?.columnIndex === columnIndex ? null : nextMenu,
-    );
+    setColumnContextMenu(null);
+    setOpenFilterMenu({ columnIndex });
   };
 
   const hideColumn = (columnIndex: number) => {
@@ -1551,13 +1860,87 @@ export function EnhancedTable({
     setHiddenColumns(new Set());
   };
 
-  const toggleFreezeFirstColumn = () => {
+  const toggleFreezeFirstColumnFromMenu = () => {
     setFreezeFirstColumn((current) => !current);
+    setColumnContextMenu(null);
+  };
+
+  const openColumnContextMenu = (
+    event: ReactMouseEvent<HTMLElement>,
+    columnIndex: number,
+  ) => {
+    if (columnIndex !== orderedVisibleColumnIndexes[0]) {
+      return;
+    }
+    event.preventDefault();
+    setSelection(null);
+    setActiveColumn(columnIndex);
+    setOpenFilterMenu(null);
+    const menuWidth = 220;
+    const menuHeight = 72;
+    setColumnContextMenu({
+      left: Math.max(
+        6,
+        Math.min(event.clientX, window.innerWidth - menuWidth - 6),
+      ),
+      top: Math.max(
+        6,
+        Math.min(event.clientY, window.innerHeight - menuHeight - 6),
+      ),
+    });
+  };
+
+  const toggleDensity = () => {
+    setDensity((current) => nextDensity(current));
   };
 
   const toggleRowDetail = (rowKey: string) => {
     setSelection(null);
+    setCellDialog(null);
+    resetCopiedCellDialog();
     setDetailRowKey((current) => (current === rowKey ? null : rowKey));
+  };
+
+  const openCellDialog = (rowKey: string, columnIndex: number) => {
+    cellDialogFocusReturnRef.current =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : null;
+    setSelection(null);
+    setOpenFilterMenu(null);
+    setDetailRowKey(null);
+    resetCopiedCellDialog();
+    setCellDialog({
+      rowKey,
+      columnIndex,
+    });
+  };
+
+  const closeCellDialog = () => {
+    setCellDialog(null);
+    resetCopiedCellDialog();
+  };
+
+  const copyCellDialogValue = () => {
+    if (currentCellDialogText == null || !navigator.clipboard) return;
+    const copyGeneration = copiedCellDialogGenRef.current;
+    void navigator.clipboard
+      .writeText(sanitizeForClipboard(currentCellDialogText))
+      .then(() => {
+        if (!mountedRef.current) return;
+        if (copiedCellDialogGenRef.current !== copyGeneration) return;
+        if (copiedCellDialogTimerRef.current) {
+          clearTimeout(copiedCellDialogTimerRef.current);
+        }
+        setCopiedCellDialog(true);
+        copiedCellDialogTimerRef.current = setTimeout(
+          () => setCopiedCellDialog(false),
+          2000,
+        );
+      })
+      .catch((error: unknown) =>
+        console.warn('[web-shell] clipboard write failed:', error),
+      );
   };
 
   const selectionRowBounds = useMemo(
@@ -1586,9 +1969,11 @@ export function EnhancedTable({
   ): CSSProperties => {
     const width = columnWidths[columnIndex];
     if (width === undefined) {
-      return extra
-        ? { ...DEFAULT_COLUMN_STYLE, ...extra }
-        : DEFAULT_COLUMN_STYLE;
+      const defaultStyle =
+        density === 'compact'
+          ? COMPACT_AUTO_COLUMN_STYLE
+          : DEFAULT_COLUMN_STYLE;
+      return extra ? { ...defaultStyle, ...extra } : defaultStyle;
     }
     return {
       width,
@@ -1604,10 +1989,14 @@ export function EnhancedTable({
   ) => {
     event.preventDefault();
     event.stopPropagation();
+    const headerCell = event.currentTarget.closest('th');
+    const renderedWidth = headerCell?.getBoundingClientRect().width;
     setResizingColumn({
       columnIndex,
       startX: event.clientX,
-      startWidth: columnWidths[columnIndex] ?? DEFAULT_COLUMN_WIDTH,
+      startWidth:
+        columnWidths[columnIndex] ??
+        (renderedWidth ? Math.round(renderedWidth) : DEFAULT_COLUMN_WIDTH),
     });
   };
 
@@ -1615,6 +2004,9 @@ export function EnhancedTable({
     event: ReactKeyboardEvent<HTMLButtonElement>,
     columnIndex: number,
   ) => {
+    if (event.ctrlKey || event.metaKey || event.altKey || event.shiftKey)
+      return;
+
     let delta = 0;
     if (event.key === 'ArrowRight') {
       delta = KEYBOARD_COLUMN_RESIZE_STEP;
@@ -1626,19 +2018,14 @@ export function EnhancedTable({
 
     event.preventDefault();
     event.stopPropagation();
+    const headerCell = event.currentTarget.closest('th');
+    const renderedWidth = headerCell?.getBoundingClientRect().width;
     setColumnWidths((current) => {
-      const width = current[columnIndex] ?? DEFAULT_COLUMN_WIDTH;
+      const width =
+        current[columnIndex] ??
+        (renderedWidth ? Math.round(renderedWidth) : DEFAULT_COLUMN_WIDTH);
       const nextWidth = clampColumnWidth(width + delta);
-      if (width === nextWidth) return current;
-      if (nextWidth === DEFAULT_COLUMN_WIDTH) {
-        const next = { ...current };
-        delete next[columnIndex];
-        return next;
-      }
-      return {
-        ...current,
-        [columnIndex]: nextWidth,
-      };
+      return applyColumnWidth(current, columnIndex, nextWidth);
     });
   };
 
@@ -1674,10 +2061,7 @@ export function EnhancedTable({
   ) => {
     const sourceColumnIndex = draggingColumnRef.current;
     stopColumnDrag();
-    if (
-      sourceColumnIndex === null ||
-      !hasColumnDragData(event.dataTransfer)
-    ) {
+    if (sourceColumnIndex === null || !hasColumnDragData(event.dataTransfer)) {
       return;
     }
     event.preventDefault();
@@ -1698,6 +2082,7 @@ export function EnhancedTable({
     if (openFilterMenu !== null) {
       setOpenFilterMenu(null);
     }
+    setActiveColumn(null);
     draggingRef.current = true;
     setSelection({
       anchorRow: rowIndex,
@@ -1849,9 +2234,29 @@ export function EnhancedTable({
     event.clipboardData.setData('text/plain', text);
   };
 
-  const selectedCount = selectionSize(selection, orderedVisibleColumnIndexes);
+  const selectionStatistics = useMemo(
+    () =>
+      getSelectionStatistics(
+        selection,
+        visibleRows,
+        orderedVisibleColumnIndexes,
+      ),
+    [orderedVisibleColumnIndexes, selection, visibleRows],
+  );
+  const selectedCount = selectionStatistics?.selectedCount ?? 0;
   const activeFilterCount =
     Object.values(filters).filter(isFilterActive).length;
+  const densityLabel = t(`markdownTable.density.${density}`);
+  const hasLongText = useMemo(
+    () =>
+      visibleRows.some((row) =>
+        orderedVisibleColumnIndexes.some((columnIndex) => {
+          const cell = row.cells[columnIndex];
+          return cell ? isLongCellText(cellReadableText(cell)) : false;
+        }),
+      ),
+    [orderedVisibleColumnIndexes, visibleRows],
+  );
   const rowSummary =
     visibleRows.length === table.rows.length
       ? t('markdownTable.rows', { count: table.rows.length })
@@ -1859,20 +2264,45 @@ export function EnhancedTable({
           visible: visibleRows.length,
           total: table.rows.length,
         });
-  const openFilterHeader =
-    openFilterMenu === null
-      ? undefined
-      : table.headers[openFilterMenu.columnIndex];
-  const openFilterColumnName =
-    openFilterHeader && openFilterMenu
-      ? openFilterHeader.text ||
-        t('markdownTable.column', { index: openFilterMenu.columnIndex + 1 })
-      : '';
+  const renderCellContent = (cell: EnhancedTableCell, expanded: boolean) => {
+    const displayText = cellReadableText(cell);
+    const isLong = isLongCellText(displayText);
+    return (
+      <div
+        className={`${styles.cellContent} ${
+          isLong && !expanded ? styles.cellContentCollapsed : ''
+        }`}
+        title={isLong && !expanded ? displayText : undefined}
+      >
+        <div className={styles.cellText}>{cell.content}</div>
+      </div>
+    );
+  };
+
+  const renderDetailValue = (cell: EnhancedTableCell, expanded: boolean) => {
+    const isEmpty = cell.text.length === 0;
+    const displayText = cellReadableText(cell);
+    const isLong = isLongCellText(displayText);
+    return (
+      <div
+        className={`${styles.detailValueContent} ${
+          isLong && !expanded ? styles.detailValueCollapsed : ''
+        } ${isEmpty ? styles.emptyValue : ''}`}
+        title={isLong && !expanded ? displayText : undefined}
+      >
+        <div className={styles.detailValueText}>
+          {isEmpty ? t('markdownTable.emptyValue') : cell.content}
+        </div>
+      </div>
+    );
+  };
 
   return (
     <div
       ref={shellRef}
-      className={`${styles.tableShell} ${isDragging ? styles.dragging : ''}`}
+      className={`${styles.tableShell} ${densityClassName(density)} ${
+        freezeFirstColumn ? styles.hasFrozenColumn : ''
+      } ${isDragging ? styles.dragging : ''}`}
     >
       <div className={styles.toolbar}>
         <span className={styles.summary}>{rowSummary}</span>
@@ -1902,15 +2332,22 @@ export function EnhancedTable({
             })}
           </button>
         )}
-        {orderedVisibleColumnIndexes.length > 0 && (
+        <button
+          className={styles.copyButton}
+          type="button"
+          onClick={toggleDensity}
+        >
+          {t('markdownTable.density', { density: densityLabel })}
+        </button>
+        {hasLongText && (
           <button
             className={styles.copyButton}
             type="button"
-            onClick={toggleFreezeFirstColumn}
+            onClick={() => setLongTextExpanded((current) => !current)}
           >
-            {freezeFirstColumn
-              ? t('markdownTable.unfreezeFirstColumn')
-              : t('markdownTable.freezeFirstColumn')}
+            {longTextExpanded
+              ? t('markdownTable.collapseLongText')
+              : t('markdownTable.expandLongText')}
           </button>
         )}
         {activeFilterCount > 0 && (
@@ -1920,9 +2357,72 @@ export function EnhancedTable({
         )}
         {selectedCount > 0 && (
           <>
-            <span className={styles.selection}>
-              {t('markdownTable.cellsSelected', { count: selectedCount })}
-            </span>
+            {selectionStatistics && (
+              <div className={styles.selectionStats}>
+                <span className={styles.selectionMetric}>
+                  {t('markdownTable.selection.selected')}{' '}
+                  <strong className={styles.selectionMetricValue}>
+                    {selectionStatistics.selectedCount}
+                  </strong>
+                </span>
+                <span className={styles.selectionMetric}>
+                  {t('markdownTable.selection.nonEmpty')}{' '}
+                  <strong className={styles.selectionMetricValue}>
+                    {selectionStatistics.nonEmptyCount}
+                  </strong>
+                </span>
+                <span className={styles.selectionMetric}>
+                  {t('markdownTable.selection.numeric')}{' '}
+                  <strong className={styles.selectionMetricValue}>
+                    {selectionStatistics.numericCount}
+                  </strong>
+                </span>
+                {selectionStatistics.numericCount > 0 && (
+                  <>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.sum')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.sum,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.average')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.average,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.min')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.min,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                    <span className={styles.selectionMetric}>
+                      {t('markdownTable.selection.max')}{' '}
+                      <strong className={styles.selectionMetricValue}>
+                        {formatSelectionStatistic(
+                          selectionStatistics.max,
+                          selectionStatistics,
+                          language,
+                        )}
+                      </strong>
+                    </span>
+                  </>
+                )}
+              </div>
+            )}
             <button
               className={styles.copyButton}
               type="button"
@@ -1997,9 +2497,13 @@ export function EnhancedTable({
                       isFrozenColumn ? styles.frozenHeaderCell : ''
                     } ${isActiveColumn ? styles.activeHeaderCell : ''}`}
                     aria-sort={ariaSort}
+                    onContextMenu={(event) =>
+                      openColumnContextMenu(event, columnIndex)
+                    }
                     onDragOver={dragOverColumn}
                     onDrop={(event) => dropColumn(event, columnIndex)}
                     style={columnStyle(columnIndex, headerAlignStyle)}
+                    title={columnName}
                   >
                     <div className={styles.headerControls}>
                       <button
@@ -2036,22 +2540,48 @@ export function EnhancedTable({
                       >
                         ⋮⋮
                       </button>
-                      <button
-                        className={`${styles.filterTrigger} ${
-                          isFiltered ? styles.filterTriggerActive : ''
-                        }`}
-                        type="button"
-                        onClick={(event) =>
-                          toggleFilterMenu(event, columnIndex)
+                      <Popover
+                        open={isMenuOpen}
+                        onOpenChange={(open) =>
+                          setFilterMenuOpen(columnIndex, open)
                         }
-                        aria-label={t('markdownTable.filterColumn', {
-                          column: columnName,
-                        })}
-                        aria-expanded={isMenuOpen}
-                        aria-controls={isMenuOpen ? filterMenuId : undefined}
                       >
-                        ▾
-                      </button>
+                        <PopoverTrigger asChild>
+                          <button
+                            className={`${styles.filterTrigger} ${
+                              isFiltered ? styles.filterTriggerActive : ''
+                            }`}
+                            type="button"
+                            aria-label={t('markdownTable.filterColumn', {
+                              column: columnName,
+                            })}
+                            aria-controls={
+                              isMenuOpen ? filterMenuId : undefined
+                            }
+                          >
+                            ▾
+                          </button>
+                        </PopoverTrigger>
+                        {isMenuOpen && (
+                          <ColumnFilterMenu
+                            key={columnIndex}
+                            id={filterMenuId}
+                            columnName={columnName}
+                            columnIndex={columnIndex}
+                            filter={filters[columnIndex]}
+                            isNumeric={numericColumns[columnIndex] ?? false}
+                            options={openFilterOptions}
+                            sort={sort}
+                            canHideColumn={
+                              orderedVisibleColumnIndexes.length > 1
+                            }
+                            onApply={setColumnFilter}
+                            onClose={closeFilterMenu}
+                            onHideColumn={hideColumn}
+                            onSort={setColumnSort}
+                          />
+                        )}
+                      </Popover>
                     </div>
                     <button
                       className={styles.resizeHandle}
@@ -2138,8 +2668,14 @@ export function EnhancedTable({
                           onTouchMove={extendTouchSelection}
                           onTouchEnd={stopDragging}
                           onTouchCancel={stopDragging}
+                          onDoubleClick={(event) => {
+                            if (isInteractiveSelectionTarget(event.target)) {
+                              return;
+                            }
+                            openCellDialog(row.key, columnIndex);
+                          }}
                         >
-                          {cell.content}
+                          {renderCellContent(cell, longTextExpanded)}
                         </td>
                       );
                     })}
@@ -2158,12 +2694,6 @@ export function EnhancedTable({
                             const header = table.headers[columnIndex];
                             const cell = row.cells[columnIndex];
                             if (!header || !cell) return null;
-                            const headerAlignStyle = header.textAlign
-                              ? { textAlign: header.textAlign }
-                              : undefined;
-                            const cellAlignStyle = cell.textAlign
-                              ? { textAlign: cell.textAlign }
-                              : undefined;
                             return (
                               <div
                                 key={`${row.key}-detail-${columnIndex}`}
@@ -2171,15 +2701,12 @@ export function EnhancedTable({
                               >
                                 <div
                                   className={styles.detailLabel}
-                                  style={headerAlignStyle}
+                                  title={header.text}
                                 >
                                   {header.content}
                                 </div>
-                                <div
-                                  className={styles.detailValue}
-                                  style={cellAlignStyle}
-                                >
-                                  {cell.content}
+                                <div className={styles.detailValue}>
+                                  {renderDetailValue(cell, longTextExpanded)}
                                 </div>
                               </div>
                             );
@@ -2201,25 +2728,76 @@ export function EnhancedTable({
           </div>
         )}
       </div>
-      {openFilterMenu && openFilterHeader && (
-        <ColumnFilterMenu
-          key={openFilterMenu.columnIndex}
-          id={`${tableId}-filter-${openFilterMenu.columnIndex}`}
-          columnName={openFilterColumnName}
-          columnIndex={openFilterMenu.columnIndex}
-          filter={filters[openFilterMenu.columnIndex]}
-          isNumeric={numericColumns[openFilterMenu.columnIndex] ?? false}
-          options={openFilterOptions}
-          sort={sort}
-          style={{ left: openFilterMenu.left, top: openFilterMenu.top }}
-          menuRef={filterMenuRef}
-          canHideColumn={orderedVisibleColumnIndexes.length > 1}
-          onApply={setColumnFilter}
-          onClose={closeFilterMenu}
-          onHideColumn={hideColumn}
-          onSort={setColumnSort}
-        />
+      {columnContextMenu && orderedVisibleColumnIndexes.length > 0 && (
+        <div
+          ref={columnContextMenuRef}
+          className={styles.columnContextMenu}
+          style={{
+            left: columnContextMenu.left,
+            top: columnContextMenu.top,
+          }}
+          role="menu"
+        >
+          <button
+            className={styles.columnContextMenuAction}
+            type="button"
+            role="menuitem"
+            onClick={toggleFreezeFirstColumnFromMenu}
+          >
+            {freezeFirstColumn
+              ? t('markdownTable.unfreezeFirstColumn')
+              : t('markdownTable.freezeFirstColumn')}
+          </button>
+        </div>
       )}
+      <Dialog
+        open={cellDialog !== null && currentCellDialogCell !== null}
+        onOpenChange={(open) => {
+          if (!open) closeCellDialog();
+        }}
+      >
+        {currentCellDialogCell && (
+          <DialogContent
+            ref={cellDialogRef}
+            className="sm:max-w-lg"
+            showCloseButton={false}
+            overlayProps={{ onMouseDown: closeCellDialog }}
+            onOpenAutoFocus={(event) => {
+              event.preventDefault();
+              cellDialogRef.current?.focus();
+            }}
+            tabIndex={-1}
+          >
+            <DialogClose asChild>
+              <Button
+                variant="ghost"
+                className="absolute top-2 right-2"
+                size="icon-sm"
+                aria-label={t('markdownTable.close')}
+              >
+                <XIcon />
+                <span className="sr-only">{t('markdownTable.close')}</span>
+              </Button>
+            </DialogClose>
+            <DialogHeader>
+              <DialogTitle>{t('markdownTable.cellDialogTitle')}</DialogTitle>
+            </DialogHeader>
+            <div className="max-h-[200px] min-h-[100px] cursor-text overflow-auto rounded-lg border bg-background/70 p-3 leading-relaxed font-semibold whitespace-pre-wrap break-words select-text">
+              {currentCellDialogCell.content}
+            </div>
+            <DialogFooter>
+              <Button variant="outline" onClick={copyCellDialogValue}>
+                {copiedCellDialog
+                  ? t('code.copied')
+                  : t('markdownTable.copyCell')}
+              </Button>
+              <DialogClose asChild>
+                <Button>{t('markdownTable.close')}</Button>
+              </DialogClose>
+            </DialogFooter>
+          </DialogContent>
+        )}
+      </Dialog>
     </div>
   );
 }

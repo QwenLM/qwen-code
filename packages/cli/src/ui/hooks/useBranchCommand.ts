@@ -21,6 +21,13 @@ import { restoreGoalFromHistory } from '../utils/restoreGoal.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
+import {
+  hasBlockingBackgroundWork,
+  resetBackgroundStateForSessionSwitch,
+} from '../utils/backgroundWorkUtils.js';
+
+const BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE =
+  "Stop the current session's running background tasks before branching the conversation.";
 
 /**
  * Derives a short one-line title from the first *real* user message in the
@@ -72,11 +79,10 @@ export interface UseBranchCommandResult {
 /**
  * Orchestrates `/branch`:
  *   1. Capture the current (soon-to-be-parent) sessionId for the resume hint.
- *   2. Finalize the outgoing ChatRecordingService so the last metadata is on disk.
+ *   2. Finalize and flush the outgoing recorder so the source tail is on disk.
  *   3. Call `SessionService.forkSession` to write a new JSONL under a new id.
- *   4. Load the fork back via `loadSession` and switch the UI + core config.
- *   5. Compute the customTitle — user-provided name OR `deriveFirstPrompt` —
- *      always suffixed with ` (Branch)` (bumping to `(Branch N)` on collision).
+ *   4. Load the fork, compute and persist its unique branch title, then reload.
+ *   5. Switch the core config and UI to the fully persisted fork.
  *   6. Fire the SessionStart hook.
  *   7. Announce the fork with Claude-style two-line info item:
  *        `Branched conversation "foo". You are now in the branch.`
@@ -94,6 +100,17 @@ export function useBranchCommand(
     async (name?: string) => {
       if (!config) return;
 
+      if (hasBlockingBackgroundWork(config)) {
+        historyManager.addItem(
+          {
+            type: 'error',
+            text: t(BACKGROUND_WORK_BRANCH_BLOCKED_MESSAGE),
+          },
+          Date.now(),
+        );
+        return;
+      }
+
       const oldSessionId = config.getSessionId();
       const newSessionId = randomUUID();
       const sessionService = config.getSessionService();
@@ -104,16 +121,16 @@ export function useBranchCommand(
       let prevSessionData: ResumedSessionData | undefined;
 
       try {
-        // 1. Flush outgoing recorder. Must happen BEFORE the parent snapshot
+        // 1. Flush outgoing recorder. A degraded source must not fork because
+        //    the visible, unpersisted tail would be silently missing.
+        //    It must happen BEFORE the parent snapshot
         //    so the snapshot captures `finalize()`'s trailing custom_title
         //    record — without that, a rollback restores the recorder with
         //    a stale `lastCompletedUuid` and the next user message attaches
         //    its parentUuid to a record that's no longer the JSONL tail.
-        try {
-          config.getChatRecordingService()?.finalize();
-        } catch {
-          // best-effort
-        }
+        const outgoingRecording = config.getChatRecordingService();
+        outgoingRecording?.finalize();
+        await outgoingRecording?.flush();
 
         // 2. Snapshot the parent JSONL state for rollback. `/branch` is
         //    guarded on `isIdleRef`, so the file isn't being mutated
@@ -130,13 +147,38 @@ export function useBranchCommand(
         await sessionService.forkSession(oldSessionId, newSessionId);
         forkCreated = true;
 
-        // 4. Load the new file.
-        const resumed = await sessionService.loadSession(newSessionId);
-        if (!resumed) {
+        // 4. Load the fork to derive its title before it becomes live.
+        const provisional = await sessionService.loadSession(newSessionId);
+        if (!provisional) {
           throw new Error('Failed to load newly forked session');
         }
 
-        // 5. Swap core first. Anything that can still fail (startNewSession,
+        // 5. Persist the branch title before switching core or UI. A failed
+        //    title write leaves the parent active and the catch path removes
+        //    the incomplete fork.
+        const baseName =
+          name ?? deriveFirstPrompt(provisional.conversation.messages);
+        const effectiveTitle = await computeUniqueBranchTitle(
+          baseName,
+          sessionService,
+        );
+        const titlePersisted = await sessionService.renameSession(
+          newSessionId,
+          effectiveTitle,
+          name ? 'manual' : 'auto',
+        );
+        if (!titlePersisted) {
+          throw new Error('Failed to persist branch title');
+        }
+
+        // 6. Reload after the title append so the new recorder starts from
+        //    the actual JSONL tail and hydrates the persisted title/source.
+        const resumed = await sessionService.loadSession(newSessionId);
+        if (!resumed) {
+          throw new Error('Failed to reload titled branch session');
+        }
+
+        // 7. Swap core first. Anything that can still fail (startNewSession,
         //    client init) runs while the UI is still showing the parent
         //    session, so a throw leaves the user safely on the parent
         //    instead of stranded with a cleared history and a half-live
@@ -148,11 +190,11 @@ export function useBranchCommand(
         coreSwapped = true;
         await config.getGeminiClient()?.initialize?.(SessionStartSource.Branch);
 
-        // 6. Swap UI. Once this commits, rolling core back is unsafe —
+        // 8. Swap UI. Once this commits, rolling core back is unsafe —
         //    it would leave UI on the branch but recorder writing into
         //    the parent JSONL (the inverse split-brain). `uiSwapped` is
         //    set immediately after the UI commits so any subsequent
-        //    failure (title, hook, remount, announce) skips the catch
+        //    failure (hook, remount, announce) skips the catch
         //    block's core rollback.
         const rawItems = buildResumedHistoryItems(resumed, config);
         const collapseOnResume =
@@ -168,8 +210,9 @@ export function useBranchCommand(
         historyManager.clearItems();
         historyManager.loadHistory(uiHistoryItems);
         uiSwapped = true;
+        resetBackgroundStateForSessionSwitch(config);
 
-        // Re-arm /goal under the fork's new sessionId. The branched JSONL
+        // 9. Re-arm /goal under the fork's new sessionId. The branched JSONL
         // is a verbatim copy of the parent's, so an active goal sentinel
         // carries over — but `config.startNewSession` rebuilt the hook
         // system under `newSessionId`, leaving the parent's `activeGoal`
@@ -185,23 +228,13 @@ export function useBranchCommand(
           // Best-effort — branch must not fail on goal restoration.
         }
 
-        // 7. Compute and apply the branch customTitle.
-        //    The forked transcript is identical to the parent's, so reading
-        //    the first real user message from `resumed.conversation.messages`
-        //    mirrors Claude's "use the first parent message" behavior.
-        const baseName =
-          name ?? deriveFirstPrompt(resumed.conversation.messages);
-        const effectiveTitle = await computeUniqueBranchTitle(
-          baseName,
-          sessionService,
-        );
-        config.getChatRecordingService()?.recordCustomTitle(effectiveTitle);
+        // 10. Apply the already-persisted title to the prompt bar.
         setSessionName?.(effectiveTitle);
 
-        // 8. Refresh terminal UI.
+        // Refresh terminal UI.
         remount?.();
 
-        // 10. Announce. Two history items mirror Claude's success message
+        // 11. Announce. Two history items mirror Claude's success message
         //    (branched line + resume hint). The quoted name is the raw
         //    user-provided `name`; no `(Branch)` suffix — that decoration
         //    belongs in the picker/prompt bar, not in the user-facing
@@ -236,7 +269,7 @@ export function useBranchCommand(
           // Skipped once `uiSwapped` is true: at that point UI is already
           // on the branch, so reverting core would create the inverse
           // split-brain (UI on branch, recorder on parent). Post-UI-swap
-          // failures (title, hook, remount, announce) are non-fatal and
+          // failures (hook, remount, announce) are non-fatal and
           // surfaced as an error item without unwinding the swap.
           try {
             config.startNewSession(oldSessionId, prevSessionData);

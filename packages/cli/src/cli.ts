@@ -32,6 +32,7 @@ export const TOP_LEVEL_COMMANDS = [
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
   ['sessions <command>', 'Manage Qwen Code sessions'],
+  ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
 
 export const MCP_COMMANDS = [
@@ -338,6 +339,17 @@ async function parseYargsCommand(
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  const managedUpdateVersion =
+    process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+  if (managedUpdateVersion) {
+    delete process.env['QWEN_CODE_MANAGED_NPM_UPDATE_VERSION'];
+    const { installManagedNpmUpdate } = await import(
+      './utils/managed-npm-update.js'
+    );
+    await installManagedNpmUpdate(managedUpdateVersion);
+    return;
+  }
+
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
 
@@ -359,7 +371,15 @@ export async function runCliEntry(
     return;
   }
 
+  const acpStartupProfiler = rawArgv.some(
+    (arg) => arg === '--acp' || arg === '--experimental-acp',
+  )
+    ? await import('./utils/acp-startup-profiler.js')
+    : undefined;
+  acpStartupProfiler?.initializeAcpStartupProfiler();
+  acpStartupProfiler?.markAcpStartup('geminiImportStart');
   const { main } = await import('./gemini.js');
+  acpStartupProfiler?.markAcpStartup('geminiImportEnd');
   await main();
 }
 

@@ -1,0 +1,124 @@
+name: 'Serve A/B Publish'
+
+# Privileged companion to `serve-ab.yml`. Runs AFTER it via workflow_run, in the
+# base-repo context with a write token, but NEVER checks out or runs PR code —
+# it only downloads the text artifact (a markdown body the capture job produced
+# + a PR number) and posts/updates one PR comment. Same GitHub-recommended split
+# as web-shell-visuals-publish.yml for commenting on fork PRs with the results
+# of untrusted-code execution.
+on:
+  workflow_run:
+    workflows:
+      - 'Serve A/B'
+    types:
+      - 'completed'
+
+permissions:
+  actions: 'read'
+
+concurrency:
+  group: >-
+    serve-ab-publish-${{ github.event.workflow_run.head_repository.full_name }}-${{ github.event.workflow_run.head_branch }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: 'bash'
+
+jobs:
+  publish:
+    name: 'Publish serve A/B to the PR'
+    if: >-
+      github.repository == 'QwenLM/qwen-code' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.conclusion == 'success'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 10
+    steps:
+      - name: 'Download serve-ab artifact'
+        id: 'download'
+        continue-on-error: true
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v5.0.0
+        with:
+          name: 'serve-ab'
+          run-id: '${{ github.event.workflow_run.id }}'
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          path: 'serve-ab'
+
+      - name: 'Publish serve A/B comment'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          RUN_HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          RUN_HEAD_REPO: '${{ github.event.workflow_run.head_repository.full_name }}'
+          RUN_HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+        run: |-
+          set -euo pipefail
+
+          ART='serve-ab'
+          if [ ! -f "${ART}/body.md" ] || [ ! -f "${ART}/pr.txt" ]; then
+            echo "::notice::No serve-ab artifact; nothing to publish."
+            exit 0
+          fi
+
+          # pr.txt is UNTRUSTED (written by a job that ran PR code): sanitize to
+          # digits, then BIND it to this run — require the PR's current head SHA
+          # (and repo+branch) to equal this run's authenticated values, so a
+          # malicious PR can't redirect the comment at a victim PR.
+          PR="$(tr -dc '0-9' < "${ART}/pr.txt" 2>/dev/null | head -c 12 || true)"
+          [ -n "${PR}" ] || { echo "::warning::Artifact has no valid PR number; aborting."; exit 0; }
+
+          BOT_LOGIN="$(gh api user --jq '.login' 2>/dev/null || true)"
+          [ -n "${BOT_LOGIN}" ] || { echo "::warning::Could not resolve bot identity; skipping."; exit 0; }
+
+          # 0 = valid, 1 = genuinely invalid (closed / mismatch), 2 = transient.
+          validate_pr() {
+            local j st hd rr rf attempt; j=''
+            for attempt in 1 2 3; do
+              j="$(gh api "repos/${GITHUB_REPOSITORY}/pulls/${PR}" 2>/dev/null || true)"
+              [ -n "${j}" ] && break; sleep 2
+            done
+            [ -n "${j}" ] || { echo "::warning::Could not fetch PR #${PR}."; return 2; }
+            st="$(jq -r '.state // empty' <<< "${j}")"
+            hd="$(jq -r '.head.sha // empty' <<< "${j}")"
+            rr="$(jq -r '.head.repo.full_name // empty' <<< "${j}")"
+            rf="$(jq -r '.head.ref // empty' <<< "${j}")"
+            [ "${st}" = "open" ] || { echo "::notice::PR #${PR} not open (${st:-unknown})."; return 1; }
+            { [ -n "${RUN_HEAD_SHA}" ] && [ "${hd}" = "${RUN_HEAD_SHA}" ]; } || { echo "::warning::PR #${PR} head != run head; refusing."; return 1; }
+            { [ -n "${RUN_HEAD_REPO}" ] && [ "${rr}" = "${RUN_HEAD_REPO}" ] && [ "${rf}" = "${RUN_HEAD_BRANCH}" ]; } || { echo "::warning::PR #${PR} repo/branch != run; refusing."; return 1; }
+            return 0
+          }
+          gate() {
+            local rc; if validate_pr; then rc=0; else rc=$?; fi
+            [ "${rc}" -eq 0 ] && return 0
+            [ "${rc}" -eq 2 ] && { echo "::error::Transient API failure; failing so it can be re-triggered."; exit 1; }
+            echo "::notice::PR #${PR} no longer valid; skipping."; exit 0
+          }
+          gate
+
+          BODY_FILE="${ART}/body.md"
+          MARKER='<!-- qwen:serve-ab -->'
+
+          # Dedup only against OUR prior comment (bot author + marker), and only
+          # after a SUCCESSFUL listing (a failed list must not read as "none" and
+          # post a duplicate).
+          EXISTING=''; listed=0
+          for attempt in 1 2 3; do
+            if resp="$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" --method GET --paginate -F per_page=100 2>/dev/null)"; then
+              EXISTING="$(jq -sr --arg m "${MARKER}" --arg u "${BOT_LOGIN}" \
+                '[.[][] | select((.user.login == $u) and (.body | contains($m)))] | last | .id // empty' <<< "${resp}")"
+              listed=1; break
+            fi
+            echo "::notice::comment lookup attempt ${attempt} failed; retrying."; sleep 2
+          done
+          [ "${listed}" -eq 1 ] || { echo "::error::Could not list PR comments; not posting (avoids duplicates)."; exit 1; }
+
+          # Final TOCTOU gate immediately before the write.
+          gate
+
+          if [ -n "${EXISTING}" ]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${EXISTING}" -F body=@"${BODY_FILE}" >/dev/null
+            echo "Updated serve-ab comment on PR #${PR}."
+          else
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" -F body=@"${BODY_FILE}" >/dev/null
+            echo "Posted serve-ab comment on PR #${PR}."
+          fi

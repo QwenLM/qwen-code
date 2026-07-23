@@ -14,7 +14,7 @@ type LifecycleBase = Omit<
 
 type TestTelegramMessage = {
   from: { id: number; first_name: string; last_name?: string };
-  chat: { id: number; type: string };
+  chat: { id: number; type: string; title?: string };
   message_thread_id?: number;
   reply_to_message?: { from?: { id: number }; text?: string };
 };
@@ -65,6 +65,7 @@ const config: ChannelConfig = {
   sessionScope: 'user',
   cwd: process.cwd(),
   groupPolicy: 'disabled',
+  dmPolicy: 'open',
   groups: {},
 };
 
@@ -238,7 +239,8 @@ describe('TelegramChannel', () => {
   });
 
   it('clears typing when a session dies without a terminal event', () => {
-    const channel = createChannel({}, { removeSessionId: vi.fn() });
+    const handleSessionDied = vi.fn();
+    const channel = createChannel({}, { handleSessionDied });
     const bot = installFakeBot(channel);
 
     channel.emitLifecycle({
@@ -253,6 +255,8 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
 
     channel.onSessionDied('session-1');
+
+    expect(handleSessionDied).toHaveBeenCalledWith('session-1');
 
     vi.advanceTimersByTime(4000);
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
@@ -381,6 +385,36 @@ describe('TelegramChannel', () => {
     );
 
     expect(topicMessage.threadId).toBe('42');
+  });
+
+  it('preserves group and supergroup display names in envelopes', () => {
+    const channel = createChannel();
+
+    const groupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 2, type: 'group', title: 'Project Group' },
+      },
+      'group message',
+    );
+    const supergroupMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 3, type: 'supergroup', title: 'Project Supergroup' },
+      },
+      'supergroup message',
+    );
+    const privateMessage = channel.buildTestEnvelope(
+      {
+        from: { id: 1, first_name: 'User' },
+        chat: { id: 1, type: 'private', title: 'Ignored Title' },
+      },
+      'direct message',
+    );
+
+    expect(groupMessage.chatName).toBe('Project Group');
+    expect(supergroupMessage.chatName).toBe('Project Supergroup');
+    expect(privateMessage.chatName).toBeUndefined();
   });
 
   it('sends proactive messages back to the Telegram forum topic', async () => {

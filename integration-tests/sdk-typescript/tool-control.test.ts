@@ -89,9 +89,10 @@ describe('Tool Control Parameters (E2E)', () => {
           // Should NOT have list_directory since it's not in coreTools
           expect(toolNames).not.toContain('list_directory');
 
-          // Verify file was modified
+          // Verify file was actually modified (content changed from original).
+          // Don't assert on specific wording — the model may paraphrase.
           const content = await helper.readFile('test.txt');
-          expect(content).toContain('modified');
+          expect(content).not.toBe('original content');
         } finally {
           await q.close();
         }
@@ -338,15 +339,52 @@ describe('Tool Control Parameters (E2E)', () => {
       'should block read operations on specific path patterns with excludeTools',
       async () => {
         await helper.createFile('.env', 'SECRET=password');
-        await helper.createFile('config.json', '{"key": "value"}');
         await helper.createFile('data.txt', 'public data');
 
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('.env') },
+                    'read-env',
+                  ),
+                  fakeToolCall(
+                    'read_file',
+                    { file_path: helper.getPath('data.txt') },
+                    'read-data',
+                  ),
+                ],
+              };
+            }
+
+            return { content: 'Done.' };
+          },
+          IS_CONTAINER_SANDBOX
+            ? {
+                listenHost: '0.0.0.0',
+                baseUrlHost: 'host.docker.internal',
+              }
+            : undefined,
+        );
+
         const q = query({
-          prompt:
-            'Read .env file, read config.json, and read data.txt. Tell me about their contents.',
+          prompt: 'Read .env and data.txt.',
           options: {
             ...SHARED_TEST_OPTIONS,
             cwd: testDir,
+            model: 'fake-model',
+            env: {
+              NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+              no_proxy: LOCAL_OPENAI_NO_PROXY,
+              OPENAI_API_KEY: 'fake-key',
+              OPENAI_BASE_URL: fakeServer.baseUrl,
+              OPENAI_MODEL: 'fake-model',
+              QWEN_MODEL: 'fake-model',
+            },
+            authType: 'openai',
             permissionMode: 'yolo',
             // Block reading .env files
             excludeTools: ['Read(.env)'],
@@ -361,29 +399,26 @@ describe('Tool Control Parameters (E2E)', () => {
             messages.push(message);
           }
 
-          const toolCalls = findToolCalls(messages);
-          const readCalls = toolCalls.filter(
-            (tc) => tc.toolUse.name === 'read_file',
+          assertSuccessfulCompletion(messages);
+          const readResults = findToolResults(messages, 'read_file');
+          const envReadResult = readResults.find(
+            (result) => result.toolUseId === 'read-env',
+          );
+          const dataReadResult = readResults.find(
+            (result) => result.toolUseId === 'read-data',
           );
 
-          // Should have attempted to read files
-          expect(readCalls.length).toBeGreaterThan(0);
-
-          // Check that .env read was blocked
-          const envReadResults = findToolResults(messages, 'read_file').filter(
-            (result) => {
-              return result.content.includes('.env');
-            },
+          expect(envReadResult?.isError).toBe(true);
+          expect(envReadResult?.content).toMatch(
+            /permission.*(?:declined|denied)|denied.*permission/i,
           );
-          if (envReadResults.length > 0) {
-            for (const result of envReadResults) {
-              expect(result.content).toMatch(
-                /permission.*(?:declined|denied)|denied.*permission/i,
-              );
-            }
-          }
+          expect(dataReadResult).toMatchObject({
+            isError: false,
+            content: expect.stringContaining('public data'),
+          });
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
@@ -398,12 +433,14 @@ describe('Tool Control Parameters (E2E)', () => {
 
         const q = query({
           prompt:
-            'Edit src/app.ts to add a semicolon, edit test/spec.ts to add a test, and edit readme.md.',
+            'Use the edit tool to modify src/app.ts (add a semicolon), edit test/spec.ts (add a test case), and edit readme.md (add a line).',
           options: {
             ...SHARED_TEST_OPTIONS,
             cwd: testDir,
             permissionMode: 'yolo',
-            coreTools: ['read_file', 'edit', 'write_file', 'list_directory'],
+            // Only offer edit (not write_file) so the model must use edit,
+            // making the excludeTools assertion deterministic.
+            coreTools: ['read_file', 'edit', 'list_directory'],
             // Block editing files in /src/** directory
             excludeTools: ['Edit(/src/**)'],
             debug: false,
@@ -547,9 +584,10 @@ describe('Tool Control Parameters (E2E)', () => {
           // canUseTool should NOT have been called (tools are in allowedTools)
           expect(canUseToolCalled).toBe(false);
 
-          // Verify file was modified
+          // Verify file was actually modified (content changed from original).
+          // Don't assert on specific wording — the model may paraphrase.
           const content = await helper.readFile('test.txt');
-          expect(content).toContain('modified');
+          expect(content).not.toBe('original');
         } finally {
           await q.close();
         }
@@ -843,9 +881,10 @@ describe('Tool Control Parameters (E2E)', () => {
           // Should NOT use tools outside coreTools
           expect(toolNames).not.toContain('run_shell_command');
 
-          // Verify file was modified
+          // Verify file was actually modified (content changed from original).
+          // Don't assert on specific wording — the model may paraphrase.
           const content = await helper.readFile('test.txt');
-          expect(content).toContain('modified');
+          expect(content).not.toBe('test');
         } finally {
           await q.close();
         }
@@ -945,9 +984,10 @@ describe('Tool Control Parameters (E2E)', () => {
           // canUseTool should be called for core write tools
           expect(canUseToolCalls).toContain('write_file');
 
-          // Verify file was modified
+          // Verify file was actually modified (content changed from original).
+          // Don't assert on specific wording — the model may paraphrase.
           const content = await helper.readFile('test.txt');
-          expect(content).toContain('modified');
+          expect(content).not.toBe('test');
         } finally {
           await q.close();
         }

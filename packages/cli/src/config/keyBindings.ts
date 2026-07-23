@@ -42,6 +42,7 @@ export enum Command {
 
   // Text input
   SUBMIT = 'submit',
+  QUEUE_MESSAGE = 'queueMessage',
   NEWLINE = 'newline',
   VOICE_PUSH_TO_TALK = 'voicePushToTalk',
 
@@ -56,7 +57,6 @@ export enum Command {
   EXIT = 'exit',
   SHOW_MORE_LINES = 'showMoreLines',
   RETRY_LAST = 'retryLast',
-  TOGGLE_COMPACT_MODE = 'toggleCompactMode',
   TOGGLE_RENDER_MODE = 'toggleRenderMode',
   /**
    * Promote the running foreground shell command to a background task.
@@ -79,6 +79,9 @@ export enum Command {
 
   // Thinking expansion
   TOGGLE_THINKING_EXPANDED = 'toggleThinkingExpanded',
+
+  // Transcript full-detail screen (Ctrl+O)
+  TOGGLE_TRANSCRIPT = 'toggleTranscript',
 
   // Scroll commands
   SCROLL_UP = 'scrollUp',
@@ -169,7 +172,10 @@ export const defaultKeyBindings: KeyBindingConfig = {
   ],
 
   // Auto-completion
-  [Command.ACCEPT_SUGGESTION]: [{ key: 'tab' }, { key: 'return', ctrl: false }],
+  [Command.ACCEPT_SUGGESTION]: [
+    { key: 'tab' },
+    { key: 'return', ctrl: false, shift: false },
+  ],
   // Completion navigation: arrows + readline/Vim-style Ctrl+P/Ctrl+N
   [Command.COMPLETION_UP]: [
     { key: 'up', shift: false },
@@ -190,6 +196,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
       paste: false,
       shift: false,
     },
+  ],
+  [Command.QUEUE_MESSAGE]: [
+    { key: 'q', ctrl: true, command: false, shift: false, paste: false },
   ],
   // Split into multiple data-driven bindings
   // Now also includes shift+enter for multi-line input
@@ -225,7 +234,6 @@ export const defaultKeyBindings: KeyBindingConfig = {
   [Command.EXIT]: [{ key: 'd', ctrl: true }],
   [Command.SHOW_MORE_LINES]: [{ key: 's', ctrl: true }],
   [Command.RETRY_LAST]: [{ key: 'y', ctrl: true }],
-  [Command.TOGGLE_COMPACT_MODE]: [{ key: 'o', ctrl: true }],
   [Command.TOGGLE_RENDER_MODE]: [{ key: 'm', meta: true }],
   [Command.PROMOTE_SHELL_TO_BACKGROUND]: [{ key: 'b', ctrl: true }],
 
@@ -242,6 +250,9 @@ export const defaultKeyBindings: KeyBindingConfig = {
 
   // Thinking expansion
   [Command.TOGGLE_THINKING_EXPANDED]: [{ key: 't', meta: true }],
+
+  // Transcript full-detail screen
+  [Command.TOGGLE_TRANSCRIPT]: [{ key: 'o', ctrl: true }],
 
   // Scroll commands
   [Command.SCROLL_UP]: [{ key: 'up', shift: true }],

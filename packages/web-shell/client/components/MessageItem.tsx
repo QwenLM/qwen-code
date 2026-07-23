@@ -5,11 +5,16 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { WebShellAssistantTurnFooterRenderInfo } from '../customization';
 import { useI18n } from '../i18n';
 import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
-import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
+import {
+  AssistantMessage,
+  ThinkingMessage,
+  type SessionContentGenerator,
+} from './messages/AssistantMessage';
 import { SystemMessage } from './messages/SystemMessage';
 import { ToolGroup } from './messages/ToolGroup';
 import { PlanMessage } from './messages/PlanMessage';
@@ -31,6 +36,8 @@ interface MessageItemProps {
   showAssistantActions?: boolean;
   showAssistantBranch?: boolean;
   isLocateFlashing?: boolean;
+  assistantTurnFooterInfo?: WebShellAssistantTurnFooterRenderInfo;
+  generateContent?: SessionContentGenerator;
 }
 
 export const MessageItem = memo(function MessageItem({
@@ -45,7 +52,10 @@ export const MessageItem = memo(function MessageItem({
   showAssistantActions = false,
   showAssistantBranch = false,
   isLocateFlashing = false,
+  assistantTurnFooterInfo,
+  generateContent,
 }: MessageItemProps) {
+  const { t } = useI18n();
   const body = ((): ReactElement | null => {
     switch (message.role) {
       case 'user':
@@ -53,6 +63,7 @@ export const MessageItem = memo(function MessageItem({
           <UserMessage
             content={message.content}
             images={message.images}
+            inputAnnotations={message.inputAnnotations}
             isLocateFlashing={isLocateFlashing}
           />
         );
@@ -66,15 +77,18 @@ export const MessageItem = memo(function MessageItem({
             showFooterActions={showAssistantActions}
             showBranchAction={showAssistantBranch}
             isLocateFlashing={isLocateFlashing}
+            customFooterInfo={assistantTurnFooterInfo}
           />
         );
       case 'thinking':
         return (
           <ThinkingMessage
+            messageId={message.id}
             content={message.content}
             isStreaming={message.isStreaming}
             timestamp={message.timestamp}
             isLocateFlashing={isLocateFlashing}
+            generateContent={generateContent}
           />
         );
       case 'tool_group':
@@ -204,7 +218,7 @@ export const MessageItem = memo(function MessageItem({
       timestamp={message.timestamp}
       chatMode={message.role === 'user'}
       copyText={message.role === 'user' ? message.content : undefined}
-      copyTitle="Copy"
+      copyTitle={t('common.copy')}
     >
       {selectableSafeBody}
     </MessageTimestamp>
@@ -252,7 +266,31 @@ function areMessageItemPropsEqual(
   if (prev.showAssistantActions !== next.showAssistantActions) return false;
   if (prev.showAssistantBranch !== next.showAssistantBranch) return false;
   if (prev.isLocateFlashing !== next.isLocateFlashing) return false;
+  if (prev.generateContent !== next.generateContent) return false;
+  if (
+    !areAssistantTurnFooterInfosEqual(
+      prev.assistantTurnFooterInfo,
+      next.assistantTurnFooterInfo,
+    )
+  ) {
+    return false;
+  }
   return areMessagesEqual(prev.message, next.message);
+}
+
+function areAssistantTurnFooterInfosEqual(
+  prev?: WebShellAssistantTurnFooterRenderInfo,
+  next?: WebShellAssistantTurnFooterRenderInfo,
+): boolean {
+  if (prev === next) return true;
+  if (!prev || !next) return false;
+  return (
+    prev.turnId === next.turnId &&
+    prev.message.id === next.message.id &&
+    prev.message.content === next.message.content &&
+    prev.message.isStreaming === next.message.isStreaming &&
+    prev.message.timestamp === next.message.timestamp
+  );
 }
 
 function areMessagesEqual(prev: Message, next: Message): boolean {

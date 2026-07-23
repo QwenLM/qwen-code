@@ -1,12 +1,12 @@
 import { type ReactNode } from 'react';
-import {
-  DaemonSessionProvider,
-  DaemonWorkspaceProvider,
-} from '@qwen-code/webui/daemon-react-sdk';
+import { DaemonWorkspaceProvider } from '@qwen-code/webui/daemon-react-sdk';
 import { App, type WebShellProps } from './App';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { RootErrorFallback } from './components/RootErrorFallback';
+import { WorkspaceSessionProvider } from './components/WorkspaceSessionProvider';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
+export { WebShellTranscript } from './components/WebShellTranscript';
+export type { WebShellTranscriptProps } from './components/WebShellTranscript';
 
 export interface WebShellWithProvidersProps extends WebShellProps {
   /** Daemon API base URL. Defaults to the browser origin when omitted. */
@@ -15,8 +15,21 @@ export interface WebShellWithProvidersProps extends WebShellProps {
   token?: string;
   /** Session id to load. Undefined starts on an empty page. */
   sessionId?: string;
+  /** Registered daemon workspace id for the session. Undefined uses primary. */
+  workspaceId?: string;
+  /** Registered daemon workspace path for the session. Takes precedence over workspaceId. */
+  workspaceCwd?: string;
+  /**
+   * Workspace path to lock this shell to. Missing paths are registered
+   * persistently before rendering. Takes precedence over workspaceCwd and workspaceId.
+   */
+  lockWorkspaceCwd?: string;
   /** Client identity to reuse when attaching to an externally created session. */
   clientId?: string;
+  /** Restart the SSE event stream after each accepted prompt. Disabled by default. */
+  restartSseOnPrompt?: boolean;
+  /** Persisted transcript records requested per page. Defaults to 100; valid range is 1–500. */
+  historyPageSize?: number;
 }
 
 function resolveBaseUrl(baseUrl: string | undefined): string {
@@ -72,7 +85,18 @@ export function WebShell(props: WebShellProps) {
  * are available without extra setup.
  */
 export function WebShellWithProviders(props: WebShellWithProvidersProps) {
-  const { baseUrl, token, sessionId, clientId, ...webShellProps } = props;
+  const {
+    baseUrl,
+    token,
+    sessionId,
+    workspaceId,
+    workspaceCwd,
+    lockWorkspaceCwd,
+    clientId,
+    restartSseOnPrompt,
+    historyPageSize,
+    ...webShellProps
+  } = props;
   const resolvedBaseUrl = resolveBaseUrl(baseUrl);
 
   return (
@@ -84,13 +108,16 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
       }
     >
       <DaemonWorkspaceProvider baseUrl={resolvedBaseUrl} token={token}>
-        <DaemonSessionProvider
+        <WorkspaceSessionProvider
           sessionId={sessionId}
+          workspaceId={workspaceId}
+          workspaceCwd={workspaceCwd}
+          lockWorkspaceCwd={lockWorkspaceCwd}
           clientId={clientId}
-          suppressOwnUserEcho
-        >
-          <App {...webShellProps} />
-        </DaemonSessionProvider>
+          restartSseOnPrompt={restartSseOnPrompt}
+          historyPageSize={historyPageSize}
+          webShellProps={webShellProps}
+        />
       </DaemonWorkspaceProvider>
     </RootBoundary>
   );
@@ -99,9 +126,32 @@ export function WebShellWithProviders(props: WebShellWithProvidersProps) {
 /** Alias for consumers who prefer a standalone naming style. */
 export const StandaloneWebShell = WebShellWithProviders;
 
-export type { WebShellProps, WebShellSidebarOptions } from './App';
+export type {
+  WebShellApi,
+  WebShellComposerPlaceholders,
+  WebShellComposerPlaceholderState,
+  WebShellSlashCommand,
+  WebShellSlashCommandHandler,
+  WebShellProps,
+  WebShellSidebarOptions,
+  BugReportInfo,
+  SessionChangeEvent,
+} from './App';
+export type { WebShellShadowDom, WebShellShadowDomOptions } from './shadowDom';
 export type { ToastTone } from './components/ToastHost';
+export type {
+  WebShellSidebarBranding,
+  WebShellSidebarFooterItem,
+  WebShellSidebarFooterOptions,
+  WebShellSidebarLockedWorkspace,
+  WebShellSidebarPrimaryNavOptions,
+  WebShellSidebarPrimaryNavItem,
+  WebShellSidebarSessionActionsOptions,
+  WebShellSidebarSessionActionItem,
+  WebShellSidebarSessionInlineActionItem,
+} from './components/sidebar/WebShellSidebar';
 export type { WebShellLanguage } from './i18n';
+export type { WebShellTheme } from './themeContext';
 export type {
   CommandDisplayCategory,
   CommandDisplayCategoryOrder,
@@ -115,19 +165,60 @@ export type {
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
+  ComposerTagClickHandler,
+  ComposerTagRenderer,
+  AssistantTurnFooterRenderer,
   UserMessageContentRenderer,
   UserMessageContentRenderInfo,
+  UserMessageContentParser,
+  ComposerHeaderRenderer,
   ComposerToolbarStartRenderer,
   ComposerToolbarRightRenderer,
+  WebShellAtItemRenderInfo,
+  WebShellAtItemRenderer,
+  WebShellComposerApi,
+  WebShellBuiltinComposerTagKind,
+  WebShellBuiltinAtProviderId,
+  WebShellBuiltinAtProvidersConfig,
+  WebShellComposerInput,
+  WebShellComposerTag,
+  WebShellComposerTagIconMap,
+  WebShellComposerTagKind,
+  WebShellComposerTagOptions,
+  WebShellComposerTagPlacement,
   WebShellComposerToolbarRenderInfo,
   WebShellComposerToolbarStartRenderInfo,
   WebShellComposerToolbarRightRenderInfo,
+  WebShellComposerTextOptions,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  ChatHeaderRenderer,
+  ChatHeaderRenderInfo,
+  WebShellFooterRenderInfo,
+  FooterRenderer,
+  LoadingPhrasesResolver,
+  WebShellAtProviderTab,
+  WebShellAtItem,
+  WebShellAtProvider,
+  WebShellBottomStatusItem,
   WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
+  WebShellAssistantMessageInfo,
+  WebShellAssistantTurnFooterRenderInfo,
+  WebShellIconSource,
+  WebShellTaskInfo,
+  WebShellUserMessagePart,
+  WebShellAgentTask,
+  WebShellShellTask,
+  WebShellMonitorTask,
+  WebShellModelInfo,
+  WebShellSkillInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export type {
+  TurnOutputKind,
+  TurnOutputOpenRequest,
+} from './components/artifacts/TurnOutputs';
 export {
   ECHARTS_FULLDATA_LANGUAGE,
   EchartsFullDataBlock,

@@ -17,6 +17,22 @@ vi.mock('../../utils/measure-element-position.js', () => ({
   measureElementPosition: () => ({ x: 0, y: 0, width: 40, height: 5 }),
 }));
 
+// ink-testing-library's fake stdout has no `isTTY`, but `useMouseEvents` now
+// gates SGR mouse mode on `stdout.isTTY` (so it never leaks escapes into piped
+// output). Report a TTY here so the scrollbar/wheel pipeline arms as it does in
+// a real terminal; without this the mouse-scroll assertions never receive
+// events. Preserve every other ink export.
+vi.mock('ink', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('ink')>();
+  return {
+    ...actual,
+    useStdout: () => ({
+      stdout: { write: vi.fn(), isTTY: true },
+      writeToStdout: vi.fn(),
+    }),
+  };
+});
+
 type Item = { id: number; label: string };
 
 // `useKeypress` (called unconditionally inside ScrollableList) requires a

@@ -22,6 +22,16 @@ import { findGitRoot } from './gitUtils.js';
 /** Re-export so consumers don't need to depend on `diff` directly. */
 export type GitDiffHunk = Hunk;
 
+/**
+ * A single file's diff hunks plus whether the per-file caps
+ * (`MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE`) actually cut content — so the
+ * viewer can label the diff as incomplete instead of silently under-reporting.
+ */
+export interface GitDiffFileHunks {
+  hunks: Hunk[];
+  truncated: boolean;
+}
+
 const execFileAsync = promisify(execFile);
 
 export interface GitDiffStats {
@@ -44,6 +54,10 @@ export interface PerFileStats {
   /** Only meaningful for untracked files: `true` when the file exceeded the
    *  line-counting read cap and `added` is therefore a lower bound. */
   truncated?: boolean;
+  /** For a rename detected by `git diff --numstat -z`, the pre-rename path.
+   *  The map key (and wire `path`) is the current post-rename path so the
+   *  single-file endpoint can address it; this carries the old path for display. */
+  oldPath?: string;
 }
 
 export interface GitDiffResult {
@@ -307,6 +321,181 @@ export async function fetchGitDiffHunks(
 }
 
 /**
+ * Fetch structured hunks for a single file (working tree vs HEAD). Cheaper than
+ * `fetchGitDiffHunks`, which diffs the whole tree — this is for on-demand
+ * rendering of one file in the diff viewer.
+ *
+ * `filePath` may be a repo-root-relative path or an absolute path inside the
+ * repo (the daemon passes the workspace-sandboxed absolute path). Relative
+ * inputs reject absolute prefixes, drive letters, and `..` traversal; absolute
+ * inputs are rejected when they fall outside the git root. Both forms are
+ * normalized to a git-root-relative path before any git call, so the path can
+ * never escape the repository.
+ *
+ * Untracked files (which `git diff HEAD` omits) are synthesized as a single
+ * all-added hunk by reading the file, so the viewer can show new files like any
+ * other addition. `truncated` is set whenever the per-file caps cut content on
+ * either path (parser cap for tracked diffs, byte/line caps for synthesized
+ * untracked ones). Returns `null` for non-repos, transient states, paths
+ * outside the repo, binary or unreadable untracked files, and tracked files
+ * with no changes.
+ */
+export async function fetchGitDiffHunksForFile(
+  cwd: string,
+  filePath: string,
+  oldPath?: string,
+): Promise<GitDiffFileHunks | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+  const relPath = toRepoRelativePath(gitRoot, filePath);
+  if (relPath === null) return null;
+  if (await isInTransientGitState(gitRoot)) return null;
+
+  // For a rename, include the pre-rename path with rename detection so git
+  // diffs old→new content instead of reporting the new path as fully added
+  // (a single-path pathspec defeats rename detection).
+  const oldRelPath =
+    oldPath != null ? toRepoRelativePath(gitRoot, oldPath) : null;
+  const diffArgs = [
+    '--no-optional-locks',
+    'diff',
+    '--no-ext-diff',
+    '--no-textconv',
+  ];
+  if (oldRelPath != null) diffArgs.push('-M');
+  diffArgs.push('HEAD', '--');
+  if (oldRelPath != null) diffArgs.push(oldRelPath);
+  diffArgs.push(relPath);
+  const diffOut = await runGit(diffArgs, gitRoot);
+  if (diffOut == null) return null;
+  const truncatedPaths = new Set<string>();
+  const parsed = parseGitDiff(diffOut, truncatedPaths);
+  // A single-file diff yields at most one entry; return its hunks regardless of
+  // the exact header key (which may carry rename / C-style-quote formatting).
+  if (parsed.size > 0) {
+    const [key, hunks] = parsed.entries().next().value as [string, Hunk[]];
+    return { hunks: hunks ?? [], truncated: truncatedPaths.has(key) };
+  }
+
+  // No tracked diff: synthesize an all-added hunk only for a genuinely
+  // untracked (and not ignored) file, matching the `--exclude-standard` listing
+  // that drives the diff file list. A tracked-but-unchanged or ignored file
+  // yields nothing here and returns null.
+  const untrackedOut = await runGit(
+    [
+      '--no-optional-locks',
+      'ls-files',
+      '--others',
+      '--exclude-standard',
+      '--',
+      relPath,
+    ],
+    gitRoot,
+  );
+  if (untrackedOut && untrackedOut.trim().length > 0) {
+    return synthesizeUntrackedHunk(gitRoot, relPath);
+  }
+  return null;
+}
+
+/**
+ * Normalize a caller-supplied path (relative or absolute) to a git-root-relative
+ * path, or `null` when it escapes the repo. Relative inputs reject absolute
+ * prefixes, drive letters, and `..` segments; absolute inputs are mapped through
+ * `path.relative` and rejected when the result climbs out of the root.
+ */
+function toRepoRelativePath(gitRoot: string, filePath: string): string | null {
+  if (!path.isAbsolute(filePath)) {
+    if (filePath.length === 0) return null;
+    if (filePath.startsWith('/') || filePath.startsWith('\\')) return null;
+    if (/^[A-Za-z]:/.test(filePath)) return null;
+    if (filePath.split(/[\\/]/).some((segment) => segment === '..'))
+      return null;
+    return filePath;
+  }
+  const rel = path.relative(gitRoot, filePath);
+  // Reject only a real climb-out (`..` or `../…`), not a literal `..foo`
+  // filename at the root, which a bare `startsWith('..')` would over-reject.
+  if (
+    rel === '' ||
+    rel === '..' ||
+    rel.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(rel)
+  )
+    return null;
+  return rel;
+}
+
+/**
+ * Build a single all-added hunk from an untracked file's content, capped by
+ * `MAX_DIFF_SIZE_BYTES` / `MAX_LINES_PER_FILE` — `truncated` reports when
+ * either cap actually cut content, so the caller can say so instead of
+ * presenting a silently incomplete file. Binary or unreadable files return
+ * `null` so the caller surfaces them without an inline diff.
+ */
+async function synthesizeUntrackedHunk(
+  gitRoot: string,
+  filePath: string,
+): Promise<GitDiffFileHunks | null> {
+  const absPath = path.join(gitRoot, filePath);
+  // lstat before open: `ls-files --others` can list FIFOs whose open() blocks
+  // forever waiting on a writer. Gate on regular files (as countUntrackedLines
+  // does) so expanding an untracked FIFO can't hang the daemon's event loop.
+  try {
+    const lst = await lstat(absPath);
+    if (!lst.isFile()) return null;
+  } catch {
+    return null;
+  }
+  let fh;
+  try {
+    fh = await open(absPath, getUntrackedOpenFlags());
+  } catch {
+    return null;
+  }
+  try {
+    const st = await fh.stat();
+    if (!st.isFile()) return null;
+    const cap = Math.min(st.size, MAX_DIFF_SIZE_BYTES);
+    const buf = Buffer.allocUnsafe(cap);
+    let offset = 0;
+    while (offset < cap) {
+      const { bytesRead } = await fh.read(buf, offset, cap - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    // Binary sniff on the same window git uses (a NUL in the first 8 KB).
+    const sniffEnd = Math.min(offset, BINARY_SNIFF_BYTES);
+    for (let i = 0; i < sniffEnd; i++) {
+      if (buf[i] === 0) return null;
+    }
+    const lines = buf.toString('utf8', 0, offset).split('\n');
+    // Drop the trailing empty element produced by a final newline.
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    const capped = lines.slice(0, MAX_LINES_PER_FILE);
+    const truncated =
+      st.size > MAX_DIFF_SIZE_BYTES || lines.length > capped.length;
+    if (capped.length === 0) return { hunks: [], truncated };
+    return {
+      hunks: [
+        {
+          oldStart: 0,
+          oldLines: 0,
+          newStart: 1,
+          newLines: capped.length,
+          lines: capped.map((line) => '+' + line),
+        },
+      ],
+      truncated,
+    };
+  } catch {
+    return null;
+  } finally {
+    await fh.close().catch(() => {});
+  }
+}
+
+/**
  * Parse `git diff --numstat -z` output.
  *
  * Wire format (stable per `git-diff(1)`):
@@ -320,21 +509,22 @@ export async function fetchGitDiffHunks(
  * Binary files use `-` for both counts. Only the first `MAX_FILES` entries are
  * retained in `perFileStats`; totals account for every entry.
  */
-export function parseGitNumstat(stdout: string): GitDiffResult {
-  // Drop the trailing empty chunk from the terminating NUL.
+interface NumstatEntry {
+  path: string;
+  oldPath?: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+function forEachNumstatEntry(
+  stdout: string,
+  visit: (entry: NumstatEntry) => void,
+): void {
   const tokens = stdout.split('\0');
   if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
 
-  let added = 0;
-  let removed = 0;
-  let validFileCount = 0;
-  const perFileStats = new Map<string, PerFileStats>();
-
-  // Rename entries span three tokens ({counts}, oldPath, newPath). When we
-  // see an empty path in the counts token we stash the counts here and
-  // consume the next two tokens as the rename pair.
-  let pending: { added: number; removed: number; isBinary: boolean } | null =
-    null;
+  let pending: Omit<NumstatEntry, 'path' | 'oldPath'> | null = null;
   let renameOld: string | null = null;
 
   for (const token of tokens) {
@@ -343,43 +533,53 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
         renameOld = token;
         continue;
       }
-      commitEntry(
-        `${renameOld} => ${token}`,
-        pending.added,
-        pending.removed,
-        pending.isBinary,
-      );
+      visit({ ...pending, path: token, oldPath: renameOld });
       pending = null;
       renameOld = null;
       continue;
     }
 
-    // Index-based parse — `split('\t')` is unsafe because `-z` preserves
-    // literal tabs inside filenames.
     const firstTab = token.indexOf('\t');
     if (firstTab < 0) continue;
     const secondTab = token.indexOf('\t', firstTab + 1);
     if (secondTab < 0) continue;
     const addStr = token.slice(0, firstTab);
     const remStr = token.slice(firstTab + 1, secondTab);
-    const filePath = token.slice(secondTab + 1);
+    const path = token.slice(secondTab + 1);
     const isBinary = addStr === '-' || remStr === '-';
-    const fileAdded = isBinary ? 0 : parseInt(addStr, 10) || 0;
-    const fileRemoved = isBinary ? 0 : parseInt(remStr, 10) || 0;
+    const added = isBinary ? 0 : parseInt(addStr, 10) || 0;
+    const removed = isBinary ? 0 : parseInt(remStr, 10) || 0;
 
-    if (filePath === '') {
-      // Rename header — wait for oldPath and newPath tokens.
-      pending = { added: fileAdded, removed: fileRemoved, isBinary };
+    if (path === '') {
+      pending = { added, removed, isBinary };
       continue;
     }
-    commitEntry(filePath, fileAdded, fileRemoved, isBinary);
+    visit({ path, added, removed, isBinary });
   }
+}
+
+export function parseGitNumstat(stdout: string): GitDiffResult {
+  let added = 0;
+  let removed = 0;
+  let validFileCount = 0;
+  const perFileStats = new Map<string, PerFileStats>();
+
+  forEachNumstatEntry(stdout, (entry) => {
+    commitEntry(
+      entry.path,
+      entry.added,
+      entry.removed,
+      entry.isBinary,
+      entry.oldPath,
+    );
+  });
 
   function commitEntry(
     filePath: string,
     fileAdded: number,
     fileRemoved: number,
     isBinary: boolean,
+    oldPath?: string,
   ): void {
     validFileCount++;
     added += fileAdded;
@@ -389,6 +589,7 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
         added: fileAdded,
         removed: fileRemoved,
         isBinary,
+        ...(oldPath ? { oldPath } : {}),
       });
     }
   }
@@ -409,9 +610,15 @@ export function parseGitNumstat(stdout: string): GitDiffResult {
  * Limits applied:
  * - Stop once `MAX_FILES` files have been collected.
  * - Skip files whose raw diff exceeds `MAX_DIFF_SIZE_BYTES`.
- * - Truncate per-file content at `MAX_LINES_PER_FILE` lines.
+ * - Truncate per-file content at `MAX_LINES_PER_FILE` lines; when
+ *   `truncatedPaths` is provided, every file that actually lost lines to that
+ *   cap is recorded there so callers can surface the truncation instead of
+ *   presenting a silently incomplete diff.
  */
-export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
+export function parseGitDiff(
+  stdout: string,
+  truncatedPaths?: Set<string>,
+): Map<string, Hunk[]> {
   const result = new Map<string, Hunk[]>();
   if (!stdout.trim()) return result;
 
@@ -467,11 +674,21 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
         line.startsWith('-') ||
         line.startsWith(' ')
       ) {
-        if (lineCount >= MAX_LINES_PER_FILE) break;
+        if (lineCount >= MAX_LINES_PER_FILE) {
+          // A content line exists beyond the cap, so this file's hunks are
+          // genuinely incomplete (an exactly-at-cap diff never reaches here).
+          truncatedPaths?.add(filePath);
+          break;
+        }
         // Force a flat string copy to break V8 sliced-string references so the
         // whole raw diff can be GC'd once parsing finishes.
         currentHunk.lines.push('' + line);
         lineCount++;
+      } else if (line.startsWith('\\')) {
+        // "\ No newline at end of file" — metadata the viewer renders as a
+        // marker. Keep it so a trailing-newline-only edit isn't shown as
+        // identical removed/added lines. Not counted against the content cap.
+        currentHunk.lines.push('' + line);
       }
     }
 
@@ -497,7 +714,7 @@ export function parseGitDiff(stdout: string): Map<string, Hunk[]> {
  * masse so multi-byte sequences like `\346\226\207` (文) round-trip
  * correctly even though we never set quotepath=true ourselves.
  */
-function unquoteCStylePath(s: string): string {
+export function unquoteCStylePath(s: string): string {
   if (!s.startsWith('"') || !s.endsWith('"') || s.length < 2) return s;
   const inner = s.slice(1, -1);
   // Build raw bytes first so octal `\NNN` sequences (each one byte of a
@@ -927,4 +1144,485 @@ async function runGit(args: string[], cwd: string): Promise<string | null> {
   } catch {
     return null;
   }
+}
+
+/** An in-progress git operation that the status indicator should surface. */
+export type GitOperation =
+  | 'merge'
+  | 'rebase'
+  | 'cherry-pick'
+  | 'revert'
+  | 'bisect';
+
+/**
+ * Working-tree summary for the status line / Web Shell git chip: branch,
+ * detached-HEAD flag, upstream ahead/behind, staged / unstaged / untracked /
+ * conflicted file counts, stash count, and any in-progress operation. A single
+ * `git status --porcelain=v1 --branch -z` call drives everything except stash
+ * and the operation (read directly from the git dir to avoid extra
+ * subprocesses).
+ *
+ * Unlike `fetchGitDiff`, this does NOT bail on a transient state — a
+ * merge / rebase / cherry-pick / revert in progress is exactly what the
+ * indicator should show (reported via `operation`). `git status` still
+ * produces valid output during these states.
+ *
+ * Returns `null` only when not inside a git repo or when git itself fails.
+ */
+export interface GitWorkingTreeStatus {
+  /** Branch name, or `null` when detached / unborn / unreadable. */
+  branch: string | null;
+  /** `true` for a detached HEAD (branch holds no name). */
+  detached: boolean;
+  /** `true` when the branch tracks an upstream. */
+  hasUpstream: boolean;
+  /** Commits ahead of upstream (0 without an upstream). */
+  ahead: number;
+  /** Commits behind upstream (0 without an upstream). */
+  behind: number;
+  /** Files with a staged change (porcelain X column). */
+  staged: number;
+  /** Files with an unstaged change (porcelain Y column). */
+  unstaged: number;
+  /** Untracked files (`??`). */
+  untracked: number;
+  /** Unmerged (conflicted) entries. */
+  conflicted: number;
+  /** Stash entries (lines in `logs/refs/stash`). */
+  stashCount: number;
+  /** In-progress operation, if any. */
+  operation?: GitOperation;
+}
+
+export async function getGitWorkingTreeStatus(
+  cwd: string,
+): Promise<GitWorkingTreeStatus | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const stdout = await runGit(
+    ['--no-optional-locks', 'status', '--porcelain=v1', '--branch', '-z'],
+    gitRoot,
+  );
+  if (stdout == null) return null;
+
+  // `-z` NUL-terminates each entry; the `--branch` header is always first.
+  const tokens = stdout.split('\0');
+  if (tokens.length > 0 && tokens[tokens.length - 1] === '') tokens.pop();
+  const head = tokens.shift() ?? '';
+  const branch = parseStatusBranchLine(head);
+  const counts = parseStatusEntries(tokens);
+  const [stashCount, operation] = await Promise.all([
+    countStashEntries(gitRoot),
+    detectGitOperation(gitRoot),
+  ]);
+
+  return {
+    ...branch,
+    ...counts,
+    stashCount,
+    ...(operation ? { operation } : {}),
+  };
+}
+
+interface StatusBranchLine {
+  branch: string | null;
+  detached: boolean;
+  hasUpstream: boolean;
+  ahead: number;
+  behind: number;
+}
+
+const NO_BRANCH: StatusBranchLine = {
+  branch: null,
+  detached: false,
+  hasUpstream: false,
+  ahead: 0,
+  behind: 0,
+};
+
+/**
+ * Parse the `## ...` header from `git status --branch`. Forms handled:
+ * `## branch...upstream [ahead N, behind M]`, `## branch`, `## HEAD (no
+ * branch)` (detached), and `## No commits yet on branch` / `## Initial commit
+ * on branch` (unborn).
+ */
+export function parseStatusBranchLine(line: string): StatusBranchLine {
+  if (!line.startsWith('## ')) return { ...NO_BRANCH };
+  let desc = line.slice(3);
+
+  if (desc.startsWith('HEAD (no branch)')) {
+    return { ...NO_BRANCH, detached: true };
+  }
+  const unborn = desc.match(/^(?:No commits yet|Initial commit) on (.+)$/);
+  if (unborn) {
+    return { ...NO_BRANCH, branch: unborn[1] ?? null };
+  }
+
+  let ahead = 0;
+  let behind = 0;
+  const bracket = desc.match(/ \[([^\]]*)\]$/);
+  if (bracket) {
+    const inner = bracket[1] ?? '';
+    const aheadMatch = inner.match(/ahead (\d+)/);
+    const behindMatch = inner.match(/behind (\d+)/);
+    ahead = aheadMatch ? Number(aheadMatch[1]) : 0;
+    behind = behindMatch ? Number(behindMatch[1]) : 0;
+    desc = desc.slice(0, bracket.index).trimEnd();
+  }
+
+  const hasUpstream = desc.includes('...');
+  // Split at the last `...` (the branch/upstream separator). Git forbids `..`
+  // in ref names so a branch can't itself contain `...`, but lastIndexOf is the
+  // robust split point regardless.
+  const sepIndex = desc.lastIndexOf('...');
+  const branch = sepIndex >= 0 ? desc.slice(0, sepIndex) : desc;
+  return {
+    branch: branch || null,
+    detached: false,
+    hasUpstream,
+    ahead,
+    behind,
+  };
+}
+
+interface StatusCounts {
+  staged: number;
+  unstaged: number;
+  untracked: number;
+  conflicted: number;
+}
+
+/**
+ * git's unmerged determination: any `U` in either column, or both-deleted /
+ * both-added. These are counted separately (a conflict is neither a plain
+ * staged nor unstaged change) and not double-counted into staged/unstaged.
+ */
+function isUnmergedEntry(x: string, y: string): boolean {
+  if (x === 'U' || y === 'U') return true;
+  if (x === 'D' && y === 'D') return true;
+  if (x === 'A' && y === 'A') return true;
+  return false;
+}
+
+/**
+ * Count staged / unstaged / untracked / conflicted entries from `git status
+ * --porcelain=v1 -z` tokens (the branch header is already removed). Each entry
+ * is `XY <path>`; a rename/copy carries a second NUL-separated path that is
+ * skipped.
+ */
+export function parseStatusEntries(tokens: string[]): StatusCounts {
+  let staged = 0;
+  let unstaged = 0;
+  let untracked = 0;
+  let conflicted = 0;
+  for (let i = 0; i < tokens.length; i++) {
+    const tok = tokens[i] ?? '';
+    // A real entry has two status chars then a space; anything else (a rename's
+    // second path, a stray token) is not an entry header.
+    if (tok.length < 3 || tok[2] !== ' ') continue;
+    const x = tok[0];
+    const y = tok[1];
+    if (x === '?' && y === '?') {
+      untracked++;
+      continue;
+    }
+    if (x === '!' && y === '!') continue; // ignored; not emitted without --ignored
+    if (isUnmergedEntry(x, y)) {
+      conflicted++;
+      continue;
+    }
+    if (x !== ' ' && x !== '?') staged++;
+    if (y !== ' ' && y !== '?') unstaged++;
+    // Rename/copy entries carry a second NUL-separated path; skip it.
+    if (x === 'R' || x === 'C' || y === 'R' || y === 'C') i++;
+  }
+  return { staged, unstaged, untracked, conflicted };
+}
+
+/**
+ * Detect an in-progress operation by probing the git dir for the marker files
+ * git writes during merge / rebase / cherry-pick / revert / bisect. Order
+ * matters: rebase markers are checked first so a rebase isn't misreported.
+ */
+async function detectGitOperation(
+  gitRoot: string,
+): Promise<GitOperation | undefined> {
+  const gitDir = await resolveGitDirFromRoot(gitRoot);
+  if (!gitDir) return undefined;
+  const checks: Array<[string, GitOperation]> = [
+    ['rebase-merge', 'rebase'],
+    ['rebase-apply', 'rebase'],
+    ['MERGE_HEAD', 'merge'],
+    ['CHERRY_PICK_HEAD', 'cherry-pick'],
+    ['REVERT_HEAD', 'revert'],
+    ['BISECT_LOG', 'bisect'],
+  ];
+  for (const [name, op] of checks) {
+    try {
+      await access(path.join(gitDir, name));
+      return op;
+    } catch {
+      // Marker absent; try the next.
+    }
+  }
+  return undefined;
+}
+
+/** Stash count = lines in `<gitDir>/logs/refs/stash` (0 when absent). */
+async function countStashEntries(gitRoot: string): Promise<number> {
+  const gitDir = await resolveGitDirFromRoot(gitRoot);
+  if (!gitDir) return 0;
+  const stashLog = path.join(gitDir, 'logs', 'refs', 'stash');
+  // lstat before read: a symlink-to-FIFO would block readFile forever (the
+  // same hazard the untracked-file readers guard against). Only count a
+  // regular file.
+  try {
+    const st = await lstat(stashLog);
+    if (!st.isFile()) return 0;
+  } catch {
+    return 0;
+  }
+  try {
+    const content = await readFile(stashLog, 'utf8');
+    return content.split('\n').filter((line) => line.trim().length > 0).length;
+  } catch {
+    return 0;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Git log
+// ---------------------------------------------------------------------------
+
+/** Maximum entries per `fetchGitLog` page. */
+export const MAX_LOG_LIMIT = 200;
+/** Default page size for `fetchGitLog`. */
+export const DEFAULT_LOG_LIMIT = 50;
+
+export interface GitLogEntry {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  /** Unix timestamp in seconds. */
+  authorDate: number;
+  subject: string;
+  /** `%D` output, e.g. `"HEAD -> main, origin/main, v1.2.0"`. */
+  refs: string;
+  /** Parent SHAs (length > 1 ⇒ merge commit). */
+  parents: string[];
+}
+
+export interface GitLogResult {
+  entries: GitLogEntry[];
+  hasMore: boolean;
+}
+
+export interface GitCommitFileStat {
+  path: string;
+  added: number;
+  removed: number;
+  isBinary: boolean;
+}
+
+export interface GitCommitDetail {
+  sha: string;
+  shortSha: string;
+  authorName: string;
+  authorEmail: string;
+  authorDate: number;
+  subject: string;
+  body: string;
+  refs: string;
+  parents: string[];
+  files: GitCommitFileStat[];
+  filesCount: number;
+  linesAdded: number;
+  linesRemoved: number;
+  hiddenCount: number;
+}
+
+const LOG_FORMAT = '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P';
+const LOG_DETAIL_FORMAT =
+  '%H%x00%h%x00%an%x00%ae%x00%at%x00%s%x00%D%x00%P%x00%b';
+
+function parseLogFields(parts: string[]): GitLogEntry | null {
+  if (parts.length !== 8) return null;
+  return {
+    sha: parts[0],
+    shortSha: parts[1],
+    authorName: parts[2],
+    authorEmail: parts[3],
+    authorDate: parseInt(parts[4], 10) || 0,
+    subject: parts[5],
+    refs: parts[6],
+    parents: parts[7] ? parts[7].split(' ').filter(Boolean) : [],
+  };
+}
+
+/**
+ * Fetch a page of commit log entries (newest first).
+ *
+ * Returns `null` when not inside a git repo or when git fails. An empty
+ * repo (no commits) returns `{ entries: [], hasMore: false }`.
+ */
+export async function fetchGitLog(
+  cwd: string,
+  options?: { limit?: number; skip?: number },
+): Promise<GitLogResult | null> {
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const limit = Math.min(
+    Math.max(options?.limit ?? DEFAULT_LOG_LIMIT, 1),
+    MAX_LOG_LIMIT,
+  );
+  const skip = Math.max(options?.skip ?? 0, 0);
+
+  const stdout = await runGit(
+    [
+      '--no-optional-locks',
+      'log',
+      '-z',
+      `--format=${LOG_FORMAT}`,
+      '-n',
+      String(limit + 1),
+      ...(skip > 0 ? ['--skip', String(skip)] : []),
+    ],
+    gitRoot,
+  );
+  if (stdout === null) {
+    // git log fails on an empty repo (no commits yet). Distinguish that from
+    // a real failure by probing HEAD: if HEAD doesn't resolve either, the
+    // repo simply has no commits.
+    const head = await runGit(['rev-parse', '--verify', 'HEAD'], gitRoot);
+    return head === null ? { entries: [], hasMore: false } : null;
+  }
+
+  const fields = stdout.split('\0');
+  if (fields.at(-1) === '') fields.pop();
+  const recordCount = Math.floor(fields.length / 8);
+  const hasMore = recordCount > limit;
+  const pageCount = hasMore ? limit : recordCount;
+
+  const entries: GitLogEntry[] = [];
+  for (let i = 0; i < pageCount; i++) {
+    const entry = parseLogFields(fields.slice(i * 8, i * 8 + 8));
+    if (entry) entries.push(entry);
+  }
+  return { entries, hasMore };
+}
+
+/**
+ * Fetch full detail for a single commit: metadata (including body) plus
+ * per-file numstat.
+ *
+ * Returns `null` when not inside a git repo, the sha is invalid / not found,
+ * or git fails.
+ */
+export async function fetchGitCommitDetail(
+  cwd: string,
+  sha: string,
+): Promise<GitCommitDetail | null> {
+  if (!/^[0-9a-f]{7,40}$/i.test(sha)) return null;
+
+  const gitRoot = findGitRoot(cwd);
+  if (!gitRoot) return null;
+
+  const metaRaw = await runGit(
+    [
+      '--no-optional-locks',
+      'log',
+      '-1',
+      '-z',
+      `--format=${LOG_DETAIL_FORMAT}`,
+      sha,
+    ],
+    gitRoot,
+  );
+  if (metaRaw === null) return null;
+
+  const parts = metaRaw.split('\0');
+  if (parts.at(-1) === '') parts.pop();
+  if (parts.length !== 9) return null;
+
+  const parents = parts[7] ? parts[7].split(' ').filter(Boolean) : [];
+
+  // Per-file stats via diff-tree. `--root` handles the initial commit (no
+  // parent). For merge commits, plain diff-tree outputs nothing; diff against
+  // the first parent to show what the merge introduced.
+  const diffTreeArgs =
+    parents.length > 1
+      ? [
+          '--no-optional-locks',
+          'diff-tree',
+          '--no-commit-id',
+          '--numstat',
+          // Detect renames so `git mv` counts as one file (by its new path),
+          // matching the main `git diff` path — diff-tree is plumbing and does
+          // NOT honour diff.renames, so without -M a rename splits into a
+          // delete + add pair. The three-token `-z` rename sequence it then
+          // emits is handled by the pending-rename state machine below.
+          '-M',
+          '-r',
+          '-z',
+          `${sha}^1`,
+          sha,
+        ]
+      : [
+          '--no-optional-locks',
+          'diff-tree',
+          '--no-commit-id',
+          '--numstat',
+          // Detect renames so `git mv` counts as one file (by its new path),
+          // matching the main `git diff` path — diff-tree is plumbing and does
+          // NOT honour diff.renames, so without -M a rename splits into a
+          // delete + add pair. The three-token `-z` rename sequence it then
+          // emits is handled by the pending-rename state machine below.
+          '-M',
+          '-r',
+          '-z',
+          '--root',
+          sha,
+        ];
+  const numstatRaw = await runGit(diffTreeArgs, gitRoot);
+
+  const files: GitCommitFileStat[] = [];
+  let filesCount = 0;
+  let linesAdded = 0;
+  let linesRemoved = 0;
+
+  if (numstatRaw) {
+    forEachNumstatEntry(numstatRaw, (entry) => {
+      filesCount++;
+      linesAdded += entry.added;
+      linesRemoved += entry.removed;
+      if (files.length < MAX_FILES) {
+        files.push({
+          path: entry.path,
+          added: entry.added,
+          removed: entry.removed,
+          isBinary: entry.isBinary,
+        });
+      }
+    });
+  }
+
+  return {
+    sha: parts[0],
+    shortSha: parts[1],
+    authorName: parts[2],
+    authorEmail: parts[3],
+    authorDate: parseInt(parts[4], 10) || 0,
+    subject: parts[5],
+    refs: parts[6],
+    parents,
+    body: parts[8].replace(/\n$/, ''),
+    files,
+    filesCount,
+    linesAdded,
+    linesRemoved,
+    hiddenCount: Math.max(filesCount - files.length, 0),
+  };
 }

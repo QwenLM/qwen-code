@@ -5,13 +5,16 @@
  */
 
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
+import { MAX_DAEMON_WORKSPACES } from '@qwen-code/acp-bridge/channelControlTimeouts';
 import { isWithinRoot } from '../config/path-comparison.js';
+
+export const MAX_REGISTERED_WORKSPACES = MAX_DAEMON_WORKSPACES;
 
 export class DuplicateWorkspaceInputError extends Error {
   constructor(workspace: string) {
     super(
       `Duplicate --workspace value resolves to ${JSON.stringify(workspace)}. ` +
-        'Multi-workspace serve is not enabled; pass one --workspace.',
+        'Pass distinct --workspace values.',
     );
     this.name = 'DuplicateWorkspaceInputError';
   }
@@ -22,7 +25,7 @@ export class NestedWorkspaceInputError extends Error {
     super(
       `Nested --workspace values are not supported yet: ` +
         `${JSON.stringify(child)} is inside ${JSON.stringify(parent)}. ` +
-        'Multi-workspace serve is not enabled; pass one --workspace.',
+        'Pass non-nested --workspace values.',
     );
     this.name = 'NestedWorkspaceInputError';
   }
@@ -31,8 +34,8 @@ export class NestedWorkspaceInputError extends Error {
 export class MultipleWorkspaceInputError extends Error {
   constructor() {
     super(
-      'Multiple --workspace values are not supported yet. ' +
-        'Multi-workspace serve is not enabled; pass one --workspace.',
+      'Multiple --workspace values are not supported by this single-workspace caller. ' +
+        'Pass one --workspace.',
     );
     this.name = 'MultipleWorkspaceInputError';
   }
@@ -60,7 +63,7 @@ function isNestedWorkspace(parent: string, child: string): boolean {
   return parent !== child && isWithinRoot(child, parent);
 }
 
-function rejectUnsupportedMultiWorkspaceInputs(
+function rejectDuplicateOrNestedWorkspaceInputs(
   workspaces: readonly string[],
 ): void {
   if (workspaces.length <= 1) return;
@@ -71,7 +74,7 @@ function rejectUnsupportedMultiWorkspaceInputs(
       canonicalizeWorkspace(workspace),
     );
   } catch {
-    throw new MultipleWorkspaceInputError();
+    return;
   }
   const seen = new Set<string>();
   for (const workspace of canonicalWorkspaces) {
@@ -93,12 +96,18 @@ function rejectUnsupportedMultiWorkspaceInputs(
       }
     }
   }
+}
 
-  throw new MultipleWorkspaceInputError();
+export function resolveWorkspaceInputs(workspace: unknown): string[] {
+  const workspaces = normalizeWorkspaceInputs(workspace);
+  rejectDuplicateOrNestedWorkspaceInputs(workspaces);
+  return workspaces;
 }
 
 export function resolveSingleWorkspaceInput(workspace: unknown): string {
-  const workspaces = normalizeWorkspaceInputs(workspace);
-  rejectUnsupportedMultiWorkspaceInputs(workspaces);
+  const workspaces = resolveWorkspaceInputs(workspace);
+  if (workspaces.length > 1) {
+    throw new MultipleWorkspaceInputError();
+  }
   return workspaces[0]!;
 }

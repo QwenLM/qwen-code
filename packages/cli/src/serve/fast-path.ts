@@ -5,6 +5,7 @@
  */
 
 import type { RunHandle } from './run-qwen-serve.js';
+import { MAX_COMPACTED_REPLAY_MAX_BYTES } from '@qwen-code/acp-bridge/replayWindowLimits';
 import { normalizeServeFastPathArgv } from './fast-path-argv.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
@@ -39,10 +40,12 @@ const NUMBER_OPTIONS = new Map<
   ['maxPendingPromptsPerSession', 'max-pending-prompts-per-session'],
   ['maxConnections', 'max-connections'],
   ['eventRingSize', 'event-ring-size'],
+  ['compactedReplayMaxBytes', 'compacted-replay-max-bytes'],
   ['mcp-client-budget', 'mcp-client-budget'],
   ['promptDeadlineMs', 'prompt-deadline-ms'],
   ['writerIdleTimeoutMs', 'writer-idle-timeout-ms'],
   ['channelIdleTimeoutMs', 'channel-idle-timeout-ms'],
+  ['initializeTimeoutMs', 'initialize-timeout-ms'],
   ['sessionReapIntervalMs', 'session-reap-interval-ms'],
   ['sessionIdleTimeoutMs', 'session-idle-timeout-ms'],
   ['permissionResponseTimeoutMs', 'permission-response-timeout-ms'],
@@ -191,6 +194,19 @@ function getServeFastPathValidationError(
       maxPendingPromptsPerSession < 0)
   ) {
     return 'qwen serve: --max-pending-prompts-per-session must be a non-negative integer (0 / Infinity = unlimited).';
+  }
+
+  const compactedReplayMaxBytes = parsed.options.compactedReplayMaxBytes;
+  if (
+    compactedReplayMaxBytes !== undefined &&
+    (!Number.isSafeInteger(compactedReplayMaxBytes) ||
+      compactedReplayMaxBytes < 1 ||
+      compactedReplayMaxBytes > MAX_COMPACTED_REPLAY_MAX_BYTES)
+  ) {
+    return (
+      'qwen serve: --compacted-replay-max-bytes must be a positive ' +
+      `safe integer in [1, ${MAX_COMPACTED_REPLAY_MAX_BYTES}].`
+    );
   }
 
   return null;

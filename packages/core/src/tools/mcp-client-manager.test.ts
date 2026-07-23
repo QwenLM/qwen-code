@@ -15,6 +15,7 @@ import { MCPServerConfig, type Config } from '../config/config.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { connectionIdOf } from './mcp-pool-key.js';
+import { listDescendantPids, sigtermPids } from './pid-descendants.js';
 
 vi.mock('./mcp-client.js', async () => {
   const originalModule = await vi.importActual('./mcp-client.js');
@@ -25,6 +26,11 @@ vi.mock('./mcp-client.js', async () => {
     populateMcpServerCommand: vi.fn((servers) => servers),
   };
 });
+
+vi.mock('./pid-descendants.js', () => ({
+  listDescendantPids: vi.fn().mockResolvedValue([]),
+  sigtermPids: vi.fn().mockReturnValue(0),
+}));
 
 /**
  * F2 (#4175 commit 6 review fix — wenshao R9 / PR A): test factory
@@ -65,6 +71,29 @@ function mkManager(
 describe('McpClientManager', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+  });
+
+  it('reports status from its own client instance', async () => {
+    const { MCPServerStatus } = await import('./mcp-client.js');
+    const manager = mkManager();
+    const clients = (
+      manager as unknown as {
+        clients: Map<
+          string,
+          {
+            getStatus(): (typeof MCPServerStatus)[keyof typeof MCPServerStatus];
+          }
+        >;
+      }
+    ).clients;
+    clients.set('docs', {
+      getStatus: () => MCPServerStatus.CONNECTED,
+    });
+
+    expect(manager.getServerStatus('docs')).toBe(MCPServerStatus.CONNECTED);
+    expect(manager.getServerStatus('missing')).toBe(
+      MCPServerStatus.DISCONNECTED,
+    );
   });
 
   it('routes discovery through the pool when one is injected (F2 commit 4)', async () => {
@@ -1471,6 +1500,72 @@ describe('McpClientManager', () => {
     neverResolve();
   });
 
+  it('runs automatic OAuth outside the discovery timeout before reconnecting', async () => {
+    const order: string[] = [];
+    const connect = vi.fn().mockImplementation(async () => {
+      order.push('connect');
+    });
+    const discover = vi.fn().mockImplementation(async () => {
+      order.push('discover');
+    });
+    vi.mocked(McpClient).mockImplementation(
+      () =>
+        ({
+          connect,
+          discover,
+          disconnect: vi.fn().mockResolvedValue(undefined),
+          getStatus: vi.fn(),
+        }) as unknown as McpClient,
+    );
+    const mcpClientModule = await import('./mcp-client.js');
+    const authenticate = vi
+      .spyOn(mcpClientModule, 'attemptAutomaticMcpOAuth')
+      .mockImplementation(async () => {
+        order.push('authenticate');
+        return true;
+      });
+    const probe = vi
+      .spyOn(mcpClientModule, 'probeMcpServerForOAuth')
+      .mockImplementation(async () => {
+        order.push('probe');
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        return true;
+      });
+    const serverConfig = {
+      httpUrl: 'https://example.com/mcp',
+      discoveryTimeoutMs: 50,
+    };
+    const mockConfig = {
+      isTrustedFolder: () => true,
+      getMcpServers: () => ({ oauth: serverConfig }),
+      getMcpServerCommand: () => undefined,
+      getPromptRegistry: () =>
+        ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+      getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+      getWorkspaceContext: () => ({}) as WorkspaceContext,
+      getDebugMode: () => false,
+      isMcpServerDisabled: () => false,
+      isInteractive: () => true,
+      isBrowserLaunchSuppressed: () => false,
+    } as unknown as Config;
+    const manager = mkManager({ config: mockConfig });
+
+    await manager.discoverAllMcpToolsIncremental(mockConfig);
+
+    expect(probe).toHaveBeenCalledWith('oauth', serverConfig);
+    expect(authenticate).toHaveBeenCalledWith('oauth', serverConfig, true);
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(discover).toHaveBeenCalledTimes(2);
+    expect(order).toEqual([
+      'connect',
+      'discover',
+      'probe',
+      'authenticate',
+      'connect',
+      'discover',
+    ]);
+  });
+
   it('discoverAllMcpToolsIncremental skips servers flagged as disabled', async () => {
     // PR-A regression guard: the new incremental path used to iterate
     // `Object.entries(servers)` without consulting `isMcpServerDisabled`,
@@ -1912,6 +2007,116 @@ describe('McpClientManager', () => {
 
     expect(calls).toContain(5_000);
     expect(calls).not.toContain(30_000);
+  });
+
+  describe('discovery timeout process cleanup', () => {
+    function makeTimedOutClient(rootPid?: number) {
+      return {
+        connect: vi.fn(() => new Promise<void>(() => {})),
+        discover: vi.fn().mockResolvedValue(undefined),
+        disconnect: vi.fn().mockResolvedValue(undefined),
+        getStatus: vi.fn(),
+        getTransportPid: vi.fn(() => rootPid),
+      };
+    }
+
+    async function runTimedOutDiscovery(
+      mockedMcpClient: ReturnType<typeof makeTimedOutClient>,
+      serverConfig: MCPServerConfig,
+    ): Promise<void> {
+      vi.mocked(McpClient).mockReturnValue(
+        mockedMcpClient as unknown as McpClient,
+      );
+      const config = {
+        isTrustedFolder: () => true,
+        getMcpServers: () => ({ slow: serverConfig }),
+        getMcpServerCommand: () => undefined,
+        getPromptRegistry: () =>
+          ({ removePromptsByServer: vi.fn() }) as unknown as PromptRegistry,
+        getResourceRegistry: () => ({ removeResourcesByServer: vi.fn() }),
+        getWorkspaceContext: () => ({}) as WorkspaceContext,
+        getDebugMode: () => false,
+        isMcpServerDisabled: () => false,
+      } as unknown as Config;
+      const manager = mkManager({ config });
+
+      await manager.discoverAllMcpToolsIncremental(config);
+    }
+
+    it('signals stdio wrapper descendants before disconnecting after timeout', async () => {
+      const events: string[] = [];
+      const mockedMcpClient = makeTimedOutClient(101);
+      mockedMcpClient.disconnect.mockImplementationOnce(async () => {
+        events.push('disconnect');
+      });
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+      vi.mocked(listDescendantPids).mockResolvedValueOnce([201, 301]);
+      vi.mocked(sigtermPids).mockImplementationOnce(() => {
+        events.push('signal');
+        return 2;
+      });
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        command: 'node',
+        args: [],
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).toHaveBeenCalledWith(101);
+      expect(sigtermPids).toHaveBeenCalledWith([201, 301]);
+      expect(events).toEqual(['signal', 'disconnect']);
+    });
+
+    it('disconnects remote transports without enumerating pids', async () => {
+      const mockedMcpClient = makeTimedOutClient();
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        httpUrl: 'https://example.test/mcp',
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).not.toHaveBeenCalled();
+      expect(sigtermPids).not.toHaveBeenCalled();
+      expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it('skips signaling when a stdio transport has no descendants', async () => {
+      const mockedMcpClient = makeTimedOutClient(101);
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        command: 'node',
+        args: [],
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).toHaveBeenCalledWith(101);
+      expect(sigtermPids).not.toHaveBeenCalled();
+      expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
+    });
+
+    it('still disconnects when descendant enumeration fails', async () => {
+      const mockedMcpClient = makeTimedOutClient(101);
+      vi.mocked(listDescendantPids).mockClear();
+      vi.mocked(sigtermPids).mockClear();
+      vi.mocked(listDescendantPids).mockRejectedValueOnce(
+        new Error('process table unavailable'),
+      );
+
+      await runTimedOutDiscovery(mockedMcpClient, {
+        command: 'node',
+        args: [],
+        discoveryTimeoutMs: 100,
+      });
+
+      expect(listDescendantPids).toHaveBeenCalledWith(101);
+      expect(sigtermPids).not.toHaveBeenCalled();
+      expect(mockedMcpClient.disconnect).toHaveBeenCalledOnce();
+    });
   });
 
   it('runWithDiscoveryTimeout disconnects the client AND drops registered tools on timeout', async () => {

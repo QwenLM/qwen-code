@@ -25,6 +25,11 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceMcpResources = vi.fn();
   const restartMcpServer = vi.fn();
   const workspaceSkills = vi.fn();
+  const setWorkspaceSkillEnabled = vi.fn();
+  const installWorkspaceSkill = vi.fn();
+  const deleteWorkspaceSkill = vi.fn();
+  const workspaceAcpStatus = vi.fn();
+  const workspaceAcpPreheat = vi.fn();
   const workspaceTools = vi.fn();
   const setWorkspaceToolEnabled = vi.fn();
   const workspaceMemory = vi.fn();
@@ -49,6 +54,11 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources = workspaceMcpResources;
     restartMcpServer = restartMcpServer;
     workspaceSkills = workspaceSkills;
+    setWorkspaceSkillEnabled = setWorkspaceSkillEnabled;
+    installWorkspaceSkill = installWorkspaceSkill;
+    deleteWorkspaceSkill = deleteWorkspaceSkill;
+    workspaceAcpStatus = workspaceAcpStatus;
+    workspaceAcpPreheat = workspaceAcpPreheat;
     workspaceTools = workspaceTools;
     setWorkspaceToolEnabled = setWorkspaceToolEnabled;
     workspaceMemory = workspaceMemory;
@@ -74,6 +84,11 @@ const sdkMocks = vi.hoisted(() => {
     workspaceMcpResources,
     restartMcpServer,
     workspaceSkills,
+    setWorkspaceSkillEnabled,
+    installWorkspaceSkill,
+    deleteWorkspaceSkill,
+    workspaceAcpStatus,
+    workspaceAcpPreheat,
     workspaceTools,
     setWorkspaceToolEnabled,
     workspaceMemory,
@@ -121,6 +136,35 @@ const sdkMocks = vi.hoisted(() => {
         workspaceCwd: '/mock-workspace',
         initialized: true,
         skills: [],
+      });
+      setWorkspaceSkillEnabled.mockReset();
+      setWorkspaceSkillEnabled.mockResolvedValue({
+        skillName: 'review',
+        enabled: false,
+        changed: true,
+        activation: 'applied',
+        sessionsRefreshed: 1,
+        sessionsFailed: 0,
+      });
+      installWorkspaceSkill.mockReset();
+      installWorkspaceSkill.mockResolvedValue({
+        skillName: 'review',
+        scope: 'workspace',
+        installedPath: '/mock-workspace/.qwen/skills/review/SKILL.md',
+      });
+      deleteWorkspaceSkill.mockReset();
+      deleteWorkspaceSkill.mockResolvedValue({
+        skillName: 'review',
+        scope: 'workspace',
+        deleted: true,
+      });
+      workspaceAcpStatus.mockReset();
+      workspaceAcpStatus.mockResolvedValue({ channelLive: true });
+      workspaceAcpPreheat.mockReset();
+      workspaceAcpPreheat.mockResolvedValue({
+        ready: true,
+        channelLive: true,
+        durationMs: 1,
       });
       workspaceTools.mockReset();
       workspaceTools.mockResolvedValue({
@@ -255,6 +299,163 @@ describe('DaemonWorkspaceProvider', () => {
     expect(context?.workspaceCwd).toBe('/mock-workspace');
   });
 
+  it('refreshCapabilities re-fetches and updates capabilities state', async () => {
+    let context: DaemonWorkspaceContextValue | undefined;
+
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    // Initial mount fetched capabilities once; no workspaces registered yet.
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(1);
+    expect(context?.capabilities?.workspaces).toBeUndefined();
+
+    // A workspace was registered out of band (e.g. POST /workspaces); the
+    // next capabilities fetch reflects it.
+    sdkMocks.capabilities.mockResolvedValueOnce({
+      workspaceCwd: '/mock-workspace',
+      features: [],
+      workspaces: [
+        { id: 'a', cwd: '/mock-workspace', primary: true, trusted: true },
+        { id: 'b', cwd: '/other', primary: false, trusted: true },
+      ],
+    });
+
+    await act(async () => {
+      await context?.refreshCapabilities?.();
+    });
+
+    // A fresh request was issued (the getCapabilities promise cache is
+    // bypassed) and state updated so the new workspace shows without a
+    // full page reload.
+    expect(sdkMocks.capabilities).toHaveBeenCalledTimes(2);
+    expect(context?.capabilities?.workspaces).toHaveLength(2);
+    expect(context?.capabilities?.workspaces?.[1]?.cwd).toBe('/other');
+  });
+
+  it('does not let the initial request overwrite a newer refresh', async () => {
+    let resolveInitial!: (value: never) => void;
+    sdkMocks.capabilities.mockImplementationOnce(
+      () => new Promise((resolve) => (resolveInitial = resolve)),
+    );
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    const accepted = {
+      workspaceCwd: '/mock-workspace',
+      features: [],
+      workspaces: [
+        { id: 'accepted', cwd: '/accepted', primary: false, trusted: true },
+      ],
+    };
+    sdkMocks.capabilities.mockResolvedValueOnce(accepted);
+
+    await act(async () => {
+      await context!.refreshCapabilities!();
+    });
+    await act(async () => {
+      resolveInitial({
+        workspaceCwd: '/mock-workspace',
+        features: [],
+        workspaces: [],
+      } as never);
+      await Promise.resolve();
+    });
+
+    expect(context?.capabilities).toBe(accepted);
+  });
+
+  it('makes superseded refreshes resolve to the accepted successor', async () => {
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    let resolveFirst!: (value: never) => void;
+    let resolveSecond!: (value: never) => void;
+    sdkMocks.capabilities
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveFirst = resolve)),
+      )
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveSecond = resolve)),
+      );
+    const first = context!.refreshCapabilities!();
+    const second = context!.refreshCapabilities!();
+    const accepted = {
+      workspaceCwd: '/mock-workspace',
+      features: [],
+      workspaces: [
+        { id: 'accepted', cwd: '/accepted', primary: false, trusted: true },
+      ],
+    };
+    await act(async () => {
+      resolveSecond(accepted as never);
+      await second;
+    });
+    await act(async () => {
+      resolveFirst({
+        workspaceCwd: '/mock-workspace',
+        features: [],
+        workspaces: [],
+      } as never);
+      expect(await first).toBe(accepted);
+    });
+
+    expect(context?.capabilities).toBe(accepted);
+  });
+
+  it('propagates the accepted successor rejection to a superseded refresh', async () => {
+    let context: DaemonWorkspaceContextValue | undefined;
+    function Harness() {
+      context = useOptionalDaemonWorkspace();
+      return null;
+    }
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    let resolveFirst!: (value: never) => void;
+    let rejectSecond!: (reason: Error) => void;
+    sdkMocks.capabilities
+      .mockImplementationOnce(
+        () => new Promise((resolve) => (resolveFirst = resolve)),
+      )
+      .mockImplementationOnce(
+        () => new Promise((_resolve, reject) => (rejectSecond = reject)),
+      );
+    const first = context!.refreshCapabilities!();
+    const second = context!.refreshCapabilities!();
+    const acceptedError = new Error('accepted refresh failed');
+    const firstOutcome = first.catch((error: unknown) => error);
+    const secondOutcome = second.catch((error: unknown) => error);
+
+    await act(async () => {
+      rejectSecond(acceptedError);
+      expect(await secondOutcome).toBe(acceptedError);
+      resolveFirst({
+        workspaceCwd: '/mock-workspace',
+        features: [],
+      } as never);
+      expect(await firstOutcome).toBe(acceptedError);
+    });
+  });
+
   it('throws when useDaemonWorkspace is used without provider', async () => {
     let error: Error | undefined;
 
@@ -296,9 +497,19 @@ describe('DaemonWorkspaceProvider', () => {
 
     expect(actions).toBeDefined();
     expect(typeof actions?.loadMcpStatus).toBe('function');
+    expect(typeof actions?.reloadMcp).toBe('function');
     expect(typeof actions?.loadSkillsStatus).toBe('function');
+    expect(typeof actions?.setWorkspaceSkillEnabled).toBe('function');
+    expect(typeof actions?.installWorkspaceSkill).toBe('function');
+    expect(typeof actions?.deleteWorkspaceSkill).toBe('function');
     expect(typeof actions?.listAgents).toBe('function');
     expect(typeof actions?.globWorkspace).toBe('function');
+
+    await actions?.setWorkspaceSkillEnabled('review', false);
+    expect(sdkMocks.setWorkspaceSkillEnabled).toHaveBeenCalledWith(
+      'review',
+      false,
+    );
   });
 
   it('useOptionalDaemonWorkspace returns undefined without provider', async () => {
@@ -677,6 +888,7 @@ describe('DaemonWorkspaceProvider', () => {
         group: 'all',
         cursor: 'cursor-1',
         pageSize: 10,
+        sourceType: 'default',
       });
       return null;
     }
@@ -693,6 +905,7 @@ describe('DaemonWorkspaceProvider', () => {
         cursor: 'cursor-1',
         view: 'organized',
         group: 'all',
+        sourceType: 'default',
       },
     );
     expect(result?.data).toEqual([session]);

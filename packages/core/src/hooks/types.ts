@@ -5,6 +5,7 @@
  */
 import type { ChildProcess } from 'child_process';
 import type { ToolArtifact } from '../tools/tools.js';
+import type { TaskStatus } from '../agents/tasks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('TRUSTED_HOOKS');
@@ -39,6 +40,8 @@ export enum HookEventName {
   SessionStart = 'SessionStart',
   // Stop - Right before Claude concludes its response
   Stop = 'Stop',
+  // MessageDisplay - Fires repeatedly as the assistant's reply streams, before Stop
+  MessageDisplay = 'MessageDisplay',
   // SubagentStart - When a subagent (Task tool call) is started
   SubagentStart = 'SubagentStart',
   // SubagentStop - Right before a subagent (Task tool call) concludes its response
@@ -924,11 +927,37 @@ export interface ContextUsageData {
 }
 
 /**
+ * Background task info for hook payloads
+ */
+export interface BackgroundTaskInfo {
+  id: string;
+  status: TaskStatus;
+  agent_type: string;
+  started_at: string;
+  description?: string;
+}
+
+/**
+ * Cron job info for hook payloads
+ */
+export interface CronJobInfo {
+  id: string;
+  schedule: string;
+  prompt: string;
+  recurring: boolean;
+  next_run?: string;
+  last_run?: string;
+  enabled: boolean;
+}
+
+/**
  * Stop hook input
  */
 export interface StopInput extends HookInput, Partial<ContextUsageData> {
   stop_hook_active: boolean;
   last_assistant_message: string;
+  background_tasks: BackgroundTaskInfo[];
+  crons: CronJobInfo[];
 }
 
 /**
@@ -938,6 +967,35 @@ export interface StopOutput extends HookOutput {
   hookSpecificOutput?: {
     hookEventName: 'Stop';
     additionalContext?: string;
+  };
+}
+
+/**
+ * MessageDisplay hook input
+ *
+ * Fires repeatedly as the assistant's reply streams (before `Stop`, which fires
+ * once at the end of the turn). `message_id` is stable for the whole streamed
+ * message; `displayed_text` is CUMULATIVE (the full text so far, not a delta),
+ * so hook authors never need to reassemble chunks themselves. `is_final` is
+ * true on the last firing for this message, so a hook script knows to flush
+ * (e.g. speak the tail of a buffered reply) rather than wait for more text
+ * that will never arrive.
+ */
+export interface MessageDisplayInput extends HookInput {
+  message_id: string;
+  displayed_text: string;
+  is_final: boolean;
+}
+
+/**
+ * MessageDisplay hook output
+ *
+ * Fire-and-forget, no control effects (no blocking/permission semantics) —
+ * purely observational, like `Notification`/`PostCompact`.
+ */
+export interface MessageDisplayOutput extends HookOutput {
+  hookSpecificOutput?: {
+    hookEventName: 'MessageDisplay';
   };
 }
 
@@ -1102,6 +1160,8 @@ export interface SubagentStopInput extends HookInput {
   agent_type: AgentType | string;
   agent_transcript_path: string;
   last_assistant_message: string;
+  background_tasks: BackgroundTaskInfo[];
+  crons: CronJobInfo[];
 }
 
 /**

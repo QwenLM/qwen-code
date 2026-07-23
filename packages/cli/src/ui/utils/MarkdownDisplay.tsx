@@ -14,6 +14,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
+import { parseCodeFenceInfo } from './markdownUtilities.js';
 import {
   fitPendingSlice,
   splitMarkdownTableRow,
@@ -40,6 +41,20 @@ interface MarkdownDisplayProps {
   contentWidth: number;
   textColor?: string;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
+  /**
+   * When true, enforce the rendered-height budget from `availableTerminalHeight`
+   * even for non-pending content. Normally the height-aware pre-slice
+   * (`fitPendingSlice`) only engages while streaming (`isPending`), because
+   * committed content is rendered by `<Static>` and does not risk the
+   * scroll-to-top lock. However, MainContent wraps the live pending region in
+   * `maxHeight` + `overflow="hidden"` as an Ink backstop, and Ink clips the
+   * BOTTOM (newest content) — so a non-pending item that renders inside that
+   * wrapper (e.g. the `exit_plan_mode` confirmation dialog's plan body) gets
+   * silently clipped without the pre-slice's clamp/indicator. Callers that
+   * render inside such a bounded container should pass `true` so the plan body
+   * respects the same viewport budget the outer wrapper enforces. See #6867.
+   */
+  enforceHeightBudget?: boolean;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -85,8 +100,7 @@ export function countMarkdownSourceBlocks(
 
     if (codeFenceMatch) {
       activeCodeFence = codeFenceMatch[1];
-      const lang =
-        codeFenceMatch[2]?.trim().split(/\s+/)[0]?.toLowerCase() || null;
+      const lang = parseCodeFenceInfo(codeFenceMatch[2]).lang?.toLowerCase();
       if (lang) {
         codeBlockLanguageCounts.set(
           lang,
@@ -121,6 +135,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   contentWidth,
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
+  enforceHeightBudget = false,
 }) => {
   const { renderMode } = useRenderMode();
   if (!text) return <></>;
@@ -151,8 +166,13 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // the live frame never exceeds the viewport regardless of how the streaming
   // layer chunks content, because rendered height ≠ source-line count (a table
   // renders ~2 rows per data row; a wide/CJK line wraps to multiple rows).
+  //
+  // Non-pending callers that render inside a bounded parent (e.g. the
+  // `exit_plan_mode` confirmation dialog inside MainContent's `maxHeight` +
+  // `overflow="hidden"` wrapper) can opt in via `enforceHeightBudget` so their
+  // content is pre-sliced the same way, avoiding silent bottom-clipping.
   const pendingRenderedBudget =
-    isPending && availableTerminalHeight !== undefined
+    (isPending || enforceHeightBudget) && availableTerminalHeight !== undefined
       ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
       : undefined;
   const headerRegex = /^ *(#{1,4}) +(.*)/;
@@ -175,6 +195,14 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // line/table alone overflows (e.g. a single very wide/CJK line that wraps past
   // the budget): render nothing rather than an oversized row.
   let lines = allLines;
+  // Track how many source lines were dropped by the pre-slice so a non-streaming
+  // caller (e.g. the `exit_plan_mode` confirmation dialog) can render a visible
+  // "N more lines" cue. For streaming content the cue is intentionally omitted:
+  // the rest is still on its way. But when the caller opts into the budget for
+  // a COMPLETE plan (`enforceHeightBudget && !isPending`), silently dropping the
+  // tail means the user is asked to approve a plan whose remainder never
+  // appears — a model could hide steps past the budget. See #6867.
+  let droppedSourceLines = 0;
   if (pendingRenderedBudget !== undefined) {
     const tableClampRows =
       availableTerminalHeight !== undefined
@@ -188,8 +216,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
     if (keptLines < allLines.length) {
       lines = allLines.slice(0, keptLines);
+      droppedSourceLines = allLines.length - keptLines;
     }
   }
+  const showTruncationCue =
+    enforceHeightBudget && !isPending && droppedSourceLines > 0;
 
   // Hold back a still-forming table at the streaming frontier. A table is only
   // recognized once its separator line (matching the header's column count) has
@@ -283,14 +314,34 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         // yet) keep holding so a multi-column header does not flash in cell by
         // cell before its separator arrives.
         const lineAfterHeader = rest[0];
+        const separatorIsTrailing = rest.length === 1;
+        // The separator's first characters may arrive as a bare `|` or `| ` with
+        // no dash yet — not matched by tableSeparatorRegex, but a valid separator
+        // PREFIX. While it is the trailing line (still being typed) and contains
+        // only separator characters, treat it as a still-forming separator so the
+        // header does not flash raw for the frame between the header's newline and
+        // the separator's first dash.
+        const looksLikeSeparatorPrefix =
+          lineAfterHeader !== undefined &&
+          lineAfterHeader.includes('|') &&
+          /^[\s|:-]*$/.test(lineAfterHeader);
         let couldStillBeTable =
           lineAfterHeader === undefined ||
-          tableSeparatorRegex.test(lineAfterHeader);
-        // A COMPLETE separator (ends with `|`) whose column count already differs
-        // from the header will never become a valid table — the main parser
-        // treats it as plain text — so release it instead of holding the run for
-        // the rest of the stream. A still-forming separator (no closing `|`) can
-        // still gain columns, so keep holding it.
+          tableSeparatorRegex.test(lineAfterHeader) ||
+          (separatorIsTrailing && looksLikeSeparatorPrefix);
+        // A COMPLETE separator whose column count already differs from the header
+        // will never become a valid table — the main parser treats it as plain
+        // text — so release it instead of holding the run for the rest of the
+        // stream. The catch: a separator is typed one group at a time and, BETWEEN
+        // groups, momentarily ends with `|` at an intermediate count
+        // (`| --- | --- |` on the way to seven columns). "Ends with `|`" alone
+        // therefore does NOT mean "complete" while it is still streaming. A
+        // streaming separator only ever GAINS columns, so treat it as a final
+        // mismatch only when it can no longer become valid: it OVERSHOT the
+        // header's column count, or a further line has already committed it (it is
+        // not the trailing line, so it will not grow). While it is the trailing
+        // line and still short of the header, keep holding — releasing there makes
+        // the header flash as raw `| … |` text on every closed-group frame.
         if (
           couldStillBeTable &&
           lineAfterHeader !== undefined &&
@@ -299,7 +350,12 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
           const sepCols = splitMarkdownTableRow(lineAfterHeader).filter(
             (c) => c.length > 0,
           ).length;
-          if (sepCols !== headerCells) couldStillBeTable = false;
+          if (
+            sepCols !== headerCells &&
+            (sepCols > headerCells || !separatorIsTrailing)
+          ) {
+            couldStillBeTable = false;
+          }
         }
         if (!hasMatchingSeparator && couldStillBeTable) {
           lines = lines.slice(0, start);
@@ -325,6 +381,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   let codeBlockIndex = 0;
   let currentCodeBlockIndex = 0;
   let currentCodeBlockLangIndex = 0;
+  // Gutter start line for the current block: >1 when it continues a block that
+  // streaming split across commits (see splitFencedMarkdown).
+  let currentCodeBlockStartLine = 1;
   const codeBlockLanguageCounts = new Map<string, number>(
     sourceCopyIndexOffsets?.codeBlockLanguageCounts,
   );
@@ -368,6 +427,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             isPending={isPending}
             availableTerminalHeight={availableTerminalHeight}
             contentWidth={contentWidth}
+            startLineNumber={currentCodeBlockStartLine}
           />,
         );
         inCodeBlock = false;
@@ -418,7 +478,9 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       codeBlockIndex += 1;
       currentCodeBlockIndex = codeBlockIndex;
       codeBlockFence = codeFenceMatch[1];
-      codeBlockLang = codeFenceMatch[2]?.trim().split(/\s+/)[0] || null;
+      const fenceInfo = parseCodeFenceInfo(codeFenceMatch[2]);
+      codeBlockLang = fenceInfo.lang;
+      currentCodeBlockStartLine = fenceInfo.startLine;
       if (codeBlockLang) {
         const normalizedLang = codeBlockLang.toLowerCase();
         const nextLangIndex =
@@ -679,6 +741,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         isPending={isPending}
         availableTerminalHeight={availableTerminalHeight}
         contentWidth={contentWidth}
+        startLineNumber={currentCodeBlockStartLine}
       />,
     );
   }
@@ -739,6 +802,23 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // "... generating more ..." cue — incremental scrollback commit (PR #6170)
   // already streams content to <Static> in real-time, so clipped content is
   // not "delayed output" but rather "still streaming".
+  //
+  // For non-streaming callers that opted in via `enforceHeightBudget` (currently
+  // the `exit_plan_mode` confirmation dialog), the tail is NOT still on its way
+  // — the rest of the plan simply won't render. Show a dim, single-line cue so
+  // the approver knows content was cut and cannot be tricked into approving a
+  // plan whose dangerous steps sit past the budget. See #6867.
+  if (showTruncationCue) {
+    contentBlocks.push(
+      <Text
+        key={`truncation-cue-${contentBlocks.length}`}
+        color={theme.text.secondary}
+        wrap="truncate-end"
+      >
+        {`... ${droppedSourceLines} more line${droppedSourceLines === 1 ? '' : 's'} not shown (viewport too small) ...`}
+      </Text>,
+    );
+  }
   return <>{contentBlocks}</>;
 };
 
@@ -752,6 +832,9 @@ interface RenderCodeBlockProps {
   isPending: boolean;
   availableTerminalHeight?: number;
   contentWidth: number;
+  /** Gutter number for the first line; >1 when the block continues a block
+   * that streaming split across commits (see splitFencedMarkdown). */
+  startLineNumber?: number;
 }
 
 const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
@@ -762,6 +845,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
   isPending,
   availableTerminalHeight,
   contentWidth,
+  startLineNumber = 1,
 }) => {
   const settings = useSettings();
   const { renderMode } = useRenderMode();
@@ -820,8 +904,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
         lang,
         availableTerminalHeight,
         contentWidth - CODE_BLOCK_PREFIX_PADDING,
-        undefined,
-        settings,
+        { settings, startLineNumber },
       );
       return (
         <Box paddingLeft={CODE_BLOCK_PREFIX_PADDING} flexDirection="column">
@@ -836,8 +919,7 @@ const RenderCodeBlockInternal: React.FC<RenderCodeBlockProps> = ({
     lang,
     availableTerminalHeight,
     contentWidth - CODE_BLOCK_PREFIX_PADDING,
-    undefined,
-    settings,
+    { settings, startLineNumber },
   );
 
   return (

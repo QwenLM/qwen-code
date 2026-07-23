@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/acp-bridge",
-  "version": "0.19.7",
+  "version": "0.20.1",
   "description": "Shared ACP bridge core (createHttpAcpBridge factory, BridgeClient, defaultSpawnChannelFactory, BridgeFileSystem injection seam) + primitives (EventBus, AcpChannel, in-memory channel, PermissionMediator interface) used by qwen serve, channels, IDE, TUI, and remote-control adapters.",
   "repository": {
     "type": "git",
@@ -59,6 +59,10 @@
       "types": "./dist/bridgeOptions.d.ts",
       "import": "./dist/bridgeOptions.js"
     },
+    "./replayWindowLimits": {
+      "types": "./dist/replayWindowLimits.d.ts",
+      "import": "./dist/replayWindowLimits.js"
+    },
     "./spawnChannel": {
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
@@ -87,6 +91,10 @@
       "types": "./dist/mcpTimeouts.d.ts",
       "import": "./dist/mcpTimeouts.js"
     },
+    "./channelControlTimeouts": {
+      "types": "./dist/channel-control-timeouts.d.ts",
+      "import": "./dist/channel-control-timeouts.js"
+    },
     "./internal/testUtils": {
       "types": "./dist/internal/testUtils.d.ts",
       "import": "./dist/internal/testUtils.js"
@@ -94,6 +102,10 @@
     "./compactionEngine": {
       "types": "./dist/compactionEngine.d.ts",
       "import": "./dist/compactionEngine.js"
+    },
+    "./transcriptReplay": {
+      "types": "./dist/transcript-replay.d.ts",
+      "import": "./dist/transcript-replay.js"
     },
     "./package.json": "./package.json"
   },

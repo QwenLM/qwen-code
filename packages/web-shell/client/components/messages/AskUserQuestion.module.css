@@ -33,7 +33,6 @@
   gap: 6px;
   min-height: 22px;
   margin-bottom: 16px;
-  padding-right: 72px;
 }
 
 .icon {
@@ -52,15 +51,57 @@
 }
 
 .tabs {
-  position: absolute;
-  top: 16px;
-  right: 16px;
   display: flex;
   gap: 4px;
   margin: 0;
   border-bottom: 0;
   padding: 0;
   flex-wrap: nowrap;
+  align-items: center;
+}
+
+.topRight {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.collapseButton {
+  display: flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.collapseButton:hover {
+  color: var(--foreground);
+}
+
+.collapseIcon {
+  width: 14px;
+  height: 14px;
+  transition: transform 0.2s ease;
+}
+
+.collapseIconCollapsed {
+  transform: rotate(-90deg);
+}
+
+.collapsed {
+  padding: 10px 16px;
+}
+
+.collapsed .titleLine {
+  margin-bottom: 0;
 }
 
 .tab {
@@ -72,7 +113,6 @@
   border-radius: 999px;
   background: var(--secondary);
   color: transparent;
-  cursor: pointer;
 }
 
 .tabActive {
@@ -94,7 +134,6 @@
 
 .text {
   margin: 0;
-  padding-right: 72px;
   color: var(--foreground);
   font-size: 14px;
   font-weight: 500;
@@ -127,14 +166,29 @@
   display: flex;
   align-items: flex-start;
   gap: 10px;
+  width: 100%;
   min-height: 36px;
   padding: 7px 12px;
+  border: 0;
   border-radius: 12px;
+  background: transparent;
   color: var(--foreground);
   cursor: pointer;
+  font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   font-weight: 500;
   line-height: 22px;
+  text-align: left;
+  appearance: none;
+}
+
+.option:hover {
+  background: var(--accent);
+}
+
+.option:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: -2px;
 }
 
 .optionActive,
@@ -240,6 +294,30 @@
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   outline: none;
+}
+
+/* The "Other" row's clickable label when not editing — a real <button> so it's
+   keyboard-reachable, styled to read like the option label it replaces. */
+.customTrigger {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 22px;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+
+.customTrigger:focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 2px;
 }
 
 .customInput:focus {

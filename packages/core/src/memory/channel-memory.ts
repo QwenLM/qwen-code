@@ -1,14 +1,26 @@
 /**
  * @license
- * Copyright 2025 Google LLC
+ * Copyright 2026 Qwen Team
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import lockfile from 'proper-lockfile';
 import { Storage } from '../config/storage.js';
+import {
+  createChannelMemoryEntry,
+  MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST,
+  normalizeChannelMemoryText,
+  parseChannelMemoryDocument,
+  parseLegacyChannelMemory,
+  renderChannelMemoryRecall,
+  serializeChannelMemoryDocument,
+  type ChannelMemoryDocument,
+  type ChannelMemoryEntry,
+} from './channel-memory-document.js';
+import { scanForSecrets } from './secret-scanner.js';
 
 export interface ChannelMemoryTarget {
   channelName: string;
@@ -16,14 +28,31 @@ export interface ChannelMemoryTarget {
   threadId?: string;
 }
 
-export interface ChannelMemoryWriteResult {
+export interface ChannelMemoryMutationResult {
   changed: boolean;
   filePath: string;
 }
 
-export const CHANNEL_MEMORY_FILE_NAME = 'CHANNEL.md';
+export interface AddChannelMemoryResult extends ChannelMemoryMutationResult {
+  added: ChannelMemoryEntry[];
+  duplicateIds: string[];
+}
+
+export interface UpdateChannelMemoryResult extends ChannelMemoryMutationResult {
+  entry?: ChannelMemoryEntry;
+}
+
+export interface RemoveChannelMemoryResult extends ChannelMemoryMutationResult {
+  removed: ChannelMemoryEntry[];
+}
+
+export type ChannelMemoryWriteResult = ChannelMemoryMutationResult;
+
+export const CHANNEL_MEMORY_FILE_NAME = 'CHANNEL.json';
+export const LEGACY_CHANNEL_MEMORY_FILE_NAME = 'CHANNEL.md';
 export const MAX_CHANNEL_MEMORY_BYTES = 1024 * 1024;
-const pendingAppends = new Map<string, Promise<void>>();
+
+const pendingMutations = new Map<string, Promise<void>>();
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   retries: {
@@ -36,8 +65,28 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
   stale: 5000,
 };
 
+interface LoadedChannelMemory {
+  document: ChannelMemoryDocument;
+  legacyBytes?: Buffer;
+  legacyHasEntries: boolean;
+}
+
+interface Mutation<T> {
+  changed: boolean;
+  result: T;
+}
+
 function isMissingFile(error: unknown): boolean {
   return (error as NodeJS.ErrnoException).code === 'ENOENT';
+}
+
+function assertNoChannelMemorySecrets(
+  content: string | readonly string[],
+): void {
+  const texts = typeof content === 'string' ? [content] : content;
+  if (texts.some((text) => scanForSecrets(text).length > 0)) {
+    throw new Error('Channel memory cannot store detected credentials');
+  }
 }
 
 async function releaseLock(release: () => Promise<void>): Promise<void> {
@@ -45,6 +94,24 @@ async function releaseLock(release: () => Promise<void>): Promise<void> {
     await release();
   } catch {
     // The write/delete already completed; stale-lock cleanup is non-fatal.
+  }
+}
+
+async function cleanupLegacyAfterCommit(
+  legacyPath: string,
+  expectedBytes: Buffer,
+): Promise<void> {
+  try {
+    const currentBytes = await fs.readFile(legacyPath);
+    if (
+      legacyHash(currentBytes) !== legacyHash(expectedBytes) ||
+      !currentBytes.equals(expectedBytes)
+    ) {
+      return;
+    }
+    await fs.unlink(legacyPath);
+  } catch {
+    // Canonical data is committed; a matching legacy file is safe to retry.
   }
 }
 
@@ -66,152 +133,417 @@ function hashedThreadPath(target: ChannelMemoryTarget): string {
     .slice(0, 32);
 }
 
-export function getChannelMemoryFilePath(target: ChannelMemoryTarget): string {
+function getChannelMemoryDirectory(target: ChannelMemoryTarget): string {
   return path.join(
     Storage.getGlobalQwenDir(),
     'channels',
     'memory',
     safeChannelName(target.channelName),
     hashedThreadPath(target),
-    CHANNEL_MEMORY_FILE_NAME,
   );
 }
 
-async function serializeAppend<T>(
-  filePath: string,
+export function getChannelMemoryFilePath(target: ChannelMemoryTarget): string {
+  return path.join(getChannelMemoryDirectory(target), CHANNEL_MEMORY_FILE_NAME);
+}
+
+export function getLegacyChannelMemoryFilePath(
+  target: ChannelMemoryTarget,
+): string {
+  return path.join(
+    getChannelMemoryDirectory(target),
+    LEGACY_CHANNEL_MEMORY_FILE_NAME,
+  );
+}
+
+async function serializeMutation<T>(
+  directory: string,
   task: () => Promise<T>,
 ): Promise<T> {
-  const previous = pendingAppends.get(filePath) ?? Promise.resolve();
-  let release: () => void = () => {};
+  const previous = pendingMutations.get(directory) ?? Promise.resolve();
+  let resolveCurrent: () => void = () => {};
   const current = new Promise<void>((resolve) => {
-    release = resolve;
+    resolveCurrent = resolve;
   });
   const queued = previous.then(
     () => current,
     () => current,
   );
-  pendingAppends.set(filePath, queued);
+  pendingMutations.set(directory, queued);
 
   await previous.catch(() => {});
   try {
     return await task();
   } finally {
-    release();
-    if (pendingAppends.get(filePath) === queued) {
-      pendingAppends.delete(filePath);
+    resolveCurrent();
+    if (pendingMutations.get(directory) === queued) {
+      pendingMutations.delete(directory);
     }
   }
+}
+
+async function readFileIfExists(filePath: string): Promise<Buffer | undefined> {
+  try {
+    return await fs.readFile(filePath);
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function legacyHash(legacyBytes: Buffer): string {
+  return createHash('sha256').update(legacyBytes).digest('hex');
+}
+
+async function lockLegacyIfExists(
+  legacyPath: string,
+): Promise<(() => Promise<void>) | undefined> {
+  try {
+    return await lockfile.lock(legacyPath, LOCK_OPTIONS);
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return undefined;
+    }
+    throw error;
+  }
+}
+
+function verifyDualFileState(
+  document: ChannelMemoryDocument,
+  legacyBytes: Buffer | undefined,
+): void {
+  if (
+    legacyBytes !== undefined &&
+    document.migration?.legacySha256 !== legacyHash(legacyBytes)
+  ) {
+    throw new Error('Channel memory migration conflict');
+  }
+}
+
+async function loadChannelMemory(
+  target: ChannelMemoryTarget,
+): Promise<LoadedChannelMemory> {
+  const filePath = getChannelMemoryFilePath(target);
+  const [initialJsonBytes, legacyBytes] = await Promise.all([
+    readFileIfExists(filePath),
+    readFileIfExists(getLegacyChannelMemoryFilePath(target)),
+  ]);
+  const jsonBytes =
+    initialJsonBytes ??
+    (legacyBytes === undefined ? await readFileIfExists(filePath) : undefined);
+
+  if (jsonBytes !== undefined) {
+    if (jsonBytes.length > MAX_CHANNEL_MEMORY_BYTES) {
+      throw new Error('Channel memory exceeds maximum size');
+    }
+    const document = parseChannelMemoryDocument(
+      new TextDecoder('utf-8', { fatal: true }).decode(jsonBytes),
+    );
+    verifyDualFileState(document, legacyBytes);
+    return {
+      document,
+      legacyBytes,
+      legacyHasEntries:
+        legacyBytes !== undefined &&
+        parseLegacyChannelMemory(legacyBytes).entries.length > 0,
+    };
+  }
+
+  if (legacyBytes !== undefined) {
+    const document = parseLegacyChannelMemory(legacyBytes);
+    return {
+      document,
+      legacyBytes,
+      legacyHasEntries: document.entries.length > 0,
+    };
+  }
+
+  return { document: { version: 1, entries: [] }, legacyHasEntries: false };
+}
+
+async function writeChannelMemory(
+  filePath: string,
+  serialized: string,
+): Promise<void> {
+  const tempPath = `${filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`;
+  let committed = false;
+  try {
+    const handle = await fs.open(tempPath, 'wx', 0o600);
+    try {
+      await handle.writeFile(serialized, 'utf8');
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await fs.rename(tempPath, filePath);
+    committed = true;
+  } finally {
+    if (!committed) {
+      await fs.unlink(tempPath).catch((error: unknown) => {
+        if (!isMissingFile(error)) {
+          throw error;
+        }
+      });
+    }
+  }
+}
+
+async function mutateChannelMemory<T>(
+  target: ChannelMemoryTarget,
+  apply: (
+    document: ChannelMemoryDocument,
+    sourceHasEntries: boolean,
+  ) => Mutation<T>,
+): Promise<T> {
+  const filePath = getChannelMemoryFilePath(target);
+  const directory = path.dirname(filePath);
+  const legacyPath = getLegacyChannelMemoryFilePath(target);
+
+  return serializeMutation(directory, async () => {
+    await fs.mkdir(directory, { recursive: true });
+    const lockPath = path.join(directory, '.channel-memory.lock');
+    const lockHandle = await fs.open(lockPath, 'a', 0o600);
+    await lockHandle.close();
+    const release = await lockfile.lock(lockPath, LOCK_OPTIONS);
+    let releaseLegacy: (() => Promise<void>) | undefined;
+    try {
+      releaseLegacy = await lockLegacyIfExists(legacyPath);
+      const loaded = await loadChannelMemory(target);
+      const mutation = apply(
+        loaded.document,
+        loaded.document.entries.length > 0 || loaded.legacyHasEntries,
+      );
+      if (!mutation.changed) {
+        return mutation.result;
+      }
+
+      const serialized = serializeChannelMemoryDocument(loaded.document);
+      if (Buffer.byteLength(serialized, 'utf8') > MAX_CHANNEL_MEMORY_BYTES) {
+        throw new Error('Channel memory exceeds maximum size');
+      }
+      await writeChannelMemory(filePath, serialized);
+      if (loaded.legacyBytes !== undefined) {
+        await cleanupLegacyAfterCommit(legacyPath, loaded.legacyBytes);
+      }
+      return mutation.result;
+    } finally {
+      if (releaseLegacy !== undefined) {
+        await releaseLock(releaseLegacy);
+      }
+      await releaseLock(release);
+    }
+  });
+}
+
+export async function listChannelMemoryEntries(
+  target: ChannelMemoryTarget,
+): Promise<ChannelMemoryEntry[]> {
+  const { document } = await loadChannelMemory(target);
+  return document.entries;
+}
+
+async function getFileRevision(filePath: string): Promise<string> {
+  try {
+    const stats = await fs.stat(filePath, { bigint: true });
+    return [
+      stats.dev,
+      stats.ino,
+      stats.size,
+      stats.mtimeNs,
+      stats.ctimeNs,
+    ].join(':');
+  } catch (error) {
+    if (isMissingFile(error)) {
+      return 'missing';
+    }
+    throw error;
+  }
+}
+
+export async function getChannelMemoryRevision(
+  target: ChannelMemoryTarget,
+): Promise<string> {
+  const [canonical, legacy] = await Promise.all([
+    getFileRevision(getChannelMemoryFilePath(target)),
+    getFileRevision(getLegacyChannelMemoryFilePath(target)),
+  ]);
+  return createHash('sha256')
+    .update(canonical)
+    .update('\0')
+    .update(legacy)
+    .digest('hex');
+}
+
+export async function addChannelMemoryEntries(
+  target: ChannelMemoryTarget,
+  texts: readonly string[],
+  createdBy?: string,
+): Promise<AddChannelMemoryResult> {
+  const textSnapshot = Array.from(texts);
+  if (textSnapshot.length > MAX_CHANNEL_MEMORY_ENTRIES_PER_REQUEST) {
+    throw new Error('Channel memory accepts at most 10 entries per request');
+  }
+  assertNoChannelMemorySecrets(textSnapshot);
+
+  const filePath = getChannelMemoryFilePath(target);
+  return mutateChannelMemory<AddChannelMemoryResult>(target, (document) => {
+    const entriesByNormalizedText = new Map(
+      document.entries.map((entry) => [
+        normalizeChannelMemoryText(entry.text),
+        entry,
+      ]),
+    );
+    const ids = new Set(document.entries.map((entry) => entry.id));
+    const added: ChannelMemoryEntry[] = [];
+    const duplicateIds: string[] = [];
+
+    for (const text of textSnapshot) {
+      const normalizedText = normalizeChannelMemoryText(text);
+      if (!normalizedText) {
+        continue;
+      }
+      const duplicate = entriesByNormalizedText.get(normalizedText);
+      if (duplicate !== undefined) {
+        duplicateIds.push(duplicate.id);
+        continue;
+      }
+
+      let randomHex: string;
+      do {
+        randomHex = randomBytes(6).toString('hex');
+      } while (ids.has(`m-${randomHex}`));
+      const entry = createChannelMemoryEntry({
+        text,
+        createdBy,
+        now: new Date().toISOString(),
+        randomHex,
+      });
+      ids.add(entry.id);
+      entriesByNormalizedText.set(normalizedText, entry);
+      document.entries.push(entry);
+      added.push(entry);
+    }
+
+    return {
+      changed: added.length > 0,
+      result: {
+        changed: added.length > 0,
+        filePath,
+        added,
+        duplicateIds,
+      },
+    };
+  });
+}
+
+export async function updateChannelMemoryEntry(
+  target: ChannelMemoryTarget,
+  mutation: { id: string; text: string; expectedText?: string },
+): Promise<UpdateChannelMemoryResult> {
+  const id = mutation.id;
+  const text = mutation.text;
+  const expectedText = mutation.expectedText;
+  assertNoChannelMemorySecrets(text);
+  const filePath = getChannelMemoryFilePath(target);
+  return mutateChannelMemory<UpdateChannelMemoryResult>(target, (document) => {
+    const entry = document.entries.find((candidate) => candidate.id === id);
+    if (entry === undefined) {
+      if (expectedText !== undefined) {
+        throw new Error('Channel memory entry changed');
+      }
+      return { changed: false, result: { changed: false, filePath } };
+    }
+    if (expectedText !== undefined && entry.text !== expectedText) {
+      throw new Error('Channel memory entry changed');
+    }
+
+    const replacement = createChannelMemoryEntry({
+      text,
+      now: new Date().toISOString(),
+      randomHex: '000000000000',
+    });
+    if (
+      document.entries.some(
+        (candidate) =>
+          candidate.id !== entry.id &&
+          normalizeChannelMemoryText(candidate.text) ===
+            normalizeChannelMemoryText(replacement.text),
+      )
+    ) {
+      throw new Error('Channel memory entry already exists');
+    }
+    entry.text = replacement.text;
+    entry.updatedAt = replacement.updatedAt;
+    return {
+      changed: true,
+      result: { changed: true, filePath, entry: { ...entry } },
+    };
+  });
+}
+
+export async function removeChannelMemoryEntries(
+  target: ChannelMemoryTarget,
+  mutation: {
+    ids: readonly string[];
+    expectedTextById?: Readonly<Record<string, string>>;
+  },
+): Promise<RemoveChannelMemoryResult> {
+  const filePath = getChannelMemoryFilePath(target);
+  return mutateChannelMemory<RemoveChannelMemoryResult>(target, (document) => {
+    const requestedIds = new Set(mutation.ids);
+    const entriesById = new Map(
+      document.entries.map((entry) => [entry.id, entry]),
+    );
+    for (const id of requestedIds) {
+      const expectedText = mutation.expectedTextById?.[id];
+      if (
+        expectedText !== undefined &&
+        entriesById.get(id)?.text !== expectedText
+      ) {
+        throw new Error('Channel memory entry changed');
+      }
+    }
+    const removed = document.entries.filter((entry) =>
+      requestedIds.has(entry.id),
+    );
+    if (removed.length === 0) {
+      return { changed: false, result: { changed: false, filePath, removed } };
+    }
+    document.entries = document.entries.filter(
+      (entry) => !requestedIds.has(entry.id),
+    );
+    return { changed: true, result: { changed: true, filePath, removed } };
+  });
 }
 
 export async function readChannelMemory(
   target: ChannelMemoryTarget,
 ): Promise<string> {
-  const filePath = getChannelMemoryFilePath(target);
-  return serializeAppend(filePath, async () => {
-    let size: number;
-    try {
-      size = (await fs.stat(filePath)).size;
-    } catch (error) {
-      if (isMissingFile(error)) {
-        return '';
-      }
-      throw error;
-    }
-    if (size > MAX_CHANNEL_MEMORY_BYTES) {
-      process.stderr.write(
-        `[channel-memory] ${filePath} is ${size} bytes, exceeding ${MAX_CHANNEL_MEMORY_BYTES}; treating as empty\n`,
-      );
-      return '';
-    }
-    try {
-      return await fs.readFile(filePath, 'utf8');
-    } catch (error) {
-      if (isMissingFile(error)) {
-        return '';
-      }
-      throw error;
-    }
-  });
+  return renderChannelMemoryRecall(await listChannelMemoryEntries(target));
 }
 
 export async function appendChannelMemory(
   target: ChannelMemoryTarget,
   text: string,
-): Promise<ChannelMemoryWriteResult> {
-  const filePath = getChannelMemoryFilePath(target);
-  const entry = text.trim();
-  if (!entry) {
-    return { changed: false, filePath };
-  }
-
-  return serializeAppend(filePath, async () => {
-    const appendBytes = Buffer.byteLength(`${entry}\n`, 'utf8');
-    await fs.mkdir(path.dirname(filePath), { recursive: true });
-    // proper-lockfile requires the target file to exist before locking it.
-    const initialHandle = await fs.open(filePath, 'a+');
-    await initialHandle.close();
-    let release: () => Promise<void>;
-    try {
-      release = await lockfile.lock(filePath, LOCK_OPTIONS);
-    } catch (error) {
-      if (!isMissingFile(error)) {
-        throw error;
-      }
-      const retryHandle = await fs.open(filePath, 'a+');
-      await retryHandle.close();
-      release = await lockfile.lock(filePath, LOCK_OPTIONS);
-    }
-    try {
-      const handle = await fs.open(filePath, 'a+');
-      try {
-        const existingSize = (await handle.stat()).size;
-        if (existingSize + appendBytes > MAX_CHANNEL_MEMORY_BYTES) {
-          throw new Error('Channel memory exceeds maximum size');
-        }
-        await handle.appendFile(`${entry}\n`, 'utf8');
-      } finally {
-        await handle.close();
-      }
-    } finally {
-      await releaseLock(release);
-    }
-    return { changed: true, filePath };
-  });
+): Promise<ChannelMemoryMutationResult> {
+  const { changed, filePath } = await addChannelMemoryEntries(target, [text]);
+  return { changed, filePath };
 }
 
 export async function clearChannelMemory(
   target: ChannelMemoryTarget,
-): Promise<ChannelMemoryWriteResult> {
+): Promise<ChannelMemoryMutationResult> {
   const filePath = getChannelMemoryFilePath(target);
-  return serializeAppend(filePath, async () => {
-    try {
-      await fs.access(filePath);
-    } catch (error) {
-      if (isMissingFile(error)) {
-        return { changed: false, filePath };
+  return mutateChannelMemory<ChannelMemoryMutationResult>(
+    target,
+    (document, sourceHasEntries) => {
+      if (!sourceHasEntries) {
+        return { changed: false, result: { changed: false, filePath } };
       }
-      throw error;
-    }
-
-    let release: () => Promise<void>;
-    try {
-      release = await lockfile.lock(filePath, LOCK_OPTIONS);
-    } catch (error) {
-      if (isMissingFile(error)) {
-        return { changed: false, filePath };
-      }
-      throw error;
-    }
-    try {
-      await fs.unlink(filePath);
-      return { changed: true, filePath };
-    } catch (error) {
-      if (isMissingFile(error)) {
-        return { changed: false, filePath };
-      }
-      throw error;
-    } finally {
-      await releaseLock(release);
-    }
-  });
+      document.entries = [];
+      return { changed: true, result: { changed: true, filePath } };
+    },
+  );
 }

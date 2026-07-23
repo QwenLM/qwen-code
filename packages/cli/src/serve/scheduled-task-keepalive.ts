@@ -36,6 +36,7 @@ import {
   getCronFilePath,
   createDebugLogger,
   SessionService,
+  taskHasLegacyCondition,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
 import { scheduledTaskSessionName } from './routes/scheduled-tasks.js';
@@ -54,6 +55,7 @@ function collectBoundSessionIds(tasks: readonly DurableCronTask[]): string[] {
     const sessionId = task.sessionId;
     if (
       task.enabled === false || // disabled (e.g. archived) — let it be reaped
+      taskHasLegacyCondition(task) || // legacy guarded — can never fire, don't pin
       typeof sessionId !== 'string' ||
       sessionId.length === 0 ||
       seen.has(sessionId)
@@ -78,10 +80,14 @@ export interface KeepaliveBridge {
     sessionId: string;
     workspaceCwd: string;
     historyReplay?: 'stream' | 'response';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<unknown>;
   spawnOrAttach(req: {
     workspaceCwd: string;
     sessionScope?: 'single' | 'thread';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<{ sessionId: string }>;
   closeSession(sessionId: string): Promise<unknown>;
   updateSessionMetadata(
@@ -122,10 +128,18 @@ async function bindAndNameSessions(
   binding: Set<string>,
 ): Promise<void> {
   const unbound = tasks.filter(
-    (t) => !t.sessionId && t.enabled !== false && !binding.has(t.id),
+    (t) =>
+      !t.sessionId &&
+      t.enabled !== false &&
+      !taskHasLegacyCondition(t) &&
+      !binding.has(t.id),
   );
   const needsName = tasks.filter(
-    (t) => t.sessionId && t.enabled !== false && !renamed.has(t.sessionId),
+    (t) =>
+      t.sessionId &&
+      t.enabled !== false &&
+      !taskHasLegacyCondition(t) &&
+      !renamed.has(t.sessionId),
   );
 
   for (const task of unbound) {
@@ -135,6 +149,8 @@ async function bindAndNameSessions(
       const rawSpawn = bridge.spawnOrAttach({
         workspaceCwd: boundWorkspace,
         sessionScope: 'thread',
+        sourceType: 'scheduled_task',
+        sourceId: task.id,
       });
       // spawnOrAttach is not abortable — if the timeout fires first, the
       // raw promise may still resolve later with a live session. Attach a
@@ -306,12 +322,16 @@ export function startScheduledTaskKeepalive(
           continue; // still backing off from prior revive failures
         }
         log.debug('keepalive: recordHeartbeat failed for', sessionId, err);
+        reviving.add(sessionId);
+        const metadata = await new SessionService(
+          boundWorkspace,
+        ).readCreationMetadata(sessionId);
         const load = bridge.loadSession({
           sessionId,
           workspaceCwd: boundWorkspace,
           historyReplay: 'response',
+          ...metadata,
         });
-        reviving.add(sessionId);
         // Clear the in-flight guard on the load's TRUE settlement (not the
         // timeout below) so a still-running load keeps blocking a duplicate.
         void load
@@ -434,6 +454,8 @@ export interface RehydrateBridge {
     sessionId: string;
     workspaceCwd: string;
     historyReplay?: 'stream' | 'response';
+    sourceType?: string;
+    sourceId?: string;
   }): Promise<unknown>;
 }
 
@@ -483,10 +505,14 @@ export async function rehydrateScheduledTaskSessions(deps: {
   const loaded: string[] = [];
   const failed: string[] = [];
   const loadOne = async (sessionId: string) => {
+    const metadata = await new SessionService(
+      boundWorkspace,
+    ).readCreationMetadata(sessionId);
     const load = bridge.loadSession({
       sessionId,
       workspaceCwd: boundWorkspace,
       historyReplay: 'response',
+      ...metadata,
     });
     // loadSession isn't abortable, so a timed-out load keeps forking/replaying
     // in the background. Swallow its eventual settlement up front so it can't

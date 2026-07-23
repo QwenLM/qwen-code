@@ -8,6 +8,7 @@ import type { RefObject } from 'react';
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import type { CompletionItem } from '../../types/completionItemTypes.js';
 import { shouldAllowCompletionQuery } from '../utils/slashCommandUtils.js';
+import { resolveCompletionTrigger } from '../utils/completionUtils.js';
 import { stripZeroWidthSpaces } from '@qwen-code/webui';
 
 interface CompletionTriggerState {
@@ -280,7 +281,13 @@ export function useCompletionTrigger(
         ) {
           offset += inputElement.childNodes[i].textContent?.length || 0;
         }
-        cursorPosition = offset || text.length;
+        // Preserve a legitimate offset of 0 (cursor at the container start);
+        // only fall back to text.length when the container has no children and
+        // the offset can't be computed from childNodes.
+        cursorPosition =
+          childIndex > 0 || inputElement.childNodes.length > 0
+            ? offset
+            : text.length;
       } else if (range.startContainer.nodeType === Node.TEXT_NODE) {
         // Cursor is in a text node - calculate offset from start of input
         const walker = document.createTreeWalker(
@@ -305,51 +312,20 @@ export function useCompletionTrigger(
         cursorPosition = found ? offset : text.length;
       }
 
-      // Find trigger character before cursor
-      // Use text length if cursorPosition is 0 but we have text (edge case for first character)
-      // Clamp to text.length because the DOM cursor offset may exceed the
-      // stripped text length (e.g. after removing a leading zero-width space).
-      const effectiveCursorPosition = Math.min(
-        cursorPosition === 0 && text.length > 0 ? text.length : cursorPosition,
-        text.length,
-      );
+      // Find the trigger character before the cursor.
+      // A cursorPosition of 0 is a valid position (cursor at the very start),
+      // so it must not be rewritten to text.length. We still clamp to
+      // text.length because the DOM cursor offset may exceed the stripped text
+      // length (e.g. after removing a leading zero-width space).
+      const clampedCursorPosition = Math.min(cursorPosition, text.length);
 
-      const textBeforeCursor = text.substring(0, effectiveCursorPosition);
-      const lastAtMatch = textBeforeCursor.lastIndexOf('@');
-      const lastSlashMatch = textBeforeCursor.lastIndexOf('/');
-
-      // Check if we're in a trigger context
-      let triggerPos = -1;
-      let triggerChar: '@' | '/' | null = null;
-
-      // Priority: @ trigger takes precedence over / trigger
-      // This allows path-like queries (e.g., "src/components/Button") in @ mentions
-      // But skip if the trigger is inside a file tag
-      if (lastAtMatch >= 0) {
-        triggerPos = lastAtMatch;
-        triggerChar = '@';
-      } else if (lastSlashMatch >= 0) {
-        triggerPos = lastSlashMatch;
-        triggerChar = '/';
-      }
-
-      // Check if trigger is at word boundary (start of line or after space)
-      if (triggerPos >= 0 && triggerChar) {
-        const charBefore = triggerPos > 0 ? text[triggerPos - 1] : ' ';
-        const isValidTrigger =
-          charBefore === ' ' || charBefore === '\n' || triggerPos === 0;
-
-        if (isValidTrigger) {
-          const query = text.substring(triggerPos + 1, effectiveCursorPosition);
-
-          if (shouldAllowCompletionQuery(triggerChar, query)) {
-            // Get precise cursor position for menu
-            const cursorPos = getCursorPosition();
-            if (cursorPos) {
-              await openCompletion(triggerChar, query, cursorPos);
-              return;
-            }
-          }
+      const trigger = resolveCompletionTrigger(text, clampedCursorPosition);
+      if (trigger && shouldAllowCompletionQuery(trigger.char, trigger.query)) {
+        // Get precise cursor position for menu
+        const cursorPos = getCursorPosition();
+        if (cursorPos) {
+          await openCompletion(trigger.char, trigger.query, cursorPos);
+          return;
         }
       }
 

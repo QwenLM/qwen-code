@@ -22,16 +22,26 @@ impl Request {
     }
 
     pub fn tool_call(&self) -> anyhow::Result<ToolCall> {
+        self.tool_call_with_filter(crate::model_payload::is_enabled())
+    }
+
+    fn tool_call_with_filter(&self, filter_enabled: bool) -> anyhow::Result<ToolCall> {
         let params = self.params.as_ref().ok_or_else(|| anyhow::anyhow!("missing params"))?;
         let name = params
             .get("name")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("missing tool name"))?
             .to_owned();
-        let args = params
+        let mut args = params
             .get("arguments")
             .cloned()
             .unwrap_or(Value::Object(Default::default()));
+        let name = if filter_enabled {
+            crate::model_payload::decode_value(&mut args).map_err(anyhow::Error::msg)?;
+            crate::model_payload::decode_text(&name).into_owned()
+        } else {
+            name
+        };
         Ok(ToolCall { name, args })
     }
 }
@@ -66,14 +76,42 @@ pub struct RpcError {
 
 impl Response {
     pub fn ok(id: Value, result: Value) -> Self {
-        Self { jsonrpc: "2.0", id, body: ResponseBody::Result { result } }
+        Self::ok_with_filter(id, result, crate::model_payload::is_enabled())
     }
 
-    pub fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
+    fn ok_with_filter(id: Value, mut result: Value, filter_enabled: bool) -> Self {
+        if filter_enabled {
+            crate::model_payload::encode_value(&mut result);
+        }
         Self {
             jsonrpc: "2.0",
             id,
-            body: ResponseBody::Error { error: RpcError { code, message: message.into() } },
+            body: ResponseBody::Result { result },
+        }
+    }
+
+    pub fn error(id: Value, code: i64, message: impl Into<String>) -> Self {
+        Self::error_with_filter(id, code, message, crate::model_payload::is_enabled())
+    }
+
+    fn error_with_filter(
+        id: Value,
+        code: i64,
+        message: impl Into<String>,
+        filter_enabled: bool,
+    ) -> Self {
+        let message = message.into();
+        let message = if filter_enabled {
+            crate::model_payload::encode_text(&message).into_owned()
+        } else {
+            message
+        };
+        Self {
+            jsonrpc: "2.0",
+            id,
+            body: ResponseBody::Error {
+                error: RpcError { code, message },
+            },
         }
     }
 
@@ -145,6 +183,118 @@ impl ToolResult {
     }
 }
 
+#[cfg(test)]
+mod model_payload_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn filter_is_disabled_by_default_on_both_wire_directions() {
+        let result = json!({
+            "content": [{ "type": "text", "text": "Open Qwen in Alibaba Cloud" }],
+            "structuredContent": { "QwenKey": "Dash Scope" }
+        });
+        let response = Response::ok_with_filter(json!(1), result.clone(), false);
+        let value = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(value["result"], result);
+
+        let response = Response::error_with_filter(json!(2), -32603, "Qwen failed", false);
+        let value = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(value["error"]["message"], "Qwen failed");
+
+        let encoded_name = crate::model_payload::encode_text("Qwen_tool").into_owned();
+        let encoded_key = crate::model_payload::encode_text("AlibabaKey").into_owned();
+        let encoded_value =
+            crate::model_payload::encode_text("/Applications/Qwen.app").into_owned();
+        let request: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {
+                "name": encoded_name,
+                "arguments": { (encoded_key.clone()): encoded_value.clone() }
+            }
+        }))
+        .expect("request");
+
+        let call = request
+            .tool_call_with_filter(false)
+            .expect("tool call");
+        assert_eq!(call.name, encoded_name);
+        assert_eq!(call.args[&encoded_key], encoded_value);
+    }
+
+    #[test]
+    fn filter_enabled_encodes_success_and_error_responses() {
+        let id = json!("Qwen-client-id");
+        let image_data = "Qwen-DashScope-Alibaba";
+        let response = Response::ok_with_filter(
+            id.clone(),
+            json!({
+                "content": [
+                    { "type": "text", "text": "Open Qwen in Alibaba Cloud" },
+                    { "type": "image", "data": image_data, "mimeType": "image/png" }
+                ],
+                "structuredContent": {
+                    "QwenKey": ["Dash Scope", "阿里"]
+                }
+            }),
+            true,
+        );
+
+        let value = serde_json::to_value(response).expect("serialize response");
+        assert_eq!(value["id"], id, "JSON-RPC ids must remain opaque");
+        assert_ne!(
+            value["result"]["content"][0]["text"],
+            "Open Qwen in Alibaba Cloud"
+        );
+        assert_eq!(value["result"]["content"][1]["data"], image_data);
+        assert!(value["result"]["structuredContent"]
+            .get("QwenKey")
+            .is_none());
+
+        let response = Response::error_with_filter(
+            json!(7),
+            -32603,
+            "Qwen daemon failed under /Applications/Alibaba Cloud",
+            true,
+        );
+        let value = serde_json::to_value(response).expect("serialize response");
+        let message = value["error"]["message"].as_str().expect("message");
+
+        assert!(!message.to_ascii_lowercase().contains("qwen"));
+        assert!(!message.to_ascii_lowercase().contains("alibaba"));
+        assert_eq!(
+            crate::model_payload::decode_text(message),
+            "Qwen daemon failed under /Applications/Alibaba Cloud"
+        );
+    }
+
+    #[test]
+    fn filter_enabled_round_trips_tool_name_argument_keys_and_values() {
+        let encoded_name = crate::model_payload::encode_text("Qwen_tool").into_owned();
+        let encoded_key = crate::model_payload::encode_text("AlibabaKey").into_owned();
+        let encoded_value =
+            crate::model_payload::encode_text("/Applications/Qwen.app").into_owned();
+        let request: Request = serde_json::from_value(json!({
+            "jsonrpc": "2.0",
+            "id": "Qwen-client-id",
+            "method": "tools/call",
+            "params": {
+                "name": encoded_name,
+                "arguments": { (encoded_key): encoded_value }
+            }
+        }))
+        .expect("request");
+
+        let call = request.tool_call_with_filter(true).expect("tool call");
+        assert_eq!(call.name, "Qwen_tool");
+        assert_eq!(call.args["AlibabaKey"], "/Applications/Qwen.app");
+        assert_eq!(request.id, Some(json!("Qwen-client-id")));
+        assert_eq!(request.method, "tools/call");
+    }
+}
+
 // ── Initialize result ─────────────────────────────────────────────────────────
 
 pub fn initialize_result() -> Value {
@@ -203,6 +353,12 @@ fn agent_instructions() -> String {
 
     let (coord_term, coord_note) = coordinate_terms(crate::coord_norm::default_normalized());
 
+    let click_hint = if crate::coord_norm::default_normalized() {
+        "issue a coordinate click or move_cursor first for a visibly gliding demo/recording."
+    } else {
+        "issue a pixel click or move_cursor first for a visibly gliding demo/recording."
+    };
+
     format!(
         r#"cua-driver: cross-platform background computer-use automation.
 
@@ -216,7 +372,7 @@ Workflow per turn:
 4. click/type_text/press_key using element_index from step 3 (+ your `session`)
 5. get_window_state(pid, window_id) again → verify the action landed
 
-Agent cursor: a per-SESSION overlay cursor visualises where a run is acting without moving the real pointer. It is shown only for a DECLARED session (pass `session`), is color-coded by the session id, and is removed by end_session or the idle-TTL. The same id over MCP, the CLI, or the raw socket drives the same cursor. set_agent_cursor_* tools hide/show/customise it. Note: a pure accessibility-action (element_index) click snaps the cursor with a brief pulse on its first action rather than a long glide, so it can be easy to miss — issue a pixel click or move_cursor first for a visibly gliding demo/recording.
+Agent cursor: a per-SESSION overlay cursor visualises where a run is acting without moving the real pointer. It is shown only for a DECLARED session (pass `session`), is color-coded by the session id, and is removed by end_session or the idle-TTL. The same id over MCP, the CLI, or the raw socket drives the same cursor. set_agent_cursor_* tools hide/show/customise it. Note: a pure accessibility-action (element_index) click snaps the cursor with a brief pulse on its first action rather than a long glide, so it can be easy to miss — {click_hint}
 
 If a `cua-driver` skill is loaded in your harness (Claude Code / Codex / OpenClaw / OpenCode dirs), prefer its detailed workflow — SKILL.md plus {platform_skill_pointer}. Install with `cua-driver skills install` if not yet present."#
     )

@@ -199,6 +199,7 @@ export class AcpHttpTransport implements DaemonTransport {
 
   readonly type = 'acp-http' as const;
   readonly supportsReplay = true;
+  readonly restFetch: typeof globalThis.fetch;
 
   constructor(
     baseUrl: string,
@@ -208,6 +209,7 @@ export class AcpHttpTransport implements DaemonTransport {
     this.baseUrl = baseUrl;
     this.token = token;
     this._fetch = fetchFn;
+    this.restFetch = fetchFn;
   }
 
   get connected(): boolean {
@@ -387,6 +389,13 @@ export class AcpHttpTransport implements DaemonTransport {
     headers['Acp-Session-Id'] = sessionId;
     if (opts.lastEventId !== undefined) {
       headers['Last-Event-ID'] = String(opts.lastEventId);
+      // Pair the resume cursor with the epoch of the bus that produced it
+      // so a restarted daemon (new epoch) forces a resync instead of
+      // resuming from a stale cursor (DAEMON-001). Meaningless without a
+      // cursor, hence nested.
+      if (opts.epoch !== undefined) {
+        headers['X-Qwen-Event-Epoch'] = opts.epoch;
+      }
     }
     // NOTE: `opts.maxQueued` does NOT apply to this transport. The REST
     // `/session/:id/events` surface accepted it as a per-subscription queue
@@ -469,6 +478,13 @@ export class AcpHttpTransport implements DaemonTransport {
 
     if (!res.body) {
       throw new Error('SSE response has no body');
+    }
+
+    // Learn the daemon's current bus epoch so the caller can pair it with
+    // its resume cursor on the next reconnect (DAEMON-001).
+    const responseEpoch = res.headers.get('x-qwen-event-epoch');
+    if (responseEpoch) {
+      opts.onEpoch?.(responseEpoch);
     }
 
     // The `/acp` session stream carries RAW JSON-RPC frames (not REST

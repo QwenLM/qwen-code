@@ -25,6 +25,8 @@ export default {
   'Shell mode': 'Shell-Modus',
   'YOLO mode': 'YOLO-Modus',
   'Auto mode': 'Auto-Modus',
+  'auto_mode.entry_notice':
+    'Auto-Modus aktiviert.\n   Ein LLM-Klassifikator bewertet jeden Tool-Aufruf — sichere Aktionen werden automatisch genehmigt,\n   riskante werden blockiert. Beenden: Shift+Tab oder /approval-mode default.',
   'plan mode': 'Planungsmodus',
   'auto-accept edits': 'Änderungen automatisch akzeptieren',
   'Accepting edits': 'Änderungen werden akzeptiert',
@@ -229,6 +231,42 @@ export default {
   'Delete {{name}}': '{{name}} löschen',
   'Unknown Step': 'Unbekannter Schritt',
   'Esc to close': 'Esc zum Schließen',
+  Transcript: 'Transkript',
+  'to close': 'zum Schließen',
+  'to scroll': 'zum Scrollen',
+  'Failed to render transcript.': 'Transkript konnte nicht gerendert werden.',
+  'Read {{count}} file': '{{count}} Datei gelesen',
+  'Read {{count}} files': '{{count}} Dateien gelesen',
+  'Reading {{count}} file': 'Lese {{count}} Datei',
+  'Reading {{count}} files': 'Lese {{count}} Dateien',
+  'Edited {{count}} file': '{{count}} Datei bearbeitet',
+  'Edited {{count}} files': '{{count}} Dateien bearbeitet',
+  'Editing {{count}} file': 'Bearbeite {{count}} Datei',
+  'Editing {{count}} files': 'Bearbeite {{count}} Dateien',
+  'Wrote {{count}} file': '{{count}} Datei geschrieben',
+  'Wrote {{count}} files': '{{count}} Dateien geschrieben',
+  'Writing {{count}} file': 'Schreibe {{count}} Datei',
+  'Writing {{count}} files': 'Schreibe {{count}} Dateien',
+  'Searched {{count}} pattern': '{{count}} Muster durchsucht',
+  'Searched {{count}} patterns': '{{count}} Muster durchsucht',
+  'Searching {{count}} pattern': 'Durchsuche {{count}} Muster',
+  'Searching {{count}} patterns': 'Durchsuche {{count}} Muster',
+  'Listed {{count}} directory': '{{count}} Verzeichnis aufgelistet',
+  'Listed {{count}} directories': '{{count}} Verzeichnisse aufgelistet',
+  'Listing {{count}} directory': 'Liste {{count}} Verzeichnis auf',
+  'Listing {{count}} directories': 'Liste {{count}} Verzeichnisse auf',
+  'Ran {{count}} command': '{{count}} Befehl ausgeführt',
+  'Ran {{count}} commands': '{{count}} Befehle ausgeführt',
+  'Running {{count}} command': 'Führe {{count}} Befehl aus',
+  'Running {{count}} commands': 'Führe {{count}} Befehle aus',
+  'Ran {{count}} agent': '{{count}} Agent ausgeführt',
+  'Ran {{count}} agents': '{{count}} Agenten ausgeführt',
+  'Running {{count}} agent': 'Führe {{count}} Agent aus',
+  'Running {{count}} agents': 'Führe {{count}} Agenten aus',
+  'Used {{count}} tool': '{{count}} Werkzeug verwendet',
+  'Used {{count}} tools': '{{count}} Werkzeuge verwendet',
+  'Using {{count}} tool': 'Verwende {{count}} Werkzeug',
+  'Using {{count}} tools': 'Verwende {{count}} Werkzeuge',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter zum Auswählen, ↑↓ zum Navigieren, Esc zum Schließen',
   'Esc to go back': 'Esc zum Zurückgehen',
@@ -411,6 +449,7 @@ export default {
   'Tool Schema Compliance': 'Tool Schema-Konformität',
   // Settings enum options
   'Auto (detect from system)': 'Automatisch (vom System erkennen)',
+  'Auto (follow user input)': 'Automatisch (Benutzereingabe folgen)',
   'Auto (detect terminal theme)': 'Automatisch (Terminal-Theme erkennen)',
   Auto: 'Automatisch',
   Text: 'Text',
@@ -548,7 +587,7 @@ export default {
   'Enables an extension.': 'Aktiviert eine Erweiterung.',
   'The name of the extension to enable.':
     'Der Name der zu aktivierenden Erweiterung.',
-  'The scope to enable the extenison in. If not set, will be enabled in all scopes.':
+  'The scope to enable the extension in. If not set, will be enabled in all scopes.':
     'Der Bereich, in dem die Erweiterung aktiviert werden soll. Wenn nicht gesetzt, wird sie in allen Bereichen aktiviert.',
   'Extension "{{name}}" successfully enabled for scope "{{scope}}".':
     'Erweiterung "{{name}}" erfolgreich für Bereich "{{scope}}" aktiviert.',
@@ -559,7 +598,7 @@ export default {
   'Disables an extension.': 'Deaktiviert eine Erweiterung.',
   'The name of the extension to disable.':
     'Der Name der zu deaktivierenden Erweiterung.',
-  'The scope to disable the extenison in.':
+  'The scope to disable the extension in.':
     'Der Bereich, in dem die Erweiterung deaktiviert werden soll.',
   'Extension "{{name}}" successfully disabled for scope "{{scope}}".':
     'Erweiterung "{{name}}" erfolgreich für Bereich "{{scope}}" deaktiviert.',
@@ -1708,8 +1747,6 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Ctrl+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Fügen Sie eine QWEN.md-Datei hinzu, um Qwen Code dauerhaften Projektkontext zu geben.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1869,11 +1906,7 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Ctrl+C zum Beenden)\n',
-  'to toggle compact mode': 'Kompaktmodus umschalten',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Ctrl+O umschalten).',
-  'Press Ctrl+O to show full tool output':
-    'Ctrl+O für vollständige Tool-Ausgabe drücken',
+  'to view transcript': 'zum Anzeigen des Transkripts',
   'Switch to plan mode or exit plan mode':
     'In den Plan-Modus wechseln oder den Plan-Modus verlassen',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
@@ -2105,4 +2138,101 @@ export default {
   in: 'ein',
   out: 'aus',
   'In/Out': 'Ein/Aus',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code-Update verfügbar! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Eine neue Version von Qwen Code ist verfügbar! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} ist aktuell!',
+  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
+    'Suche nach Updates fehlgeschlagen ({{reason}}). Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
+  'Update check skipped ({{reason}}) — run /update to retry.':
+    'Update-Prüfung übersprungen ({{reason}}) — mit /update erneut versuchen.',
+  'registry did not respond within {{seconds}}s':
+    'Registry hat nicht innerhalb von {{seconds}}s geantwortet',
+  'registry unreachable': 'Registry nicht erreichbar',
+  'registry error': 'Registry-Fehler',
+  'Unable to check for updates: {{reason}}':
+    'Updates können nicht geprüft werden: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Update erfolgreich! Die neue Version wird beim nächsten Start verwendet.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Update heruntergeladen. Es wird nach dem Beenden dieser Sitzung angewendet.',
+  'Update failed: {{error}}': 'Update fehlgeschlagen: {{error}}',
+  'Downloading update...': 'Update wird heruntergeladen...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Update erfolgreich! Bitte starten Sie Qwen Code neu, um die neue Version zu verwenden. Das Wechseln von Modellanbietern vor dem Neustart funktioniert möglicherweise nicht korrekt.',
+  'Automatic update failed. Please try updating manually.':
+    'Automatisches Update fehlgeschlagen. Bitte versuchen Sie, manuell zu aktualisieren.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Automatisches Update fehlgeschlagen: {{error}}. Führen Sie das Installationsprogramm erneut aus, um manuell zu aktualisieren.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Wird aus einem lokalen Git-Klon ausgeführt. Bitte mit "git pull" aktualisieren.',
+  'Running via npx, update not applicable.':
+    'Wird über npx ausgeführt, Update nicht anwendbar.',
+  'Running via pnpx, update not applicable.':
+    'Wird über pnpx ausgeführt, Update nicht anwendbar.',
+  'Running via bunx, update not applicable.':
+    'Wird über bunx ausgeführt, Update nicht anwendbar.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Über Homebrew installiert. Bitte mit "brew upgrade" aktualisieren.',
+  "Locally installed. Please update via your project's package.json.":
+    'Lokal installiert. Bitte über die package.json Ihres Projekts aktualisieren.',
+  'Update requires sudo. Please run:':
+    'Das Update erfordert sudo. Bitte ausführen:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Standalone-Installation erkannt. Automatisches Update wird jetzt versucht...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Standalone-Installation erkannt. Bitte führen Sie den Standalone-Installer zum Aktualisieren erneut aus:',
+  'Run the following to update:': 'Führen Sie Folgendes zum Aktualisieren aus:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Diese Standalone-Installation kann nicht automatisch aktualisiert werden. Bitte neu installieren von:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Manuelles Update erforderlich. Bitte installieren Sie Qwen Code neu.',
+  'This session uses the custom sandbox image {{image}}. Update that image and restart Qwen Code.':
+    'Diese Sitzung verwendet das benutzerdefinierte Sandbox-Image {{image}}. Aktualisieren Sie das Image und starten Sie Qwen Code neu.',
+  'Update Qwen Code on the host, then restart the sandbox.':
+    'Aktualisieren Sie Qwen Code auf dem Host und starten Sie anschließend die Sandbox neu.',
+  'The update will be installed after you exit this session.':
+    'Das Update wird nach dem Beenden dieser Sitzung installiert.',
+  'Run /update to install the update on the host.':
+    'Führen Sie /update aus, um das Update auf dem Host zu installieren.',
+  'Run /update to install the update.':
+    'Führen Sie /update aus, um das Update zu installieren.',
+
+  // ============================================================================
+  // reload-plugins command
+  // ============================================================================
+  '{{count}} extension': '{{count}} extension',
+  '{{count}} extensions': '{{count}} extensions',
+  '{{count}} command': '{{count}} command',
+  '{{count}} commands': '{{count}} commands',
+  '{{count}} skill': '{{count}} skill',
+  '{{count}} skills': '{{count}} skills',
+  '{{count}} agent': '{{count}} agent',
+  '{{count}} agents': '{{count}} agents',
+  '{{count}} hook': '{{count}} hook',
+  '{{count}} hooks': '{{count}} hooks',
+  '{{count}} extension MCP server': '{{count}} extension MCP server',
+  '{{count}} extension MCP servers': '{{count}} extension MCP servers',
+  '{{count}} extension LSP server': '{{count}} extension LSP server',
+  '{{count}} extension LSP servers': '{{count}} extension LSP servers',
+  'Reload extension changes from disk': 'Reload extension changes from disk',
+  'Reloaded extensions: {{summary}}': 'Reloaded extensions: {{summary}}',
+  'Reload failed: {{message}}': 'Reload failed: {{message}}',
+  'Reload failed.': 'Reload failed.',
+  'Extensions changed on disk. Run /reload-plugins to apply updates.':
+    'Extensions changed on disk. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content: {{message}}. Run /reload-plugins to apply updates.',
+  'Failed to refresh extension content. Run /reload-plugins to apply updates.':
+    'Failed to refresh extension content. Run /reload-plugins to apply updates.',
+  'Extension reload did not complete. Run /reload-plugins to try again.':
+    'Extension reload did not complete. Run /reload-plugins to try again.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then start a new session to resume recording. See the debug log for details.':
+    'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und starten Sie anschließend eine neue Sitzung, um die Aufzeichnung fortzusetzen. Weitere Details finden Sie im Debug-Protokoll.',
+  'Session recording stopped after a write failure. New messages for the affected session will not be saved. Check disk space and permissions, then run `/clear` to start a new recorded session. See the debug log for details.':
+    'Die Sitzungsaufzeichnung wurde nach einem Schreibfehler beendet. Neue Nachrichten der betroffenen Sitzung werden nicht gespeichert. Prüfen Sie Speicherplatz und Berechtigungen und führen Sie anschließend `/clear` aus, um eine neue aufgezeichnete Sitzung zu starten. Weitere Details finden Sie im Debug-Protokoll.',
 };

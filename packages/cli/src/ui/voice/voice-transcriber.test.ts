@@ -545,6 +545,8 @@ describe('voice-transcriber', () => {
   });
 
   it('rejects voice model hosts that resolve to private-network IPs', async () => {
+    const onEgress = vi.fn();
+
     await expect(
       transcribeVoiceAudio(
         { data: new Uint8Array([1, 2, 3]), mimeType: 'audio/wav' },
@@ -562,9 +564,11 @@ describe('voice-transcriber', () => {
           voiceModel: 'qwen3-asr-flash',
           lookupHost: vi.fn().mockResolvedValue({ address: '10.0.0.8' }),
           fetchFn: vi.fn(),
+          onEgress,
         },
       ),
     ).rejects.toThrow(/private-network address/);
+    expect(onEgress).not.toHaveBeenCalled();
   });
 
   it('rejects private-network IP literal voice URLs during network checks', async () => {
@@ -606,6 +610,22 @@ describe('voice-transcriber', () => {
         },
       ),
     ).rejects.toThrow(/DNS lookup failed for asr\.example/);
+  });
+
+  it('aborts a pending DNS safety lookup', async () => {
+    const controller = new AbortController();
+    const check = assertVoiceBaseUrlNetworkAllowed(
+      {
+        model: 'qwen3-asr-flash',
+        baseUrl: 'https://asr.example/v1',
+      },
+      () => new Promise(() => undefined),
+      controller.signal,
+    );
+
+    controller.abort(new Error('Workspace runtime was removed'));
+
+    await expect(check).rejects.toThrow('Workspace runtime was removed');
   });
 
   it('allows localhost voice URLs for development', () => {
@@ -719,6 +739,7 @@ describe('voice-transcriber', () => {
   });
 
   it('posts audio to chat/completions as input_audio content', async () => {
+    const onEgress = vi.fn();
     const fetchFn = vi.fn().mockResolvedValue({
       ok: true,
       json: vi.fn().mockResolvedValue({
@@ -742,10 +763,12 @@ describe('voice-transcriber', () => {
         voiceModel: 'qwen3-asr-flash',
         lookupHost: lookupPublicHost,
         fetchFn,
+        onEgress,
       },
     );
 
     expect(text).toBe('hello world');
+    expect(onEgress).toHaveBeenCalledOnce();
     const [url, init] = fetchFn.mock.calls[0];
     expect(url).toBe('https://dashscope.example/v1/chat/completions');
     expect(init.method).toBe('POST');

@@ -9,6 +9,18 @@ import { OverflowProvider } from '../../contexts/OverflowContext.js';
 import { MaxSizedBox, setMaxSizedBoxDebugging } from './MaxSizedBox.js';
 import { Box, Text } from 'ink';
 import { describe, it, expect } from 'vitest';
+import { getScreenBuffer } from '../../selection/screen-buffer.js';
+import { getSelectedText } from '../../selection/selection-text.js';
+
+function selectedFrameText(stdout: NodeJS.WriteStream): string {
+  const frame = getScreenBuffer(stdout)!.frame!;
+  return getSelectedText(frame, {
+    sx: 0,
+    sy: 0,
+    ex: frame.width - 1,
+    ey: frame.height - 1,
+  });
+}
 
 describe('<MaxSizedBox />', () => {
   // Make sure MaxSizedBox logs errors on invalid configurations.
@@ -84,6 +96,79 @@ Line 3`);
     expect(lastFrame()).equals(`This is a
 long line
 of text`);
+  });
+
+  it('rejoins soft wraps while preserving hard row boundaries', () => {
+    const { stdout } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={5} maxHeight={10}>
+          <Box>
+            <Text wrap="wrap">hello world</Text>
+          </Box>
+          <Box>
+            <Text>next</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      'hello world\nnext',
+    );
+  });
+
+  it('does not join clipped content to the bottom overflow banner', () => {
+    const { stdout, lastFrame } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={5} maxHeight={2} overflowDirection="bottom">
+          <Box>
+            <Text wrap="wrap">abcdefghijklm</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      lastFrame(),
+    );
+  });
+
+  it.each([
+    ['multiple spaces', 'hello  world'],
+    ['a tab', 'hello\tworld'],
+  ])('preserves %s when wrapping', (_name, source) => {
+    const { stdout } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={5} maxHeight={10}>
+          <Box>
+            <Text wrap="wrap">{source}</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      source,
+    );
+  });
+
+  it('excludes a gutter and synthesized continuation padding', () => {
+    const { stdout } = render(
+      <OverflowProvider>
+        <MaxSizedBox maxWidth={8} maxHeight={10}>
+          <Box>
+            <Text wrap="truncate-end" selectable={false}>
+              {'1 '}
+            </Text>
+            <Text wrap="wrap">long content</Text>
+          </Box>
+        </MaxSizedBox>
+      </OverflowProvider>,
+    );
+
+    expect(selectedFrameText(stdout as unknown as NodeJS.WriteStream)).toBe(
+      'long content',
+    );
   });
 
   it('handles mixed wrapping and non-wrapping segments', () => {
@@ -421,5 +506,51 @@ Line 3 direct child`);
     ].join('\n');
 
     expect(lastFrame()).equals(expected);
+  });
+
+  // Regression for #6809: when MaxSizedBox renders all its rows (maxHeight
+  // undefined — the "show more lines" mode) while a pending-region ancestor
+  // clamps the column height, Ink's default flexShrink=1 compresses the rows
+  // and stacks several at the same Y, leaving only every Nth line visible.
+  // The ancestor chain mirrors the live confirmation dialog: a maxHeight
+  // backstop wrapping a padded content box with a flexGrow/overflow body.
+  it('keeps rows sequential when an ancestor clamps the column height (#6809)', () => {
+    const rows = Array.from({ length: 60 }, (_, i) => (
+      <Box key={i}>
+        <Text>{`line ${i + 1}`}</Text>
+      </Box>
+    ));
+
+    const { lastFrame } = render(
+      <OverflowProvider>
+        <Box
+          flexDirection="column"
+          flexShrink={0}
+          maxHeight={24}
+          overflow="hidden"
+        >
+          <Box flexDirection="column" padding={1} width={80}>
+            <Box flexGrow={1} flexShrink={1} overflow="hidden" marginBottom={1}>
+              <MaxSizedBox maxWidth={80} maxHeight={undefined}>
+                {rows}
+              </MaxSizedBox>
+            </Box>
+          </Box>
+        </Box>
+      </OverflowProvider>,
+    );
+
+    const frame = lastFrame()!;
+    const gutters: number[] = [];
+    for (const line of frame.split('\n')) {
+      const match = line.match(/^\s*line (\d+)/);
+      if (match) gutters.push(Number(match[1]));
+    }
+    // Without the flexShrink={0} pin, the gutters are sparse (e.g. 1, 4, 7…)
+    // because the rows are compressed onto shared lines. With the pin they
+    // remain a contiguous prefix.
+    expect(gutters).toEqual(
+      Array.from({ length: gutters.length }, (_, i) => i + 1),
+    );
   });
 });

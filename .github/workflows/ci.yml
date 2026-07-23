@@ -19,6 +19,14 @@ on:
         required: true
         default: 'main'
         type: 'string'
+      linux_runner:
+        description: 'Linux runner to use for manual validation'
+        required: true
+        default: 'self-hosted'
+        type: 'choice'
+        options:
+          - 'self-hosted'
+          - 'hosted'
 
 concurrency:
   group: '${{ github.workflow }}-${{ github.head_ref || github.ref }}'
@@ -38,11 +46,16 @@ env:
   ACTIONLINT_VERSION: '1.7.12'
   SHELLCHECK_VERSION: '0.11.0'
   YAMLLINT_VERSION: '1.35.1'
+  # Single source of truth for the .github/scripts node:test suites — run by
+  # BOTH the github_ci_only helper step and the full-profile Test step, so a
+  # new helper test can't be added to one path and silently dropped from the
+  # other.
+  HELPER_TESTS: '.github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/classify-release-notes.test.mjs .github/scripts/resolve-sandbox-image.test.mjs .github/scripts/web-shell-visuals-publish.test.mjs .github/scripts/web-shell-visuals-compose.test.mjs .github/scripts/serve-ab-diff.test.mjs'
 
 jobs:
   classify_pr:
     name: 'Classify PR'
-    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}"
+    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' || github.event_name == 'workflow_dispatch' }}"
     # Gate runs on ECS for in-repo PRs and for the merge queue (which runs in the
     # base-repo context), else a busy hosted pool delays it and blocks the
     # ECS-bound jobs. The kill-switch is read here, so flipping it reverts
@@ -98,9 +111,14 @@ jobs:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
           EVENT_NAME: '${{ github.event_name }}'
+          DISPATCH_LINUX_RUNNER: '${{ github.event.inputs.linux_runner }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
-          if [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
+          if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
+            if [[ "${ECS_DISABLED}" != "true" && "${DISPATCH_LINUX_RUNNER}" == "self-hosted" ]]; then
+              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+            fi
+          elif [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
@@ -136,7 +154,7 @@ jobs:
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           # Shallow: nothing here walks git history (the verify guard below checks
@@ -199,7 +217,7 @@ jobs:
           node scripts/lint.js --setup
           node scripts/lint.js --actionlint
           node scripts/lint.js --yamllint
-          node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs .github/scripts/resolve-sandbox-image.test.mjs
+          node --test ${{ env.HELPER_TESTS }}
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'
@@ -313,12 +331,37 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      - name: 'Generate VS Code companion notices'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'npm run generate:notices --workspace=qwen-code-vscode-ide-companion'
+
+      - name: 'Check VS Code companion notices are up-to-date'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: |-
+          if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt) ]]; then
+            echo "Error: NOTICES.txt is out of date."
+            echo "Please run: npm run generate:notices --workspace=qwen-code-vscode-ide-companion"
+            echo "Then commit the updated file."
+            git diff --stat packages/vscode-ide-companion/NOTICES.txt
+            exit 1
+          fi
+          echo "NOTICES.txt is up-to-date"
+
       # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
       # npm run test:ci only, so they intentionally do not repeat this
       # platform-independent bundle closure check.
       - name: 'Check serve fast-path bundle closure'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:serve-fast-path-bundle'
+
+      # The `github_ci_only` profile runs the .github/scripts helper tests, but a
+      # `full` PR that touches those scripts skips that path and `npm run
+      # test:ci` (vitest) does not collect `node:test` files — so run them here
+      # too, or a compositor/publisher change could pass CI without its
+      # regression tests. Linux-only (they're platform-independent).
+      - name: 'Run .github/scripts helper tests'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
+        run: 'node --test ${{ env.HELPER_TESTS }}'
 
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
@@ -365,6 +408,110 @@ jobs:
           name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
 
+  web_shell_e2e_smoke:
+    name: 'web-shell E2E Smoke (ubuntu-latest, Node 22.x)'
+    needs:
+      - 'classify_pr'
+      - 'test'
+    if: |-
+      ${{
+        !cancelled() &&
+        (github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch') &&
+        needs.classify_pr.outputs.skip_ci != 'true' &&
+        needs.test.outputs.ci_profile == 'full'
+      }}
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 20
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          fetch-depth: 1
+
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ github.event_name == 'pull_request' }}"
+        env:
+          EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'
+        run: |-
+          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
+            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
+            git log --oneline --decorate -5
+            exit 1
+          fi
+
+      # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
+      - name: 'Set up Node.js 22.x (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route PRs back to hosted runners."
+            exit 1
+          fi
+          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
+            echo "::warning::Expected Node 22.x but found $(node -v); web-shell smoke tests will run against the runner's Node."
+          fi
+
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
+      - name: 'Configure npm for rate limiting'
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Install Playwright Chromium (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        run: 'npx playwright install --with-deps chromium'
+
+      - name: 'Install Playwright Chromium (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        # Self-hosted ECS runners already include system deps; --with-deps can race apt locks.
+        run: 'npx playwright install chromium'
+
+      - name: 'Choose web-shell Playwright port'
+        run: |-
+          port="$(node -e "const net=require('node:net');const server=net.createServer();server.listen(0,'127.0.0.1',()=>{console.log(server.address().port);server.close();});")"
+          echo "PLAYWRIGHT_PORT=${port}" >> "${GITHUB_ENV}"
+          echo "Using web-shell Playwright port ${port}"
+
+      - name: 'Run web-shell browser smoke'
+        run: 'npm run test:e2e:smoke --workspace=packages/web-shell'
+
+      - name: 'Upload web-shell Playwright artifacts'
+        if: '${{ always() }}'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'web-shell-e2e-smoke'
+          path: |-
+            packages/web-shell/client/e2e/test-results
+            packages/web-shell/client/e2e/playwright-report
+          if-no-files-found: 'ignore'
+
   # macOS/Windows: slowest/costliest runners, rare platform regressions — run
   # only in the merge queue. Skipped on PR (ubuntu is the fast PR signal) and on
   # push (the queue already tested the merged tree, so a post-merge re-run is
@@ -386,7 +533,7 @@ jobs:
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
@@ -441,7 +588,7 @@ jobs:
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
 
@@ -510,7 +657,7 @@ jobs:
           - '22.x'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
 
       - name: 'Download coverage reports artifact'
         uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
@@ -557,7 +704,7 @@ jobs:
       OPENAI_MODEL: '${{ secrets.OPENAI_MODEL }}'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           # Shallow, mirroring the Ubuntu gate: nothing here walks git history,

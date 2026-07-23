@@ -8,16 +8,23 @@ import path from 'node:path';
 import fs from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
-import type { ToolInvocation, ToolLocation, ToolResult } from './tools.js';
+import type {
+  ToolInvocation,
+  ToolLocation,
+  ToolResult,
+  ToolResultDisplay,
+} from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 
-import type { PartUnion } from '@google/genai';
+import type { PartListUnion } from '@google/genai';
 import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
   getSpecificMimeType,
   isCacheableReadResult,
+  type PDFVisionBridgeCandidate,
+  type ProcessedFileReadResult,
 } from '../utils/fileUtils.js';
 import { parsePDFPageRange, PDF_MAX_PAGES_PER_READ } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
@@ -30,6 +37,18 @@ import { Storage } from '../config/storage.js';
 import { isAnyAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  formatVisionBridgeNotice,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  type VisionBridgeNoticeDisplay,
+  type VisionBridgePdfSourceContext,
+} from '../services/visionBridge/vision-bridge-service.js';
+import {
+  hasImageParts,
+  normalizeParts,
+  splitImageParts,
+} from '../services/visionBridge/image-part-utils.js';
 
 const debugLogger = createDebugLogger('READ_FILE_CACHE');
 
@@ -98,8 +117,8 @@ class ReadFileToolInvocation extends BaseToolInvocation<
   }
 
   /**
-   * Returns 'ask' for paths outside the workspace/qwen-managed temp/userSkills
-   * directories, so that external file reads require user confirmation.
+   * Returns 'ask' for paths outside the workspace/temp/userSkills directories,
+   * so that external file reads require user confirmation.
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
     const filePath = path.resolve(this.params.file_path);
@@ -199,21 +218,27 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       debugLogger.debug('miss', { path: absPath, state: status.state });
     }
 
-    const result = await processSingleFileContent(
+    const preparePdfForVisionBridge = shouldRunVisionBridge(this.config);
+    let result = await processSingleFileContent(
       this.params.file_path,
       this.config,
       {
         offset: this.params.offset,
         limit: this.params.limit,
         pages: this.params.pages,
+        preparePdfForVisionBridge,
         signal,
       },
     );
 
+    if (result.pdfVisionBridgeCandidate) {
+      result = await this.transcribePdfCandidate(result, signal);
+    }
+
     if (result.error) {
       return {
         llmContent: result.llmContent,
-        returnDisplay: result.returnDisplay || 'Error reading file',
+        returnDisplay: this.toToolResultDisplay(result, 'Error reading file'),
         error: {
           message: result.error,
           type: result.errorType,
@@ -277,7 +302,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
       });
     }
 
-    let llmContent: PartUnion;
+    let llmContent: PartListUnion;
     if (
       result.isTruncated &&
       result.linesShown &&
@@ -331,8 +356,152 @@ class ReadFileToolInvocation extends BaseToolInvocation<
 
     return {
       llmContent,
-      returnDisplay: result.returnDisplay || '',
+      returnDisplay: this.toToolResultDisplay(result),
     };
+  }
+
+  private async transcribePdfCandidate(
+    result: ProcessedFileReadResult,
+    signal: AbortSignal,
+  ): Promise<ProcessedFileReadResult> {
+    const candidate = result.pdfVisionBridgeCandidate;
+    if (!candidate) return result;
+
+    const { imageParts } = splitImageParts(result.llmContent);
+    if (imageParts.length === 0 || !hasImageParts(imageParts)) {
+      debugLogger.debug('pdf vision bridge candidate contained no images');
+      return this.restorePdfFallback(result, 'Vision bridge could not run.');
+    }
+
+    const sourceContext: VisionBridgePdfSourceContext = {
+      displayName: candidate.displayName,
+      renderedRange: candidate.renderedRange,
+      ...(candidate.continuation && {
+        continuation: candidate.continuation,
+      }),
+    };
+
+    try {
+      const bridgeResult = await runVisionBridge({
+        config: this.config,
+        parts: imageParts,
+        signal,
+        sourceContext,
+      });
+      signal.throwIfAborted();
+      const notice = formatVisionBridgeNotice(bridgeResult);
+      if (
+        bridgeResult.status === 'ok' &&
+        bridgeResult.applied &&
+        bridgeResult.parts != null
+      ) {
+        if (
+          bridgeResult.convertedCount !== imageParts.length ||
+          bridgeResult.omittedCount !== 0
+        ) {
+          debugLogger.debug('pdf vision bridge omitted candidate pages');
+          return this.restorePdfFallback(
+            result,
+            `${notice} The transcription was discarded because the bridge did not transcribe every rendered PDF page.`,
+          );
+        }
+        const bridgedParts = normalizeParts(bridgeResult.parts);
+        if (
+          bridgedParts.some(
+            (part) => part.inlineData != null || part.fileData != null,
+          )
+        ) {
+          debugLogger.debug('pdf vision bridge returned media data');
+          return this.restorePdfFallback(
+            result,
+            `${notice} The transcription was discarded because the bridge returned an unsafe media payload.`,
+          );
+        }
+        return {
+          ...result,
+          llmContent: bridgedParts,
+          returnDisplay: `${result.returnDisplay} (${this.formatPdfBridgeRange(candidate, 'transcribed')})`,
+          pdfVisionBridgeNotice: notice,
+          pdfVisionBridgeCandidate: undefined,
+        };
+      }
+      return this.restorePdfFallback(
+        result,
+        bridgeResult.status === 'ok'
+          ? formatVisionBridgeNotice({
+              applied: false,
+              status: 'failed',
+              convertedCount: 0,
+              omittedCount: 0,
+              ...(bridgeResult.modelId !== undefined && {
+                modelId: bridgeResult.modelId,
+              }),
+              ...(bridgeResult.modelEndpoint !== undefined && {
+                modelEndpoint: bridgeResult.modelEndpoint,
+              }),
+              ...(bridgeResult.egressOccurred !== undefined && {
+                egressOccurred: bridgeResult.egressOccurred,
+              }),
+            })
+          : notice,
+      );
+    } catch (error) {
+      signal.throwIfAborted();
+      debugLogger.debug(
+        `pdf vision bridge failed before replacement: ${String(error instanceof Error ? error.message : error)}`,
+      );
+      return this.restorePdfFallback(
+        result,
+        'Vision bridge failed before producing a transcription.',
+      );
+    }
+  }
+
+  private restorePdfFallback(
+    result: ProcessedFileReadResult,
+    notice: string,
+  ): ProcessedFileReadResult {
+    const candidate = result.pdfVisionBridgeCandidate;
+    if (!candidate) return result;
+    const fallback = candidate.fallback;
+    return {
+      ...result,
+      llmContent: fallback.llmContent,
+      returnDisplay: `${fallback.returnDisplay} (${this.formatPdfBridgeRange(candidate, 'rendered')})`,
+      error: fallback.error,
+      errorType: fallback.errorType,
+      pdfVisionBridgeNotice: notice,
+      pdfVisionBridgeCandidate: undefined,
+    };
+  }
+
+  private formatPdfBridgeRange(
+    candidate: PDFVisionBridgeCandidate,
+    action: 'rendered' | 'transcribed',
+  ): string {
+    const processed = `${action} PDF pages ${candidate.renderedRange.firstPage}-${candidate.renderedRange.lastPage}`;
+    if (!candidate.continuation) return processed;
+    if (candidate.continuation.certainty === 'known') {
+      return `${processed}; remaining pages ${candidate.continuation.firstPage}-${candidate.continuation.lastPage}`;
+    }
+    const requestedEnd = candidate.continuation.requestedLastPage
+      ? ` through page ${candidate.continuation.requestedLastPage}`
+      : '';
+    return `${processed}; additional pages may exist from page ${candidate.continuation.firstPage}${requestedEnd}`;
+  }
+
+  private toToolResultDisplay(
+    result: ProcessedFileReadResult,
+    fallback = '',
+  ): ToolResultDisplay {
+    const summary = result.returnDisplay || fallback;
+    if (!result.pdfVisionBridgeNotice) return summary;
+    const display: VisionBridgeNoticeDisplay = {
+      type: 'vision_bridge_notice',
+      summary,
+      notice: result.pdfVisionBridgeNotice,
+    };
+    return display;
   }
 
   /**
@@ -396,7 +565,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
+      `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. The tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb). For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Max ${PDF_MAX_PAGES_PER_READ} pages per request. Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. This tool can read Jupyter notebooks (.ipynb) and returns structured cell content with outputs.`,
       Kind.Read,
       {
         properties: {
@@ -416,8 +585,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
             type: 'integer',
           },
           pages: {
-            description:
-              `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
+            description: `Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max ${PDF_MAX_PAGES_PER_READ} pages per request. Open-ended ranges like '3-' are not supported. Use this for large PDFs or when the model does not support native PDF input.`,
             type: 'string',
           },
         },

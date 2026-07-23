@@ -20,6 +20,7 @@ import { randomUUID } from 'node:crypto';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { runWithInvocationContext } from '../../utils/invocation-context.js';
 import type { Config } from '../../config/config.js';
 import {
   getCurrentAgentDepth,
@@ -34,9 +35,12 @@ import {
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
+  GeminiEventType,
   markDuplicateProviderToolCallResponseSent,
+  type ServerGeminiStreamEvent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
+import { LoopDetectionService } from '../../services/loopDetectionService.js';
 import {
   CoreToolScheduler,
   type ToolCall,
@@ -48,8 +52,13 @@ import type {
   ToolCallConfirmationDetails,
   ToolResultDisplay,
 } from '../../tools/tools.js';
+import { isShellProgressData } from '../../tools/tools.js';
 import { getInitialChatHistory } from '../../utils/environmentContext.js';
-import { FinishReason } from '@google/genai';
+import {
+  finalizeToolResponses,
+  type ToolResponseBudgetEntry,
+} from '../../utils/tool-response-finalizer.js';
+import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
   Part,
@@ -88,6 +97,8 @@ import { matchesMcpPattern } from '../../permissions/rule-parser.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { DEFAULT_QWEN_MODEL } from '../../config/models.js';
 import { type ContextState, templateString } from './agent-headless.js';
+import { getResponseText } from '../../utils/partUtils.js';
+import { getThoughtSummary } from '../../utils/thoughtUtils.js';
 import {
   isTeammate,
   getTeammateContext,
@@ -132,6 +143,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
   ToolNames.TEAM_CREATE,
@@ -165,6 +177,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
@@ -220,6 +233,8 @@ export interface ReasoningLoopOptions {
   maxTimeMinutes?: number;
   /** Start time in ms (for timeout calculation). Defaults to Date.now(). */
   startTimeMs?: number;
+  /** Rounds already completed in the same logical turn. */
+  roundOffset?: number;
   /**
    * Optional callback to drain external messages between model rounds.
    * Returned inputs are appended to the next model request as user-role
@@ -287,6 +302,7 @@ export interface ExecutionStats {
  * or final result interpretation — those are the caller's responsibility.
  */
 export class AgentCore {
+  private promptOrdinal = 0;
   readonly subagentId: string;
   readonly name: string;
   readonly runtimeContext: Config;
@@ -652,7 +668,9 @@ export class AgentCore {
         abortController,
         options,
       );
-    return this.runInAgentFrames(inner);
+    return runWithInvocationContext(undefined, () =>
+      this.runInAgentFrames(inner),
+    );
   }
 
   /**
@@ -749,6 +767,7 @@ export class AgentCore {
     options?: ReasoningLoopOptions,
   ): Promise<ReasoningLoopResult> {
     const startTime = options?.startTimeMs ?? Date.now();
+    const runId = randomUUID();
     let currentMessages = initialMessages;
     let turnCounter = 0;
     let finalText = '';
@@ -758,6 +777,19 @@ export class AgentCore {
     // provider id would keep deterministic providers in a tool-result loop.
     const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
+    const loopDetector = new LoopDetectionService(this.runtimeContext);
+    loopDetector.reset(
+      `${this.runtimeContext.getSessionId()}#${this.subagentId}`,
+    );
+    const checkSubagentLoop = (event: ServerGeminiStreamEvent): boolean => {
+      if (loopDetector.checkAlwaysOnSafeties(event)) {
+        return true;
+      }
+      return (
+        !this.runtimeContext.getSkipLoopDetection() &&
+        loopDetector.addAndCheckHeuristicLoops(event)
+      );
+    };
 
     while (true) {
       // Check abort before starting a new round — prevents unnecessary API
@@ -786,7 +818,8 @@ export class AgentCore {
       const roundAbortController = createChildAbortController(abortController);
 
       try {
-        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${turnCounter++}`;
+        const promptId = `${this.runtimeContext.getSessionId()}#${this.subagentId}#${this.promptOrdinal++}`;
+        turnCounter += 1;
 
         const messageParams = {
           message: currentMessages[0]?.parts || [],
@@ -821,6 +854,7 @@ export class AgentCore {
           undefined;
         let currentResponseId: string | undefined = undefined;
         let wasOutputTruncated = false;
+        let loopDetectedInStream = false;
 
         for await (const streamEvent of responseStream) {
           if (roundAbortController.signal.aborted) {
@@ -835,6 +869,11 @@ export class AgentCore {
           // retry does not inherit stale data (e.g. wasOutputTruncated) from a
           // previous attempt that may have hit MAX_TOKENS.
           if (streamEvent.type === 'retry') {
+            if (checkSubagentLoop({ type: GeminiEventType.Retry })) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
             if (streamEvent.maxOutputTokensEscalated !== undefined) {
               stickyMaxOutputTokens = streamEvent.maxOutputTokensEscalated;
             }
@@ -866,7 +905,8 @@ export class AgentCore {
             if (resp.responseId) {
               currentResponseId = resp.responseId;
             }
-            if (resp.functionCalls) functionCalls.push(...resp.functionCalls);
+            const chunkFunctionCalls = resp.functionCalls ?? [];
+            functionCalls.push(...chunkFunctionCalls);
             if (
               resp.candidates?.[0]?.finishReason === FinishReason.MAX_TOKENS
             ) {
@@ -882,6 +922,7 @@ export class AgentCore {
               if (txt)
                 this.eventEmitter?.emit(AgentEventType.STREAM_TEXT, {
                   subagentId: this.subagentId,
+                  runId,
                   round: turnCounter,
                   text: txt,
                   thought: isThought,
@@ -889,21 +930,96 @@ export class AgentCore {
                 });
             }
             if (resp.usageMetadata) lastUsage = resp.usageMetadata;
+
+            const thoughtSummary = getThoughtSummary(resp);
+            if (
+              thoughtSummary &&
+              checkSubagentLoop({
+                type: GeminiEventType.Thought,
+                value: thoughtSummary,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            const responseText = getResponseText(resp);
+            if (
+              responseText &&
+              checkSubagentLoop({
+                type: GeminiEventType.Content,
+                value: responseText,
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
+
+            for (const fc of chunkFunctionCalls) {
+              const toolName = String(fc.name);
+              if (
+                checkSubagentLoop({
+                  type: GeminiEventType.ToolCallRequest,
+                  value: {
+                    callId: fc.id ?? `${toolName}-${Date.now()}`,
+                    providerCallId: getProviderToolCallId(fc),
+                    name: toolName,
+                    args: (fc.args ?? {}) as Record<string, unknown>,
+                    isClientInitiated: false,
+                    prompt_id: promptId,
+                    response_id: currentResponseId,
+                    wasOutputTruncated,
+                  },
+                })
+              ) {
+                terminateMode = AgentTerminateMode.LOOP_DETECTED;
+                loopDetectedInStream = true;
+                break;
+              }
+            }
+            if (loopDetectedInStream) {
+              break;
+            }
+
+            const finishReason = resp.candidates?.[0]?.finishReason;
+            if (
+              finishReason &&
+              checkSubagentLoop({
+                type: GeminiEventType.Finished,
+                value: {
+                  reason: finishReason,
+                  usageMetadata: resp.usageMetadata,
+                },
+              })
+            ) {
+              terminateMode = AgentTerminateMode.LOOP_DETECTED;
+              loopDetectedInStream = true;
+              break;
+            }
           }
         }
 
-        if (roundText || roundThoughtText) {
+        if (loopDetectedInStream) {
+          break;
+        }
+
+        if (roundText || roundThoughtText || lastUsage) {
           this.eventEmitter?.emit(AgentEventType.ROUND_TEXT, {
             subagentId: this.subagentId,
+            runId,
             round: turnCounter,
             text: roundText,
             thoughtText: roundThoughtText,
+            usageMetadata: lastUsage,
             timestamp: Date.now(),
           } as AgentRoundTextEvent);
         }
 
-        this.executionStats.rounds = turnCounter;
-        this.stats.setRounds(turnCounter);
+        const cumulativeRounds = (options?.roundOffset ?? 0) + turnCounter;
+        this.executionStats.rounds = cumulativeRounds;
+        this.stats.setRounds(cumulativeRounds);
 
         durationMin = (Date.now() - startTime) / (1000 * 60);
         if (options?.maxTimeMinutes && durationMin >= options.maxTimeMinutes) {
@@ -1259,8 +1375,24 @@ export class AgentCore {
     messages: Content[];
     repeatedDuplicateProviderToolCall: boolean;
   }> {
-    const toolResponseParts: Part[] = [];
+    const responseByCallId = new Map<
+      string,
+      {
+        toolName: string;
+        responseParts: Part[];
+        persistedOutputFiles?: string[];
+        durationMs?: number;
+      }
+    >();
     const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
+    const generatedCallIdBase = randomUUID();
+    const callIdByFunctionCall = new Map(
+      uniqueFunctionCalls.map((functionCall, index) => [
+        functionCall,
+        functionCall.id ??
+          `${functionCall.name ?? 'tool'}-${generatedCallIdBase}-${index}`,
+      ]),
+    );
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
@@ -1289,7 +1421,7 @@ export class AgentCore {
     const authorizedCalls: FunctionCall[] = [];
     let duplicateEventIndex = 0;
     for (const fc of uniqueFunctionCalls) {
-      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const callId = callIdByFunctionCall.get(fc)!;
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const toolName = String(fc.name);
       const args = (fc.args ?? {}) as Record<string, unknown>;
@@ -1318,7 +1450,11 @@ export class AgentCore {
           currentRound,
         });
 
-        toolResponseParts.push(functionResponsePart);
+        responseByCallId.set(callId, {
+          toolName,
+          responseParts: [functionResponsePart],
+          durationMs: 0,
+        });
         continue;
       }
 
@@ -1361,7 +1497,12 @@ export class AgentCore {
             currentRound,
           });
 
-          toolResponseParts.push(...response.responseParts);
+          responseByCallId.set(callId, {
+            toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+            durationMs: 0,
+          });
           continue;
         }
         handledProviderToolCallIds.add(providerCallId);
@@ -1384,6 +1525,11 @@ export class AgentCore {
     const scheduler = new CoreToolScheduler({
       config: this.runtimeContext,
       outputUpdateHandler: (callId, outputChunk) => {
+        // Shell liveness heartbeats have no subagent consumer; broadcasting
+        // one would overwrite the live output view kept in liveOutputs.
+        if (isShellProgressData(outputChunk)) {
+          return;
+        }
         this.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
           subagentId: this.subagentId,
           round: currentRound,
@@ -1435,18 +1581,12 @@ export class AgentCore {
             timestamp: Date.now(),
           });
 
-          // Append response parts
-          const respParts = call.response.responseParts;
-          if (respParts) {
-            const parts = Array.isArray(respParts) ? respParts : [respParts];
-            for (const part of parts) {
-              if (typeof part === 'string') {
-                toolResponseParts.push({ text: part });
-              } else if (part) {
-                toolResponseParts.push(part);
-              }
-            }
-          }
+          responseByCallId.set(call.request.callId, {
+            toolName,
+            responseParts: call.response.responseParts,
+            persistedOutputFiles: call.response.persistedOutputFiles,
+            durationMs: duration,
+          });
         }
         // Signal that this batch is complete (all tools terminal)
         resolveBatch?.();
@@ -1558,7 +1698,7 @@ export class AgentCore {
     // Prepare requests and emit TOOL_CALL events
     const requests: ToolCallRequestInfo[] = authorizedCalls.map((fc) => {
       const toolName = String(fc.name || 'unknown');
-      const callId = fc.id ?? `${fc.name}-${Date.now()}`;
+      const callId = callIdByFunctionCall.get(fc)!;
       const providerCallId = getProviderToolCallId(fc) ?? fc.id;
       const args = (fc.args ?? {}) as Record<string, unknown>;
       const request: ToolCallRequestInfo = {
@@ -1615,6 +1755,15 @@ export class AgentCore {
           emittedCallIds.add(req.callId);
 
           const errorMessage = 'Tool call cancelled by user abort.';
+          const responseParts: Part[] = [
+            {
+              functionResponse: {
+                id: req.callId,
+                name: req.name,
+                response: { error: errorMessage },
+              },
+            },
+          ];
           this.recordToolCallStats(req.name, false, 0, errorMessage);
 
           this.eventEmitter?.emit(AgentEventType.TOOL_RESULT, {
@@ -1624,19 +1773,16 @@ export class AgentCore {
             name: req.name,
             success: false,
             error: errorMessage,
-            responseParts: [
-              {
-                functionResponse: {
-                  id: req.callId,
-                  name: req.name,
-                  response: { error: errorMessage },
-                },
-              },
-            ],
+            responseParts,
             resultDisplay: errorMessage,
             durationMs: 0,
             timestamp: Date.now(),
           } as AgentToolResultEvent);
+          responseByCallId.set(req.callId, {
+            toolName: req.name,
+            responseParts,
+            durationMs: 0,
+          });
         }
       };
       abortController.signal.addEventListener('abort', onAbort, { once: true });
@@ -1659,12 +1805,54 @@ export class AgentCore {
       }
     }
 
-    // If all tool calls failed, inform the model so it can re-evaluate.
-    if (functionCalls.length > 0 && toolResponseParts.length === 0) {
-      toolResponseParts.push({
-        text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+    const orderedResponses: ToolResponseBudgetEntry[] =
+      uniqueFunctionCalls.flatMap((fc) => {
+        const callId = callIdByFunctionCall.get(fc) ?? fc.id ?? '';
+        const response = responseByCallId.get(callId);
+        if (!response) return [];
+        return [
+          {
+            callId,
+            toolName: response.toolName,
+            responseParts: response.responseParts,
+            persistedOutputFiles: response.persistedOutputFiles,
+          },
+        ];
+      });
+    if (functionCalls.length > 0 && orderedResponses.length === 0) {
+      orderedResponses.push({
+        callId: 'tool-call-batch',
+        toolName: 'tool-call-batch',
+        responseParts: [
+          {
+            text: 'All tool calls failed. Please analyze the errors and try an alternative approach.',
+          },
+        ],
+        persistedOutputFiles: [],
       });
     }
+    const finalizedResponses = await finalizeToolResponses(
+      this.runtimeContext,
+      orderedResponses,
+    );
+    const toolResponseParts = finalizedResponses.flatMap(
+      (response) => response.responseParts,
+    );
+    this.eventEmitter?.emit(AgentEventType.TOOL_RESPONSES_FINALIZED, {
+      subagentId: this.subagentId,
+      round: currentRound,
+      responses: finalizedResponses.map((response) => {
+        const collected = responseByCallId.get(response.callId);
+        return {
+          callId: response.callId,
+          responseParts: response.responseParts,
+          ...(collected?.durationMs !== undefined
+            ? { durationMs: collected.durationMs }
+            : {}),
+        };
+      }),
+      timestamp: Date.now(),
+    });
 
     return {
       messages: [{ role: 'user', parts: toolResponseParts }],
@@ -1731,6 +1919,22 @@ export class AgentCore {
   }
 
   // ─── Stats & Events ───────────────────────────────────────
+
+  resetExecutionStats(): void {
+    this.executionStats = {
+      startTimeMs: 0,
+      totalDurationMs: 0,
+      rounds: 0,
+      totalToolCalls: 0,
+      successfulToolCalls: 0,
+      failedToolCalls: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      totalTokens: 0,
+    };
+    this.toolUsage.clear();
+    this.stats.reset();
+  }
 
   getEventEmitter(): AgentEventEmitter {
     return this.eventEmitter;

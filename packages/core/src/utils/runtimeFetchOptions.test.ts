@@ -4,7 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import {
+  describe,
+  it,
+  expect,
+  vi,
+  beforeAll,
+  beforeEach,
+  afterEach,
+} from 'vitest';
 
 // Hoist mockWarn and mockConsoleError so they're available to both the vi.mock and test cases
 const { mockWarn, mockConsoleError } = vi.hoisted(() => ({
@@ -34,15 +42,14 @@ vi.mock('undici', () => {
     }
   }
 
-  class MockProxyAgent {
+  class MockEnvHttpProxyAgent {
     options: UndiciOptions;
-    uri: string;
     constructor(options: UndiciOptions) {
       this.options = options;
-      this.uri = (options as { uri?: string }).uri || '';
+      const httpProxy = (options as { httpProxy?: string }).httpProxy || '';
       // Simulate failure for specifically invalid proxy URLs
-      // Note: Real ProxyAgent accepts credential URLs — only syntactically invalid URIs fail
-      if (this.uri === 'http://invalid-proxy') {
+      // Note: Real EnvHttpProxyAgent accepts credential URLs — only syntactically invalid URIs fail
+      if (httpProxy === 'http://invalid-proxy') {
         throw new Error('Invalid proxy URL: http://user:secret@proxy.local');
       }
     }
@@ -50,7 +57,7 @@ vi.mock('undici', () => {
 
   return {
     Agent: MockAgent,
-    ProxyAgent: MockProxyAgent,
+    EnvHttpProxyAgent: MockEnvHttpProxyAgent,
     fetch: mockUndiciFetch,
   };
 });
@@ -60,12 +67,19 @@ import {
   extractHostnameFromProxyUrl,
   getOrCreateSharedDispatcher,
   isTlsVerificationDisabled,
+  preloadRuntimeFetchModule,
   redactProxyCredentials,
   redactProxyError,
   resetDispatcherCache,
 } from './runtimeFetchOptions.js';
 
 type UndiciOptions = Record<string, unknown>;
+
+// The sync option builders require undici to be preloaded (issue #7264);
+// vi.mock('undici') intercepts the dynamic import, so this loads the mock.
+beforeAll(async () => {
+  await preloadRuntimeFetchModule();
+});
 
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
@@ -108,7 +122,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     expect((result as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
   });
 
-  it('uses ProxyAgent with disabled timeouts when proxy is set', () => {
+  it('uses EnvHttpProxyAgent with disabled timeouts when proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
 
     expect(result).toBeDefined();
@@ -118,13 +132,14 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      uri: 'http://proxy.local',
+      httpProxy: 'http://proxy.local',
+      httpsProxy: 'http://proxy.local',
       headersTimeout: 0,
       bodyTimeout: 0,
     });
   });
 
-  it('returns fetchOptions with ProxyAgent for Anthropic with proxy', () => {
+  it('returns fetchOptions with EnvHttpProxyAgent for Anthropic with proxy', () => {
     const result = buildRuntimeFetchOptions('anthropic', 'http://proxy.local');
 
     expect(result).toBeDefined();
@@ -134,7 +149,8 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
       result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
     ).fetchOptions?.dispatcher;
     expect(dispatcher?.options).toMatchObject({
-      uri: 'http://proxy.local',
+      httpProxy: 'http://proxy.local',
+      httpsProxy: 'http://proxy.local',
       headersTimeout: 0,
       bodyTimeout: 0,
     });
@@ -142,7 +158,7 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
 
   it('pins fetch to undici when proxy is set so dispatcher and fetch share a version', () => {
     // Regression for `invalid onError method`: Node's built-in fetch (newer
-    // undici) cannot accept a ProxyAgent built from a different undici major.
+    // undici) cannot accept a dispatcher built from a different undici major.
     // The function must hand back the bundled undici's fetch alongside the
     // dispatcher.
     const openaiResult = buildRuntimeFetchOptions(
@@ -281,7 +297,7 @@ describe('getOrCreateSharedDispatcher', () => {
     expect(d1).not.toBe(d2);
   });
 
-  it('shares the same ProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
+  it('shares the same EnvHttpProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
     const shared = getOrCreateSharedDispatcher('http://proxy.local');
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
     const sdkDispatcher = (
@@ -347,7 +363,7 @@ describe('TLS verification opt-out (insecure)', () => {
     expect(options?.['connect']).toBeUndefined();
   });
 
-  it('uses requestTls/proxyTls (not connect) for the ProxyAgent', () => {
+  it('configures TLS opt-out for direct and proxied requests', () => {
     process.env['QWEN_TLS_INSECURE'] = '1';
     const dispatcher = getOrCreateSharedDispatcher(
       'http://proxy.local',
@@ -358,7 +374,9 @@ describe('TLS verification opt-out (insecure)', () => {
     expect(dispatcher.options['proxyTls']).toEqual({
       rejectUnauthorized: false,
     });
-    expect(dispatcher.options['connect']).toBeUndefined();
+    expect(dispatcher.options['connect']).toEqual({
+      rejectUnauthorized: false,
+    });
   });
 
   it('keeps secure and insecure dispatchers in separate cache entries', () => {
@@ -699,5 +717,15 @@ describe('extractHostnameFromProxyUrl', () => {
     expect(extractHostnameFromProxyUrl('http://user:secret@')).toBe(
       'http://<redacted>@',
     );
+  });
+});
+
+describe('requireUndici guard', () => {
+  it('throws an actionable error when a sync builder runs before preload', async () => {
+    vi.resetModules();
+    const fresh = await import('./runtimeFetchOptions.js');
+    expect(() =>
+      fresh.getOrCreateSharedDispatcher('http://proxy.local'),
+    ).toThrow(/undici is not loaded yet; await preloadRuntimeFetchModule\(\)/);
   });
 });

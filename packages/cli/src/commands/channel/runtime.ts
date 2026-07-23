@@ -1,12 +1,14 @@
 import * as path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace, Storage } from '@qwen-code/qwen-code-core';
 import type {
   SessionRouter,
   ChannelAgentBridge,
   ChannelBase,
   ChannelBaseOptions,
   ChannelPlugin,
+  PermissionRequestEvent,
+  PermissionResolvedEvent,
   ToolCallEvent,
 } from '@qwen-code/channel-base';
 import { sanitizeLogText } from '@qwen-code/channel-base';
@@ -27,6 +29,26 @@ export interface ParsedChannel {
 
 export function sessionsPath(): string {
   return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
+}
+
+export function daemonSessionRoutesPath(workspaceCwd: string): string {
+  return path.join(
+    Storage.getGlobalQwenDir(),
+    'channels',
+    'daemon',
+    hashDaemonWorkspace(workspaceCwd),
+    'routes.json',
+  );
+}
+
+export function daemonObservedContactsPath(workspaceCwd: string): string {
+  return path.join(
+    Storage.getGlobalQwenDir(),
+    'channels',
+    'daemon',
+    hashDaemonWorkspace(workspaceCwd),
+    'observed-contacts.json',
+  );
 }
 
 export function channelLoopPath(): string {
@@ -164,6 +186,89 @@ export function registerToolCallDispatch(
   });
 }
 
+export function registerBackgroundResponseRelay(
+  bridge: ChannelAgentBridge,
+  router: SessionRouter,
+  channels: Map<string, ChannelBase>,
+): void {
+  bridge.on('backgroundResponse', (sessionId: string, text: string) => {
+    const target = router.getTarget(sessionId);
+    if (!target) {
+      writeStderrLine(
+        `[Channel] No route for background response from session ${sanitizeLogText(sessionId, 128)}`,
+      );
+      return;
+    }
+    const channel = channels.get(target.channelName);
+    if (!channel) {
+      writeStderrLine(
+        `[Channel] No channel "${sanitizeLogText(target.channelName, 64)}" for background response from session ${sanitizeLogText(sessionId, 128)}`,
+      );
+      return;
+    }
+    void channel
+      .dispatchBackgroundResponse(sessionId, text)
+      .catch((err: unknown) => {
+        writeStderrLine(
+          `[Channel] Background response relay failed for session ${sanitizeLogText(sessionId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+        );
+      });
+  });
+}
+
+function cancelPermissionRequest(
+  bridge: ChannelAgentBridge,
+  requestId: string,
+): void {
+  if (!bridge.respondToPermission) {
+    return;
+  }
+  void bridge
+    .respondToPermission(requestId, { outcome: { outcome: 'cancelled' } })
+    .catch((err: unknown) => {
+      writeStderrLine(
+        `[Channel] Permission cancellation failed for ${sanitizeLogText(requestId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+      );
+    });
+}
+
+export function registerPermissionRelay(
+  bridge: ChannelAgentBridge,
+  router: SessionRouter,
+  channels: Map<string, ChannelBase>,
+): void {
+  bridge.on('permissionRequest', (event: PermissionRequestEvent) => {
+    const target = router.getTarget(event.sessionId);
+    if (!target) {
+      writeStderrLine(
+        `[Channel] No route for session ${sanitizeLogText(event.sessionId, 128)}; cancelling permission ${sanitizeLogText(event.requestId, 128)}`,
+      );
+      cancelPermissionRequest(bridge, event.requestId);
+      return;
+    }
+    const channel = channels.get(target.channelName);
+    if (!channel) {
+      writeStderrLine(
+        `[Channel] No channel "${sanitizeLogText(target.channelName, 64)}" for session ${sanitizeLogText(event.sessionId, 128)}; cancelling permission ${sanitizeLogText(event.requestId, 128)}`,
+      );
+      cancelPermissionRequest(bridge, event.requestId);
+      return;
+    }
+    channel.dispatchPermissionRequest(event).catch((err: unknown) => {
+      writeStderrLine(
+        `[Channel] Permission relay failed for ${sanitizeLogText(event.requestId, 128)}: ${err instanceof Error ? sanitizeLogText(err.message, 512) : sanitizeLogText(String(err), 512)}`,
+      );
+      cancelPermissionRequest(bridge, event.requestId);
+    });
+  });
+
+  bridge.on('permissionResolved', (event: PermissionResolvedEvent) => {
+    for (const channel of channels.values()) {
+      channel.dispatchPermissionResolved(event);
+    }
+  });
+}
+
 export function registerSessionCleanup(
   bridge: ChannelAgentBridge,
   router: SessionRouter,
@@ -173,14 +278,14 @@ export function registerSessionCleanup(
     const safeId = sanitizeLogText(event.sessionId, 128);
     const safeReason = event.reason ? sanitizeLogText(event.reason, 512) : '';
     writeStderrLine(
-      `[Channel] Session ${safeId} died${safeReason ? ` (${safeReason})` : ''}, removing routing state`,
+      `[Channel] Session ${safeId} died${safeReason ? ` (${safeReason})` : ''}, updating routing state`,
     );
     const target = router.getTarget(event.sessionId);
     const channel = target ? channels.get(target.channelName) : undefined;
     if (channel) {
       channel.onSessionDied(event.sessionId);
     } else {
-      router.removeSessionId(event.sessionId);
+      router.handleSessionDied(event.sessionId);
     }
   });
 }

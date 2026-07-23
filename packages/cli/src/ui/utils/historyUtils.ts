@@ -57,10 +57,16 @@ export function isSyntheticHistoryItem(
     case 'stop_hook_system_message':
       return true;
 
+    // Steer messages (mid-turn user injections) are typed 'user' but
+    // carry sentToModel === false; treat them as synthetic so the
+    // cancel handler can still do a full rewind when only a steer
+    // follows the real prompt.
+    case 'user':
+      return item.sentToModel === false;
+
     // Meaningful: user input, model text, tool runs, slash-command
     // results the user explicitly asked for. Auto-restore must bail
     // when any of these appear after the candidate user prompt.
-    case 'user':
     case 'user_shell':
     case 'gemini':
     case 'gemini_content':
@@ -122,35 +128,47 @@ export function itemsAfterAreOnlySynthetic(
 /** Index of the last `user` (real prompt) item, or -1. */
 export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].type === 'user') return i;
+    const item = history[i];
+    if (item.type === 'user' && item.sentToModel !== false) return i;
   }
   return -1;
 }
 
+/** Texts of real (non-steer) user prompts in `history`, oldest-first. */
+export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
+  return history
+    .filter(
+      (item): item is HistoryItem & { type: 'user'; text: string } =>
+        item.type === 'user' &&
+        item.sentToModel !== false &&
+        typeof item.text === 'string' &&
+        item.text.trim() !== '',
+    )
+    .map((item) => item.text);
+}
+
 /**
- * For each `gemini_thought` item that is immediately followed by one or
- * more `gemini_thought_content` continuations, build the concatenated
- * full text (header + continuations joined by newlines).  Items with no
- * continuation are omitted from the result — callers fall back to
- * `item.text` in that case.
+ * Map every thought item to the id of its group's `gemini_thought` head.
+ *
+ * A "thought" is one `gemini_thought` head followed by zero or more
+ * `gemini_thought_content` continuations. Both the head and its continuations
+ * map to the head id, so a single click on the head can expand/collapse the
+ * whole group as a unit (see the per-thought inline expansion in
+ * HistoryItemDisplay).
  */
-export function buildThinkingFullTextMap(
+export function buildThoughtHeadIdMap(
   items: readonly HistoryItem[],
-): Map<HistoryItem, string> {
-  const map = new Map<HistoryItem, string>();
+): Map<HistoryItem, number> {
+  const map = new Map<HistoryItem, number>();
   for (let i = 0; i < items.length; i++) {
     const item = items[i]!;
     if (item.type !== 'gemini_thought') continue;
-    let fullText = item.text;
-    let hasContinuation = false;
+    const headId = item.id;
+    map.set(item, headId);
     for (let j = i + 1; j < items.length; j++) {
       const next = items[j]!;
       if (next.type !== 'gemini_thought_content') break;
-      fullText += '\n' + next.text;
-      hasContinuation = true;
-    }
-    if (hasContinuation) {
-      map.set(item, fullText);
+      map.set(next, headId);
     }
   }
   return map;

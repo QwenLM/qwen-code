@@ -211,6 +211,24 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: () => ({}),
     },
   },
+  // POST /workspace/mcp/initialize → _qwen/workspace/mcp/initialize
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/mcp\/initialize\/?$/,
+    mapping: {
+      method: '_qwen/workspace/mcp/initialize',
+      extractParams: (_segs, body) => bodyRecord(body),
+    },
+  },
+  // POST /workspace/mcp/reload → _qwen/workspace/mcp/reload
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/mcp\/reload\/?$/,
+    mapping: {
+      method: '_qwen/workspace/mcp/reload',
+      extractParams: (_segs, body) => bodyRecord(body),
+    },
+  },
   // GET /health
   {
     httpMethod: 'GET',
@@ -286,10 +304,16 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)$/,
     mapping: {
       method: '_qwen/session/artifacts/remove',
-      extractParams: (segs) => ({
-        sessionId: segs[0],
-        artifactId: segs[1],
-      }),
+      extractParams: (segs, body) => {
+        const record = isRecord(body) ? body : {};
+        return {
+          sessionId: segs[0],
+          artifactId: segs[1],
+          ...(typeof record.clientId === 'string'
+            ? { clientId: record.clientId }
+            : {}),
+        };
+      },
     },
   },
   // POST /session/:id/recap → _qwen/session/recap
@@ -754,6 +778,9 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
           ...strParam(query, 'archiveState'),
           ...strParam(query, 'view'),
           ...strParam(query, 'group'),
+          ...strParam(query, 'parentSessionId'),
+          ...strParam(query, 'sourceType'),
+          ...strParam(query, 'sourceId'),
           ...(size == null || size === ''
             ? {}
             : { _meta: { size: Number(size) } }),

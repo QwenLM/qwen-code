@@ -8,22 +8,56 @@ name: 'Qwen Autofix'
 # The lifecycle is asynchronous — a PR is opened in one run and its review is
 # addressed in a later run once a reviewer has weighed in — so each scheduled
 # tick runs only the phase(s) that make sense, decided by the `route` job:
-#   • every 4h             → review phase (sweep the bot's open PRs)
-#   • every 12h (00/12 UTC) → also the issue phase (locate + fix one new bug)
+#   • every 10m            → review phase; issue phase only if no PR needs work
 #   • issues:labeled        → issue phase when ready label, state, and sender match
+#   • pull_request_review   → review phase for submitted feedback on bot PRs
+#   • pull_request:labeled  → maintainer applies autofix/takeover → the loop
+#                             manages that PR (human-authored included, and
+#                             maintainer FORKS too: the fork's author must
+#                             hold write+ live and the PR must allow
+#                             maintainer edits — the bot then fetches/pushes
+#                             the fork branch directly; org-owned forks
+#                             cannot enable allow-edits → adoption instead);
+#                             unlabeled releases it. autofix/skip opts any PR
+#                             out everywhere and wins over takeover. Labels
+#                             need GitHub triage+, so the permission gate is
+#                             GitHub's own. The bot's OWN fork PRs (author ==
+#                             the autofix bot, e.g. its codex flow) are auto-
+#                             managed WITHOUT a label when allow-edits is on —
+#                             they are the bot's own generated work, trust-
+#                             equal to an in-repo bot PR; autofix/skip still
+#                             opts them out.
+#   • issue_comment         → '@qwen-code /takeover' (apply the label) and
+#                             '@qwen-code /takeover stop' (remove it) — sugar
+#                             for people without label access: the PR author,
+#                             or write+ collaborators. Exact-match constants,
+#                             and the ONLY side effect is the label toggle;
+#                             engagement/release still happen exclusively via
+#                             the label events, so manual labeling and the
+#                             commands are the same single mechanism.
 #   • workflow_dispatch     → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
-# through CI_DEV_BOT_PAT so the bot acts as a single identity, qwen-code-dev-bot.
+# through CI_DEV_BOT_PAT so the bot acts as the configured autofix identity.
 # PAT label writes can emit issues:labeled events; the route guards below make
 # those runs exit unless the label, issue state, and ready label all match.
 on:
   issues:
     types:
       - 'labeled'
+      - 'assigned'
+  pull_request_review:
+    types:
+      - 'submitted'
+  pull_request:
+    types:
+      - 'labeled'
+      - 'unlabeled'
+  issue_comment:
+    types:
+      - 'created'
   schedule:
-    - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
-    - cron: '0 4,8,16,20 * * *' # Review only between issue runs
+    - cron: '*/10 * * * *' # Review first; issue fallback only when no PR needs work
   workflow_dispatch:
     inputs:
       phase:
@@ -41,7 +75,7 @@ on:
         required: false
         type: 'string'
       pr_number:
-        description: 'Force a specific autofix PR number (implies the review phase)'
+        description: 'Force a specific bot PR number (implies the review phase)'
         required: false
         type: 'string'
       dry_run:
@@ -58,9 +92,11 @@ permissions:
   contents: 'read'
 
 env:
-  # Identity of the autofix bot and the branches it owns. Only its own in-repo
-  # PRs are ever eligible for the review phase — never a fork or another branch.
-  AUTOFIX_BOT: 'qwen-code-dev-bot'
+  # Identity of the autofix bot. All open in-repo PRs authored by this bot are
+  # eligible for the review phase — not limited to autofix/issue-* branches.
+  AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+  # Branch-name prefix used by the issue phase when creating PRs. Also used
+  # for duplicate-PR detection and issue-number extraction from branch names.
   BRANCH_PREFIX: 'autofix/issue-'
   # The automated Qwen PR reviewer posts as this account; its review counts as
   # actionable feedback even though it is not a human collaborator.
@@ -70,18 +106,139 @@ env:
   # hostile commenter cannot steer the agent.
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
-  # and leaves the PR for a human.
-  MAX_ROUNDS: '3'
+  # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
+  # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
+  # its five rounds on the verify-gate ENOENT that #7330 fixed), so the ceiling
+  # was near enough to bind on a bad day without any headroom for one. The cap
+  # exists to stop an unproductive LOOP, not to ration ordinary iteration —
+  # a genuinely stuck PR still stops, just later.
+  MAX_ROUNDS: '10'
+  # An auth/access model error (401/402/403, "no access"/"does not exist")
+  # never self-heals - only a maintainer can fix the key - and every retry
+  # costs an agent run AND a PR comment. Cap those attempts far below
+  # MAX_ROUNDS so the actionable "check the model key" message lands in an
+  # hour instead of a day. Transient (429/5xx) errors keep the full budget.
+  API_AUTH_MAX_ROUNDS: '3'
+  # Checks the "wait for checks to settle" gate does NOT wait for. The gate
+  # exists so a FAILED check can be read as feedback, which is why build/test/
+  # lint are still waited for. `review-pr` is the LLM code review: its output
+  # is a REVIEW, delivered by its own real-time pull_request_review trigger and
+  # counted by the review path — the check conclusion carries nothing the loop
+  # acts on. Blocking on it bought nothing and cost a median 49 minutes per
+  # round (p90 123, max 158, over 32 completed runs), during which the PR was
+  # invisible to the scan even when it already had unaddressed feedback.
+  # Names must match job ids in qwen-code-pr-review.yml; a test pins that.
+  NON_BLOCKING_CHECKS: '["review-pr"]'
+  # Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the
+  # code — a self-hosted runner losing the server, the disk filling, a runner
+  # shutdown, or a git fetch/clone dying mid-transfer. Such a check is red for a
+  # reason unrelated to the PR and clears on a re-run (observed: #7490's E2E
+  # "runner lost communication"; #6506's checkout "RPC failed; curl 92" /
+  # "fetch-pack: invalid index-pack output" — both green on the rerun). The scan
+  # auto-reruns those failed jobs ONCE, guarded by run_attempt so a persistent
+  # infra problem cannot loop. Deliberately conservative — only unambiguous
+  # machine/transport failures, never a bare test-level timeout, which could be
+  # a real regression (a co-present timeout does not block a match — one
+  # matching line classifies the run). Case-insensitive, vs the annotations.
+  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
+  # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
+  # excess is logged and deferred to the next scan).
+  MAX_TARGETS_PER_SCAN: '10'
+  # Upper bound on candidates INSPECTED per scan: idle candidates consume
+  # serial API calls even when they emit nothing, and takeover widens the
+  # candidate pool. Candidates are inspected NEWEST-first; past the budget
+  # the oldest tail defers — old quiet PRs are the least likely to hold new
+  # feedback, and a deferred PR with a live conflict is still picked up by
+  # the shepherd's conflict lever.
+  MAX_CANDIDATE_INSPECTIONS: '60'
+  # Maintainer-facing engagement labels (applying labels requires GitHub
+  # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
+  # including a human-authored one — into the loop; SKIP opts any PR out
+  # everywhere, and wins when both are present.
+  TAKEOVER_LABEL: 'autofix/takeover'
+  SKIP_LABEL: 'autofix/skip'
+  # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
+  # stop' removes it). Matched EXACTLY against the trimmed comment body.
+  TAKEOVER_COMMAND: '@qwen-code /takeover'
+  # Re-arm sugar. Recovering a stranded PR previously meant DELETING the
+  # bot's autofix-eval marker comment by hand (undiscoverable, destructive,
+  # and it erases the audit trail). This command instead posts an
+  # 'autofix-rearm' marker that supersedes the earlier evaluation markers:
+  # the scan re-reads the feedback from scratch and the round counter resets.
+  RETRY_COMMAND: '@qwen-code /retry'
+  # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
+  # need dozens of feedback rounds — that is the point of takeover — so the
+  # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
+  # (a bot↔review-bot ping-pong is still bounded), it is just sized for
+  # explicitly delegated work; removing the label restores the strict cap,
+  # and re-engaging opens a fresh counting window (see REARM_KEY below).
+  TAKEOVER_MAX_ROUNDS: '100'
+  # Consecutive-failure sub-cap, distinct from the total round cap above. The
+  # total cap bounds how many PRODUCTIVE rounds a PR may take; this bounds how
+  # many rounds may fail IN A ROW with nothing pushed. Under takeover a PR gets
+  # up to 100 rounds, but a PR that fails to push this many times running is not
+  # iterating, it is stuck — a too-large / fast-conflicting PR whose fix keeps
+  # timing out or failing the gate. Retrying at the same budget will not fix
+  # that; a human has to rebase or split it. Any pushed round OR a legitimate
+  # "no changes needed" no-op resets the streak, so this only ever fires on an
+  # unbroken run of failures. Observed on #6723: 7 straight failed rounds (3
+  # timeouts, 4 gate rejections) over 8 hours, heading for 100.
+  CONSECUTIVE_FAILURE_CAP: '5'
+  # Do not claim more issues when too many existing autofix PRs are still open.
+  MAX_OPEN_AUTOFIX_PRS: '5'
 
 jobs:
   # ---------------------------------------------------------------------------
   # Router: fork the run into phases by schedule/dispatch input.
   # ---------------------------------------------------------------------------
   route:
+    # The issue_comment clause is a cheap expression-level prefilter: the
+    # overwhelming majority of comments never start a job at all. The real
+    # gates (exact body match, sender authorization) live in 'Decide phases'.
+    # Nuance: a body with LEADING whitespace dies here even though the decide
+    # branch would trim it — fail closed, command must start the comment.
+    # Both commands are prefiltered here (/takeover toggles the label, /retry
+    # re-arms a stranded PR); everything else never starts a job.
     if: |-
-      ${{ github.repository == 'QwenLM/qwen-code' }}
+      ${{ github.repository == 'QwenLM/qwen-code' && (github.event_name != 'issue_comment' || (github.event.issue.pull_request && (startsWith(github.event.comment.body, '@qwen-code /takeover') || startsWith(github.event.comment.body, '@qwen-code /retry')))) && (github.event_name != 'pull_request' || github.event.label.name == 'autofix/takeover') }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    concurrency:
+      # Concurrency is keyed by TARGET, not shared and not fully unique:
+      #   • cron ticks share one group (a newer tick supersedes a queued one)
+      #   • review events coalesce PER PR (two reviews on the same PR seconds
+      #     apart route once — the old shared group's one useful side effect,
+      #     kept, without letting events on OTHER PRs cancel this one)
+      #   • issue events coalesce PER issue
+      #   • dispatches are unique per run and are never cancelled
+      # The old single shared cancel-in-progress group let ANY newer event kill
+      # pending full scans while route jobs sat queued behind runner backlog —
+      # observed as hours of scan starvation during review-event storms.
+      # Five cases: schedule → one shared cron group (newer tick supersedes);
+      # pull_request_review → per-PR, but ONLY when the review payload
+      # already looks trusted (the group is entered before any step runs, so
+      # an arbitrary commenter's review would otherwise cancel a queued
+      # legitimate route and then die in 'Decide phases' — untrusted payloads
+      # get a run-unique group and still face the real permission gate
+      # inside; the association literal mirrors TRUSTED_ASSOC and the login
+      # mirrors REVIEW_BOT); pull_request label events → per-PR (GitHub only
+      # lets triage+ apply labels, so the whole event class is trusted —
+      # in their OWN per-PR group (label-{N}), distinct from the review
+      # group so a simultaneous review and label toggle on the same PR can
+      # never cancel each other, and only the takeover label routes at all
+      # (unrelated labels are filtered at the job gate); issue_comment → its own per-PR command group, but
+      # ONLY when the commenter's payload association already looks trusted
+      # (same prefilter pattern as reviews — an untrusted commenter must not
+      # cancel a maintainer's queued command; untrusted payloads get a
+      # run-unique group and still face the real permission gate inside), so
+      # a burst of trusted command comments coalesces to at most two runs
+      # with latest-intent semantics, never touching review routes;
+      # issues → per-issue; anything else (dispatch) → unique per run_id,
+      # never cancelled.
+      group: >-
+        ${{ github.event_name == 'schedule' && 'qwen-autofix-route-cron' || (github.event_name == 'pull_request_review' && (contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.review.author_association) || github.event.review.user.login == 'qwen-code-ci-bot') && format('qwen-autofix-route-pr-{0}', github.event.pull_request.number)) || (github.event_name == 'pull_request' && github.event.label.name == 'autofix/takeover' && format('qwen-autofix-route-label-{0}', github.event.pull_request.number)) || (github.event_name == 'issue_comment' && contains(fromJSON('["OWNER", "MEMBER", "COLLABORATOR"]'), github.event.comment.author_association) && format('qwen-autofix-route-cmd-{0}', github.event.issue.number)) || (github.event_name == 'issues' && format('qwen-autofix-route-issue-{0}', github.event.issue.number)) || format('qwen-autofix-route-{0}', github.run_id) }}
+      cancel-in-progress: |-
+        ${{ github.event_name != 'workflow_dispatch' }}
     permissions:
       contents: 'read'
     outputs:
@@ -90,6 +247,12 @@ jobs:
       dry_run: '${{ steps.decide.outputs.dry_run }}'
       issue_number: '${{ steps.decide.outputs.issue_number }}'
       pr_number: '${{ steps.decide.outputs.pr_number }}'
+      takeover_ack: '${{ steps.decide.outputs.takeover_ack }}'
+      ack_pr: '${{ steps.decide.outputs.ack_pr }}'
+      ack_base: '${{ steps.decide.outputs.ack_base }}'
+      takeover_cmd: '${{ steps.decide.outputs.takeover_cmd }}'
+      retry_pr: '${{ steps.decide.outputs.retry_pr }}'
+      cmd_pr: '${{ steps.decide.outputs.cmd_pr }}'
     steps:
       - name: 'Decide phases'
         id: 'decide'
@@ -109,10 +272,25 @@ jobs:
           AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           REPO: '${{ github.repository }}'
           SENDER_LOGIN: '${{ github.event.sender.login }}'
+          ASSIGNEE_LOGIN: '${{ github.event.assignee.login }}'
           SCHEDULE: '${{ github.event.schedule }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+          PR_NUMBER_EVENT: '${{ github.event.pull_request.number }}'
+          PR_HEAD_REPO: '${{ github.event.pull_request.head.repo.full_name }}'
+          PR_BASE_REF: '${{ github.event.pull_request.base.ref }}'
+          PR_STATE: '${{ github.event.pull_request.state }}'
+          EVENT_ACTION: '${{ github.event.action }}'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
+          COMMENT_PR_AUTHOR: '${{ github.event.issue.user.login }}'
+          HAS_PR_URL: '${{ github.event.issue.pull_request.url }}'
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
+          TAKEOVER_ACK=''
+          ACK_BASE=''
+          TAKEOVER_CMD=''
+          CMD_PR=''
+          RETRY_PR=''
           DRY_RUN="${DRY_RUN_INPUT:-false}"
           sanitize_number() {
             local value="${1//$'\r'/}"
@@ -137,31 +315,257 @@ jobs:
               if [[ "${EVENT_NAME}" == 'schedule' || "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
                 DO_REVIEW=true
               fi
-              # Must match the issue-phase cron string on the schedule trigger.
-              if [[ "${EVENT_NAME}" == 'schedule' && "${SCHEDULE}" == '0 0,12 * * *' ]]; then
+              # Scheduled runs scan review PRs first; issue-autofix runs only
+              # when review-scan reports no target.
+              if [[ "${EVENT_NAME}" == 'schedule' ]]; then
                 DO_ISSUE=true
+              fi
+              # Real-time review triggers: process the SAME managed set the
+              # scheduled scan does, so feedback is picked up seconds after the
+              # review instead of waiting for a schedule GitHub throttles hard
+              # (the */10 cron actually lands every 40-70min on this repo).
+              # Reviews must come from trusted senders (collaborators or the
+              # review bot) so arbitrary commenters cannot force expensive
+              # review-scan runs. Only pull_request_review:submitted triggers
+              # (not per-comment events) to avoid redundant runs on
+              # multi-comment reviews.
+              if [[ "${EVENT_NAME}" == 'pull_request_review' ]]; then
+                DO_ISSUE=false
+                pr_is_managed=false
+                if [[ "${PR_BASE_REF}" != "main" ]]; then
+                  echo "🧭 review event ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                elif [[ "${PR_HEAD_REPO}" == "${REPO}" ]]; then
+                  if [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" ]]; then
+                    pr_is_managed=true
+                  else
+                    echo "🧭 review event ignored: PR author '${PR_AUTHOR}' is not ${AUTOFIX_BOT}"
+                  fi
+                else
+                  # Fork PR. The scheduled scan already admits these for
+                  # takeover, so real-time pickup applies the SAME admission
+                  # (allow-edits on, and either the bot's own fork or an
+                  # explicit TAKEOVER_LABEL) rather than making the takeover
+                  # PRs — the ones a maintainer is actively waiting on — sit
+                  # through a throttled schedule. This event runs in BASE-repo
+                  # context, and review-address independently re-verifies
+                  # allow-edits, a live write+ author and a matching live head
+                  # repo before it touches the branch, so this only decides
+                  # WHEN that same gated work happens, never whether it may.
+                  fork_meta=''
+                  if fork_meta="$(gh pr view "${PR_NUMBER_EVENT}" --repo "${REPO}" --json labels,maintainerCanModify 2> /dev/null)"; then
+                    fork_allows_edits="$(jq -r '.maintainerCanModify == true' <<< "${fork_meta}")"
+                    fork_has_takeover="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${fork_meta}")"
+                    if [[ "${fork_allows_edits}" != 'true' ]]; then
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} does not allow maintainer edits"
+                    elif [[ "${PR_AUTHOR}" == "${AUTOFIX_BOT}" || "${fork_has_takeover}" == 'true' ]]; then
+                      pr_is_managed=true
+                    else
+                      echo "🧭 review event ignored: fork PR #${PR_NUMBER_EVENT} is neither ${AUTOFIX_BOT}'s own fork nor ${TAKEOVER_LABEL}-labeled"
+                    fi
+                  else
+                    echo "🧭 review event ignored: could not read fork PR #${PR_NUMBER_EVENT} metadata"
+                  fi
+                fi
+                if [[ "${pr_is_managed}" == 'true' ]]; then
+                  # Verify the reviewer/commenter is trusted (prompt-injection gate).
+                  sender_permission=''
+                  sender_is_trusted=false
+                  if [[ "${SENDER_LOGIN}" == "${REVIEW_BOT}" ]]; then
+                    sender_is_trusted=true
+                  elif [[ -n "${SENDER_LOGIN}" ]]; then
+                    api_error_file="$(mktemp)"
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
+                      case "${sender_permission}" in
+                        admin|maintain|write) sender_is_trusted=true ;;
+                      esac
+                    else
+                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error:-unknown error}"
+                      sender_permission=''
+                    fi
+                    rm -f "${api_error_file}"
+                  fi
+                  if [[ "${sender_is_trusted}" == "true" ]]; then
+                    DO_REVIEW=true
+                    ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
+                    echo "🧭 review event on bot PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} (${sender_permission:-review-bot}) → review phase"
+                  else
+                    echo "🧭 review event ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not trusted"
+                  fi
+                fi
+              fi
+              # Comment-command sugar over the labels: TAKEOVER_COMMAND
+              # applies TAKEOVER_LABEL, 'TAKEOVER_COMMAND stop' removes it —
+              # nothing else. The label stays the single source of truth:
+              # engagement and release happen ONLY via the label events
+              # below, so the command's whole blast radius is one label
+              # toggle. Exact match on the trimmed body (constants, never
+              # user-input parsing); allowed senders: the PR author (who may
+              # lack label access) or a write+ collaborator. This immediately
+              # narrows a previously fully-closed surface reopened under
+              # maintainer mandate.
+              if [[ "${EVENT_NAME}" == 'issue_comment' ]]; then
+                DO_ISSUE=false
+                DO_REVIEW=false
+                BODY_TRIMMED="$(printf '%s' "${COMMENT_BODY}" | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+                CMD=''
+                [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND}" ]] && CMD='add'
+                [[ "${BODY_TRIMMED}" == "${TAKEOVER_COMMAND} stop" ]] && CMD='remove'
+                # Re-arm shares the takeover command's authorization exactly:
+                # both summon bot activity on a managed PR, so inventing a
+                # second policy would only add surface.
+                RETRY_REQ=''
+                [[ "${BODY_TRIMMED}" == "${RETRY_COMMAND}" ]] && RETRY_REQ='true'
+                if [[ -z "${HAS_PR_URL}" ]]; then
+                  echo "🧭 command ignored: not a PR comment"
+                elif [[ -z "${CMD}" && -z "${RETRY_REQ}" ]]; then
+                  echo "🧭 command ignored: body is not an exact command"
+                elif [[ "${ISSUE_STATE}" != 'open' ]]; then
+                  echo "🧭 command ignored: PR is not open"
+                elif [[ -z "${SENDER_LOGIN}" || "${SENDER_LOGIN}" == "${AUTOFIX_BOT}" ]]; then
+                  echo "🧭 command ignored: sender '${SENDER_LOGIN:-n/a}'"
+                else
+                  sender_is_authorized=false
+                  sender_permission=''
+                  # Author privilege applies to IN-REPO PRs only: on a fork
+                  # PR the author is an arbitrary external account, and
+                  # accepting them here would let them drive PAT-authored
+                  # writes (even just refusal comments) onto their own PR at
+                  # will. Fork authors without write+ are dropped silently.
+                  CMD_HEAD_REPO="$(gh api "repos/${REPO}/pulls/${ISSUE_NUMBER}" --jq '.head.repo.full_name // ""' 2> /dev/null || echo '')"
+                  if [[ "${SENDER_LOGIN}" == "${COMMENT_PR_AUTHOR}" && "${CMD_HEAD_REPO}" == "${REPO}" ]]; then
+                    # Author privilege is LIVE, not durable: an author removed
+                    # from the repo keeps their PR/head-repo match forever, so
+                    # authorship alone must not keep summoning secret-bearing
+                    # runs. Authors qualify at triage+ (the sugar exists for
+                    # members below write who cannot apply labels).
+                    api_error_file="$(mktemp)"
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
+                      case "${sender_permission}" in
+                        admin|maintain|write|triage) sender_is_authorized=true; sender_permission="pr-author/${sender_permission}" ;;
+                      esac
+                    else
+                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+                      echo "::warning::Permission API call failed for author ${SENDER_LOGIN}: ${api_error:-unknown error}"
+                      sender_permission=''
+                    fi
+                    rm -f "${api_error_file}"
+                  else
+                    api_error_file="$(mktemp)"
+                    if sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>"${api_error_file}")"; then
+                      case "${sender_permission}" in
+                        admin|maintain|write) sender_is_authorized=true ;;
+                      esac
+                    else
+                      api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error:-unknown error}"
+                      sender_permission=''
+                    fi
+                    rm -f "${api_error_file}"
+                  fi
+                  if [[ "${sender_is_authorized}" == 'true' ]]; then
+                    if [[ -n "${RETRY_REQ}" ]]; then
+                      RETRY_PR="$(sanitize_number "${ISSUE_NUMBER}")"
+                      echo "🧭 retry command accepted: re-arm PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    else
+                      TAKEOVER_CMD="${CMD}"
+                      CMD_PR="$(sanitize_number "${ISSUE_NUMBER}")"
+                      echo "🧭 takeover command accepted: ${CMD} ${TAKEOVER_LABEL} on PR #${ISSUE_NUMBER} by ${SENDER_LOGIN} (${sender_permission})"
+                    fi
+                  else
+                    echo "🧭 command ignored: sender '${SENDER_LOGIN}' permission='${sender_permission:-none}' is not the PR author or write+"
+                  fi
+                fi
+              fi
+              # Label-driven takeover: TAKEOVER_LABEL applied to an eligible
+              # PR summons the loop onto it (human-authored included);
+              # removing it releases the PR — future engagement stops, and an
+              # in-flight round, if any, completes its bounded work (matrix
+              # runs are shared across PRs, so cancelling one is not possible
+              # without collateral damage). ISSUE_LABEL carries the label
+              # name for pull_request events too (same payload field).
+              if [[ "${EVENT_NAME}" == 'pull_request' ]]; then
+                DO_ISSUE=false
+                if [[ "${ISSUE_LABEL}" != "${TAKEOVER_LABEL}" ]]; then
+                  echo "🧭 pull_request ${EVENT_ACTION} ignored: label '${ISSUE_LABEL:-n/a}' is not ${TAKEOVER_LABEL}"
+                elif [[ "${EVENT_ACTION}" == 'labeled' ]]; then
+                  if [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
+                    # Fork pull_request events carry NO secrets, so neither
+                    # the immediate scan nor the ack job can run from this
+                    # event. The label still counts: the next scheduled scan
+                    # (repo context, ≤10m) admits fork takeover PRs whose
+                    # author holds write+ and whose PR allows maintainer
+                    # edits, and posts the engage ack on first pickup.
+                    echo "🧭 fork takeover noted for #${PR_NUMBER_EVENT} — the next scheduled scan engages (author write+ and allow-edits required)"
+                  elif [[ "${PR_STATE}" != 'open' ]]; then
+                    echo "🧭 takeover ignored: PR state '${PR_STATE:-unknown}' is not open"
+                  elif [[ "${PR_BASE_REF}" != 'main' ]]; then
+                    # Refuse OUT LOUD. Staying silent here made a labelled
+                    # stacked PR indistinguishable from a managed one: the
+                    # label stuck, the route run went green, and the only
+                    # trace was this log line — so the PR sat unmanaged for
+                    # hours with nobody able to tell without reading the job
+                    # log. The ack job posts the explanation instead.
+                    TAKEOVER_ACK='base-refused'
+                    ACK_BASE="${PR_BASE_REF}"
+                    echo "🧭 takeover ignored: PR targets '${PR_BASE_REF}' not 'main'"
+                  else
+                    DO_REVIEW=true
+                    ROUTE_PR="$(sanitize_number "${PR_NUMBER_EVENT}")"
+                    TAKEOVER_ACK='engaged'
+                    echo "🧭 ${TAKEOVER_LABEL} applied by ${SENDER_LOGIN} on PR #${PR_NUMBER_EVENT} → review phase (takeover)"
+                  fi
+                elif [[ "${EVENT_ACTION}" == 'unlabeled' ]]; then
+                  # Mirror the labeled-path guards: a fork, closed, or
+                  # non-main PR was never engaged, so a release ack would
+                  # announce a disengagement that never existed.
+                  if [[ "${PR_STATE}" != 'open' || "${PR_BASE_REF}" != 'main' ]]; then
+                    echo "🧭 takeover release ignored: PR state '${PR_STATE:-unknown}' base '${PR_BASE_REF:-unknown}' was never engaged"
+                  elif [[ "${PR_HEAD_REPO}" != "${REPO}" ]]; then
+                    # Fork pull_request events carry no secrets: emitting the
+                    # ack here would start takeover-ack with an empty PAT and
+                    # fail its identity check — a red run for a label that
+                    # never engaged anything. Log and stop.
+                    echo "🧭 takeover release ignored: PR is a fork (${PR_HEAD_REPO} != ${REPO})"
+                  else
+                    TAKEOVER_ACK='released'
+                    echo "🧭 ${TAKEOVER_LABEL} removed from PR #${PR_NUMBER_EVENT} by ${SENDER_LOGIN} → released"
+                  fi
+                fi
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true
+                [[ "${ASSIGNEE_LOGIN}" == "${AUTOFIX_BOT}" ]] && label_is_trigger=true
+                sender_permission=''
+                sender_is_trusted=false
+                if [[ -n "${SENDER_LOGIN}" ]]; then
+                  if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                    api_error="${sender_permission}"
+                    sender_permission=''
+                    api_error="${api_error//$'\r'/ }"
+                    api_error="${api_error//$'\n'/ }"
+                    echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
+                  fi
+                  [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
+                fi
                 if [[ "${label_is_trigger}" != 'true' ]]; then
-                  echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  # A non-trigger label (e.g. scope/*, priority/*) may arrive
+                  # after the trigger labels and cancel their runs via per-issue
+                  # concurrency. If the issue already carries both required
+                  # labels and the current sender is trusted, proceed anyway.
+                  _late_ready="$(jq -r --arg l "${READY_FOR_AGENT_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  _late_approved="$(jq -r --arg l "${AUTOFIX_APPROVED_LABEL}" 'index($l) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  if [[ "${ISSUE_STATE}" == 'open' && "${_late_ready}" == 'true' && "${_late_approved}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
+                    echo "🧭 non-trigger label '${ISSUE_LABEL:-n/a}' but issue #${ISSUE_NUMBER} already approved+ready → issue phase"
+                    DO_ISSUE=true
+                  else
+                    echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  fi
                 else
                   issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                   issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
-                  sender_permission=''
-                  sender_is_trusted=false
-                  if [[ -n "${SENDER_LOGIN}" ]]; then
-                    if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
-                      api_error="${sender_permission}"
-                      sender_permission=''
-                      api_error="${api_error//$'\r'/ }"
-                      api_error="${api_error//$'\n'/ }"
-                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
-                    fi
-                    [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
-                  fi
                   issue_is_approved="$(jq -r --arg label "${AUTOFIX_APPROVED_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                   if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_ready}" == 'true' && "${issue_is_approved}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
                     DO_ISSUE=true
@@ -190,19 +594,29 @@ jobs:
           echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
           echo "issue_number=${ROUTE_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
-          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
+          echo "takeover_ack=${TAKEOVER_ACK}" >> "${GITHUB_OUTPUT}"
+          echo "ack_pr=$(sanitize_number "${PR_NUMBER_EVENT}")" >> "${GITHUB_OUTPUT}"
+          echo "ack_base=${ACK_BASE}" >> "${GITHUB_OUTPUT}"
+          echo "takeover_cmd=${TAKEOVER_CMD}" >> "${GITHUB_OUTPUT}"
+          echo "retry_pr=${RETRY_PR}" >> "${GITHUB_OUTPUT}"
+          echo "cmd_pr=${CMD_PR}" >> "${GITHUB_OUTPUT}"
+          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' pr='#${PR_NUMBER_EVENT:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
   # ISSUE PHASE — locate one maintainer-ready issue, fix it, open a PR.
   # ===========================================================================
   issue-autofix:
-    needs: 'route'
+    needs: ['route', 'review-scan']
     if: |-
-      ${{ needs.route.outputs.do_issue == 'true' }}
+      ${{
+        always() &&
+        needs.route.outputs.do_issue == 'true' &&
+        (github.event_name != 'schedule' || (needs.review-scan.result == 'success' && needs.review-scan.outputs.has_targets != 'true'))
+      }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
     concurrency:
-      group: 'qwen-autofix-issue'
+      group: 'qwen-autofix-issue-${{ needs.route.outputs.issue_number || github.run_id }}'
       cancel-in-progress: false
     permissions:
       contents: 'read'
@@ -215,7 +629,7 @@ jobs:
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
     steps:
       - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -224,6 +638,13 @@ jobs:
         run: |-
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
+
+      # Same staging as the review-address job: the verify gate always runs the
+      # trusted checkout's copy of the schema gate, never a working-tree copy.
+      - name: 'Stage trusted schema gate'
+        run: |-
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
 
       - name: 'Check bot credentials'
         env:
@@ -319,6 +740,7 @@ jobs:
           FORCED_ISSUE: '${{ needs.route.outputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          OPEN_AUTOFIX_PR_COUNT=0
 
           if [[ -n "${FORCED_ISSUE}" ]]; then
             echo "🎯 Forced issue #${FORCED_ISSUE}"
@@ -354,34 +776,51 @@ jobs:
               fi
             fi
           else
-            echo "🔍 Ready-for-agent issues (newest first)..."
-            if ! gh issue list --repo "${REPO}" \
+            if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
+              --limit 100 --json number,headRefName,isCrossRepository > "${WORKDIR}/open-autofix-prs.json"; then
+              echo "::warning::Open autofix PR scan failed; proceeding without WIP-cap enforcement."
+            else
+              OPEN_AUTOFIX_PR_COUNT="$(jq --arg p "${BRANCH_PREFIX}" \
+                '[.[] | select((.isCrossRepository != true) and ((.headRefName // "") | startswith($p)))] | length' \
+                "${WORKDIR}/open-autofix-prs.json")"
+            fi
+
+            if [[ "${OPEN_AUTOFIX_PR_COUNT}" -ge "${MAX_OPEN_AUTOFIX_PRS}" ]]; then
+              echo "⏭️ ${OPEN_AUTOFIX_PR_COUNT} open autofix PR(s) already exist; WIP limit is ${MAX_OPEN_AUTOFIX_PRS}; skipping issue fallback."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            else
+              echo "🔍 Ready-for-agent issues (newest first)..."
+              if ! gh issue list --repo "${REPO}" \
               --search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}" \
               --limit 30 --json number,title,body,labels,createdAt,url \
               > "${WORKDIR}/scan.json"; then
-              echo "::warning::Ready-for-agent issue scan failed; falling back to an empty candidate list."
-              jq -n -c '[]' > "${WORKDIR}/candidates.json"
-            else
-              if ! jq -c '.[0:10] | map(. + {autofixTier: 1})' \
-                "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"; then
-                echo "::warning::Ready-for-agent result processing failed; falling back to an empty candidate list."
+                echo "::warning::Ready-for-agent issue scan failed; falling back to an empty candidate list."
                 jq -n -c '[]' > "${WORKDIR}/candidates.json"
+              else
+                if ! jq -c '.[0:10] | map(. + {autofixTier: 1})' \
+                  "${WORKDIR}/scan.json" > "${WORKDIR}/candidates.json"; then
+                  echo "::warning::Ready-for-agent result processing failed; falling back to an empty candidate list."
+                  jq -n -c '[]' > "${WORKDIR}/candidates.json"
+                fi
               fi
             fi
           fi
 
           COUNT="$(jq length "${WORKDIR}/candidates.json")"
           if [[ "${COUNT}" -gt 0 ]]; then
-            if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
-              --limit 100 --json number,headRefName > "${WORKDIR}/open-autofix-prs.json"; then
+            if [[ -s "${WORKDIR}/open-autofix-prs.json" ]]; then
+              echo "ℹ️ Reusing open autofix PR scan for duplicate-PR annotation."
+            elif ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
+              --limit 100 --json number,headRefName,isCrossRepository > "${WORKDIR}/open-autofix-prs.json"; then
               echo "::warning::Open autofix PR scan failed; candidates will proceed without duplicate-PR annotation."
-            else
+            fi
+            if [[ -s "${WORKDIR}/open-autofix-prs.json" ]]; then
               if ! jq -c --arg p "${BRANCH_PREFIX}" --slurpfile prs "${WORKDIR}/open-autofix-prs.json" '
                 ($prs[0] // []) as $prs
                 | map(
                     ($p + (.number | tostring)) as $branch
                     | (
-                        first($prs[] | select((.headRefName // "") == $branch) | {
+                        first($prs[] | select((.isCrossRepository != true) and ((.headRefName // "") == $branch)) | {
                           number,
                           headRefName
                         }) // null
@@ -451,7 +890,7 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
@@ -610,7 +1049,7 @@ jobs:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
@@ -636,6 +1075,7 @@ jobs:
                 "run_shell_command(npm run typecheck)",
                 "run_shell_command(npm run lint)",
                 "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
                 "run_shell_command(pwd)"
               ],
               "tools": {
@@ -682,6 +1122,7 @@ jobs:
             echo "❌ Expected branch ${BRANCH} does not exist"
             exit 1
           fi
+          git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
 
           if git diff --quiet origin/main..."${BRANCH}"; then
@@ -701,15 +1142,39 @@ jobs:
           npm run typecheck
           npm run lint
 
+          # Settings-schema freshness gate, shared with the triage-and-address
+          # verify step so the two copies cannot drift (rationale + the
+          # generator crash guard live in the script). On failure it writes
+          # outcome=failed to GITHUB_OUTPUT and exits 1.
+          # Run the copy staged from the trusted base checkout: a PR branch
+          # that predates the script does not contain it (bash would exit 127
+          # and kill the gate with no outcome), and the gate logic must come
+          # from the trusted base, not the branch under verification.
+          bash "${RUNNER_TEMP}/check-settings-schema.sh"
+
           # Run changed/related tests for the packages this fix touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
@@ -752,16 +1217,18 @@ jobs:
         if: |-
           ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
         env:
-          # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) opens the PR as
-          # qwen-code-dev-bot. This is required: the default GITHUB_TOKEN is
+          # CI_DEV_BOT_PAT opens the PR as the configured autofix bot. This is
+          # required: the default GITHUB_TOKEN is
           # blocked from creating PRs ("GitHub Actions is not permitted to
           # create or approve pull requests"), and PRs it does create do not
           # trigger CI. The bot PAT clears both problems.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
+          MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
-            echo '::error::CI_DEV_BOT_PAT is required to publish the PR as qwen-code-dev-bot.'
+            echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the autofix bot.'
             exit 1
           fi
           api_error_file="$(mktemp)"
@@ -780,7 +1247,8 @@ jobs:
           BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          git push origin "${BRANCH}"
+          git config core.hooksPath /dev/null
+          git push --no-verify origin "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -789,6 +1257,11 @@ jobs:
           echo "🚀 Opened ${PR_URL}"
 
           # Per AGENTS.md, post the E2E report as a separate PR comment.
+          {
+            echo
+            echo "---"
+            echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+          } >> "${WORKDIR}/e2e-report.md"
           gh pr comment "${PR_URL}" --body-file "${WORKDIR}/e2e-report.md"
 
       - name: 'Report dry-run / failure'
@@ -849,8 +1322,256 @@ jobs:
           fi
 
   # ===========================================================================
-  # REVIEW PHASE (scan) — find every autofix PR with new, unaddressed feedback
-  # (or a base conflict) and emit them as a matrix. Cheap: GitHub API only.
+  # TAKEOVER COMMAND — the accepted comment command's side effects are the
+  # label toggle plus its own acknowledgements: add on an unlabeled PR
+  # toggles TAKEOVER_LABEL (the resulting pull_request event drives
+  # engagement exactly like a manual label edit — one mechanism, two entry
+  # points); add on an already-managed PR posts the re-arm ack (the round
+  # window anchor); skip-labeled and fork PRs get bilingual refusals instead
+  # of a toggle.
+  # ===========================================================================
+  takeover-command:
+    needs: 'route'
+    if: |-
+      ${{ needs.route.outputs.takeover_cmd != '' }}
+    # Two quick commands are independent runs; without serialization an older
+    # /takeover could land its label write AFTER a newer /takeover stop read
+    # the unlabeled state, leaving the PR engaged against the latest intent.
+    # Queued (never cancelled) per-PR execution preserves command order.
+    concurrency:
+      group: 'qwen-autofix-takeover-cmd-${{ needs.route.outputs.cmd_pr }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      CMD: '${{ needs.route.outputs.takeover_cmd }}'
+      PR: '${{ needs.route.outputs.cmd_pr }}'
+      GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+    steps:
+      - name: 'Toggle takeover label'
+        run: |-
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+          # Presence-aware toggle: adding a present label / removing an
+          # absent one fires no event, so make the no-op explicit instead.
+          # The same fetch carries isCrossRepository: fork PRs are refused UP
+          # FRONT — unlike the label path this job runs in issue_comment
+          # context WITH secrets, so it can explain itself, and refusing here
+          # keeps the label from ever sticking to a fork PR via the command.
+          if ! PR_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,isCrossRepository,state,baseRefName,author,maintainerCanModify 2> /dev/null)"; then
+            echo "::error::could not read PR #${PR}"
+            exit 1
+          fi
+          # State/base can change while this job sits in its per-PR queue —
+          # re-verify what the route checked so a stale command cannot label
+          # a closed or non-main PR.
+          if [[ "$(jq -r '.state // ""' <<< "${PR_INFO}")" != "OPEN" || "$(jq -r '.baseRefName // ""' <<< "${PR_INFO}")" != "main" ]]; then
+            echo "🧭 takeover command dropped: PR #${PR} is no longer an open main-targeting PR"
+            exit 0
+          fi
+          # Skip wins over takeover EVERYWHERE — including here: engaging or
+          # re-arming a skip-labeled PR would post an 'engaged' window anchor
+          # for management that the scans deliberately refuse to perform.
+          if [[ "${CMD}" == 'add' && "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")" == "true" ]]; then
+            gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover not engaged: this PR carries `%s`, which wins over takeover. Remove `%s` first, then re-run `%s`.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：本 PR 带有 `%s` 标签，其优先级高于接管。请先移除 `%s`，再执行 `%s`。\n\n</details>\n\n<!-- takeover-ack skip-blocked -->' "${SKIP_LABEL}" "${SKIP_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${SKIP_LABEL}" "${TAKEOVER_COMMAND}")"
+            echo "🧭 takeover command refused: ${SKIP_LABEL} present on #${PR}"
+            exit 0
+          fi
+          # Fork PRs are manageable when the bot can actually push: the
+          # author must have granted 'Allow edits from maintainers'
+          # (org-owned forks cannot — adoption stays the path there), and
+          # only write+ senders reach this job for forks (fork authors are
+          # silently dropped at route). Without allow-edits, refuse with the
+          # actionable ask. Engage-side requirement only: release ('stop')
+          # is never blocked.
+          if [[ "${CMD}" == 'add' && "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" \
+            && "$(jq -r '.maintainerCanModify // false' <<< "${PR_INFO}")" != "true" ]]; then
+            gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover needs push access to this fork branch: please tick “Allow edits from maintainers” on the PR and re-run `%s`. (Org-owned forks cannot enable it — a maintainer can adopt the PR instead: snapshot the head into an in-repo branch and take that over.)\n\n<details>\n<summary>中文说明</summary>\n\n🚫 托管需要对 fork 分支的推送权限：请在 PR 上勾选 “Allow edits from maintainers” 后重新执行 `%s`。（组织账号的 fork 无法勾选 —— 维护者可改用领养：将 head 快照为本仓库分支后接管。）\n\n</details>\n\n<!-- takeover-ack fork-refused -->' "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"
+            echo "🧭 takeover command refused: fork PR #${PR} without maintainer-edit access"
+            exit 0
+          fi
+          # The fork AUTHOR must hold write+ too (the scan re-checks this on
+          # every pickup and the address job once more live): engaging a
+          # below-write fork would stick a label that nothing ever manages —
+          # a silent ghost engagement with no ack and no explanation.
+          # Engage-side only; release is never blocked.
+          if [[ "${CMD}" == 'add' && "$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_INFO}")" != "false" ]]; then
+            FORK_PR_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_INFO}")"
+            FORK_AUTHOR_PERM="$(gh api "repos/${REPO}/collaborators/${FORK_PR_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+            case "${FORK_AUTHOR_PERM}" in
+              admin|maintain|write) : ;;
+              *)
+                gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🚫 Takeover not engaged: fork takeover requires the PR author to hold write access on this repository (author `%s` currently: `%s`). A maintainer can adopt the PR instead: snapshot the head into an in-repo branch, open a new PR (commit authorship is preserved), and take that over.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：fork 托管要求 PR 作者在本仓库持有 write 及以上权限（作者 `%s` 当前为：`%s`）。维护者可改用领养：将 head 快照为本仓库分支并另开 PR（commit 署名保留），再对新 PR 执行接管。\n\n</details>\n\n<!-- takeover-ack fork-refused -->' "${FORK_PR_AUTHOR}" "${FORK_AUTHOR_PERM:-none}" "${FORK_PR_AUTHOR}" "${FORK_AUTHOR_PERM:-none}")"
+                echo "🧭 takeover command refused: fork PR #${PR} author '${FORK_PR_AUTHOR}' permission='${FORK_AUTHOR_PERM:-none}' below write"
+                exit 0
+                ;;
+            esac
+          fi
+          HAS="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[].name] | index($t) != null' <<< "${PR_INFO}")"
+          if [[ "${CMD}" == 'add' ]]; then
+            if [[ "${HAS}" == 'true' ]]; then
+              # Already managed: repeating the command is the ROUND-COUNTER
+              # RESET. A fresh engage ack starts a new counting window (only
+              # markers newer than the latest ack count toward the cap), so
+              # a PR that exhausted its rounds continues under management —
+              # no label churn needed. The watermark is untouched: feedback
+              # already addressed is never replayed.
+              gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔄 Takeover re-armed: the round counter starts a fresh window (previous rounds no longer count toward the cap); management continues.\n\n<details>\n<summary>中文说明</summary>\n\n🔄 已重新武装：轮次计数开启新窗口（此前轮次不再计入上限），托管继续。\n\n</details>\n\n<!-- takeover-ack engaged -->')"
+              echo "🔄 re-armed ${TAKEOVER_LABEL} window on #${PR}"
+            else
+              gh pr edit "${PR}" --repo "${REPO}" --add-label "${TAKEOVER_LABEL}"
+              echo "🏷️ applied ${TAKEOVER_LABEL} to #${PR}"
+            fi
+          else
+            if [[ "${HAS}" != 'true' ]]; then
+              echo "ℹ️ #${PR} does not carry ${TAKEOVER_LABEL} — nothing to do"
+            else
+              gh pr edit "${PR}" --repo "${REPO}" --remove-label "${TAKEOVER_LABEL}"
+              echo "🏷️ removed ${TAKEOVER_LABEL} from #${PR}"
+            fi
+          fi
+
+  # ===========================================================================
+  # TAKEOVER ACK — visible confirmation when a maintainer engages or releases
+  # a PR via the takeover label. Label events are explicit user actions, so
+  # every toggle acks (no dedup wanted). In-repo PRs only reach this job.
+  # ===========================================================================
+  # Re-arm a stranded PR without deleting anything. Recovery previously meant
+  # `gh api -X DELETE` on the bot's own autofix-eval marker comment: raw API
+  # access, an erased audit trail, and undiscoverable unless you had read the
+  # workflow. This posts ONE marker instead — the scan then re-reads the
+  # feedback (the marker releases the watermark those older markers held) and
+  # the round counter resets, because the marker also opens a fresh counting
+  # window exactly like an engage ack.
+  retry-command:
+    needs: 'route'
+    if: |-
+      ${{ needs.route.outputs.retry_pr != '' }}
+    # Queued (never cancelled) per PR so two quick /retry comments cannot
+    # interleave their marker writes.
+    concurrency:
+      group: 'qwen-autofix-retry-cmd-${{ needs.route.outputs.retry_pr }}'
+      cancel-in-progress: false
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      PR: '${{ needs.route.outputs.retry_pr }}'
+      GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+    steps:
+      - name: 'Post re-arm marker'
+        run: |-
+          # The marker only counts when the AUTOFIX_BOT authored it (both the
+          # scan and the address-side recheck filter markers by that login), so
+          # a mis-scoped PAT would post a comment that silently does nothing.
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+          gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '\U0001F504 AutoFix re-armed. The next scan re-reads this PR'"'"'s feedback from the start and the round counter resets. Nothing was deleted — this marker supersedes the evaluation markers above it.\n\n<details>\n<summary>中文说明</summary>\n\n\U0001F504 已重新武装 AutoFix。下一次扫描会从头重新读取本 PR 的反馈，轮次计数也已重置。未删除任何内容 —— 本标记使其上方的评估标记失效。\n\n</details>\n\n<!-- autofix-rearm -->')"
+          echo "🔄 re-armed PR #${PR}"
+
+  takeover-ack:
+    needs: 'route'
+    if: |-
+      ${{ needs.route.outputs.takeover_ack != '' }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      ACK: '${{ needs.route.outputs.takeover_ack }}'
+      PR: '${{ needs.route.outputs.ack_pr }}'
+      # The base the ROUTE saw when it refused — naming a live re-read here
+      # could report 'main' for a refusal that was decided against something
+      # else, so the message stays tied to the decision it explains.
+      ACK_BASE: '${{ needs.route.outputs.ack_base }}'
+      GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+    steps:
+      - name: 'Acknowledge takeover state change'
+        run: |-
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as '${bot_actor:-unknown}'; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+          # Bilingual with COLLAPSED Chinese (project convention), built via
+          # printf so no workflow indentation leaks into the markdown (4+
+          # leading spaces would render the marker line as a code block).
+          # Live label/author state decides WHAT to acknowledge: a skip label
+          # vetoes the engagement (skip wins — no engaged anchor for
+          # management the scans refuse), and a release on a BOT-authored PR
+          # must not claim disengagement — standard bot management continues,
+          # only takeover mode (raised cap) ends.
+          # Fail CLOSED like the sibling takeover-command job: empty metadata
+          # here would default HAS_SKIP to false and post a wrong "engaged"
+          # ack on a skip-labeled PR during a transient API failure. A red
+          # ack job posts nothing — engagement itself is scan-driven and
+          # unaffected.
+          # A base refusal needs no live state — it is decided entirely by the
+          # route — so it does NOT ride on this read. Making the one ack whose
+          # whole purpose is "say why nothing happened" depend on an unrelated
+          # API call would reintroduce the silence it exists to remove.
+          HAS_SKIP=''
+          PR_AUTHOR_LIVE=''
+          if [[ "${ACK}" != 'base-refused' ]]; then
+            if ! PR_STATE_INFO="$(gh pr view "${PR}" --repo "${REPO}" --json labels,author 2> /dev/null)"; then
+              echo "::error::could not read PR #${PR} state for takeover ack"
+              exit 1
+            fi
+            HAS_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_STATE_INFO}")"
+            PR_AUTHOR_LIVE="$(jq -r '.author.login // ""' <<< "${PR_STATE_INFO}")"
+          fi
+          if [[ "${ACK}" == 'base-refused' ]]; then
+            BODY="$(printf '🚫 Takeover not engaged: the loop only manages PRs that target `main`, and this one targets `%s`. A stacked PR moves whenever its base branch does, so "new feedback since the last round" and base-conflict resolution are not well defined until the base lands. Two ways forward: retarget this PR to `main` once the base PR merges — the `%s` label is left in place and the scan lists by label, so the next scan engages it with no re-labelling — or take over the base PR instead.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 未接管：循环只管理以 `main` 为 base 的 PR，而本 PR 的 base 是 `%s`。堆叠 PR 会随 base 分支移动，因此“自上一轮以来的新反馈”与 base 冲突处理都无法良定义。两条路：待 base 的 PR 合入后把本 PR 改为面向 `main` —— `%s` 标签予以保留，扫描按标签枚举，下一次扫描即会自动接管，无需重新打标签；或改为接管 base 那个 PR。\n\n</details>\n\n<!-- takeover-ack base-refused -->' "${ACK_BASE}" "${TAKEOVER_LABEL}" "${ACK_BASE}" "${TAKEOVER_LABEL}")"
+          elif [[ "${ACK}" == 'engaged' && "${HAS_SKIP}" == "true" ]]; then
+            BODY="$(printf '🚫 Takeover label applied but NOT engaged: this PR carries `%s`, which wins over takeover — the loop will not manage it. Remove `%s` to engage.\n\n<details>\n<summary>中文说明</summary>\n\n🚫 已打接管标签但未生效：本 PR 带有 `%s`，其优先级高于接管，循环不会介入。移除 `%s` 后才会接管。\n\n</details>\n\n<!-- takeover-ack skip-blocked -->' "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}" "${SKIP_LABEL}")"
+          elif [[ "${ACK}" == 'engaged' ]]; then
+            BODY="$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+          elif [[ "${PR_AUTHOR_LIVE}" == "${AUTOFIX_BOT}" && "${HAS_SKIP}" == "true" ]]; then
+            BODY="$(printf '👋 Takeover mode ended. This bot-authored PR also carries `%s`, which opts it out of standard bot management entirely — nothing will engage it until that label is removed.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束。本 bot 创建的 PR 同时带有 `%s`，已完全退出常规 bot 管理 —— 移除该标签前不会有任何介入。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${SKIP_LABEL}")"
+          elif [[ "${PR_AUTHOR_LIVE}" == "${AUTOFIX_BOT}" ]]; then
+            BODY="$(printf '👋 Takeover mode ended: the raised round cap no longer applies. This is a bot-authored PR, so STANDARD bot management continues under the strict cap (apply `%s` to opt it out entirely). Re-apply `%s` (or comment `%s`) for the raised cap again.\n\n<details>\n<summary>中文说明</summary>\n\n👋 接管模式结束：提升的轮次上限不再适用。这是 bot 创建的 PR，常规 bot 管理仍将继续（严格上限；如需完全退出请打 `%s`）。重新打上 `%s` 标签（或评论 `%s`）可恢复提升上限。\n\n</details>\n\n<!-- takeover-ack released -->' "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${SKIP_LABEL}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+          else
+            BODY="$(printf '👋 Takeover released: the autofix loop will no longer engage this PR (an in-flight round, if any, completes its bounded work). Re-apply `%s` (or comment `%s`) to re-engage.\n\n<details>\n<summary>中文说明</summary>\n\n👋 已释放：autofix 循环不再介入此 PR（在飞的一轮如有，将完成其有界工作）。重新打上 `%s` 标签（或评论 `%s`）即可再次接管。\n\n</details>\n\n<!-- takeover-ack released -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"
+          fi
+          gh pr comment "${PR}" --repo "${REPO}" --body "${BODY}"
+
+  # ===========================================================================
+  # REVIEW PHASE (scan) — find one autofix PR with new, unaddressed feedback
+  # (or a base conflict) and emit it as a matrix. Cheap: GitHub API only —
+  # its single write is the identity-verified, once-per-window cap notice.
   # ===========================================================================
   review-scan:
     needs: 'route'
@@ -869,60 +1590,528 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           FORCED_PR: '${{ needs.route.outputs.pr_number }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
+          # Fleet visibility: every per-PR decision below also records a row so
+          # the run summary shows the WHOLE managed fleet in one table.
+          # Reconstructing this by hand (list bot PRs, regex each one's eval
+          # markers, cross-check checks and fork state) was the only way to see
+          # a stall, so stalls stayed invisible until someone went looking.
+          FLEET_FILE="$(mktemp)"
+          trap 'rm -f "${FLEET_FILE}"' EXIT
+          fleet_row() {
+            printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${FLEET_FILE}"
+          }
           WORKDIR="$(mktemp -d)"
 
-          # Candidate PRs: open, authored by the autofix bot, on autofix/issue-*.
-          # A forced PR must still pass these checks.
+          # Candidate PRs: open, same-repo, targeting main, and either
+          # authored by the dev-bot or opted in via TAKEOVER_LABEL. A PR
+          # carrying SKIP_LABEL is excluded everywhere — skip wins over
+          # takeover when both are present. A forced PR must still pass all
+          # these checks. NOTE `.isCrossRepository == false` (fail-closed on a
+          # missing field), never a `// true` default piped through `not`:
+          # jq's // treats false as empty, so that form is false for EVERY
+          # input and silently green-no-op'd all forced dispatches.
           if [[ -n "${FORCED_PR}" ]]; then
             META="$(gh pr view "${FORCED_PR}" --repo "${REPO}" \
-              --json number,state,author,headRefName 2> /dev/null || echo '{}')"
-            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg p "${BRANCH_PREFIX}" \
+              --json number,state,author,headRefName,isCrossRepository,baseRefName,labels,maintainerCanModify 2> /dev/null || echo '{}')"
+            # Same admission as the scheduled scan below. In-repo PRs fail
+            # CLOSED on a missing isCrossRepository field (`.isCrossRepository
+            # == false`, never a `// true | not` default — jq's // treats false
+            # as empty, so that form is false for EVERY input and silently
+            # green-no-op'd all forced dispatches). Fork PRs are admitted under
+            # the scan's OWN fork rules (allow-edits on; the live write+ author
+            # gate runs in the shell case just below, mirroring the scan's
+            # per-candidate permission call) so the real-time route's fork
+            # pickup is not silently discarded here.
+            OK="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg take "${TAKEOVER_LABEL}" --arg skip "${SKIP_LABEL}" \
               '(((.state // "") == "OPEN")
-                 and ((.author.login // "") == $ab)
-                 and ((.headRefName // "") | startswith($p)))' <<< "${META}")"
+                 and (((.author.login // "") == $ab) or ([.labels[]?.name] | index($take) != null))
+                 and ([.labels[]?.name] | index($skip) | not)
+                 and ((.baseRefName // "") == "main")
+                 and (if (.isCrossRepository == true)
+                        then (.maintainerCanModify == true)
+                        else (.isCrossRepository == false)
+                      end))' <<< "${META}")"
+            # Fork only: the author must hold write+ RIGHT NOW (the same
+            # live-privilege rule the scan applies per candidate and
+            # review-address re-checks before pushing). In-repo PRs are gated
+            # by author/label alone.
+            if [[ "${OK}" == 'true' && "$(jq -r '.isCrossRepository == true' <<< "${META}")" == 'true' ]]; then
+              FORK_AUTHOR="$(jq -r '.author.login // ""' <<< "${META}")"
+              FPERM="$(gh api "repos/${REPO}/collaborators/${FORK_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              case "${FPERM}" in
+                admin|maintain|write)
+                  echo "🌿 forced fork PR #${FORCED_PR} admitted (author ${FORK_AUTHOR}=${FPERM})"
+                  ;;
+                *)
+                  echo "🧭 forced fork PR #${FORCED_PR} rejected: author ${FORK_AUTHOR} permission='${FPERM:-none}' below write"
+                  OK='false'
+                  ;;
+              esac
+            fi
             if [[ "${OK}" != "true" ]]; then
-              echo "❌ #${FORCED_PR} is not an open autofix PR owned by ${AUTOFIX_BOT}"
+              echo "❌ #${FORCED_PR} is not an open main-targeting PR owned by ${AUTOFIX_BOT} or labeled ${TAKEOVER_LABEL} (or it carries ${SKIP_LABEL}); a fork PR additionally needs maintainer edits allowed and a live write+ author"
+              echo "targets=[]" >> "${GITHUB_OUTPUT}"
               echo "has_targets=false" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
             CANDIDATES="${FORCED_PR}"
           else
             gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
-              --limit 100 --json number,headRefName > "${WORKDIR}/bot-prs.json"
-            CANDIDATES="$(jq -r --arg p "${BRANCH_PREFIX}" \
-              '.[] | select(.headRefName | startswith($p)) | .number' \
-              "${WORKDIR}/bot-prs.json")"
+              --base main \
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/bot-prs.json"
+            gh pr list --repo "${REPO}" --state open --label "${TAKEOVER_LABEL}" \
+              --base main \
+              --limit 100 --json number,headRefName,isCrossRepository,labels,author,maintainerCanModify > "${WORKDIR}/takeover-prs.json"
+            # Skip-labeled PRs are excluded HERE, not only at the address
+            # gate: that gate discards without writing a marker, so the
+            # watermark never advances and an unfiltered scan would re-emit
+            # the PR (checkout, npm ci, build) every tick forever.
+            # Rotating start offset (changes every ~10 minutes): a fixed
+            # newest-first order plus the inspection budget would starve the
+            # oldest tail FOREVER once the pool exceeds the budget; rotation
+            # guarantees every candidate is reached within pool/budget scans.
+            ROT_OFF="$(( ($(date -u +%s) / 600) % 97 ))"
+            CANDIDATES="$(jq -rs --arg skip "${SKIP_LABEL}" --argjson off "${ROT_OFF}" \
+              'add
+               | unique_by(.number)
+               | sort_by(-.number)
+               | map(select(.isCrossRepository == false))
+               | map(select([.labels[]?.name] | index($skip) | not))
+               | (if length == 0 then . else (($off % length) as $o | .[$o:] + .[:$o]) end)
+               | .[]
+               | .number' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")"
+            # FORK PRs are admitted per candidate: the author must hold write+
+            # RIGHT NOW (the same live-privilege rule as the comment command)
+            # and the PR must allow maintainer edits (or the bot cannot push).
+            # Two sources, unioned: takeover-LABELED forks (any eligible author,
+            # explicit opt-in) AND the bot's OWN forks (bot-prs.json is
+            # --author AUTOFIX_BOT) — a fork the bot itself opened is its own
+            # generated work, trust-equal to an in-repo bot PR, so it needs no
+            # label (autofix/skip still opts it out). Rare set — one permission
+            # call each; the write+ check below still gates every candidate.
+            # Appended after the rotated in-repo list: forks sit outside the
+            # anti-starvation rotation, which only bites once in-repo
+            # candidates alone exhaust the inspection budget.
+            while IFS=$'\t' read -r FPR FAUTHOR; do
+              [[ -z "${FPR}" ]] && continue
+              FPERM="$(gh api "repos/${REPO}/collaborators/${FAUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+              case "${FPERM}" in
+                admin|maintain|write)
+                  echo "🌿 fork takeover candidate #${FPR} admitted (author ${FAUTHOR}=${FPERM})"
+                  CANDIDATES="${CANDIDATES} ${FPR}"
+                  ;;
+                *)
+                  echo "🧭 fork takeover candidate #${FPR} skipped: author ${FAUTHOR} permission='${FPERM:-none}' below write"
+                  ;;
+              esac
+            done < <(jq -rs --arg skip "${SKIP_LABEL}" '
+              add | unique_by(.number)
+              | .[] | select(.isCrossRepository == true)
+                    | select(.maintainerCanModify == true)
+                    | select([.labels[]?.name] | index($skip) | not)
+                    | [(.number | tostring), (.author.login // "")] | @tsv' \
+              "${WORKDIR}/bot-prs.json" "${WORKDIR}/takeover-prs.json")
           fi
 
-          TARGETS='[]'
-          for PR in ${CANDIDATES}; do
-            BRANCH="$(gh pr view "${PR}" --repo "${REPO}" --json headRefName --jq '.headRefName')"
-            ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
-            HEAD_SHA="$(gh api "repos/${REPO}/pulls/${PR}" --jq '.head.sha')"
+          # Pending-check staleness bound (invariant across candidate PRs, computed
+          # once): ignore a check stuck far past any legitimate runtime. The bound
+          # must sit ABOVE real check durations here — review-pr can take ~50m and
+          # review-address is capped at 120m — so an active run keeps blocking and
+          # is never aged out mid-flight (which would enqueue the PR against a live
+          # check and double-process the feedback).
+          PENDING_STALE_MIN=240
+          PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
 
-            # Push watermark: the PR's last push. Feedback older than this was in
-            # front of the agent on a previous round.
-            PUSH_WM="$(gh api "repos/${REPO}/commits/${HEAD_SHA}" --jq '.commit.committer.date')"
+          # PRs whose review-address is already RUNNING OR QUEUED in any live
+          # autofix run must not be re-targeted. Schedule/dispatch runs execute
+          # against main's SHA, so their matrix jobs never appear in the PR's
+          # statusCheckRollup — and a fanned-out matrix holds queued jobs well
+          # past a 10-minute tick, so without this the next scan re-emits the
+          # same PRs and the per-PR address groups accumulate duplicates that
+          # later replay stale watermarks. The status filter is SERVER-side: a
+          # client-side filter over the N newest runs loses a long-lived
+          # fanned-out run once cron traffic pushes it past the window, and
+          # its queued PRs silently stop looking busy. Filtered this way the
+          # limit applies to LIVE runs only (at most a handful), and one
+          # jobs-view per live run stays cheap.
+          BUSY_PRS=' '
+          while IFS= read -r LIVE_RUN; do
+            [[ -z "${LIVE_RUN}" ]] && continue
+            while IFS= read -r BUSY; do
+              [[ -n "${BUSY}" ]] && BUSY_PRS="${BUSY_PRS}${BUSY} "
+            done < <(gh run view "${LIVE_RUN}" --repo "${REPO}" --json jobs \
+              --jq '.jobs[] | select(.status != "completed") | .name | capture("^review-address \\((?<pr>[0-9]+),") | .pr' 2> /dev/null)
+          done < <(
+            for LIVE_STATUS in in_progress queued; do
+              # || true: one status query failing must not hide the other. A
+              # DOUBLE failure yields an empty set — deliberately fail-open:
+              # this skip is an optimization, and the address-side live-marker
+              # revalidation is the correctness gate. If that revalidation is
+              # ever removed, this read must become fail-closed instead.
+              gh run list --repo "${REPO}" --workflow qwen-autofix.yml \
+                --status "${LIVE_STATUS}" --limit 50 --json databaseId \
+                --jq '.[].databaseId' 2> /dev/null || true
+            done | sort -u
+          )
+          [[ "${BUSY_PRS}" != ' ' ]] && echo "🚧 address in flight/queued for PR(s):${BUSY_PRS}"
+
+          TARGETS='[]'
+          INSPECTED=0
+          for PR in ${CANDIDATES}; do
+            # The busy skip is free (in-memory set) — it must not consume
+            # inspection budget.
+            if [[ "${BUSY_PRS}" == *" ${PR} "* ]]; then
+              echo "⏳ #${PR}: review-address already in flight or queued — skipping"
+              fleet_row "${PR}" 'busy' 'address run in flight'
+              continue
+            fi
+            INSPECTED=$(( INSPECTED + 1 ))
+            if [[ "${INSPECTED}" -gt "${MAX_CANDIDATE_INSPECTIONS}" ]]; then
+              echo "🧮 candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — deferring the rest to the next scan"
+              fleet_row '-' 'deferred' "candidate-inspection budget (${MAX_CANDIDATE_INSPECTIONS}) reached — remaining candidates deferred to next scan"
+              break
+            fi
+            # One PR fetch for the branch name, check rollup, creation time
+            # (the watermark floor below), and labels (the effective round
+            # cap) — avoids extra round-trips per candidate PR.
+            PR_META="$(gh pr view "${PR}" --repo "${REPO}" \
+              --json headRefName,headRefOid,statusCheckRollup,createdAt,labels,isCrossRepository,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+            HEAD_REPO_FULL="${REPO}"
+            if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" == "true" ]]; then
+              HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_META}")"
+              HR_NAME="$(jq -r '.headRepository.name // ""' <<< "${PR_META}")"
+              # Component-wise: a deleted fork yields owner XOR name empty,
+              # which a joined '/' test would wave through into a red fetch.
+              if [[ -z "${HR_OWNER}" || -z "${HR_NAME}" ]]; then
+                echo "⚠️ #${PR}: fork head repository unresolved (owner='${HR_OWNER}' name='${HR_NAME}') — skipping"
+                fleet_row "${PR}" 'skipped' "fork head unresolved (owner='${HR_OWNER}' name='${HR_NAME}')"
+                continue
+              fi
+              HEAD_REPO_FULL="${HR_OWNER}/${HR_NAME}"
+            fi
+            BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_META}")"
+            HAS_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")"
+            # The candidate snapshot filtered skip once, but this per-PR fetch
+            # is FRESHER — a skip label applied mid-scan must still win (the
+            # address job re-checks it live once more before any mutation).
+            if [[ "$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_META}")" == "true" ]]; then
+              echo "⏭️ #${PR}: ${SKIP_LABEL} label present (applied mid-scan) — skipping"
+              fleet_row "${PR}" 'skipped' "${SKIP_LABEL} label present"
+              continue
+            fi
+            EFF_MAX_ROUNDS="${MAX_ROUNDS}"
+            [[ "${HAS_TAKEOVER}" == "true" ]] && EFF_MAX_ROUNDS="${TAKEOVER_MAX_ROUNDS}"
+            if [[ -z "${BRANCH}" ]]; then
+              # Metadata fetch failed (transient API error / rate limit). Skip rather
+              # than fall through with an empty branch, which would make the address
+              # job fail at `git checkout -B "" origin/` and post a misleading "could
+              # not start evaluation" handoff. Retried on the next scan. (This also
+              # means CREATED_WM below is only reached with a populated PR_META.)
+              echo "⚠️ #${PR}: could not fetch PR metadata (API error); skipping until next scan"
+              fleet_row "${PR}" 'unknown' 'PR metadata unreadable (API error)'
+              continue
+            fi
+            # Extract issue number: autofix/issue-<N> → N; otherwise use PR number.
+            if [[ "${BRANCH}" == "${BRANCH_PREFIX}"* ]]; then
+              ISSUE="${BRANCH#"${BRANCH_PREFIX}"}"
+            else
+              ISSUE="${PR}"
+            fi
+            CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
+
+            # Auto-rerun a check that died on INFRASTRUCTURE, not the code (see
+            # INFRA_FAILURE_SIGNATURES). Only reached when the PR has a FAILED
+            # check; then, for each, we read its annotations and — if they carry
+            # a machine-death signature — rerun that run's failed jobs ONCE. The
+            # once is enforced by run_attempt: a run already retried to attempt 2
+            # and still infra-failing is persistent, so we stop and leave it. No
+            # marker needed; the attempt counter is the guard, and after a rerun
+            # the attempt increments so the next scan skips it. Any API failure
+            # here is fail-safe: it just means no rerun.
+            PR_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            if [[ -n "${PR_HEAD_OID}" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
+              RERAN_INFRA=false
+              # Failed check-runs on this head, with their run id and annotation
+              # count — fetched once. External statuses (no check-run) are absent
+              # here, which is fine: only Actions runs can be reran.
+              FAILED_CRS="$(gh api --paginate "repos/${REPO}/commits/${PR_HEAD_OID}/check-runs" \
+                --jq '.check_runs[] | select(.conclusion == "failure")
+                  | select(((.output.annotations_count // 0) > 0))
+                  | [(.id | tostring), (.details_url // ""), (.name // "")] | @tsv' 2> /dev/null | sort -u || true)"
+              while IFS=$'\t' read -r CR_ID DETAILS_URL CR_NAME; do
+                [[ -n "${CR_ID}" && "${DETAILS_URL}" == *"/actions/runs/"* ]] || continue
+                RUN_ID="${DETAILS_URL#*/actions/runs/}"
+                RUN_ID="${RUN_ID%%/*}"
+                [[ "${RUN_ID}" =~ ^[0-9]+$ ]] || continue
+                ANNS="$(gh api --paginate "repos/${REPO}/check-runs/${CR_ID}/annotations" \
+                  --jq '[.[].message] | join("\n")' 2> /dev/null || true)"
+                grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${ANNS}" || continue
+                RUN_META="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '[(.run_attempt // 0), (.name // "")] | @tsv' 2> /dev/null || printf '0\t')"
+                ATTEMPT="${RUN_META%%$'\t'*}"
+                WF_NAME="${RUN_META#*$'\t'}"
+                # Mirror the gate's self-trigger guard: skip Qwen Autofix runs
+                # unless the check is a review-address job.
+                if [[ "${WF_NAME}" == "Qwen Autofix" && "${CR_NAME}" != review-address* ]]; then
+                  continue
+                fi
+                if [[ "${ATTEMPT}" == '1' ]]; then
+                  if gh api -X POST "repos/${REPO}/actions/runs/${RUN_ID}/rerun-failed-jobs" > /dev/null 2>&1; then
+                    echo "♻️ #${PR}: a check died on infrastructure (run ${RUN_ID}, attempt 1) — reran its failed jobs; not the PR's code"
+                    fleet_row "${PR}" 'infra-reran' "infra failure (run ${RUN_ID}) reran once"
+                    RERAN_INFRA=true
+                    break
+                  fi
+                else
+                  echo "⚠️ #${PR}: infra failure persisted after a rerun (run ${RUN_ID}, attempt ${ATTEMPT}) — leaving for a human"
+                fi
+              done <<< "${FAILED_CRS}"
+              [[ "${RERAN_INFRA}" == 'true' ]] && continue
+            fi
+
+            # startedAt is the only staleness clock: a check blocks only if it
+            # started within the bound; one with no startedAt (queued, not yet
+            # running) is not blocking (the next scan re-checks once it starts).
+            HAS_PENDING_CHECKS="$(jq -r --arg cut "${PENDING_CUTOFF}" \
+              --argjson nonblocking "${NON_BLOCKING_CHECKS}" '
+              [ .[]
+                | select((.status // .state // "") | IN("QUEUED", "IN_PROGRESS", "PENDING", "WAITING", "REQUESTED"))
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | select((.name // "") as $n | ($nonblocking | index($n)) == null)
+                | select((.startedAt // $cut) > $cut) ]
+              | length > 0
+            ' <<< "${CHECKS_JSON}")"
+            if [[ "${HAS_PENDING_CHECKS}" == "true" ]]; then
+              echo "⏳ #${PR}: active checks in flight; skipping until they finish (only checks stuck >${PENDING_STALE_MIN}m past their start are treated as dead and ignored)"
+              fleet_row "${PR}" 'waiting' 'active checks in flight'
+              continue
+            fi
+            # Pre-first-eval floor: the PR's IMMUTABLE creation time. Feedback
+            # cannot predate the PR, and unlike the head commit date this never
+            # advances when the branch is synced with main ("Update branch"/base
+            # merge), so an early base-sync merge cannot bury a comment made before
+            # the first eval. If the metadata query failed (empty), fall back to an
+            # EMPTY floor — over-inclusive (evaluates all feedback once, then the
+            # first eval writes a marker) but never buries. NEVER fall back to the
+            # mutable head commit date: a base-sync HEAD would recreate the burial.
+            CREATED_WM="$(jq -r '.createdAt // ""' <<< "${PR_META}")"
 
             gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+            # First-pickup engage ack: fork label events carry no secrets and
+            # manual labels may race the ack job, so a takeover PR with NO
+            # engage ack yet gets one here (identity-verified) — it is also
+            # the round-window anchor. ic.json is re-fetched so THIS scan
+            # already counts under the fresh key. ORDERING IS LOAD-BEARING:
+            # ic.json for THIS candidate is fetched just above — reading a
+            # previous candidate's file would mis-dedup (spurious re-ack →
+            # window reset every scan), and a missing file would kill the
+            # whole scan step under -eo pipefail. Dedup is author-filtered
+            # (a forged human marker must not suppress the real ack), and a
+            # label application NEWER than the latest bot ack means a fresh
+            # engagement — post a fresh ack so the round window and cap
+            # reset as documented (re-arm), which no ack job can do for
+            # forks.
+            NEED_ENGAGE_ACK='false'
+            if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+              LAST_ENGAGE_ACK_TS="$(jq -rs --arg ab "${AUTOFIX_BOT}" '
+                add | [.[] | select((.user.login // "") == $ab)
+                     | select(.body // "" | contains("<!-- takeover-ack engaged -->"))
+                     | .created_at] | sort | last // ""' "${WORKDIR}/ic.json")"
+              gh api "repos/${REPO}/issues/${PR}/events" --paginate > "${WORKDIR}/pr-events.json" 2> /dev/null \
+                || echo '[]' > "${WORKDIR}/pr-events.json"
+              LAST_LABELED_TS="$(jq -rs --arg lb "${TAKEOVER_LABEL}" '
+                add | [.[] | select(.event == "labeled")
+                     | select((.label.name // "") == $lb)
+                     | .created_at] | sort | last // ""' "${WORKDIR}/pr-events.json")"
+              if [[ -z "${LAST_ENGAGE_ACK_TS}" ]]; then
+                NEED_ENGAGE_ACK='true'
+                # In-repo label events have a DEDICATED ack job — the scan is
+                # only its healer. Within a short grace after the label lands,
+                # defer: a concurrent ack job must not be double-posted (that
+                # shifts the window anchor). A failed ack job is healed by the
+                # next scan, which is past the grace. Forks have no ack job,
+                # so no grace applies there.
+                if [[ "$(jq -r '.isCrossRepository // false' <<< "${PR_META}")" != "true" ]] \
+                  && [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "$(date -u -d '3 minutes ago' +%Y-%m-%dT%H:%M:%SZ)" ]]; then
+                  echo "🧭 engage ack deferred for #${PR}: in-repo label applied <3m ago — the ack job owns it"
+                  NEED_ENGAGE_ACK='false'
+                fi
+              else
+                if [[ -n "${LAST_LABELED_TS}" && "${LAST_LABELED_TS}" > "${LAST_ENGAGE_ACK_TS}" ]]; then
+                  NEED_ENGAGE_ACK='true'
+                fi
+              fi
+            fi
+            if [[ "${NEED_ENGAGE_ACK}" == "true" && "${DRY_RUN}" == "true" ]]; then
+              echo "🧪 DRY-RUN: would post engage ack on #${PR} (window key untouched)"
+              NEED_ENGAGE_ACK='false'
+            fi
+            if [[ "${NEED_ENGAGE_ACK}" == "true" ]]; then
+              if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+              fi
+              if [[ "${SCAN_BOT_ACTOR}" == "${AUTOFIX_BOT}" ]]; then
+                if gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🤝 Takeover engaged: the autofix loop now manages this PR — it will address new review feedback and resolve base conflicts until the label is removed or the round cap is reached. Remove the `%s` label (or comment `%s stop`) to release.\n\n<details>\n<summary>中文说明</summary>\n\n🤝 已接管：autofix 循环现在管理此 PR —— 将持续处理新的评审反馈与 base 冲突，直到移除标签或达到轮次上限。移除 `%s` 标签（或评论 `%s stop`）即可释放。\n\n</details>\n\n<!-- takeover-ack engaged -->' "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}" "${TAKEOVER_LABEL}" "${TAKEOVER_COMMAND}")"; then
+                  gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json" \
+                    || echo "::warning::ic re-fetch after engage ack failed for #${PR}"
+                else
+                  echo "::warning::first-pickup engage ack failed for #${PR}; window anchors on a later scan"
+                fi
+              else
+                echo "::warning::engage ack skipped: PAT authenticates as '${SCAN_BOT_ACTOR}'"
+              fi
+            fi
             # Eval markers the bot left after a previous evaluation carry the
             # newest feedback timestamp it already considered, plus the round.
             # Only our own comments are trusted, so a spoofed marker is ignored.
+            # NOTE: this regex is POSITIONAL — group .[0]=ts, .[2]=round — and must
+            # match the marker string emitted at every write site verbatim (search
+            # `autofix-eval ts=`: the push/report success, noop, and handoff steps).
+            # Inserting or reordering a field here or at any write site silently
+            # corrupts round tracking; keep the `ts= acted= round=` order in lockstep.
             MARKERS="$(jq -c --arg ab "${AUTOFIX_BOT}" '
-              [ .[] | select((.user.login // "") == $ab) | (.body // "")
-                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+) -->") ] | .[]
-                | {ts: .[0], round: (.[2] | tonumber)} ]' "${WORKDIR}/ic.json")"
-            EVAL_WM="$(jq -r 'map(.ts) | max // ""' <<< "${MARKERS}")"
-            ROUND="$(jq -r '(sort_by(.ts) | last | .round) // 0' <<< "${MARKERS}")"
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
+                | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+            # The watermark is GLOBAL across all markers — feedback already
+            # evaluated stays evaluated, no matter how counting windows move.
+            # The terminal-handoff SENTINEL ts is excluded: it is a flag, not
+            # an evaluation time, and letting it into the watermark would
+            # filter all future feedback forever — making a re-arm after a
+            # terminal handoff dead on arrival (terminal skipping itself is
+            # round-based and window-scoped, so re-arm properly clears it).
+            REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- autofix-rearm -->"))
+                | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+            # The head this PR's red checks were last reported against. Carried
+            # as its OWN marker inside the eval comment rather than a new field
+            # on autofix-eval, so none of the ts/acted/round parsers change —
+            # and the comment still matches the eval filter, so the agent never
+            # sees it as feedback.
+            RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+                | {sha: .[0], at: ($c.created_at // "")} ]
+              | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
+            # A maintainer '@qwen-code /retry' posts that marker to say
+            # "evaluate this feedback again": markers written BEFORE it stop
+            # holding the watermark down. This is the sanctioned exception to
+            # the global rule above, and it replaces the old recovery -
+            # deleting the bot's marker comment by hand, which erased the
+            # audit trail and needed raw API access to do at all.
+            EVAL_WM="$(jq -r --arg rearm "${REARM_AT}" '
+              map(select($rearm == "" or (.at > $rearm)))
+              | map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${MARKERS}")"
+            # ROUND counting is windowed by KEY EQUALITY, not timestamps: the
+            # current window key is the created_at of the latest
+            # '<!-- takeover-ack engaged -->' comment ('none' before any
+            # takeover), every marker records the key of the window it was
+            # produced in (win=…, legacy markers count as 'none'), and only
+            # markers of the CURRENT window count toward the cap. Timestamp
+            # windowing would race an in-flight address job selected before a
+            # re-arm: its marker lands AFTER the ack and would instantly
+            # re-cap the fresh window — key equality cannot. Within a window
+            # the highest round wins (a terminal handoff marker must make the
+            # scan skip regardless of order).
+            REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                    or ((.body // "") | contains("<!-- autofix-rearm -->")))
+                | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
+            ROUND="$(jq -r --arg key "${REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${MARKERS}")"
 
-            # Effective watermark = the later of the last push and the last eval.
-            EFF_WM="${PUSH_WM}"
-            if [[ -n "${EVAL_WM}" && "${EVAL_WM}" > "${EFF_WM}" ]]; then EFF_WM="${EVAL_WM}"; fi
+            # Effective watermark = what the agent has actually evaluated (its last
+            # eval marker's newest-feedback timestamp), NOT the last push. A bot
+            # fix always writes a marker, so a real fix advances this; a base-sync
+            # "Merge branch 'main'" push (or any commit that did not evaluate
+            # feedback) does NOT, so it can never bury unaddressed maintainer
+            # comments under the watermark. Before the first evaluation there is no
+            # marker, so fall back to the PR creation floor.
+            if [[ -n "${EVAL_WM}" ]]; then
+              EFF_WM="${EVAL_WM}"
+            else
+              EFF_WM="${CREATED_WM}"
+            fi
 
-            if [[ "${ROUND}" -ge "${MAX_ROUNDS}" ]]; then
-              echo "🚧 #${PR}: hit MAX_ROUNDS (${ROUND}/${MAX_ROUNDS}) — leaving for a human"
+            if [[ "${ROUND}" -ge "${EFF_MAX_ROUNDS}" ]]; then
+              echo "🚧 #${PR}: hit the round cap (${ROUND}/${EFF_MAX_ROUNDS}) — leaving for a human"
+              fleet_row "${PR}" 'round-capped' "round ${ROUND}/${EFF_MAX_ROUNDS} - needs a human or @qwen-code /retry"
+              # A MANAGED PR pausing at its cap deserves a visible reminder —
+              # maintainers otherwise learn about it only from workflow logs.
+              # Once per counting window: re-arming opens a fresh window and,
+              # if the cap is hit again, a fresh reminder. A failed post
+              # retries naturally on the next scan (marker still absent).
+              if [[ "${HAS_TAKEOVER}" == "true" ]]; then
+                # Dedup boundary = the current window key; with no engage ack
+                # yet (key 'none') fall back to LIFETIME dedup — created_at is
+                # never > 'none' lexically, which would flip this into posting
+                # every scan.
+                NOTICE_RT="${REARM_KEY}"
+                [[ "${NOTICE_RT}" == "none" ]] && NOTICE_RT=''
+                CAP_NOTICED="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg rt "${NOTICE_RT}" '
+                  [ .[] | select((.user.login // "") == $ab)
+                    | select((.body // "") | contains("<!-- takeover-cap-reached -->"))
+                    | select((.created_at // "") > $rt) ] | length' "${WORKDIR}/ic.json")"
+                if [[ "${DRY_RUN}" == "true" ]]; then
+                  echo "🧪 DRY-RUN: would post cap-paused notice on #${PR}"
+                elif [[ "${CAP_NOTICED}" == "0" ]]; then
+                  # Consent may have moved since PR_META: a takeover label
+                  # removed (or skip added) moments ago must not receive a
+                  # stale 'paused' notice.
+                  LIVE_LABELS="$(gh pr view "${PR}" --repo "${REPO}" --json labels 2> /dev/null | jq -r '[.labels[]?.name] | join(" ")' || echo '')"
+                  if [[ " ${LIVE_LABELS} " != *" ${TAKEOVER_LABEL} "* || " ${LIVE_LABELS} " == *" ${SKIP_LABEL} "* ]]; then
+                    echo "🧭 cap notice skipped: consent changed since the snapshot (labels: ${LIVE_LABELS:-unreadable})"
+                    continue
+                  fi
+                  # Convention: verify the PAT identity before ANY write. A
+                  # rotated PAT would post under a foreign login the dedup
+                  # (which counts AUTOFIX_BOT comments only) can never see —
+                  # reposting the notice every scan. Memoized per scan run.
+                  if [[ -z "${SCAN_BOT_ACTOR:-}" ]]; then
+                    SCAN_BOT_ACTOR="$(gh api user --jq '.login' 2> /dev/null || echo 'unknown')"
+                  fi
+                  if [[ "${SCAN_BOT_ACTOR}" != "${AUTOFIX_BOT}" ]]; then
+                    echo "::warning::cap-paused notice skipped: PAT authenticates as '${SCAN_BOT_ACTOR}', expected ${AUTOFIX_BOT}"
+                  elif ! gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '⏸️ Takeover paused: this PR reached its round cap (%s/%s). Comment `%s` to re-arm a fresh window and continue management, or `%s stop` to release.\n\n<details>\n<summary>中文说明</summary>\n\n⏸️ 托管已暂停：本 PR 达到轮次上限（%s/%s）。评论 `%s` 可重新武装、开启新窗口继续托管；或评论 `%s stop` 释放。\n\n</details>\n\n<!-- takeover-cap-reached -->' "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}" "${ROUND}" "${EFF_MAX_ROUNDS}" "${TAKEOVER_COMMAND}" "${TAKEOVER_COMMAND}")"; then
+                    echo "::warning::cap-paused notice failed for #${PR}; will retry next scan"
+                  fi
+                fi
+              fi
               continue
+            fi
+            N_FAILED_CHECKS="$(jq --arg wm "${EFF_WM}" '
+              [ .[]
+                | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | select((.completedAt // .updatedAt // "") > $wm) ]
+              | length
+            ' <<< "${CHECKS_JSON}")"
+            # A red check is a persistent STATE, not the instant it turned red.
+            # Counting only "failed since the watermark" made a still-failing PR
+            # invisible the moment the watermark passed the failure: measured on
+            # #6451 (3 reds, all completed 09:30-09:51, watermark 10:55),
+            # #7357 (red 07:59, watermark 09:18) and #7390 (red and watermark
+            # both 11:27:37, so a strict `>` hid it the instant it appeared) —
+            # all three sat red for hours while every scan logged "nothing new".
+            #
+            # So: a currently-red check counts as feedback until the head it ran
+            # against has been evaluated. The address job records the head it
+            # reported on; a PR whose recorded head still matches is left alone,
+            # which bounds this to ONE look per head instead of every scan.
+            # Empty LIVE_HEAD → N_RED_NOW stays 0: fail-closed (no head → cannot judge → do not act),
+            # unlike the recording side where an empty REPORT_HEAD keeps reds visible.
+            LIVE_HEAD="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            N_RED_NOW=0
+            if [[ -n "${LIVE_HEAD}" && "${RED_HEAD}" != "${LIVE_HEAD}" ]]; then
+              N_RED_NOW="$(jq '
+                [ .[]
+                  | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                  | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address")))) ]
+                | length
+              ' <<< "${CHECKS_JSON}")"
             fi
 
             gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
@@ -935,6 +2124,15 @@ jobs:
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
                 | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED")) ] | length' \
               "${WORKDIR}/rv.json")"
+            # Per AGENTS.md's review policy, Suggestion-level findings ARE
+            # addressed during a PR's first ~5 review rounds; only past that are
+            # they deferred (with a recorded reason). The loop's MAX_ROUNDS cap is
+            # that same boundary — every round the loop actually runs is within
+            # the address-Suggestions window — so /review `**[Suggestion]**`
+            # inline comments count as actionable feedback here. The agent's
+            # triage still decides implement-vs-defer per finding and records the
+            # decision in its summary comment, and the MAX_ROUNDS handoff is the
+            # defer-to-a-human boundary.
             N_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               [ .[]
@@ -942,6 +2140,26 @@ jobs:
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) ] | length' \
               "${WORKDIR}/rc.json")"
+            # Issue-level PR comments are also actionable feedback. Exclude the
+            # bot's own eval markers, and known non-actionable bot comments
+            # (triage stages, coverage reports, legacy suggestion summaries,
+            # force-push reminders).
+            BOT_COMMENT_FILTER='<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) '
+            # Command-style comments (@qwen-code /takeover, /triage, /review …)
+            # are INSTRUCTIONS to tooling, not review feedback on the diff:
+            # counting them as actionable burns a full agent cycle to post a
+            # no-action report about the command itself (and the takeover
+            # command would self-trigger such a round on every engagement).
+            COMMAND_FILTER='^\s*@qwen-code /'
+            N_ISSUE_COMMENTS="$(jq --arg wm "${EFF_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" --arg bf "${BOT_COMMENT_FILTER}" --arg cf "${COMMAND_FILTER}" '
+              [ .[]
+                | select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.body // "") | test($bf) | not)
+                | select((.body // "") | test($cf) | not) ] | length' \
+              "${WORKDIR}/ic.json")"
 
             # mergeable: GitHub may report UNKNOWN until it recomputes; treat only
             # an explicit CONFLICTING as a conflict so we never block on UNKNOWN.
@@ -949,21 +2167,58 @@ jobs:
             HAS_CONFLICT='false'
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
-            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+            if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${N_RED_NOW}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
+              fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
             fi
 
-            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} comment(s) new, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            echo "🔎 #${PR}: ${N_REVIEWS} review(s) + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} issue comment(s) + ${N_FAILED_CHECKS} failed check(s) new, ${N_RED_NOW} still-red on ${LIVE_HEAD:0:9}, conflict=${HAS_CONFLICT}, round=${ROUND}"
+            fleet_row "${PR}" 'SELECTED' "${N_REVIEWS} review + ${N_COMMENTS} inline + ${N_ISSUE_COMMENTS} comment + ${N_FAILED_CHECKS} failed-check new, ${N_RED_NOW} still-red (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
             TARGETS="$(jq -c \
               --arg pr "${PR}" --arg branch "${BRANCH}" --arg issue "${ISSUE}" \
-              --arg round "${ROUND}" --arg wm "${EFF_WM}" \
-              '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm}]' \
+              --arg round "${ROUND}" --arg wm "${EFF_WM}" --arg mr "${EFF_MAX_ROUNDS}" \
+              --arg win "${REARM_KEY}" --arg hr "${HEAD_REPO_FULL}" \
+              '. + [{pr: $pr, branch: $branch, issue: $issue, round: $round, watermark: $wm, max_rounds: $mr, win: $win, head_repo: $hr}]' \
               <<< "${TARGETS}")"
+            # Fan out: emit EVERY eligible PR up to the per-scan budget. The
+            # address matrix bounds simultaneity (max-parallel) and the per-PR
+            # concurrency groups plus the busy-PR skip above prevent duplicate
+            # same-PR runs, so one scan drains the whole backlog instead of
+            # serving a single newest-first target per tick (which starved
+            # older PRs for hours when cron ticks were sparse). The budget
+            # break bounds this loop's RUNTIME and API usage too — each
+            # candidate costs several serial API reads, so scanning past a
+            # full budget would spend hundreds of calls for nothing. Never a
+            # silent cap: the deferral is logged and the next scan picks up
+            # the remainder (their signals persist).
+            if [[ "$(jq 'length' <<< "${TARGETS}")" -ge "${MAX_TARGETS_PER_SCAN}" ]]; then
+              echo "⚠️ target budget (${MAX_TARGETS_PER_SCAN}) reached; deferring the remaining candidates to the next scan"
+              fleet_row '-' 'deferred' "target budget (${MAX_TARGETS_PER_SCAN}) reached — remaining candidates deferred to next scan"
+              break
+            fi
           done
 
           COUNT="$(jq 'length' <<< "${TARGETS}")"
           echo "📋 ${COUNT} PR(s) to process"
+          {
+            echo "### 🤖 AutoFix fleet (${COUNT} selected this scan)"
+            echo
+            echo '| PR | State | Detail |'
+            echo '| --- | --- | --- |'
+            if [[ -s "${FLEET_FILE}" ]]; then
+              while IFS=$'\t' read -r f_pr f_state f_detail; do
+                f_detail="${f_detail//|/\\|}"
+                if [[ "${f_pr}" == '-' ]]; then
+                  printf '| — | %s | %s |\n' "${f_state}" "${f_detail}"
+                else
+                  printf '| #%s | %s | %s |\n' "${f_pr}" "${f_state}" "${f_detail}"
+                fi
+              done < "${FLEET_FILE}"
+            else
+              echo '| - | no managed PRs inspected | - |'
+            fi
+          } >> "${GITHUB_STEP_SUMMARY}"
           echo "targets=${TARGETS}" >> "${GITHUB_OUTPUT}"
           echo "has_targets=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
@@ -981,11 +2236,38 @@ jobs:
       contents: 'read'
     strategy:
       fail-fast: false
-      max-parallel: 3
+      # Simultaneity bound for the whole fleet — the ONLY place different PRs
+      # wait on each other (the per-scan target budget and the inspection
+      # budget are both far from binding at the current pool size).
+      # Measured at 3, on the scan that selected 7 PRs: the legs started
+      # 3-at-a-time and each new one began 3-4s after a slot freed, so the
+      # 7th PR waited 81 minutes for a slot it could have had immediately.
+      # 5 halves that tail while staying a real bound — the point of the cap
+      # is that a backlog cannot open an unbounded number of agent runs at
+      # once, not the specific number.
+      max-parallel: 5
       matrix:
         target: '${{ fromJSON(needs.review-scan.outputs.targets) }}'
+    # Serialises every writer of THIS PR's head branch, across workflows.
+    # GitHub concurrency groups are repository-scoped, so sharing one name with
+    # qwen-code-pr-review.yml's resolve-pr job is what makes the two mutually
+    # exclusive — a per-workflow name only guards against itself.
+    # Without this, a `@qwen-code /resolve` and this job's own conflict path
+    # both merge the base branch and both push. Observed on #7355: /resolve
+    # pushed at 03:51, this job pushed at 04:05 and was rejected `fetch first`,
+    # discarding a full agent run and leaving no marker to show for it.
+    # Serialising is strictly better than racing: this job fetches the head by
+    # NAME at job start, so the second run reads the winner's result instead of
+    # a stale base — its work is usable and its push lands, rather than being
+    # rejected and thrown away. It may still spend an agent run: the
+    # address-time recheck re-verifies lifecycle and consent (state, labels,
+    # author, base, head branch) but not whether the conflict is still there.
+    # The prefix is a LITERAL on both sides: job-level `concurrency` cannot read
+    # the `env` context, so the two files cannot share a constant. A test pins
+    # them equal instead, because a rename in one file alone silently unlocks
+    # the race again with nothing failing.
     concurrency:
-      group: 'qwen-autofix-review-${{ matrix.target.pr }}'
+      group: 'qwen-pr-head-write-${{ matrix.target.pr }}'
       cancel-in-progress: false
     env:
       REPO: '${{ github.repository }}'
@@ -995,10 +2277,29 @@ jobs:
       ISSUE: '${{ matrix.target.issue }}'
       ROUND: '${{ matrix.target.round }}'
       WATERMARK: '${{ matrix.target.watermark }}'
+      # The scan computed the effective cap from the takeover label
+      # (TAKEOVER_MAX_ROUNDS for managed PRs, the strict default otherwise);
+      # shadowing the workflow-level MAX_ROUNDS
+      # makes every round message, marker, and cap gate in this job use it.
+      MAX_ROUNDS: '${{ matrix.target.max_rounds }}'
+      # The round-counting window key this target was selected under; every
+      # marker this job writes records it, and prepare discards the job if a
+      # re-arm superseded the key while it sat queued.
+      WINDOW: '${{ matrix.target.win }}'
+      # owner/name of the PR's HEAD repository — equals REPO for in-repo
+      # branches; a fork for maintainer-fork takeover targets (pushable via
+      # 'Allow edits from maintainers').
+      HEAD_REPO: '${{ matrix.target.head_repo }}'
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10'  # v6.0.3
+      # SECURITY: checkout trusted base code first. The PR branch is checked
+      # out later in "Prepare branch and feedback" after the trusted CLI bundle
+      # is built from this base. Without this pin, pull_request_review events
+      # would check out the PR merge ref by default, letting PR-controlled
+      # code influence the secret-bearing address run.
+      - name: 'Checkout trusted base'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
+          ref: '${{ github.event.repository.default_branch }}'
           fetch-depth: 0
           persist-credentials: false
 
@@ -1006,6 +2307,31 @@ jobs:
         run: |-
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
+
+      # Stage the schema gate script from the TRUSTED BASE checkout before
+      # "Prepare branch and feedback" switches the working tree to the PR
+      # branch. The verify gate must run the trusted copy: a PR branch that
+      # predates this script does not contain it (bash exits 127 and the gate
+      # dies without an outcome), and an in-branch copy would let branch code
+      # define its own gate.
+      - name: 'Stage trusted schema gate and agent runner'
+        run: |-
+          cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
+          cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+          # The agent step runs AFTER prepare checks out the PR branch, so
+          # invoking the runner from the working tree would execute
+          # branch-controlled code on the host with the model key in env
+          # (takeover targets human-authored branches). Stage the runner AND
+          # its SKILL from the trusted base, MIRRORING the skill's on-disk
+          # layout (autofix/{SKILL.md,scripts/run-agent.mjs}) — run-agent.mjs
+          # resolves the skill as `<its dir>/../SKILL.md`, so a flat stage
+          # (RUNNER_TEMP/run-agent.mjs) points ../SKILL.md at RUNNER_TEMP/..
+          # and the agent crashes with ENOENT before reading any feedback.
+          # The mirror also means the model's instructions come from the
+          # trusted base, never the PR branch.
+          mkdir -p "${RUNNER_TEMP}/autofix-skill/scripts"
+          cp .qwen/skills/autofix/SKILL.md "${RUNNER_TEMP}/autofix-skill/SKILL.md"
+          cp .qwen/skills/autofix/scripts/run-agent.mjs "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs"
 
       - name: 'Check runner environment'
         env:
@@ -1083,10 +2409,122 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
           mkdir -p "${WORKDIR}"
+
+          # ---- address-time eligibility recheck ---------------------------
+          # Fan-out can hold this job queued for hours behind max-parallel,
+          # and the matrix snapshot cannot see lifecycle changes: a PR
+          # closed or merged while queued must not get a secret-bearing
+          # agent run, a branch push, or a comment; an author/base/head
+          # change must not be processed against stale assumptions. Re-fetch
+          # and require the same shape the scan selected. A failed fetch is
+          # UNKNOWN and discards too (fail closed — the next scan re-emits a
+          # still-valid target).
+          PR_LIVE="$(gh pr view "${PR}" --repo "${REPO}" \
+            --json state,author,isCrossRepository,baseRefName,headRefName,labels,maintainerCanModify,headRepositoryOwner,headRepository 2> /dev/null || echo '{}')"
+          LIVE_STATE="$(jq -r '.state // ""' <<< "${PR_LIVE}")"
+          LIVE_AUTHOR="$(jq -r '.author.login // ""' <<< "${PR_LIVE}")"
+          LIVE_XREPO="$(jq -r 'if has("isCrossRepository") then .isCrossRepository else true end' <<< "${PR_LIVE}")"
+          LIVE_CAN_MODIFY="$(jq -r '.maintainerCanModify // false' <<< "${PR_LIVE}")"
+          LIVE_BASE="$(jq -r '.baseRefName // ""' <<< "${PR_LIVE}")"
+          LIVE_BRANCH="$(jq -r '.headRefName // ""' <<< "${PR_LIVE}")"
+          # Engagement labels are re-read LIVE too: a takeover label grants a
+          # human-authored PR the author exemption, and a skip label applied
+          # while this job sat queued withdraws consent — both must hold at
+          # the moment the secret-bearing run starts, not at scan time.
+          LIVE_TAKEOVER="$(jq -r --arg t "${TAKEOVER_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_LIVE}")"
+          LIVE_SKIP="$(jq -r --arg t "${SKIP_LABEL}" '[.labels[]?.name] | index($t) != null' <<< "${PR_LIVE}")"
+          INELIGIBLE=''
+          if [[ "${PR_LIVE}" == '{}' ]]; then INELIGIBLE='metadata fetch failed (API error) — fail-closed'
+          elif [[ "${LIVE_STATE}" != "OPEN" ]]; then INELIGIBLE="state='${LIVE_STATE:-unknown}'"
+          elif [[ "${LIVE_SKIP}" == "true" ]]; then INELIGIBLE="${SKIP_LABEL} label present"
+          elif [[ "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" && "${LIVE_TAKEOVER}" != "true" ]]; then INELIGIBLE="author='${LIVE_AUTHOR:-unknown}' without ${TAKEOVER_LABEL}"
+          elif [[ "${LIVE_BASE}" != "main" ]]; then INELIGIBLE="base='${LIVE_BASE:-unknown}'"
+          elif [[ "${LIVE_BRANCH}" != "${BRANCH}" ]]; then INELIGIBLE="head branch is now '${LIVE_BRANCH:-unknown}'"
+          # Base/branch invariants sit ABOVE the fork chain: the last fork
+          # elif ends the ladder for eligible forks, so anything below it
+          # would be unreachable for exactly the PR class we fetch and push.
+          elif [[ "${LIVE_XREPO}" != "false" && "${LIVE_TAKEOVER}" != "true" && "${LIVE_AUTHOR}" != "${AUTOFIX_BOT}" ]]; then INELIGIBLE='fork head without takeover (a non-bot fork needs the label)'
+          elif [[ "${LIVE_XREPO}" != "false" && "${LIVE_CAN_MODIFY}" != "true" ]]; then INELIGIBLE='fork head without maintainer-edit access'
+          elif [[ "${LIVE_XREPO}" != "false" ]]; then
+            # Live author-privilege re-check for fork targets: an author who
+            # lost write+ since the scan must not get a secret-bearing run.
+            FORK_AUTHOR_PERM="$(gh api "repos/${REPO}/collaborators/${LIVE_AUTHOR}/permission" --jq '.permission // ""' 2> /dev/null || echo '')"
+            case "${FORK_AUTHOR_PERM}" in
+              admin|maintain|write) : ;;
+              *) INELIGIBLE="fork author '${LIVE_AUTHOR}' permission='${FORK_AUTHOR_PERM:-none}' below write" ;;
+            esac
+            # The fetch source and token-push target must still be the LIVE
+            # head repository — a fork renamed or transferred since the scan
+            # would route both to a stale path. Fail-closed: moved or
+            # unresolved discards; the next scan re-admits the fresh path.
+            if [[ -z "${INELIGIBLE}" ]]; then
+              LIVE_HR_OWNER="$(jq -r '.headRepositoryOwner.login // ""' <<< "${PR_LIVE}")"
+              LIVE_HR_NAME="$(jq -r '.headRepository.name // ""' <<< "${PR_LIVE}")"
+              if [[ -z "${LIVE_HR_OWNER}" || -z "${LIVE_HR_NAME}" || "${LIVE_HR_OWNER}/${LIVE_HR_NAME}" != "${HEAD_REPO:-${REPO}}" ]]; then
+                INELIGIBLE="fork head repository moved or unresolved (live='${LIVE_HR_OWNER}/${LIVE_HR_NAME}' target='${HEAD_REPO:-${REPO}}')"
+              fi
+            fi
+          fi
+          if [[ -n "${INELIGIBLE}" ]]; then
+            echo "🫥 target no longer eligible (${INELIGIBLE}) — discarding without action or marker"
+            {
+              echo "stale=true"
+              echo "conflict=false"
+              echo "newest=${WATERMARK}"
+              echo "effective_round=${ROUND}"
+            } >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           echo 'Restoring tracked build output before switching to the PR branch.'
           git status --short
           git restore --source=HEAD --staged --worktree .
-          git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          # This step's env carries the PAT, and checkout fires post-checkout
+          # hooks — sever hooks here exactly like the push steps do; the
+          # agent step (no PAT, sandboxed tools) re-points hooksPath at
+          # .husky itself so ITS commits still get checked.
+          git config core.hooksPath /dev/null
+          if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
+            # Maintainer-fork target: the branch does not exist on origin —
+            # fetch it (data only; hooks are severed) from the fork.
+            if ! git fetch "https://github.com/${HEAD_REPO}.git" "refs/heads/${BRANCH}"; then
+              echo "🫥 fork fetch failed for ${HEAD_REPO} (${BRANCH}) — discarding without action or marker"
+              {
+                echo "stale=true"
+                echo "conflict=false"
+                echo "newest=${WATERMARK}"
+                echo "effective_round=${ROUND}"
+              } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            git checkout -B "${BRANCH}" FETCH_HEAD
+            # Create the remote-tracking ref so the verification gate's
+            # `git diff --quiet "origin/${BRANCH}...${BRANCH}"` works for
+            # fork PRs the same way it does for same-repo branches.
+            git update-ref "refs/remotes/origin/${BRANCH}" "${BRANCH}"
+            # Allow-edits pushes ride the classic-PAT grant — GITHUB_TOKEN
+            # and fine-grained PATs are documented as NOT receiving it.
+            # Prove push access NOW, before an agent round is spent, instead
+            # of 403ing at the report step after the work is done.
+            if ! git push --no-verify --dry-run "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}" > /dev/null 2>&1; then
+              echo "🫥 fork push preflight failed for ${HEAD_REPO} (allow-edits grant or PAT type) — discarding without action or marker"
+              {
+                echo "stale=true"
+                echo "conflict=false"
+                echo "newest=${WATERMARK}"
+                echo "effective_round=${ROUND}"
+              } >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          else
+            git checkout -B "${BRANCH}" "origin/${BRANCH}"
+          fi
+
+          # The exact SHA the agent will evaluate. Captured HERE, before any
+          # agent mutation, so the marker records what was actually looked at —
+          # not the report-time remote head, which can move during the run.
+          CHECKED_OUT_HEAD="$(git rev-parse HEAD)"
+          echo "checked_out_head=${CHECKED_OUT_HEAD}" >> "${GITHUB_OUTPUT}"
 
           # Does the branch conflict with base? merge-tree computes the merge
           # without touching the tree; exit 1 means conflicts. UNKNOWN/errors are
@@ -1102,9 +2540,15 @@ jobs:
 
           gh api "repos/${REPO}/pulls/${PR}/reviews" --paginate > "${WORKDIR}/rv.json"
           gh api "repos/${REPO}/pulls/${PR}/comments" --paginate > "${WORKDIR}/rc.json"
+          gh api "repos/${REPO}/issues/${PR}/comments" --paginate > "${WORKDIR}/ic.json"
+          gh pr view "${PR}" --repo "${REPO}" \
+            --json statusCheckRollup --jq '.statusCheckRollup // []' > "${WORKDIR}/checks.json" \
+            2> /dev/null || echo '[]' > "${WORKDIR}/checks.json"
 
           # Newest actionable feedback timestamp — stamped into the eval marker so
           # the next scan knows everything up to here has been considered.
+          # Includes reviews, inline review comments, and issue-level PR comments
+          # (excluding the bot's own eval markers).
           NEWEST="$(jq -rs \
             --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
             --argjson trust "${TRUSTED_ASSOC}" '
@@ -1115,13 +2559,135 @@ jobs:
             + (.[1] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb) | .created_at))
-            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json")"
+            + (.[2] | map(select((.created_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
+            + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") > $wm)
+              | (.completedAt // .updatedAt // "")))
+            | max // ""' "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json")"
           [[ -z "${NEWEST}" ]] && NEWEST="${WATERMARK}"
           echo "newest=${NEWEST}" >> "${GITHUB_OUTPUT}"
 
+          # Live-watermark revalidation: two near-simultaneous triggers for the
+          # SAME PR can both pass their (per-target, route-level) gates and both
+          # scan before either has emitted a matrix job, so both emit this PR
+          # with the same stale watermark. The per-PR address concurrency group
+          # QUEUES the duplicate rather than discarding it — but that queueing
+          # is exactly what makes this check sound: address jobs for one PR run
+          # strictly one at a time, so by the time the duplicate runs here, the
+          # first job's eval marker is posted and visible. Three duplicate
+          # signatures: (a) a sibling evaluated through a NEWER live ts than
+          # our matrix watermark; (b) a conflict-only sibling resolved and
+          # marked at the SAME ts — with no newer feedback its marker keeps
+          # ts=watermark while its ROUND advances past ours (ours is the max
+          # round observed at scan time); (c) a no-op sibling judged THIS exact
+          # head (its redcheck marker matches CHECKED_OUT_HEAD) while keeping
+          # BOTH ts and round unchanged — neither (a) nor (b) fires, but
+          # re-running would post a duplicate report for the same head. Either
+          # way, if there is no live conflict left and nothing newer than the
+          # live watermark, this run is a stale duplicate and discards itself.
+          STALE='false'
+          LIVE_MARKS="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-eval ts=([^ ]+) acted=([^ ]+) round=([0-9]+)(?: win=([^ ]+))? -->") ] | .[]
+              | {ts: .[0], round: (.[2] | tonumber), win: (.[3] // "none"), at: ($c.created_at // "")} ]' "${WORKDIR}/ic.json")"
+          LIVE_REARM_AT="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select((.body // "") | contains("<!-- autofix-rearm -->"))
+              | .created_at ] | max // ""' "${WORKDIR}/ic.json")"
+          # Mirrors the scan: a /retry marker releases the watermark it holds.
+          LIVE_EVAL_WM="$(jq -r --arg rearm "${LIVE_REARM_AT}" '
+            map(select($rearm == "" or (.at > $rearm)))
+            | map(.ts) | map(select(. != "9999-12-31T23:59:59Z")) | max // ""' <<< "${LIVE_MARKS}")"
+          # Round counting mirrors the scan: keyed to the CURRENT window (the
+          # latest engage ack's created_at, 'none' before any takeover), so
+          # pre-re-arm markers can neither trip the cap nor inflate the live
+          # round here.
+          LIVE_REARM_KEY="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab)
+              | select(((.body // "") | contains("<!-- takeover-ack engaged -->"))
+                    or ((.body // "") | contains("<!-- autofix-rearm -->")))
+              | .created_at ] | max // "none"' "${WORKDIR}/ic.json")"
+          LIVE_MAX_ROUND="$(jq -r --arg key "${LIVE_REARM_KEY}" 'map(select(.win == $key)) | map(.round) | max // 0' <<< "${LIVE_MARKS}")"
+          # The head a sibling last judged, mirrored from the scan's RED_HEAD
+          # parse. A no-op sibling records this marker while leaving BOTH ts and
+          # round UNCHANGED — so the watermark/round triggers below never fire,
+          # yet a second same-watermark target for the same head would otherwise
+          # run the agent again and post a duplicate report for that head.
+          LIVE_RED_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+            [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+              | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
+              | {sha: .[0], at: ($c.created_at // "")} ]
+            | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
+          # A re-arm SUPERSEDES every job selected under the old window key:
+          # the maintainer asked for a fresh start, so a queued old-window job
+          # must discard instead of finishing and stamping an old-sequence
+          # marker into the new window. Conflicts stay actionable.
+          if [[ "${STALE}" != "true" && "${WINDOW:-none}" != "${LIVE_REARM_KEY}" && "${CONFLICT}" != "true" ]]; then
+            STALE='true'
+            echo "🫥 window superseded: selected under key '${WINDOW:-none}' but the live window is '${LIVE_REARM_KEY}' (re-armed while queued) — discarding without action or marker"
+          fi
+          if [[ -n "${LIVE_EVAL_WM}" && "${CONFLICT}" != "true" ]] \
+            && { [[ "${LIVE_EVAL_WM}" > "${WATERMARK}" ]] || [[ "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]] \
+              || { [[ -n "${LIVE_RED_HEAD}" ]] && [[ "${LIVE_RED_HEAD}" == "${CHECKED_OUT_HEAD}" ]]; }; }; then
+            LIVE_NEW="$(jq -rs \
+              --arg wm "${LIVE_EVAL_WM}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              (.[0] | map(select((.submitted_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.state // "") | IN("CHANGES_REQUESTED", "COMMENTED"))) | length)
+              + (.[1] | map(select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)) | length)
+              + (.[2] | map(select((.created_at // "") > $wm)
+                | select((.user.login // "") != $ab)
+                | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
+              + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | select((.completedAt // .updatedAt // "") > $wm)) | length)' \
+              "${WORKDIR}/rv.json" "${WORKDIR}/rc.json" "${WORKDIR}/ic.json" "${WORKDIR}/checks.json")"
+            if [[ "${LIVE_NEW}" == "0" ]]; then
+              STALE='true'
+              echo "🫥 stale duplicate target: a sibling run already evaluated through ${LIVE_EVAL_WM} (round ${LIVE_MAX_ROUND}) and nothing is newer — discarding without action or marker"
+            fi
+          fi
+          # A NON-stale run must still not replay a sibling's work: if live
+          # markers advanced past the matrix snapshot, adopt the live
+          # watermark (so the renderers below list only feedback the fleet
+          # has not yet evaluated) and the live round (so the next marker
+          # continues the live sequence instead of double-writing a round).
+          if [[ "${STALE}" != "true" && -n "${LIVE_EVAL_WM}" && "${LIVE_EVAL_WM}" > "${WATERMARK}" && "${LIVE_EVAL_WM}" != "9999-12-31T23:59:59Z" ]]; then
+            echo "⏩ adopting live watermark ${LIVE_EVAL_WM} (matrix had ${WATERMARK})"
+            WATERMARK="${LIVE_EVAL_WM}"
+          fi
+          if [[ "${STALE}" != "true" && "${LIVE_MAX_ROUND}" -gt "${ROUND}" ]]; then
+            echo "⏩ adopting live round ${LIVE_MAX_ROUND} (matrix had ${ROUND})"
+            ROUND="${LIVE_MAX_ROUND}"
+          fi
+          # The live round may already sit at the hard cap (a sibling consumed
+          # the final round after this target was emitted). Running would do
+          # round MAX+1 work and write a second capped marker, concealing the
+          # cap — the scan itself skips capped PRs before even looking at
+          # conflicts, so mirror that and discard.
+          if [[ "${STALE}" != "true" && "${ROUND}" -ge "${MAX_ROUNDS}" ]]; then
+            STALE='true'
+            echo "⛔ live round ${ROUND} already at MAX_ROUNDS (${MAX_ROUNDS}) — discarding without action or marker"
+          fi
+          echo "stale=${STALE}" >> "${GITHUB_OUTPUT}"
+          echo "effective_round=${ROUND}" >> "${GITHUB_OUTPUT}"
+
           # Render the actionable feedback into one prompt-ready file.
           {
-            echo "# Review feedback to triage on PR #${PR} (issue #${ISSUE})"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "# Review feedback to triage on PR #${PR}${ISSUE_REF}"
             echo
             echo "Only feedback newer than the last evaluation (${WATERMARK}) from"
             echo "trusted maintainers or the automated reviewer is listed."
@@ -1138,26 +2704,96 @@ jobs:
               "${WORKDIR}/rv.json"
             echo
             echo "## Inline comments"
+            # Mirrors the review-scan gate: per AGENTS.md, Suggestion-level
+            # findings are actionable within the first ~5 review rounds (the
+            # loop's whole operating range), so they are rendered for the agent
+            # to triage — implement if valuable, otherwise record the deferral.
             jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
               --argjson trust "${TRUSTED_ASSOC}" '
               .[]
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | "- \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              | "- [rc:\(.id)] \(.path // "?"):\(.line // "?") @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/rc.json"
+            echo
+            echo "## Issue-level comments"
+            jq -r --arg wm "${WATERMARK}" --arg rb "${REVIEW_BOT}" --arg ab "${AUTOFIX_BOT}" \
+              --argjson trust "${TRUSTED_ASSOC}" '
+              .[]
+              | select((.created_at // "") > $wm)
+              | select((.user.login // "") != $ab)
+              | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("^\\s*@qwen-code /") | not)
+              | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
+              "${WORKDIR}/ic.json"
+            echo
+            echo "## Failed checks"
+            jq -r --arg wm "${WATERMARK}" '
+              .[]
+              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") > $wm)
+              | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
+              "${WORKDIR}/checks.json"
+            # Checks that turned red BEFORE the watermark and are STILL red.
+            # The section above only shows checks that failed AFTER the
+            # watermark, so a persistent red (the exact case the scan's
+            # N_RED_NOW gate selects) would leave the agent with an empty
+            # "Failed checks" section and no check name to reproduce.
+            echo
+            echo "## Still-red checks (persisting from before the last evaluation)"
+            jq -r --arg wm "${WATERMARK}" '
+              .[]
+              | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+              | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+              | select((.completedAt // .updatedAt // "") <= $wm)
+              | "- \(((.name // .workflowName) // "external check") | gsub("[^A-Za-z0-9 _./()-]"; "") | .[0:80]): \(.conclusion // .state // "?")"' \
+              "${WORKDIR}/checks.json"
+            # If the LAST round ended in a gate rejection, show the agent WHY.
+            # It is otherwise invisible on the retry: the reason lives in the
+            # bot's own handoff comment, which the feedback filter above
+            # (correctly) excludes, so the agent would re-read only the original
+            # review points and re-make the same mistake - #7208 was handed to a
+            # human over a two-character TS4111 fix its own compiler output had
+            # already spelled out.
+            LAST_REJECTION="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab)
+                | select((.body // "") | contains("<!-- autofix-eval ts=")) ]
+              | sort_by(.created_at) | last | .body // ""' "${WORKDIR}/ic.json" \
+              | sed -n '/<!-- autofix-gate-rejection-start -->/,/<!-- autofix-gate-rejection-end -->/p' \
+              | sed '1d;$d')"
+            if [[ -n "${LAST_REJECTION}" ]]; then
+              echo
+              echo '## Your previous attempt was REJECTED by the verification gate'
+              echo
+              echo 'Fix this first — the same change will be rejected again otherwise.'
+              echo
+              printf '%s\n' "${LAST_REJECTION}"
+            fi
           } > "${WORKDIR}/feedback.md"
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
 
       - name: 'Triage and address'
         id: 'address'
+        # Skipped entirely for a stale duplicate target (see the live-watermark
+        # revalidation in prepare) — no agent run, no marker, no comment.
+        if: |-
+          ${{ steps.prepare.outputs.stale != 'true' }}
+        # Bound the agent well below the 120-minute job timeout so a runaway agent
+        # fails THIS step (not the whole job), leaving the always() verify and
+        # report steps time to run and post a handoff. A job-level timeout would
+        # cancel those steps too and leave the loop silent. 80 leaves ~40 minutes
+        # of headroom for setup (install/build) plus verify + report.
+        timeout-minutes: 80
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
@@ -1185,6 +2821,7 @@ jobs:
                 "run_shell_command(npm run typecheck)",
                 "run_shell_command(npm run lint)",
                 "run_shell_command(npx vitest)",
+                "run_shell_command(npm run generate:settings-schema)",
                 "run_shell_command(pwd)"
               ],
               "tools": {
@@ -1200,7 +2837,20 @@ jobs:
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/failure.md"
-          node .qwen/skills/autofix/scripts/run-agent.mjs \
+          # Prepare severed hooks for its PAT-bearing git ops; THIS step
+          # holds no PAT, so the branch's own hooks may check the agent's
+          # commits again. HONEST LIMIT: the model key (OPENAI_API_KEY) IS
+          # forwarded into the docker sandbox by the CLI, and the agent's
+          # job is to build/test the branch — so on a taken-over
+          # human-authored PR, branch-controlled scripts can read that key.
+          # This is an accepted, explicit consequence of takeover
+          # (triage+-gated, in-repo branches only, whose authors are
+          # write-capable collaborators); keep AUTOFIX_OPENAI_API_KEY a
+          # low-privilege, quota-bounded, rotatable key.
+          git config core.hooksPath .husky
+          # Trusted staged copy in the mirrored layout — resolves
+          # ../SKILL.md to the trusted staged SKILL, never the PR branch's.
+          node "${RUNNER_TEMP}/autofix-skill/scripts/run-agent.mjs" \
             --mode address-review \
             --pr "${PR}" \
             --issue "${ISSUE}" \
@@ -1211,8 +2861,22 @@ jobs:
       - name: 'Verification gate'
         id: 'verify'
         if: |-
-          ${{ always() }}
+          ${{ always() && steps.prepare.outputs.stale != 'true' }}
         run: |-
+          # Record whether the agent left a commit FIRST — this is a ref-only
+          # diff, so it runs before the failure.md early-exits and covers an
+          # agent that commits and then aborts. The failure handoff keys its
+          # "was NOT pushed / commit discarded" wording on this, NOT on
+          # outcome=failed: abort / pre-commit-gate paths that never committed
+          # keep the neutral framing. `git diff --quiet` exits 1 for a real diff
+          # (committed) but 128 on a bad ref — only 1 counts as a commit, so a
+          # git error is not misreported as a discarded commit.
+          committed_rc=0
+          git diff --quiet "origin/${BRANCH}...${BRANCH}" || committed_rc=$?
+          if [[ "${committed_rc}" -eq 1 ]]; then
+            echo "committed=true" >> "${GITHUB_OUTPUT}"
+          fi
+
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
             git status --short
@@ -1228,7 +2892,26 @@ jobs:
             exit 1
           fi
 
+          # Convention: hooks are severed at EVERY host checkout of the PR
+          # branch (no secret sits in this step's env, but a post-checkout
+          # hook still runs branch code on the host).
+          git config core.hooksPath /dev/null
           git checkout "${BRANCH}"
+
+          # Settings-schema freshness is a STRUCTURAL guard, checked BEFORE the
+          # no-op/unchanged return: on a stale-schema PR the agent can wrongly
+          # write no-action.md, and without this the no-op path would report the
+          # feedback as evaluated (acted=false) while CI stays red — the exact bug
+          # this PR fixes. So it runs on EVERY path. The gate is shared with the
+          # issue-fix verify step (rationale + the generator crash guard live in
+          # the script); the write is on a tracked file compared by `git status`,
+          # not the commit-level no-op git-diff below, and it is restored on
+          # failure. On failure it writes outcome=failed and exits 1.
+          # Run the copy staged from the trusted base checkout: a PR branch
+          # that predates the script does not contain it (bash would exit 127
+          # and kill the gate with no outcome), and the gate logic must come
+          # from the trusted base, not the branch under verification.
+          bash "${RUNNER_TEMP}/check-settings-schema.sh"
 
           if git diff --quiet "origin/${BRANCH}...${BRANCH}"; then
             # No new commit. That is only legitimate as a deliberate no-action.
@@ -1249,27 +2932,87 @@ jobs:
             exit 1
           fi
 
+          # Every check below can legitimately REJECT the agent's attempt, so
+          # each declares that verdict explicitly. That is what lets the handoff
+          # tell a rejection apart from the gate's OWN death: an empty outcome
+          # on a failed job means the gate never reached a verdict (its own bug,
+          # an infra blip), and the agent's work must then be retried rather
+          # than buried by a watermark advance.
+          # Capture each check's output. A rejection has to tell the agent WHY
+          # its change was refused: without that, the next round re-reads only
+          # the original review feedback and re-makes the same mistake - #7208
+          # was handed to a human over a two-character TS4111 fix its own
+          # compiler output already spelled out.
+          GATE_LOG="${WORKDIR}/gate-output.log"
+          : > "${GATE_LOG}"
+          reject_fix() {
+            echo "❌ ${1}"
+            # Declare the verdict FIRST. The handoff routes on outcome=, and an
+            # empty outcome on a failed job means "the gate never reached a
+            # verdict" — i.e. a crash, which is RETRIED. So a rejection that
+            # dies while writing its detail file would be re-attempted forever
+            # instead of reported once. A detail we cannot write is a degraded
+            # message; it must never cost the verdict, hence this order and the
+            # non-fatal write below.
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            {
+              echo "**${1}**"
+              echo
+              # A four-backtick fence cannot be closed by a ``` line, so
+              # captured output containing its own fences stays inside the
+              # block when this is posted verbatim as a PR comment.
+              echo '````'
+              tail -c 3000 "${GATE_LOG}" 2> /dev/null
+              echo '````'
+            } > "${WORKDIR}/gate-rejection.md" ||
+              echo "::warning::could not write the gate rejection detail; the verdict stands."
+            exit 1
+          }
+          run_check() {
+            # pipefail makes the pipeline carry the command's status, not tee's.
+            local label="${1}"
+            shift
+            if ! "$@" 2>&1 | tee -a "${GATE_LOG}"; then
+              reject_fix "${label}"
+            fi
+          }
+
           echo '🔬 Re-running deterministic checks (independent of the agent)...'
-          npm run build
-          npm run typecheck
-          npm run lint
+          run_check 'build failed on the agent-committed fix' npm run build
+          run_check 'typecheck failed on the agent-committed fix' npm run typecheck
+          run_check 'lint failed on the agent-committed fix' npm run lint
 
           # Test changed/related files for the packages this PR touches.
           # --changed follows the import graph so transitive breakage is caught.
           # Full regression is covered by regular CI on the PR after the push.
+          # Map each changed file to its OWNING npm workspace via the trusted
+          # staged resolver, shared with the other verify gate so both resolve
+          # packages identically. It expands the on-disk root package.json
+          # workspaces globs (so a workspace the branch ADDS is included) and
+          # takes each file's longest-prefix workspace — never a flat
+          # 'packages/<dir>' (ENOENT-crashes on nested packages) nor a fixture
+          # package.json inside a workspace's src tree (would skip the owning
+          # workspace's tests). No '|| true': a resolver error (missing node, an
+          # unreadable manifest) must fail the gate loudly rather than silently
+          # skip package tests; legitimate no-match input already exits 0 empty.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
-            | grep -oE '^packages/[^/]+' | sort -u || true)"
+            | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              if [[ ! -f "${p}/package.json" ]]; then
+                echo "Skipping ${p}: no package.json."
+                continue
+              fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
               if [[ "${test_script}" != *vitest* ]]; then
                 echo "Skipping ${p}: test script is not Vitest."
                 continue
               fi
               echo "🧪 Testing ${p} (changed files only)..."
-              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
+              run_check "tests failed in ${p}" \
+                npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
             done
           fi
           echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
@@ -1281,7 +3024,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -1310,7 +3053,21 @@ jobs:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          # Surfaced in the report footer for diagnosis + attribution; a repo
+          # variable (not a secret), already the agent's OPENAI_MODEL.
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
+          # Prepare may have adopted a sibling's live round; the matrix value
+          # would double-write that round's marker.
+          ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
+          MODEL_DISPLAY="${MODEL:-default}"
           if [[ -z "${GITHUB_TOKEN}" ]]; then
             echo '::error::CI_DEV_BOT_PAT is required to push and report as qwen-code-dev-bot.'
             exit 1
@@ -1333,30 +3090,103 @@ jobs:
             NEXT_ROUND="$(( ROUND + 1 ))"
             git config --local --unset-all http.https://github.com/.extraheader || true
             git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-            git push origin "${BRANCH}"
+            # This step carries the PAT; the branch carries PR-controlled
+            # .husky hooks (hooksPath was pointed there so the AGENT's
+            # commits get checked). A pre-push hook would execute that code
+            # with the PAT in env — sever hooks entirely before pushing.
+            git config core.hooksPath /dev/null
+            if [[ "${HEAD_REPO:-${REPO}}" != "${REPO}" ]]; then
+              # Push back to the FORK branch via allow-edits (PAT has push
+              # rights on the upstream, which GitHub extends to the fork's
+              # PR branch when the author ticked the box).
+              git push --no-verify "https://x-access-token:${GITHUB_TOKEN}@github.com/${HEAD_REPO}.git" HEAD:"${BRANCH}"
+            else
+              git push --no-verify origin "${BRANCH}"
+            fi
+            # Resolve the review threads whose findings the agent actually
+            # IMPLEMENTED, so a human re-reviewing sees only what is still open
+            # instead of re-reading every thread to work out what was handled.
+            # The agent cannot do this itself - its sandbox carries no token -
+            # so it records the inline-comment ids it implemented and this step,
+            # which already holds the PAT, maps each to its thread. Findings it
+            # DECLINED or deferred are deliberately left open. Best-effort
+            # throughout: a resolve failure must never fail a good push.
+            if [[ -s "${WORKDIR}/resolved-comments.txt" ]]; then
+              # first-100 page cap: threads beyond this page are not resolved
+              THREADS_RAW="$(gh api graphql -f owner="${REPO%%/*}" -f name="${REPO##*/}" -F pr="${PR}" -f query='
+                query($owner:String!,$name:String!,$pr:Int!){
+                  repository(owner:$owner,name:$name){
+                    pullRequest(number:$pr){
+                      reviewThreads(first:100){nodes{id isResolved comments(first:100){nodes{databaseId}}} pageInfo{hasNextPage}}
+                    }
+                  }
+                }' --jq '(.data.repository.pullRequest.reviewThreads // {nodes:[]})' 2> /dev/null || echo '{"nodes":[]}')"
+              THREADS_JSON="$(jq '.nodes' <<< "${THREADS_RAW}")"
+              if [[ "$(jq -r '.pageInfo.hasNextPage // false' <<< "${THREADS_RAW}")" == "true" ]]; then
+                echo "::warning::PR has more than 100 review threads; threads past the first page will not be resolved"
+              fi
+              RESOLVED_N=0
+              while IFS= read -r rc_id || [[ -n "${rc_id}" ]]; do
+                rc_id="${rc_id%$'\r'}"
+                rc_id="${rc_id#rc:}"
+                [[ "${rc_id}" =~ ^[0-9]+$ ]] || continue
+                thread_id="$(jq -r --argjson id "${rc_id}" \
+                  'map(select(.isResolved | not)
+                     | select(any(.comments.nodes[]; .databaseId == $id)))
+                   | .[0].id // ""' <<< "${THREADS_JSON}")"
+                if [[ -z "${thread_id}" ]]; then
+                  echo "::warning::comment ${rc_id} matched no open review thread"
+                  continue
+                fi
+                if gh api graphql -f threadId="${thread_id}" -f query='
+                  mutation($threadId:ID!){
+                    resolveReviewThread(input:{threadId:$threadId}){thread{isResolved}}
+                  }' > /dev/null 2>&1; then
+                  RESOLVED_N=$(( RESOLVED_N + 1 ))
+                else
+                  echo "::warning::could not resolve the review thread for comment ${rc_id}"
+                fi
+              done < "${WORKDIR}/resolved-comments.txt"
+              echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
+            fi
             {
-              echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
+              echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
-              cat "${WORKDIR}/address-summary.md"
+              # Neutralize the comment-opening token itself: model output
+              # posted verbatim under the bot identity could smuggle a forged
+              # control marker ('<!-- autofix-eval …') the scanners would
+              # trust. Token-breaking is LINE-INDEPENDENT — a strip like
+              # 's/<!--[^>]*-->//' misses a marker whose --> sits on another
+              # line, and jq scan() matches across newlines. The backslashes
+              # render away in markdown, so the visible text is unchanged.
+              sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
               echo
-              echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push.' || echo 'no conflict with main.')"
+              echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo
-              echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human."
+              echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
               echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} -->"
+              echo "---"
+              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+              echo
+              echo "<!-- autofix-eval ts=${NEWEST} acted=true round=${NEXT_ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="pushed (round ${NEXT_ROUND}/${MAX_ROUNDS})"
           else
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
-              echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point:"
+              echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point: · 已审阅最新反馈——无需改动。逐点说明原因如下："
               echo
-              cat "${WORKDIR}/no-action.md"
+              sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/no-action.md"
               echo
-              echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge).' || echo 'no conflict with main.')"
+              echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->"
+              echo "---"
+              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+              echo
+              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} win=${WINDOW:-none} -->"
+              echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
             } > "${WORKDIR}/report.md"
             STATUS="no action needed"
           fi
@@ -1364,7 +3194,9 @@ jobs:
           gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md"
 
           {
-            echo "### PR #${PR} (issue #${ISSUE}) — ${STATUS}"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "### PR #${PR}${ISSUE_REF} — ${STATUS}"
             echo "- Base conflict: ${CONFLICT}"
             echo
             if [[ "${OUTCOME}" == "fixed" ]]; then
@@ -1380,15 +3212,35 @@ jobs:
           ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
         env:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
+          COMMITTED: '${{ steps.verify.outputs.committed }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
           DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
+          JOB_STATUS: '${{ job.status }}'
+          # 'skipped' when an EARLIER step failed before Prepare ran (base
+          # install/build) — an infra/base failure, not the agent.
+          # 'success'/'failure' when Prepare itself ran. Distinguishes a
+          # transient pre-agent crash (retry) from a genuine agent crash.
+          PREPARE_OUTCOME: '${{ steps.prepare.outcome }}'
+          STALE: '${{ steps.prepare.outputs.stale }}'
+          EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
+          MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          CHECKED_OUT_HEAD: '${{ steps.prepare.outputs.checked_out_head }}'
         run: |-
+          # The head the agent actually evaluated — captured in prepare before
+          # any mutation, not the report-time remote head (which can move
+          # during the run). Empty when prepare exited early, which matches
+          # no marker and keeps reds visible — fail-open.
+          REPORT_HEAD="${CHECKED_OUT_HEAD}"
+          ROUND="${EFFECTIVE_ROUND:-${ROUND}}"
+          MODEL_DISPLAY="${MODEL:-default}"
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
           {
-            echo "### PR #${PR} (issue #${ISSUE}) — outcome=${OUTCOME:-unknown}${SUFFIX}"
+            ISSUE_REF=""
+            [[ "${ISSUE}" != "${PR}" ]] && ISSUE_REF=" (issue #${ISSUE})"
+            echo "### PR #${PR}${ISSUE_REF} — outcome=${OUTCOME:-unknown}${SUFFIX}"
             echo "- Base conflict: ${CONFLICT:-unknown}"
             echo
             for f in address-summary.md no-action.md failure.md handoff.md; do
@@ -1400,7 +3252,30 @@ jobs:
             done
           } >> "${GITHUB_STEP_SUMMARY}"
 
-          if [[ "${DRY_RUN}" != "true" && "${OUTCOME:-unknown}" == "failed" && -n "${NEWEST:-}" && -n "${GITHUB_TOKEN:-}" && -s "${WORKDIR}/handoff.md" ]]; then
+          # Leave a visible handoff + eval marker when the address did NOT publish a
+          # result — a verify failure, or an agent/infra crash or timeout before the
+          # verify gate ran. Without it the loop goes SILENT (no comment, no marker)
+          # and the next scan re-targets the same feedback forever.
+          #
+          # SUPPRESS entirely once "Push and report" already handled this run
+          # (OUTCOME fixed or noop). That step is also always()-gated and runs even
+          # if a LATER always() step (e.g. artifact upload) fails the job; without
+          # this guard, such a late failure would flip JOB_STATUS to failure and
+          # post a contradictory acted=false handoff on top of the published fix.
+          # (A genuine push failure leaves OUTCOME=fixed but writes no marker, so
+          # the next scan simply retries — it does not need a handoff here.)
+          #
+          # SUPPRESS likewise for a stale-discarded run: it did no work, so a
+          # late always()-step failure (e.g. artifact upload) must not turn a
+          # deliberate no-comment/no-marker discard into a handoff that
+          # consumes a round.
+          POST_HANDOFF=false
+          if [[ "${DRY_RUN}" != "true" && "${STALE:-}" != "true" && -n "${GITHUB_TOKEN:-}" && "${OUTCOME:-unknown}" != "fixed" && "${OUTCOME:-unknown}" != "noop" ]]; then
+            if [[ "${OUTCOME:-unknown}" == "failed" || "${JOB_STATUS:-}" != "success" ]]; then
+              POST_HANDOFF=true
+            fi
+          fi
+          if [[ "${POST_HANDOFF}" == "true" ]]; then
             api_error_file="$(mktemp)"
             if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
               api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
@@ -1414,18 +3289,347 @@ jobs:
               echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
               exit 1
             fi
+            # Attach the most actionable agent output. failure.md first (its
+            # diagnosis; run-agent.mjs wraps it in a generic handoff.md, so prefer
+            # failure.md). Then the agent's SUCCESS outputs: on the OUTCOME=failed
+            # path where the agent committed a fix but a post-agent verify gate then
+            # failed (most notably the schema-freshness gate), only
+            # address-summary.md/no-action.md exist and "Push and report" is
+            # skipped, so this handoff is their only route to the PR — otherwise the
+            # comment would wrongly say "crashed or timed out". Generic notice only
+            # if none exist.
+            DETAIL_FILE=''
+            for f in failure.md handoff.md address-summary.md no-action.md; do
+              if [[ -s "${WORKDIR}/${f}" ]]; then DETAIL_FILE="${WORKDIR}/${f}"; break; fi
+            done
+            # run-agent.mjs drops this marker when qwen died on a model-side
+            # [API Error: 4xx/5xx] (access denied, quota, a 5xx). The agent never
+            # evaluated the feedback, so this is treated as a retry (sentinel ts,
+            # no watermark advance) below — a model access/quota blip must not
+            # strand the PR the way a real evaluated handoff would.
+            API_ERROR_DETAIL=''
+            API_ERROR_KIND=''
+            if [[ -s "${WORKDIR}/agent-api-error" ]]; then
+              # First line only, comment-opener escaped (agent stdout can echo
+              # external PR-comment text and the marker regex spans '<!-- ... -->'
+              # happily), and capped so a long span can't bloat the headline.
+              # `cut -c` counts BYTES, so the cap can split a multi-byte
+              # character - and the classifier deliberately matches CJK renders,
+              # so a >200-byte Chinese error is a supported input, not a
+              # hypothetical. iconv -c drops the dangling bytes so the headline
+              # stays valid UTF-8; it EXITS 1 when it discards one, which under
+              # this step's `set -eo pipefail` would abort before the marker and
+              # the gh pr comment - hence the `|| true`, same as the sibling
+              # publish site below.
+              API_ERROR_DETAIL="$(head -n 1 "${WORKDIR}/agent-api-error" | sed 's/<!--/<!\\-\\-/g' | cut -c1-200 | iconv -f utf-8 -t utf-8 -c || true)"
+            fi
+            if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
+              API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
+            fi
+            # A timeout means the agent evaluated NOTHING before its budget ran
+            # out (run-agent.mjs writes this signal). Routed to retry, not an
+            # evaluated advance — same as a pre-verdict crash. Bounded by the
+            # round cap and the consecutive-failure cap, so a PR that keeps
+            # timing out still stops; a one-off (usually followed by a good
+            # round) recovers on the next scan instead of stranding its feedback.
+            AGENT_TIMEOUT=''
+            if [[ -s "${WORKDIR}/agent-timeout" ]]; then
+              AGENT_TIMEOUT="$(head -n 1 "${WORKDIR}/agent-timeout" | cut -c1-120 | iconv -f utf-8 -t utf-8 -c || true)"
+            fi
+            # If feedback was actually read (prepare ran), stamp its newest ts so
+            # the watermark advances and the same feedback is not re-selected next
+            # scan. If the crash happened before prepare, NEWEST is empty and the
+            # watermark cannot advance — mark the round terminal (MAX_ROUNDS) so the
+            # scan's max-round guard skips this PR instead of re-handing-off every
+            # tick, without pretending the unread feedback was evaluated. The final
+            # sentinel guards a cascading API failure that left WATERMARK empty too:
+            # an empty ts= would not match the scan's `ts=([^ ]+)` regex, so the
+            # terminal marker would be ignored and the PR re-handed-off. A far-future
+            # ISO-8601 date is used (not a bare word) so it is both non-empty AND
+            # sorts above any real timestamp in EVAL_WM's max, belt-and-suspenders
+            # with the terminal round.
+            # The gate declares its verdict explicitly (failed / noop / fixed).
+            # An EMPTY outcome on a non-success job means it died BEFORE reaching
+            # one - its own crash (a gate bug, an infra blip, a resolver error),
+            # not a judgement on the agent's work. That must retry like any other
+            # pre-verdict crash instead of advancing the watermark: the
+            # nested-package ENOENT that stranded #7329/#7336 looked exactly like
+            # a rejection, so a fix the agent had already written was discarded
+            # and the PR sat idle until a human deleted the marker by hand.
+            GATE_CRASHED=false
+            if [[ -z "${OUTCOME}" && "${JOB_STATUS:-}" != 'success' ]]; then
+              GATE_CRASHED=true
+            fi
+            MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
+            if [[ -n "${NEWEST:-}" ]]; then
+              MARK_ROUND="$(( ROUND + 1 ))"
+              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || -n "${AGENT_TIMEOUT}" || "${GATE_CRASHED}" == 'true' ]]; then
+                # Prepare ran (NEWEST is set) but no verdict was reached. Ways
+                # that happens, and in ALL of them the agent evaluated NOTHING:
+                # it produced no output at all (crashed before any verdict — a
+                # staged runner that fails to boot), it died on a model
+                # [API Error] (access/quota/5xx/transport), it TIMED OUT before
+                # finishing, or the gate crashed after the agent wrote its
+                # summary. So the watermark
+                # must NOT advance past this feedback: an advance makes the next
+                # scan see "nothing new" and never retry, stranding the PR on a
+                # transient failure (an infra blip, a quota reset minutes away, a
+                # model-access grant, a base-image bug fixed minutes later).
+                # Stamp the sentinel ts (excluded from EVAL_WM) so the feedback
+                # stays live and the next scan retries; the incremented round
+                # still bounds retries before a terminal handoff, so a PERSISTENT
+                # failure cannot loop forever.
+                MARK_TS='9999-12-31T23:59:59Z'
+                # Cause-aware wording, most specific first — a model error and a
+                # gate crash each name the operator fix, while a bare no-output
+                # crash points at a human. (The API clause runs first as
+                # defense-in-depth: today run-agent writes failure.md on the
+                # API-death path and the gate converts that to an explicit
+                # outcome=failed, so GATE_CRASHED is false — but if the gate
+                # ever changes, a model blip must not be reported as a gate
+                # problem.) No Run log here — the report block below appends
+                # it (avoid a duplicate).
+                if [[ -n "${API_ERROR_DETAIL}" ]]; then
+                  CAUSE="could not reach the model — ${API_ERROR_DETAIL}"
+                  LAST_FIX="a maintainer should check the autofix model key/access, then re-arm"
+                elif [[ -n "${AGENT_TIMEOUT}" ]]; then
+                  # A timeout evaluated nothing, so the feedback is unaddressed
+                  # and stays live for the retry. On a big / heavily-reviewed PR
+                  # this is usually a one-off; the last automatic attempt names
+                  # the real fix (split the PR or raise the budget).
+                  CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"
+                  LAST_FIX="a human should split the PR or raise the agent time budget, then re-arm"
+                elif [[ -z "${DETAIL_FILE}" ]]; then
+                  CAUSE="crashed before it could evaluate the feedback"
+                  LAST_FIX="a human should take over this PR"
+                else
+                  # A gate crash points the maintainer at the gate logs: the
+                  # agent's commit is discarded with the runner, but the
+                  # feedback watermark is preserved, so the retry re-attempts
+                  # the same feedback rather than skipping it.
+                  CAUSE="hit a verification-gate error before reaching a verdict"
+                  LAST_FIX="a maintainer should check the gate logs, then re-arm"
+                fi
+                # Budget retries by CAUSE. A transient 429/5xx self-heals, so
+                # it keeps the full round budget. An auth/access error that
+                # only a maintainer can fix never self-heals, and every attempt
+                # costs an agent run AND a PR comment - on a takeover PR that
+                # is ~100 comments over ~17h before the useful message lands.
+                CAUSE_MAX="${MAX_ROUNDS}"
+                if [[ "${API_ERROR_KIND}" == 'auth' && "${API_AUTH_MAX_ROUNDS}" -lt "${MAX_ROUNDS}" ]]; then
+                  CAUSE_MAX="${API_AUTH_MAX_ROUNDS}"
+                fi
+                # Only promise a retry when one will actually happen: at the
+                # cap the next scan's round gate skips the PR, and the
+                # cap-reached notice is takeover-only, so the final attempt
+                # must say so itself. Clamp the displayed numerator:
+                # MARK_ROUND counts ALL rounds in the window, so earlier real
+                # attempts can push it past CAUSE_MAX — "attempt 4/3" reads
+                # as a bug.
+                DISPLAY_ROUND=$(( MARK_ROUND < CAUSE_MAX ? MARK_ROUND : CAUSE_MAX ))
+                if [[ "${MARK_ROUND}" -lt "${CAUSE_MAX}" ]]; then
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${DISPLAY_ROUND}/${CAUSE_MAX}) — it will retry on the next scan."
+                else
+                  HEADLINE="🤖 AutoFix ${CAUSE} (attempt ${DISPLAY_ROUND}/${CAUSE_MAX}) — this was the last automatic attempt; ${LAST_FIX}."
+                  # Stamp the terminal round so the scan's max-round gate skips
+                  # this PR instead of re-handing-off every tick; the sentinel
+                  # ts keeps the feedback live for a re-arm once the key is
+                  # fixed. (No-op when CAUSE_MAX is already MAX_ROUNDS.)
+                  MARK_ROUND="${MAX_ROUNDS}"
+                fi
+              else
+                # The gate ran and rejected the agent's fix (a build/test
+                # failure). Before handing to a human, check whether the PR is
+                # merely BEHIND main: a build that fails on something main
+                # already changed — e.g. #7471's update-notifier, removed by
+                # #7515, left its import unresolved on a stale branch — is a
+                # stale-base failure, NOT the fix. If behind, merge main in and
+                # retry: the next round builds against current main. After the
+                # update the PR is current, so a genuine fix-failure next round
+                # is no longer "behind" and falls through to the handoff below —
+                # which self-limits this to ONE base-update. update-branch is a
+                # CAS on the checked-out head; any API failure is fail-safe (fall
+                # through to the handoff). This is the agent-gate sibling of the
+                # scan's stale-base auto-update, which only sees PR status
+                # checks, never the gate's own build.
+                STALE_BASE_RETRY=false
+                MAIN_HEAD_R="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH:-main}" --jq '.sha' 2> /dev/null || echo '')"
+                if [[ -n "${MAIN_HEAD_R}" && -n "${REPORT_HEAD}" ]]; then
+                  CMP_R="$(gh api "repos/${REPO}/compare/${MAIN_HEAD_R}...${REPORT_HEAD}" --jq '.status' 2> /dev/null || echo '')"
+                  if [[ "${CMP_R}" == 'behind' || "${CMP_R}" == 'diverged' ]] \
+                    && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${REPORT_HEAD}" > /dev/null 2>&1; then
+                    STALE_BASE_RETRY=true
+                  fi
+                fi
+                if [[ "${STALE_BASE_RETRY}" == 'true' ]]; then
+                  # Feedback stays live (sentinel ts) so the retry re-reads it
+                  # against the freshly-merged base; the incremented round still
+                  # bounds it, and the consecutive-failure exemption below keeps
+                  # this not-the-PR's-fault round from counting toward the cap.
+                  MARK_TS='9999-12-31T23:59:59Z'
+                  HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
+                else
+                  HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+                fi
+              fi
+            elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
+              # NEWEST is empty because Prepare never RAN TO A VERDICT — an
+              # earlier step failed or the job stopped before the agent started:
+              # installing/building the trusted base, node setup. That
+              # is infra or a broken base, NOT the agent, and it is usually
+              # transient (a base build fixed minutes later, an ENOSPC runner).
+              # Match on "not a real Prepare run" rather than 'skipped' alone, so
+              # this also covers a CANCELLED job (outcome 'cancelled') and a job
+              # that stopped before Prepare even entered the step context
+              # (outcome ''): a concurrency/manual cancel is not the agent's
+              # fault either, and 'cancelled' is a DISTINCT value from 'skipped'
+              # — matching only 'skipped' would send a cancel to the terminal
+              # branch below. Terminal here is wrong: a web-shell TS break on
+              # main failed the base build across a whole scan batch and stranded
+              # SIX healthy PRs terminally, including ones at round 11. Retry
+              # instead — sentinel ts keeps the feedback live — but still
+              # increment the round so a PERSISTENTLY broken base is bounded and
+              # cannot loop forever.
+              MARK_ROUND="$(( ROUND + 1 ))"
+              MARK_TS='9999-12-31T23:59:59Z'
+              if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
+                HEADLINE="🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran, so no fix was attempted. This is normally a transient infra issue, a broken base build, or a cancelled run — not this PR. It will retry on the next scan."
+              else
+                MARK_ROUND="${MAX_ROUNDS}"
+                HEADLINE="🤖 AutoFix could not start — reached the round cap (${MAX_ROUNDS}) because a setup step (base install/build) kept failing before the agent ran. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
+              fi
+            else
+              # Prepare RAN (outcome success/failure) but produced no feedback to
+              # read — prepare itself crashed or timed out before emitting a
+              # verdict. Mark
+              # terminal so the scan skips (it can't advance the watermark
+              # without a read); do NOT imply MAX_ROUNDS attempts were made when
+              # zero rounds happened. The headline states the real recovery
+              # (delete the marker) rather than promise a re-trigger the
+              # max-round guard would ignore.
+              MARK_ROUND="${MAX_ROUNDS}"
+              HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
+            fi
+
+            # Consecutive-failure circuit breaker, distinct from the round cap.
+            # Reaching this step at all means this round did NOT push (the push
+            # and no-op paths report from "Push and report"), so this round is a
+            # failure. Count how many failures precede it WITHOUT a break: walk
+            # the bot's prior eval markers in API order (oldest-first, pinned
+            # by sort_by so a stray reorder cannot corrupt the streak) and
+            # reset the streak at each push ("Addressed the latest review
+            # feedback"), deliberate no-op ("no changes needed"), or pre-agent
+            # infra-failure marker ("AutoFix could not start"). After the
+            # full walk, CONSEC_FAIL holds failures since the last progress
+            # point plus one for this round. If the unbroken
+            # streak (this round included) reaches the cap, stop retrying even
+            # under takeover: a PR that fails this many times running is stuck
+            # on something a re-run at the same budget will not fix (observed on
+            # #6723: 7 straight failures, 3 timeouts + 4 gate rejections). Only
+            # overrides a would-be RETRY — a round already terminal for another
+            # reason keeps its own headline.
+            # Transient model errors (429/5xx) are exempt: the CAUSE_MAX logic
+            # above deliberately gives them the full round budget because they
+            # self-heal once the provider recovers. Letting the breaker override
+            # that would mark every in-flight PR terminal at once during a
+            # provider outage — the failures are not the PR's fault and DO
+            # self-heal. Auth errors are NOT exempt (they never self-heal).
+            # Pre-agent infra failures (skipped/cancelled/empty Prepare outcome)
+            # are exempt for the same reason: a broken base build or a runner
+            # crash is not the PR's fault, self-heals, and hits the whole scan
+            # batch at once — the exact scenario the retry path above exists to
+            # prevent. The round cap + sentinel-ts /retry recovery already
+            # bounds a persistently broken base. A stale-base retry (the gate
+            # rejected the fix but the PR was behind main, so the base was just
+            # updated) is exempt for the same reason — it is not the PR's fault
+            # and self-limits to one round (after the update the PR is current).
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && [[ "${STALE_BASE_RETRY:-false}" != 'true' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+              CONSEC_FAIL=1
+              if [[ -f "${WORKDIR}/ic.json" ]]; then
+                COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
+              else
+                COMMENTS_JSON="$(gh api "repos/${REPO}/issues/${PR}/comments" --paginate 2> /dev/null || true)"
+              fi
+              PRIOR_HEADS="$(jq -r --arg ab "${AUTOFIX_BOT}" --arg win "${WINDOW:-none}" '
+                [.[] | select((.user.login // "") == $ab)
+                     | select((.body // "") | contains("<!-- autofix-eval "))
+                     | select(
+                         ((.body // "") | contains("win=" + $win + " -->"))
+                         or ($win == "none" and (((.body // "") | contains("win=")) | not)))]
+                | sort_by(.created_at) | .[]
+                | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
+              while IFS= read -r H; do
+                [[ -n "${H}" ]] || continue
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"updated a stale base"* ]]; then
+                  CONSEC_FAIL=1
+                else
+                  CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))
+                fi
+              done <<< "${PRIOR_HEADS}"
+              if [[ "${CONSEC_FAIL}" -ge "${CONSECUTIVE_FAILURE_CAP}" ]]; then
+                MARK_ROUND="${MAX_ROUNDS}"
+                HEADLINE="🤖 AutoFix stopped after ${CONSEC_FAIL} consecutive rounds that failed to push anything (timeouts and/or gate rejections). Retrying at the same per-round budget is not converging — this usually means the PR is too large or conflicts with a fast-moving \`main\`. A human should rebase, split, or reduce it, then comment \`${RETRY_COMMAND}\` to re-arm. Until then future scans will skip this PR."
+              fi
+            fi
             {
-              echo "🤖 Could not address the latest review feedback automatically."
+              echo "${HEADLINE}"
               echo
-              echo "The feedback was evaluated, but AutoFix failed before producing a verified commit. A human should take over this PR."
+              if [[ -n "${DETAIL_FILE}" ]]; then
+                if [[ "${COMMITTED}" == "true" ]]; then
+                  # The agent committed (verify recorded committed=true before
+                  # any gate could fail), but every path that reaches this
+                  # handoff skipped "Push and report" — nothing landed on the
+                  # branch. Say so before the agent's address-summary.md, which
+                  # can read like a success and cite that now-discarded commit
+                  # SHA. Keyed on committed, NOT outcome=failed: the abort/no-op
+                  # paths (failure.md, dirty tree, unchanged branch, missing
+                  # summary) made no commit and keep the neutral framing below.
+                  echo "⚠️ This change was NOT pushed — any commit referenced below was made only in the runner workspace and has been discarded. What the agent reported:"
+                else
+                  echo "**What I found before stopping:**"
+                fi
+                # -c drops any partial multi-byte sequence a byte-level head -c may
+                # have split, so the comment body stays valid UTF-8. iconv -c still
+                # EXITS 1 when it discards a byte, which under this shell's
+                # `set -eo pipefail` would abort the step and skip the marker + gh
+                # pr comment below — the exact silent stall this block prevents — so
+                # `|| true` keeps the (already-emitted) cleaned text and continues.
+                head -c 1500 "${DETAIL_FILE}" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
+              else
+                echo "AutoFix failed before producing a verified commit (the run crashed or timed out before it could explain why)."
+              fi
+              # Carry the gate's own rejection reason. Without it the comment
+              # shows only the agent's optimistic summary, so neither a human
+              # nor the NEXT round can see why the change was refused - the
+              # agent then re-reads the original review feedback and repeats
+              # the same mistake. Delimited so `Prepare branch and feedback`
+              # can lift it back out on the retry.
+              if [[ -s "${WORKDIR}/gate-rejection.md" ]]; then
+                echo
+                echo '<!-- autofix-gate-rejection-start -->'
+                echo "**Why it was not pushed:**"
+                echo
+                # Must stay >= reject_fix's tail -c 3000 + label + two four-backtick
+                # fences (~3.1 KB), or the closing fence is silently truncated.
+                head -c 3500 "${WORKDIR}/gate-rejection.md" | iconv -f utf-8 -t utf-8 -c | sed 's/<!--/<!\\-\\-/g' || true
+                echo '<!-- autofix-gate-rejection-end -->'
+              fi
               echo
-              echo "Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
-              echo "**Failure:**"
-              head -c 1500 "${WORKDIR}/failure.md" | sed 's/<!--[^>]*-->//g'
+              echo "Run log: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
               echo
+              echo "---"
+              echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
               echo
-              echo "<!-- autofix-eval ts=${NEWEST} acted=false round=${ROUND} -->"
+              echo "<!-- autofix-eval ts=${MARK_TS} acted=false round=${MARK_ROUND} win=${WINDOW:-none} -->"
+              # A sentinel ts means the agent evaluated NOTHING (crash, API
+              # error, gate crash) and the next scan must retry. Recording a
+              # judged head here would make RED_HEAD == LIVE_HEAD, so the
+              # retry scan sees N_RED_NOW=0 and goes idle despite the handoff
+              # promising a retry.
+              if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
+                echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
           fi

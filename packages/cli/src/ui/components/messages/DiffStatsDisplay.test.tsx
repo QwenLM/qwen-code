@@ -177,4 +177,57 @@ describe('DiffStatsDisplay', () => {
     expect(visible).toContain('60 files changed');
     expect(visible).toMatch(/59 more/);
   });
+
+  it('renders renamed files as `old → new`', () => {
+    const model: DiffRenderModel = {
+      filesCount: 1,
+      linesAdded: 2,
+      linesRemoved: 1,
+      hiddenCount: 0,
+      rows: [
+        {
+          filename: 'src/new-name.ts',
+          oldPath: 'src/old-name.ts',
+          added: 2,
+          removed: 1,
+          isBinary: false,
+          isUntracked: false,
+          isDeleted: false,
+          truncated: false,
+        },
+      ],
+    };
+    const visible = stripAnsi(
+      render(<DiffStatsDisplay model={model} />).lastFrame() ?? '',
+    );
+    const row = visible.split('\n').find((l) => l.includes('new-name.ts'))!;
+    expect(row).toContain('src/old-name.ts → src/new-name.ts');
+  });
+
+  it('sanitizes hostile filenames carrying control characters', () => {
+    const model: DiffRenderModel = {
+      filesCount: 1,
+      linesAdded: 1,
+      linesRemoved: 0,
+      hiddenCount: 0,
+      rows: [
+        {
+          // A crafted filename with a BEL — sanitizeFilenameForDisplay must
+          // escape it to inert text rather than injecting a control byte.
+          filename: 'evil\x07.txt',
+          added: 1,
+          removed: 0,
+          isBinary: false,
+          isUntracked: false,
+          isDeleted: false,
+          truncated: false,
+        },
+      ],
+    };
+    const visible = stripAnsi(
+      render(<DiffStatsDisplay model={model} />).lastFrame() ?? '',
+    );
+    expect(visible).toContain('evil\\u0007.txt');
+    expect(visible).not.toContain('\x07');
+  });
 });

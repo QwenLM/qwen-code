@@ -134,6 +134,107 @@ describe('scheduled-task keepalive', () => {
     expect(loads).toEqual([]); // no revive attempted for any disabled session
   });
 
+  it('does not heartbeat or revive a bound legacy `condition` task (never pinned)', async () => {
+    // A legacy precondition task fails closed — the scheduler can never fire it,
+    // so keepalive must not pin its session resident (no heartbeat) nor revive
+    // it. The `condition` field predates the current DurableCronTask shape, so it
+    // is attached off-type to model a task written by a pre-removal version.
+    await updateCronTasks(workspace, () => [
+      task({ id: 'live', sessionId: 'sess-live' }),
+      task({
+        id: 'legacy',
+        sessionId: 'sess-legacy',
+        condition: 'files_changed',
+      } as unknown as Partial<DurableCronTask>),
+    ]);
+    const guarded = {
+      recordHeartbeat: (id: string) => {
+        if (id !== 'sess-live') {
+          throw new Error(`unexpected heartbeat for legacy session ${id}`);
+        }
+        beats.push(id);
+      },
+      loadSession: async (req: { sessionId: string }) => {
+        loads.push(req.sessionId);
+      },
+      spawnOrAttach: async () => {
+        throw new Error('not mocked');
+      },
+      closeSession: async () => {},
+      updateSessionMetadata: () => {
+        throw new Error('not mocked');
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: guarded,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(beats).toEqual(['sess-live']); // only the fireable task's session
+    expect(loads).toEqual([]); // no revive attempted for the legacy task
+  });
+
+  it('does not bind an unbound legacy `condition` task', async () => {
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'legacy-unbound',
+        prompt: 'guarded',
+        condition: 'files_changed',
+      } as unknown as Partial<DurableCronTask>),
+    ]);
+    let spawnCount = 0;
+    const noSpawn = {
+      ...bridge,
+      spawnOrAttach: async () => {
+        spawnCount++;
+        return { sessionId: 'should-not-spawn' };
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: noSpawn,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(spawnCount).toBe(0);
+    const tasks = await readCronTasks(workspace);
+    expect(tasks[0]!.sessionId).toBeUndefined(); // still unbound
+  });
+
+  it('does not rename a bound legacy `condition` task', async () => {
+    await updateCronTasks(workspace, () => [
+      task({
+        id: 'legacy-bound',
+        sessionId: 'legacy-sess',
+        prompt: 'guarded',
+        condition: 'files_changed',
+      } as unknown as Partial<DurableCronTask>),
+    ]);
+    const names: Array<[string, { displayName?: string }]> = [];
+    const naming = {
+      ...bridge,
+      recordHeartbeat: () => {
+        // Legacy tasks are excluded from the bound set, so no heartbeat should
+        // be attempted for this session in the first place.
+        throw new Error('unexpected heartbeat for legacy session');
+      },
+      updateSessionMetadata: (id: string, m: { displayName?: string }) => {
+        names.push([id, m]);
+      },
+    };
+    const ka = startScheduledTaskKeepalive({
+      bridge: naming,
+      boundWorkspace: workspace,
+      intervalMs: 60_000,
+    });
+    await ka.tick();
+    ka.stop();
+    expect(names).toEqual([]); // legacy task never gets the ⏰ rename
+  });
+
   it('heartbeats nothing (and does not throw) when there are no tasks', async () => {
     const ka = startScheduledTaskKeepalive({
       bridge,
@@ -150,6 +251,13 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'a', sessionId: 'sess-1' }),
       task({ id: 'b', sessionId: 'sess-2' }),
     ]);
+    const readMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockResolvedValue({
+        sourceType: 'scheduled_task',
+        sourceId: 'a',
+      });
+    const loadRequests: unknown[] = [];
     const reviving = {
       recordHeartbeat: (id: string) => {
         if (id === 'sess-1') throw new Error('not resident');
@@ -157,6 +265,7 @@ describe('scheduled-task keepalive', () => {
       },
       loadSession: async (req: { sessionId: string }) => {
         loads.push(req.sessionId);
+        loadRequests.push(req);
       },
       spawnOrAttach: async () => {
         throw new Error('not mocked');
@@ -177,6 +286,16 @@ describe('scheduled-task keepalive', () => {
     // scheduler; sess-2 was resident and still got its heartbeat.
     expect(loads).toEqual(['sess-1']);
     expect(beats).toEqual(['sess-2']);
+    expect(loadRequests).toEqual([
+      {
+        sessionId: 'sess-1',
+        workspaceCwd: workspace,
+        historyReplay: 'response',
+        sourceType: 'scheduled_task',
+        sourceId: 'a',
+      },
+    ]);
+    readMetadata.mockRestore();
   });
 
   it('a failed revive is swallowed and does not block siblings', async () => {
@@ -298,18 +417,42 @@ describe('scheduled-task keepalive', () => {
       task({ id: 'c', sessionId: 'sess-1' }), // same session as 'a'
       task({ id: 'd' }), // unbound
     ]);
-    const loaded: string[] = [];
+    const readMetadata = vi
+      .spyOn(SessionService.prototype, 'readCreationMetadata')
+      .mockImplementation(async (sessionId) => ({
+        sourceType: 'scheduled_task',
+        sourceId: `task-for-${sessionId}`,
+      }));
+    const loaded: Array<{
+      sessionId: string;
+      sourceType?: string;
+      sourceId?: string;
+    }> = [];
     const res = await rehydrateScheduledTaskSessions({
       bridge: {
         loadSession: async (req) => {
-          loaded.push(req.sessionId);
+          loaded.push(req);
         },
       },
       boundWorkspace: workspace,
     });
-    expect(loaded.sort()).toEqual(['sess-1', 'sess-2']);
+    expect(loaded).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId: 'sess-1',
+          sourceType: 'scheduled_task',
+          sourceId: 'task-for-sess-1',
+        }),
+        expect.objectContaining({
+          sessionId: 'sess-2',
+          sourceType: 'scheduled_task',
+          sourceId: 'task-for-sess-2',
+        }),
+      ]),
+    );
     expect(res.loaded.sort()).toEqual(['sess-1', 'sess-2']);
     expect(res.failed).toEqual([]);
+    readMetadata.mockRestore();
   });
 
   it('rehydrate records a gone session as failed but keeps loading siblings', async () => {
@@ -426,6 +569,8 @@ describe('scheduled-task keepalive', () => {
     expect(spawns[0]).toEqual({
       workspaceCwd: workspace,
       sessionScope: 'thread',
+      sourceType: 'scheduled_task',
+      sourceId: 'unbound-1',
     });
     expect(names).toHaveLength(1);
     expect(names[0]![0]).toBe('new-sess-1');

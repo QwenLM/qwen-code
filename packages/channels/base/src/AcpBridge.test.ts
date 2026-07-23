@@ -1,5 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
+import type { RequestPermissionResponse } from '@agentclientprotocol/sdk';
+import {
+  ACP_EVENT_LOOP_STALL_RESTART_MS,
+  ACP_PERMISSION_RESPONSE_TIMEOUT_MS,
+  AcpBridge,
+} from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
 
@@ -44,6 +49,13 @@ const child = vi.hoisted(() => {
 
   return {
     instances: [] as MockChild[],
+    clients: [] as Array<{
+      requestPermission: (params: unknown) => Promise<unknown>;
+    }>,
+    connections: [] as Array<{
+      initialize: ReturnType<typeof vi.fn>;
+      cancel: ReturnType<typeof vi.fn>;
+    }>,
     MockChild,
     spawn: vi.fn(() => {
       const instance = new MockChild();
@@ -65,9 +77,16 @@ vi.mock('node:stream', () => ({
 vi.mock('@agentclientprotocol/sdk', () => ({
   PROTOCOL_VERSION: 1,
   ndJsonStream: vi.fn(() => ({})),
-  ClientSideConnection: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn().mockResolvedValue(undefined),
-  })),
+  ClientSideConnection: vi.fn().mockImplementation((createClient) => {
+    const client = createClient();
+    const connection = {
+      initialize: vi.fn().mockResolvedValue(undefined),
+      cancel: vi.fn().mockResolvedValue(undefined),
+    };
+    child.clients.push(client);
+    child.connections.push(connection);
+    return connection;
+  }),
 }));
 
 type TestableAcpBridge = AcpBridge & {
@@ -75,6 +94,7 @@ type TestableAcpBridge = AcpBridge & {
   connection: {
     extMethod: ReturnType<typeof vi.fn>;
     newSession?: ReturnType<typeof vi.fn>;
+    prompt?: ReturnType<typeof vi.fn>;
   };
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
@@ -83,6 +103,8 @@ type TestableAcpBridge = AcpBridge & {
     method: string,
     params: Record<string, unknown>,
   ): Promise<unknown>;
+  handleSessionUpdate(params: Record<string, unknown>): void;
+  requestPermission(params: Record<string, unknown>): Promise<unknown>;
   handleClientMcpMessage(params: Record<string, unknown>): Promise<unknown>;
   registerChannelLoopMcpServer(): Promise<void>;
   resolveChannelLoopToolHandler(sessionId: string): ChannelLoopToolHandler;
@@ -91,6 +113,8 @@ type TestableAcpBridge = AcpBridge & {
 describe('AcpBridge', () => {
   beforeEach(() => {
     child.instances.length = 0;
+    child.clients.length = 0;
+    child.connections.length = 0;
     child.spawn.mockClear();
   });
 
@@ -225,6 +249,371 @@ describe('AcpBridge', () => {
     ).resolves.toStrictEqual({ messages: [] });
   });
 
+  it('returns only the final turn text after tool calls', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Let me search. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'search',
+            title: 'Search',
+            status: 'pending',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Now I will read. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-2',
+            kind: 'read',
+            title: 'Read',
+            status: 'pending',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Final answer.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
+  it('excludes nested subagent text from the final response', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Nested research report.' },
+            _meta: {
+              parentToolCallId: 'agent-call-1',
+              subagentType: 'Explore',
+            },
+          },
+        });
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        });
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
+  it('excludes discrete background notifications from the final response', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Final answer.' },
+          },
+        });
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'Background agent "Explore" completed.',
+            },
+            _meta: {
+              source: 'background_notification',
+              qwenDiscreteMessage: true,
+            },
+          },
+        });
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
+  it('emits a completed background response separately from the active turn', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const backgroundResponses: Array<[string, string]> = [];
+    bridge.on('backgroundResponse', (sessionId, text) => {
+      backgroundResponses.push([sessionId, text]);
+    });
+    const textChunks: Array<[string, string]> = [];
+    bridge.on('textChunk', (sessionId, text) => {
+      textChunks.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Background final answer.' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+        },
+      },
+    });
+
+    expect(backgroundResponses).toEqual([['s-1', 'Background final answer.']]);
+    expect(textChunks).toEqual([]);
+  });
+
+  it('ignores a rewritten background response to avoid duplicate delivery', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    const backgroundResponses: Array<[string, string]> = [];
+    bridge.on('backgroundResponse', (sessionId, text) => {
+      backgroundResponses.push([sessionId, text]);
+    });
+
+    bridge.handleSessionUpdate({
+      sessionId: 's-1',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'Background final answer.' },
+        _meta: {
+          source: 'background_notification_response',
+          qwenDiscreteMessage: true,
+          rewritten: true,
+        },
+      },
+    });
+
+    expect(backgroundResponses).toEqual([]);
+  });
+
+  it('returns only the final slash-command output', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Compressing context...' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Context compressed.' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Context compressed.',
+    );
+  });
+
+  it('prefers model text over slash-command output', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Slash output' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Model text');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe('Model text');
+  });
+
+  it('clears slash-command output at response boundaries', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'Stale slash output' },
+            _meta: { source: 'slash_command' },
+          },
+        });
+        bridge.emit('responseBoundary', 's-1');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe('');
+  });
+
+  it('returns only the final turn text after auto-approved tool calls', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Let me inspect. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'read',
+            title: 'Read',
+            status: 'in_progress',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Final answer.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
+  it('preserves text when tool calls are not pending', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Before. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'tool_call',
+            toolCallId: 'call-1',
+            kind: 'search',
+            title: 'Search',
+            status: 'completed',
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'After.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Before. After.',
+    );
+  });
+
+  it('treats plan updates as turn boundaries for TodoWrite-only rounds', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'Updating todos. ');
+        bridge.handleSessionUpdate({
+          sessionId: 's-1',
+          update: {
+            sessionUpdate: 'plan',
+            entries: [{ content: 'Task', status: 'pending' }],
+          },
+        });
+        bridge.emit('textChunk', 's-1', 'Done.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe('Done.');
+  });
+
+  it('treats permission requests as turn boundaries', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.on('permissionRequest', (event) => {
+      void bridge.respondToPermission(event.requestId, {
+        outcome: { outcome: 'selected', optionId: 'proceed_once' },
+      });
+    });
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn(async () => {
+        bridge.emit('textChunk', 's-1', 'I need permission. ');
+        await bridge.requestPermission({
+          sessionId: 's-1',
+          toolCall: {
+            toolCallId: 'tool-1',
+            kind: 'shell',
+            title: 'Run command',
+          },
+          options: [{ optionId: 'proceed_once', name: 'Allow' }],
+        });
+        bridge.emit('textChunk', 's-1', 'Final answer.');
+      }),
+    };
+
+    await expect(bridge.prompt('s-1', 'question')).resolves.toBe(
+      'Final answer.',
+    );
+  });
+
   it('rejects channel loop tool calls when no handler matches the session', () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
@@ -349,5 +738,288 @@ describe('AcpBridge', () => {
     );
 
     expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('relays ACP permission requests instead of auto-approving them', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const request = {
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [
+        { optionId: 'proceed_once', name: 'Allow' },
+        { optionId: 'cancel', name: 'Deny' },
+      ],
+    };
+
+    const pending = child.clients[0]!.requestPermission(request);
+    await Promise.resolve();
+
+    expect(permissionRequest).toHaveBeenCalledTimes(1);
+    const event = permissionRequest.mock.calls[0]![0];
+    expect(event).toMatchObject({
+      sessionId: 'session-1',
+      request,
+    });
+    expect(event.requestId).toMatch(/^acp-permission-/);
+
+    const response = { outcome: { outcome: 'selected', optionId: 'cancel' } };
+    await expect(
+      (
+        bridge as unknown as TestableAcpBridge & {
+          respondToPermission(
+            requestId: string,
+            response: typeof response,
+          ): Promise<boolean>;
+        }
+      ).respondToPermission(event.requestId, response),
+    ).resolves.toBe(true);
+    await expect(pending).resolves.toEqual(response);
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: event.requestId,
+      outcome: response.outcome,
+    });
+    await expect(
+      (
+        bridge as unknown as TestableAcpBridge & {
+          respondToPermission(
+            requestId: string,
+            response: typeof response,
+          ): Promise<boolean>;
+        }
+      ).respondToPermission(event.requestId, response),
+    ).resolves.toBe(false);
+  });
+
+  it('allows permission request listeners to respond synchronously', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'proceed_once' },
+    };
+    bridge.on('permissionRequest', (event) => {
+      void bridge.respondToPermission(event.requestId, response);
+    });
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'proceed_once', name: 'Allow' }],
+    });
+
+    await expect(pending).resolves.toEqual(response);
+  });
+
+  it('falls back to the tool call id for permission requests without a session id', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+
+    const event = permissionRequest.mock.calls[0]![0];
+    expect(event.sessionId).toBe('tool-1');
+    await bridge.respondToPermission(event.requestId, {
+      outcome: { outcome: 'cancelled' },
+    });
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+  });
+
+  it('resolves matching pending permissions as cancelled when a session is cancelled', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const first = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    const second = child.clients[0]!.requestPermission({
+      sessionId: 'session-2',
+      toolCall: {
+        toolCallId: 'tool-2',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+
+    const firstEvent = permissionRequest.mock.calls[0]![0];
+    const secondEvent = permissionRequest.mock.calls[1]![0];
+    await bridge.cancelSession('session-1');
+
+    expect(child.connections[0]!.cancel).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+    });
+    await expect(first).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: firstEvent.requestId,
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).not.toHaveBeenCalledWith({
+      requestId: secondEvent.requestId,
+      outcome: { outcome: 'cancelled' },
+    });
+
+    const response: RequestPermissionResponse = {
+      outcome: { outcome: 'selected', optionId: 'cancel' },
+    };
+    await expect(
+      bridge.respondToPermission(secondEvent.requestId, response),
+    ).resolves.toBe(true);
+    await expect(second).resolves.toEqual(response);
+  });
+
+  it('resolves pending permissions as cancelled after the response timeout', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+
+    vi.useFakeTimers();
+    try {
+      const pending = child.clients[0]!.requestPermission({
+        sessionId: 'session-1',
+        toolCall: {
+          toolCallId: 'tool-1',
+          kind: 'shell',
+          title: 'Run command',
+        },
+        options: [{ optionId: 'cancel', name: 'Deny' }],
+      });
+      await Promise.resolve();
+      const event = permissionRequest.mock.calls[0]![0];
+
+      await vi.advanceTimersByTimeAsync(ACP_PERMISSION_RESPONSE_TIMEOUT_MS);
+
+      await expect(pending).resolves.toEqual({
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(permissionResolved).toHaveBeenCalledWith({
+        requestId: event.requestId,
+        outcome: { outcome: 'cancelled' },
+      });
+      expect(stderr.mock.calls.join('')).toContain(
+        `[AcpBridge] permission request ${event.requestId} timed out after ${ACP_PERMISSION_RESPONSE_TIMEOUT_MS}ms (session=session-1)`,
+      );
+    } finally {
+      stderr.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('resolves pending permissions as cancelled when the ACP child exits', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const permissionRequest = vi.fn();
+    const permissionResolved = vi.fn();
+    bridge.on('permissionRequest', permissionRequest);
+    bridge.on('permissionResolved', permissionResolved);
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+    const event = permissionRequest.mock.calls[0]![0];
+
+    child.instances[0]!.emit('exit', 1, null);
+
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
+    expect(permissionResolved).toHaveBeenCalledWith({
+      requestId: event.requestId,
+      outcome: { outcome: 'cancelled' },
+    });
+  });
+
+  it('resolves pending permissions as cancelled on stop', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const pending = child.clients[0]!.requestPermission({
+      sessionId: 'session-1',
+      toolCall: {
+        toolCallId: 'tool-1',
+        kind: 'shell',
+        title: 'Run command',
+      },
+      options: [{ optionId: 'cancel', name: 'Deny' }],
+    });
+    await Promise.resolve();
+
+    bridge.stop();
+
+    await expect(pending).resolves.toEqual({
+      outcome: { outcome: 'cancelled' },
+    });
   });
 });

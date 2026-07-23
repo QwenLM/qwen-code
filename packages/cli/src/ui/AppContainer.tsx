@@ -30,7 +30,11 @@ import {
   type HistoryItemWithoutId,
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
-import { MessageType, StreamingState } from './types.js';
+import {
+  MessageType,
+  StreamingState,
+  isHistoryItemVisibleAfterRestore,
+} from './types.js';
 import {
   type EditorType,
   type Config,
@@ -77,7 +81,7 @@ import {
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
   getStickyTodos,
-  getStickyTodoMaxVisibleItems,
+  getStickyTodoMaxVisibleItemsForMode,
   getStickyTodosLayoutKey,
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
@@ -114,6 +118,7 @@ const STARTUP_PROFILE_FINALIZE_CAP_MS = 35_000;
 import { useHistory } from './hooks/useHistoryManager.js';
 import { useMemoryMonitor } from './hooks/useMemoryMonitor.js';
 import { useResizeSettleRepaint } from './hooks/useResizeSettleRepaint.js';
+import { useWakeRepaint } from './hooks/use-wake-repaint.js';
 import { useThemeCommand } from './hooks/useThemeCommand.js';
 import { useFeedbackDialog } from './hooks/useFeedbackDialog.js';
 import { useAuthCommand } from './auth/useAuth.js';
@@ -138,7 +143,6 @@ import {
   useVimModeState,
   useVimModeActions,
 } from './contexts/VimModeContext.js';
-import { CompactModeProvider } from './contexts/CompactModeContext.js';
 import { ThoughtExpandedProvider } from './contexts/ThoughtExpandedContext.js';
 import { useTerminalSize } from './hooks/useTerminalSize.js';
 import { calculatePromptWidths } from './components/InputPrompt.js';
@@ -166,6 +170,7 @@ import {
 } from './utils/workflow-keyword.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
 import { type InitializationResult } from '../core/initializer.js';
+import { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { useFocus } from './hooks/useFocus.js';
 import { useAwaySummary } from './hooks/useAwaySummary.js';
 import { useBracketedPaste } from './hooks/useBracketedPaste.js';
@@ -198,16 +203,13 @@ import {
 } from './hooks/useExtensionUpdates.js';
 import { useProviderUpdates } from './hooks/useProviderUpdates.js';
 import { ShellFocusContext } from './contexts/ShellFocusContext.js';
+import { StreamingContext } from './contexts/StreamingContext.js';
 import {
   RenderModeProvider,
   type RenderMode,
 } from './contexts/RenderModeContext.js';
 import { TerminalOutputProvider } from './contexts/TerminalOutputContext.js';
-import {
-  ThinkingViewerProvider,
-  type ThinkingViewerData,
-} from './contexts/ThinkingViewerContext.js';
-import { ThinkingViewer } from './components/ThinkingViewer.js';
+import { TranscriptView } from './components/TranscriptView.js';
 import { useAgentViewState } from './contexts/AgentViewContext.js';
 import {
   useBackgroundTaskViewState,
@@ -215,6 +217,8 @@ import {
 } from './contexts/BackgroundTaskViewContext.js';
 import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
+import { TUI_CHAT_RECORDING_FAILURE_MESSAGE } from '../utils/chat-recording-failure.js';
+import { buildPermissionSuggestions } from '../utils/permission-suggestions.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
 import { useInitializationAuthError } from './hooks/useInitializationAuthError.js';
@@ -230,22 +234,27 @@ import { useAttentionNotifications } from './hooks/useAttentionNotifications.js'
 import { buildTerminalNotification } from './hooks/useTerminalNotification.js';
 import { useContextualTips } from './hooks/useContextualTips.js';
 import { getTipHistory } from '../services/tips/index.js';
+import { restorePromptStash } from '../services/prompt-stash.js';
 import { useRemoteInput } from '../remoteInput/RemoteInputContext.js';
 import { useDualOutput } from '../dualOutput/DualOutputContext.js';
 import {
   requestConsentInteractive,
   requestConsentOrFail,
 } from '../commands/extensions/consent.js';
-import { compactToggleHasVisualEffect } from './utils/mergeCompactToolGroups.js';
 import {
   findLastUserItemIndex,
   isSyntheticHistoryItem,
   itemsAfterAreOnlySynthetic,
+  realUserPromptTexts,
 } from './utils/historyUtils.js';
 import { MAIN_CONTENT_HEIGHT_RESERVATION } from './utils/layoutUtils.js';
 
 const CTRL_EXIT_PROMPT_DURATION_MS = 1000;
 const debugLogger = createDebugLogger('APP_CONTAINER');
+
+// Stable empty reference for the transcript items memo when no snapshot is
+// frozen, so the memo never hands TranscriptView a fresh [] each render.
+const EMPTY_HISTORY_ITEMS: HistoryItem[] = [];
 
 export function isRenderModeToggleKey(key: Key): boolean {
   return (
@@ -327,6 +336,27 @@ export function shouldDrainMessageQueue({
     !dialogsVisible &&
     messageQueueLength > 0
   );
+}
+
+export function getSpeculativeToolResult(response: unknown): {
+  text: string;
+  status: ToolCallStatus;
+} {
+  const responseRecord =
+    typeof response === 'object' && response
+      ? (response as Record<string, unknown>)
+      : undefined;
+  const hasError =
+    responseRecord !== undefined &&
+    Object.prototype.hasOwnProperty.call(responseRecord, 'error');
+  const result = responseRecord
+    ? (responseRecord[hasError ? 'error' : 'output'] ??
+      JSON.stringify(responseRecord))
+    : String(response ?? '');
+  return {
+    text: String(result),
+    status: hasError ? ToolCallStatus.Error : ToolCallStatus.Success,
+  };
 }
 
 function getResponseCandidateTokens(
@@ -424,6 +454,7 @@ interface AppContainerProps {
   startupWarnings?: string[];
   version: string;
   initializationResult: InitializationResult;
+  extensionRefreshState?: ExtensionRefreshState;
 }
 
 /**
@@ -440,6 +471,10 @@ const SHELL_HEIGHT_PADDING = 10;
 
 export const AppContainer = (props: AppContainerProps) => {
   const { settings, config, initializationResult } = props;
+  const extensionRefreshState = useMemo(
+    () => props.extensionRefreshState ?? new ExtensionRefreshState(),
+    [props.extensionRefreshState],
+  );
   const historyManager = useHistory();
   // `useHistory()` returns a fresh memoized object whenever `history` changes,
   // so depending on `historyManager` directly inside event-handler callbacks
@@ -559,18 +594,45 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const [userMessages, setUserMessages] = useState<string[]>([]);
 
-  // Thinking viewer overlay state
-  const [thinkingViewerData, setThinkingViewerData] =
-    useState<ThinkingViewerData | null>(null);
-  const openThinkingViewer = useCallback((data: ThinkingViewerData) => {
-    setThinkingViewerData(data);
-  }, []);
-  const closeThinkingViewer = useCallback(() => {
-    setThinkingViewerData(null);
+  // Transcript full-detail screen (Ctrl+O). Freezes a snapshot of the
+  // conversation at entry time. Both committed history and the streaming
+  // `pendingHistoryItems` are stored as shallow copies (`.slice()` / spread):
+  // the snapshot must stay stable while open, but `useMemoryMonitor` →
+  // `compactOldItems` can replace `historyManager.history` with a rewritten
+  // array (collapsed tool groups, merged thoughts, shifted indices) mid-view.
+  // Re-slicing the live array at render would let that rewrite visibly corrupt
+  // the "frozen" transcript, so we pin the array of item references here. A
+  // shallow copy is cheap (references only) even for long sessions.
+  const [transcriptFreeze, setTranscriptFreeze] = useState<{
+    committedItems: HistoryItem[];
+    pendingItems: HistoryItemWithoutId[];
+  } | null>(null);
+  const isTranscriptOpen = transcriptFreeze != null;
+  const isTranscriptOpenRef = useRef(isTranscriptOpen);
+  isTranscriptOpenRef.current = isTranscriptOpen;
+  const closeTranscript = useCallback(() => {
+    setTranscriptFreeze(null);
   }, []);
 
-  // Alt+T inline expansion toggle for thinking blocks
+  // Alt+T inline expansion toggle for thinking blocks (expands all at once).
   const [thoughtExpanded, setThoughtExpanded] = useState(false);
+  // Per-thought inline expansion: head ids the user expanded by clicking the
+  // collapsed thinking line (VP mode). Replaces the old full-screen viewer —
+  // the thought expands in place and scrolls with the conversation.
+  const [expandedThoughtHeadIds, setExpandedThoughtHeadIds] = useState<
+    ReadonlySet<number>
+  >(() => new Set<number>());
+  const toggleThoughtExpanded = useCallback((headId: number) => {
+    setExpandedThoughtHeadIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(headId)) {
+        next.delete(headId);
+      } else {
+        next.add(headId);
+      }
+      return next;
+    });
+  }, []);
 
   // Terminal and layout hooks
   const { columns: terminalWidth, rows: terminalHeight } = useTerminalSize();
@@ -598,8 +660,10 @@ export const AppContainer = (props: AppContainerProps) => {
     seedPromptCount,
   } = useSessionStats();
   const logger = useLogger(config.storage, sessionStats.sessionId);
-  const branchName = useGitBranchName(config.getTargetDir());
   const worktreeSession = useWorktreeSession(config);
+  const branchName = useGitBranchName(
+    worktreeSession?.worktreePath ?? config.getTargetDir(),
+  );
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
   // P7-trigger: true while the current turn was steered toward the Workflow
   // tool by the `workflow` keyword (drives the Footer indicator). Set in
@@ -1003,19 +1067,24 @@ export const AppContainer = (props: AppContainerProps) => {
     shellModeActive,
     preferredEditor,
   });
+  const restoredPromptStashTargetsRef = useRef(new Set<string>());
+  const promptStashTargetDir = config.getTargetDir();
+  useEffect(() => {
+    if (restoredPromptStashTargetsRef.current.has(promptStashTargetDir)) {
+      return;
+    }
+    restoredPromptStashTargetsRef.current.add(promptStashTargetDir);
+    restorePromptStash(promptStashTargetDir, buffer.text, (text) =>
+      buffer.setText(text),
+    );
+  }, [buffer, promptStashTargetDir]);
 
   useEffect(() => {
     const fetchUserMessages = async () => {
       const pastMessagesRaw = (await logger?.getPreviousUserMessages()) || [];
-      const currentSessionUserMessages = historyManager.history
-        .filter(
-          (item): item is HistoryItem & { type: 'user'; text: string } =>
-            item.type === 'user' &&
-            typeof item.text === 'string' &&
-            item.text.trim() !== '',
-        )
-        .map((item) => item.text)
-        .reverse();
+      const currentSessionUserMessages = realUserPromptTexts(
+        historyManager.history,
+      ).reverse();
       // Current-session messages are already newest-first; combining with past
       // messages gives a newest-first list. dedupeNewestFirst keeps the first
       // (newest) occurrence so resubmitting an old prompt promotes it to
@@ -1044,12 +1113,69 @@ export const AppContainer = (props: AppContainerProps) => {
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
+  const showScrollbar = settings.merged.ui?.showScrollbar ?? true;
   const refreshStatic = useCallback(() => {
+    // While the transcript (alt-screen) owns the whole screen, suppress static
+    // refreshes (e.g. resize-settle repaints) so they don't write into / reorder
+    // the normal-buffer scrollback that is currently hidden behind the alt
+    // screen. On transcript close the
+    // AlternateScreen unmount restores the normal buffer; the next legitimate
+    // refreshStatic (model change, Alt+T, etc.) repaints as usual.
+    if (isTranscriptOpenRef.current) {
+      return;
+    }
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);
     }
     remountStaticHistory();
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
+
+  // Repaint the normal buffer once when the transcript (alt-screen) closes.
+  // In the legacy <Static> path the normal buffer still holds the pre-transcript
+  // frame; remounting the main tree would append the committed history a second
+  // time (the transcript's full-detail rows leaking into scrollback). Force one
+  // clear + Static remount AFTER the AlternateScreen's exit escape (?1049l) has
+  // flushed — deferred a tick so the buffer switch lands first, and run outside
+  // the during-transcript guard above (which has already cleared by now). VP
+  // mode keeps its own scrollback via the React tree, so this is non-VP only.
+  // Snapshot the previous-render value during render (not inside the effect),
+  // so React.StrictMode's double-invoke of the effect can't read a value the
+  // effect itself just wrote — `wasOpenPrevRender` is always a true previous
+  // render snapshot.
+  const prevTranscriptOpenRef = useRef(isTranscriptOpen);
+  const wasOpenPrevRender = prevTranscriptOpenRef.current;
+  prevTranscriptOpenRef.current = isTranscriptOpen;
+  // Bump a counter on each close transition and use IT — not `wasOpenPrevRender`
+  // / `isTranscriptOpen` — as the effect's only changing trigger. If those were
+  // in the dep array (as they were originally), the very next streaming
+  // re-render flips `wasOpenPrevRender` back to false, the deps change, cleanup
+  // runs, and `clearTimeout` cancels the pending repaint before it fires —
+  // leaving stale pre-transcript content in the normal buffer. With the counter,
+  // post-close re-renders don't change the deps, so the scheduled repaint
+  // survives and fires exactly once per close.
+  const transcriptCloseCountRef = useRef(0);
+  if (wasOpenPrevRender && !isTranscriptOpen) {
+    transcriptCloseCountRef.current += 1;
+  }
+  const transcriptCloseCount = transcriptCloseCountRef.current;
+  useEffect(() => {
+    if (transcriptCloseCount === 0 || useTerminalBuffer) {
+      return undefined;
+    }
+    // Guard the clear-screen write on stdout being a TTY: with stdout piped or
+    // redirected (`qwen | tee log`) the transcript degrades to in-buffer
+    // rendering (AlternateScreen skips its escapes on non-TTY), so emitting
+    // `clearTerminal` here would leak raw control bytes into the captured
+    // output without ever having taken over a screen to repaint.
+    if (!stdout.isTTY) {
+      return undefined;
+    }
+    const id = setTimeout(() => {
+      stdout.write(ansiEscapes.clearTerminal);
+      remountStaticHistory();
+    }, 0);
+    return () => clearTimeout(id);
+  }, [transcriptCloseCount, useTerminalBuffer, stdout, remountStaticHistory]);
 
   // Keep the static header in sync with model changes without polling.
   // Ink's <Static> output is append-only, so model changes must explicitly
@@ -1204,16 +1330,34 @@ export const AppContainer = (props: AppContainerProps) => {
 
     // Chain with existing callback (e.g., Session's ACP notification)
     const existingCallback = chatRecordingService.getTitleRecordedCallback();
-    chatRecordingService.setTitleRecordedCallback((customTitle, source) => {
-      existingCallback?.(customTitle, source);
-      setSessionName(customTitle);
-    });
+    chatRecordingService.setTitleRecordedCallback(
+      (customTitle, source, sessionId) => {
+        existingCallback?.(customTitle, source, sessionId);
+        if (sessionId === config.getSessionId()) {
+          setSessionName(customTitle);
+        }
+      },
+    );
 
     return () => {
       // Restore original callback on unmount
       chatRecordingService.setTitleRecordedCallback(existingCallback);
     };
   }, [config]);
+
+  const addHistoryItem = historyManager.addItem;
+  useEffect(() => {
+    if (typeof config.onChatRecordingFailure !== 'function') return;
+    return config.onChatRecordingFailure(() => {
+      addHistoryItem(
+        {
+          type: MessageType.WARNING,
+          text: t(TUI_CHAT_RECORDING_FAILURE_MESSAGE),
+        },
+        Date.now(),
+      );
+    });
+  }, [addHistoryItem, config]);
 
   const {
     isResumeDialogOpen,
@@ -1286,11 +1430,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const { isStatsDialogOpen, openStatsDialog, closeStatsDialog } =
     useStatsDialog();
 
-  // Ref bridge: the guarded openRewindSelector callback is defined later
-  // (after useDoublePress), but slashCommandActions needs it now. The ref
-  // lets the useMemo capture a stable function pointer whose implementation
-  // is swapped in once the real callback exists.
+  // Ref bridges: these callbacks are defined later, but slashCommandActions
+  // needs them now. The refs let the useMemo capture stable function pointers
+  // whose implementations are swapped in once the real callbacks exist.
   const openRewindSelectorRef = useRef<() => void>(() => {});
+  const cancelOngoingRequestRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
   // history-bound guard is needed, so the open/close handlers can live here
@@ -1413,6 +1557,11 @@ export const AppContainer = (props: AppContainerProps) => {
       openApprovalModeDialog,
       openEffortDialog,
       quit: (messages: HistoryItem[]) => {
+        try {
+          cancelOngoingRequestRef.current();
+        } catch (error) {
+          debugLogger.debug('Failed to cancel request while quitting:', error);
+        }
         setQuittingMessages(messages);
         // Signal the client to skip background memory tasks (extract, dream,
         // skill review) so the process can exit without spawning new agent
@@ -1505,6 +1654,7 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     historyManager.updateItem,
     setSessionName,
+    extensionRefreshState,
   );
 
   // onDebugMessage should log to debug logfile, not update footer debugMessage
@@ -1714,6 +1864,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);
+  const midTurnRestoreRef = useRef<((messages: string[]) => void) | null>(null);
 
   const {
     streamingState,
@@ -1753,7 +1904,9 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     availableTerminalHeightRef,
     terminalWidthRef,
+    midTurnRestoreRef,
   );
+  cancelOngoingRequestRef.current = cancelOngoingRequest;
 
   // Now that streamingState is available, keep isIdleRef in sync and
   // flush any deferred update notifications when the model finishes responding.
@@ -1863,6 +2016,7 @@ export const AppContainer = (props: AppContainerProps) => {
     messageQueue,
     addMessage,
     popAllMessages,
+    restoreMessages,
     drainQueue,
     popNextSegment,
   } = useMessageQueue();
@@ -1871,6 +2025,7 @@ export const AppContainer = (props: AppContainerProps) => {
   // drainQueue reads the synchronous queueRef inside the hook, so it
   // stays consistent with popNextSegment even before React re-renders.
   midTurnDrainRef.current = drainQueue;
+  midTurnRestoreRef.current = restoreMessages;
 
   // Connect remote input watcher to submitQuery for bidirectional sync.
   // When an external process writes a command to the input-file,
@@ -1919,6 +2074,8 @@ export const AppContainer = (props: AppContainerProps) => {
           tc.request.name,
           tc.request.callId,
           tc.request.args,
+          null,
+          buildPermissionSuggestions(tc.confirmationDetails),
         );
       }
     }
@@ -2000,7 +2157,7 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Callback for handling final submit (must be after addMessage from useMessageQueue)
   const handleFinalSubmit = useCallback(
-    (submittedValue: string) => {
+    (submittedValue: string, options?: { deferUntilIdle?: boolean }) => {
       // Route to active in-process agent if viewing a sub-agent tab.
       if (agentViewState.activeView !== 'main') {
         const agent = agentViewState.agents.get(agentViewState.activeView);
@@ -2012,6 +2169,25 @@ export const AppContainer = (props: AppContainerProps) => {
       // The user's raw text, captured before any `<system-reminder>` prefix is
       // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
+      // Quit must bypass reminders and the message queue so it can stop an
+      // active stream without consuming one-shot session state.
+      if (
+        ['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
+          userPromptText.trim(),
+        )
+      ) {
+        void handleSlashCommand('/quit');
+        return;
+      }
+      const recoveredAgentsNotice =
+        !isSlashCommand(userPromptText) && !isBtwCommand(userPromptText)
+          ? config.consumePendingRecoveredAgentsNotice()
+          : null;
+      if (recoveredAgentsNotice) {
+        submittedValue =
+          `<system-reminder>\n${recoveredAgentsNotice}\n</system-reminder>\n\n` +
+          submittedValue;
+      }
       // Phase C: one-shot worktree restore reminder. Set during --resume
       // when the persisted sidecar names a live worktree. We only inject
       // on top-level user prompts (not btw-during-response, not slash
@@ -2048,21 +2224,15 @@ export const AppContainer = (props: AppContainerProps) => {
           `<system-reminder>\n${buildWorkflowSteeringNotice()}\n</system-reminder>\n\n` +
           submittedValue;
       }
+      if (options?.deferUntilIdle) {
+        addMessage(submittedValue, true);
+        return;
+      }
       if (
         streamingState === StreamingState.Responding &&
         isBtwCommand(submittedValue)
       ) {
         void submitQuery(submittedValue);
-        return;
-      }
-
-      // Handle bare exit/quit commands (without the / prefix)
-      if (
-        ['exit', 'quit', ':q', ':q!', ':wq', ':wq!'].includes(
-          submittedValue.trim(),
-        )
-      ) {
-        void handleSlashCommand('/quit');
         return;
       }
 
@@ -2139,11 +2309,7 @@ export const AppContainer = (props: AppContainerProps) => {
                       const name = tc.functionCall?.name ?? 'unknown';
                       const args = tc.functionCall?.args ?? {};
                       const resp = toolResults[i]?.functionResponse?.response;
-                      const resultText =
-                        typeof resp === 'object' && resp
-                          ? ((resp as Record<string, unknown>)['output'] ??
-                            JSON.stringify(resp))
-                          : String(resp ?? '');
+                      const speculativeResult = getSpeculativeToolResult(resp);
                       return {
                         callId: `spec-${name}-${i}`,
                         name,
@@ -2151,8 +2317,8 @@ export const AppContainer = (props: AppContainerProps) => {
                           Object.entries(args)
                             .map(([k, v]) => `${k}: ${String(v).slice(0, 80)}`)
                             .join(', ') || name,
-                        resultDisplay: String(resultText).slice(0, 500),
-                        status: ToolCallStatus.Success,
+                        resultDisplay: speculativeResult.text.slice(0, 500),
+                        status: speculativeResult.status,
                         confirmationDetails: undefined,
                       };
                     });
@@ -2231,6 +2397,47 @@ export const AppContainer = (props: AppContainerProps) => {
     () => [...pendingSlashCommandHistoryItems, ...pendingGeminiHistoryItems],
     [pendingSlashCommandHistoryItems, pendingGeminiHistoryItems],
   );
+  // Read history/pending through refs so `openTranscript` stays referentially
+  // stable. Both arrays change identity on every streaming tick; capturing them
+  // as deps would rebuild this callback — and, since `handleGlobalKeypress`
+  // lists it in its deps, the entire keypress-handler closure — on every render
+  // during active streaming. The callback only ever runs on a Ctrl+O press, so
+  // reading the latest values via refs at call time is sufficient.
+  const historyForTranscriptRef = useRef(historyManager.history);
+  historyForTranscriptRef.current = historyManager.history;
+  const pendingForTranscriptRef = useRef(pendingHistoryItems);
+  pendingForTranscriptRef.current = pendingHistoryItems;
+  const openTranscript = useCallback(() => {
+    setTranscriptFreeze({
+      // Share MainContent's visibility predicate so the transcript shows exactly
+      // what the main view shows. Items collapsed on session resume
+      // (ui.history.collapseOnResume) are represented by their collapse-summary
+      // row and must NOT be re-exposed in the Ctrl+O view.
+      committedItems: historyForTranscriptRef.current.filter(
+        isHistoryItemVisibleAfterRestore,
+      ),
+      pendingItems: [...pendingForTranscriptRef.current],
+    });
+  }, []);
+
+  // Build the transcript item list from the frozen snapshot only. Recomputes
+  // on open/close (when `transcriptFreeze` flips), not on every streaming tick,
+  // so the array reference stays stable while open — combined with the
+  // React.memo'd TranscriptView this avoids re-running its VirtualizedList
+  // offset/render memos on every AppContainer re-render during streaming.
+  const transcriptItems = useMemo<HistoryItem[]>(() => {
+    if (!transcriptFreeze) return EMPTY_HISTORY_ITEMS;
+    return [
+      ...transcriptFreeze.committedItems,
+      // Pending snapshot gets negative ids (mirrors MainContent's `id: -(i+1)`)
+      // so keys never collide with committed history items.
+      ...transcriptFreeze.pendingItems.map((item, i) => ({
+        ...item,
+        id: -(i + 1),
+      })),
+    ];
+  }, [transcriptFreeze]);
+
   const rawStickyTodos = useMemo(
     () => getStickyTodos(historyManager.history, pendingHistoryItems),
     [historyManager.history, pendingHistoryItems],
@@ -2268,11 +2475,10 @@ export const AppContainer = (props: AppContainerProps) => {
         buffer.setText(currentText ? `${popped}\n${currentText}` : popped);
       }
 
-      // Auto-restore-on-cancel: if the user hit ESC immediately after submit
-      // (nothing meaningful was produced), pull the just-submitted prompt back
-      // into the input box and rewind the transcript so it doesn't show a
-      // stranded "user prompt + Request cancelled." pair. Mirrors claude-code
-      // (REPL.tsx auto-restore branch).
+      // Restore-on-cancel: pull the just-submitted prompt back into the input
+      // box when it is safe to do so. If nothing meaningful was produced,
+      // also rewind the stranded "user prompt + Request cancelled." pair. If
+      // output exists, keep the transcript and restore only the editable text.
       //
       // Guards (all required):
       //   - Buffer was empty before the queue drain (don't clobber typed-during-
@@ -2302,12 +2508,25 @@ export const AppContainer = (props: AppContainerProps) => {
         );
         return;
       }
-      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
+
+      // The cancelled turn must have added a `user` history item itself —
+      // Cron / Notification / slash submit_prompt / Retry paths submit
+      // without pushing a user item, so they have no prompt to restore.
+      const cancelledTurnUserItem = info?.lastTurnUserItem;
+      if (cancelledTurnUserItem == null) {
         debugLogger.debug(
-          'auto-restore bail: pending stream item has meaningful content',
+          'auto-restore bail: cancelled turn did not add a user history item',
         );
         return;
       }
+
+      if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
+        debugLogger.debug(
+          'auto-restore bail: tool execution is pending or committed',
+        );
+        return;
+      }
+
       // Synchronous "did the turn produce any content event" flag from
       // useGeminiStream. Catches the race where the pre-cancel flush
       // committed gemini_content via addItem and a later thought event
@@ -2317,20 +2536,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // otherwise pass and we'd wrongly truncate the committed content.
       if (info?.turnProducedMeaningfulContent) {
         debugLogger.debug(
-          'auto-restore bail: turn produced meaningful content during stream/flush',
+          'auto-restore: preserving streamed output and restoring prompt text',
         );
+        buffer.setText(cancelledTurnUserItem.text);
         return;
       }
-
-      // The cancelled turn must have added a `user` history item itself —
-      // Cron / Notification / slash submit_prompt / Retry paths submit
-      // without pushing a user item, so an older user item that happens
-      // to be followed only by synthetic content must NOT be wrongly
-      // auto-restored on top of those turns.
-      const cancelledTurnUserItem = info?.lastTurnUserItem;
-      if (cancelledTurnUserItem == null) {
+      if (pendingHistoryItems.some((item) => !isSyntheticHistoryItem(item))) {
         debugLogger.debug(
-          'auto-restore bail: cancelled turn did not add a user history item',
+          'auto-restore bail: pending stream item has meaningful content',
         );
         return;
       }
@@ -2343,8 +2556,9 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       if (!itemsAfterAreOnlySynthetic(history, lastUserIdx)) {
         debugLogger.debug(
-          'auto-restore bail: meaningful content committed after last user item',
+          'auto-restore: preserving committed output and restoring prompt text',
         );
+        buffer.setText(cancelledTurnUserItem.text);
         return;
       }
 
@@ -2653,12 +2867,6 @@ export const AppContainer = (props: AppContainerProps) => {
   const [showToolDescriptions, setShowToolDescriptions] =
     useState<boolean>(false);
 
-  const [compactMode, setCompactMode] = useState<boolean>(
-    settings.merged.ui?.compactMode ?? false,
-  );
-  const [compactInline] = useState<boolean>(
-    settings.merged.ui?.compactInline ?? false,
-  );
   const configuredRenderMode = settings.merged.ui?.renderMode;
   const [renderMode, setRenderMode] = useState<RenderMode>(
     configuredRenderMode === 'raw' ? 'raw' : 'render',
@@ -2767,14 +2975,37 @@ export const AppContainer = (props: AppContainerProps) => {
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
   dialogsVisibleRef.current = dialogsVisible;
+
+  // Anti-deadlock: the transcript takes over the whole screen via alt-screen,
+  // so any blocking confirmation/dialog (or a tool awaiting confirmation) would
+  // be invisible and unanswerable behind it. Auto-close the transcript whenever
+  // one appears so the user can see and respond. `dialogsVisible` already
+  // aggregates every blocking request surfaced by DialogManager
+  // (shellConfirmationRequest / loopDetectionConfirmationRequest /
+  // confirmationRequest / confirmUpdateExtensionRequests / providerUpdateRequest
+  // and friends); WaitingForConfirmation covers the inline tool-approval path.
+  const needsBlockingInput =
+    dialogsVisible || streamingState === StreamingState.WaitingForConfirmation;
+  useEffect(() => {
+    if (needsBlockingInput && isTranscriptOpen) {
+      closeTranscript();
+    }
+    // `isTranscriptOpen` must be a dependency (not just read via ref): if a
+    // blocking prompt is already visible when the user opens the transcript,
+    // `needsBlockingInput` doesn't change, so without this the effect wouldn't
+    // re-fire and the transcript would open over an invisible prompt.
+  }, [needsBlockingInput, isTranscriptOpen, closeTranscript]);
+
   const shouldShowStickyTodos =
     stickyTodos !== null &&
     !dialogsVisible &&
     !isFeedbackDialogOpen &&
-    streamingState !== StreamingState.WaitingForConfirmation;
+    streamingState === StreamingState.Responding;
   const stickyTodoWidth = Math.min(mainAreaWidth, 64);
-  const stickyTodoMaxVisibleItems =
-    getStickyTodoMaxVisibleItems(terminalHeight);
+  const stickyTodoMaxVisibleItems = getStickyTodoMaxVisibleItemsForMode(
+    terminalHeight,
+    useTerminalBuffer,
+  );
   const stickyTodosLayoutKey = shouldShowStickyTodos
     ? getStickyTodosLayoutKey(
         stickyTodos,
@@ -2815,6 +3046,16 @@ export const AppContainer = (props: AppContainerProps) => {
     dialogsVisible,
     stickyTodosLayoutKey,
     liveAgentPanelLayoutKey,
+    // Composer and update notification height also shift with these; without
+    // them the footer isn't re-measured during a streaming turn and the VP
+    // viewport bottom clips.
+    // (elapsedTime/currentLoadingPhrase excluded: they tick without changing rows.)
+    streamingState,
+    updateInfo,
+    agentViewState.activeView,
+    embeddedShellFocused,
+    messageQueue.length,
+    isInputActive,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -2864,6 +3105,12 @@ export const AppContainer = (props: AppContainerProps) => {
 
   // Repaint static history on the trailing edge of a resize burst (#4891).
   useResizeSettleRepaint(terminalWidth, refreshStatic);
+
+  // Repaint after the process resumes from OS sleep / suspend (lid close,
+  // display sleep, Ctrl+Z → fg).  The terminal's screen buffer is stale but
+  // Ink's frame-diff state still reflects the pre-sleep output, so the next
+  // render strands border characters on screen.
+  useWakeRepaint(refreshStatic);
 
   useEffect(() => {
     if (ideNeedsRestart) {
@@ -3407,20 +3654,44 @@ export const AppContainer = (props: AppContainerProps) => {
         debugLogger.debug('[DEBUG] Keystroke:', JSON.stringify(key));
       }
 
-      // ThinkingViewer owns all input while open.
-      // Ctrl+C / Ctrl+D close the viewer and fall through to quit/exit.
-      if (thinkingViewerData) {
-        if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
-          closeThinkingViewer();
-        } else {
-          return;
+      // Transcript full-detail screen owns all input while open. This MUST be
+      // the first branch — earlier than QUIT(Ctrl+C) / EXIT(Ctrl+D) / ESCAPE
+      // (and its vim-INSERT guard) — so Ctrl+C/Esc close the transcript
+      // instead of triggering quit / being swallowed by vim. TranscriptView's
+      // own ScrollableList handles the scroll keys; we swallow everything else
+      // here so a single broadcast keypress isn't double-handled.
+      if (isTranscriptOpenRef.current) {
+        if (
+          keyMatchers[Command.ESCAPE](key) ||
+          // Bare `q` only — Ink reports Ctrl/Alt/Shift+Q as `{ name: 'q', … }`
+          // too (Alt arrives as `meta`), so guard every modifier to avoid those
+          // silently closing it (Shift+Q is the user typing a literal `Q`, not
+          // a close request).
+          (key.name === 'q' && !key.ctrl && !key.meta && !key.shift) ||
+          keyMatchers[Command.QUIT](key) ||
+          keyMatchers[Command.EXIT](key) ||
+          keyMatchers[Command.TOGGLE_TRANSCRIPT](key)
+        ) {
+          // Esc / q / Ctrl+C / Ctrl+D / Ctrl+O all just close the transcript.
+          // EXIT (Ctrl+D) is included so it isn't silently swallowed by the
+          // blanket return below — the transcript is a transient overlay, so we
+          // close it rather than fall through to app exit.
+          closeTranscript();
         }
+        return;
       }
 
       // Alt+T: toggle inline expansion of thinking blocks.
       if (keyMatchers[Command.TOGGLE_THINKING_EXPANDED](key)) {
         setThoughtExpanded((prev) => !prev);
         refreshStatic();
+        return;
+      }
+
+      // Ctrl+O: open the transcript full-detail screen. (Close while open is
+      // handled by the transcript guard at the very top of this handler.)
+      if (keyMatchers[Command.TOGGLE_TRANSCRIPT](key)) {
+        openTranscript();
         return;
       }
 
@@ -3570,25 +3841,13 @@ export const AppContainer = (props: AppContainerProps) => {
         handleSlashCommand('/ide status');
       } else if (
         keyMatchers[Command.SHOW_MORE_LINES](key) &&
+        buffer.text.length === 0 &&
         !enteringConstrainHeightMode
       ) {
         setConstrainHeight(false);
       } else if (keyMatchers[Command.TOGGLE_SHELL_INPUT_FOCUS](key)) {
         if (activePtyId || embeddedShellFocused) {
           setEmbeddedShellFocused((prev) => !prev);
-        }
-      } else if (keyMatchers[Command.TOGGLE_COMPACT_MODE](key)) {
-        const newValue = !compactMode;
-        setCompactMode(newValue);
-        void settings.setValue(SettingScope.User, 'ui.compactMode', newValue);
-        // Skip the expensive clearTerminal + Static remount when no past
-        // item would render differently (no tool_group / gemini_thought*).
-        // Future items pick up the new mode naturally because Static is
-        // append-only. Issue #3899: this unfreezes Ctrl+O for plain-chat
-        // long sessions; tool/thinking-bearing sessions still go through
-        // the (now chunked) full path in MainContent.
-        if (compactToggleHasVisualEffect(historyRef.current)) {
-          refreshStatic();
         }
       } else if (keyMatchers[Command.PROMOTE_SHELL_TO_BACKGROUND](key)) {
         // Ctrl+B: promote a running foreground shell command to a
@@ -3683,16 +3942,14 @@ export const AppContainer = (props: AppContainerProps) => {
       // debugKeystrokeLogging is read at call time, so no stale closure risk.
       settings,
       isAuthenticating,
-      compactMode,
-      setCompactMode,
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
       vimEnabled,
       vimMode,
-      thinkingViewerData,
-      closeThinkingViewer,
       setThoughtExpanded,
+      openTranscript,
+      closeTranscript,
     ],
   );
 
@@ -3755,9 +4012,12 @@ export const AppContainer = (props: AppContainerProps) => {
     ) {
       return;
     }
+    // Don't silently auto-submit queued messages while the transcript is open
+    // (it isn't part of `dialogsVisible`). Resume draining once it closes.
+    if (isTranscriptOpenRef.current) return;
 
     // Two-phase: batch plain prompts as one turn, else pop next slash command.
-    const plainPrompts = drainQueue();
+    const plainPrompts = drainQueue(true);
     const submission =
       plainPrompts.length > 0 ? plainPrompts.join('\n\n') : popNextSegment();
     if (submission === null) return;
@@ -3772,6 +4032,8 @@ export const AppContainer = (props: AppContainerProps) => {
     streamingState,
     isProcessing,
     dialogsVisible,
+    // Re-run the drain when the transcript closes so queued messages resume.
+    isTranscriptOpen,
     messageQueue,
     drainQueue,
     popNextSegment,
@@ -3862,6 +4124,7 @@ export const AppContainer = (props: AppContainerProps) => {
       contextFileNames,
       availableTerminalHeight,
       useTerminalBuffer,
+      showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -4003,6 +4266,7 @@ export const AppContainer = (props: AppContainerProps) => {
       contextFileNames,
       availableTerminalHeight,
       useTerminalBuffer,
+      showScrollbar,
       mainAreaWidth,
       staticAreaMaxItemHeight,
       staticExtraHeight,
@@ -4253,18 +4517,18 @@ export const AppContainer = (props: AppContainerProps) => {
     ],
   );
 
-  const compactModeValue = useMemo(
-    () => ({ compactMode, compactInline, setCompactMode }),
-    [compactMode, compactInline, setCompactMode],
-  );
   const renderModeValue = useMemo(
     () => ({ renderMode, setRenderMode }),
     [renderMode, setRenderMode],
   );
 
-  const thinkingViewerValue = useMemo(
-    () => ({ openThinkingViewer }),
-    [openThinkingViewer],
+  const thoughtExpandedValue = useMemo(
+    () => ({
+      allExpanded: thoughtExpanded,
+      expandedHeadIds: expandedThoughtHeadIds,
+      toggle: toggleThoughtExpanded,
+    }),
+    [thoughtExpanded, expandedThoughtHeadIds, toggleThoughtExpanded],
   );
 
   return (
@@ -4277,27 +4541,31 @@ export const AppContainer = (props: AppContainerProps) => {
               startupWarnings,
             }}
           >
-            <CompactModeProvider value={compactModeValue}>
-              <ThoughtExpandedProvider value={thoughtExpanded}>
-                <RenderModeProvider value={renderModeValue}>
-                  <TerminalOutputProvider value={writeRaw}>
-                    <ThinkingViewerProvider value={thinkingViewerValue}>
-                      <ShellFocusContext.Provider value={isFocused}>
-                        {thinkingViewerData ? (
-                          <ThinkingViewer
-                            data={thinkingViewerData}
-                            onClose={closeThinkingViewer}
-                            useAlternateScreen={!useTerminalBuffer}
-                          />
-                        ) : (
-                          <App />
-                        )}
-                      </ShellFocusContext.Provider>
-                    </ThinkingViewerProvider>
-                  </TerminalOutputProvider>
-                </RenderModeProvider>
-              </ThoughtExpandedProvider>
-            </CompactModeProvider>
+            <ThoughtExpandedProvider value={thoughtExpandedValue}>
+              <RenderModeProvider value={renderModeValue}>
+                <TerminalOutputProvider value={writeRaw}>
+                  <ShellFocusContext.Provider value={isFocused}>
+                    {transcriptFreeze ? (
+                      // TranscriptView renders as a sibling of <App/>, which
+                      // owns the StreamingContext.Provider — so the frozen
+                      // transcript subtree has no provider of its own. A
+                      // pending tool group captured in the snapshot can hold a
+                      // tool in the Executing state, whose spinner calls
+                      // useStreamingContext and would otherwise throw. Provide
+                      // the context here so the transcript renders.
+                      <StreamingContext.Provider value={streamingState}>
+                        <TranscriptView
+                          items={transcriptItems}
+                          useAlternateScreen={!useTerminalBuffer}
+                        />
+                      </StreamingContext.Provider>
+                    ) : (
+                      <App />
+                    )}
+                  </ShellFocusContext.Provider>
+                </TerminalOutputProvider>
+              </RenderModeProvider>
+            </ThoughtExpandedProvider>
           </AppContext.Provider>
         </ConfigContext.Provider>
       </UIActionsContext.Provider>

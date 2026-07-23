@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ACPToolCall, PermissionRequest } from '../../../adapters/types';
 import { useI18n } from '../../../i18n';
+import { useSubagentDetails } from '../../../subagentDetailsContext';
 import {
   formatElapsed,
   formatLiveElapsed,
@@ -31,6 +32,76 @@ function formatDuration(ms: number): string {
   const min = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
   return sec > 0 ? `${min}m ${sec}s` : `${min}m`;
+}
+
+export interface TimelineRow {
+  leftPct: number;
+  widthPct: number;
+  running: boolean;
+}
+
+export interface TimelineTick {
+  leftPct: number;
+  label: string;
+}
+
+export interface AgentsTimeline {
+  rows: Map<string, TimelineRow>;
+  ticks: TimelineTick[];
+}
+
+/**
+ * Geometry for the shared-axis mini timeline: one bar per agent against
+ * the group's combined wall-clock span, so overlap and relative duration
+ * read at a glance. Returns null when the bars would not be comparable
+ * (an agent without a start time) or carry no information (single agent,
+ * sub-second span) — the list then renders without a timeline.
+ */
+export function computeAgentsTimeline(
+  agents: ACPToolCall[],
+  now: number,
+): AgentsTimeline | null {
+  if (agents.length < 2) return null;
+  const starts: number[] = [];
+  for (const agent of agents) {
+    if (typeof agent.startTime !== 'number') return null;
+    starts.push(agent.startTime);
+  }
+  const ends = agents.map((agent, i) =>
+    agent.status === 'in_progress'
+      ? Math.max(now, starts[i])
+      : Math.max(agent.endTime ?? starts[i], starts[i]),
+  );
+  const t0 = Math.min(...starts);
+  const span = Math.max(...ends) - t0;
+  if (span < 1000) return null;
+
+  const rows = new Map<string, TimelineRow>();
+  agents.forEach((agent, i) => {
+    // Keep a visible sliver for near-instant agents, clamped so it never
+    // overflows the right edge.
+    const width = Math.max((ends[i] - starts[i]) / span, 0.02);
+    const left = Math.min((starts[i] - t0) / span, 1 - width);
+    rows.set(agent.callId, {
+      leftPct: left * 100,
+      widthPct: width * 100,
+      running: agent.status === 'in_progress',
+    });
+  });
+
+  // Ruler at 0 / step / 2·step… with a "nice" step (1-2-5 × 10ᵏ seconds),
+  // stopping short of the right edge so labels don't collide with it.
+  const targetSec = Math.max(span / 1000 / 2.2, 1);
+  const pow = Math.pow(10, Math.floor(Math.log10(targetSec)));
+  const stepSec =
+    [5, 2, 1].map((m) => m * pow).find((s) => s <= targetSec) ?? pow;
+  const ticks: TimelineTick[] = [];
+  for (let m = 0; ticks.length < 4; m++) {
+    const atMs = m * stepSec * 1000;
+    if (atMs > span * 0.92) break;
+    ticks.push({ leftPct: (atMs / span) * 100, label: formatDuration(atMs) });
+  }
+  return { rows, ticks };
 }
 
 function getAgentStats(agent: ACPToolCall, now: number): string {
@@ -90,6 +161,7 @@ export function ParallelAgentsGroup({
   pendingApproval,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
+  const subagentDetails = useSubagentDetails();
   const [groupExpanded, setGroupExpanded] = useState(false);
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [now, setNow] = useState(() => Date.now());
@@ -121,6 +193,7 @@ export function ParallelAgentsGroup({
     ? agents.find((a) => toolContainsCallId(a, pendingApproval.toolCallId!))
     : undefined;
   const showGroup = groupExpanded || !!approvalAgent;
+  const timeline = showGroup ? computeAgentsTimeline(agents, now) : null;
   const summaryStatus = agents.some(
     (a) => getAgentDisplayStatus(a) === 'failed',
   )
@@ -174,13 +247,17 @@ export function ParallelAgentsGroup({
               const stats = getAgentStats(agent, now);
               const status = getAgentDisplayStatus(agent);
               const isExpanded = expandedId === agent.callId;
+              const track = timeline?.rows.get(agent.callId);
               return (
                 <div key={agent.callId}>
-                  <div
+                  <button
+                    type="button"
                     className={styles.row}
-                    onClick={() =>
-                      setExpandedId(isExpanded ? null : agent.callId)
-                    }
+                    aria-expanded={subagentDetails ? undefined : isExpanded}
+                    onClick={() => {
+                      if (subagentDetails) subagentDetails.onOpen(agent);
+                      else setExpandedId(isExpanded ? null : agent.callId);
+                    }}
                   >
                     <StatusIcon status={status} />
                     <span className={styles.rowDesc}>
@@ -192,8 +269,23 @@ export function ParallelAgentsGroup({
                       )}
                     </span>
                     {stats && <span className={styles.rowStats}>{stats}</span>}
-                  </div>
-                  {isExpanded && (
+                  </button>
+                  {track && (
+                    <div className={styles.track} aria-hidden="true">
+                      <span
+                        className={
+                          track.running
+                            ? `${styles.bar} ${styles.barRunning}`
+                            : styles.bar
+                        }
+                        style={{
+                          left: `${track.leftPct}%`,
+                          width: `${track.widthPct}%`,
+                        }}
+                      />
+                    </div>
+                  )}
+                  {!subagentDetails && isExpanded && (
                     <div className={styles.detail}>
                       <SubAgentPanel tool={agent} hideHeader />
                     </div>
@@ -202,6 +294,19 @@ export function ParallelAgentsGroup({
               );
             })}
           </div>
+          {timeline && timeline.ticks.length >= 2 && (
+            <div className={styles.ruler} aria-hidden="true">
+              {timeline.ticks.map((tick) => (
+                <span
+                  key={tick.label}
+                  className={styles.tick}
+                  style={{ left: `${tick.leftPct}%` }}
+                >
+                  {tick.label}
+                </span>
+              ))}
+            </div>
+          )}
         </div>
       )}
     </div>

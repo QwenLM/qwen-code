@@ -1,36 +1,30 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import type { Content } from '@google/genai';
-import type { Config } from '../../config/config.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
+import {
+  getStartupContextLength,
+  isSystemReminderContent,
+} from '../../utils/environmentContext.js';
 
 export const FORK_SUBAGENT_TYPE = 'fork';
 
 /**
- * Fork subagent availability gate.
- *
- * Fork is available in interactive sessions. Non-interactive sessions
- * (e.g. `qwen -p`, SDK headless, CI/CD) lack a terminal UI for fork progress
- * display and permission prompts, which can cause hangs or silent failures.
- *
  * Forking is an explicit choice — the caller selects it with
  * `subagent_type: "fork"`. Omitting `subagent_type` always resolves to the
- * general-purpose subagent (awaitable, returns its result inline), never a
- * fork. This preserves the long-standing "omit ⇒ awaitable subagent" contract
- * that skills and callers depend on. When fork is unavailable, an explicit
- * `subagent_type: "fork"` also falls back to the general-purpose subagent.
+ * general-purpose subagent, never a fork. Regular top-level subagents run in
+ * the background by default; callers can set `run_in_background: false` for an
+ * inline result. Forks are available in both interactive and headless
+ * sessions; headless forks use the background registry so the caller waits for
+ * completion and non-interactive permission policy is applied.
  */
-export function isForkSubagentEnabled(config: Config): boolean {
-  return config.isInteractive();
-}
-
 export const FORK_BOILERPLATE_TAG = 'fork-boilerplate';
 export const FORK_DIRECTIVE_PREFIX = 'Directive: ';
 
 export const FORK_AGENT = {
   name: FORK_SUBAGENT_TYPE,
   description:
-    'Fork yourself — inherits your full conversation context. Selected explicitly via `subagent_type: "fork"` (only in interactive sessions). Runs detached in the background; you are notified when it completes.',
+    'Fork yourself — inherits parent conversation context. Selected explicitly via `subagent_type: "fork"`. Runs detached in the background; you are notified when it completes.',
   tools: ['*'],
   systemPrompt:
     'You are a forked worker process. Follow the directive in the conversation history. Execute tasks directly using available tools. Do not spawn sub-agents.',
@@ -69,6 +63,34 @@ export function isInForkExecution(): boolean {
 export const FORK_PLACEHOLDER_RESULT =
   'Fork started — processing in background';
 
+export type ForkTurns = 'all' | `${number}`;
+export type NormalizedForkTurns = 'all' | number;
+
+export function normalizeForkTurns(
+  forkTurns: ForkTurns | undefined,
+): NormalizedForkTurns {
+  return forkTurns === undefined || forkTurns === 'all'
+    ? 'all'
+    : Number(forkTurns);
+}
+
+function isSystemReminderPart(content: Content, partIndex: number): boolean {
+  const part = content.parts?.[partIndex];
+  return part
+    ? isSystemReminderContent({ role: 'user', parts: [part] })
+    : false;
+}
+
+function isRealUserTurn(content: Content): boolean {
+  if (content.role !== 'user' || !content.parts?.length) return false;
+  return content.parts.some((part, index) => {
+    if (part.functionResponse || isSystemReminderPart(content, index)) {
+      return false;
+    }
+    return typeof part.text !== 'string' || part.text.trim().length > 0;
+  });
+}
+
 /**
  * Build functionResponse parts for every open function call in a model message.
  *
@@ -98,6 +120,51 @@ export function buildFunctionResponseParts(
       response: { output: placeholderOutput },
     },
   }));
+}
+
+/**
+ * Select parent conversation history for a fork.
+ *
+ * A turn is a real user prompt, not a function response or a pure structural
+ * reminder. A bounded selection omits synthetic prefixes; the caller can
+ * reattach startup context that the fork still needs.
+ */
+export function selectForkHistory(
+  history: Content[],
+  forkTurns: NormalizedForkTurns,
+): Content[] {
+  let selected = history;
+
+  if (typeof forkTurns === 'number') {
+    // includeCompressed is load-bearing here. getHistoryForForkWindow strips
+    // the startup reminder with includeCompressed:false, so a post-compression
+    // summary prefix can still lead this history. Detecting it here keeps that
+    // synthetic summary from being counted as a real user turn — which would
+    // consume one of the requested turns and seed the fork with a prefix it
+    // should not inherit.
+    const syntheticPrefixLength = getStartupContextLength(history, {
+      includeCompressed: true,
+    });
+    const realUserTurnIndexes: number[] = [];
+    for (let index = syntheticPrefixLength; index < history.length; index++) {
+      const content = history[index]!;
+      if (isRealUserTurn(content)) {
+        realUserTurnIndexes.push(index);
+      }
+    }
+
+    if (realUserTurnIndexes.length === 0) {
+      selected = [];
+    } else {
+      selected = history.slice(
+        realUserTurnIndexes[
+          Math.max(0, realUserTurnIndexes.length - forkTurns)
+        ],
+      );
+    }
+  }
+
+  return structuredClone(selected);
 }
 
 /**
@@ -179,6 +246,24 @@ export function buildWorktreeNotice(
   );
 }
 
+/**
+ * Notice for a sub-agent pinned to a caller-owned worktree via `working_dir`.
+ *
+ * Deliberately narrower than {@link buildWorktreeNotice}: that one describes a
+ * freshly provisioned copy of the parent's tree, so it asks the agent to
+ * translate inherited paths and to re-read files the parent may have touched.
+ * A pinned worktree is instead the code the agent was asked to work on, and its
+ * cwd already IS that directory — telling it to prefix absolute paths or to
+ * translate the parent's paths would contradict the caller's own instructions.
+ */
+export function buildPinnedWorktreeNotice(worktreeCwd: string): string {
+  return (
+    `Your working directory is ${worktreeCwd}, a git worktree checked out to the code you have been asked to work on. ` +
+    `Relative paths, shell commands, and searches already resolve there — do not \`cd\` elsewhere and do not prefix paths with the parent's directory. ` +
+    `Do not operate on the parent's checkout.`
+  );
+}
+
 export function buildChildMessage(directive: string): string {
   return `<${FORK_BOILERPLATE_TAG}>
 STOP. READ THIS FIRST.
@@ -190,7 +275,7 @@ RULES (non-negotiable):
 2. Do NOT converse, ask questions, or suggest next steps
 3. Do NOT editorialize or add meta-commentary
 4. USE your tools directly: Bash, Read, Write, etc.
-5. If you modify files, commit your changes before reporting. Include the commit hash in your report.
+5. If you modify files, report the files changed and verification performed. Do NOT create a commit unless the directive explicitly asks you to.
 6. Do NOT emit text between tool calls. Use tools silently, then report once at the end.
 7. Stay strictly within your directive's scope. If you discover related systems outside your scope, mention them in one sentence at most — other workers cover those areas.
 8. Keep your report under 500 words unless the directive specifies otherwise. Be factual and concise.
@@ -201,7 +286,8 @@ Output format (plain text labels, not markdown headers):
   Scope: <echo back your assigned scope in one sentence>
   Result: <the answer or key findings, limited to the scope above>
   Key files: <relevant file paths — include for research tasks>
-  Files changed: <list with commit hash — include only if you modified files>
+  Files changed: <list — include only if you modified files>
+  Verification: <checks performed and their outcome — include only if you modified files>
   Issues: <list — include only if there are issues to flag>
 </${FORK_BOILERPLATE_TAG}>
 

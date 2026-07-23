@@ -11,7 +11,13 @@ This guide covers setting up Qwen Code with a WeCom intelligent robot (企业微
 ## Creating the Robot
 
 1. Open the WeCom admin console and create an intelligent robot.
+
+![](https://gw.alicdn.com/imgextra/i2/O1CN017w1jWj1TTvNBcfya8_!!6000000002384-2-tps-2212-887.png)
+
 2. Choose API mode.
+
+![](https://gw.alicdn.com/imgextra/i3/O1CN01buuik0207paQUuLQW_!!6000000006803-1-tps-1276-720.gif)
+
 3. Copy the Bot ID and Secret.
 4. Add the robot to the direct chats or groups where it should be available.
 
@@ -33,10 +39,7 @@ Add the channel to `~/.qwen/settings.json`:
       "sessionScope": "user",
       "cwd": "/path/to/your/project",
       "instructions": "You are a concise coding assistant responding via WeCom.",
-      "groupPolicy": "open",
-      "groups": {
-        "*": { "requireMention": true }
-      }
+      "groupPolicy": "open"
     }
   }
 }
@@ -76,9 +79,13 @@ Open WeCom and send a message to the intelligent robot.
 - `pairing`: users must pair before using the bot.
 - `open`: anyone who can message the robot can use it.
 
-For groups, set `groupPolicy` to `"allowlist"` or `"open"`. By default, group messages require a mention through `"requireMention": true`.
+For groups, set `groupPolicy` to `"allowlist"` or `"open"`. WeCom only delivers group messages that mention the intelligent robot, so every delivered group callback is treated as mentioned. The `requireMention` setting cannot enable responses to unmentioned group messages because those messages are not delivered to the bot.
 
-When the WeCom SDK includes explicit mention metadata, Qwen Code uses it for this gate. If no mention metadata is present, the channel treats delivered group messages as unmentioned. Set `"requireMention": false` only if you want to rely on WeCom-side delivery scoping instead.
+### Group Mention Compatibility
+
+Earlier Qwen Code versions also applied the generic `requireMention` gate after WeCom delivered a group callback. Because the callback does not include separate mention metadata, `requireMention: true`—including the default value—could reject every delivered group message and make group chat appear nonfunctional.
+
+Qwen Code now relies on WeCom's mention-scoped delivery and does not apply a second mention decision. Existing WeCom configurations containing either `requireMention: true` or `requireMention: false` remain valid and do not produce configuration errors. Both values have the same behavior for WeCom, so the field can be removed. Other settings in the same group entry, such as `dispatchMode`, continue to apply. `groupHistoryLimit` remains accepted but cannot collect new WeCom history because unmentioned group messages are not delivered.
 
 ## Images and Files
 
@@ -103,7 +110,7 @@ For safety, local image paths must be inside the channel file directory under th
 ### Bot does not respond in groups
 
 - Check `groupPolicy`.
-- Mention the bot unless the group config sets `"requireMention": false`.
+- Mention the bot in the group.
 - Confirm the robot has been added to the group.
 
 ### Self-built application credentials do not work

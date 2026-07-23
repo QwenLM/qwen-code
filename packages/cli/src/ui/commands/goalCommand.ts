@@ -24,7 +24,10 @@ import { installGoalTerminalObserver } from '../utils/restoreGoal.js';
 import { formatDuration } from '../utils/formatters.js';
 import { t } from '../../i18n/index.js';
 
-// Keep in sync with GOAL_CLEAR_KEYWORDS in packages/web-shell/client/App.tsx
+// Mirrored by GOAL_CLEAR_KEYWORDS in
+// packages/web-shell/client/utils/goalCondition.ts, whose test reads this
+// literal and fails on drift. The Web Shell client bundles for the browser and
+// cannot import from core, so this is duplicated rather than shared.
 const CLEAR_KEYWORDS = new Set([
   'clear',
   'stop',
@@ -33,8 +36,6 @@ const CLEAR_KEYWORDS = new Set([
   'none',
   'cancel',
 ]);
-
-const MAX_GOAL_LENGTH = 4000;
 
 // Keep the surrounding `"…"` quote structure intact: collapse newlines so the
 // condition stays on one line, and downgrade embedded double-quotes to single
@@ -165,14 +166,7 @@ export const goalCommand: SlashCommand = {
       return;
     }
 
-    // ── Branch 3: length cap ─────────────────────────────────────────────
-    if (q.length > MAX_GOAL_LENGTH) {
-      return errorMessage(
-        `Goal condition is limited to ${MAX_GOAL_LENGTH} characters (got ${q.length}).`,
-      );
-    }
-
-    // ── Branch 4: gates ──────────────────────────────────────────────────
+    // ── Branch 3: gates ──────────────────────────────────────────────────
     if (!config.isTrustedFolder()) {
       return errorMessage(
         '/goal is only available in trusted workspaces. Trust this folder via `/trust` and try again.',
@@ -189,7 +183,7 @@ export const goalCommand: SlashCommand = {
       );
     }
 
-    // ── Branch 5: register hook + emit set card + kick off first turn ────
+    // ── Branch 4: register hook + emit set card + kick off first turn ────
     let registered;
     try {
       registered = registerGoalHook({

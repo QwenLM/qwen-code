@@ -10,12 +10,18 @@ import * as path from 'node:path';
 import { createHash, randomBytes } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { Ignore } from '@qwen-code/qwen-code-core';
+import {
+  buildRecordArtifactReminder,
+  Ignore,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import { createServeApp } from '../server.js';
+import { workspaceRelative } from './workspace-file-read.js';
 import {
   canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
 } from '../fs/index.js';
+import type { Request } from 'express';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import type { ServeOptions } from '../types.js';
 
@@ -66,6 +72,35 @@ function loopbackHost(): string {
 function rawHash(data: string | Buffer): `sha256:${string}` {
   return `sha256:${createHash('sha256').update(data).digest('hex')}`;
 }
+
+describe('workspaceRelative', () => {
+  let scratch: string;
+
+  beforeEach(async () => {
+    scratch = await fsp.mkdtemp(
+      path.join(
+        os.tmpdir(),
+        `qwen-route-rel-${randomBytes(4).toString('hex')}-`,
+      ),
+    );
+  });
+
+  afterEach(async () => {
+    await fsp.rm(scratch, { recursive: true, force: true });
+  });
+
+  it('rejects paths that remain outside the workspace after canonicalization', async () => {
+    const workspace = path.join(scratch, 'ws');
+    await fsp.mkdir(workspace);
+    const req = {
+      app: { locals: { boundWorkspace: workspace } },
+    } as unknown as Request;
+
+    expect(() =>
+      workspaceRelative(req, path.join(scratch, 'outside.txt')),
+    ).toThrow(expect.objectContaining({ kind: 'path_outside_workspace' }));
+  });
+});
 
 describe('GET /file', () => {
   let h: Harness;
@@ -516,6 +551,117 @@ describe('capability advertisement', () => {
       expect(res.body.features).toContain('workspace_file_read');
       expect(res.body.features).toContain('workspace_file_bytes');
       expect(res.body.features).toContain('workspace_file_write');
+    } finally {
+      await teardown(h);
+    }
+  });
+});
+
+// The `record_artifact` hint that `write_file` appends to a successful write
+// names a `workspacePath`, and the model hands that exact string back to this
+// route. Producer and consumer live in different packages, each with its own
+// notion of what the path is relative to — `write_file` starts from the session
+// cwd, the route resolves against the bound workspace root. They agree for an
+// ordinary session and drifted apart for a worktree one, where every artifact
+// preview 404'd. Neither side's unit tests could catch that: both were
+// internally consistent. These pin the round trip instead, over real HTTP.
+describe('record_artifact workspacePath contract (write_file ⇄ GET /file)', () => {
+  const ARTIFACT = '<!doctype html><h1>Quarterly Chart</h1>';
+
+  /** The workspacePath the model is told to send, from the real producer. */
+  function emittedWorkspacePath(sessionCwd: string, filePath: string): string {
+    const reminder = buildRecordArtifactReminder(
+      {
+        isRecordArtifactEnabled: () => true,
+        getTargetDir: () => sessionCwd,
+      } as unknown as Config,
+      filePath,
+    );
+    const match = /workspacePath "([^"]+)"/.exec(reminder ?? '');
+    if (!match?.[1]) {
+      throw new Error(`no workspacePath in reminder: ${reminder ?? 'null'}`);
+    }
+    return match[1];
+  }
+
+  it('round-trips an artifact written by an ordinary session', async () => {
+    const h = await makeHarness();
+    try {
+      const filePath = path.join(h.workspace, 'report.html');
+      await fsp.writeFile(filePath, ARTIFACT);
+
+      const workspacePath = emittedWorkspacePath(h.workspace, filePath);
+      expect(workspacePath).toBe('report.html');
+
+      const res = await request(h.app)
+        .get('/file')
+        .query({ path: workspacePath })
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(ARTIFACT);
+    } finally {
+      await teardown(h);
+    }
+  });
+
+  it('round-trips an artifact written inside a worktree session', async () => {
+    const h = await makeHarness();
+    try {
+      // A worktree session's cwd is <workspace>/.qwen/worktrees/<slug>, but the
+      // route only ever resolves against <workspace>. A path relative to the
+      // session cwd ("report.html") would resolve to <workspace>/report.html —
+      // a different file, or none at all.
+      const sessionCwd = path.join(
+        h.workspace,
+        '.qwen',
+        'worktrees',
+        'my-feature',
+      );
+      await fsp.mkdir(sessionCwd, { recursive: true });
+      const filePath = path.join(sessionCwd, 'report.html');
+      await fsp.writeFile(filePath, ARTIFACT);
+
+      const workspacePath = emittedWorkspacePath(sessionCwd, filePath);
+      expect(workspacePath).toBe('.qwen/worktrees/my-feature/report.html');
+
+      const res = await request(h.app)
+        .get('/file')
+        .query({ path: workspacePath })
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(ARTIFACT);
+    } finally {
+      await teardown(h);
+    }
+  });
+
+  it('does not silently read a same-named file at the workspace root', async () => {
+    const h = await makeHarness();
+    try {
+      // The failure this guards is worse than a 404: with an unrelated
+      // report.html sitting at the root, a session-cwd-relative path resolves
+      // to it and the preview shows the WRONG artifact with a 200.
+      await fsp.writeFile(
+        path.join(h.workspace, 'report.html'),
+        '<!doctype html><h1>UNRELATED ROOT FILE</h1>',
+      );
+      const sessionCwd = path.join(
+        h.workspace,
+        '.qwen',
+        'worktrees',
+        'my-feature',
+      );
+      await fsp.mkdir(sessionCwd, { recursive: true });
+      const filePath = path.join(sessionCwd, 'report.html');
+      await fsp.writeFile(filePath, ARTIFACT);
+
+      const res = await request(h.app)
+        .get('/file')
+        .query({ path: emittedWorkspacePath(sessionCwd, filePath) })
+        .set('Host', loopbackHost());
+      expect(res.status).toBe(200);
+      expect(res.body.content).toBe(ARTIFACT);
+      expect(res.body.content).not.toContain('UNRELATED ROOT FILE');
     } finally {
       await teardown(h);
     }
