@@ -297,19 +297,25 @@ describe('qwen-autofix workflow', () => {
     // Every failed-check selector must guard against the loop reading its OWN
     // runs as feedback about the PR. Most selectors carry the review-address
     // carve-out; the stale-base selector instead excludes ALL Qwen Autofix
-    // checks (no carve-out), which is strictly narrower. Assert that every
-    // selector has one guard or the other.
+    // checks (no carve-out), which is strictly narrower. Assert PER SELECTOR
+    // that its own text carries one guard or the other — a global count is
+    // vacuous here because `!= "Qwen Autofix"` is a substring of the carve-out
+    // expression, so every carve-out selector increments BOTH counters and a
+    // guardless selector slips through (proven by A/B mutation).
     const scanCheckSelectors =
       reviewScanJob.match(/IN\("(?:FAILURE|QUEUED)"/g) ?? [];
     expect(scanCheckSelectors.length).toBeGreaterThanOrEqual(3);
-    const carveOutCount = (
-      reviewScanJob.match(/startswith\("review-address"\)/g) ?? []
-    ).length;
-    const fullExclusionCount = (reviewScanJob.match(/!= "Qwen Autofix"/g) ?? [])
-      .length;
-    expect(carveOutCount + fullExclusionCount).toBeGreaterThanOrEqual(
-      scanCheckSelectors.length,
-    );
+    const guardlessSelectors = reviewScanJob
+      .split(/(?=IN\("(?:FAILURE|QUEUED)")/)
+      .slice(1)
+      .filter((seg) => {
+        const sel = seg.slice(0, 400);
+        return (
+          !/startswith\("review-address"\)/.test(sel) &&
+          !/!= "Qwen Autofix"/.test(sel)
+        );
+      });
+    expect(guardlessSelectors).toEqual([]);
     expect(reviewScanJob).toContain('"${N_FAILED_CHECKS}" -eq 0');
     expect(reviewScanJob).toContain('${N_FAILED_CHECKS} failed check(s) new');
     expect(reviewScanJob).toContain('.completedAt // .updatedAt // ""');
@@ -428,6 +434,7 @@ describe('qwen-autofix workflow', () => {
       prHeadOid = 'prhead123',
       dryRun = false,
       hasMarker = false,
+      actor = 'autofix-bot',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ub-'));
       const bin = join(dir, 'bin');
@@ -438,7 +445,8 @@ describe('qwen-autofix workflow', () => {
           '#!/usr/bin/env bash',
           `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
           'for a in "$@"; do case "$a" in',
-          `  *compare*) printf '{"status":"%s"}' "${cmp}"; exit 0;;`,
+          `  user) printf '%s' ${JSON.stringify(actor)}; exit 0;;`,
+          `  *compare*) printf '%s' "${cmp}"; exit 0;;`,
           `  *update-branch*) ${updateOk ? '' : `printf 'HTTP 409: merge conflict' >&2; `}exit ${updateOk ? 0 : 1};;`,
           'esac; done',
           'exit 0',
@@ -694,6 +702,112 @@ describe('qwen-autofix workflow', () => {
       cas: false,
       continued: false,
       markerPosted: false,
+    });
+    // Wrong PAT identity: the mutating update-branch and its marker are
+    // skipped (convention: verify identity before ANY write), and the scan
+    // falls through to feedback processing rather than updating under a
+    // foreign login the dedup could never see.
+    expect(
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        actor: 'some-other-bot',
+      }),
+    ).toEqual({
+      updated: false,
+      cas: false,
+      continued: false,
+      markerPosted: false,
+    });
+  });
+
+  it('resolves MAIN_GREEN_CHECKS from the last-merged PR check-runs, once per scan', () => {
+    // The stale-base gate reads MAIN_GREEN_CHECKS, but the test above injects it
+    // as a pre-built env var, sidestepping the three gh calls and the jq
+    // aggregation that populate it. Exercise that population block end-to-end:
+    // resolve main's head -> the PR that produced it -> that PR's check-runs,
+    // then concatenate pages and unique them. Every failure path must fail safe
+    // to an empty set (no update-branch can then trigger).
+    const popBlock = reviewScanJob.match(
+      /( {10}MAIN_HEAD="\$\(gh api "repos\/\$\{REPO\}\/commits\/main" --jq '\.sha'[\s\S]*?\n {10}fi\n)/,
+    )?.[1];
+    expect(popBlock).toBeTruthy();
+    // The server-side filter keeps only successfully-concluded check-runs, by
+    // name; pin it so a change to the conclusion predicate is caught (the stub
+    // below cannot execute this --jq itself).
+    expect(popBlock).toContain('select(.conclusion == "success") | .name');
+    const popScript = popBlock.replace(/^ {10}/gm, '');
+
+    const runPop = ({
+      mainSha = 'mainsha123',
+      prHeadSha = 'prheadsha456',
+      greenPages = [
+        ['Test', 'Lint'],
+        ['Lint', 'Build'],
+      ],
+      mainFails = false,
+      pullsFails = false,
+      checkRunsFails = false,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'mgc-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      const pageArgs = greenPages
+        .map((p) => `'${JSON.stringify(p)}'`)
+        .join(' ');
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'for a in "$@"; do case "$a" in',
+          `  *commits/main) ${mainFails ? 'exit 1' : `printf '%s' '${mainSha}'`}; exit 0;;`,
+          `  */pulls) ${pullsFails ? 'exit 1' : `printf '%s' '${prHeadSha}'`}; exit 0;;`,
+          `  *check-runs) ${checkRunsFails ? 'exit 1' : `printf '%s\\n' ${pageArgs}`}; exit 0;;`,
+          'esac; done',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -eo pipefail\n${popScript}\njq -n --arg h "$MAIN_HEAD" --argjson g "$MAIN_GREEN_CHECKS" '{mainHead:$h, green:$g}'`,
+        ],
+        {
+          env: {
+            ...process.env,
+            REPO: 'o/r',
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          encoding: 'utf8',
+        },
+      );
+      rmSync(dir, { recursive: true, force: true });
+      return JSON.parse(out);
+    };
+
+    // Two pages aggregate (concatenate then unique, lexical order).
+    expect(runPop({})).toEqual({
+      mainHead: 'mainsha123',
+      green: ['Build', 'Lint', 'Test'],
+    });
+    // A single page with a duplicate also uniques.
+    expect(runPop({ greenPages: [['Test', 'Test', 'Lint']] })).toEqual({
+      mainHead: 'mainsha123',
+      green: ['Lint', 'Test'],
+    });
+    // commits/main fails -> fail-safe empty.
+    expect(runPop({ mainFails: true })).toEqual({ mainHead: '', green: [] });
+    // The /pulls resolution fails -> fail-safe empty.
+    expect(runPop({ pullsFails: true })).toEqual({
+      mainHead: 'mainsha123',
+      green: [],
+    });
+    // check-runs fails -> fail-safe empty.
+    expect(runPop({ checkRunsFails: true })).toEqual({
+      mainHead: 'mainsha123',
+      green: [],
     });
   });
 
