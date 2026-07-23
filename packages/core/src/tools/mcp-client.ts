@@ -26,7 +26,6 @@ import {
   ReadResourceResultSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { parse } from 'shell-quote';
-import { Agent, fetch as undiciFetch } from 'undici';
 import type { Config, MCPServerConfig } from '../config/config.js';
 import { AuthProviderType, isSdkMcpServerConfig } from '../config/config.js';
 import { GoogleCredentialProvider } from '../mcp/google-auth-provider.js';
@@ -56,7 +55,12 @@ import type { OAuthCredentials } from '../mcp/token-storage/types.js';
 import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
-import { isTlsVerificationDisabled } from '../utils/runtimeFetchOptions.js';
+import {
+  getOrCreateMcpDispatcher,
+  loadUndici,
+  preloadRuntimeFetchModule,
+  resetDispatcherCache,
+} from '../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
@@ -271,40 +275,24 @@ export function createStreamableHttpCompatibilityFetch(
 // Node's built-in fetch stalls subsequent same-origin POSTs
 // (tools/resources/prompts discovery) behind that stream until the SDK's
 // request timeout fires (#7147 — reproduced by the reporter against
-// Fastmail's MCP endpoint on Node 26.4; both replacing the fetch
-// implementation with the npm `undici` build and suppressing the GET
-// stream independently resolved it). A dedicated Agent also lets us
-// disable `headersTimeout`/`bodyTimeout`, which undici defaults to 300s —
-// a standalone SSE stream legitimately sits idle longer than that
-// between server-sent events.
-let mcpFetchDispatcher: Agent | undefined;
-function getMcpFetchDispatcher(): Agent {
-  if (!mcpFetchDispatcher) {
-    mcpFetchDispatcher = new Agent({
-      headersTimeout: 0,
-      bodyTimeout: 0,
-      keepAliveTimeout: 60_000,
-      ...(isTlsVerificationDisabled()
-        ? { connect: { rejectUnauthorized: false } }
-        : {}),
-    });
-  }
-  return mcpFetchDispatcher;
-}
-
-// Bound to undici's own fetch (not Node's global fetch) so the dispatcher
-// and the fetch implementation always come from the same undici build —
-// Node's bundled undici can be a different major version than the
-// installed `undici` package, and mixing a package dispatcher into the
-// bundled fetch throws "invalid onError method".
-const mcpUndiciFetch: typeof fetch = ((
-  input: Parameters<typeof undiciFetch>[0],
-  init?: Parameters<typeof undiciFetch>[1],
-) =>
-  undiciFetch(input, {
-    ...init,
-    dispatcher: getMcpFetchDispatcher(),
-  })) as unknown as typeof fetch;
+// Fastmail's MCP endpoint on Node 26.4). The transport therefore pins
+// undici's own fetch with a dedicated dispatcher — both loaded lazily via
+// loadUndici() so undici stays out of the eager startup closure (#7264),
+// and the dispatcher shared through runtimeFetchOptions so MCP traffic
+// honors an explicit --proxy or HTTP(S)_PROXY/NO_PROXY environment and
+// uses the same disabled header/body timeouts as the LLM path (#7195).
+const mcpUndiciFetch: typeof fetch = (async (
+  input: Parameters<typeof fetch>[0],
+  init?: Parameters<typeof fetch>[1],
+) => {
+  // preload populates the sync cache the shared dispatcher builders read.
+  await preloadRuntimeFetchModule();
+  const { fetch: undiciFetch } = await loadUndici();
+  return undiciFetch(input as Parameters<typeof undiciFetch>[0], {
+    ...(init as Parameters<typeof undiciFetch>[1]),
+    dispatcher: getOrCreateMcpDispatcher(),
+  });
+}) as unknown as typeof fetch;
 
 // Test-only override: unit tests stub `globalThis.fetch`, which the
 // dedicated undici fetch above deliberately bypasses. Follows the
@@ -314,13 +302,12 @@ export function _setMcpFetchForTest(fn?: typeof fetch): void {
   mcpFetchOverrideForTest = fn;
 }
 
-// Test-only: drops the lazily-created singleton so a test can re-evaluate
-// `isTlsVerificationDisabled()` under a different environment. The old
-// Agent is closed asynchronously; in-flight test requests on it complete.
+// Test-only: clears the shared dispatcher cache so a test can re-evaluate
+// `isTlsVerificationDisabled()` / proxy configuration under a different
+// environment. Kept under its historical name; delegates to the shared
+// runtimeFetchOptions cache the MCP dispatcher now lives in.
 export function _resetMcpFetchDispatcherForTest(): void {
-  const old = mcpFetchDispatcher;
-  mcpFetchDispatcher = undefined;
-  void old?.close().catch(() => {});
+  resetDispatcherCache();
 }
 
 function createMcpStreamableHttpFetch(
