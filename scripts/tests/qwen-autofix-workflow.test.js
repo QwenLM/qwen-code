@@ -4365,6 +4365,33 @@ describe('qwen-autofix workflow', () => {
     ).toMatchObject({ consec: 2, terminal: false });
   });
 
+  it('posts the review-address report wrapper lines bilingually', () => {
+    // The agent's own address-summary.md / no-action.md ends with a collapsed
+    // Chinese block, but these workflow-appended wrapper lines sit OUTSIDE it —
+    // so each must carry its own inline translation (the `model/模型` footer in
+    // this same step is the idiom) or the posted comment is only half in
+    // Chinese. Pin the English↔Chinese pairs so a reword that drops the Chinese
+    // fails here. The English halves are load-bearing elsewhere too: the streak
+    // reset detector globs `*"Addressed the latest review feedback"*` and
+    // `*"no changes needed"*`, so they must stay verbatim.
+    for (const [en, zh] of [
+      ['Addressed the latest review feedback', '已处理最新评审反馈'],
+      ['Re-review when you have a moment', '有空请复审'],
+      ['Reviewed the latest feedback — no changes needed', '无需改动'],
+      ['conflicted with main — resolved in this push', '已在本次推送中解决'],
+      ['conflicts with main (no review fix needed', '合并前需 rebase/merge'],
+      ['no conflict with main', '与 main 无冲突'],
+    ]) {
+      expect(pushAndReportStep, `English anchor missing: ${en}`).toContain(en);
+      expect(pushAndReportStep, `Chinese missing for: ${en}`).toContain(zh);
+    }
+    // Every posted line in the step is either bilingual, the agent's own
+    // (already-bilingual) markdown, a structural token (---), or the footer
+    // (model/模型). Guard specifically that no Base-conflict label is emitted
+    // English-only.
+    expect(pushAndReportStep).not.toMatch(/echo "Base-conflict check:/);
+  });
+
   it('makes every known gate rejection declare its verdict', () => {
     // The retry/advance split above is only sound while each real rejection
     // writes outcome=failed; an unwired check would read as a gate crash and be
