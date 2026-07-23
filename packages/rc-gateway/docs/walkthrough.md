@@ -234,11 +234,11 @@ every tool call from a remote client.
 
 **Upgrading from an earlier version? Read this before you rely on an
 existing policy file.** Rule matching was previously broken against real
-permission frames, so `tool:` and `pathGlob:` rules never matched anything —
-only `defaults.action` ever actually fired, regardless of what individual
-rules said. This release fixes matching, which means **`deny` rules begin
-blocking and `allow` rules begin auto-approving for the first time** the
-moment you upgrade. Before you trust an existing file, run
+permission frames, so `tool:` and `pathGlob:` rules never matched a real
+call — they sat inert no matter what action they specified. This release
+fixes matching, which means **`deny` rules begin blocking and `allow` rules
+begin auto-approving for the first time** the moment you upgrade. Before you
+trust an existing file, run
 `qwen-rc policy lint <file>` — it reports how many `allow` rules are newly
 effective and warns on any that were written against a tool name (e.g.
 `write_file`) whose ACP kind also covers other tools (e.g. `edit`) it wasn't
