@@ -1349,7 +1349,6 @@ export function App({
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
-      // @ts-expect-error reloadSession exists in SDK source, not in stale dist
       await sessionActions.reloadSession(signal);
     },
     [connection.sessionId, sessionActions],
@@ -1442,7 +1441,6 @@ export function App({
       .sessionStatus(sid)
       .then((summary) => {
         if (worktreeSessionIdRef.current === sid) {
-          // @ts-expect-error worktree exists in SDK source, not in stale dist
           setSessionWorktree(summary.worktree);
         }
       })
@@ -1489,7 +1487,6 @@ export function App({
     const fetchStatus = () => {
       void workspace.client
         .workspaceByCwd(activeWorkspaceCwd)
-        // @ts-expect-error workspaceGit(cwd) exists in SDK source, not in stale dist
         .workspaceGit(sessionWorktree?.path)
         .then((git) => {
           if (!cancelled) setSelectedWorkspaceGitStatus(git);
@@ -4347,7 +4344,6 @@ export function App({
     workspaceMutationTokenRef.current = token;
     setWorkspaceMutationBusy(true);
     try {
-      // @ts-expect-error addScratchWorkspace exists in SDK source, not in stale dist
       const result = await workspaceActions.addScratchWorkspace();
       const reconciled = await reconcileAddedWorkspace(result.cwd);
       if (!reconciled) {
@@ -8111,7 +8107,7 @@ export function App({
                 open
                 direction="right"
                 shouldScaleBackground={false}
-                onOpenChange={(open: boolean) => {
+                onOpenChange={(open) => {
                   if (!open) closeArtifactPanel();
                 }}
               >

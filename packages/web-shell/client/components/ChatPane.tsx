@@ -193,7 +193,6 @@ export function ChatPane({
   const reloadTranscript = useCallback(
     async (signal: AbortSignal) => {
       if (!connection.sessionId) return;
-      // @ts-expect-error reloadSession exists in SDK source, not in stale dist
       await actions.reloadSession(signal);
     },
     [actions, connection.sessionId],
