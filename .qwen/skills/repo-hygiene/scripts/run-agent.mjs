@@ -31,14 +31,15 @@ const specs = {
     inputs: [],
     outputs: ['findings.json', 'report-only.md'],
     required: [],
-    invocation: (o) => `/repo-hygiene scan-only --workdir ${o.workdir}`,
+    invocation: (o) =>
+      `You are in the **scan phase** (step 1 of Execution Steps). --workdir ${o.workdir}`,
   },
   'fix': {
     inputs: ['findings.json'],
     outputs: ['findings.json', 'report-only.md'],
     required: ['branch'],
     invocation: (o) =>
-      `/repo-hygiene fix-only --workdir ${o.workdir} --branch ${o.branch}`,
+      `You are in the **fix phase** (steps 2-9 of Execution Steps). --workdir ${o.workdir} --branch ${o.branch}`,
   },
 };
 
