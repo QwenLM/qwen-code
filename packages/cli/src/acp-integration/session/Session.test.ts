@@ -787,6 +787,7 @@ describe('Session', () => {
         sessionId: 'test-session-id',
         prompt: [{ type: 'text', text: 'hello' }],
       },
+      undefined,
       cancellation.signal,
     );
     await vi.waitFor(() =>
@@ -16472,6 +16473,7 @@ describe('Session', () => {
           prompt: [{ type: 'text', text: 'retry after cancellation' }],
           _meta: { 'qwen.daemon.retry': true },
         } as Parameters<typeof session.prompt>[0],
+        undefined,
         cancellation.signal,
       );
       await vi.waitFor(() => {
