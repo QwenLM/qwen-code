@@ -1,0 +1,33 @@
+{
+  "name": "@qwen-code/external-context",
+  "version": "0.20.1",
+  "private": true,
+  "description": "Repository-bound external context extension for Qwen Code",
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run --config vitest.config.ts",
+    "test:ci": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src"
+  },
+  "files": [
+    "dist",
+    "examples",
+    "hooks",
+    "qwen-extension.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.2",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.4.5",
+    "vitest": "^3.2.4"
+  }
+}

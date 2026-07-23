@@ -1,0 +1,20 @@
+{
+  "name": "external-context",
+  "displayName": {
+    "en": "External Context",
+    "zh": "外部上下文"
+  },
+  "description": {
+    "en": "Repository-bound search and optional memory writes for trusted teams",
+    "zh": "为可信团队提供仓库绑定的搜索和可选记忆写入"
+  },
+  "version": "1.0.0",
+  "hooks": "hooks/hooks.json",
+  "mcpServers": {
+    "external-context": {
+      "command": "node",
+      "args": ["${extensionPath}${/}dist${/}main.js", "mcp"],
+      "cwd": "${extensionPath}"
+    }
+  }
+}

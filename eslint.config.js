@@ -23,6 +23,7 @@ export default tseslint.config(
     ignores: [
       'node_modules/*',
       'packages/**/dist/**',
+      'integrations/**/dist/**',
       'bundle/**',
       'package/bundle/**',
       '.integration-tests/**',

@@ -1,0 +1,16 @@
+{
+  "memory": {
+    "enableManagedAutoMemory": false,
+    "enableManagedAutoDream": false,
+    "enableTeamMemory": false,
+    "enableTeamMemorySync": false,
+    "enableAutoSkill": false
+  },
+  "slashCommands": {
+    "disabled": ["memory", "remember", "forget", "dream", "cd"]
+  },
+  "permissions": {
+    "allow": ["mcp__external-context__context_search"],
+    "ask": ["mcp__external-context__context_remember"]
+  }
+}

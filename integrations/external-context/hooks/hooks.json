@@ -1,0 +1,29 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" hook",
+            "name": "external-context-auto-recall",
+            "timeout": 5500
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "mcp__external-context__context_remember",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/main.js\" hook",
+            "name": "external-context-write-confirmation",
+            "timeout": 5500
+          }
+        ]
+      }
+    ]
+  }
+}
