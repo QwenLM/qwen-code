@@ -20,10 +20,14 @@
 import { parseArgs } from 'node:util';
 import { pathToFileURL } from 'node:url';
 
-const MAINTAINERS = ['wenshao', 'tanzhenxin', 'yiliang114', 'LaZzyMan'];
-// NOTE: this list is canonical. The CLI emits it as `maintainers` so the
-// workflow's apply step reconciles against the same source of truth.
-// Keep the YAML `if:` skip-list in sync (it cannot read script output).
+export const MAINTAINERS = [
+  'wenshao',
+  'tanzhenxin',
+  'yiliang114',
+  'LaZzyMan',
+];
+// NOTE: this list is canonical. Keep the YAML `if:` skip-list in sync
+// (it cannot read script output); the sync is validated by a test.
 
 const CORE_PREFIX = 'packages/core/';
 
@@ -166,8 +170,5 @@ if (isMain) {
 
   const files = JSON.parse(values.files ?? '[]');
   const result = classify(files, values.author, Number(values.pr));
-  // Emit the canonical maintainer list alongside the decision so the
-  // apply step reconciles against the same source of truth instead of
-  // a hardcoded copy that could drift from MAINTAINERS above.
   console.log(JSON.stringify({ ...result, maintainers: MAINTAINERS }));
 }
