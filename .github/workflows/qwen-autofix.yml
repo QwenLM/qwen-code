@@ -2962,7 +2962,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3264,6 +3264,16 @@ jobs:
             if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
               API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
             fi
+            # A timeout means the agent evaluated NOTHING before its budget ran
+            # out (run-agent.mjs writes this signal). Routed to retry, not an
+            # evaluated advance — same as a pre-verdict crash. Bounded by the
+            # round cap and the consecutive-failure cap, so a PR that keeps
+            # timing out still stops; a one-off (usually followed by a good
+            # round) recovers on the next scan instead of stranding its feedback.
+            AGENT_TIMEOUT=''
+            if [[ -s "${WORKDIR}/agent-timeout" ]]; then
+              AGENT_TIMEOUT="$(head -n 1 "${WORKDIR}/agent-timeout" | cut -c1-120 | iconv -f utf-8 -t utf-8 -c || true)"
+            fi
             # If feedback was actually read (prepare ran), stamp its newest ts so
             # the watermark advances and the same feedback is not re-selected next
             # scan. If the crash happened before prepare, NEWEST is empty and the
@@ -3291,13 +3301,14 @@ jobs:
             MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
-              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || "${GATE_CRASHED}" == 'true' ]]; then
-                # Prepare ran (NEWEST is set) but no verdict was reached. Three
-                # ways that happens, and in ALL of them the agent evaluated
-                # NOTHING: it produced no output at all (crashed before any
-                # verdict — a staged runner that fails to boot), it died on a
-                # model [API Error] (access/quota/5xx/transport), or the gate
-                # crashed after the agent wrote its summary. So the watermark
+              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || -n "${AGENT_TIMEOUT}" || "${GATE_CRASHED}" == 'true' ]]; then
+                # Prepare ran (NEWEST is set) but no verdict was reached. Ways
+                # that happens, and in ALL of them the agent evaluated NOTHING:
+                # it produced no output at all (crashed before any verdict — a
+                # staged runner that fails to boot), it died on a model
+                # [API Error] (access/quota/5xx/transport), it TIMED OUT before
+                # finishing, or the gate crashed after the agent wrote its
+                # summary. So the watermark
                 # must NOT advance past this feedback: an advance makes the next
                 # scan see "nothing new" and never retry, stranding the PR on a
                 # transient failure (an infra blip, a quota reset minutes away, a
@@ -3319,6 +3330,13 @@ jobs:
                 if [[ -n "${API_ERROR_DETAIL}" ]]; then
                   CAUSE="could not reach the model — ${API_ERROR_DETAIL}"
                   LAST_FIX="a maintainer should check the autofix model key/access, then re-arm"
+                elif [[ -n "${AGENT_TIMEOUT}" ]]; then
+                  # A timeout evaluated nothing, so the feedback is unaddressed
+                  # and stays live for the retry. On a big / heavily-reviewed PR
+                  # this is usually a one-off; the last automatic attempt names
+                  # the real fix (split the PR or raise the budget).
+                  CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"
+                  LAST_FIX="a human should split the PR or raise the agent time budget, then re-arm"
                 elif [[ -z "${DETAIL_FILE}" ]]; then
                   CAUSE="crashed before it could evaluate the feedback"
                   LAST_FIX="a human should take over this PR"

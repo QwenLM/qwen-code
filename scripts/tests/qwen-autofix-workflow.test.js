@@ -4006,6 +4006,27 @@ describe('qwen-autofix workflow', () => {
     expect(noOutput.split('|')[0]).toBe(SENTINEL);
     expect(noOutput).toContain('crashed before it could evaluate the feedback');
 
+    // A TIMEOUT evaluated nothing → retry (sentinel), not an evaluated advance
+    // that would strand the unaddressed feedback. Even with OUTCOME=failed set
+    // by the gate (so GATE_CRASHED is false), the agent-timeout signal wins.
+    const timedOut = run({
+      OUTCOME: 'failed',
+      AGENT_TIMEOUT: 'timeout (3000000ms)',
+    });
+    expect(timedOut.split('|')[0]).toBe(SENTINEL);
+    expect(timedOut).toContain('ran out of time before finishing');
+    expect(timedOut).toContain('it will retry on the next scan');
+    // At the cap it names the real fix instead of promising a refused retry.
+    const timedOutCapped = run({
+      OUTCOME: 'failed',
+      AGENT_TIMEOUT: 'timeout (3000000ms)',
+      ROUND: '4',
+    });
+    expect(timedOutCapped).toContain('this was the last automatic attempt');
+    expect(timedOutCapped).toContain(
+      'split the PR or raise the agent time budget',
+    );
+
     // At the cap the gate crash names the operator fix rather than promising a
     // retry the scan's round gate would refuse.
     const capped = run({ OUTCOME: '', ROUND: '4' });
@@ -5687,6 +5708,16 @@ describe('qwen-autofix workflow', () => {
       expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
         'timeout (100ms)',
       );
+      // A timeout drops the agent-timeout signal so the handoff routes it to a
+      // RETRY (sentinel ts), not an evaluated advance that strands the feedback
+      // the agent never finished addressing.
+      expect(existsSync(join(dir, 'agent-timeout'))).toBe(true);
+      expect(readFileSync(join(dir, 'agent-timeout'), 'utf8')).toContain(
+        'timeout (100ms)',
+      );
+      // It is NOT an API error — the api-error signal must stay absent so the
+      // model-key handoff is not shown for a budget timeout.
+      expect(existsSync(join(dir, 'agent-api-error'))).toBe(false);
     });
   });
 
