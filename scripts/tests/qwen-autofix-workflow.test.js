@@ -467,6 +467,7 @@ describe('qwen-autofix workflow', () => {
       rmSync(dir, { recursive: true, force: true });
       return {
         updated: /pulls\/1\/update-branch/.test(calls),
+        cas: /expected_head_sha=prhead123/.test(calls),
         continued: !out.includes('FELL_THROUGH'),
       };
     };
@@ -476,36 +477,39 @@ describe('qwen-autofix workflow', () => {
     // Base-inherited red (fails here, passes on main) + behind → update & skip.
     expect(run({ prChecks: [FAIL('Test')], mainGreen: ['Test'] })).toEqual({
       updated: true,
+      cas: true,
       continued: true,
     });
     // Red on the PR AND on main (not base-inherited — the PR's own bug) → never
     // touch it. This is the gate that stops churning a genuinely-broken PR.
     expect(run({ prChecks: [FAIL('Test')], mainGreen: [] })).toEqual({
       updated: false,
+      cas: false,
       continued: false,
     });
     // Base-inherited red but the PR already contains main (ahead) → no-op skip.
     expect(
       run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], cmp: 'ahead' }),
-    ).toEqual({ updated: false, continued: false });
+    ).toEqual({ updated: false, cas: false, continued: false });
     // Diverged also counts as behind (has commits main lacks AND vice versa).
     expect(
       run({ prChecks: [FAIL('Lint')], mainGreen: ['Lint'], cmp: 'diverged' }),
-    ).toEqual({ updated: true, continued: true });
+    ).toEqual({ updated: true, cas: true, continued: true });
     // No red at all → nothing to do.
     expect(run({ prChecks: [OK('Test')], mainGreen: ['Test'] })).toEqual({
       updated: false,
+      cas: false,
       continued: false,
     });
-    // update-branch fails (a merge conflict): still attempted, logged, and the
-    // PR is skipped this scan rather than crashing the loop.
+    // update-branch fails (a merge conflict): still attempted and logged, but
+    // the scan falls through to feedback processing rather than skipping the PR.
     expect(
       run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], updateOk: false }),
-    ).toEqual({ updated: true, continued: true });
+    ).toEqual({ updated: true, cas: true, continued: false });
     // DRY_RUN: the scan must NOT call update-branch — it logs and skips.
     expect(
       run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], dryRun: true }),
-    ).toEqual({ updated: false, continued: true });
+    ).toEqual({ updated: false, cas: false, continued: true });
     // A Qwen Autofix check (not review-address) that fails on the PR and passes
     // on main must NOT be treated as stale-base red — the exclusion filter keeps
     // the workflow's own failing checks from triggering an update-branch. A logic
@@ -521,7 +525,7 @@ describe('qwen-autofix workflow', () => {
         ],
         mainGreen: ['Build'],
       }),
-    ).toEqual({ updated: false, continued: false });
+    ).toEqual({ updated: false, cas: false, continued: false });
     // ...but a review-address check IS eligible (it is the workflow's signal that
     // the previous address round needs a fresh base), so it still updates.
     expect(
@@ -535,19 +539,19 @@ describe('qwen-autofix workflow', () => {
         ],
         mainGreen: ['review-address (1)'],
       }),
-    ).toEqual({ updated: true, continued: true });
+    ).toEqual({ updated: true, cas: true, continued: true });
     // MAIN_HEAD empty (initial gh api failure): the -n guard prevents any
     // update-branch call — a future refactor removing that guard would silently
     // allow updates with a null compare baseline.
     expect(
       run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], mainHead: '' }),
-    ).toEqual({ updated: false, continued: false });
+    ).toEqual({ updated: false, cas: false, continued: false });
     // CMP_STATUS empty (compare API failure): empty falls through today (no
     // update), but a future change treating empty as "assume behind" would
     // auto-merge main into PRs blindly.
     expect(
       run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], cmp: '' }),
-    ).toEqual({ updated: false, continued: false });
+    ).toEqual({ updated: false, cas: false, continued: false });
   });
 
   it('auto-reruns a check that died on infrastructure, once, guarded by run_attempt', () => {

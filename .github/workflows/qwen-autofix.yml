@@ -1875,11 +1875,14 @@ jobs:
                 if gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${PR_HEAD_OID}" > /dev/null 2>&1; then
                   echo "🔀 #${PR}: red check(s) [${RED_NAMES}] pass on current main ${MAIN_HEAD:0:9} but fail here on a stale base — merged main in via update-branch; CI will re-run"
                   fleet_row "${PR}" 'base-updated' "stale-base red [${RED_NAMES}] — merged current main, CI re-running"
+                  continue
                 else
                   echo "⚠️ #${PR}: wanted to update the stale base (red [${RED_NAMES}] green on main) but update-branch failed (likely a merge conflict) — leaving for a human"
                   fleet_row "${PR}" 'base-update-failed' "stale-base red [${RED_NAMES}] but update-branch failed (conflict?)"
+                  # A failed update (merge conflict) is a human problem, but
+                  # the bot's review comments need not be deferred forever —
+                  # fall through to feedback processing.
                 fi
-                continue
               fi
             fi
 
