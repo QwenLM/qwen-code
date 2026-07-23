@@ -1730,16 +1730,17 @@ jobs:
           # since been FIXED — observed repeatedly (a web-shell TS break, an
           # agent-registry test) stranding healthy PRs on a failure that has
           # nothing to do with them. GitHub's "Update branch" merges current
-          # main in and re-runs CI, which clears it. We do that automatically,
-          # but ONLY when TWO predicates hold for the specific failing check:
-          # (1) it is GREEN on current main — main is healthy on it right now,
-          # so the update cannot pull a NEW breakage in; AND (2) it was NOT
-          # green on the merge-base commit the PR carries — the red is
-          # base-inherited, not the PR's own regression. Fetch main's head
-          # and the set of check names currently passing on it, ONCE per scan.
-          # ci.yml has no push trigger, so its check-runs never land on main's
-          # squash commits; resolve main's head to the PR that produced it and
-          # read check-runs from that PR's head SHA instead.
+          # main in and re-runs CI, which clears it. We do that automatically
+          # when the failing check is GREEN on current main — main is healthy
+          # on it right now, so the update cannot pull a NEW breakage in. This
+          # cannot distinguish a base-inherited red from the PR's own regression
+          # (both are red-on-PR / green-on-main), but the safety bounds are
+          # tight: the merge is recoverable, a marker limits re-updates to once
+          # per 2h, and the CAS (expected_head_sha) rejects a concurrent push.
+          # Fetch main's head and the set of check names currently passing on
+          # it, ONCE per scan. ci.yml has no push trigger, so its check-runs
+          # never land on main's squash commits; resolve main's head to the PR
+          # that produced it and read check-runs from that PR's head SHA.
           MAIN_HEAD="$(gh api "repos/${REPO}/commits/main" --jq '.sha' 2> /dev/null || echo '')"
           MAIN_GREEN_CHECKS='[]'
           if [[ -n "${MAIN_HEAD}" ]]; then
@@ -2110,38 +2111,26 @@ jobs:
               continue
             fi
             # Auto-update a PR that is red ONLY because of a stale base (see the
-            # MAIN_GREEN_CHECKS rationale above). Two predicates must hold for a
-            # failing check: (1) it is GREEN on current main (main is healthy on
-            # it), AND (2) it was NOT green on the merge-base commit the PR
-            # carries (the red is base-inherited, not the PR's own regression).
-            # Runs after the round cap and pending-checks gates but before the
-            # feedback logic, because a stuck-on-stale-base PR often has no NEW
-            # feedback at all (it just sits red), which is exactly #7490's case.
+            # MAIN_GREEN_CHECKS rationale above). The gate: the failing check is
+            # GREEN on current main, so merging main in cannot pull a NEW
+            # breakage — and the PR is behind or diverged, so it actually carries
+            # a stale base. Runs after the round cap and pending-checks gates but
+            # before the feedback logic, because a stuck-on-stale-base PR often
+            # has no NEW feedback at all (it just sits red), which is exactly
+            # #7490's case.
             if [[ -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" ]]; then
               CMP="$(gh api "repos/${REPO}/compare/${MAIN_HEAD}...${PR_HEAD_OID}" 2> /dev/null || echo '{}')"
               CMP_STATUS="$(jq -r '.status // ""' <<< "${CMP}")"
               if [[ "${CMP_STATUS}" == 'behind' || "${CMP_STATUS}" == 'diverged' ]]; then
-                # Resolve the merge-base to the PR that produced it and read
-                # its check-runs, so we can require the failing check to have
-                # been NOT green at the base the PR carries (predicate 2).
-                BASE_SHA="$(jq -r '.merge_base_commit.sha // ""' <<< "${CMP}")"
-                BASE_NOT_GREEN='[]'
-                if [[ -n "${BASE_SHA}" ]]; then
-                  BASE_PR_HEAD="$(gh api "repos/${REPO}/commits/${BASE_SHA}/pulls" \
-                    --jq '.[0].head.sha // ""' 2> /dev/null || echo '')"
-                  if [[ -n "${BASE_PR_HEAD}" ]]; then
-                    BASE_NOT_GREEN="$(gh api --paginate "repos/${REPO}/commits/${BASE_PR_HEAD}/check-runs" \
-                      --jq '[.check_runs[] | select(.conclusion | IN("failure","error","timed_out","action_required","cancelled","stale")) | .name]' 2> /dev/null \
-                      | jq -c -s 'add // [] | unique')" || BASE_NOT_GREEN='[]'
-                  fi
-                fi
+                # CANCELLED is deliberately omitted from the PR-side selector:
+                # a cancelled check is not evidence of a stale base.
                 STALE_BASE_REDS="$(jq -c -n \
-                  --argjson checks "${CHECKS_JSON}" --argjson green "${MAIN_GREEN_CHECKS}" --argjson basered "${BASE_NOT_GREEN}" '
+                  --argjson checks "${CHECKS_JSON}" --argjson green "${MAIN_GREEN_CHECKS}" '
                   [ $checks[]
                     | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
                     | select((.workflowName // "") != "Qwen Autofix")
                     | (.name // .workflowName // "")
-                    | select(. != "" and (. as $n | $green | index($n)) and (. as $n | $basered | index($n))) ]')"
+                    | select(. != "" and (. as $n | $green | index($n))) ]')" || STALE_BASE_REDS='[]'
                 if [[ "${STALE_BASE_REDS}" != '[]' ]]; then
                   # Repetition guard: a marker comment bounds re-updates to
                   # once per 2 hours (CI takes ~40 min; main moves ~13 min).
@@ -2155,7 +2144,7 @@ jobs:
                   if [[ "${BASE_UPDATE_RECENT}" != "true" ]]; then
                     RED_NAMES="$(jq -r 'join(", ")' <<< "${STALE_BASE_REDS}")"
                     if [[ "${DRY_RUN}" == "true" ]]; then
-                      echo "🧪 DRY-RUN: would update stale base on #${PR} (red [${RED_NAMES}] green on main ${MAIN_HEAD:0:9}, red at base)"
+                      echo "🧪 DRY-RUN: would update stale base on #${PR} (red [${RED_NAMES}] green on main ${MAIN_HEAD:0:9})"
                       fleet_row "${PR}" 'dry-run-base' "would merge main (stale-base red [${RED_NAMES}])"
                       continue
                     fi
@@ -2164,9 +2153,9 @@ jobs:
                     # GitHub rejects it rather than merging main into an
                     # unverified head.
                     if UPDATE_ERR="$(gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${PR_HEAD_OID}" 2>&1 >/dev/null)"; then
-                      echo "🔀 #${PR}: red check(s) [${RED_NAMES}] pass on current main ${MAIN_HEAD:0:9} but failed at the base this PR carries — merged main in via update-branch; CI will re-run"
+                      echo "🔀 #${PR}: red check(s) [${RED_NAMES}] pass on current main ${MAIN_HEAD:0:9} — merged main in via update-branch; CI will re-run"
                       fleet_row "${PR}" 'base-updated' "stale-base red [${RED_NAMES}] — merged current main, CI re-running"
-                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔀 Base updated: red check(s) [%s] pass on current main but failed at the stale base this PR carried — merged current main via update-branch; CI will re-run.\n\n<details>\n<summary>中文说明</summary>\n\n🔀 已更新 base：红色检查 [%s] 在当前 main 上通过，但在本 PR 携带的旧 base 上失败 —— 已通过 update-branch 合入当前 main，CI 将重新运行。\n\n</details>\n\n<!-- autofix-base-updated -->' "${RED_NAMES}" "${RED_NAMES}")" > /dev/null 2>&1 || true
+                      gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '🔀 Base updated: red check(s) [%s] pass on current main — merged current main via update-branch; CI will re-run.\n\n<details>\n<summary>中文说明</summary>\n\n🔀 已更新 base：红色检查 [%s] 在当前 main 上通过 —— 已通过 update-branch 合入当前 main，CI 将重新运行。\n\n</details>\n\n<!-- autofix-base-updated -->' "${RED_NAMES}" "${RED_NAMES}")" > /dev/null 2>&1 || true
                       continue
                     else
                       echo "⚠️ #${PR}: wanted to update the stale base (red [${RED_NAMES}] green on main) but update-branch failed: ${UPDATE_ERR:-unknown error}"
