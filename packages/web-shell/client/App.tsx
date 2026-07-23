@@ -195,7 +195,6 @@ import {
   TasksStatusMessage,
   type SerializedTasksMessage,
 } from './components/messages/TasksStatusMessage';
-import { isBackgroundSubAgentToolCall } from './adapters/toolClassification';
 import { serializeContextUsageMessage } from './components/messages/ContextUsageMessage';
 import {
   serializeStatsMessage,
@@ -946,15 +945,14 @@ function isBackgroundShellToolCall(tool: ACPToolCall): boolean {
   );
 }
 
-function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
+export function getBackgroundTaskActivityKey(
+  messages: readonly Message[],
+): string {
   const parts: string[] = [];
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (
-        isBackgroundSubAgentToolCall(tool) ||
-        isBackgroundShellToolCall(tool)
-      ) {
+      if (isBackgroundShellToolCall(tool)) {
         parts.push(`${tool.callId}:${tool.status}`);
       }
     }
@@ -2320,12 +2318,9 @@ export function App({
     () => getBackgroundTaskActivityKey(messages),
     [messages],
   );
-  const [backgroundTasksRefreshTrigger, setBackgroundTasksRefreshTrigger] =
-    useState(0);
   const backgroundTasks = useBackgroundTasks(
     backgroundTaskActivityKey,
     connection.status === 'connected',
-    backgroundTasksRefreshTrigger,
   );
   const footerTasks = useMemo(
     () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
@@ -5163,7 +5158,6 @@ export function App({
                   pushToast('warning', t('fork.notStarted'));
                   return;
                 }
-                setBackgroundTasksRefreshTrigger((value) => value + 1);
                 pushToast(
                   'success',
                   t('fork.started', { name: result.description }),
@@ -8136,7 +8130,14 @@ export function App({
                 </DrawerContent>
               </Drawer>
             ) : artifactPanelOpen ? (
-              <>
+              <div
+                className={styles.artifactPanelDock}
+                style={
+                  {
+                    '--artifact-panel-dock-width': `${artifactPanelWidth + 4}px`,
+                  } as CSSProperties
+                }
+              >
                 <div
                   className={styles.artifactResizeHandle}
                   role="separator"
@@ -8146,22 +8147,24 @@ export function App({
                   aria-valuenow={artifactPanelWidth}
                   onPointerDown={handleArtifactPanelResizeStart}
                 />
-                <ArtifactPanel
-                  artifacts={artifactPanelArtifacts}
-                  tabs={artifactPanelTabs}
-                  activeTabId={activeArtifactPanelTabId}
-                  reviewChanges={reviewChanges}
-                  selectedReviewPath={selectedReviewPath}
-                  panelWidth={artifactPanelWidth}
-                  workspaceCwd={connection.workspaceCwd || ''}
-                  loading={artifactsLoading}
-                  error={artifactsError}
-                  onSelectTab={setActiveArtifactPanelTabId}
-                  onCloseTab={closeArtifactPanelTab}
-                  onOpenFilePreview={openFilePreview}
-                  onClose={closeArtifactPanel}
-                />
-              </>
+                <div className={styles.artifactPanelClip}>
+                  <ArtifactPanel
+                    artifacts={artifactPanelArtifacts}
+                    tabs={artifactPanelTabs}
+                    activeTabId={activeArtifactPanelTabId}
+                    reviewChanges={reviewChanges}
+                    selectedReviewPath={selectedReviewPath}
+                    panelWidth={artifactPanelWidth}
+                    workspaceCwd={connection.workspaceCwd || ''}
+                    loading={artifactsLoading}
+                    error={artifactsError}
+                    onSelectTab={setActiveArtifactPanelTabId}
+                    onCloseTab={closeArtifactPanelTab}
+                    onOpenFilePreview={openFilePreview}
+                    onClose={closeArtifactPanel}
+                  />
+                </div>
+              </div>
             ) : null}
           </div>
         </div>
