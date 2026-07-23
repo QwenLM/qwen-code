@@ -1,9 +1,10 @@
 name: 'Repo Hygiene Patrol'
 
 # Weekly consolidated hygiene PR (see issue #7383): the agent scans for small,
-# certain docs/test/code hygiene issues and commits fixes on ONE branch; the
-# workflow owns credentials, dedup, the independent verification gate, the
-# push, and PR creation. The agent never holds GitHub credentials.
+# certain docs/test/code hygiene issues and commits fixes on ONE branch.
+# Two-phase design: scan job (read-only, ~15min) produces findings.json as an
+# artifact; fix job (write, ~25min) reads it, fixes, and pushes the PR.
+# Splitting keeps each phase within the model's tool-call budget.
 
 on:
   schedule:
@@ -15,17 +16,17 @@ on:
         required: false
         type: 'boolean'
         default: false
-      mode:
-        description: 'scan-and-fix (default), scan (findings only), fix (use previous scan artifact)'
+      phase:
+        description: 'both (default), scan-only, fix-only (needs scan_run_id)'
         required: false
         type: 'choice'
         options:
-          - 'scan-and-fix'
+          - 'both'
           - 'scan'
           - 'fix'
-        default: 'scan-and-fix'
+        default: 'both'
       scan_run_id:
-        description: 'Run ID of a previous scan-only run (required for fix mode)'
+        description: 'Run ID of a previous scan run (required for fix-only)'
         required: false
         type: 'string'
         default: ''
@@ -42,22 +43,22 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  # The hygiene PR is authored by this bot, same identity as Qwen Autofix.
   AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
   WORKDIR: '/tmp/hygiene'
 
 jobs:
-  patrol:
-    name: 'Scan and fix'
-    if: "${{ github.repository == 'ZijianZhang989/qwen-code' }}"
+  # ── Phase 1: Scan (read-only, no code changes) ──────────────────────────
+  scan:
+    name: 'Scan'
+    if: |
+      github.repository == 'ZijianZhang989/qwen-code' &&
+      (github.event_name != 'workflow_dispatch' || inputs.phase != 'fix')
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 150
+    timeout-minutes: 60
     permissions:
       contents: 'read'
     env:
       REPO: '${{ github.repository }}'
-      DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}"
-      MODE: "${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'scan-and-fix' }}"
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -70,37 +71,182 @@ jobs:
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
 
-      # The verify gate always runs the trusted checkout's copy of the schema
-      # gate and package resolver, never a working-tree copy.
+      - name: 'Check bot credentials'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::CI_DEV_BOT_PAT is required.'
+            exit 1
+          fi
+          bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login')"
+          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+
+      - name: 'Install dependencies and build'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then exit 1; fi
+            sleep $((attempt * 15))
+          done
+          git config core.hooksPath .husky
+          npm run build
+          npm run bundle
+
+      - name: 'Prepare Qwen Code CLI'
+        run: |-
+          qwen_version="$(node -p "require('./package.json').version")"
+          echo "Using checked-out Qwen Code bundle ${qwen_version}"
+          qwen_bin="${RUNNER_TEMP}/qwen-bin"
+          mkdir -p "${qwen_bin}"
+          cat > "${qwen_bin}/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          EOF
+          chmod +x "${qwen_bin}/qwen"
+          echo "${qwen_bin}" >> "${GITHUB_PATH}"
+          PATH="${qwen_bin}:${PATH}"
+          qwen --version
+
+      - name: 'Run scan agent'
+        id: 'scan'
+        env:
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
+          OPENAI_MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
+          QWEN_HOME: '${{ runner.temp }}/qwen-hygiene-home'
+          SETTINGS_JSON: |-
+            {
+              "maxSessionTurns": 400,
+              "coreTools": [
+                "read_file",
+                "read_many_files",
+                "glob",
+                "search_file_content",
+                "write_file",
+                "run_shell_command(cat)",
+                "run_shell_command(rg)",
+                "run_shell_command(git diff)",
+                "run_shell_command(git log)",
+                "run_shell_command(git status)",
+                "run_shell_command(ls)",
+                "run_shell_command(pwd)"
+              ],
+              "tools": {
+                "sandbox": "docker"
+              }
+            }
+        run: |-
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required.'
+            exit 1
+          fi
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          rm -f "${WORKDIR}/failure.md"
+          node .qwen/skills/repo-hygiene/scripts/run-agent.mjs \
+            --mode scan \
+            --workdir "${WORKDIR}"
+
+      - name: 'Upload scan findings'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'scan-findings'
+          path: |
+            ${{ env.WORKDIR }}/findings.json
+            ${{ env.WORKDIR }}/report-only.md
+          if-no-files-found: 'warn'
+          retention-days: 7
+
+  # ── Phase 2: Fix (write code, push PR) ──────────────────────────────────
+  fix:
+    name: 'Fix'
+    if: |
+      github.repository == 'ZijianZhang989/qwen-code' &&
+      (github.event_name != 'workflow_dispatch' || inputs.phase != 'scan') &&
+      (needs.scan.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.phase == 'fix'))
+    needs: 'scan'
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 90
+    permissions:
+      contents: 'read'
+    env:
+      REPO: '${{ github.repository }}'
+      DRY_RUN: "${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || false }}"
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: 'Reset hygiene workspace'
+        run: |-
+          rm -rf "${WORKDIR}"
+          mkdir -p "${WORKDIR}"
+
       - name: 'Stage trusted gates'
         run: |-
           cp .github/scripts/check-settings-schema.sh "${RUNNER_TEMP}/check-settings-schema.sh"
           cp .github/scripts/resolve-owning-packages.sh "${RUNNER_TEMP}/resolve-owning-packages.sh"
+
+      - name: 'Download scan findings'
+        uses: 'actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c' # v8.0.1
+        with:
+          name: 'scan-findings'
+          path: '${{ env.WORKDIR }}'
+        if: "${{ github.event_name != 'workflow_dispatch' || inputs.phase != 'fix' }}"
+
+      - name: 'Download scan findings from previous run'
+        if: "${{ github.event_name == 'workflow_dispatch' && inputs.phase == 'fix' }}"
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          SCAN_RUN_ID="${{ inputs.scan_run_id }}"
+          if [[ -z "${SCAN_RUN_ID}" ]]; then
+            echo '::error::scan_run_id is required for fix-only mode.'
+            exit 1
+          fi
+          echo "Downloading findings from run ${SCAN_RUN_ID}..."
+          gh run download "${SCAN_RUN_ID}" --repo "${REPO}" -D "${WORKDIR}/dl"
+          cp "${WORKDIR}/dl/scan-findings/findings.json" "${WORKDIR}/findings.json"
+
+      - name: 'Validate findings'
+        run: |-
+          if [[ ! -s "${WORKDIR}/findings.json" ]]; then
+            echo '::error::findings.json not found or empty.'
+            exit 1
+          fi
+          echo "Findings: $(jq '.fixes | length' "${WORKDIR}/findings.json") fixes, $(jq '.reportOnly | length' "${WORKDIR}/findings.json") report-only."
 
       - name: 'Check bot credentials'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
           if [[ -z "${GITHUB_TOKEN}" ]]; then
-            echo '::error::CI_DEV_BOT_PAT is required to run the repo-hygiene job.'
+            echo '::error::CI_DEV_BOT_PAT is required.'
             exit 1
           fi
-          api_error_file="$(mktemp)"
-          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
-            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
-            rm -f "${api_error_file}"
-            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
-            exit 1
-          fi
-          rm -f "${api_error_file}"
-          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+          bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login')"
           if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
             echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
             exit 1
           fi
 
-      # One open hygiene PR at a time: last week's batch must be reviewed (or
-      # closed) before a new one is created, so review load stays bounded.
       - name: 'Skip when a hygiene PR is already open'
         id: 'dedup'
         env:
@@ -108,7 +254,7 @@ jobs:
         run: |-
           OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --search 'repo-hygiene in:title' --json number --jq 'map(.number) | join(", ")')"
           if [[ -n "${OPEN_PRS}" ]]; then
-            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still open; skipping this run."
+            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still open; skipping."
             echo 'open_prs_present=true' >> "${GITHUB_OUTPUT}"
           else
             echo 'open_prs_present=false' >> "${GITHUB_OUTPUT}"
@@ -121,10 +267,7 @@ jobs:
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
             github-hosted) ;;
-            *)
-              echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
-              exit 1
-              ;;
+            *) echo "::error::Unsupported runner environment."; exit 1 ;;
           esac
 
       - name: 'Set up Node.js'
@@ -141,12 +284,8 @@ jobs:
           QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
-            if npm ci --prefer-offline --no-audit --progress=false; then
-              break
-            fi
-            if [[ "${attempt}" == "3" ]]; then
-              exit 1
-            fi
+            if npm ci --prefer-offline --no-audit --progress=false; then break; fi
+            if [[ "${attempt}" == "3" ]]; then exit 1; fi
             sleep $((attempt * 15))
           done
           git config core.hooksPath .husky
@@ -156,8 +295,6 @@ jobs:
       - name: 'Prepare Qwen Code CLI'
         if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
         run: |-
-          qwen_version="$(node -p "require('./package.json').version")"
-          echo "Using checked-out Qwen Code bundle ${qwen_version}"
           qwen_bin="${RUNNER_TEMP}/qwen-bin"
           mkdir -p "${qwen_bin}"
           cat > "${qwen_bin}/qwen" <<'EOF'
@@ -170,33 +307,12 @@ jobs:
           qwen --version
 
       - name: 'Resolve branch name'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' && env.MODE != 'scan' }}"
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
         id: 'branch'
         run: |-
           echo "name=hygiene/$(date -u +%Y%m%d-%H%M)" >> "${GITHUB_OUTPUT}"
 
-      - name: 'Download scan findings (fix mode only)'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' && env.MODE == 'fix' }}"
-        env:
-          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          SCAN_RUN_ID: "${{ inputs.scan_run_id }}"
-        run: |-
-          if [[ -z "${SCAN_RUN_ID}" ]]; then
-            echo '::error::scan_run_id is required when mode=fix.'
-            exit 1
-          fi
-          echo "Downloading findings from run ${SCAN_RUN_ID}..."
-          gh run download "${SCAN_RUN_ID}" --repo "${REPO}" -D "${WORKDIR}/dl"
-          if [[ ! -s "${WORKDIR}/dl/repo-hygiene-artifacts/findings.json" ]]; then
-            echo '::error::findings.json not found in scan artifact.'
-            exit 1
-          fi
-          cp "${WORKDIR}/dl/repo-hygiene-artifacts/findings.json" "${WORKDIR}/findings.json"
-          echo "Findings downloaded. $(jq '.fixes | length' "${WORKDIR}/findings.json") fixes, $(jq '.reportOnly | length' "${WORKDIR}/findings.json") report-only."
-
-      # The agent scans, selects, fixes, commits, and writes outputs. It holds
-      # no GitHub token — all network writes happen in the publish step below.
-      - name: 'Run hygiene agent'
+      - name: 'Run fix agent'
         if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
         id: 'agent'
         env:
@@ -239,22 +355,16 @@ jobs:
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
-          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
-            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for the repo-hygiene agent.'
-            exit 1
-          fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/failure.md"
           node .qwen/skills/repo-hygiene/scripts/run-agent.mjs \
-            --mode "${MODE}" \
+            --mode fix \
             --workdir "${WORKDIR}" \
-            ${{ env.MODE != 'scan' && format('--branch {0}', steps.branch.outputs.name) || '' }}
+            --branch "${{ steps.branch.outputs.name }}"
 
-      # Structural gate: decide what the agent produced and enforce limits
-      # before any verification or publishing happens. failure.md or a
-      # contract violation fails the run; no branch/diff is a quiet skip.
+      # Gate: verify agent output before pushing
       - name: 'Gate on agent outcome'
-        if: "${{ steps.dedup.outputs.open_prs_present == 'false' && env.MODE != 'scan' }}"
+        if: "${{ steps.dedup.outputs.open_prs_present == 'false' }}"
         id: 'gate'
         run: |-
           BRANCH="${{ steps.branch.outputs.name }}"
@@ -274,67 +384,54 @@ jobs:
           git checkout "${BRANCH}"
 
           if git diff --quiet origin/main..."${BRANCH}"; then
-            echo 'Branch has no changes against main — no accepted fixes this run.'
+            echo 'Branch has no changes against main.'
             echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
             exit 0
           fi
 
           if [[ -n "$(git status --porcelain)" ]]; then
-            echo '❌ Working tree is dirty after the agent run; uncommitted leftovers would contaminate verification:'
+            echo '❌ Working tree is dirty:'
             git status --short
             exit 1
           fi
 
           for f in pr-title.txt pr-body.md; do
             if [[ ! -s "${WORKDIR}/${f}" ]]; then
-              echo "❌ Branch has commits but ${f} is missing from ${WORKDIR}"
+              echo "❌ Branch has commits but ${f} is missing"
               exit 1
             fi
           done
 
-          # Impact-scope gate (skill scope limits): no single commit may
-          # touch more than 3 files or more than 100 lines of production
-          # code. A hit means the agent broke contract: fail the run.
           MAX_FILES_PER_FIX='3'
           MAX_LINES_PER_FIX='100'
           while IFS= read -r sha; do
             FILES="$(git diff-tree --no-commit-id --name-only -r "${sha}" | wc -l | tr -d ' ')"
             if [[ "${FILES}" -gt "${MAX_FILES_PER_FIX}" ]]; then
-              echo "❌ Commit ${sha:0:7} touches ${FILES} files; per-fix cap is ${MAX_FILES_PER_FIX}."
+              echo "❌ Commit ${sha:0:7} touches ${FILES} files; cap is ${MAX_FILES_PER_FIX}."
               exit 1
             fi
             LINES="$(git diff-tree --no-commit-id --numstat -r "${sha}" | awk '{a+=$1; d+=$2} END {print a+d+0}')"
             if [[ "${LINES}" -gt "${MAX_LINES_PER_FIX}" ]]; then
-              echo "❌ Commit ${sha:0:7} has ${LINES} diff lines; per-fix cap is ${MAX_LINES_PER_FIX}."
+              echo "❌ Commit ${sha:0:7} has ${LINES} diff lines; cap is ${MAX_LINES_PER_FIX}."
               exit 1
             fi
           done < <(git rev-list origin/main.."${BRANCH}")
 
           COMMITS="$(git rev-list --count origin/main.."${BRANCH}")"
           echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
-
-          TOTAL="$(git diff --numstat origin/main..."${BRANCH}" | awk '{a+=$1; d+=$2} END {print a+d+0}')"
-          echo "total_diff_lines=${TOTAL}" >> "${GITHUB_OUTPUT}"
-
           echo 'result=fixes' >> "${GITHUB_OUTPUT}"
 
-      # Deterministic re-verification, independent of the agent. Full
-      # regression is covered by regular CI on the PR after the push.
-      # If typecheck fails, auto-revert the last commit and retry until
-      # clean — this salvages good fixes while discarding bad ones.
+      # Verification with auto-revert
       - name: 'Independent verification'
         if: "${{ steps.gate.outputs.result == 'fixes' }}"
         id: 'verify'
         run: |-
-          # Phase 1: typecheck with auto-revert on failure.
           REVERTED=0
           while true; do
-            if npm run typecheck 2>/dev/null; then
-              break
-            fi
+            if npm run typecheck 2>/dev/null; then break; fi
             COMMITS_LEFT="$(git rev-list --count origin/main..HEAD)"
             if [[ "${COMMITS_LEFT}" -le 0 ]]; then
-              echo '❌ All commits reverted — no fixes survived typecheck.'
+              echo '❌ All commits reverted.'
               echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
               exit 0
             fi
@@ -344,7 +441,7 @@ jobs:
             REVERTED=$((REVERTED + 1))
           done
           if [[ "${REVERTED}" -gt 0 ]]; then
-            echo "⚠️  Reverted ${REVERTED} commit(s) that broke typecheck."
+            echo "⚠️  Reverted ${REVERTED} commit(s)."
             COMMITS="$(git rev-list --count origin/main..HEAD)"
             echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
             if [[ "${COMMITS}" -eq 0 ]]; then
@@ -352,29 +449,20 @@ jobs:
               exit 0
             fi
           fi
-
-          # Phase 2: full build + lint + schema check + package tests.
           npm run build
           npm run lint
-
           bash "${RUNNER_TEMP}/check-settings-schema.sh"
 
           CHANGED_PKGS="$(git diff --name-only origin/main...HEAD \
             | bash "${RUNNER_TEMP}/resolve-owning-packages.sh")"
           if [[ -z "${CHANGED_PKGS}" ]]; then
-            echo 'No package changes detected; skipping package tests.'
+            echo 'No package changes detected; skipping tests.'
           else
             for p in ${CHANGED_PKGS}; do
-              if [[ ! -f "${p}/package.json" ]]; then
-                echo "Skipping ${p}: no package.json."
-                continue
-              fi
+              if [[ ! -f "${p}/package.json" ]]; then continue; fi
               test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
-              if [[ "${test_script}" != *vitest* ]]; then
-                echo "Skipping ${p}: test script is not Vitest."
-                continue
-              fi
-              echo "🧪 Testing ${p} (changed files only)..."
+              if [[ "${test_script}" != *vitest* ]]; then continue; fi
+              echo "🧪 Testing ${p}..."
               npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
             done
           fi
@@ -383,36 +471,20 @@ jobs:
         if: "${{ steps.gate.outputs.result == 'fixes' && env.DRY_RUN != 'true' }}"
         id: 'publish'
         env:
-          # CI_DEV_BOT_PAT opens the PR as the hygiene bot: the default
-          # GITHUB_TOKEN is blocked from creating PRs, and PRs it does create
-          # do not trigger CI.
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
         run: |-
           MODEL_DISPLAY="${MODEL:-default}"
-          if [[ -z "${GITHUB_TOKEN}" ]]; then
-            echo '::error::CI_DEV_BOT_PAT is required to publish the PR as the hygiene bot.'
-            exit 1
-          fi
-          api_error_file="$(mktemp)"
-          if ! publish_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
-            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
-            rm -f "${api_error_file}"
-            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
-            exit 1
-          fi
-          rm -f "${api_error_file}"
-          echo "CI_DEV_BOT_PAT authenticates as ${publish_actor}"
-          if [[ "${publish_actor}" != "${AUTOFIX_BOT}" ]]; then
-            echo "::error::CI_DEV_BOT_PAT authenticates as ${publish_actor}; expected ${AUTOFIX_BOT}."
-            exit 1
-          fi
-
           BRANCH="${{ steps.branch.outputs.name }}"
-          git config --local --unset-all http.https://github.com/.extraheader || true
-          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          git config core.hooksPath /dev/null
-          git push --no-verify origin "${BRANCH}"
+          git push origin "${BRANCH}"
+
+          if [[ -s "${WORKDIR}/pr-body.md" ]]; then
+            {
+              echo
+              echo "---"
+              echo "🧠 Scanned and fixed by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
+            } >> "${WORKDIR}/pr-body.md"
+          fi
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -420,8 +492,6 @@ jobs:
             --body-file "${WORKDIR}/pr-body.md")"
           echo "🚀 Opened ${PR_URL}"
 
-          # Report-only findings (high-risk paths the agent must not touch)
-          # ride along as a PR comment so maintainers still see them.
           if [[ -s "${WORKDIR}/report-only.md" ]]; then
             {
               echo
@@ -437,16 +507,14 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
           if [[ ! -s "${WORKDIR}/findings.json" ]]; then
-            echo 'No findings.json — skipping issue creation.'
+            echo 'No findings.json — skipping.'
             exit 0
           fi
           COUNT="$(jq '.reportOnly | length' "${WORKDIR}/findings.json")"
           if [[ "${COUNT}" -eq 0 ]]; then
-            echo 'No report-only findings — skipping issue creation.'
+            echo 'No report-only findings — skipping.'
             exit 0
           fi
-
-          # Deduplicate: skip if an open issue with matching title already exists.
           ISSUE_TITLE="[repo-hygiene] $(date -u '+%Y-W%V') report-only findings (${COUNT} items)"
           EXISTING="$(GH_TOKEN="${GITHUB_TOKEN}" gh issue list \
             --repo "${REPO}" \
@@ -454,11 +522,9 @@ jobs:
             --search "repo-hygiene report-only in:title" \
             --json number --jq 'length')"
           if [[ "${EXISTING}" -gt 0 ]]; then
-            echo "Open report-only issue already exists; skipping (deduplicate manually)."
+            echo "Open report-only issue exists; skipping."
             exit 0
           fi
-
-          # Build issue body from findings.json
           BODY="$(jq -r '
             .reportOnly | to_entries[] |
             "## \(.value.id)\n\n" +
@@ -467,10 +533,8 @@ jobs:
             "**Why real**: \(.value.whyReal)\n\n" +
             "**Suggested fix**: \(.value.minimalFix)\n"
           ' "${WORKDIR}/findings.json")"
-
           FULL_BODY="$(printf '%s\n\n---\n\n_Auto-generated by repo-hygiene patrol on %s._\n' \
             "${BODY}" "$(date -u '+%Y-%m-%d')")"
-
           GH_TOKEN="${GITHUB_TOKEN}" gh issue create \
             --repo "${REPO}" \
             --title "${ISSUE_TITLE}" \
@@ -478,51 +542,11 @@ jobs:
             --label "bug"
           echo "📋 Filed ${COUNT} report-only findings as issue."
 
-      - name: 'Collect run artifacts'
-        if: 'always()'
-        run: |-
-          BRANCH="${{ steps.branch.outputs.name }}"
-          if [[ -n "${BRANCH}" ]] && git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
-            git diff "origin/main...${BRANCH}" > "${WORKDIR}/fix.diff" || true
-          fi
-          for f in findings.json pr-title.txt pr-body.md report-only.md failure.md fix.diff; do
-            if [[ -f "${WORKDIR}/${f}" ]]; then
-              echo "=============== ${f} ==============="
-              cat "${WORKDIR}/${f}"
-              echo
-            fi
-          done
-
       - name: 'Upload run artifacts'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'repo-hygiene-artifacts'
+          name: 'fix-artifacts'
           path: '${{ env.WORKDIR }}'
           if-no-files-found: 'ignore'
           retention-days: 14
-
-      - name: 'Write run summary'
-        if: 'always()'
-        run: |-
-          RESULT="${{ steps.gate.outputs.result }}"
-          if [[ "${{ steps.dedup.outputs.open_prs_present }}" == 'true' ]]; then
-            RESULT='skipped (open hygiene PR exists)'
-          elif [[ -z "${RESULT}" ]]; then
-            RESULT='unknown (run ended before the gate)'
-          fi
-          SUFFIX=''
-          [[ "${DRY_RUN}" == 'true' ]] && SUFFIX=' (dry-run, nothing pushed)'
-          {
-            echo "### Repo hygiene patrol — ${RESULT}${SUFFIX}"
-            echo
-            for f in findings.json pr-title.txt pr-body.md report-only.md failure.md fix.diff; do
-              if [[ -s "${WORKDIR}/${f}" ]]; then
-                echo "**${f}:**"
-                echo '```'
-                cat "${WORKDIR}/${f}"
-                echo '```'
-                echo
-              fi
-            done
-          } >> "${GITHUB_STEP_SUMMARY}"
