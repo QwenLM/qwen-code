@@ -57,7 +57,7 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from '../../utils/tool-response-finalizer.js';
-import { FinishReason } from '@google/genai';
+import { FinishReason } from '../../core/genai-compat.js';
 import type {
   Content,
   Part,
