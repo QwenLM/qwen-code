@@ -413,7 +413,14 @@ describe('qwen-autofix workflow', () => {
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
 
-    const run = ({ checks, annotations, attempt = 1, rerunOk = true }) => {
+    const run = ({
+      checks,
+      annotations,
+      attempt = 1,
+      rerunOk = true,
+      crName = 'E2E',
+      wfName = 'CI',
+    }) => {
       const dir = mkdtempSync(join(tmpdir(), 'infra-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
@@ -421,12 +428,12 @@ describe('qwen-autofix workflow', () => {
       // annotations → the given message; runs/{id} → run_attempt; POST
       // rerun-failed-jobs → success/fail. Records the rerun POST.
       // The workflow calls check-runs with a --jq filter that yields, per
-      // failed check-run WITH annotations, a `<id>\t<details_url>` line; the
-      // stub emits what that filter would produce (a single line when there is
-      // an annotation, nothing otherwise) rather than raw JSON the stub can't
-      // filter.
+      // failed check-run WITH annotations, a `<id>\t<details_url>\t<name>`
+      // line; the stub emits what that filter would produce (a single line
+      // when there is an annotation, nothing otherwise) rather than raw JSON
+      // the stub can't filter.
       const crTsv = annotations
-        ? '42\thttps://github.com/o/r/actions/runs/9001/job/5\n'
+        ? `42\thttps://github.com/o/r/actions/runs/9001/job/5\t${crName}\n`
         : '';
       writeFileSync(
         join(bin, 'gh'),
@@ -440,7 +447,7 @@ describe('qwen-autofix workflow', () => {
           `  *"/commits/"*"/check-runs"*) printf '%b' ${JSON.stringify(crTsv)}; exit 0;;`,
           `  *"/check-runs/42/annotations"*) printf '%s' ${JSON.stringify(annotations || '')}; exit 0;;`,
           `  *"/actions/runs/9001"*"rerun-failed-jobs"*) exit ${rerunOk ? 0 : 1};;`,
-          `  *"/actions/runs/9001"*) printf '${attempt}'; exit 0;;`,
+          `  *"/actions/runs/9001"*) printf '${attempt}\\t${wfName}'; exit 0;;`,
           'esac',
           'exit 0',
         ].join('\n'),
@@ -578,6 +585,28 @@ describe('qwen-autofix workflow', () => {
           },
         ],
         annotations: 'No space left on device',
+      }),
+    ).toEqual({ reran: true, continued: true });
+    // In-loop self-trigger guard: the gate above blocks a PR whose ONLY
+    // failed check is Qwen Autofix, but when a non-Autofix check ALSO failed
+    // the gate passes and FAILED_CRS returns ALL failed check-runs — the
+    // in-loop filter must skip the Autofix run so it cannot consume the
+    // single rerun slot.
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        wfName: 'Qwen Autofix',
+      }),
+    ).toEqual({ reran: false, continued: false });
+    // …but a review-address job from the Autofix workflow IS rerun (the
+    // exception carved out in both the gate and the in-loop filter).
+    expect(
+      run({
+        checks: [FAIL],
+        annotations: 'No space left on device',
+        crName: 'review-address issue-123',
+        wfName: 'Qwen Autofix',
       }),
     ).toEqual({ reran: true, continued: true });
     // Spawn-heavy: each run() forks bash + a stubbed gh. The default 5s per-test
