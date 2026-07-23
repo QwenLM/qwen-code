@@ -8921,6 +8921,143 @@ describe('createServeApp', () => {
       }
     });
 
+    it('rollback skips branch deletion when the base-ref checkout fails', async () => {
+      const rollbackCalls: string[] = [];
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new Error('spawn failed');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+      mockBranchOps.checkoutRef = () => {
+        rollbackCalls.push('checkout');
+        return Promise.reject(new Error('checkout failed'));
+      };
+      mockBranchOps.deleteBranch = () => {
+        rollbackCalls.push('delete');
+        return Promise.resolve();
+      };
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(500);
+        expect(rollbackCalls).toContain('checkout');
+        // The workspace is still on the new branch, so deleting it is
+        // skipped; an orphaned branch is preferred over relying on git's
+        // checked-out-branch protection.
+        expect(rollbackCalls).not.toContain('delete');
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.checkoutRef = undefined;
+        mockBranchOps.deleteBranch = undefined;
+      }
+    });
+
+    it('400 on branch names containing whitespace or control characters', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+
+      // The server-side whitelist only permits Unicode letters/numbers and
+      // `._/-`; everything git forbids (whitespace, control chars, DEL, and
+      // `~^:?*[`) is rejected before any git operation runs.
+      const names = [
+        'foo bar',
+        `foo${String.fromCharCode(9)}bar`, // tab
+        `foo${String.fromCharCode(10)}bar`, // newline
+        `foo${String.fromCharCode(0)}bar`, // NUL
+        `foo${String.fromCharCode(31)}bar`, // control
+        `foo${String.fromCharCode(127)}bar`, // DEL
+        'foo~bar',
+        'foo^bar',
+        'foo:bar',
+        'foo?bar',
+        'foo*bar',
+        'foo[bar',
+      ];
+      for (const name of names) {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name } });
+        expect(res.status).toBe(400);
+        expect(res.body.code).toBe('branch_invalid_name');
+      }
+      // Validation rejects before any spawn, so the raw git error (which can
+      // include workspace paths) never reaches the caller as a 500.
+      expect(bridge.calls).toHaveLength(0);
+    });
+
+    it('self-heals a stale branch entry when the prior session is gone (no spurious 409)', async () => {
+      const reaped = new Set<string>();
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId: string) => {
+          if (reaped.has(sessionId)) {
+            throw new SessionNotFoundError(sessionId);
+          }
+          return {
+            sessionId,
+            workspaceCwd: WS_BOUND,
+            attached: true,
+            clientId: 'client-0',
+          };
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const first = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/first' } });
+        expect(first.status).toBe(200);
+
+        // Simulate the branch session being reaped without an explicit
+        // DELETE (channel exited -> the bridge drops it from its map), so
+        // getSessionSummary now throws for it.
+        reaped.add(first.body.sessionId);
+
+        // The next branch POST must transparently clean the stale entry and
+        // proceed, not surface a spurious 409 that needs a client retry.
+        const second = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/second' } });
+        expect(second.status).toBe(200);
+        expect(second.body.code).toBeUndefined();
+        expect(second.body.sessionId).not.toBe(first.body.sessionId);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
     it('409 when a branch session is already active for the workspace', async () => {
       const bridge = fakeBridge({
         summaryImpl: (sessionId: string) => ({

@@ -424,14 +424,23 @@ export function registerSessionRoutes(
   ): Promise<void> => {
     activeBranchSessions.delete(cwd);
     inFlightBranchWorkspaces.delete(cwd);
-    await checkoutRef(
+    // Restore the base ref first and only delete the new branch once the
+    // workspace is off it: `git branch -D` refuses to delete the checked-out
+    // branch, so deleting unconditionally after a failed checkout would just
+    // fail and relies on that git-specific protection. An orphaned branch left
+    // behind here is harmless and cleanable with `git branch -D`.
+    const baseRestored = await checkoutRef(
       cwd,
       meta.baseBranch === 'HEAD' && baseCommit ? baseCommit : meta.baseBranch,
-    ).catch((rollbackErr) => {
-      log?.warn('branch rollback checkout failed', {
-        error: rollbackErr,
+    )
+      .then(() => true)
+      .catch((rollbackErr) => {
+        log?.warn('branch rollback checkout failed', {
+          error: rollbackErr,
+        });
+        return false;
       });
-    });
+    if (!baseRestored) return;
     await deleteBranch(cwd, meta.name).catch((rollbackErr) => {
       log?.warn('branch rollback delete failed', {
         error: rollbackErr,
