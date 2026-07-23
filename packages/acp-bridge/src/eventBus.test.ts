@@ -1209,4 +1209,215 @@ describe('EventBus', () => {
       abort.abort();
     });
   });
+
+  describe('epoch token (DAEMON-001)', () => {
+    it('exposes a stable per-instance epoch that differs across instances', () => {
+      const a = new EventBus();
+      const b = new EventBus();
+      expect(a.epoch).toBeTruthy();
+      expect(a.epoch).toBe(a.epoch);
+      expect(a.epoch).not.toBe(b.epoch);
+    });
+
+    it('forces epoch_reset resync with detail=epoch_mismatch when the presented epoch does not match', async () => {
+      // The numeric heuristic alone is defeated once the new epoch's event
+      // count catches up with the stale cursor: lastEventId 2 with 3 fresh
+      // events looks like a perfectly valid suffix resume. The epoch token
+      // makes staleness provable regardless of the numbers.
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 2,
+        epoch: 'dead-epoch-token',
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 full-ring replay frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(out[0]?.id).toBeUndefined();
+      const data = out[0]?.data as {
+        reason: string;
+        detail?: string;
+        lastDeliveredId: number;
+        earliestAvailableId: number;
+      };
+      expect(data.reason).toBe('epoch_reset');
+      expect(data.detail).toBe('epoch_mismatch');
+      expect(data.lastDeliveredId).toBe(2);
+      expect(data.earliestAvailableId).toBe(1);
+      // Full fresh-ring replay: the stale cursor must not filter low ids.
+      expect(out.slice(1, 4).map((e) => e.id)).toEqual([1, 2, 3]);
+      expect(out[4]?.type).toBe('replay_complete');
+      expect(out[4]?.data).toMatchObject({ replayedCount: 3 });
+      abort.abort();
+    });
+
+    it('resumes normally (no resync frame) when the presented epoch matches', async () => {
+      const bus = new EventBus(10);
+      for (let i = 1; i <= 3; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 1,
+        epoch: bus.epoch,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // 2 suffix replay frames + replay_complete = 3.
+        if (out.length === 3) break;
+      }
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      expect(out.slice(0, 2).map((e) => e.id)).toEqual([2, 3]);
+      expect(out[2]?.type).toBe('replay_complete');
+      abort.abort();
+    });
+
+    it('numeric-heuristic epoch_reset does NOT carry detail (only epoch-token mismatches do)', async () => {
+      // `detail` is the operator-facing discriminator between the two
+      // triggers — the heuristic path must not claim it.
+      const bus = new EventBus(10);
+      const abort = new AbortController();
+      const iter = bus.subscribe({ lastEventId: 5, signal: abort.signal });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + replay_complete (empty ring) = 2.
+        if (out.length === 2) break;
+      }
+      const data = out[0]?.data as { reason: string; detail?: string };
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(data.reason).toBe('epoch_reset');
+      expect(data.detail).toBeUndefined();
+      abort.abort();
+    });
+
+    it('ring_evicted resync does NOT carry detail either', async () => {
+      const bus = new EventBus(3);
+      for (let i = 1; i <= 5; i++) bus.publish({ type: 'foo', data: i });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        lastEventId: 1,
+        epoch: bus.epoch,
+        signal: abort.signal,
+      });
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        // resync + 3 surviving frames + replay_complete = 5.
+        if (out.length === 5) break;
+      }
+      const data = out[0]?.data as { reason: string; detail?: string };
+      expect(out[0]?.type).toBe('state_resync_required');
+      expect(data.reason).toBe('ring_evicted');
+      expect(data.detail).toBeUndefined();
+      abort.abort();
+    });
+
+    it('ignores a mismatching epoch when no lastEventId is presented (nothing to resume)', async () => {
+      // Without a cursor there is no stale state to protect — the fresh
+      // subscriber is live-only regardless of what epoch it presents.
+      const bus = new EventBus(10);
+      bus.publish({ type: 'foo', data: 1 });
+      const abort = new AbortController();
+      const iter = bus.subscribe({
+        epoch: 'dead-epoch-token',
+        signal: abort.signal,
+      });
+      setTimeout(() => bus.publish({ type: 'foo', data: 2 }), 0);
+      const out: BridgeEvent[] = [];
+      for await (const e of iter) {
+        out.push(e);
+        if (out.length === 1) break;
+      }
+      expect(out[0]?.type).toBe('foo');
+      expect(out[0]?.id).toBe(2);
+      expect(out.some((e) => e.type === 'state_resync_required')).toBe(false);
+      abort.abort();
+    });
+  });
+
+  describe('compaction degradation (DAEMON-008)', () => {
+    function makeEngine(
+      overrides: Partial<{
+        ingest: (event: BridgeEvent) => void;
+        seedReplayEvents: (events: BridgeEvent[]) => void;
+      }> = {},
+    ) {
+      return {
+        ingest: overrides.ingest ?? vi.fn(),
+        seedReplayEvents: overrides.seedReplayEvents ?? vi.fn(),
+        snapshot: () => ({
+          compactedTurns: [],
+          liveJournal: [],
+          lastEventId: 0,
+        }),
+        close: vi.fn(),
+      };
+    }
+
+    it('marks the snapshot degraded and fires onCompactionError exactly once when ingest throws', () => {
+      const onCompactionError = vi.fn();
+      const engine = makeEngine({
+        ingest: () => {
+          throw new Error('boom');
+        },
+      });
+      const bus = new EventBus(10, undefined, engine, { onCompactionError });
+
+      // publish() keeps its never-throws contract across repeated failures.
+      expect(() => bus.publish({ type: 'foo', data: 1 })).not.toThrow();
+      expect(() => bus.publish({ type: 'foo', data: 2 })).not.toThrow();
+
+      expect(onCompactionError).toHaveBeenCalledTimes(1);
+      expect((onCompactionError.mock.calls[0]![0] as Error).message).toBe(
+        'boom',
+      );
+      expect(bus.snapshotReplay()?.degraded).toBe(true);
+    });
+
+    it('marks the snapshot degraded when seedReplayEvents throws', () => {
+      const onCompactionError = vi.fn();
+      const engine = makeEngine({
+        seedReplayEvents: () => {
+          throw new Error('seed boom');
+        },
+      });
+      const bus = new EventBus(10, undefined, engine, { onCompactionError });
+
+      expect(() =>
+        bus.seedReplayEvents([{ type: 'foo', data: 1 }]),
+      ).not.toThrow();
+
+      expect(onCompactionError).toHaveBeenCalledTimes(1);
+      expect(bus.snapshotReplay()?.degraded).toBe(true);
+    });
+
+    it('does not mark degraded on the healthy path', () => {
+      const engine = makeEngine();
+      const bus = new EventBus(10, undefined, engine);
+      bus.publish({ type: 'foo', data: 1 });
+      expect(bus.snapshotReplay()?.degraded).toBeUndefined();
+    });
+
+    it('survives a throwing onCompactionError callback', () => {
+      const engine = makeEngine({
+        ingest: () => {
+          throw new Error('boom');
+        },
+      });
+      const bus = new EventBus(10, undefined, engine, {
+        onCompactionError: () => {
+          throw new Error('diagnostics blew up');
+        },
+      });
+      expect(() => bus.publish({ type: 'foo', data: 1 })).not.toThrow();
+      expect(bus.snapshotReplay()?.degraded).toBe(true);
+    });
+  });
 });

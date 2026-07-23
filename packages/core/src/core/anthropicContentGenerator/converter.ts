@@ -114,16 +114,14 @@ export interface ConvertGeminiRequestToAnthropicOptions {
 }
 
 export class AnthropicContentConverter {
-  private model: string;
   private schemaCompliance: SchemaComplianceMode;
   private enableCacheControl: boolean;
 
   constructor(
-    model: string,
+    _model: string,
     schemaCompliance: SchemaComplianceMode = 'auto',
     enableCacheControl: boolean = true,
   ) {
-    this.model = model;
     this.schemaCompliance = schemaCompliance;
     this.enableCacheControl = enableCacheControl;
   }
@@ -353,7 +351,7 @@ export class AnthropicContentConverter {
     geminiResponse.candidates = [candidate];
     geminiResponse.responseId = response.id;
     geminiResponse.createTime = Date.now().toString();
-    geminiResponse.modelVersion = response.model || this.model;
+    geminiResponse.modelVersion = response.model || undefined;
     geminiResponse.promptFeedback = { safetyRatings: [] };
 
     if (response.usage) {
@@ -362,6 +360,10 @@ export class AnthropicContentConverter {
         cacheReadTokens: response.usage.cache_read_input_tokens || 0,
         cacheCreationTokens: response.usage.cache_creation_input_tokens || 0,
         outputTokens: response.usage.output_tokens || 0,
+        cacheReadTokensReported:
+          typeof response.usage.cache_read_input_tokens === 'number',
+        cacheCreationTokensReported:
+          typeof response.usage.cache_creation_input_tokens === 'number',
       });
     }
 

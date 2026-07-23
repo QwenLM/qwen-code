@@ -16,6 +16,7 @@ vi.mock('../../utils/schemaConverter.js', () => ({
 
 import { convertSchema } from '../../utils/schemaConverter.js';
 import { AnthropicContentConverter } from './converter.js';
+import { getGenAiUsageProvenance } from '../../telemetry/gen-ai-usage.js';
 
 describe('AnthropicContentConverter', () => {
   let converter: AnthropicContentConverter;
@@ -2202,6 +2203,10 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 8,
         cachedContentTokenCount: 0,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: false,
+        cacheCreationInputTokens: undefined,
+      });
 
       const parts = response.candidates?.[0]?.content?.parts || [];
       expect(parts).toEqual([
@@ -2255,6 +2260,22 @@ describe('AnthropicContentConverter', () => {
         totalTokenCount: 43_688,
         cachedContentTokenCount: 32_088,
       });
+      expect(getGenAiUsageProvenance(response.usageMetadata)).toEqual({
+        cachedInputTokensReported: true,
+        cacheCreationInputTokens: 8_700,
+      });
+    });
+
+    it('does not substitute the request model when the provider omits its model', () => {
+      const response = converter.convertAnthropicResponseToGemini({
+        id: 'msg-no-model',
+        model: '',
+        stop_reason: 'end_turn',
+        content: [{ type: 'text', text: 'ok' }],
+        usage: { input_tokens: 1, output_tokens: 1 },
+      } as unknown as Anthropic.Message);
+
+      expect(response.modelVersion).toBeUndefined();
     });
   });
 

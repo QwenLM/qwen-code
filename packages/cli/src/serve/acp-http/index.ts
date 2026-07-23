@@ -47,7 +47,10 @@ import {
   parseInbound,
   type JsonRpcInbound,
 } from './json-rpc.js';
-import { parseLastEventId } from '../sse-last-event-id.js';
+import {
+  parseEventEpochHeader,
+  parseLastEventId,
+} from '../sse-last-event-id.js';
 import {
   ClientMcpWsConnection,
   type ClientMcpServerProvider,
@@ -1106,9 +1109,6 @@ export function mountAcpHttp(
       },
       () => conn.touch(),
     );
-    // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
-    // handshake precedes any buffered frames the attach flushes.
-    stream.open();
     // Resume cursor: an EventSource/SSE client auto-resends the last `id:` it
     // saw as `Last-Event-ID` on reconnect. Drives the EventBus ring replay so
     // content frames produced during a mid-turn proxy gap are recovered (§1.8).
@@ -1116,6 +1116,23 @@ export function mountAcpHttp(
       headerOf(req, 'last-event-id'),
       '/acp ',
     );
+    // Epoch token paired with the resume cursor (DAEMON-001). Invalid values
+    // degrade to "not provided" so the bus falls back to the numeric
+    // stale-cursor heuristic.
+    const eventEpoch = parseEventEpochHeader(
+      headerOf(req, 'x-qwen-event-epoch'),
+      '/acp ',
+    );
+    // Advertise the current bus epoch BEFORE `stream.open()` flushes headers
+    // so every subscription (including the first, cursor-less one) learns the
+    // epoch to pair with its resume cursor on later reconnects.
+    const busEpoch = mount.dispatcher.getSessionEventEpoch(sessionId);
+    if (busEpoch !== undefined) {
+      res.setHeader('X-Qwen-Event-Epoch', busEpoch);
+    }
+    // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
+    // handshake precedes any buffered frames the attach flushes.
+    stream.open();
     // Pass the resume cursor INTO attach: when resuming, attach skips flushing
     // id-bearing buffered frames because the ring replay below redelivers every
     // bus event after `lastEventId` exactly once — including any frame lost
@@ -1166,7 +1183,7 @@ export function mountAcpHttp(
       }
     };
     void mount.dispatcher
-      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
+      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId, eventEpoch)
       .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
           `qwen serve: ${mount.routeLabel} event pump error (${logSafe(sessionId)}, lastEventId=${

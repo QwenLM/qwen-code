@@ -83,6 +83,11 @@ import { setDaemonTelemetryWorkspace } from '../server/telemetry.js';
 import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import { replayTranscriptRecordPage } from '../../acp-integration/session/history-replay-page.js';
 import { GENERATION_MAX_PROMPT_BYTES } from '../../acp-integration/generation.js';
+import {
+  formatGenerationSse,
+  GENERATION_HEARTBEAT_MS,
+  writeGenerationSseChunk,
+} from '../generation-sse.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
   parseVirtualSubagentSessionId,
@@ -120,7 +125,6 @@ const WORKSPACE_TRANSCRIPT_RESPONSE_MAX_BYTES = 32 * 1024 * 1024;
 const WORKSPACE_TRANSCRIPT_CURSOR_MAX_BYTES = 64 * 1024;
 const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
-const GENERATION_HEARTBEAT_MS = 15_000;
 const PRIMARY_ONLY_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
   'POST /session/:id/fork',
@@ -135,50 +139,6 @@ function isPrimaryOnlyLiveSessionRoute(
   return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
     route,
   );
-}
-
-function formatGenerationSse(
-  event: string,
-  data: Record<string, unknown>,
-): string {
-  return `event: ${event}\ndata: ${JSON.stringify({ v: 1, ...data })}\n\n`;
-}
-
-function writeGenerationSseChunk(res: Response, chunk: string): Promise<void> {
-  if (res.destroyed) {
-    return Promise.reject(new Error('Generation SSE connection destroyed'));
-  }
-  const writable = res.write(chunk);
-  const flush = (res as Response & { flush?: () => void }).flush;
-  flush?.call(res);
-  if (writable) {
-    return res.destroyed
-      ? Promise.reject(new Error('Generation SSE connection destroyed'))
-      : Promise.resolve();
-  }
-  return new Promise<void>((resolve, reject) => {
-    const cleanup = () => {
-      res.off('drain', onDrain);
-      res.off('close', onClose);
-      res.off('error', onError);
-    };
-    const onDrain = () => {
-      cleanup();
-      resolve();
-    };
-    const onClose = () => {
-      cleanup();
-      reject(new Error('Generation SSE connection closed'));
-    };
-    const onError = (error: Error) => {
-      cleanup();
-      reject(error);
-    };
-    res.once('drain', onDrain);
-    res.once('close', onClose);
-    res.once('error', onError);
-    if (res.destroyed) onClose();
-  });
 }
 
 function isReadOnlyWorkspaceInspection(runtime: WorkspaceRuntime): boolean {
@@ -2794,6 +2754,10 @@ export function registerSessionRoutes(
         delete forwardedBody['deadlineMs'];
 
         const lastEventId = ownerBridge.getSessionLastEventId(sessionId);
+        // Epoch token paired with the cursor above: a client that seeds its
+        // SSE resume position from this 202 must also learn the bus epoch so
+        // a daemon restart in between is detected (DAEMON-001).
+        const eventEpoch = ownerBridge.getSessionEventEpoch(sessionId);
         addDaemonRequestAttribute('qwen-code.prompt_id', promptId);
 
         const abort = new AbortController();
@@ -2889,7 +2853,7 @@ export function registerSessionRoutes(
         if (daemonLog) {
           daemonLog.info('prompt enqueued', { sessionId, promptId, clientId });
         }
-        res.status(202).json({ promptId, lastEventId });
+        res.status(202).json({ promptId, lastEventId, eventEpoch });
       },
     ),
   );
