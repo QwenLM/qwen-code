@@ -24,36 +24,49 @@ function fakeAudit(): { entries: AuditEntry[]; recorder: AuditRecorder } {
   };
 }
 
-/** A permission_request event with the daemon's nested toolCall/options shape. */
-function permEvent(
-  tool: string,
-  opts: { requestId?: string; withOptions?: boolean; args?: unknown } = {},
+/**
+ * REAL permission_request data: the daemon emits the ACP ToolCall verbatim as
+ * `{ toolCallId, title, kind, rawInput }`. The old synthetic `{ name, input }`
+ * shape is what hid the extraction bug for nine policy cycles — never
+ * reintroduce it. Every permission event in this file is built through this
+ * one helper.
+ *
+ * `opts.requestId: null` omits `requestId` entirely (vs. the default `'q1'`),
+ * for the fail-safe "no requestId" case. `opts.options` overrides the default
+ * two-option (`allow_always` + `allow_once`) list for the fail-safe
+ * "no options" / "only allow_always" cases.
+ */
+function permissionEvent(
+  kind: string,
+  rawInput: Record<string, unknown> = {},
+  opts: {
+    requestId?: string | null;
+    options?: unknown[];
+  } = {},
 ): { type: string; data: unknown } {
-  const { requestId = 'r1', withOptions = true, args } = opts;
+  const requestId = 'requestId' in opts ? opts.requestId : 'q1';
   return {
     type: 'permission_request',
     data: {
-      requestId,
-      toolCall: { name: tool, input: args ?? {} },
-      // allow_always at [0] (must NOT be chosen) + the allow_once we expect.
-      options: withOptions
-        ? [
-            { optionId: 'always', kind: 'allow_always', label: 'Always allow' },
-            { optionId: 'ok', kind: 'allow_once', label: 'Allow once' },
-          ]
-        : [],
+      ...(requestId ? { requestId } : {}),
+      sessionId: 's1',
+      toolCall: { toolCallId: 'tc1', title: 'humanized', kind, rawInput },
+      options: opts.options ?? [
+        { optionId: 'always', kind: 'allow_always', label: 'Always allow' },
+        { optionId: 'ok', kind: 'allow_once', label: 'Allow once' },
+      ],
     },
   };
 }
 
-const allowBash: Policy = {
+const allowExecute: Policy = {
   defaults: { action: 'prompt', requireScope: 'approve' },
-  rules: [{ id: 'allow-bash', match: { tool: 'bash' }, action: 'allow' }],
+  rules: [{ id: 'allow-bash', match: { tool: 'execute' }, action: 'allow' }],
 };
 
-const denyBash: Policy = {
+const denyExecute: Policy = {
   defaults: { action: 'prompt', requireScope: 'approve' },
-  rules: [{ id: 'deny-bash', match: { tool: 'bash' }, action: 'deny' }],
+  rules: [{ id: 'deny-bash', match: { tool: 'execute' }, action: 'deny' }],
 };
 
 const emptyPolicy: Policy = {
@@ -64,12 +77,12 @@ const emptyPolicy: Policy = {
 // An allow rule whose expiresAt is firmly in the past: the (real-clock)
 // evaluator classifies it as a definitive no-match → falls through to default
 // prompt, so the enforcer must NOT auto-vote. Clock-independent.
-const expiredAllowBash: Policy = {
+const expiredAllowExecute: Policy = {
   defaults: { action: 'prompt', requireScope: 'approve' },
   rules: [
     {
       id: 'expired-allow',
-      match: { tool: 'bash' },
+      match: { tool: 'execute' },
       action: 'allow',
       expiresAt: '2000-01-01T00:00:00Z',
     },
@@ -88,9 +101,12 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
     expect(handled).toBe(true);
     expect(audit.entries).toHaveLength(1);
     const e = audit.entries[0];
@@ -107,9 +123,12 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, denyBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, denyExecute, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
     expect(handled).toBe(true);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'deny',
@@ -123,7 +142,10 @@ describe('PolicyEnforcer', () => {
     const audit = fakeAudit();
     const enf = new PolicyEnforcer(daemon, emptyPolicy, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'prompt',
@@ -135,11 +157,11 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
     const handled = await enf.handlePermission(
       's1',
-      permEvent('bash', { withOptions: false }),
+      permissionEvent('execute', {}, { requestId: 'r1', options: [] }),
     );
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
@@ -154,16 +176,19 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', {
-      type: 'permission_request',
-      data: {
-        requestId: 'r1',
-        toolCall: { name: 'bash', input: {} },
-        options: [{ optionId: 'always', kind: 'allow_always' }],
-      },
-    });
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent(
+        'execute',
+        {},
+        {
+          requestId: 'r1',
+          options: [{ optionId: 'always', kind: 'allow_always' }],
+        },
+      ),
+    );
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'allow',
@@ -175,9 +200,12 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 404 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'allow',
@@ -189,9 +217,12 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 500 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'allow',
@@ -203,9 +234,12 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, expiredAllowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, expiredAllowExecute, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', {}, { requestId: 'r1' }),
+    );
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'prompt',
@@ -217,7 +251,7 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
     const handled = await enf.handlePermission('s1', {
       type: 'session_update',
@@ -231,11 +265,15 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
     await enf.handlePermission(
       's1',
-      permEvent('bash', { args: { command: 'rm -rf /secret/path' } }),
+      permissionEvent(
+        'execute',
+        { command: 'rm -rf /secret/path' },
+        { requestId: 'r1' },
+      ),
     );
     const blob = JSON.stringify(audit.entries);
     expect(blob).not.toContain('rm -rf');
@@ -246,12 +284,16 @@ describe('PolicyEnforcer', () => {
     stub = await startStubDaemon({ permissionStatus: 200 });
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
     const audit = fakeAudit();
-    const enf = new PolicyEnforcer(daemon, allowBash, audit.recorder);
+    const enf = new PolicyEnforcer(daemon, allowExecute, audit.recorder);
 
-    const handled = await enf.handlePermission('s1', {
-      type: 'permission_request',
-      data: { toolCall: { name: 'bash' }, options: [{ optionId: 'ok' }] },
-    });
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent(
+        'execute',
+        {},
+        { requestId: null, options: [{ optionId: 'ok' }] },
+      ),
+    );
     expect(handled).toBe(false);
     expect(audit.entries[0].detail).toMatchObject({
       action: 'allow',
@@ -264,16 +306,16 @@ describe('PolicyEnforcer', () => {
     const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
 
     const a = fakeAudit();
-    await new PolicyEnforcer(daemon, allowBash, a.recorder).handlePermission(
+    await new PolicyEnforcer(daemon, allowExecute, a.recorder).handlePermission(
       's1',
-      permEvent('bash'),
+      permissionEvent('execute', {}, { requestId: 'r1' }),
     );
     expect(a.entries[0].detail).toMatchObject({ decisionSource: 'policy' });
 
     const d = fakeAudit();
-    await new PolicyEnforcer(daemon, denyBash, d.recorder).handlePermission(
+    await new PolicyEnforcer(daemon, denyExecute, d.recorder).handlePermission(
       's1',
-      permEvent('bash'),
+      permissionEvent('execute', {}, { requestId: 'r1' }),
     );
     expect(d.entries[0].detail).toMatchObject({ decisionSource: 'policy' });
 
@@ -281,11 +323,96 @@ describe('PolicyEnforcer', () => {
     const p = fakeAudit();
     await new PolicyEnforcer(daemon, emptyPolicy, p.recorder).handlePermission(
       's1',
-      permEvent('bash'),
+      permissionEvent('execute', {}, { requestId: 'r1' }),
     );
     expect(p.entries[0].detail).toMatchObject({
       action: 'prompt',
       decisionSource: 'default',
     });
+  });
+
+  it('matches a rule against a REAL frame (kind + rawInput)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const policy: Policy = {
+      defaults: { action: 'prompt' },
+      rules: [{ id: 'deny-shell', match: { tool: 'execute' }, action: 'deny' }],
+    };
+    const enf = new PolicyEnforcer(
+      daemon,
+      policy,
+      audit.recorder,
+      undefined,
+      () => 0,
+      () => '/proj',
+    );
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', { command: 'rm -rf /' }),
+    );
+    expect(handled).toBe(true);
+    expect(
+      (stub.lastRespondedPermission?.response as { outcome?: unknown })
+        ?.outcome,
+    ).toEqual({ outcome: 'cancelled' });
+  });
+
+  it('matches a pathGlob rule via rawInput.file_path', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const policy: Policy = {
+      defaults: { action: 'prompt' },
+      rules: [
+        {
+          id: 'deny-env',
+          match: { pathGlob: ['**/.env*'] },
+          action: 'deny',
+        },
+      ],
+    };
+    const enf = new PolicyEnforcer(
+      daemon,
+      policy,
+      audit.recorder,
+      undefined,
+      () => 0,
+      () => '/proj',
+    );
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('edit', { file_path: '/proj/.env' }),
+    );
+    expect(handled).toBe(true);
+  });
+
+  it('leaves originScope/sessionTag unpopulated (documented limitation)', async () => {
+    stub = await startStubDaemon({ permissionStatus: 200 });
+    const daemon = new DaemonClient({ baseUrl: stub.baseUrl });
+    const audit = fakeAudit();
+    const policy: Policy = {
+      defaults: { action: 'prompt' },
+      rules: [
+        {
+          id: 'scoped',
+          match: { originScope: 'write' },
+          action: 'deny',
+        },
+      ],
+    };
+    const enf = new PolicyEnforcer(
+      daemon,
+      policy,
+      audit.recorder,
+      undefined,
+      () => 0,
+      () => '/proj',
+    );
+    const handled = await enf.handlePermission(
+      's1',
+      permissionEvent('execute', { command: 'ls' }),
+    );
+    expect(handled).toBe(false); // no match → falls through to a human
   });
 });

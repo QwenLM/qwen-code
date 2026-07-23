@@ -7,13 +7,10 @@
 import type { DaemonClient } from '@qwen-code/sdk';
 import type { AuditRecorder } from '../auditLog.js';
 import type { Policy } from './loader.js';
-import {
-  evaluate,
-  type ToolCallContext,
-  type QuotaOracle,
-} from './evaluator.js';
+import { evaluate, type QuotaOracle } from './evaluator.js';
 import type { QuotaStore } from './quotas.js';
 import { selectAllowOnceOptionId } from '../permissionOptions.js';
+import { frameToContext } from './frameContext.js';
 
 /** Safe optional read of a string field from an unknown record. */
 function readString(
@@ -22,17 +19,6 @@ function readString(
 ): string | undefined {
   const v = obj[key];
   return typeof v === 'string' ? v : undefined;
-}
-
-/** Safe optional read of a nested record (plain object) field. */
-function readRecord(
-  obj: Record<string, unknown>,
-  key: string,
-): Record<string, unknown> | undefined {
-  const v = obj[key];
-  return typeof v === 'object' && v !== null && !Array.isArray(v)
-    ? (v as Record<string, unknown>)
-    : undefined;
 }
 
 /**
@@ -67,6 +53,17 @@ export class PolicyEnforcer {
     private readonly quota?: QuotaStore,
     /** Injected clock (epoch-ms) for deterministic tests. */
     private readonly nowFn: () => number = Date.now,
+    /**
+     * Lazily-read project-root resolver, anchoring `pathGlob` matching
+     * (frameContext.ts). MUST resolve to a value sourced from daemon
+     * capabilities/config — NEVER from the frame's `rawInput` — or a
+     * prompt-injected model could move the anchor out from under a
+     * `pathGlob` deny on a literal path (see frameContext.ts / evaluator.ts).
+     * A closure (rather than a value captured at construction) so callers
+     * whose project root resolves later in boot (cli.ts) don't need to
+     * reorder construction.
+     */
+    private readonly projectRootFn: () => string = () => process.cwd(),
   ) {}
 
   /** Swap the active policy (for a future hot-reload). */
@@ -92,13 +89,6 @@ export class PolicyEnforcer {
       !Array.isArray(event.data)
         ? (event.data as Record<string, unknown>)
         : {};
-    const toolCall = readRecord(data, 'toolCall');
-    const tool =
-      (toolCall &&
-        (readString(toolCall, 'name') ?? readString(toolCall, 'title'))) ||
-      readString(data, 'toolName') ||
-      '';
-    const args = toolCall?.['input'] ?? toolCall?.['args'] ?? toolCall ?? {};
     const requestId = readString(data, 'requestId');
     // The ONE-TIME approve option (kind 'allow_once'), never options[0] — that
     // is typically 'allow_always', which would persist a standing grant / flip
@@ -114,7 +104,11 @@ export class PolicyEnforcer {
       ? { state: (id, ms) => this.quota!.state(id, ms) }
       : undefined;
 
-    const ctx: ToolCallContext = { tool, args };
+    // projectRoot MUST come from the daemon/config resolver (this.projectRootFn),
+    // NEVER from the frame's rawInput — see the constructor doc above.
+    const ctx = frameToContext(event.data, {
+      projectRoot: this.projectRootFn(),
+    });
     const d = evaluate(this.policy, ctx, now, oracle);
 
     if (d.action === 'allow') {

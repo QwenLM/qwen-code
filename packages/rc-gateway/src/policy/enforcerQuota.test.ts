@@ -39,15 +39,20 @@ function fakeDaemon(voteOk: boolean): {
   return { daemon, votes };
 }
 
+/**
+ * REAL permission_request data (the daemon's ACP ToolCall verbatim): `{
+ * toolCallId, title, kind, rawInput }`. The old synthetic `{ name, input }`
+ * shape hid the extraction bug that Task 7 fixes — never reintroduce it here.
+ */
 function permEvent(
-  tool: string,
+  kind: string,
   requestId = 'r1',
 ): { type: string; data: unknown } {
   return {
     type: 'permission_request',
     data: {
       requestId,
-      toolCall: { name: tool, input: {} },
+      toolCall: { toolCallId: 'tc1', title: 'humanized', kind, rawInput: {} },
       options: [
         { optionId: 'always', kind: 'allow_always', label: 'Always' },
         { optionId: 'ok', kind: 'allow_once', label: 'Once' },
@@ -61,7 +66,7 @@ const quotaRule = (count: number): Policy => ({
   rules: [
     {
       id: 'q',
-      match: { tool: 'bash' },
+      match: { tool: 'execute' },
       action: 'allow',
       maxPerWindow: { count, windowSec: 60 },
     },
@@ -85,7 +90,7 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
       () => NOW,
     );
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission('s1', permEvent('execute'));
     expect(handled).toBe(true);
     expect(votes).toHaveLength(1);
     expect(store.remaining('q', NOW)).toBe(1); // consumed once
@@ -110,7 +115,7 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
       () => NOW,
     );
 
-    const handled = await enf.handlePermission('s1', permEvent('bash'));
+    const handled = await enf.handlePermission('s1', permEvent('execute'));
     expect(handled).toBe(false); // fell through to push
     expect(store.remaining('q', NOW)).toBe(2); // untouched
   });
@@ -127,10 +132,14 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
       () => NOW,
     );
 
-    expect(await enf.handlePermission('s1', permEvent('bash', 'a'))).toBe(true);
-    expect(await enf.handlePermission('s1', permEvent('bash', 'b'))).toBe(true);
+    expect(await enf.handlePermission('s1', permEvent('execute', 'a'))).toBe(
+      true,
+    );
+    expect(await enf.handlePermission('s1', permEvent('execute', 'b'))).toBe(
+      true,
+    );
     // 3rd within the window: exhausted → rule no-match → default prompt → no vote.
-    expect(await enf.handlePermission('s1', permEvent('bash', 'c'))).toBe(
+    expect(await enf.handlePermission('s1', permEvent('execute', 'c'))).toBe(
       false,
     );
     expect(votes).toHaveLength(2); // only the first two allowed
@@ -144,11 +153,11 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
     const store = await QuotaStore.create(wal, () => undefined); // nothing tracked
     const plain: Policy = {
       defaults: { action: 'prompt', requireScope: 'approve' },
-      rules: [{ id: 'plain', match: { tool: 'bash' }, action: 'allow' }],
+      rules: [{ id: 'plain', match: { tool: 'execute' }, action: 'allow' }],
     };
     const enf = new PolicyEnforcer(daemon, plain, recorder, store, () => NOW);
 
-    expect(await enf.handlePermission('s1', permEvent('bash'))).toBe(true);
+    expect(await enf.handlePermission('s1', permEvent('execute'))).toBe(true);
     expect(await wal.load()).toEqual([]); // no consume persisted
     const rec = entries.find((e) => e.action === 'policy_decision');
     expect(rec?.detail).not.toHaveProperty('quotaRemaining');
@@ -167,7 +176,7 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
     };
     const enf = new PolicyEnforcer(daemon, empty, recorder, store, () => NOW);
 
-    expect(await enf.handlePermission('s1', permEvent('bash'))).toBe(false);
+    expect(await enf.handlePermission('s1', permEvent('execute'))).toBe(false);
     expect(await wal.load()).toEqual([]);
   });
 
@@ -176,7 +185,7 @@ describe('PolicyEnforcer + quota store (cycle 43 flip)', () => {
     const { recorder } = fakeAudit();
     const enf = new PolicyEnforcer(daemon, quotaRule(2), recorder); // no store
 
-    expect(await enf.handlePermission('s1', permEvent('bash'))).toBe(false);
+    expect(await enf.handlePermission('s1', permEvent('execute'))).toBe(false);
     expect(votes).toHaveLength(0); // never auto-voted
   });
 });

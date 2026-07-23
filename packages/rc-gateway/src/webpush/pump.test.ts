@@ -179,7 +179,7 @@ describe('SessionEventPump', () => {
     const collected: Dispatched[] = [];
     const denyBash: Policy = {
       defaults: { action: 'prompt', requireScope: 'approve' },
-      rules: [{ id: 'deny-bash', match: { tool: 'bash' }, action: 'deny' }],
+      rules: [{ id: 'deny-bash', match: { tool: 'execute' }, action: 'deny' }],
     };
     stub = await startStubDaemon({
       workspaceCwd: '/w',
@@ -192,7 +192,12 @@ describe('SessionEventPump', () => {
           type: 'permission_request',
           data: {
             requestId: 'r1',
-            toolCall: { name: 'bash' },
+            toolCall: {
+              toolCallId: 'tc1',
+              title: 'humanized',
+              kind: 'execute',
+              rawInput: {},
+            },
             options: [{ optionId: 'ok' }],
           },
         },
@@ -232,7 +237,12 @@ describe('SessionEventPump', () => {
           type: 'permission_request',
           data: {
             requestId: 'r1',
-            toolCall: { name: 'bash' },
+            toolCall: {
+              toolCallId: 'tc1',
+              title: 'humanized',
+              kind: 'execute',
+              rawInput: {},
+            },
             options: [{ optionId: 'ok' }],
           },
         },

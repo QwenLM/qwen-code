@@ -719,8 +719,21 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
         (id) => quotaLimits.get(id),
       )
     : undefined;
+  // projectRoot for pathGlob anchoring MUST be the daemon's own workspaceCwd
+  // (resolved above for routing/policy layering), never a frame-supplied
+  // value — see enforcer.ts's constructor doc. Read lazily via a closure
+  // (rather than capturing `workspaceCwd` by value here) so a future boot
+  // reordering that resolves it after the enforcer is constructed still
+  // sees the final value.
   const enforcer = notifier
-    ? new PolicyEnforcer(handle.daemon, policy, audit, quota)
+    ? new PolicyEnforcer(
+        handle.daemon,
+        policy,
+        audit,
+        quota,
+        Date.now,
+        () => workspaceCwd ?? process.cwd(),
+      )
     : undefined;
 
   // Policy hot-reload (cycle 45, Phase 3.1): watch both policy files; on a
