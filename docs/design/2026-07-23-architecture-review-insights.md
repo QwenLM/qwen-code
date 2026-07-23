@@ -258,6 +258,30 @@ npm run preflight  → clean → install → format → lint → build → typec
 
 **模式：** 需要模型访问但不需要工具或会话修改时，用 forked side-query。缓存路径（`cacheSafeParams`）省 token，`NO_TOOLS` 保安全。并发控制由调用方负责。
 
+### 5.11 渐进式披露（Progressive Disclosure）
+
+- **PR #7589**：紧凑工具摘要从 "Read 3 files" 改为 "Read a.ts, b.ts, c.ts"（≤3 项内联，>3 项截断为 "a.ts, b.ts, ...and 2 more"）
+
+**模式：** 数量小时显示具体项，数量大时回退到聚合。阈值（3）平衡信息密度与行宽。缺失描述时优雅降级到计数格式。
+
+### 5.12 进程全局引导属于入口 Wrapper
+
+- **PR #7594**：编译缓存传播在 `cli-entry.js`（入口 wrapper）中实现，而非 `spawnChannel`（共享基础设施）
+
+**模式：** 进程全局引导行为（编译缓存、环境变量发布）属于入口 wrapper，不属于共享基础设施。入口 wrapper 拥有策略，子进程构造已经复制环境——不需要在 ACP 层做特殊处理。
+
+### 5.13 验证解析目标的类型，而非仅验证存在性
+
+- **PR #7591**：`fs.realpathSync` 成功解析 npm 路径，但目标可能是 bash shim 而非 JS 文件——用 `.endsWith('.js')` 验证类型
+
+**模式：** 通过符号链接解析路径时，`realpathSync` 成功只说明文件存在，不说明文件类型正确。验证目标的类型（扩展名、内容格式）而非仅验证存在性。
+
+### 5.14 环境变量覆盖链
+
+- **PR #7579**：`parseBooleanEnvFlag(env) ?? setting ?? default` — 与 `QWEN_TELEMETRY_ENABLED` 完全一致的模式
+
+**模式：** 添加新的环境变量覆盖时，复用 `parseBooleanEnvFlag()` 工具和三级优先级链（env > setting > default）。不要发明新的解析逻辑。
+
 ## 六、架构演进方向
 
 基于当前 PR 趋势的观察：
