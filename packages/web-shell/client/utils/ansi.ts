@@ -17,11 +17,40 @@ const ANSI_COLORS: Record<number, string> = {
   97: '#ffffff',
 };
 
+/** The six channel levels of the xterm 6x6x6 color cube (indices 16-231). */
+const CUBE_LEVELS = [0, 95, 135, 175, 215, 255];
+
 interface Segment {
   text: string;
   color?: string;
   bold?: boolean;
   dim?: boolean;
+}
+
+function toHex(r: number, g: number, b: number): string | undefined {
+  if (![r, g, b].every((v) => Number.isInteger(v) && v >= 0 && v <= 255)) {
+    return undefined;
+  }
+  return `#${[r, g, b].map((v) => v.toString(16).padStart(2, '0')).join('')}`;
+}
+
+/** Resolve an xterm 256-color index to a hex string. */
+function xterm256(index: number): string | undefined {
+  if (!Number.isInteger(index) || index < 0 || index > 255) return undefined;
+  // 0-15 stay on the palette above, so a tool emitting `38;5;2` and one
+  // emitting `32` render as the same green.
+  if (index < 8) return ANSI_COLORS[30 + index];
+  if (index < 16) return ANSI_COLORS[90 + (index - 8)];
+  if (index < 232) {
+    const v = index - 16;
+    return toHex(
+      CUBE_LEVELS[Math.floor(v / 36)]!,
+      CUBE_LEVELS[Math.floor(v / 6) % 6]!,
+      CUBE_LEVELS[v % 6]!,
+    );
+  }
+  const level = 8 + (index - 232) * 10;
+  return toHex(level, level, level);
 }
 
 export function parseAnsi(input: string): Segment[] {
@@ -41,8 +70,33 @@ export function parseAnsi(input: string): Segment[] {
     pos = match.index + match[0].length;
 
     const codes = match[1].split(';').map(Number);
-    for (const code of codes) {
-      if (code === 0) {
+    for (let i = 0; i < codes.length; i++) {
+      const code = codes[i];
+      // 38/48/58 (foreground/background/underline color) never stand alone:
+      // each is followed by `5;<index>` or `2;<r>;<g>;<b>`. Those arguments
+      // have to be consumed here, or the loop reads them as codes in their own
+      // right — `38;5;2` would take the color index for "dim", and a truecolor
+      // value with a zero channel would hit the reset below and drop the
+      // color, bold and dim state that was already correct.
+      if (code === 38 || code === 48 || code === 58) {
+        const mode = codes[i + 1];
+        let value: string | undefined;
+        if (mode === 5) {
+          value = xterm256(codes[i + 2]!);
+          i += 2;
+        } else if (mode === 2) {
+          value = toHex(codes[i + 2]!, codes[i + 3]!, codes[i + 4]!);
+          i += 4;
+        } else {
+          // An unrecognized form has an unknown argument count, so there is no
+          // safe place to resume; drop the rest of this sequence rather than
+          // guess where the color ends.
+          break;
+        }
+        // Only the foreground maps onto a Segment. Background and underline
+        // color are still parsed so their arguments cannot leak into the loop.
+        if (code === 38) color = value;
+      } else if (code === 0) {
         color = undefined;
         bold = false;
         dim = false;
