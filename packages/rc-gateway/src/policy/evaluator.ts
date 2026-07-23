@@ -388,11 +388,11 @@ export interface RuleTrace {
   /**
    * Short reason token. For `skipped`: why the rule did not apply
    * (`tool-mismatch`, `args-mismatch`, `path-mismatch`, `no-path-candidates`,
-   * `origin-scope-mismatch`, `session-tag-mismatch`, `expired`,
-   * `outside-time-window`, `quota-exhausted`). For `matched`: either `matched`
-   * or the unevaluable cause that downgraded it to prompt (`malformed-expiresAt`,
-   * `malformed-timeOfDay`, `quota-not-evaluated`). For `not-reached`:
-   * `earlier-rule-won`.
+   * `operation-mismatch`, `origin-scope-mismatch`, `session-tag-mismatch`,
+   * `expired`, `outside-time-window`, `quota-exhausted`). For `matched`: either
+   * `matched` or the unevaluable cause that downgraded it to prompt
+   * (`malformed-expiresAt`, `malformed-timeOfDay`, `quota-not-evaluated`). For
+   * `not-reached`: `earlier-rule-won`.
    */
   reason: string;
   /** The action this rule contributes as the winner (`matched` only). */

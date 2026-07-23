@@ -71,7 +71,12 @@ export function parseExplainArgs(argv: string[]): ParsedExplain {
     }
   }
 
-  const ctx: ToolCallContext = { tool: tool ?? '' };
+  const ctx: ToolCallContext = {
+    tool: tool ?? '',
+    projectRoot: process.cwd(),
+    cwd: process.cwd(),
+  };
+  if (flags['path'] !== undefined) ctx.paths = [flags['path']];
   if (args !== undefined) ctx.args = args;
   if (flags['scope'] !== undefined) ctx.originScope = flags['scope'];
   if (flags['tag'] !== undefined) ctx.sessionTag = flags['tag'];

@@ -143,6 +143,30 @@ describe('explainPolicy — trace structure', () => {
   });
 });
 
+describe('explains a pathGlob rule from --path', () => {
+  it('explains a pathGlob rule from --path', () => {
+    const policy = {
+      defaults: { action: 'prompt' as const },
+      rules: [
+        {
+          id: 'deny-env',
+          match: { pathGlob: ['**/.env*'] },
+          action: 'deny' as const,
+        },
+      ],
+    };
+    const ex = explainPolicy(policy, {
+      tool: 'edit',
+      args: {},
+      paths: ['/proj/.env'],
+      projectRoot: '/proj',
+      cwd: '/proj',
+    });
+    expect(ex.decision.action).toBe('deny');
+    expect(ex.trace.find((t) => t.id === 'deny-env')?.status).toBe('matched');
+  });
+});
+
 describe('explainPolicy — skipped reason tokens', () => {
   const cases: Array<{
     name: string;
