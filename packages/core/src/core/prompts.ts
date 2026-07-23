@@ -14,12 +14,28 @@ import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import {
-  renderPromptFragments,
-  type PromptFragment,
-} from './prompt-fragments.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
+
+type SystemPromptText = string | null | undefined;
+
+export interface SystemPromptTiers {
+  stable: string;
+  context: string;
+  volatile: string;
+}
+
+function joinSystemPromptTier(parts: readonly SystemPromptText[]): string {
+  return parts
+    .filter((part): part is string => Boolean(part?.trim()))
+    .join('\n\n');
+}
+
+export function joinSystemPrompt(tiers: SystemPromptTiers): string {
+  return [tiers.stable, tiers.context, tiers.volatile]
+    .filter((tier): tier is string => Boolean(tier?.trim()))
+    .join('\n\n---\n\n');
+}
 
 export type SystemPromptInteractionMode = 'interactive' | 'headless' | 'acp';
 
@@ -193,19 +209,19 @@ export function resolvePathFromEnv(envVar?: string): {
 }
 
 /**
- * Processes a custom system instruction by appending user memory if available.
+ * Processes a custom system instruction with the remaining prompt tiers.
  * This function should only be used when there is actually a custom instruction.
  *
  * @param customInstruction - Custom system instruction (ContentUnion from @google/genai)
- * @param userMemory - User memory to append
- * @param appendInstruction - Extra instructions to append after user memory
- * @returns Processed custom system instruction with user memory and extra append instructions applied
+ * @param volatileMemory - Memory and user-profile snapshots
+ * @param appendInstruction - Caller-supplied system message
+ * @returns Processed custom system instruction
  */
 export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
-  userMemory?: string,
+  volatileMemory?: string,
   appendInstruction?: string,
-  additionalFragments: readonly PromptFragment[] = [],
+  additionalTiers: Partial<Omit<SystemPromptTiers, 'stable'>> = {},
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -228,35 +244,25 @@ export function getCustomSystemPrompt(
     instructionText = customInstruction.text || '';
   }
 
-  return renderPromptFragments([
-    {
-      marker: 'custom-system-prompt',
-      role: 'system',
-      tier: 'stable',
-      content: instructionText,
-    },
-    {
-      marker: 'user-memory',
-      role: 'system',
-      tier: 'context',
-      content: userMemory?.trim(),
-    },
-    ...additionalFragments,
-    {
-      marker: 'append-system-prompt',
-      role: 'system',
-      tier: 'volatile',
-      content: appendInstruction?.trim(),
-    },
-  ]);
+  return joinSystemPrompt({
+    stable: instructionText,
+    context: joinSystemPromptTier([
+      additionalTiers.context,
+      appendInstruction?.trim(),
+    ]),
+    volatile: joinSystemPromptTier([
+      volatileMemory?.trim(),
+      additionalTiers.volatile,
+    ]),
+  });
 }
 
 export function getCoreSystemPrompt(
-  userMemory?: string,
+  volatileMemory?: string,
   model?: string,
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
-  additionalFragments: readonly PromptFragment[] = [],
+  additionalTiers: Partial<Omit<SystemPromptTiers, 'stable'>> = {},
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
@@ -465,27 +471,17 @@ Interaction mode reminder: ${interaction.questions}
     fs.writeFileSync(writePath, basePrompt);
   }
 
-  return renderPromptFragments([
-    {
-      marker: 'core-system-prompt',
-      role: 'system',
-      tier: 'stable',
-      content: basePrompt,
-    },
-    {
-      marker: 'user-memory',
-      role: 'system',
-      tier: 'context',
-      content: userMemory?.trim(),
-    },
-    ...additionalFragments,
-    {
-      marker: 'append-system-prompt',
-      role: 'system',
-      tier: 'volatile',
-      content: appendInstruction?.trim(),
-    },
-  ]);
+  return joinSystemPrompt({
+    stable: basePrompt,
+    context: joinSystemPromptTier([
+      additionalTiers.context,
+      appendInstruction?.trim(),
+    ]),
+    volatile: joinSystemPromptTier([
+      volatileMemory?.trim(),
+      additionalTiers.volatile,
+    ]),
+  });
 }
 
 /**

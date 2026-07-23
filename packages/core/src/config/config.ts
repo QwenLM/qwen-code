@@ -1738,8 +1738,8 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
-  private systemPromptContext: string;
-  private systemPromptVolatileMemory = '';
+  private systemPromptContext = '';
+  private systemPromptVolatileMemory: string;
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -1979,7 +1979,7 @@ export class Config {
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
-    this.systemPromptContext = this.userMemory;
+    this.systemPromptVolatileMemory = this.userMemory;
     this.geminiMdFileCount = params.geminiMdFileCount ?? 0;
     this.contextRuleExcludes = params.contextRuleExcludes ?? [];
     this.approvalMode = params.approvalMode ?? ApprovalMode.AUTO;
@@ -3053,23 +3053,29 @@ export class Config {
       );
       return;
     }
-    const { memoryContent, fileCount, conditionalRules, projectRoot } =
-      await loadServerHierarchicalMemory(
-        this.getWorkingDir(),
-        this.getMemoryDiscoveryDirectories(),
-        this.getFileService(),
-        this.getExtensionContextFilePaths(),
-        this.isTrustedFolder(),
-        this.getImportFormat(),
-        this.contextRuleExcludes,
-        {
-          explicitOnly: this.getBareMode(),
-          loadReason,
-          onInstructionsLoaded: createInstructionsLoadedCallback(
-            () => this.hookSystem,
-          ),
-        },
-      );
+    const {
+      memoryContent,
+      userInstructions,
+      workspaceInstructions,
+      fileCount,
+      conditionalRules,
+      projectRoot,
+    } = await loadServerHierarchicalMemory(
+      this.getWorkingDir(),
+      this.getMemoryDiscoveryDirectories(),
+      this.getFileService(),
+      this.getExtensionContextFilePaths(),
+      this.isTrustedFolder(),
+      this.getImportFormat(),
+      this.contextRuleExcludes,
+      {
+        explicitOnly: this.getBareMode(),
+        loadReason,
+        onInstructionsLoaded: createInstructionsLoadedCallback(
+          () => this.hookSystem,
+        ),
+      },
+    );
     if (this.isManagedMemoryAvailable()) {
       // User-level read is best-effort — an EACCES on
       // `~/.qwen/memories/MEMORY.md` must not strip the whole managed-memory
@@ -3180,9 +3186,19 @@ export class Config {
             }
           : undefined,
       );
-      this.setSystemPromptMemory(memoryContent, managedMemory);
+      this.setSystemPromptMemory(
+        memoryContent,
+        userInstructions,
+        workspaceInstructions,
+        managedMemory,
+      );
     } else {
-      this.setUserMemory(memoryContent);
+      this.setSystemPromptMemory(
+        memoryContent,
+        userInstructions,
+        workspaceInstructions,
+        '',
+      );
     }
     this.setGeminiMdFileCount(fileCount);
     this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -5184,14 +5200,24 @@ export class Config {
 
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
-    this.systemPromptContext = newUserMemory;
-    this.systemPromptVolatileMemory = '';
+    this.systemPromptContext = '';
+    this.systemPromptVolatileMemory = newUserMemory;
   }
 
-  private setSystemPromptMemory(context: string, volatileMemory: string): void {
-    this.systemPromptContext = context;
-    this.systemPromptVolatileMemory = volatileMemory;
-    this.userMemory = [context.trim(), volatileMemory.trim()]
+  private setSystemPromptMemory(
+    memoryContent: string,
+    userInstructions: string,
+    workspaceInstructions: string,
+    managedMemory: string,
+  ): void {
+    this.systemPromptContext = workspaceInstructions;
+    this.systemPromptVolatileMemory = [
+      userInstructions.trim(),
+      managedMemory.trim(),
+    ]
+      .filter(Boolean)
+      .join('\n\n');
+    this.userMemory = [memoryContent.trim(), managedMemory.trim()]
       .filter(Boolean)
       .join('\n\n---\n\n');
   }

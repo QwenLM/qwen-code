@@ -19,10 +19,6 @@ import {
   renderAvailableSkillsBlock,
   type AvailableSkillEntry,
 } from '../tools/skill-utils.js';
-import {
-  orderPromptFragments,
-  type PromptFragment,
-} from '../core/prompt-fragments.js';
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
@@ -90,9 +86,7 @@ ${folderStructure}`;
  * @param {Config} config - The runtime configuration and services.
  * @returns A promise that resolves to an array of `Part` objects containing environment information.
  */
-async function getEnvironmentPromptFragments(
-  config: Config,
-): Promise<PromptFragment[]> {
+export async function getEnvironmentContext(config: Config): Promise<Part[]> {
   const today = formatDateForContext();
   const platform = process.platform;
   const directoryContext = await getDirectoryContextString(config);
@@ -105,24 +99,12 @@ ${directoryContext}
 
   return [
     {
-      marker: 'startup-environment',
-      role: 'user',
-      tier: 'context',
-      content: environmentContext,
+      text: environmentContext,
     },
     {
-      marker: 'startup-date',
-      role: 'user',
-      tier: 'volatile',
-      content: `Today's date is ${today}.`,
+      text: `Today's date is ${today}.`,
     },
   ];
-}
-
-export async function getEnvironmentContext(config: Config): Promise<Part[]> {
-  return (await getEnvironmentPromptFragments(config)).map((fragment) => ({
-    text: fragment.content || '',
-  }));
 }
 
 // Centralized reminder envelope. Every reminder body — startup/env context,
@@ -501,12 +483,11 @@ export async function buildStartupContextReminder(
   return wrapSystemReminder(envContextString);
 }
 
-async function buildStartupContextFragments(
+async function buildStartupContextReminderParts(
   config: Config,
-): Promise<PromptFragment[]> {
-  return (await getEnvironmentPromptFragments(config)).map((fragment) => ({
-    ...fragment,
-    content: wrapSystemReminder(fragment.content || ''),
+): Promise<Part[]> {
+  return (await getEnvironmentContext(config)).map((part) => ({
+    text: wrapSystemReminder(part.text || ''),
   }));
 }
 
@@ -537,39 +518,23 @@ export async function getInitialChatHistory(
     options.includeDeferredToolsReminder ?? true;
   const includeAvailableSkillsReminder =
     options.includeAvailableSkillsReminder ?? true;
-  const startupFragments = config.getSkipStartupContext()
+  const startupParts = config.getSkipStartupContext()
     ? []
-    : await buildStartupContextFragments(config);
+    : await buildStartupContextReminderParts(config);
   const skillsResult = includeAvailableSkillsReminder
     ? await buildAvailableSkillsReminder(config)
     : null;
 
-  const reminderFragments: PromptFragment[] = [
-    {
-      marker: 'mcp-server-instructions',
-      role: 'user',
-      tier: 'context',
-      content: buildMcpServerInstructionsReminder(toolRegistry),
-    },
-    {
-      marker: 'available-skills',
-      role: 'user',
-      tier: 'context',
-      content: skillsResult?.reminder,
-    },
-    ...startupFragments,
-    {
-      marker: 'deferred-tools',
-      role: 'user',
-      tier: 'volatile',
-      content: includeDeferredToolsReminder
-        ? buildDeferredToolsReminder(toolRegistry)
-        : null,
-    },
-  ];
-  const reminderParts = orderPromptFragments(reminderFragments).map(
-    (fragment) => ({ text: fragment.content || '' }),
-  );
+  const reminderParts = [
+    buildMcpServerInstructionsReminder(toolRegistry),
+    skillsResult?.reminder,
+    ...startupParts.map((part) => part.text),
+    includeDeferredToolsReminder
+      ? buildDeferredToolsReminder(toolRegistry)
+      : null,
+  ]
+    .filter((text): text is string => Boolean(text?.trim()))
+    .map((text) => ({ text }));
 
   const prelude =
     reminderParts.length === 0

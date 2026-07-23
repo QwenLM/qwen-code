@@ -2,44 +2,49 @@
 
 ## Problem
 
-Qwen Code currently assembles prompt context in several places. The main system instruction appends project instructions, `--append-system-prompt`, and Git state in an order that does not reflect how frequently they change. Startup reminders similarly mix the date with workspace context. This makes the cache boundary implicit and lets a frequently changing fragment invalidate slower-changing suffixes.
+Qwen Code currently assembles prompt context in several places. The main system instruction flattens user instructions, workspace instructions, managed memory, `--append-system-prompt`, and Git state before their different lifetimes can influence ordering. Startup reminders similarly mix the date with workspace context. This makes the cache boundary implicit and lets frequently changing text invalidate slower-changing suffixes.
 
 ## Design
 
-Introduce a small typed prompt-fragment model with three cache tiers:
+Assemble the system instruction once from three ordered groups:
 
-- `stable`: product-owned instructions that normally remain identical across sessions.
-- `context`: workspace- or session-scoped instructions that normally remain stable during a session.
-- `volatile`: run- or request-scoped additions that can change frequently.
+- `stable`: identity, tool guidance, platform and model-family operational guidance.
+- `context`: workspace context files and caller-supplied system messages.
+- `volatile`: managed-memory and user-profile snapshots, Git state, and other session-scoped information.
 
-Each fragment also records its wire role and a marker identifying its source. Rendering keeps insertion order inside a tier and always emits tiers as `stable`, `context`, then `volatile`.
+`joinSystemPrompt` accepts these three groups directly and preserves insertion order inside each group. It does not introduce a generic fragment object, wire-role metadata, or source markers. Message role remains owned by the API request that carries the rendered text.
 
 The main system instruction uses:
 
-| Tier     | Fragments                                                                                |
-| -------- | ---------------------------------------------------------------------------------------- |
-| stable   | base or overridden system prompt                                                         |
-| context  | hierarchical `QWEN.md` / `AGENTS.md` instructions and Git snapshot                       |
-| volatile | managed auto-memory, `--append-system-prompt`, followed by optional SessionStart context |
+| Tier     | Content                                                                                         |
+| -------- | ----------------------------------------------------------------------------------------------- |
+| stable   | base or overridden system prompt                                                                |
+| context  | workspace `QWEN.md` / `AGENTS.md`, rules, local and extension instructions, then caller message |
+| volatile | user-level profile/instructions, managed auto-memory, and initial Git snapshot                  |
 
-The startup user-role prelude uses:
+Instruction discovery retains user- and workspace-scoped text separately instead of flattening both into `userMemory`. Configuration then exposes only the aggregate `context` and `volatile` prompt buckets; the legacy combined getter remains available to consumers that do not participate in tiered main-session prompt assembly.
 
-| Tier     | Fragments                                                    |
-| -------- | ------------------------------------------------------------ |
-| context  | MCP server guidance, available skills, OS/cwd/directory tree |
-| volatile | current date, deferred tool summary                          |
+The startup user-role prelude remains an explicit ordered array:
 
-MCP and skill metadata remain in a user-role `<system-reminder>` rather than being promoted to the trusted system role. Existing per-turn reminders remain volatile user-role content.
+1. MCP server guidance
+2. available skills
+3. OS/cwd/directory tree
+4. current date
+5. deferred tool summary
+
+MCP and skill metadata remain in user-role `<system-reminder>` parts rather than being promoted to the trusted system role. Existing per-turn reminders are unchanged.
 
 ## Behavioral changes
 
-- The Git snapshot moves before `--append-system-prompt`, so the explicit append remains in the volatile tail of the base system instruction.
+- Workspace instruction files and `--append-system-prompt` form the context tier.
+- User-level instructions, managed auto-memory, and the initial Git snapshot form the volatile tier.
 - Startup date text moves after OS/workspace context. It is emitted as a separate reminder part so a date change does not invalidate the workspace-context prefix.
-- Blank fragments continue to be omitted. Existing text is otherwise retained.
+- Blank sections continue to be omitted. Existing text is otherwise retained.
 
 ## Verification
 
-- Unit-test tier ordering, role filtering, blank-fragment handling, and stable ordering within a tier.
-- Unit-test main system-instruction ordering with base, memory, Git context, and append content.
-- Unit-test startup reminder ordering and separate date/workspace fragments.
+- Unit-test aggregate tier ordering and blank handling.
+- Unit-test user/workspace instruction discovery and managed-memory separation.
+- Assert the complete `systemInstruction` at the content-generator request boundary with workspace context, caller message, user profile, managed memory, and Git state present.
+- Assert startup `contents` ordering and separate date/workspace reminder parts.
 - Run the targeted core tests, then the core build and repository typecheck.

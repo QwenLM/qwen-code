@@ -11,6 +11,7 @@ import {
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
+  joinSystemPrompt,
   resolveInteractionMode,
 } from './prompts.js';
 import { InputFormat } from '../output/types.js';
@@ -216,7 +217,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot(); // Snapshot the combined prompt
   });
 
-  it('should append extra system prompt instructions after user memory when provided', () => {
+  it('places caller system instructions before volatile user memory', () => {
     vi.stubEnv('SANDBOX', undefined);
     const memory = 'Remember the project conventions.';
     const appendInstruction = 'Always answer in exactly one sentence.';
@@ -224,12 +225,12 @@ describe('Core System Prompt (prompts.ts)', () => {
 
     expect(prompt).toContain(`\n\n---\n\n${memory}`);
     expect(prompt).toContain(`\n\n---\n\n${appendInstruction}`);
-    expect(prompt.indexOf(memory)).toBeLessThan(
-      prompt.indexOf(appendInstruction),
+    expect(prompt.indexOf(appendInstruction)).toBeLessThan(
+      prompt.indexOf(memory),
     );
   });
 
-  it('should append extra instructions after a custom system prompt and user memory', () => {
+  it('places a caller system message in context and user memory in volatile', () => {
     const customInstruction = 'You are a release manager.';
     const userMemory = 'The repo uses pnpm.';
     const appendInstruction = 'Only report blocking issues.';
@@ -241,23 +242,33 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
 
     expect(result).toBe(
-      [customInstruction, userMemory, appendInstruction].join('\n\n---\n\n'),
+      [customInstruction, appendInstruction, userMemory].join('\n\n---\n\n'),
     );
   });
 
-  it('places additional context fragments before volatile append instructions', () => {
-    const result = getCustomSystemPrompt('Base', 'Memory', 'Append', [
-      {
-        marker: 'git-status',
-        role: 'system',
-        tier: 'context',
-        content: 'Git',
-      },
-    ]);
+  it('assembles the three Hermes-style system prompt tiers', () => {
+    const result = getCustomSystemPrompt('Base', 'User', 'Append', {
+      context: 'Workspace',
+      volatile: ['Managed memory', 'Git'].join('\n\n'),
+    });
 
     expect(result).toBe(
-      ['Base', ['Memory', 'Git'].join('\n\n'), 'Append'].join('\n\n---\n\n'),
+      [
+        'Base',
+        ['Workspace', 'Append'].join('\n\n'),
+        ['User', 'Managed memory', 'Git'].join('\n\n'),
+      ].join('\n\n---\n\n'),
     );
+  });
+
+  it('omits blank system prompt tiers without changing order', () => {
+    expect(
+      joinSystemPrompt({
+        stable: 'Base',
+        context: '',
+        volatile: 'Git',
+      }),
+    ).toBe(['Base', 'Git'].join('\n\n---\n\n'));
   });
 
   it('should include sandbox-specific instructions when SANDBOX env var is set', () => {

@@ -65,6 +65,8 @@ vi.mock('../tools/tool-registry', () => {
 vi.mock('../utils/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
+    userInstructions: '',
+    workspaceInstructions: '',
     fileCount: 0,
     ruleCount: 0,
     conditionalRules: [],

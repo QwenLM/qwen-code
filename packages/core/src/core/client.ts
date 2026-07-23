@@ -54,8 +54,8 @@ import {
   getCustomSystemPrompt,
   getPlanModeSystemReminder,
   resolveInteractionMode,
+  type SystemPromptTiers,
 } from './prompts.js';
-import type { PromptFragment } from './prompt-fragments.js';
 import {
   CompressionStatus,
   GeminiEventType,
@@ -864,53 +864,39 @@ export class GeminiClient {
   }
 
   private getMainSessionSystemInstruction(): string {
-    const instructionContext = this.config.getSystemPromptContext();
+    const volatileMemory = this.config.getSystemPromptVolatileMemory();
     const overrideSystemPrompt = this.config.getSystemPrompt();
     const appendSystemPrompt = this.config.getAppendSystemPrompt();
-    const additionalFragments = this.getAdditionalSystemPromptFragments(
+    const additionalTiers = this.getAdditionalSystemPromptTiers(
       this.getCachedGitStatus(),
     );
 
     if (overrideSystemPrompt) {
       return getCustomSystemPrompt(
         overrideSystemPrompt,
-        instructionContext,
+        volatileMemory,
         appendSystemPrompt,
-        additionalFragments,
+        additionalTiers,
       );
     }
 
     return getCoreSystemPrompt(
-      instructionContext,
+      volatileMemory,
       this.config.getModel(),
       appendSystemPrompt,
       resolveInteractionMode(this.config),
-      additionalFragments,
+      additionalTiers,
     );
   }
 
-  private getAdditionalSystemPromptFragments(
+  private getAdditionalSystemPromptTiers(
     gitStatus?: string | null,
-  ): PromptFragment[] {
-    const additionalFragments: PromptFragment[] = [];
-    if (gitStatus) {
-      additionalFragments.push({
-        marker: 'git-status',
-        role: 'system',
-        tier: 'context',
-        content: gitStatus,
-      });
-    }
-    const volatileMemory = this.config.getSystemPromptVolatileMemory();
-    if (volatileMemory?.trim()) {
-      additionalFragments.push({
-        marker: 'managed-auto-memory',
-        role: 'system',
-        tier: 'volatile',
-        content: volatileMemory,
-      });
-    }
-    return additionalFragments;
+  ): Omit<SystemPromptTiers, 'stable'> {
+    const context = this.config.getSystemPromptContext();
+    return {
+      context,
+      volatile: gitStatus?.trim() ?? '',
+    };
   }
 
   async refreshStartupContextReminder(): Promise<void> {
@@ -3160,9 +3146,9 @@ export class GeminiClient {
       const finalSystemInstruction = generationConfig.systemInstruction
         ? getCustomSystemPrompt(
             generationConfig.systemInstruction,
-            this.config.getSystemPromptContext(),
+            this.config.getSystemPromptVolatileMemory(),
             undefined,
-            this.getAdditionalSystemPromptFragments(),
+            this.getAdditionalSystemPromptTiers(),
           )
         : this.getMainSessionSystemInstruction();
 

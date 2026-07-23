@@ -29,6 +29,7 @@ const logger = createDebugLogger('MEMORY_DISCOVERY');
 interface GeminiFileContent {
   filePath: string;
   content: string | null;
+  memoryType: InstructionMemoryType;
 }
 
 export interface InstructionsLoadedNotification {
@@ -241,6 +242,7 @@ async function readGeminiMdFiles(
     const batch = filePaths.slice(i, i + CONCURRENT_LIMIT);
     const batchPromises = batch.map(
       async (filePath): Promise<GeminiFileContent> => {
+        const memoryType = getMemoryType(filePath);
         try {
           const content = await fs.readFile(filePath, 'utf-8');
 
@@ -262,7 +264,7 @@ async function readGeminiMdFiles(
                 await notifyInstructionsLoaded({
                   filePath: notification.filePath,
                   // Included files inherit the root instruction file's memory type.
-                  memoryType: getMemoryType(filePath),
+                  memoryType,
                   loadReason: 'include',
                   triggerFilePath: filePath,
                   parentFilePath,
@@ -272,14 +274,14 @@ async function readGeminiMdFiles(
           );
           await notifyInstructionsLoaded({
             filePath,
-            memoryType: getMemoryType(filePath),
+            memoryType,
             loadReason,
           });
           logger.debug(
             `Successfully read and processed imports: ${filePath} (Length: ${processedResult.content.length})`,
           );
 
-          return { filePath, content: processedResult.content };
+          return { filePath, content: processedResult.content, memoryType };
         } catch (error: unknown) {
           const isTestEnv =
             process.env['NODE_ENV'] === 'test' || process.env['VITEST'];
@@ -291,7 +293,7 @@ async function readGeminiMdFiles(
             );
           }
           logger.debug(`Failed to read: ${filePath}`);
-          return { filePath, content: null }; // Still include it with null content
+          return { filePath, content: null, memoryType }; // Still include it with null content
         }
       },
     );
@@ -337,6 +339,8 @@ function concatenateInstructions(
 
 export interface LoadServerHierarchicalMemoryResponse {
   memoryContent: string;
+  userInstructions: string;
+  workspaceInstructions: string;
   fileCount: number;
   /** Number of baseline rules injected at session start. */
   ruleCount: number;
@@ -475,6 +479,8 @@ export async function loadServerHierarchicalMemory(
   }
 
   let combinedInstructions = '';
+  let userInstructions = '';
+  let workspaceInstructions = '';
   let fileCount = 0;
 
   if (filePaths.length > 0) {
@@ -493,6 +499,14 @@ export async function loadServerHierarchicalMemory(
     // Pass CWD for relative path display in concatenated content
     combinedInstructions = concatenateInstructions(
       contentsWithPaths,
+      currentWorkingDirectory,
+    );
+    userInstructions = concatenateInstructions(
+      contentsWithPaths.filter((item) => item.memoryType === 'user'),
+      currentWorkingDirectory,
+    );
+    workspaceInstructions = concatenateInstructions(
+      contentsWithPaths.filter((item) => item.memoryType !== 'user'),
       currentWorkingDirectory,
     );
 
@@ -522,6 +536,9 @@ export async function loadServerHierarchicalMemory(
     memoryContent = memoryContent
       ? `${memoryContent}\n\n${rulesContent}`
       : rulesContent;
+    workspaceInstructions = workspaceInstructions
+      ? `${workspaceInstructions}\n\n${rulesContent}`
+      : rulesContent;
   }
 
   if (!memoryContent && filePaths.length === 0 && ruleCount === 0) {
@@ -530,6 +547,8 @@ export async function loadServerHierarchicalMemory(
 
   return {
     memoryContent,
+    userInstructions,
+    workspaceInstructions,
     fileCount,
     ruleCount,
     conditionalRules,

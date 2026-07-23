@@ -140,12 +140,40 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: '',
       fileCount: 0,
       ruleCount: 0,
       conditionalRules: [],
       projectRoot: expect.any(String),
     });
+  });
+
+  it('separates user instructions from workspace instructions', async () => {
+    await createTestFile(
+      path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),
+      'global user instructions',
+    );
+    await createTestFile(
+      path.join(projectRoot, DEFAULT_CONTEXT_FILENAME),
+      'project instructions',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [],
+      DEFAULT_FOLDER_TRUST,
+    );
+
+    expect(result.userInstructions).toContain('global user instructions');
+    expect(result.userInstructions).not.toContain('project instructions');
+    expect(result.workspaceInstructions).toContain('project instructions');
+    expect(result.workspaceInstructions).not.toContain(
+      'global user instructions',
+    );
   });
 
   it('should skip implicit global, project, and rule discovery in explicit-only mode', async () => {
@@ -178,6 +206,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: '',
       fileCount: 0,
       ruleCount: 0,
@@ -217,6 +247,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, explicitContextFile)} ---\nexplicit context\n--- End of Context from: ${path.relative(cwd, explicitContextFile)} ---`,
       fileCount: 1,
       ruleCount: 0,
@@ -240,6 +272,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---`,
       fileCount: 1,
       ruleCount: 0,
@@ -266,6 +300,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, customContextFile)} ---\ncustom context content\n--- End of Context from: ${path.relative(cwd, customContextFile)} ---`,
       fileCount: 1,
       ruleCount: 0,
@@ -296,6 +332,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, projectContextFile)} ---\nproject context content\n--- End of Context from: ${path.relative(cwd, projectContextFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdContextFile)} ---\ncwd context content\n--- End of Context from: ${path.relative(cwd, cwdContextFile)} ---`,
       fileCount: 2,
       ruleCount: 0,
@@ -324,6 +362,8 @@ describe('loadServerHierarchicalMemory', () => {
 
     // Only upward traversal is performed, subdirectory files are not loaded
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${customFilename} ---\nCWD custom memory\n--- End of Context from: ${customFilename} ---`,
       fileCount: 1,
       ruleCount: 0,
@@ -351,6 +391,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, srcGeminiFile)} ---\nSrc directory memory\n--- End of Context from: ${path.relative(cwd, srcGeminiFile)} ---`,
       fileCount: 2,
       ruleCount: 0,
@@ -379,6 +421,8 @@ describe('loadServerHierarchicalMemory', () => {
 
     // Subdirectory files are not loaded, only CWD and upward
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${DEFAULT_CONTEXT_FILENAME} ---\nCWD memory\n--- End of Context from: ${DEFAULT_CONTEXT_FILENAME} ---`,
       fileCount: 1,
       ruleCount: 0,
@@ -419,6 +463,8 @@ describe('loadServerHierarchicalMemory', () => {
 
     // Subdirectory files are not loaded, only global and upward from CWD
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, defaultContextFile)} ---\ndefault context content\n--- End of Context from: ${path.relative(cwd, defaultContextFile)} ---\n\n--- Context from: ${path.relative(cwd, rootGeminiFile)} ---\nProject parent memory\n--- End of Context from: ${path.relative(cwd, rootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\nProject root memory\n--- End of Context from: ${path.relative(cwd, projectRootGeminiFile)} ---\n\n--- Context from: ${path.relative(cwd, cwdGeminiFile)} ---\nCWD memory\n--- End of Context from: ${path.relative(cwd, cwdGeminiFile)} ---`,
       fileCount: 4,
       ruleCount: 0,
@@ -442,6 +488,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, extensionFilePath)} ---\nExtension memory content\n--- End of Context from: ${path.relative(cwd, extensionFilePath)} ---`,
       fileCount: 1,
       ruleCount: 0,
@@ -844,6 +892,8 @@ describe('loadServerHierarchicalMemory', () => {
     );
 
     expect(result).toEqual({
+      userInstructions: expect.any(String),
+      workspaceInstructions: expect.any(String),
       memoryContent: `--- Context from: ${path.relative(cwd, includedFile)} ---\nincluded directory memory\n--- End of Context from: ${path.relative(cwd, includedFile)} ---`,
       fileCount: 1,
       ruleCount: 0,

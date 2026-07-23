@@ -162,6 +162,8 @@ vi.mock('../tools/tool-registry', () => {
 vi.mock('../utils/memoryDiscovery.js', () => ({
   loadServerHierarchicalMemory: vi.fn().mockResolvedValue({
     memoryContent: '',
+    userInstructions: '',
+    workspaceInstructions: '',
     fileCount: 0,
     ruleCount: 0,
     conditionalRules: [],
@@ -3862,8 +3864,8 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(baseParams);
 
     expect(config.getUserMemory()).toBe(USER_MEMORY);
-    expect(config.getSystemPromptContext()).toBe(USER_MEMORY);
-    expect(config.getSystemPromptVolatileMemory()).toBe('');
+    expect(config.getSystemPromptContext()).toBe('');
+    expect(config.getSystemPromptVolatileMemory()).toBe(USER_MEMORY);
     // Verify other getters if needed
     expect(config.getTargetDir()).toBe(path.resolve(TARGET_DIR)); // Check resolved path
   });
@@ -3874,6 +3876,30 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(paramsWithoutMemory);
 
     expect(config.getUserMemory()).toBe('');
+  });
+
+  it('keeps discovered user and workspace instructions separate', async () => {
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+    });
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
+      memoryContent: 'User instructions\n\nWorkspace instructions',
+      userInstructions: 'User instructions',
+      workspaceInstructions: 'Workspace instructions',
+      fileCount: 2,
+      ruleCount: 0,
+      conditionalRules: [],
+      projectRoot: '/tmp',
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(config.getSystemPromptContext()).toBe('Workspace instructions');
+    expect(config.getSystemPromptVolatileMemory()).toBe('User instructions');
+    expect(config.getUserMemory()).toBe(
+      'User instructions\n\nWorkspace instructions',
+    );
   });
 
   it('Config constructor should enable runtime sleep prevention by default', () => {
@@ -3896,6 +3922,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -3923,6 +3951,8 @@ describe('Server Config (config.ts)', () => {
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(false);
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -3956,6 +3986,8 @@ describe('Server Config (config.ts)', () => {
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        userInstructions: '',
+        workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
         ruleCount: 0,
         conditionalRules: [],
@@ -4001,6 +4033,8 @@ describe('Server Config (config.ts)', () => {
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        userInstructions: '',
+        workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
         ruleCount: 0,
         conditionalRules: [],
@@ -4046,6 +4080,8 @@ describe('Server Config (config.ts)', () => {
       vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
         memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+        userInstructions: '',
+        workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
         fileCount: 1,
         ruleCount: 0,
         conditionalRules: [],
@@ -4073,6 +4109,8 @@ describe('Server Config (config.ts)', () => {
     vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4100,6 +4138,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: 'short project rules',
+      userInstructions: '',
+      workspaceInstructions: 'short project rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4124,6 +4164,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
       memoryContent: 'a'.repeat(800),
+      userInstructions: '',
+      workspaceInstructions: 'a'.repeat(800),
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4179,6 +4221,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce({
       memoryContent: 'short project context',
+      userInstructions: '',
+      workspaceInstructions: 'short project context',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4622,6 +4666,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4644,6 +4690,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4668,6 +4716,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4716,6 +4766,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
@@ -4738,6 +4790,8 @@ describe('Server Config (config.ts)', () => {
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
       memoryContent: '--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: '',
+      workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
       conditionalRules: [],
