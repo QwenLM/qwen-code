@@ -612,10 +612,9 @@ export abstract class ChannelBase {
   abstract disconnect(): void;
 
   /**
-   * Thread-targeted delivery. Polling adapters (GitHub, Gitea, GitLab) override
-   * this to post comments on a specific issue/PR. The default falls through to
-   * sendMessage(chatId, text), ignoring threadId — existing IM adapters are
-   * behaviorally unchanged.
+   * Thread-targeted delivery. Polling adapters override this to post comments
+   * on a specific issue/PR. The default falls through to sendMessage(chatId,
+   * text), ignoring threadId — existing IM adapters are behaviorally unchanged.
    */
   protected async sendThreadMessage(
     chatId: string,
