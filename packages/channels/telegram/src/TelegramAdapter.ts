@@ -100,6 +100,7 @@ export class TelegramChannel extends ChannelBase {
 
       const envelope = this.buildEnvelope(msg, text, msg.entities);
 
+      if (envelope.threadId) this.chatThreadMap.set(envelope.chatId, envelope.threadId);
       // Don't await — long prompts would block the update loop
       this.handleInbound(envelope).catch((err) => {
         process.stderr.write(
@@ -138,6 +139,7 @@ export class TelegramChannel extends ChannelBase {
         );
       }
 
+      if (envelope.threadId) this.chatThreadMap.set(envelope.chatId, envelope.threadId);
       this.handleInbound(envelope).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
@@ -191,6 +193,7 @@ export class TelegramChannel extends ChannelBase {
           `\n\n(User sent a file "${fileName}" but download failed)`;
       }
 
+      if (envelope.threadId) this.chatThreadMap.set(envelope.chatId, envelope.threadId);
       this.handleInbound(envelope).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
@@ -244,6 +247,7 @@ export class TelegramChannel extends ChannelBase {
           `\n\n(User sent a voice message but download failed)`;
       }
 
+      if (envelope.threadId) this.chatThreadMap.set(envelope.chatId, envelope.threadId);
       this.handleInbound(envelope).catch((err) => {
         process.stderr.write(
           `[Telegram:${this.name}] Error handling message: ${err}\n`,
@@ -280,6 +284,14 @@ export class TelegramChannel extends ChannelBase {
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
   private activeTypingSessions = new Map<string, Set<string>>();
+
+  /**
+   * Cache of the most recent threadId per chatId, populated from inbound
+   * envelopes.  Used by {@link sendMessage} to route replies back to the
+   * correct Telegram forum topic when {@link ChannelBase} does not supply
+   * a threadId.
+   */
+  private chatThreadMap = new Map<string, string>();
 
   private sendTyping(chatId: string): void {
     try {
@@ -342,7 +354,7 @@ export class TelegramChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    await this.sendTelegramMessage(chatId, text);
+    await this.sendTelegramMessage(chatId, text, this.chatThreadMap.get(chatId));
   }
 
   protected override async pushProactive(
