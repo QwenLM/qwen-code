@@ -1,4 +1,5 @@
 import type { ACPToolCall, Message, TodoItem } from '../adapters/types';
+import { isSubAgentToolCall } from '../adapters/toolClassification';
 
 /**
  * The todo tool is registered as `todo_write` on the wire, but older paths and
@@ -12,21 +13,26 @@ export function isTodoWriteToolName(name: string): boolean {
 
 export function parseTodoItemsFromEntries(
   entries: readonly unknown[],
-): TodoItem[] | undefined {
+): TodoItem[] {
   const todos = entries.flatMap((entry, index): TodoItem[] => {
     const item = getRecord(entry);
     const content = getString(item, 'content');
     if (!content) return [];
+    const meta = getRecord(item?.['_meta']);
+    const qwenTodo = getRecord(meta?.['qwenTodo']);
+    const blockedBy = getStringArray(qwenTodo, 'blockedBy');
     return [
       {
-        id: getString(item, 'id') ?? `plan-${index}`,
+        id:
+          getString(qwenTodo, 'id') ?? getString(item, 'id') ?? `plan-${index}`,
         content,
         status: getTodoStatus(getString(item, 'status')),
         priority: getTodoPriority(getString(item, 'priority')),
+        ...(blockedBy ? { blockedBy } : {}),
       },
     ];
   });
-  return todos.length > 0 ? todos : undefined;
+  return todos;
 }
 
 export function extractTodosFromToolCall(
@@ -72,6 +78,7 @@ export function getTodoStatusIcon(status: TodoItem['status']): string {
 
 export interface FloatingTodosState {
   todos: TodoItem[];
+  planId: string | null;
   /** Every item is completed — the panel shows a transient "all done" state. */
   allCompleted: boolean;
   /** Transcript message the latest todo update came from. */
@@ -82,6 +89,7 @@ export interface FloatingTodosState {
 
 const EMPTY_FLOATING_TODOS: FloatingTodosState = {
   todos: [],
+  planId: null,
   allCompleted: false,
   sourceMessageId: null,
   sourceCallId: null,
@@ -91,6 +99,7 @@ export function getFloatingTodos(
   messages: readonly Message[],
 ): FloatingTodosState {
   let todos: TodoItem[] = [];
+  let planId: string | null = null;
   let sourceMessageId: string | null = null;
   let sourceCallId: string | null = null;
   let userMessageAfter = false;
@@ -102,6 +111,7 @@ export function getFloatingTodos(
     }
     if (message.role === 'plan') {
       todos = message.todos;
+      planId = null;
       sourceMessageId = message.id;
       sourceCallId = null;
       userMessageAfter = false;
@@ -113,6 +123,7 @@ export function getFloatingTodos(
       const nextTodos = extractTodosFromToolCall(tool);
       if (nextTodos) {
         todos = nextTodos;
+        planId = getTodoPlanId(tool);
         sourceMessageId = message.id;
         sourceCallId = tool.callId;
         userMessageAfter = false;
@@ -123,7 +134,40 @@ export function getFloatingTodos(
   if (todos.length === 0) return EMPTY_FLOATING_TODOS;
   const allCompleted = !hasActiveTodos(todos);
   if (userMessageAfter) return EMPTY_FLOATING_TODOS;
-  return { todos, allCompleted, sourceMessageId, sourceCallId };
+  return { todos, planId, allCompleted, sourceMessageId, sourceCallId };
+}
+
+export function getAgentToolsForPlan(
+  messages: readonly Message[],
+  plan: Pick<FloatingTodosState, 'planId' | 'sourceMessageId'>,
+): ACPToolCall[] {
+  if (plan.sourceMessageId === null) return [];
+
+  const tools: ACPToolCall[] = [];
+  const startIndex = messages.findIndex((message) => {
+    if (plan.planId === null) return message.id === plan.sourceMessageId;
+    if (message.role !== 'tool_group') return false;
+    return message.tools.some(
+      (tool) =>
+        extractTodosFromToolCall(tool) !== undefined &&
+        getTodoPlanId(tool) === plan.planId,
+    );
+  });
+  if (startIndex < 0) return [];
+
+  for (let index = startIndex; index < messages.length; index++) {
+    const message = messages[index];
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      if (extractTodosFromToolCall(tool) !== undefined) {
+        continue;
+      }
+      if (!tool.parentToolCallId && isSubAgentToolCall(tool)) {
+        tools.push(tool);
+      }
+    }
+  }
+  return tools;
 }
 
 /** A status transition surfaced for a single todo snapshot. */
@@ -643,4 +687,20 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getStringArray(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string[] | undefined {
+  const value = record?.[key];
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined;
+}
+
+export function getTodoPlanId(tool: ACPToolCall): string | null {
+  const rawOutput = getRecord(tool.rawOutput);
+  const plan = getRecord(rawOutput?.['plan']);
+  return getString(plan, 'id') ?? null;
 }

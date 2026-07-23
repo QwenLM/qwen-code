@@ -15,6 +15,8 @@ import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
 import { formatRuntime } from '../../utils/formatRuntime';
 import { createSentinelSerializer } from '../../utils/sentinelMessage';
+import type { ACPToolCall, TodoItem } from '../../adapters/types';
+import { PlanExecutionView } from './PlanExecutionView';
 import {
   localizeToolDisplayName,
   sanitizeControlChars,
@@ -239,11 +241,17 @@ export function TasksStatusMessage({
   embedded = false,
   manageActiveEvent = true,
   onClose,
+  planTodos = [],
+  agentTools = [],
+  onOpenSubagent,
 }: {
   message: SerializedTasksMessage;
   embedded?: boolean;
   manageActiveEvent?: boolean;
   onClose?: () => void;
+  planTodos?: readonly TodoItem[];
+  agentTools?: readonly ACPToolCall[];
+  onOpenSubagent?: (tool: ACPToolCall) => void;
 }) {
   const { t } = useI18n();
   const actions = useActions();
@@ -532,6 +540,12 @@ export function TasksStatusMessage({
             {actionError && <div className={styles.error}>{actionError}</div>}
           </div>
         )}
+        <PlanExecutionView
+          todos={planTodos}
+          tools={agentTools}
+          tasks={tasks}
+          onOpenSubagent={onOpenSubagent}
+        />
         <div>
           <div className={styles.secondary}>{t('tasks.empty')}</div>
         </div>
@@ -569,6 +583,14 @@ export function TasksStatusMessage({
           </div>
         )}
 
+      {(embedded || step === 'list') && (
+        <PlanExecutionView
+          todos={planTodos}
+          tools={agentTools}
+          tasks={tasks}
+          onOpenSubagent={onOpenSubagent}
+        />
+      )}
       {(embedded || step === 'list') && (
         <div className={styles.list}>
           {!embedded && (

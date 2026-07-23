@@ -5,10 +5,10 @@
  */
 
 import { BaseEmitter } from './base-emitter.js';
-import type { TodoItem } from '../types.js';
+import type { TodoPlanSnapshot } from '../types.js';
 import {
   createTranscriptPlanUpdate,
-  extractTranscriptTodos,
+  extractTranscriptTodoPlan,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 
 /**
@@ -22,9 +22,9 @@ export class PlanEmitter extends BaseEmitter {
   /**
    * Emits a plan update with the given todo items.
    *
-   * @param todos - Array of todo items to send as plan entries
+   * @param plan - Plan identity and todo items to send as plan entries
    */
-  async emitPlan(todos: TodoItem[]): Promise<void> {
+  async emitPlan(plan: TodoPlanSnapshot, sourceCallId?: string): Promise<void> {
     // Snapshot the running cumulative usage as a per-snapshot baseline. The
     // web-shell diffs consecutive snapshots to attribute tokens/API time to the
     // task that ran between two todo updates. Copied so later accumulation
@@ -35,7 +35,12 @@ export class PlanEmitter extends BaseEmitter {
     // emitting a plan ahead of its turn's usage would record a stale baseline
     // and zero out that task's stats.
     const cumulative = this.ctx.cumulativeUsage;
-    await this.sendUpdate(createTranscriptPlanUpdate(todos, cumulative));
+    await this.sendUpdate(
+      createTranscriptPlanUpdate(plan.todos, cumulative, {
+        planToolCallId: sourceCallId,
+        todoPlanId: plan.planId,
+      }),
+    );
   }
 
   /**
@@ -43,23 +48,26 @@ export class PlanEmitter extends BaseEmitter {
    * Tries multiple sources in priority order:
    * 1. Result display object with type 'todo_list'
    * 2. Result display as JSON string
-   * 3. Args with 'todos' array
+   * 3. Args with 'todos' array when no result display is available
    *
    * @param resultDisplay - The tool result display (object, string, or undefined)
    * @param args - The tool call arguments (fallback source)
-   * @returns Array of todos if found, null otherwise
+   * @returns Plan snapshot if found, null otherwise
    */
-  extractTodos(
+  extractPlan(
     resultDisplay: unknown,
     args?: Record<string, unknown>,
-  ): TodoItem[] | null {
-    const todos = extractTranscriptTodos(resultDisplay, args);
-    return (
-      todos?.map((todo, index) => ({
+  ): TodoPlanSnapshot | null {
+    const plan = extractTranscriptTodoPlan(resultDisplay, args);
+    if (!plan) return null;
+    return {
+      ...(plan.planId ? { planId: plan.planId } : {}),
+      todos: plan.todos.map((todo, index) => ({
         id: todo.id ?? String(index),
         content: todo.content,
         status: todo.status,
-      })) ?? null
-    );
+        ...(todo.blockedBy ? { blockedBy: [...todo.blockedBy] } : {}),
+      })),
+    };
   }
 }

@@ -7335,20 +7335,23 @@ export class Session implements SessionContext {
           }
 
           // Handle TodoWriteTool: extract todos and send plan update
-          if (isTodoWriteTool) {
-            const todos = this.planEmitter.extractTodos(
+          if (isTodoWriteTool && succeeded) {
+            const plan = this.planEmitter.extractPlan(
               toolResult.returnDisplay,
               args,
             );
 
             // Match original logic: emit plan if todos.length > 0 OR if args had todos
-            if ((todos && todos.length > 0) || Array.isArray(args['todos'])) {
-              await this.planEmitter.emitPlan(todos ?? []);
+            if (
+              plan &&
+              (plan.todos.length > 0 || Array.isArray(args['todos']))
+            ) {
+              await this.planEmitter.emitPlan(plan, callId);
             }
 
             // Skip tool_call_update event for TodoWriteTool
             // Still log and return function response for LLM
-          } else {
+          } else if (!isTodoWriteTool) {
             // Normal tool handling: emit result using ToolCallEmitter
             await this.toolCallEmitter.emitResult({
               callId,

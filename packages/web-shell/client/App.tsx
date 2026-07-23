@@ -227,6 +227,7 @@ import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
   computeTodoTimeline,
+  getAgentToolsForPlan,
   getFloatingTodos,
   todoDetailSignature,
   todoTimelineSignature,
@@ -2209,6 +2210,9 @@ export function App({
     () => getFloatingTodos(messages),
     [messages],
   );
+  const planAgentTools = useMemo(() => {
+    return getAgentToolsForPlan(messages, floatingTodosState);
+  }, [floatingTodosState, messages]);
   // Keep the timeline Map referentially stable across streaming ticks that
   // don't touch any todo snapshot. The Map is a context value, so a fresh
   // reference would re-render every todo/plan row regardless of memoization;
@@ -6760,7 +6764,11 @@ export function App({
           )}
           {tasksDialogMessage && (
             <DialogShell
-              title={t('tasks.title')}
+              title={
+                floatingTodos.length > 0
+                  ? t('planExecution.dialogTitle')
+                  : t('tasks.title')
+              }
               size="lg"
               onClose={() => setTasksDialogMessage(null)}
             >
@@ -6769,6 +6777,12 @@ export function App({
                 embedded
                 manageActiveEvent={false}
                 onClose={() => setTasksDialogMessage(null)}
+                planTodos={floatingTodos}
+                agentTools={planAgentTools}
+                onOpenSubagent={(tool) => {
+                  setTasksDialogMessage(null);
+                  openSubagentPanel(tool);
+                }}
               />
             </DialogShell>
           )}
@@ -7804,6 +7818,9 @@ export function App({
                           <TodoPanel
                             todos={showFloatingTodos ? floatingTodos : []}
                             statusItems={floatingBottomStatusItems}
+                            onOpen={
+                              showFloatingTodos ? openTasksPanel : undefined
+                            }
                           />
                         </div>
                       )}

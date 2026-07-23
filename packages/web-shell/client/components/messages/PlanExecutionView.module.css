@@ -1,0 +1,180 @@
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.heading,
+.unassignedTitle {
+  font-weight: 700;
+}
+
+.count,
+.dependencies,
+.executionStatus {
+  color: var(--muted-foreground);
+  font-weight: 400;
+}
+
+.dag {
+  display: flex;
+  gap: 12px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.flatList,
+.layer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.flatList .layer {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.layer {
+  min-width: 220px;
+}
+
+.dag .layer {
+  flex: 0 0 240px;
+  min-width: 0;
+}
+
+.node {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--background);
+}
+
+.nodeTop {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.nodeId {
+  color: var(--muted-foreground);
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+}
+
+.nodeStatus,
+.attention {
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--secondary);
+  font-size: 11px;
+}
+
+.running,
+.completed {
+  color: var(--success-color);
+}
+
+.paused,
+.blocked,
+.attention {
+  color: var(--warning-color);
+}
+
+.in_progress {
+  color: var(--agent-blue-500);
+}
+
+.ready {
+  color: var(--muted-foreground);
+}
+
+.nodeContent {
+  color: var(--foreground);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.dependencies {
+  font-size: 11px;
+}
+
+.executions {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.executionGroup {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.execution {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  min-height: 32px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 6px;
+  color: var(--foreground);
+  background: var(--secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.execution:disabled {
+  cursor: default;
+}
+
+.execution:not(:disabled):hover,
+.execution:not(:disabled):focus-visible {
+  background: var(--muted);
+}
+
+.execution:not(:disabled):focus-visible {
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 1px;
+}
+
+.executionLabel {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.executionStatus {
+  flex: 0 0 auto;
+  font-size: 11px;
+}
+
+.nestedExecution {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding-top: 2px;
+  padding-bottom: 2px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.unassigned {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}

@@ -362,9 +362,18 @@ describe('daemon UI normalizer and transcript reducer', () => {
         update: {
           sessionUpdate: 'plan',
           entries: [
-            { content: 'Task', status: 'completed', priority: 'medium' },
+            {
+              content: 'Task',
+              status: 'completed',
+              priority: 'medium',
+              _meta: {
+                qwenTodo: { id: 'task', blockedBy: ['prepare'] },
+              },
+            },
           ],
           _meta: {
+            qwenTodoPlan: { id: 'plan-1' },
+            qwenTranscript: { planToolCallId: 'call-1' },
             stats: {
               promptTokens: 100,
               cachedTokens: 10,
@@ -381,7 +390,15 @@ describe('daemon UI normalizer and transcript reducer', () => {
       type: 'tool.update',
       toolName: 'todo_write',
       rawOutput: {
-        entries: [{ content: 'Task', status: 'completed', priority: 'medium' }],
+        entries: [
+          {
+            content: 'Task',
+            status: 'completed',
+            priority: 'medium',
+            _meta: { qwenTodo: { id: 'task', blockedBy: ['prepare'] } },
+          },
+        ],
+        plan: { id: 'plan-1', sourceCallId: 'call-1' },
         stats: {
           promptTokens: 100,
           cachedTokens: 10,

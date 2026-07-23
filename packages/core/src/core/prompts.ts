@@ -297,6 +297,7 @@ You have access to the ${ToolNames.TODO_WRITE} tool to keep user-visible progres
 
 When you create a todo list:
 - Keep it short and outcome-oriented. Use a few meaningful, logically ordered, verifiable steps rather than one item per error, file, command, or minor edit.
+- For complex work delegated through top-level Agent calls, create the relevant todo first and pass its ID as \`todo_id\` so the execution can be associated with the plan node.
 - Keep at most one item in_progress. Keep the list current, mark finished work completed, and revise it when the scope or approach changes. When work completes together, update multiple statuses in one tool call rather than making bookkeeping-only calls.
 - Do not repeat the full todo list in prose after calling the tool; briefly communicate only important context or the next step.
 

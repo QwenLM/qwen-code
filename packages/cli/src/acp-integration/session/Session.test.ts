@@ -16329,6 +16329,26 @@ describe('Session', () => {
       ).toBe(false);
     });
 
+    it('does not publish rejected Todo arguments as a live plan', async () => {
+      const execute = installPendingTodoTool();
+      execute.mockResolvedValue({
+        llmContent: 'Failed to modify todos',
+        returnDisplay:
+          'Error writing todos: Todo dependency graph contains a cycle',
+      });
+      queuePendingTodoThenNaturalStops();
+
+      await runGuardPrompt();
+
+      expect(
+        vi
+          .mocked(mockClient.sessionUpdate)
+          .mock.calls.some(
+            ([params]) => params.update.sessionUpdate === 'plan',
+          ),
+      ).toBe(false);
+    });
+
     it('preserves feature-off Stop hook loop reporting before token rejection', async () => {
       mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
       mockConfig.getStopHookBlockingCap = vi.fn().mockReturnValue(3);

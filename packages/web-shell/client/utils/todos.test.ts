@@ -6,6 +6,7 @@ import {
   computeTodoTimeline,
   extractTodoStats,
   extractTodosFromToolCall,
+  getAgentToolsForPlan,
   getFloatingTodos,
   getTodoStatusIcon,
   getTodoWindow,
@@ -89,6 +90,7 @@ describe('getFloatingTodos', () => {
       getFloatingTodos([userMessage('u1'), assistantMessage('a1')]),
     ).toEqual({
       todos: [],
+      planId: null,
       allCompleted: false,
       sourceMessageId: null,
       sourceCallId: null,
@@ -106,6 +108,37 @@ describe('getFloatingTodos', () => {
     expect(state.allCompleted).toBe(false);
     expect(state.sourceMessageId).toBe('m2');
     expect(state.sourceCallId).toBe('call-m2');
+  });
+
+  it('preserves a stable plan id and dependency metadata', () => {
+    const tool: ACPToolCall = {
+      callId: 'call-plan',
+      toolName: 'todo_write',
+      status: 'completed',
+      rawOutput: {
+        entries: [
+          {
+            content: 'Build',
+            status: 'pending',
+            _meta: { qwenTodo: { id: 'build', blockedBy: ['research'] } },
+          },
+        ],
+        plan: { id: 'plan-1', sourceCallId: 'call-plan' },
+      },
+    };
+    const state = getFloatingTodos([
+      { id: 'message-plan', role: 'tool_group', tools: [tool] },
+    ]);
+
+    expect(state.planId).toBe('plan-1');
+    expect(state.todos).toEqual([
+      {
+        id: 'build',
+        content: 'Build',
+        status: 'pending',
+        blockedBy: ['research'],
+      },
+    ]);
   });
 
   it('uses a null sourceCallId for plan messages', () => {
@@ -196,6 +229,67 @@ describe('getFloatingTodos', () => {
     expect(state.todos).toHaveLength(2);
     expect(state.allCompleted).toBe(true);
     expect(state.sourceMessageId).toBe('p1');
+  });
+});
+
+describe('getAgentToolsForPlan', () => {
+  const planUpdate = (messageId: string, planId: string): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${messageId}`,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: {
+          entries: [{ content: planId, status: 'pending' }],
+          plan: { id: planId, sourceCallId: `call-${messageId}` },
+        },
+      },
+    ],
+  });
+  const agentUpdate = (
+    messageId: string,
+    callId: string,
+    parentToolCallId?: string,
+  ): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId,
+        toolName: 'Agent',
+        status: 'completed',
+        args: { todo_id: 'work' },
+        ...(parentToolCallId ? { parentToolCallId } : {}),
+      },
+    ],
+  });
+
+  it('collects only top-level Agent calls from the current stable plan', () => {
+    const messages = [
+      planUpdate('old-plan', 'old'),
+      agentUpdate('old-agent', 'old-agent'),
+      planUpdate('new-plan', 'new'),
+      agentUpdate('new-agent', 'new-agent'),
+      agentUpdate('nested-agent', 'nested-agent', 'new-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'new',
+        sourceMessageId: 'new-plan',
+      }).map((tool) => tool.callId),
+    ).toEqual(['new-agent']);
+  });
+
+  it('returns immediately when there is no active plan source', () => {
+    expect(
+      getAgentToolsForPlan([agentUpdate('agent', 'agent')], {
+        planId: null,
+        sourceMessageId: null,
+      }),
+    ).toEqual([]);
   });
 });
 
@@ -428,6 +522,30 @@ describe('extractTodosFromToolCall', () => {
       toolCall({ rawOutput: { entries: [item('1', 'A', 'completed')] } }),
     );
     expect(todos?.map((t) => t.status)).toEqual(['completed']);
+  });
+
+  it('reads stable ids and dependencies from entry metadata', () => {
+    const todos = extractTodosFromToolCall(
+      toolCall({
+        rawOutput: {
+          entries: [
+            {
+              content: 'A',
+              status: 'pending',
+              _meta: { qwenTodo: { id: 'a', blockedBy: ['root'] } },
+            },
+          ],
+        },
+      }),
+    );
+    expect(todos).toEqual([
+      {
+        id: 'a',
+        content: 'A',
+        status: 'pending',
+        blockedBy: ['root'],
+      },
+    ]);
   });
 
   it('returns undefined for a non-todo tool even if it carries a todos array', () => {

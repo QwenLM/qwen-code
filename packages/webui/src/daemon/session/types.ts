@@ -287,6 +287,7 @@ export interface DaemonTodoItem {
   content: string;
   status: DaemonTodoStatus;
   priority?: DaemonTodoPriority;
+  blockedBy?: string[];
 }
 
 export interface DaemonTodoList {
@@ -294,6 +295,8 @@ export interface DaemonTodoList {
   toolCallId: string;
   title: string;
   status: string;
+  planId?: string;
+  sourceCallId?: string;
   items: DaemonTodoItem[];
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
 }

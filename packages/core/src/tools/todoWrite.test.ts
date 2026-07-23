@@ -133,6 +133,93 @@ describe('TodoWriteTool', () => {
       const result = tool.validateToolParams(params);
       expect(result).toContain('unique');
     });
+
+    it('should accept a valid dependency graph', () => {
+      expect(
+        tool.validateToolParams({
+          todos: [
+            { id: 'design', content: 'Design', status: 'completed' },
+            {
+              id: 'build',
+              content: 'Build',
+              status: 'pending',
+              blockedBy: ['design'],
+            },
+          ],
+        }),
+      ).toBeNull();
+    });
+
+    it('should validate deep dependency chains without recursive traversal', () => {
+      const todos = Array.from({ length: 3_000 }, (_, index) => ({
+        id: `todo-${index}`,
+        content: `Todo ${index}`,
+        status: 'pending' as const,
+        ...(index === 0 ? {} : { blockedBy: [`todo-${index - 1}`] }),
+      }));
+
+      expect(tool.validateToolParams({ todos })).toBeNull();
+    });
+
+    it.each([
+      {
+        name: 'duplicate dependency',
+        todos: [
+          { id: 'a', content: 'A', status: 'pending' as const },
+          {
+            id: 'b',
+            content: 'B',
+            status: 'pending' as const,
+            blockedBy: ['a', 'a'],
+          },
+        ],
+        error: 'duplicate blockedBy',
+      },
+      {
+        name: 'unknown dependency',
+        todos: [
+          {
+            id: 'a',
+            content: 'A',
+            status: 'pending' as const,
+            blockedBy: ['missing'],
+          },
+        ],
+        error: 'unknown dependency',
+      },
+      {
+        name: 'self dependency',
+        todos: [
+          {
+            id: 'a',
+            content: 'A',
+            status: 'pending' as const,
+            blockedBy: ['a'],
+          },
+        ],
+        error: 'must not depend on itself',
+      },
+      {
+        name: 'cycle',
+        todos: [
+          {
+            id: 'a',
+            content: 'A',
+            status: 'pending' as const,
+            blockedBy: ['b'],
+          },
+          {
+            id: 'b',
+            content: 'B',
+            status: 'pending' as const,
+            blockedBy: ['a'],
+          },
+        ],
+        error: 'must not contain a cycle',
+      },
+    ])('should reject a $name', ({ todos, error }) => {
+      expect(tool.validateToolParams({ todos })).toContain(error);
+    });
   });
 
   describe('execute', () => {
@@ -162,6 +249,7 @@ describe('TodoWriteTool', () => {
       expect(result.llmContent).toContain(JSON.stringify(params.todos));
       expect(result.returnDisplay).toMatchObject({
         type: 'todo_list',
+        planId: expect.any(String),
         todos: [
           { id: '1', content: 'Task 1', status: 'pending' },
           { id: '2', content: 'Task 2', status: 'in_progress' },
@@ -172,6 +260,71 @@ describe('TodoWriteTool', () => {
         expect.stringContaining('"todos"'),
         { encoding: 'utf-8' },
       );
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
+      ).toMatchObject({ planId: expect.any(String), todos: params.todos });
+    });
+
+    it('should retain the plan ID while an active plan is revised', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'in_progress' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: '1', content: 'Task', status: 'completed' }],
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({ planId: 'plan-1' });
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
+      ).toMatchObject({ planId: 'plan-1' });
+    });
+
+    it('should start a new plan after the previous plan completed', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'finished-plan',
+          todos: [{ id: '1', content: 'Done', status: 'completed' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({ todos: [{ id: '2', content: 'New', status: 'pending' }] })
+        .execute(mockAbortSignal);
+      const display = result.returnDisplay as { planId?: string };
+
+      expect(display.planId).toEqual(expect.any(String));
+      expect(display.planId).not.toBe('finished-plan');
+    });
+
+    it('should clear persisted plan identity while identifying the cleared plan', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'plan-to-clear',
+          todos: [{ id: '1', content: 'Task', status: 'in_progress' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool.build({ todos: [] }).execute(mockAbortSignal);
+      const persisted = JSON.parse(mockAtomicWrite.mock.calls[0][1] as string);
+
+      expect(result.returnDisplay).toMatchObject({
+        type: 'todo_list',
+        planId: 'plan-to-clear',
+        todos: [],
+      });
+      expect(persisted).not.toHaveProperty('planId');
     });
 
     it('should replace todos with new ones', async () => {

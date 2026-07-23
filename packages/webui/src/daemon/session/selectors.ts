@@ -36,13 +36,19 @@ export function selectDaemonTodoLists(
   return blocks.flatMap((block): DaemonTodoList[] => {
     if (block.kind !== 'tool') return [];
     const items = extractDaemonTodosFromToolBlock(block);
-    if (!items || items.length === 0) return [];
+    if (!items) return [];
+    const rawOutput = getRecord(block.rawOutput);
+    const plan = getRecord(rawOutput?.['plan']);
+    const planId = getString(plan, 'id');
+    const sourceCallId = getString(plan, 'sourceCallId');
     return [
       {
         blockId: block.id,
         toolCallId: block.toolCallId,
         title: block.title,
         status: block.status,
+        ...(planId ? { planId } : {}),
+        ...(sourceCallId ? { sourceCallId } : {}),
         items,
         raw: block,
       },
@@ -96,17 +102,22 @@ export function extractDaemonTodosFromToolBlock(
 
 export function parseDaemonTodoItemsFromEntries(
   entries: readonly unknown[],
-): DaemonTodoItem[] | undefined {
+): DaemonTodoItem[] {
   const todos = entries.flatMap((entry, index): DaemonTodoItem[] => {
     const item = getRecord(entry);
     const content = getString(item, 'content');
     if (!content) return [];
-    const id = getString(item, 'id') ?? `plan-${index}`;
+    const meta = getRecord(item?.['_meta']);
+    const qwenTodo = getRecord(meta?.['qwenTodo']);
+    const id =
+      getString(qwenTodo, 'id') ?? getString(item, 'id') ?? `plan-${index}`;
+    const blockedBy = getStringArray(qwenTodo, 'blockedBy');
     return [
       {
         id,
         content,
         status: getTodoStatus(getString(item, 'status')),
+        ...(blockedBy ? { blockedBy } : {}),
         ...(() => {
           const priority = getTodoPriority(getString(item, 'priority'));
           return priority ? { priority } : {};
@@ -114,7 +125,7 @@ export function parseDaemonTodoItemsFromEntries(
       },
     ];
   });
-  return todos.length > 0 ? todos : undefined;
+  return todos;
 }
 
 export function hasDaemonActiveTodos(
@@ -241,4 +252,14 @@ function getString(
 ): string | undefined {
   const value = record?.[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function getStringArray(
+  record: Record<string, unknown> | undefined,
+  key: string,
+): string[] | undefined {
+  const value = record?.[key];
+  return Array.isArray(value) && value.every((item) => typeof item === 'string')
+    ? value
+    : undefined;
 }

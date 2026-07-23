@@ -7,6 +7,7 @@
 import type { ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import type { FunctionDeclaration } from '@google/genai';
+import { randomUUID } from 'node:crypto';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
@@ -50,6 +51,12 @@ const todoWriteToolSchemaData: FunctionDeclaration = {
             id: {
               type: 'string',
             },
+            blockedBy: {
+              type: 'array',
+              items: { type: 'string' },
+              uniqueItems: true,
+              description: 'Todo IDs that must be completed before this item',
+            },
           },
           required: ['content', 'status', 'id'],
           additionalProperties: false,
@@ -74,6 +81,8 @@ Do not use it for simple or single-step work, purely conversational or informati
 
 Keep the list short and outcome-oriented. Use a small number of meaningful, logically ordered, verifiable steps. Do not create a separate todo for every error, file, command, or minor edit.
 
+Use blockedBy only when the work has real dependencies. Reference Todo IDs from the same list and keep independent work unblocked.
+
 Keep at most one task in_progress. When a plan exists, keep its statuses current, mark finished work completed, revise the plan when the scope or approach changes, and remove items that are no longer relevant. Do not mark incomplete or blocked work completed.
 `;
 
@@ -87,21 +96,28 @@ function getTodoFilePath(sessionId?: string): string {
   return path.join(todoDir, filename);
 }
 
-/**
- * Reads the current todos from the file system
- */
-async function readTodosFromFile(sessionId?: string): Promise<TodoItem[]> {
+interface TodoPlanState {
+  planId?: string;
+  todos: TodoItem[];
+}
+
+async function readTodoPlanFromFile(
+  sessionId?: string,
+): Promise<TodoPlanState> {
   try {
     const todoFilePath = getTodoFilePath(sessionId);
     const content = await fs.readFile(todoFilePath, 'utf-8');
-    const data = JSON.parse(content);
-    return Array.isArray(data.todos) ? data.todos : [];
+    const data = JSON.parse(content) as Record<string, unknown>;
+    return {
+      ...(typeof data['planId'] === 'string' ? { planId: data['planId'] } : {}),
+      todos: Array.isArray(data['todos']) ? (data['todos'] as TodoItem[]) : [],
+    };
   } catch (err) {
     const error = err as Error & { code?: string };
     if (!(error instanceof Error) || error.code !== 'ENOENT') {
       throw err;
     }
-    return [];
+    return { todos: [] };
   }
 }
 
@@ -110,6 +126,7 @@ async function readTodosFromFile(sessionId?: string): Promise<TodoItem[]> {
  */
 async function writeTodosToFile(
   todos: TodoItem[],
+  planId: string | undefined,
   sessionId?: string,
 ): Promise<void> {
   const todoFilePath = getTodoFilePath(sessionId);
@@ -118,6 +135,7 @@ async function writeTodosToFile(
   await fs.mkdir(todoDir, { recursive: true });
 
   const data = {
+    ...(planId ? { planId } : {}),
     todos,
     sessionId: sessionId || 'default',
   };
@@ -125,6 +143,90 @@ async function writeTodosToFile(
   await atomicWriteFile(todoFilePath, JSON.stringify(data, null, 2), {
     encoding: 'utf-8',
   });
+}
+
+function validateTodos(value: unknown): string | null {
+  if (!Array.isArray(value)) {
+    return 'Parameter "todos" must be an array.';
+  }
+
+  const todos = value as TodoItem[];
+  for (const todo of todos) {
+    if (!todo || typeof todo !== 'object') {
+      return 'Each todo must be an object.';
+    }
+    if (!todo.id || typeof todo.id !== 'string' || todo.id.trim() === '') {
+      return 'Each todo must have a non-empty "id" string.';
+    }
+    if (
+      !todo.content ||
+      typeof todo.content !== 'string' ||
+      todo.content.trim() === ''
+    ) {
+      return 'Each todo must have a non-empty "content" string.';
+    }
+    if (!['pending', 'in_progress', 'completed'].includes(todo.status)) {
+      return 'Each todo must have a valid "status" (pending, in_progress, completed).';
+    }
+    if (
+      todo.blockedBy !== undefined &&
+      (!Array.isArray(todo.blockedBy) ||
+        todo.blockedBy.some(
+          (dependency) =>
+            typeof dependency !== 'string' || dependency.trim() === '',
+        ))
+    ) {
+      return 'Each todo "blockedBy" value must be an array of non-empty Todo IDs.';
+    }
+  }
+
+  const ids = todos.map((todo) => todo.id);
+  const uniqueIds = new Set(ids);
+  if (ids.length !== uniqueIds.size) {
+    return 'Todo IDs must be unique within the array.';
+  }
+
+  for (const todo of todos) {
+    const dependencies = todo.blockedBy ?? [];
+    if (new Set(dependencies).size !== dependencies.length) {
+      return `Todo "${todo.id}" must not contain duplicate blockedBy references.`;
+    }
+    if (dependencies.includes(todo.id)) {
+      return `Todo "${todo.id}" must not depend on itself.`;
+    }
+    const missing = dependencies.find(
+      (dependency) => !uniqueIds.has(dependency),
+    );
+    if (missing) {
+      return `Todo "${todo.id}" references unknown dependency "${missing}".`;
+    }
+  }
+
+  const remainingDependencies = new Map<string, number>();
+  const dependents = new Map<string, string[]>();
+  for (const todo of todos) {
+    remainingDependencies.set(todo.id, todo.blockedBy?.length ?? 0);
+    for (const dependency of todo.blockedBy ?? []) {
+      const children = dependents.get(dependency) ?? [];
+      children.push(todo.id);
+      dependents.set(dependency, children);
+    }
+  }
+  const queue = todos
+    .filter((todo) => remainingDependencies.get(todo.id) === 0)
+    .map((todo) => todo.id);
+  for (let index = 0; index < queue.length; index++) {
+    for (const dependent of dependents.get(queue[index]) ?? []) {
+      const remaining = (remainingDependencies.get(dependent) ?? 1) - 1;
+      remainingDependencies.set(dependent, remaining);
+      if (remaining === 0) queue.push(dependent);
+    }
+  }
+  if (queue.length !== todos.length) {
+    return 'Todo dependencies must not contain a cycle.';
+  }
+
+  return null;
 }
 
 function createBlockedTodoResult(
@@ -166,18 +268,23 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
 
     try {
       // 1. Read current todos (for change detection)
-      const oldTodos = await readTodosFromFile(sessionId);
+      const previousPlan = await readTodoPlanFromFile(sessionId);
+      const oldTodos = previousPlan.todos;
 
-      let finalTodos: TodoItem[];
+      let candidateTodos: unknown;
 
       if (modified_by_user && modified_content !== undefined) {
         // User modified the content in external editor, parse it directly
-        const data = JSON.parse(modified_content);
-        finalTodos = Array.isArray(data.todos) ? data.todos : [];
+        const data = JSON.parse(modified_content) as Record<string, unknown>;
+        candidateTodos = data['todos'];
       } else {
         // Use the normal todo logic - simply replace with new todos
-        finalTodos = todos;
+        candidateTodos = todos;
       }
+
+      const validationError = validateTodos(candidateTodos);
+      if (validationError) throw new Error(validationError);
+      const finalTodos = candidateTodos as TodoItem[];
 
       // 2. Detect changes
       const changes = detectTodoChanges(oldTodos, finalTodos);
@@ -248,8 +355,20 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
         }
       }
 
+      const startsNewPlan =
+        finalTodos.length > 0 &&
+        (oldTodos.length === 0 ||
+          oldTodos.every((todo) => todo.status === 'completed'));
+      const activePlanId =
+        finalTodos.length === 0
+          ? undefined
+          : startsNewPlan || !previousPlan.planId
+            ? randomUUID()
+            : previousPlan.planId;
+      const resultPlanId = activePlanId ?? previousPlan.planId;
+
       // 4. Write new todos AFTER all validation passes
-      await writeTodosToFile(finalTodos, sessionId);
+      await writeTodosToFile(finalTodos, activePlanId, sessionId);
 
       // 5. POST-WRITE PHASE: Execute hooks for side effects (logging, HTTP sync, etc.)
       // These hooks can now safely perform side effects knowing data is persisted
@@ -304,6 +423,7 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       // 6. Create structured display object for rich UI rendering
       const todoResultDisplay = {
         type: 'todo_list' as const,
+        ...(resultPlanId ? { planId: resultPlanId } : {}),
         todos: finalTodos,
         changes,
       };
@@ -369,7 +489,7 @@ Todo list modification failed with error: ${errorMessage}. You may need to retry
 export async function readTodosForSession(
   sessionId?: string,
 ): Promise<TodoItem[]> {
-  return readTodosFromFile(sessionId);
+  return (await readTodoPlanFromFile(sessionId)).todos;
 }
 
 /**
@@ -408,36 +528,7 @@ export class TodoWriteTool extends BaseDeclarativeTool<
   }
 
   override validateToolParams(params: TodoWriteParams): string | null {
-    // Validate todos array
-    if (!Array.isArray(params.todos)) {
-      return 'Parameter "todos" must be an array.';
-    }
-
-    // Validate individual todos
-    for (const todo of params.todos) {
-      if (!todo.id || typeof todo.id !== 'string' || todo.id.trim() === '') {
-        return 'Each todo must have a non-empty "id" string.';
-      }
-      if (
-        !todo.content ||
-        typeof todo.content !== 'string' ||
-        todo.content.trim() === ''
-      ) {
-        return 'Each todo must have a non-empty "content" string.';
-      }
-      if (!['pending', 'in_progress', 'completed'].includes(todo.status)) {
-        return 'Each todo must have a valid "status" (pending, in_progress, completed).';
-      }
-    }
-
-    // Check for duplicate IDs
-    const ids = params.todos.map((todo) => todo.id);
-    const uniqueIds = new Set(ids);
-    if (ids.length !== uniqueIds.size) {
-      return 'Todo IDs must be unique within the array.';
-    }
-
-    return null;
+    return validateTodos(params.todos);
   }
 
   protected createInvocation(params: TodoWriteParams) {
