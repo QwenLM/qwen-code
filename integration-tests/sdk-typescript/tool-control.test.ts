@@ -89,10 +89,13 @@ describe('Tool Control Parameters (E2E)', () => {
           // Should NOT have list_directory since it's not in coreTools
           expect(toolNames).not.toContain('list_directory');
 
-          // Verify file was actually modified (content changed from original).
-          // Don't assert on specific wording — the model may paraphrase.
-          const content = await helper.readFile('test.txt');
-          expect(content).not.toBe('original content');
+          // Verify write_file executed successfully (tool-control check,
+          // not model-content check — the model may echo back the original).
+          const writeResults = findToolResults(messages, 'write_file');
+          expect(writeResults.length).toBeGreaterThan(0);
+          for (const result of writeResults) {
+            expect(result.isError).toBe(false);
+          }
         } finally {
           await q.close();
         }
@@ -584,10 +587,13 @@ describe('Tool Control Parameters (E2E)', () => {
           // canUseTool should NOT have been called (tools are in allowedTools)
           expect(canUseToolCalled).toBe(false);
 
-          // Verify file was actually modified (content changed from original).
-          // Don't assert on specific wording — the model may paraphrase.
-          const content = await helper.readFile('test.txt');
-          expect(content).not.toBe('original');
+          // Verify write_file executed successfully (tool-control check,
+          // not model-content check — the model may echo back the original).
+          const writeResults = findToolResults(messages, 'write_file');
+          expect(writeResults.length).toBeGreaterThan(0);
+          for (const result of writeResults) {
+            expect(result.isError).toBe(false);
+          }
         } finally {
           await q.close();
         }
@@ -881,10 +887,13 @@ describe('Tool Control Parameters (E2E)', () => {
           // Should NOT use tools outside coreTools
           expect(toolNames).not.toContain('run_shell_command');
 
-          // Verify file was actually modified (content changed from original).
-          // Don't assert on specific wording — the model may paraphrase.
-          const content = await helper.readFile('test.txt');
-          expect(content).not.toBe('test');
+          // Verify write_file executed successfully (tool-control check,
+          // not model-content check — the model may echo back the original).
+          const writeResults = findToolResults(messages, 'write_file');
+          expect(writeResults.length).toBeGreaterThan(0);
+          for (const result of writeResults) {
+            expect(result.isError).toBe(false);
+          }
         } finally {
           await q.close();
         }
@@ -984,10 +993,13 @@ describe('Tool Control Parameters (E2E)', () => {
           // canUseTool should be called for core write tools
           expect(canUseToolCalls).toContain('write_file');
 
-          // Verify file was actually modified (content changed from original).
-          // Don't assert on specific wording — the model may paraphrase.
-          const content = await helper.readFile('test.txt');
-          expect(content).not.toBe('test');
+          // Verify write_file executed successfully (tool-control check,
+          // not model-content check — the model may echo back the original).
+          const writeResults = findToolResults(messages, 'write_file');
+          expect(writeResults.length).toBeGreaterThan(0);
+          for (const result of writeResults) {
+            expect(result.isError).toBe(false);
+          }
         } finally {
           await q.close();
         }
