@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   channelSelectionNames,
+  isAllChannelSelectionName,
   normalizeServeChannelSelection,
 } from './channel-selection.js';
 
@@ -33,6 +34,13 @@ describe('normalizeServeChannelSelection', () => {
     expect(() => normalizeServeChannelSelection(['all', 'telegram'])).toThrow(
       '--channel all cannot be combined with channel names.',
     );
+  });
+});
+
+describe('isAllChannelSelectionName', () => {
+  it('recognizes the trimmed all sentinel only', () => {
+    expect(isAllChannelSelectionName(' all ')).toBe(true);
+    expect(isAllChannelSelectionName('allx')).toBe(false);
   });
 });
 
