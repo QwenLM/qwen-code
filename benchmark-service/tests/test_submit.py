@@ -4,8 +4,10 @@ from pathlib import Path
 
 import pytest
 
+import qwen_benchmark.store as store_module
 from qwen_benchmark.config import Settings
 from qwen_benchmark.models import RunRequest
+from qwen_benchmark.store import Store
 from qwen_benchmark.submit import submit_run
 
 
@@ -55,3 +57,23 @@ def test_submit_rejects_a_suite_outside_the_allowlist(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="not allowlisted"):
         submit_run(settings(tmp_path), request, "manual-test")
+
+
+def test_store_closes_connections(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    connections = []
+    real_connect = store_module.sqlite3.connect
+
+    def tracking_connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+
+    monkeypatch.setattr(store_module.sqlite3, "connect", tracking_connect)
+    store = Store(tmp_path / "benchmark.db")
+    store.initialize()
+    assert store.get_run("missing") is None
+
+    assert connections
+    for connection in connections:
+        with pytest.raises(store_module.sqlite3.ProgrammingError, match="closed"):
+            connection.execute("SELECT 1")

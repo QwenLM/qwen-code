@@ -486,6 +486,11 @@ Harbor 原始任务目录：
 
 当前方案没有 FastAPI、HTTP listener 或公网入口，不需要开放 8000/443。若未来改为远程控制面，再单独设计 HTTPS/OIDC API。
 
+当前 Harbor Docker backend 会将部分容器环境变量展开到 `docker compose exec`
+的子进程参数中。即使凭证源文件是 root-only，具有主机进程查看权限的用户仍可能看到
+模型凭证。因此 POC ECS 应保持单租户、限制 SSH/sudo/进程查看权限，并在每轮测试后
+轮换模型凭证；生产化前应改为不在命令行展开 secret 的传递方式。
+
 ## 14. 已验证 POC
 
 2026-07-22 使用以下配置完成端到端验证：
