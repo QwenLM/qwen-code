@@ -31,12 +31,14 @@ fixing is a valid, silent outcome.
 - Keep changes minimal and scoped. No drive-by refactors, no formatting
   sweeps, no dependency upgrades, no "cleaner / more modern / more consistent"
   edits.
-- Run required verification commands before committing. Use only these project
-  commands: `npm run build`, `npm run typecheck`, `npm run lint`, focused
-  Vitest runs for touched packages, and `npm run generate:settings-schema`
-  when a settings source changed (see the generated-artifact rule below). If
-  any command fails, fix the cause and rerun it; if you cannot make the checks
-  pass confidently, write `<workdir>/failure.md` and do not commit.
+- Run required verification commands **after each individual fix** and before
+  the next `git commit`. Use only these project commands: `npm run build`,
+  `npm run typecheck`, `npm run lint`, focused Vitest runs for touched
+  packages, and `npm run generate:settings-schema` when a settings source
+  changed (see the generated-artifact rule below). Do **not** batch multiple
+  fixes without intermediate verification. If any command fails after a fix,
+  do **not** commit that fix — discard the working-tree change, record it as
+  report-only in `findings.json`, and continue with the next finding.
 - Regenerate committed generated artifacts when you change their source. If
   you edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated

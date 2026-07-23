@@ -287,12 +287,41 @@ jobs:
 
       # Deterministic re-verification, independent of the agent. Full
       # regression is covered by regular CI on the PR after the push.
+      # If typecheck fails, auto-revert the last commit and retry until
+      # clean — this salvages good fixes while discarding bad ones.
       - name: 'Independent verification'
         if: "${{ steps.gate.outputs.result == 'fixes' }}"
         id: 'verify'
         run: |-
+          # Phase 1: typecheck with auto-revert on failure.
+          REVERTED=0
+          while true; do
+            if npm run typecheck 2>/dev/null; then
+              break
+            fi
+            COMMITS_LEFT="$(git rev-list --count origin/main..HEAD)"
+            if [[ "${COMMITS_LEFT}" -le 0 ]]; then
+              echo '❌ All commits reverted — no fixes survived typecheck.'
+              echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            BAD="$(git rev-parse --short HEAD)"
+            echo "⏪ Reverting ${BAD} (typecheck failed)"
+            git reset --hard HEAD~1
+            REVERTED=$((REVERTED + 1))
+          done
+          if [[ "${REVERTED}" -gt 0 ]]; then
+            echo "⚠️  Reverted ${REVERTED} commit(s) that broke typecheck."
+            COMMITS="$(git rev-list --count origin/main..HEAD)"
+            echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
+            if [[ "${COMMITS}" -eq 0 ]]; then
+              echo 'result=no-fixes' >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+          fi
+
+          # Phase 2: full build + lint + schema check + package tests.
           npm run build
-          npm run typecheck
           npm run lint
 
           bash "${RUNNER_TEMP}/check-settings-schema.sh"
