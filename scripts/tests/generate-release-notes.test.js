@@ -6,6 +6,7 @@
 
 import { execFileSync } from 'node:child_process';
 import {
+  appendFileSync,
   chmodSync,
   mkdtempSync,
   readFileSync,
@@ -14,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   appendDegradedStepSummary,
   buildPullRequestQuery,
@@ -669,12 +670,16 @@ describe('appendDegradedStepSummary', () => {
   it('appends a degraded note when warnings exist', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
     const summaryPath = join(dir, 'summary.md');
+    // test-setup mocks appendFileSync, so assert on the call instead of the file.
+    vi.mocked(appendFileSync).mockClear();
     appendDegradedStepSummary(
       { usedAi: false, warnings: ['Summary batch fallback: HTTP 500'] },
       summaryPath,
     );
 
-    const written = readFileSync(summaryPath, 'utf8');
+    expect(vi.mocked(appendFileSync)).toHaveBeenCalledTimes(1);
+    const [writtenPath, written] = vi.mocked(appendFileSync).mock.calls[0];
+    expect(writtenPath).toBe(summaryPath);
     expect(written).toContain('AI generation degraded');
     expect(written).toContain('Summary batch fallback: HTTP 500');
     rmSync(dir, { recursive: true, force: true });
@@ -684,7 +689,9 @@ describe('appendDegradedStepSummary', () => {
     const fs = await import('node:fs');
     const dir = mkdtempSync(join(tmpdir(), 'qwen-rn-summary-'));
     const summaryPath = join(dir, 'summary.md');
+    vi.mocked(appendFileSync).mockClear();
     appendDegradedStepSummary({ usedAi: true, warnings: [] }, summaryPath);
+    expect(vi.mocked(appendFileSync)).not.toHaveBeenCalled();
     expect(fs.existsSync(summaryPath)).toBe(false);
     rmSync(dir, { recursive: true, force: true });
   });
