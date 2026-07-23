@@ -7,7 +7,8 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { appendFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import { isMainModule, parseArgs } from './release-script-utils.js';
 
 const GENERATED_ENTRY_RE =
@@ -767,6 +768,8 @@ export function appendDegradedStepSummary(
     ...result.warnings.map((warning) => `- ${warning}`),
     '',
   ];
+  // The step-summary path's parent may not exist yet on a fresh runner.
+  mkdirSync(dirname(summaryPath), { recursive: true });
   appendFileSync(summaryPath, `${lines.join('\n')}\n`);
 }
 
