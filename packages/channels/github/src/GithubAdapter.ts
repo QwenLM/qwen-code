@@ -270,11 +270,12 @@ export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private extractFromSubjectUrl(
     url: string,
   ): { chatId: string; threadId: string; issueNumber: number } | null {
-    const match = url.match(/\/repos\/([^/]+\/[^/]+)\/issues\/(\d+)/);
+    const match = url.match(/\/repos\/([^/]+\/[^/]+)\/(issues|pulls)\/(\d+)/);
     if (!match) return null;
     const chatId = match[1];
-    const issueNumber = Number(match[2]);
-    const threadId = `issue:${issueNumber}`;
+    const kind = match[2] === 'pulls' ? 'pr' : 'issue';
+    const issueNumber = Number(match[3]);
+    const threadId = `${kind}:${issueNumber}`;
     return { chatId, threadId, issueNumber };
   }
 
