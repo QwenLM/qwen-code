@@ -162,9 +162,11 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
     '/workspaces/:workspace/reload',
     deps.mutate({ strict: true }),
     async (req, res) => {
-      await (
-        req.app.locals as { requestTrustReconcile?: () => Promise<void> }
-      ).requestTrustReconcile?.();
+      void (req.app.locals as { requestTrustReconcile?: () => Promise<void> })
+        .requestTrustReconcile?.()
+        .catch(() => {
+          // The policy monitor reports reconciliation failures separately.
+        });
       const runtime = resolveWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
