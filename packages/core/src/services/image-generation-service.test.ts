@@ -506,3 +506,114 @@ describe('generateImage', () => {
     await expect(request).rejects.not.toThrow(signedUrl);
   });
 });
+
+describe('generateImage redirect handling', () => {
+  it('follows a valid 302 → 200 redirect chain and returns the PNG', async () => {
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            output: {
+              choices: [
+                {
+                  message: {
+                    content: [{ image: 'https://api.example.com/image.png' }],
+                  },
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+      )
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://cdn.example.com/final.png' },
+        }),
+      )
+      .mockResolvedValueOnce(
+        new Response(PNG_BYTES, {
+          status: 200,
+          headers: { 'content-type': 'image/png' },
+        }),
+      );
+
+    const result = await generateImage({
+      baseUrl: 'https://images.example.com/api/v1',
+      apiKey: 'secret',
+      model: 'qwen-image-2.0',
+      prompt: 'poster',
+      signal: new AbortController().signal,
+      fetchFn,
+    });
+
+    expect(result.bytes).toEqual(Buffer.from(PNG_BYTES));
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('rejects when redirects exceed the maximum allowed', async () => {
+    const redirectResponse = () =>
+      new Response(null, {
+        status: 302,
+        headers: { location: 'https://cdn.example.com/next.png' },
+      });
+    const fetchFn = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            output: {
+              choices: [
+                {
+                  message: {
+                    content: [{ image: 'https://api.example.com/image.png' }],
+                  },
+                },
+              ],
+            },
+          }),
+          { status: 200 },
+        ),
+      )
+      // MAX_DOWNLOAD_REDIRECTS + 1 consecutive redirects
+      .mockResolvedValueOnce(redirectResponse())
+      .mockResolvedValueOnce(redirectResponse())
+      .mockResolvedValueOnce(redirectResponse())
+      .mockResolvedValueOnce(redirectResponse());
+
+    await expect(
+      generateImage({
+        baseUrl: 'https://images.example.com/api/v1',
+        apiKey: 'secret',
+        model: 'qwen-image-2.0',
+        prompt: 'poster',
+        signal: new AbortController().signal,
+        fetchFn,
+      }),
+    ).rejects.toThrow(/exceeded.*redirects/i);
+  });
+});
+
+describe('generateImage error body handling', () => {
+  it('reports HTTP status when the error body is not JSON', async () => {
+    const fetchFn = vi.fn<typeof fetch>().mockResolvedValue(
+      new Response('<html><body>502 Bad Gateway</body></html>', {
+        status: 502,
+        headers: { 'content-type': 'text/html' },
+      }),
+    );
+
+    await expect(
+      generateImage({
+        baseUrl: 'https://images.example.com/api/v1',
+        apiKey: 'secret',
+        model: 'qwen-image-2.0',
+        prompt: 'poster',
+        signal: new AbortController().signal,
+        fetchFn,
+      }),
+    ).rejects.toThrow(/HTTP 502/);
+  });
+});

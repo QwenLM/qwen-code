@@ -2987,6 +2987,39 @@ describe('Server Config (config.ts)', () => {
       );
     });
 
+    it('does not register image_gen when the permission manager disables it', async () => {
+      const baseUrl = 'https://images.example.com/api/v1';
+      const config = new Config({
+        ...baseParams,
+        modelProvidersConfig: {
+          openai: [
+            {
+              id: 'qwen-image-2.0',
+              baseUrl,
+              envKey: 'TEST_IMAGE_GENERATION_KEY',
+              imageOnly: true,
+            },
+          ],
+        },
+      });
+      await config.initialize();
+      vi.mocked(ToolRegistry.prototype.registerFactory).mockClear();
+      (
+        config as unknown as {
+          permissionManager: { isToolEnabled: () => Promise<boolean> };
+        }
+      ).permissionManager = {
+        isToolEnabled: vi.fn().mockResolvedValue(false),
+      };
+
+      await config.setImageModel(`openai:qwen-image-2.0\0${baseUrl}`);
+
+      expect(ToolRegistry.prototype.registerFactory).not.toHaveBeenCalledWith(
+        ToolNames.IMAGE_GEN,
+        expect.any(Function),
+      );
+    });
+
     it('registers both artifact tools by default for interactive sessions', async () => {
       const config = new Config({
         ...baseParams,

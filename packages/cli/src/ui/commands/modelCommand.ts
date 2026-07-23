@@ -830,8 +830,8 @@ export const modelCommand: SlashCommand = {
       const qualifiedModelName = `${
         selector.authType ?? matched.authType
       }:${selector.modelId}`;
-      const imageModel = matched.registryBaseUrl
-        ? `${qualifiedModelName}\0${matched.registryBaseUrl}`
+      const imageModel = matched.baseUrl
+        ? `${qualifiedModelName}\0${matched.baseUrl}`
         : qualifiedModelName;
       if (!config.resolveImageGenerationModel(imageModel)) {
         return {

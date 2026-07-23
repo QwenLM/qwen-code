@@ -211,6 +211,7 @@ export default {
   'toolDisplayName.ExitWorktree': '退出 Worktree',
   'toolDisplayName.Workflow': '工作流',
   'toolDisplayName.ReadMcpResource': '读取 MCP 资源',
+  'toolDisplayName.ImageGen': '图像生成',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1423,6 +1424,8 @@ export default {
     '切换此会话的模型（--fast 可设置建议模型，--voice 可设置语音转写模型，[model-id] 可立即切换）',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    '切换此会话的模型（--fast 建议模型，--voice 语音转写模型，--vision 视觉桥接模型，--image 图像生成模型，--project 持久化到项目设置，--global 持久化到用户设置，[model-id] 立即切换，或用 [model-id] [prompt] 在另一个模型上运行一次性提示；内联提示按原文发送，不展开 @file）',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "此模式不支持内联一次性覆盖——请先运行 '/model {{model}}'，再发送你的提示。",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1435,16 +1438,20 @@ export default {
   'Set the model for voice transcription': '设置语音转写模型',
   'Set the image-capable model used to transcribe images for a text-only main model':
     '设置用于为纯文本主模型转写图像的图像能力模型',
+  'Set the model used to generate images': '设置用于生成图像的模型',
   'Persist the model selection to the project settings (workspace scope)':
     '将模型选择持久化到项目设置（工作区）',
   'Persist the model selection to the user settings (global scope)':
     '将模型选择持久化到用户设置（全局）',
   'Select Fast Model': '选择快速模型',
   'Select Vision Model': '选择视觉模型',
+  'Select Image Model': '选择图像模型',
   'Select Voice Model': '选择语音模型',
   'Vision Model': '视觉模型',
+  'Image Model': '图像模型',
   'Voice Model': '语音模型',
   'Selected voice model is unavailable.': '所选语音模型不可用。',
+  'Selected image model is unavailable.': '所选图像模型不可用。',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "语音模型 '{{model}}' 被配置了多次。请先移除重复的模型 ID，再将其选为语音转写模型。",
   'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
@@ -1678,8 +1685,16 @@ export default {
     '当前语音模型：{{voiceModel}}\n使用 "/model --voice <model-id>" 设置语音模型。',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     '当前视觉模型：{{visionModel}}\n使用 "/model --vision <model-id>" 设置视觉桥接模型。',
+  'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
+    '当前图像模型：{{imageModel}}\n使用 "/model --image <model-id>" 设置图像生成模型。',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "语音模型 '{{modelName}}' 不唯一。请先配置唯一的模型 ID，再使用 /model --voice。",
+  "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
+    "图像模型 '{{modelName}}' 匹配了多个已配置的端点。请运行 /model --image（不带参数）并选择确切的端点。",
+  "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "图像模型 '{{modelName}}' 必须声明有效的 HTTPS baseUrl 和凭据环境变量。",
+  "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "'{{model}}' 必须声明有效的 HTTPS baseUrl 和凭据环境变量。",
   none: '无',
   unknown: '未知',
   // ============================================================================

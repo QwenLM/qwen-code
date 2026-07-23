@@ -10,6 +10,7 @@ import {
   resolveNetworkTarget,
   type ResolvedNetworkTarget,
 } from '../extension/network-policy.js';
+import { loadUndici } from '../utils/runtimeFetchOptions.js';
 
 const GENERATION_TIMEOUT_MS = 240_000;
 const DOWNLOAD_TIMEOUT_MS = 120_000;
@@ -120,10 +121,16 @@ export async function generateImage(
     );
   }
 
-  const payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
   if (!response.ok) {
+    let payload: unknown = {};
+    try {
+      payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
+    } catch {
+      // non-JSON error body — formatImageGenerationError handles missing fields
+    }
     throw new Error(formatImageGenerationError(response.status, payload));
   }
+  const payload = await readJsonResponse(response, MAX_API_RESPONSE_BYTES);
 
   const imageUrl = findGeneratedImageUrl(payload);
   if (!imageUrl) {
@@ -249,7 +256,8 @@ async function downloadPng(
   ) {
     let dispatcher: import('undici').Dispatcher | undefined;
     if (currentTarget.lookup) {
-      const { Agent } = await import('undici');
+      const undici = await loadUndici();
+      const { Agent } = undici as unknown as typeof import('undici');
       dispatcher = new Agent({ connect: { lookup: currentTarget.lookup } });
     }
     let response: Response;
