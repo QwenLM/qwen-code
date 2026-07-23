@@ -232,13 +232,15 @@ prove it fails or misaligns before the fix; how to verify after the fix.
 
 ## Scope Limits
 
-- At most 8 fixes per run. Fewer is fine; zero is fine.
+- No cap on the number of fixes per run. Every finding whose minimal fix
+  fits the per-commit threshold below should be committed.
 - Each fix: production diff ≤ 20 lines. Tests or docs may exceed slightly, but
   the change must stay a small, single-root-cause fix.
 - Any finding whose minimal fix spans more than three files or more than one
   hundred lines of production code is report-only, regardless of how certain
   the finding is. The threshold is the floor, not a goal — a four-file fix is
-  already past it.
+  already past it. Report-only findings are filed as a single consolidated
+  issue by the workflow after the PR is opened.
 
 ## Mode: scan-and-fix
 
