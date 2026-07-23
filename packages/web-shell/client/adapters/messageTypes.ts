@@ -53,6 +53,7 @@ export interface DaemonMessageToolCall {
   endTime?: number;
   subContent?: string;
   subTools?: DaemonMessageToolCall[];
+  subToolsTruncated?: boolean;
 }
 
 export interface DaemonMessageTodoItem {

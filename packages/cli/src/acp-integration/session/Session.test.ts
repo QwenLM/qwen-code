@@ -14696,6 +14696,46 @@ describe('Session', () => {
       ).toBe(false);
     });
 
+    it('passes the parent tool call id to call-id-aware invocations', async () => {
+      const setCallId = vi.fn();
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'agent completed',
+        returnDisplay: 'agent completed',
+      });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build: vi.fn().mockReturnValue({
+          params: { subagent_type: 'explore' },
+          eventEmitter: new EventEmitter(),
+          setCallId,
+          execute,
+          getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+          getDescription: vi.fn().mockReturnValue('Agent'),
+          toolLocations: vi.fn().mockReturnValue([]),
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-agent-call-id',
+        [
+          {
+            id: 'agent_call',
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: 'explore' },
+          },
+        ],
+      );
+
+      expect(setCallId).toHaveBeenCalledWith('agent_call');
+      expect(execute).toHaveBeenCalledOnce();
+    });
+
     it('cleans up Agent sub-agent listeners when permission request fails before execution', async () => {
       const eventEmitter = new EventEmitter();
       const execute = vi.fn();

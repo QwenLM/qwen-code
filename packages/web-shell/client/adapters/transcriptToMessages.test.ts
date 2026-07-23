@@ -281,11 +281,26 @@ describe('transcriptBlocksToDaemonMessages', () => {
           content: '检查项目结构',
           priority: 'medium',
           status: 'pending',
+          _meta: { qwenTodo: { id: 'discover' } },
         },
         {
           content: '运行类型检查',
           priority: 'high',
           status: 'in_progress',
+          _meta: {
+            qwenTodo: { id: 'verify', blockedBy: ['discover'] },
+          },
+        },
+        {
+          id: 'legacy-id',
+          content: '兼容旧版 ID',
+          priority: 'low',
+          status: 'pending',
+        },
+        {
+          content: '兼容旧版位置 ID',
+          priority: 'low',
+          status: 'pending',
         },
       ],
     };
@@ -301,16 +316,29 @@ describe('transcriptBlocksToDaemonMessages', () => {
         timestamp: 1,
         todos: [
           {
-            id: 'plan-0',
+            id: 'discover',
             content: '检查项目结构',
             priority: 'medium',
             status: 'pending',
           },
           {
-            id: 'plan-1',
+            id: 'verify',
             content: '运行类型检查',
             priority: 'high',
             status: 'in_progress',
+            blockedBy: ['discover'],
+          },
+          {
+            id: 'legacy-id',
+            content: '兼容旧版 ID',
+            priority: 'low',
+            status: 'pending',
+          },
+          {
+            id: 'plan-3',
+            content: '兼容旧版位置 ID',
+            priority: 'low',
+            status: 'pending',
           },
         ],
       },

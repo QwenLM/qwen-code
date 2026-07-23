@@ -1950,6 +1950,11 @@ const EN: Messages = {
   'planExecution.stepDetails': 'Step details',
   'planExecution.subagents': 'Subagents',
   'planExecution.openDetails': 'Open subagent details',
+  'planExecution.lineageTruncated':
+    'Only part of the subagent history is shown because the lineage exceeded the safe display limit.',
+  'planExecution.historyIncomplete':
+    'Earlier session history could not be loaded. The executions shown here may be incomplete.',
+  'planExecution.view': 'View plan execution',
   'planExecution.dependsOn': 'Depends on:',
   'planExecution.unassigned': 'Unassigned executions',
   'planExecution.attention': 'Needs attention',
@@ -4077,6 +4082,11 @@ const ZH: Messages = {
   'planExecution.stepDetails': '步骤详情',
   'planExecution.subagents': '子智能体',
   'planExecution.openDetails': '打开子智能体详情',
+  'planExecution.lineageTruncated':
+    '子智能体层级超出安全展示上限，当前仅显示部分历史。',
+  'planExecution.historyIncomplete':
+    '无法加载更早的会话历史，当前显示的执行记录可能不完整。',
+  'planExecution.view': '查看计划执行',
   'planExecution.dependsOn': '依赖：',
   'planExecution.unassigned': '未关联的执行',
   'planExecution.attention': '需要关注',

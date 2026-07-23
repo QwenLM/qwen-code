@@ -92,8 +92,6 @@ export interface FloatingTodosState {
   allCompleted: boolean;
   /** Transcript message the latest todo update came from. */
   sourceMessageId: string | null;
-  /** Tool call id within the source message, when it came from a tool call. */
-  sourceCallId: string | null;
 }
 
 const EMPTY_FLOATING_TODOS: FloatingTodosState = {
@@ -101,7 +99,6 @@ const EMPTY_FLOATING_TODOS: FloatingTodosState = {
   planId: null,
   allCompleted: false,
   sourceMessageId: null,
-  sourceCallId: null,
 };
 
 export function getFloatingTodos(
@@ -110,7 +107,6 @@ export function getFloatingTodos(
   let todos: TodoItem[] = [];
   let planId: string | null = null;
   let sourceMessageId: string | null = null;
-  let sourceCallId: string | null = null;
   let userMessageAfter = false;
 
   for (const message of messages) {
@@ -122,7 +118,6 @@ export function getFloatingTodos(
       todos = message.todos;
       planId = null;
       sourceMessageId = message.id;
-      sourceCallId = null;
       userMessageAfter = false;
       continue;
     }
@@ -134,7 +129,6 @@ export function getFloatingTodos(
         todos = nextTodos;
         planId = getTodoPlanId(tool);
         sourceMessageId = message.id;
-        sourceCallId = tool.callId;
         userMessageAfter = false;
       }
     }
@@ -143,7 +137,23 @@ export function getFloatingTodos(
   if (todos.length === 0) return EMPTY_FLOATING_TODOS;
   const allCompleted = !hasActiveTodos(todos);
   if (userMessageAfter) return EMPTY_FLOATING_TODOS;
-  return { todos, planId, allCompleted, sourceMessageId, sourceCallId };
+  return { todos, planId, allCompleted, sourceMessageId };
+}
+
+export function getLatestActiveTodos(messages: readonly Message[]): TodoItem[] {
+  let todos: TodoItem[] = [];
+  for (const message of messages) {
+    if (message.role === 'plan') {
+      todos = message.todos;
+      continue;
+    }
+    if (message.role !== 'tool_group') continue;
+    for (const tool of message.tools) {
+      const nextTodos = extractTodosFromToolCall(tool);
+      if (nextTodos !== undefined) todos = nextTodos;
+    }
+  }
+  return hasActiveTodos(todos) ? todos : [];
 }
 
 export function getAgentToolsForPlan(
@@ -164,14 +174,36 @@ export function getAgentToolsForPlan(
   });
   if (startIndex < 0) return [];
 
+  let planCompleted = false;
   for (let index = startIndex; index < messages.length; index++) {
     const message = messages[index];
+    if (
+      index > startIndex &&
+      planCompleted &&
+      (message.role === 'user' || message.role === 'user_shell')
+    ) {
+      return tools;
+    }
+    if (message.role === 'plan') {
+      if (index > startIndex) break;
+      planCompleted = !hasActiveTodos(message.todos);
+      continue;
+    }
     if (message.role !== 'tool_group') continue;
     for (const tool of message.tools) {
-      if (extractTodosFromToolCall(tool) !== undefined) {
+      const snapshot = extractTodosFromToolCall(tool);
+      if (snapshot !== undefined) {
+        if (
+          index > startIndex &&
+          (plan.planId === null || getTodoPlanId(tool) !== plan.planId)
+        ) {
+          return tools;
+        }
+        planCompleted = !hasActiveTodos(snapshot);
         continue;
       }
       if (!tool.parentToolCallId && isSubAgentToolCall(tool)) {
+        if (planCompleted) return tools;
         tools.push(tool);
       }
     }
@@ -201,13 +233,14 @@ interface TodoSnapshot {
 
 /**
  * Identity used to track an item across snapshots. Folds content into the key
- * because todo ids are NOT globally unique: the ACP bridge assigns positional
- * ids (`plan-0`, `plan-1`, …) and models restart numbering at `1, 2, 3` for each
- * new `todo_write` plan, so a later, unrelated list reuses an earlier list's
- * ids. Keying on id alone would diff a new plan's items against a previous
- * plan's stale terminal status; id+content keeps distinct tasks separate, and —
- * unlike a user-turn reset — it still tracks a list correctly when it spans
- * turns (a "continue" turn that completes an item carried over from before).
+ * because todo ids are NOT globally unique. Modern Qwen plan metadata preserves
+ * the core id, but legacy ACP records fall back to positional ids (`plan-0`,
+ * `plan-1`, …), and models commonly restart numbering at `1, 2, 3` for a new
+ * `todo_write` plan. Keying on id alone would diff a new plan's items against a
+ * previous plan's stale terminal status; id+content keeps distinct tasks
+ * separate and, unlike a user-turn reset, still tracks a list correctly when it
+ * spans turns (a "continue" turn that completes an item carried over from
+ * before).
  *
  * Two rare cases this trades for, affecting the collapsed diff and the per-task
  * detail ({@link computeTodoDetails}) but not the expanded list itself:

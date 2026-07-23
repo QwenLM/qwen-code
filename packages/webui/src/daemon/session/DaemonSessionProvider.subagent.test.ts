@@ -98,4 +98,21 @@ describe('on-demand subagent transcript projection', () => {
       rawOutput: undefined,
     });
   });
+
+  it('drops an oversized todo linkage id instead of truncating it', () => {
+    const [result] = projectMainTranscriptEventsForTesting([
+      {
+        type: 'tool.update',
+        toolCallId: 'agent-1',
+        toolName: 'agent',
+        rawInput: { todo_id: 'x'.repeat(501) },
+      },
+    ]);
+
+    expect(result).toMatchObject({
+      type: 'tool.update',
+      toolCallId: 'agent-1',
+      rawInput: undefined,
+    });
+  });
 });

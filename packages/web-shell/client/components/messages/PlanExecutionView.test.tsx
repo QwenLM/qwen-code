@@ -9,6 +9,7 @@ import { I18nProvider } from '../../i18n';
 import {
   getPlanNodeState,
   layerPlanTodos,
+  nestedAgentToolsForTool,
   nestedTasksForTool,
   PlanExecutionView,
 } from './PlanExecutionView';
@@ -147,6 +148,43 @@ describe('PlanExecutionView', () => {
     });
   });
 
+  it('keeps root running precedence while surfacing a failed live descendant', () => {
+    const root = task('running');
+    const child = task('failed', {
+      id: 'agent-child',
+      toolUseId: 'call-child',
+      parentAgentId: root.id,
+    });
+
+    expect(
+      getPlanNodeState(
+        todos[1],
+        todosById,
+        [agentTool('build')],
+        [root, child],
+      ),
+    ).toEqual({ status: 'running', attention: true });
+  });
+
+  it('surfaces a failed persisted descendant after live tasks disappear', () => {
+    const failedChild: ACPToolCall = {
+      ...agentTool('build'),
+      callId: 'call-child',
+      status: 'failed',
+      parentToolCallId: 'call-build',
+    };
+    const completedRoot: ACPToolCall = {
+      ...agentTool('build'),
+      status: 'completed',
+      subTools: [failedChild],
+    };
+
+    expect(getPlanNodeState(todos[1], todosById, [completedRoot], [])).toEqual({
+      status: 'in_progress',
+      attention: true,
+    });
+  });
+
   it('keeps nested agents under their linked root execution', () => {
     const root = task('running');
     const child = task('running', {
@@ -172,6 +210,157 @@ describe('PlanExecutionView', () => {
       ['agent-child', 1],
       ['agent-grandchild', 2],
     ]);
+  });
+
+  it('rebuilds the nested agent tree from transcript tools', () => {
+    const grandchild = {
+      ...agentTool('verify'),
+      callId: 'grandchild',
+      parentToolCallId: 'child',
+    };
+    const child = {
+      ...agentTool('build'),
+      callId: 'child',
+      parentToolCallId: 'root',
+      subTools: [grandchild],
+    };
+    const root = { ...agentTool('build'), callId: 'root', subTools: [child] };
+
+    expect(
+      nestedAgentToolsForTool(root).map(({ tool, depth }) => [
+        tool.callId,
+        depth,
+      ]),
+    ).toEqual([
+      ['child', 1],
+      ['grandchild', 2],
+    ]);
+  });
+
+  it('opens a live nested agent through its transcript tool call', () => {
+    const onOpen = vi.fn();
+    const childTool = {
+      ...agentTool('build'),
+      callId: 'call-child',
+      title: 'Child agent',
+      parentToolCallId: 'call-build',
+    };
+    const rootTool = { ...agentTool('build'), subTools: [childTool] };
+    const rootTask = task('running');
+    const childTask = task('running', {
+      id: 'agent-child',
+      label: 'Child agent',
+      toolUseId: childTool.callId,
+      parentAgentId: rootTask.id,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[rootTool]}
+            tasks={[rootTask, childTask]}
+            onOpenSubagent={onOpen}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const childButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Child agent'),
+    );
+    expect(childButton?.hasAttribute('data-plan-interactive')).toBe(true);
+    act(() => childButton?.click());
+    expect(onOpen).toHaveBeenCalledWith(childTool);
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('opens a live nested agent from its task tool call id', () => {
+    const onOpen = vi.fn();
+    const rootTool = agentTool('build');
+    const rootTask = task('running');
+    const childTask = task('running', {
+      id: 'agent-child',
+      label: 'Live nested agent',
+      description: 'Inspect live progress',
+      toolUseId: 'call-child',
+      parentAgentId: rootTask.id,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[rootTool]}
+            tasks={[rootTask, childTask]}
+            onOpenSubagent={onOpen}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    const childButton = Array.from(container.querySelectorAll('button')).find(
+      (button) => button.textContent?.includes('Live nested agent'),
+    );
+    expect(childButton?.hasAttribute('data-plan-interactive')).toBe(true);
+    act(() => childButton?.click());
+    expect(onOpen).toHaveBeenCalledWith(
+      expect.objectContaining({
+        callId: 'call-child',
+        toolName: 'Agent',
+        status: 'in_progress',
+      }),
+    );
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('keeps persisted nested agents beside still-live siblings', () => {
+    const completedChild = {
+      ...agentTool('build'),
+      callId: 'call-completed-child',
+      title: 'Completed child',
+      status: 'completed' as const,
+      parentToolCallId: 'call-build',
+    };
+    const rootTool = { ...agentTool('build'), subTools: [completedChild] };
+    const rootTask = task('running');
+    const liveChild = task('running', {
+      id: 'agent-live-child',
+      label: 'Live child',
+      toolUseId: 'call-live-child',
+      parentAgentId: rootTask.id,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <PlanExecutionView
+            todos={todos}
+            tools={[rootTool]}
+            tasks={[rootTask, liveChild]}
+          />
+        </I18nProvider>,
+      );
+    });
+
+    expect(container.textContent).toContain('Live child');
+    expect(container.textContent).toContain('Completed child');
+
+    act(() => root.unmount());
+    container.remove();
   });
 
   it('groups executions by todo and keeps missing links unassigned', () => {

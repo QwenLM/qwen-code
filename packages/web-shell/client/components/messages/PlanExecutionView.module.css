@@ -11,6 +11,12 @@
   font-weight: 700;
 }
 
+.lineageNotice {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
 .count,
 .dependencies,
 .executionStatus {
@@ -261,6 +267,7 @@
 }
 
 .nestedExecution {
+  width: 100%;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -269,7 +276,25 @@
   padding-top: 2px;
   padding-bottom: 2px;
   color: var(--muted-foreground);
+  border: 0;
+  background: transparent;
+  font: inherit;
   font-size: 11px;
+  text-align: left;
+}
+
+button.nestedExecution:not(:disabled) {
+  cursor: pointer;
+}
+
+button.nestedExecution:not(:disabled):hover {
+  color: var(--foreground);
+}
+
+button.nestedExecution:not(:disabled):focus-visible {
+  color: var(--foreground);
+  outline: 2px solid var(--agent-blue-500);
+  outline-offset: 1px;
 }
 
 .unassigned {

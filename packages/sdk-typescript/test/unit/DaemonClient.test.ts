@@ -1348,6 +1348,30 @@ describe('DaemonClient', () => {
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     });
 
+    it('requests nested lineage only when includeTree is enabled', async () => {
+      const body = {
+        sessionId: 'subagent.virtual',
+        taskId: 'general-purpose-agent-1',
+        title: 'agent: research',
+        status: 'completed',
+        nestedAgents: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.resolveSubagentSession('s-1', 'agent-1', 'client-1', {
+          includeTree: true,
+        }),
+      ).resolves.toEqual(body);
+
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/session/s-1/subagents/agent-1?includeTree=1',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
     it('cancels a subagent through its parent tool call', async () => {
       const body = { cancelled: true };
       const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));

@@ -649,7 +649,19 @@ describe('AgentTool', () => {
         ...validParams,
         todo_id: ' ',
       });
-      expect(result).toBe('Parameter "todo_id" must be a non-empty string.');
+      expect(result).toBe(
+        'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
+      );
+    });
+
+    it('should reject an oversized todo_id', () => {
+      const result = agentTool.validateToolParams({
+        ...validParams,
+        todo_id: 'x'.repeat(501),
+      });
+      expect(result).toBe(
+        'Parameter "todo_id" must be a non-empty string of at most 500 characters.',
+      );
     });
 
     it('should reject empty subagent_type', async () => {
@@ -5751,6 +5763,7 @@ describe('AgentTool', () => {
 
         const meta = readSidecar('monitor-top-1');
         expect(meta.parentAgentId).toBeNull();
+        expect(meta.toolUseId).toBe('top-1');
       });
 
       it('records the launching agent id when launched from a subagent frame', async () => {
@@ -5773,6 +5786,8 @@ describe('AgentTool', () => {
 
         const meta = readSidecar('monitor-nested-1');
         expect(meta.parentAgentId).toBe('explore-parent-42');
+        expect(meta.parentSessionId).toBe('test-session-id');
+        expect(meta.toolUseId).toBe('nested-1');
       });
     });
 

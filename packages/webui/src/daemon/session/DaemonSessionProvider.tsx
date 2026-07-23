@@ -219,8 +219,13 @@ function projectSubagentToolUpdate(
   const subagentType = boundedString(rawInput?.['subagent_type'], 120);
   const prompt = boundedString(rawInput?.['prompt'], 240);
   const description = boundedString(rawInput?.['description'], 240);
+  const rawTodoId = rawInput?.['todo_id'];
   const todoId =
-    typeof rawInput?.['todo_id'] === 'string' ? rawInput['todo_id'] : undefined;
+    typeof rawTodoId === 'string' &&
+    rawTodoId.length > 0 &&
+    rawTodoId.length <= 500
+      ? rawTodoId
+      : undefined;
   const subagentName = boundedString(rawOutput?.['subagentName'], 120);
   const taskDescription = boundedString(rawOutput?.['taskDescription'], 240);
   const status = boundedString(rawOutput?.['status'], 80);

@@ -9,6 +9,22 @@ stream, session task snapshot, and subagent detail session.
 This feature is observational. It does not schedule, retry, unblock, or
 complete work.
 
+## Ownership and lifecycle
+
+The feature deliberately keeps one source of truth per concern:
+
+- Core owns the persisted Todo snapshot, dependency validation, and stable
+  `planId` lifecycle.
+- ACP plan updates carry the portable Todo projection plus Qwen metadata; no
+  second workflow protocol or graph store is introduced.
+- The session task registry owns live execution state. Agent sidecars retain
+  only the durable identity needed after live tasks expire.
+- Web Shell joins these streams for presentation. It never writes execution
+  state or infers scheduler behavior from the graph.
+
+This separation lets ordinary sessions continue without a planning gate while
+Plan Mode adds an opt-in approval boundary over the same data.
+
 ## Data contract
 
 `todo_write` accepts optional `blockedBy` Todo IDs. The runtime validates that
@@ -53,6 +69,34 @@ adds a native CSS plan-execution section above the existing task tree:
 No graph library is added. Plans without dependency metadata keep list-style
 presentation.
 
+## Completed-session history
+
+Each persisted Todo snapshot keeps a collapsed plan-execution entry in the
+session transcript. Expanding it rebuilds the matching plan revision and its
+root Agent executions from the parent transcript. If the matching revision
+crosses the initially loaded history page, expansion uses the existing
+transcript pagination path until it reaches the prior plan boundary or the
+start of history. Nested Agent calls live in
+their own transcripts, so the Web Shell then uses the existing subagent
+resolver to read only lightweight descendant metadata from that session's
+sidecars: task ID, parent task ID, tool-call ID, title, and lifecycle status.
+Concurrent history consumers share the same pagination request and wait for
+the loaded messages to commit before deciding that a plan boundary was reached.
+If pagination fails, the history view remains explicitly marked as incomplete.
+
+The sidecar projection is lazy, runtime-scoped, cycle-safe, and contains no
+prompt, result, output path, or transcript content. Clicking either a root or
+nested Agent continues to load the existing virtual subagent session by its
+exact tool-call ID. This preserves the full subagent tree after the live task
+registry has released foreground children without adding a graph endpoint or
+duplicating execution data in Todo history.
+
+The resolver indexes sidecars and parent Agent call metrics on demand. Indexes
+are identity-scoped, bounded, shared across concurrent root lookups, and
+actively evicted after a short TTL. Oversized lineage is reported as truncated
+and the UI labels it as partial instead of silently presenting incomplete data
+as authoritative.
+
 ## Plan Mode approval
 
 Plan Mode is the opt-in execution gate for users who want to review a workflow
@@ -68,6 +112,11 @@ Mode and starts execution, while rejecting keeps the session in Plan Mode. If
 there is no active Todo snapshot, the approval keeps its existing text-only
 presentation using the plan body carried by ACP. Sessions that do not enter
 Plan Mode are unchanged.
+
+Approval reads the latest active persisted Todo snapshot, independently of the
+bottom panel's per-turn visibility rule. A user message can hide that footer,
+but it does not clear the plan and therefore must not remove the approval DAG;
+only an explicit empty or terminal snapshot does.
 
 ## Status composition
 
@@ -90,6 +139,7 @@ the Todo status.
 - Agent calls without `todo_id` remain valid.
 - Empty Todo snapshots must clear active state immediately.
 - Full subagent results stay out of the three-second task polling response.
+- Older daemons without nested lineage metadata retain the root execution view.
 - Todo nodes do not invent step output; execution detail comes from linked
   Agent tool calls and the existing subagent detail session.
 - Strict plan-first enforcement for every session remains out of scope because

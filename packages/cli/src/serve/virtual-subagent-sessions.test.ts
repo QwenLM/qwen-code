@@ -33,6 +33,7 @@ it.each(['running', 'paused'])(
 );
 
 afterEach(async () => {
+  vi.useRealTimers();
   await Promise.all(
     tempDirs
       .splice(0)
@@ -78,6 +79,34 @@ function activeTarget(sessions: VirtualSubagentSessions): {
   return target;
 }
 
+function agentMetaIndexCount(sessions: VirtualSubagentSessions): number {
+  return (
+    sessions as unknown as {
+      agentMetaIndexes: Map<string, unknown>;
+    }
+  ).agentMetaIndexes.size;
+}
+
+function parentTranscriptCount(sessions: VirtualSubagentSessions): number {
+  return (
+    sessions as unknown as {
+      parentTranscripts: Map<string, unknown>;
+    }
+  ).parentTranscripts.size;
+}
+
+async function parentTranscriptIndexValue(
+  sessions: VirtualSubagentSessions,
+): Promise<unknown> {
+  const cache = (
+    sessions as unknown as {
+      parentTranscripts: Map<string, { index: Promise<unknown> }>;
+    }
+  ).parentTranscripts;
+  const entry = cache.values().next().value;
+  return entry ? await entry.index : undefined;
+}
+
 describe('VirtualSubagentSessions', () => {
   it('rejects id parts that the parser cannot accept', () => {
     expect(() =>
@@ -86,6 +115,20 @@ describe('VirtualSubagentSessions', () => {
     expect(() =>
       createVirtualSubagentSessionId('parent-session', 'agent/1'),
     ).toThrow('valid id parts');
+  });
+
+  it('rejects unsafe parent session ids before runtime or filesystem access', async () => {
+    const getSessionTasksStatus = vi.fn();
+    const resolved = await new VirtualSubagentSessions().resolve(
+      {
+        bridge: { getSessionTasksStatus },
+      } as unknown as WorkspaceRuntime,
+      'parent/session',
+      'tool-1',
+    );
+
+    expect(resolved).toBeUndefined();
+    expect(getSessionTasksStatus).not.toHaveBeenCalled();
   });
 
   it('resolves, fully loads, and independently streams an agent transcript', async () => {
@@ -642,7 +685,195 @@ describe('VirtualSubagentSessions', () => {
     await iterator.return?.();
   });
 
+  it('returns persisted nested agent lineage without loading transcripts', async () => {
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-subagent-tree-'),
+    );
+    tempDirs.push(runtimeDir);
+    const workspaceCwd = path.join(runtimeDir, 'workspace');
+    const parentSessionId = 'parent-with-tree';
+    const rootTaskId = 'agent-root';
+    const rootToolCallId = 'tool-root';
+    const projectDir = Storage.runWithRuntimeBaseDir(
+      runtimeDir,
+      workspaceCwd,
+      () => new Storage(workspaceCwd).getProjectDir(),
+    );
+    const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
+    await fs.mkdir(sessionDir, { recursive: true });
+    const rootOutput = path.join(sessionDir, 'agent-root.jsonl');
+    await fs.writeFile(
+      rootOutput,
+      `${JSON.stringify(record('root', null, 'user', 'root prompt'))}\n`,
+    );
+    const writeMeta = async (filename: string, meta: Record<string, unknown>) =>
+      fs.writeFile(
+        path.join(sessionDir, filename),
+        JSON.stringify({
+          agentType: 'general-purpose',
+          parentSessionId,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          ...meta,
+        }),
+      );
+    await Promise.all([
+      writeMeta('child.meta.json', {
+        agentId: 'agent-child',
+        description: 'Child agent',
+        toolUseId: 'tool-child',
+        parentAgentId: rootTaskId,
+        status: 'completed',
+      }),
+      writeMeta('grandchild.meta.json', {
+        agentId: 'agent-grandchild',
+        description: 'Grandchild agent',
+        toolUseId: 'tool-grandchild',
+        parentAgentId: 'agent-child',
+        status: 'failed',
+        createdAt: '2026-01-01T00:00:01.000Z',
+      }),
+      writeMeta('unrelated.meta.json', {
+        agentId: 'agent-unrelated',
+        description: 'Unrelated agent',
+        toolUseId: 'tool-unrelated',
+        parentAgentId: 'another-root',
+        status: 'completed',
+      }),
+      writeMeta('wrong-session.meta.json', {
+        agentId: 'agent-wrong-session',
+        description: 'Wrong session agent',
+        toolUseId: 'tool-wrong-session',
+        parentAgentId: rootTaskId,
+        parentSessionId: 'another-session',
+        status: 'completed',
+      }),
+      writeMeta('cycle-a.meta.json', {
+        agentId: 'cycle-a',
+        description: 'Cycle A',
+        toolUseId: 'tool-cycle-a',
+        parentAgentId: rootTaskId,
+        status: 'completed',
+      }),
+      writeMeta('cycle-b.meta.json', {
+        agentId: 'cycle-b',
+        description: 'Cycle B',
+        toolUseId: 'tool-cycle-b',
+        parentAgentId: 'cycle-a',
+        status: 'completed',
+      }),
+      writeMeta('cycle-back.meta.json', {
+        agentId: 'cycle-a',
+        description: 'Cycle A duplicate',
+        toolUseId: 'tool-cycle-a-back',
+        parentAgentId: 'cycle-b',
+        status: 'completed',
+      }),
+      writeMeta('invalid-status.meta.json', {
+        agentId: 'agent-invalid-status',
+        description: 'Invalid status',
+        toolUseId: 'tool-invalid-status',
+        parentAgentId: rootTaskId,
+        status: 'unknown',
+      }),
+      writeMeta('invalid-id.meta.json', {
+        agentId: '../invalid',
+        description: 'Invalid id',
+        toolUseId: 'tool-invalid-id',
+        parentAgentId: rootTaskId,
+        status: 'completed',
+      }),
+      fs.writeFile(
+        path.join(sessionDir, 'oversized.meta.json'),
+        'x'.repeat(64 * 1024 + 1),
+      ),
+      fs.writeFile(path.join(sessionDir, 'malformed.meta.json'), '{'),
+    ]);
+    const runtime = {
+      workspaceId: 'workspace-tree',
+      workspaceCwd,
+      env: {
+        mode: 'runtime-overlay',
+        overlayKeys: ['QWEN_RUNTIME_DIR'],
+        effectiveEnv: { QWEN_RUNTIME_DIR: runtimeDir },
+      },
+      bridge: {
+        getSessionTasksStatus: async () => ({
+          v: 1 as const,
+          sessionId: parentSessionId,
+          now: Date.now(),
+          tasks: [
+            {
+              kind: 'agent' as const,
+              id: rootTaskId,
+              label: 'Root agent',
+              description: 'Root agent',
+              status: 'running' as const,
+              startTime: Date.now(),
+              runtimeMs: 1,
+              outputFile: rootOutput,
+              isBackgrounded: true,
+              toolUseId: rootToolCallId,
+            },
+          ],
+        }),
+      },
+    } as unknown as WorkspaceRuntime;
+
+    const sessions = new VirtualSubagentSessions();
+    const defaultResolution = await sessions.resolve(
+      runtime,
+      parentSessionId,
+      rootToolCallId,
+    );
+    expect(defaultResolution).not.toHaveProperty('nestedAgents');
+    expect(agentMetaIndexCount(sessions)).toBe(0);
+
+    const [resolved, cachedResolution] = await Promise.all([
+      sessions.resolve(runtime, parentSessionId, rootToolCallId, {
+        includeTree: true,
+      }),
+      sessions.resolve(runtime, parentSessionId, rootToolCallId, {
+        includeTree: true,
+      }),
+    ]);
+
+    expect(resolved?.nestedAgents).toEqual([
+      {
+        taskId: 'agent-child',
+        toolCallId: 'tool-child',
+        parentTaskId: rootTaskId,
+        title: 'Child agent',
+        status: 'completed',
+      },
+      {
+        taskId: 'agent-grandchild',
+        toolCallId: 'tool-grandchild',
+        parentTaskId: 'agent-child',
+        title: 'Grandchild agent',
+        status: 'failed',
+      },
+      {
+        taskId: 'cycle-a',
+        toolCallId: 'tool-cycle-a',
+        parentTaskId: rootTaskId,
+        title: 'Cycle A',
+        status: 'completed',
+      },
+      {
+        taskId: 'cycle-b',
+        toolCallId: 'tool-cycle-b',
+        parentTaskId: 'cycle-a',
+        title: 'Cycle B',
+        status: 'completed',
+      },
+    ]);
+    expect(cachedResolution?.nestedAgents).toEqual(resolved?.nestedAgents);
+    expect(agentMetaIndexCount(sessions)).toBe(1);
+    expect(JSON.stringify(resolved)).not.toContain('root prompt');
+  });
+
   it('keeps terminal legacy sidecar status over the background launch result', async () => {
+    vi.useFakeTimers();
     const runtimeDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'qwen-subagent-runtime-'),
     );
@@ -755,11 +986,11 @@ describe('VirtualSubagentSessions', () => {
       },
     } as unknown as WorkspaceRuntime;
 
-    const resolved = await new VirtualSubagentSessions().resolve(
-      runtime,
-      parentSessionId,
-      toolCallId,
-    );
+    const sessions = new VirtualSubagentSessions();
+    const [resolved, cachedResolution] = await Promise.all([
+      sessions.resolve(runtime, parentSessionId, toolCallId),
+      sessions.resolve(runtime, parentSessionId, toolCallId),
+    ]);
 
     expect(parseVirtualSubagentSessionId(resolved!.sessionId)?.agentId).toBe(
       'general-purpose-random',
@@ -772,5 +1003,16 @@ describe('VirtualSubagentSessions', () => {
       outputTokens: 234,
       cachedTokens: 800,
     });
+    expect(cachedResolution).toEqual(resolved);
+    expect(agentMetaIndexCount(sessions)).toBe(1);
+    expect(parentTranscriptCount(sessions)).toBe(1);
+    expect(await parentTranscriptIndexValue(sessions)).toEqual({
+      byToolCallId: expect.any(Map),
+      truncated: false,
+    });
+
+    await vi.advanceTimersByTimeAsync(1_001);
+    expect(agentMetaIndexCount(sessions)).toBe(0);
+    expect(parentTranscriptCount(sessions)).toBe(0);
   });
 });

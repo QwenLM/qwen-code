@@ -8,6 +8,7 @@ import {
   extractTodosFromToolCall,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getLatestActiveTodos,
   getTodoStatusIcon,
   getTodoWindow,
   isTodoWriteToolName,
@@ -93,11 +94,10 @@ describe('getFloatingTodos', () => {
       planId: null,
       allCompleted: false,
       sourceMessageId: null,
-      sourceCallId: null,
     });
   });
 
-  it('returns the latest active list with its source ids', () => {
+  it('returns the latest active list with its source message', () => {
     const first = [todo('1', 'in_progress')];
     const second = [todo('1', 'completed'), todo('2', 'in_progress')];
     const state = getFloatingTodos([
@@ -107,7 +107,6 @@ describe('getFloatingTodos', () => {
     expect(state.todos.map((t) => t.id)).toEqual(['1', '2']);
     expect(state.allCompleted).toBe(false);
     expect(state.sourceMessageId).toBe('m2');
-    expect(state.sourceCallId).toBe('call-m2');
   });
 
   it('preserves a stable plan id and dependency metadata', () => {
@@ -123,7 +122,7 @@ describe('getFloatingTodos', () => {
             _meta: { qwenTodo: { id: 'build', blockedBy: ['research'] } },
           },
         ],
-        plan: { id: 'plan-1', sourceCallId: 'call-plan' },
+        plan: { id: 'plan-1' },
       },
     };
     const state = getFloatingTodos([
@@ -141,10 +140,9 @@ describe('getFloatingTodos', () => {
     ]);
   });
 
-  it('uses a null sourceCallId for plan messages', () => {
+  it('tracks the source message for plan messages', () => {
     const state = getFloatingTodos([planMessage('p1', [todo('1', 'pending')])]);
     expect(state.sourceMessageId).toBe('p1');
-    expect(state.sourceCallId).toBeNull();
   });
 
   it('clears an active list after the next user message', () => {
@@ -232,6 +230,32 @@ describe('getFloatingTodos', () => {
   });
 });
 
+describe('getLatestActiveTodos', () => {
+  it('keeps the persisted workflow available after a later user message', () => {
+    const todos = [todo('1', 'in_progress')];
+    expect(
+      getLatestActiveTodos([
+        todoWriteMessage('m1', todos),
+        userMessage('revision'),
+      ]),
+    ).toEqual(todos);
+  });
+
+  it('honors an explicit clear and ignores a terminal-only snapshot', () => {
+    expect(
+      getLatestActiveTodos([
+        todoWriteMessage('m1', [todo('1', 'in_progress')]),
+        todoWriteMessage('clear', []),
+      ]),
+    ).toEqual([]);
+    expect(
+      getLatestActiveTodos([
+        todoWriteMessage('done', [todo('1', 'completed')]),
+      ]),
+    ).toEqual([]);
+  });
+});
+
 describe('getAgentToolsForPlan', () => {
   const planUpdate = (messageId: string, planId: string): Message => ({
     id: messageId,
@@ -243,7 +267,37 @@ describe('getAgentToolsForPlan', () => {
         status: 'completed',
         rawOutput: {
           entries: [{ content: planId, status: 'pending' }],
-          plan: { id: planId, sourceCallId: `call-${messageId}` },
+          plan: { id: planId },
+        },
+      },
+    ],
+  });
+  const completedPlanUpdate = (messageId: string, planId: string): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${messageId}`,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: {
+          entries: [{ content: planId, status: 'completed' }],
+          plan: { id: planId },
+        },
+      },
+    ],
+  });
+  const clearedPlanUpdate = (messageId: string, planId: string): Message => ({
+    id: messageId,
+    role: 'tool_group',
+    tools: [
+      {
+        callId: `call-${messageId}`,
+        toolName: 'todo_write',
+        status: 'completed',
+        rawOutput: {
+          entries: [],
+          plan: { id: planId },
         },
       },
     ],
@@ -281,6 +335,78 @@ describe('getAgentToolsForPlan', () => {
         sourceMessageId: 'new-plan',
       }).map((tool) => tool.callId),
     ).toEqual(['new-agent']);
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'old',
+        sourceMessageId: 'old-plan',
+      }).map((tool) => tool.callId),
+    ).toEqual(['old-agent']);
+  });
+
+  it('keeps collecting agents after an update to the same plan', () => {
+    const messages = [
+      planUpdate('plan-start', 'stable'),
+      agentUpdate('first-agent', 'first-agent'),
+      planUpdate('plan-progress', 'stable'),
+      agentUpdate('second-agent', 'second-agent'),
+      planUpdate('next-plan', 'next'),
+      agentUpdate('next-agent', 'next-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'stable',
+        sourceMessageId: 'plan-start',
+      }).map((tool) => tool.callId),
+    ).toEqual(['first-agent', 'second-agent']);
+  });
+
+  it('stops collecting as soon as a plan is completed', () => {
+    const messages = [
+      planUpdate('plan-start', 'stable'),
+      agentUpdate('plan-agent', 'plan-agent'),
+      completedPlanUpdate('plan-complete', 'stable'),
+      agentUpdate('unrelated-agent', 'unrelated-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'stable',
+        sourceMessageId: 'plan-start',
+      }).map((tool) => tool.callId),
+    ).toEqual(['plan-agent']);
+  });
+
+  it('stops collecting as soon as a plan is cleared', () => {
+    const messages = [
+      planUpdate('plan-start', 'stable'),
+      agentUpdate('plan-agent', 'plan-agent'),
+      clearedPlanUpdate('plan-clear', 'stable'),
+      agentUpdate('unrelated-agent', 'unrelated-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: 'stable',
+        sourceMessageId: 'plan-start',
+      }).map((tool) => tool.callId),
+    ).toEqual(['plan-agent']);
+  });
+
+  it('stops an ACP plan at the next plan message', () => {
+    const messages = [
+      planMessage('first', [todo('first', 'in_progress')]),
+      agentUpdate('first-agent', 'first-agent'),
+      planMessage('second', [todo('second', 'in_progress')]),
+      agentUpdate('second-agent', 'second-agent'),
+    ];
+
+    expect(
+      getAgentToolsForPlan(messages, {
+        planId: null,
+        sourceMessageId: 'first',
+      }).map((tool) => tool.callId),
+    ).toEqual(['first-agent']);
   });
 
   it('returns immediately when there is no active plan source', () => {

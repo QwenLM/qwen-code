@@ -772,6 +772,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         },
         todo_id: {
           type: 'string',
+          maxLength: 500,
           description:
             'ID of the todo this top-level agent execution implements. Use an ID from the current todo list when one exists.',
         },
@@ -1017,9 +1018,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
 
     if (
       params.todo_id !== undefined &&
-      (typeof params.todo_id !== 'string' || params.todo_id.trim() === '')
+      (typeof params.todo_id !== 'string' ||
+        params.todo_id.trim() === '' ||
+        params.todo_id.length > 500)
     ) {
-      return 'Parameter "todo_id" must be a non-empty string.';
+      return 'Parameter "todo_id" must be a non-empty string of at most 500 characters.';
     }
 
     if (params.subagent_type !== undefined) {

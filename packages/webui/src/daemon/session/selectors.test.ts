@@ -55,7 +55,7 @@ describe('daemon selectors', () => {
             },
           },
         ],
-        plan: { id: 'plan-1', sourceCallId: 'todo-call-1' },
+        plan: { id: 'plan-1' },
       },
     });
     const active = block({
@@ -88,7 +88,6 @@ describe('daemon selectors', () => {
     expect(selectDaemonTodoLists([completed, active])).toHaveLength(2);
     expect(selectDaemonTodoLists([completed])[0]).toMatchObject({
       planId: 'plan-1',
-      sourceCallId: 'todo-call-1',
       items: [{ id: 'todo-1', blockedBy: ['prepare'] }],
     });
     expect(selectDaemonLatestTodoList([completed, active])).toMatchObject({
@@ -121,7 +120,7 @@ describe('daemon selectors', () => {
       toolName: 'TodoWrite',
       rawOutput: {
         entries: [],
-        plan: { id: 'plan-1', sourceCallId: 'clear-call' },
+        plan: { id: 'plan-1' },
       },
     });
 

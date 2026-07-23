@@ -104,6 +104,26 @@ describe('TodoWriteTool', () => {
       expect(result).toContain('non-empty "id" string');
     });
 
+    it('should reject oversized todo and dependency ids', () => {
+      expect(
+        tool.validateToolParams({
+          todos: [{ id: 'x'.repeat(501), content: 'Task', status: 'pending' }],
+        }),
+      ).toContain('at most 500 characters');
+      expect(
+        tool.validateToolParams({
+          todos: [
+            {
+              id: 'task',
+              content: 'Task',
+              status: 'pending',
+              blockedBy: ['x'.repeat(501)],
+            },
+          ],
+        }),
+      ).toContain('at most 500 characters');
+    });
+
     it('should reject todos with invalid status', () => {
       const params: TodoWriteParams = {
         todos: [
@@ -285,6 +305,28 @@ describe('TodoWriteTool', () => {
       expect(
         JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
       ).toMatchObject({ planId: 'plan-1' });
+    });
+
+    it('should retain the plan ID for a repeated terminal snapshot', async () => {
+      mockFs.readFile.mockResolvedValue(
+        JSON.stringify({
+          planId: 'finished-plan',
+          todos: [{ id: '1', content: 'Done', status: 'completed' }],
+        }),
+      );
+      mockFs.mkdir.mockResolvedValue(undefined);
+      mockAtomicWrite.mockResolvedValue(undefined);
+
+      const result = await tool
+        .build({
+          todos: [{ id: '1', content: 'Still done', status: 'completed' }],
+        })
+        .execute(mockAbortSignal);
+
+      expect(result.returnDisplay).toMatchObject({ planId: 'finished-plan' });
+      expect(
+        JSON.parse(mockAtomicWrite.mock.calls[0][1] as string),
+      ).toMatchObject({ planId: 'finished-plan' });
     });
 
     it('should start a new plan after the previous plan completed', async () => {

@@ -6,12 +6,11 @@
 
 import * as fs from 'node:fs/promises';
 import { createReadStream } from 'node:fs';
+import { createHash } from 'node:crypto';
 import readline from 'node:readline';
 import {
   getSubagentSessionDir,
   parseLineTolerant,
-  read as readJsonl,
-  readAgentMeta,
   Storage,
   type ChatRecord,
   type SessionTranscriptCursorState,
@@ -25,6 +24,12 @@ import type { WorkspaceRuntime } from './workspace-registry.js';
 const PREFIX = 'subagent.';
 const POLL_INTERVAL_MS = 250;
 const TARGET_RETENTION_MS = 60_000;
+const SESSION_INDEX_TTL_MS = 1_000;
+const MAX_SESSION_INDEXES = 64;
+const MAX_AGENT_META_FILES = 4_096;
+const MAX_AGENT_META_BYTES = 64 * 1024;
+const MAX_NESTED_AGENTS = 2_048;
+const MAX_INDEXED_AGENT_CALLS = 4_096;
 
 interface VirtualSubagentSessionKey {
   parentSessionId: string;
@@ -68,6 +73,16 @@ export interface ResolvedVirtualSubagentSession {
   inputTokens?: number;
   outputTokens?: number;
   cachedTokens?: number;
+  nestedAgents?: ResolvedVirtualSubagentChild[];
+  nestedAgentsTruncated?: boolean;
+}
+
+export interface ResolvedVirtualSubagentChild {
+  taskId: string;
+  toolCallId: string;
+  parentTaskId: string;
+  title: string;
+  status: string;
 }
 
 interface ToolCallMetrics {
@@ -79,7 +94,65 @@ interface ToolCallMetrics {
   cachedTokens?: number;
 }
 
-async function readFirstUserText(
+type PersistedAgentStatus =
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'paused';
+
+interface IndexedAgentMeta {
+  agentId: string;
+  agentType: string;
+  description: string;
+  parentAgentId: string | null;
+  toolUseId?: string;
+  status: PersistedAgentStatus;
+  createdAt: string;
+  lastUpdatedAt?: string;
+  startTime: number;
+  outputFile: string;
+}
+
+interface SessionAgentMetaIndex {
+  entries: IndexedAgentMeta[];
+  childrenByParent: Map<string, ResolvedVirtualSubagentChild[]>;
+  truncated: boolean;
+}
+
+interface SessionIndexCacheEntry<T> {
+  expiresAt: number;
+  settled: boolean;
+  index: Promise<T>;
+  evictionTimer?: NodeJS.Timeout;
+}
+
+interface LegacyAgentLaunch {
+  timestamp: number;
+  description?: string;
+  promptHash?: string;
+  agentType?: string;
+}
+
+interface ParentToolCallIndexEntry {
+  launch?: LegacyAgentLaunch;
+  metrics?: ToolCallMetrics;
+}
+
+interface ParentTranscriptIndex {
+  byToolCallId: Map<string, ParentToolCallIndexEntry>;
+  truncated: boolean;
+}
+
+export interface ResolveVirtualSubagentSessionOptions {
+  includeTree?: boolean;
+}
+
+function hashText(value: string): string {
+  return createHash('sha256').update(value).digest('base64url');
+}
+
+async function readFirstUserTextHash(
   filePath: string,
 ): Promise<string | undefined> {
   const stream = createReadStream(filePath);
@@ -93,9 +166,10 @@ async function readFirstUserText(
       if (!trimmed) continue;
       for (const record of parseLineTolerant<ChatRecord>(trimmed, filePath)) {
         if (record.type !== 'user') continue;
-        return record.message?.parts?.find(
+        const text = record.message?.parts?.find(
           (part) => typeof part.text === 'string',
         )?.text;
+        return typeof text === 'string' ? hashText(text) : undefined;
       }
     }
     return undefined;
@@ -118,6 +192,34 @@ function finiteNonNegative(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0
     ? value
     : undefined;
+}
+
+function boundedString(value: unknown, maxLength: number): string | undefined {
+  return typeof value === 'string' &&
+    value.length > 0 &&
+    value.length <= maxLength
+    ? value
+    : undefined;
+}
+
+function persistedAgentStatus(
+  value: unknown,
+): PersistedAgentStatus | undefined {
+  if (value === undefined) return 'completed';
+  switch (value) {
+    case 'running':
+      return 'running';
+    case 'completed':
+      return 'completed';
+    case 'failed':
+      return 'failed';
+    case 'cancelled':
+      return 'cancelled';
+    case 'paused':
+      return 'paused';
+    default:
+      return undefined;
+  }
 }
 
 function normalizeTaskStatus(status: unknown): string | undefined {
@@ -701,6 +803,401 @@ class VirtualSubagentTarget {
 
 export class VirtualSubagentSessions {
   private readonly targets = new Map<string, VirtualSubagentTarget>();
+  private readonly agentMetaIndexes = new Map<
+    string,
+    SessionIndexCacheEntry<SessionAgentMetaIndex>
+  >();
+  private readonly parentTranscripts = new Map<
+    string,
+    SessionIndexCacheEntry<ParentTranscriptIndex>
+  >();
+
+  private getProjectDir(runtime: WorkspaceRuntime): string {
+    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
+    return Storage.runWithRuntimeBaseDir(runtimeDir, runtime.workspaceCwd, () =>
+      new Storage(runtime.workspaceCwd).getProjectDir(),
+    );
+  }
+
+  private getSessionDir(
+    runtime: WorkspaceRuntime,
+    parentSessionId: string,
+  ): string {
+    return getSubagentSessionDir(this.getProjectDir(runtime), parentSessionId);
+  }
+
+  private setBoundedCacheEntry<K, V>(
+    map: Map<K, SessionIndexCacheEntry<V>>,
+    key: K,
+    value: SessionIndexCacheEntry<V>,
+  ): void {
+    const replaced = map.get(key);
+    if (replaced?.evictionTimer) clearTimeout(replaced.evictionTimer);
+    if (!map.has(key) && map.size >= MAX_SESSION_INDEXES) {
+      const oldest = map.keys().next().value;
+      if (oldest !== undefined) {
+        const evicted = map.get(oldest);
+        if (evicted?.evictionTimer) clearTimeout(evicted.evictionTimer);
+        map.delete(oldest);
+      }
+    }
+    map.set(key, value);
+  }
+
+  private scheduleCacheExpiry<K, V>(
+    map: Map<K, SessionIndexCacheEntry<V>>,
+    key: K,
+    entry: SessionIndexCacheEntry<V>,
+  ): void {
+    entry.expiresAt = Date.now() + SESSION_INDEX_TTL_MS;
+    entry.evictionTimer = setTimeout(() => {
+      if (map.get(key) === entry) map.delete(key);
+    }, SESSION_INDEX_TTL_MS);
+    entry.evictionTimer.unref();
+  }
+
+  private async readAgentMetaIndex(
+    sessionDir: string,
+    parentSessionId: string,
+  ): Promise<SessionAgentMetaIndex> {
+    let names: string[];
+    try {
+      names = await fs.readdir(sessionDir);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { entries: [], childrenByParent: new Map(), truncated: false };
+      }
+      throw error;
+    }
+
+    const entriesByAgentId = new Map<string, IndexedAgentMeta>();
+    const metaNames = names
+      .filter((name) => name.endsWith('.meta.json'))
+      .sort();
+    let truncated = false;
+    for (const name of metaNames) {
+      const filenameAgentId = name.slice(0, -'.meta.json'.length);
+      if (!isValidVirtualSessionPart(filenameAgentId)) continue;
+      const metaPath = `${sessionDir}/${name}`;
+      let meta: Record<string, unknown>;
+      try {
+        const stat = await fs.lstat(metaPath);
+        if (!stat.isFile() || stat.size > MAX_AGENT_META_BYTES) continue;
+        const parsed = asRecord(
+          JSON.parse(await fs.readFile(metaPath, 'utf8')),
+        );
+        if (!parsed) continue;
+        meta = parsed;
+      } catch {
+        continue;
+      }
+      const agentId = boundedString(meta['agentId'], 500);
+      const agentType = boundedString(meta['agentType'], 120);
+      const description = boundedString(meta['description'], 500);
+      const createdAt = boundedString(meta['createdAt'], 64);
+      const status = persistedAgentStatus(meta['status']);
+      const toolUseId = boundedString(meta['toolUseId'], 500);
+      const rawParentAgentId = meta['parentAgentId'];
+      const parentAgentId =
+        rawParentAgentId === null || rawParentAgentId === undefined
+          ? null
+          : boundedString(rawParentAgentId, 500);
+      if (
+        meta['parentSessionId'] !== parentSessionId ||
+        !agentId ||
+        !isValidVirtualSessionPart(agentId) ||
+        !agentType ||
+        !description ||
+        !createdAt ||
+        !status ||
+        parentAgentId === undefined
+      ) {
+        continue;
+      }
+      const parsedStartTime = Date.parse(createdAt);
+      const lastUpdatedAt = boundedString(meta['lastUpdatedAt'], 64);
+      const candidate: IndexedAgentMeta = {
+        agentId,
+        agentType,
+        description,
+        parentAgentId,
+        ...(toolUseId ? { toolUseId } : {}),
+        status,
+        createdAt,
+        ...(lastUpdatedAt ? { lastUpdatedAt } : {}),
+        startTime: Number.isFinite(parsedStartTime) ? parsedStartTime : 0,
+        outputFile: metaPath.slice(0, -'.meta.json'.length) + '.jsonl',
+      };
+      const existing = entriesByAgentId.get(agentId);
+      if (existing) {
+        if (
+          candidate.startTime < existing.startTime ||
+          (candidate.startTime === existing.startTime &&
+            candidate.outputFile.localeCompare(existing.outputFile) < 0)
+        ) {
+          entriesByAgentId.set(agentId, candidate);
+        }
+        continue;
+      }
+      if (entriesByAgentId.size >= MAX_AGENT_META_FILES) {
+        truncated = true;
+        break;
+      }
+      entriesByAgentId.set(agentId, candidate);
+    }
+    const entries = [...entriesByAgentId.values()];
+    entries.sort(
+      (a, b) =>
+        a.startTime - b.startTime ||
+        a.agentId.localeCompare(b.agentId) ||
+        a.outputFile.localeCompare(b.outputFile),
+    );
+
+    const uniqueEntries: IndexedAgentMeta[] = [];
+    const seenToolUseIds = new Set<string>();
+    for (const entry of entries) {
+      if (entry.toolUseId && seenToolUseIds.has(entry.toolUseId)) {
+        const withoutToolUseId = { ...entry };
+        delete withoutToolUseId.toolUseId;
+        uniqueEntries.push(withoutToolUseId);
+        continue;
+      }
+      if (entry.toolUseId) seenToolUseIds.add(entry.toolUseId);
+      uniqueEntries.push(entry);
+    }
+
+    const childrenByParent = new Map<string, ResolvedVirtualSubagentChild[]>();
+    for (const entry of uniqueEntries) {
+      if (!entry.parentAgentId || !entry.toolUseId) continue;
+      const siblings = childrenByParent.get(entry.parentAgentId) ?? [];
+      siblings.push({
+        taskId: entry.agentId,
+        toolCallId: entry.toolUseId,
+        parentTaskId: entry.parentAgentId,
+        title: entry.description || entry.agentType,
+        status: entry.status,
+      });
+      childrenByParent.set(entry.parentAgentId, siblings);
+    }
+    return { entries: uniqueEntries, childrenByParent, truncated };
+  }
+
+  private async getAgentMetaIndex(
+    runtime: WorkspaceRuntime,
+    parentSessionId: string,
+  ): Promise<SessionAgentMetaIndex> {
+    const sessionDir = this.getSessionDir(runtime, parentSessionId);
+    const cacheKey = `${sessionDir}\0${parentSessionId}`;
+    const cached = this.agentMetaIndexes.get(cacheKey);
+    if (cached && (!cached.settled || cached.expiresAt > Date.now())) {
+      return cached.index;
+    }
+    if (cached?.evictionTimer) clearTimeout(cached.evictionTimer);
+    this.agentMetaIndexes.delete(cacheKey);
+
+    const index = this.readAgentMetaIndex(sessionDir, parentSessionId);
+    const entry = {
+      expiresAt: Date.now() + SESSION_INDEX_TTL_MS,
+      settled: false,
+      index,
+    };
+    this.setBoundedCacheEntry(this.agentMetaIndexes, cacheKey, entry);
+    try {
+      const resolved = await index;
+      entry.settled = true;
+      this.scheduleCacheExpiry(this.agentMetaIndexes, cacheKey, entry);
+      return resolved;
+    } catch (error) {
+      entry.settled = true;
+      if (this.agentMetaIndexes.get(cacheKey) === entry) {
+        this.agentMetaIndexes.delete(cacheKey);
+      }
+      throw error;
+    }
+  }
+
+  private getParentTranscriptPath(
+    runtime: WorkspaceRuntime,
+    parentSessionId: string,
+  ): string {
+    return `${this.getProjectDir(runtime)}/chats/${parentSessionId}.jsonl`;
+  }
+
+  private async readParentTranscriptIndex(
+    transcriptPath: string,
+    targetToolCallId?: string,
+  ): Promise<ParentTranscriptIndex> {
+    const byToolCallId = new Map<string, ParentToolCallIndexEntry>();
+    let truncated = false;
+    const stream = createReadStream(transcriptPath);
+    const lines = readline.createInterface({
+      input: stream,
+      crlfDelay: Infinity,
+    });
+    try {
+      for await (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        for (const record of parseLineTolerant<ChatRecord>(
+          trimmed,
+          transcriptPath,
+        )) {
+          for (const part of record.message?.parts ?? []) {
+            const call = part.functionCall;
+            const callId = boundedString(call?.id, 500);
+            if (
+              call?.name !== 'agent' ||
+              typeof callId !== 'string' ||
+              (targetToolCallId && callId !== targetToolCallId)
+            ) {
+              continue;
+            }
+            let entry = byToolCallId.get(callId);
+            if (!entry) {
+              if (
+                targetToolCallId === undefined &&
+                byToolCallId.size >= MAX_INDEXED_AGENT_CALLS
+              ) {
+                truncated = true;
+                continue;
+              }
+              entry = {};
+              byToolCallId.set(callId, entry);
+            }
+            if (entry.launch) continue;
+            const args = call.args;
+            const description = boundedString(args?.['description'], 500);
+            const prompt = args?.['prompt'];
+            const agentType = boundedString(args?.['subagent_type'], 120);
+            entry.launch = {
+              timestamp: Date.parse(record.timestamp),
+              ...(description ? { description } : {}),
+              ...(typeof prompt === 'string'
+                ? { promptHash: hashText(prompt) }
+                : {}),
+              ...(agentType ? { agentType } : {}),
+            };
+          }
+
+          const resultCallId = boundedString(
+            record.toolCallResult?.callId,
+            500,
+          );
+          if (
+            !resultCallId ||
+            (targetToolCallId && resultCallId !== targetToolCallId)
+          ) {
+            continue;
+          }
+          const entry = byToolCallId.get(resultCallId);
+          const resultEntry =
+            entry ??
+            (targetToolCallId
+              ? (() => {
+                  const created: ParentToolCallIndexEntry = {};
+                  byToolCallId.set(resultCallId, created);
+                  return created;
+                })()
+              : undefined);
+          if (resultEntry && !resultEntry.metrics) {
+            resultEntry.metrics = findToolCallMetrics([record], resultCallId);
+          }
+        }
+      }
+      return { byToolCallId, truncated };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { byToolCallId: new Map(), truncated: false };
+      }
+      throw error;
+    } finally {
+      lines.close();
+      stream.destroy();
+    }
+  }
+
+  private async getParentTranscriptIndex(
+    runtime: WorkspaceRuntime,
+    parentSessionId: string,
+  ): Promise<ParentTranscriptIndex> {
+    const transcriptPath = this.getParentTranscriptPath(
+      runtime,
+      parentSessionId,
+    );
+    const cacheKey = `${transcriptPath}\0${parentSessionId}`;
+    const cached = this.parentTranscripts.get(cacheKey);
+    if (cached && (!cached.settled || cached.expiresAt > Date.now())) {
+      return cached.index;
+    }
+    if (cached?.evictionTimer) clearTimeout(cached.evictionTimer);
+    this.parentTranscripts.delete(cacheKey);
+
+    const index = this.readParentTranscriptIndex(transcriptPath);
+    const entry = {
+      expiresAt: Date.now() + SESSION_INDEX_TTL_MS,
+      settled: false,
+      index,
+    };
+    this.setBoundedCacheEntry(this.parentTranscripts, cacheKey, entry);
+    try {
+      const resolved = await index;
+      entry.settled = true;
+      this.scheduleCacheExpiry(this.parentTranscripts, cacheKey, entry);
+      return resolved;
+    } catch (error) {
+      entry.settled = true;
+      if (this.parentTranscripts.get(cacheKey) === entry) {
+        this.parentTranscripts.delete(cacheKey);
+      }
+      throw error;
+    }
+  }
+
+  private async getParentToolCallIndexEntry(
+    runtime: WorkspaceRuntime,
+    parentSessionId: string,
+    toolCallId: string,
+  ): Promise<ParentToolCallIndexEntry | undefined> {
+    const index = await this.getParentTranscriptIndex(runtime, parentSessionId);
+    const cached = index.byToolCallId.get(toolCallId);
+    if (cached) return cached;
+    return (
+      await this.readParentTranscriptIndex(
+        this.getParentTranscriptPath(runtime, parentSessionId),
+        toolCallId,
+      )
+    ).byToolCallId.get(toolCallId);
+  }
+
+  private async findNestedAgents(
+    runtime: WorkspaceRuntime,
+    parentSessionId: string,
+    rootTaskId: string,
+  ): Promise<{
+    agents: ResolvedVirtualSubagentChild[];
+    truncated: boolean;
+  }> {
+    const { childrenByParent, truncated: indexTruncated } =
+      await this.getAgentMetaIndex(runtime, parentSessionId);
+
+    const result: ResolvedVirtualSubagentChild[] = [];
+    const visited = new Set([rootTaskId]);
+    const stack = (childrenByParent.get(rootTaskId) ?? []).slice().reverse();
+    while (stack.length > 0 && result.length < MAX_NESTED_AGENTS) {
+      const child = stack.pop()!;
+      if (visited.has(child.taskId)) continue;
+      visited.add(child.taskId);
+      result.push(child);
+      const descendants = childrenByParent.get(child.taskId) ?? [];
+      for (let index = descendants.length - 1; index >= 0; index--) {
+        stack.push(descendants[index]);
+      }
+    }
+    return {
+      agents: result,
+      truncated: indexTruncated || stack.length > 0,
+    };
+  }
 
   private async findTask(
     runtime: WorkspaceRuntime,
@@ -735,45 +1232,34 @@ export class VirtualSubagentSessions {
       };
     }
 
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
-      () => new Storage(runtime.workspaceCwd).getProjectDir(),
+    const { entries, truncated } = await this.getAgentMetaIndex(
+      runtime,
+      parentSessionId,
     );
-    const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
-    let names: string[];
-    try {
-      names = await fs.readdir(sessionDir);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-      throw error;
-    }
-    for (const name of names) {
-      if (!name.endsWith('.meta.json')) continue;
-      const metaPath = `${sessionDir}/${name}`;
-      const meta = readAgentMeta(metaPath);
+    for (const entry of entries) {
       if (
-        !meta ||
         !predicate({
           kind: 'agent',
-          id: meta.agentId,
-          toolUseId: meta.toolUseId,
-          outputFile: metaPath.slice(0, -'.meta.json'.length) + '.jsonl',
+          id: entry.agentId,
+          toolUseId: entry.toolUseId,
+          outputFile: entry.outputFile,
         })
       ) {
         continue;
       }
       return {
-        id: meta.agentId,
-        title: meta.description || meta.agentType,
-        outputFile: metaPath.slice(0, -'.meta.json'.length) + '.jsonl',
-        status: meta.status ?? 'completed',
-        startTime: Number.isFinite(Date.parse(meta.createdAt))
-          ? Date.parse(meta.createdAt)
-          : Date.now(),
-        durationMs: durationBetween(meta.createdAt, meta.lastUpdatedAt),
+        id: entry.agentId,
+        title: entry.description || entry.agentType,
+        outputFile: entry.outputFile,
+        status: entry.status,
+        startTime: entry.startTime,
+        durationMs: durationBetween(entry.createdAt, entry.lastUpdatedAt),
       };
+    }
+    if (truncated) {
+      throw new Error(
+        `Subagent metadata exceeds the ${MAX_AGENT_META_FILES}-entry index limit`,
+      );
     }
     return undefined;
   }
@@ -785,87 +1271,53 @@ export class VirtualSubagentSessions {
   ): Promise<ResolvedAgentTask | undefined> {
     // Pre-toolUseId transcripts cannot be linked exactly. This score is only a
     // best-effort compatibility path and identical parallel launches may tie.
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
-      () => new Storage(runtime.workspaceCwd).getProjectDir(),
+    const parentToolCall = await this.getParentToolCallIndexEntry(
+      runtime,
+      parentSessionId,
+      toolCallId,
     );
-    const parentRecords = await readJsonl<ChatRecord>(
-      `${projectDir}/chats/${parentSessionId}.jsonl`,
-    );
-    let root:
-      | {
-          timestamp: number;
-          description?: string;
-          prompt?: string;
-          agentType?: string;
-        }
-      | undefined;
-    for (const record of parentRecords) {
-      for (const part of record.message?.parts ?? []) {
-        const call = part.functionCall;
-        if (call?.id !== toolCallId || call.name !== 'agent') continue;
-        const args = call.args;
-        root = {
-          timestamp: Date.parse(record.timestamp),
-          ...(typeof args?.['description'] === 'string'
-            ? { description: args['description'] }
-            : {}),
-          ...(typeof args?.['prompt'] === 'string'
-            ? { prompt: args['prompt'] }
-            : {}),
-          ...(typeof args?.['subagent_type'] === 'string'
-            ? { agentType: args['subagent_type'] }
-            : {}),
-        };
-        break;
-      }
-      if (root) break;
-    }
+    const root = parentToolCall?.launch;
     if (!root) return undefined;
 
-    const sessionDir = getSubagentSessionDir(projectDir, parentSessionId);
-    let names: string[];
-    try {
-      names = await fs.readdir(sessionDir);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return undefined;
-      throw error;
-    }
+    const { entries, truncated } = await this.getAgentMetaIndex(
+      runtime,
+      parentSessionId,
+    );
     const candidates: Array<
       ResolvedAgentTask & { score: number; delta: number }
     > = [];
-    for (const name of names) {
-      if (!name.endsWith('.meta.json')) continue;
-      const metaPath = `${sessionDir}/${name}`;
-      const meta = readAgentMeta(metaPath);
-      if (!meta) continue;
-      const outputFile = metaPath.slice(0, -'.meta.json'.length) + '.jsonl';
-      const launchPrompt = await readFirstUserText(outputFile);
+    for (const entry of entries) {
+      const launchPromptHash = await readFirstUserTextHash(entry.outputFile);
       let score = 0;
-      if (root.prompt && launchPrompt === root.prompt) score += 8;
-      if (root.description && meta.description === root.description) score += 4;
-      if (root.agentType && meta.agentType === root.agentType) score += 2;
-      const startTime = Date.parse(meta.createdAt);
-      const delta = Math.abs(startTime - root.timestamp);
+      if (root.promptHash && launchPromptHash === root.promptHash) score += 8;
+      if (root.description && entry.description === root.description)
+        score += 4;
+      if (root.agentType && entry.agentType === root.agentType) score += 2;
+      const delta = Math.abs(entry.startTime - root.timestamp);
       if (Number.isFinite(delta) && delta <= 60_000) score += 1;
       if (score === 0) continue;
       candidates.push({
-        id: meta.agentId,
-        title: meta.description || meta.agentType,
-        outputFile,
-        status: meta.status ?? 'completed',
-        startTime: Number.isFinite(startTime) ? startTime : Date.now(),
-        durationMs: durationBetween(meta.createdAt, meta.lastUpdatedAt),
+        id: entry.agentId,
+        title: entry.description || entry.agentType,
+        outputFile: entry.outputFile,
+        status: entry.status,
+        startTime: entry.startTime,
+        durationMs: durationBetween(entry.createdAt, entry.lastUpdatedAt),
         score,
         delta,
       });
     }
     candidates.sort((a, b) => b.score - a.score || a.delta - b.delta);
     const selected = candidates[0];
-    if (!selected) return undefined;
-    const metrics = findToolCallMetrics(parentRecords, toolCallId);
+    if (!selected) {
+      if (truncated) {
+        throw new Error(
+          `Subagent metadata exceeds the ${MAX_AGENT_META_FILES}-entry index limit`,
+        );
+      }
+      return undefined;
+    }
+    const metrics = parentToolCall.metrics ?? {};
     return {
       ...selected,
       status: preferTerminalTaskStatus(metrics.status, selected.status),
@@ -882,23 +1334,24 @@ export class VirtualSubagentSessions {
     parentSessionId: string,
     toolCallId: string,
   ): Promise<ToolCallMetrics> {
-    const runtimeDir = runtime.env.effectiveEnv?.['QWEN_RUNTIME_DIR'];
-    const projectDir = Storage.runWithRuntimeBaseDir(
-      runtimeDir,
-      runtime.workspaceCwd,
-      () => new Storage(runtime.workspaceCwd).getProjectDir(),
+    return (
+      (
+        await this.getParentToolCallIndexEntry(
+          runtime,
+          parentSessionId,
+          toolCallId,
+        )
+      )?.metrics ?? {}
     );
-    const records = await readJsonl<ChatRecord>(
-      `${projectDir}/chats/${parentSessionId}.jsonl`,
-    );
-    return findToolCallMetrics(records, toolCallId);
   }
 
   async resolve(
     runtime: WorkspaceRuntime,
     parentSessionId: string,
     toolCallId: string,
+    options: ResolveVirtualSubagentSessionOptions = {},
   ): Promise<ResolvedVirtualSubagentSession | undefined> {
+    if (!isValidVirtualSessionPart(parentSessionId)) return undefined;
     let task = await this.findTask(
       runtime,
       parentSessionId,
@@ -920,6 +1373,9 @@ export class VirtualSubagentSessions {
       toolCallId,
     );
     if (!task) return undefined;
+    const nestedAgentTree = options.includeTree
+      ? await this.findNestedAgents(runtime, parentSessionId, task.id)
+      : undefined;
     const sessionId = createVirtualSubagentSessionId(parentSessionId, task.id);
     const status = task.status;
     this.targets
@@ -935,6 +1391,8 @@ export class VirtualSubagentSessions {
       inputTokens: metrics?.inputTokens ?? task.inputTokens,
       outputTokens: metrics?.outputTokens ?? task.outputTokens,
       cachedTokens: metrics?.cachedTokens ?? task.cachedTokens,
+      ...(nestedAgentTree ? { nestedAgents: nestedAgentTree.agents } : {}),
+      ...(nestedAgentTree?.truncated ? { nestedAgentsTruncated: true } : {}),
     };
   }
 

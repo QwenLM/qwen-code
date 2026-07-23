@@ -398,7 +398,7 @@ describe('daemon UI normalizer and transcript reducer', () => {
             _meta: { qwenTodo: { id: 'task', blockedBy: ['prepare'] } },
           },
         ],
-        plan: { id: 'plan-1', sourceCallId: 'call-1' },
+        plan: { id: 'plan-1' },
         stats: {
           promptTokens: 100,
           cachedTokens: 10,

@@ -663,6 +663,7 @@ describe('ChatPane', () => {
           },
         ],
       },
+      { id: 'revision', role: 'user', content: 'Revise the wording' },
     ];
     pendingPermission = {
       id: 'perm-plan',

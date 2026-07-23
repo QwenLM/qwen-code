@@ -1009,7 +1009,7 @@ function normalizePlanUpdate(
     rawOutput: {
       entries,
       ...(stats ? { stats } : {}),
-      ...(planId ? { plan: { id: planId, sourceCallId: planCallId } } : {}),
+      ...(planId ? { plan: { id: planId } } : {}),
     },
   };
 }

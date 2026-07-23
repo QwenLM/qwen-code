@@ -50,10 +50,11 @@ const todoWriteToolSchemaData: FunctionDeclaration = {
             },
             id: {
               type: 'string',
+              maxLength: 500,
             },
             blockedBy: {
               type: 'array',
-              items: { type: 'string' },
+              items: { type: 'string', maxLength: 500 },
               uniqueItems: true,
               description: 'Todo IDs that must be completed before this item',
             },
@@ -155,8 +156,13 @@ function validateTodos(value: unknown): string | null {
     if (!todo || typeof todo !== 'object') {
       return 'Each todo must be an object.';
     }
-    if (!todo.id || typeof todo.id !== 'string' || todo.id.trim() === '') {
-      return 'Each todo must have a non-empty "id" string.';
+    if (
+      !todo.id ||
+      typeof todo.id !== 'string' ||
+      todo.id.trim() === '' ||
+      todo.id.length > 500
+    ) {
+      return 'Each todo must have a non-empty "id" string of at most 500 characters.';
     }
     if (
       !todo.content ||
@@ -173,10 +179,12 @@ function validateTodos(value: unknown): string | null {
       (!Array.isArray(todo.blockedBy) ||
         todo.blockedBy.some(
           (dependency) =>
-            typeof dependency !== 'string' || dependency.trim() === '',
+            typeof dependency !== 'string' ||
+            dependency.trim() === '' ||
+            dependency.length > 500,
         ))
     ) {
-      return 'Each todo "blockedBy" value must be an array of non-empty Todo IDs.';
+      return 'Each todo "blockedBy" value must be an array of non-empty Todo IDs of at most 500 characters.';
     }
   }
 
@@ -358,7 +366,8 @@ class TodoWriteToolInvocation extends BaseToolInvocation<
       const startsNewPlan =
         finalTodos.length > 0 &&
         (oldTodos.length === 0 ||
-          oldTodos.every((todo) => todo.status === 'completed'));
+          (oldTodos.every((todo) => todo.status === 'completed') &&
+            finalTodos.some((todo) => todo.status !== 'completed')));
       const activePlanId =
         finalTodos.length === 0
           ? undefined

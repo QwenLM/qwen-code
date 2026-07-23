@@ -6392,6 +6392,12 @@ export class Session implements SessionContext {
         let toolBuildSucceeded = false;
         try {
           const invocation = tool.build(args);
+          const callIdAware = invocation as {
+            setCallId?: (id: string) => void;
+          };
+          if (typeof callIdAware.setCallId === 'function') {
+            callIdAware.setCallId(callId);
+          }
           toolBuildSucceeded = true;
 
           // Production AgentTool always initializes `eventEmitter` on its
@@ -7351,7 +7357,7 @@ export class Session implements SessionContext {
 
             // Skip tool_call_update event for TodoWriteTool
             // Still log and return function response for LLM
-          } else if (!isTodoWriteTool) {
+          } else {
             // Normal tool handling: emit result using ToolCallEmitter
             await this.toolCallEmitter.emitResult({
               callId,

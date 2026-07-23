@@ -29,6 +29,7 @@ import {
 import { useSharedNow } from '../../hooks/useSharedNow';
 import { useSubagentDetails } from '../../subagentDetailsContext';
 import { TodoEventSummary, TodoFullList } from './TodoView';
+import { HistoricalPlanExecution } from './HistoricalPlanExecution';
 import { Markdown } from './Markdown';
 import {
   formatDurationMs,
@@ -375,6 +376,7 @@ function TodoToolBody({
     <ToolExpandedCard title={title}>
       <div className={styles.todoBody}>
         <TodoFullList todos={todos} />
+        <HistoricalPlanExecution todos={todos} sourceTool={tool} />
       </div>
     </ToolExpandedCard>
   ) : (

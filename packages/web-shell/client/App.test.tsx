@@ -1154,6 +1154,7 @@ describe('App plan todos', () => {
           },
         ],
       },
+      { id: 'revision', role: 'user', content: 'Revise the wording' },
     ];
     testState.blocks = [
       makePendingPermissionBlock({

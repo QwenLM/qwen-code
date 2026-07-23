@@ -43,7 +43,10 @@ import { GitForkIcon, XIcon } from 'lucide-react';
 import { SESSION_TRANSCRIPT_PAGINATION_FEATURE } from './constants/sessions';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
 import { MessageList, type MessageListHandle } from './components/MessageList';
-import { SubagentDetailsProvider } from './subagentDetailsContext';
+import {
+  SubagentDetailsProvider,
+  useSubagentTreeResolver,
+} from './subagentDetailsContext';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
   ChatEditor,
@@ -229,6 +232,7 @@ import {
   computeTodoTimeline,
   getAgentToolsForPlan,
   getFloatingTodos,
+  getLatestActiveTodos,
   todoDetailSignature,
   todoTimelineSignature,
   type TodoDetail,
@@ -1327,6 +1331,7 @@ export function App({
   const connection = useConnection();
   const transcriptHistory = useTranscriptHistory();
   const workspace = useWorkspace();
+  const resolveSubagentTree = useSubagentTreeResolver();
   const workspaces = useMemo(() => {
     const capabilityWorkspaces = workspace.capabilities?.workspaces ?? [];
     if (
@@ -2208,6 +2213,10 @@ export function App({
     (canActOnPendingApproval && extractPendingPermission(blocks) !== null);
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
+    [messages],
+  );
+  const approvalPlanTodos = useMemo(
+    () => getLatestActiveTodos(messages),
     [messages],
   );
   // Keep the timeline Map referentially stable across streaming ticks that
@@ -7712,6 +7721,7 @@ export function App({
                             const messageList = (
                               <SubagentDetailsProvider
                                 onOpen={openSubagentPanel}
+                                resolveTree={resolveSubagentTree}
                               >
                                 {messageListContent}
                               </SubagentDetailsProvider>
@@ -7842,7 +7852,7 @@ export function App({
                             onConfirm={handleConfirm}
                             variant="floating"
                             keyboardActive={toolApprovalOverlayVisible}
-                            planTodos={floatingTodos}
+                            planTodos={approvalPlanTodos}
                           />
                         </div>
                       )}
