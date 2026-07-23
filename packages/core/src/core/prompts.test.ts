@@ -325,6 +325,7 @@ describe('Core System Prompt (prompts.ts)', () => {
       '<available_skills>',
       `My operating system is: ${process.platform}`,
       "I'm currently working in the directory: /workspace",
+      'Git snapshot',
     ];
     for (const marker of stableMarkers) {
       expect(parts.stable).toContain(marker);
@@ -337,7 +338,7 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(parts.stable).not.toContain('search_docs');
     expect(parts.context).toBe('Caller message\n\nProject instructions');
     expect(parts.volatile).toMatch(
-      /^Memory snapshot\n\nUser profile\n\nGit snapshot\n\nThe following tools are reachable via `tool_search`\..*search_docs.*Today's date is .+\.$/s,
+      /^Memory snapshot\n\nUser profile\n\nThe following tools are reachable via `tool_search`\..*search_docs.*Today's date is .+\.$/s,
     );
     expect(getRecentGitStatus).toHaveBeenCalledWith('/workspace');
   });

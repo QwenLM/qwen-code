@@ -9925,11 +9925,11 @@ Other open files:
           config: expect.objectContaining({
             systemInstruction:
               'Stable identity\n\n' +
+              'Git snapshot\n\n' +
               'Caller system message\n\n' +
               'Project instructions\n\n' +
               'Managed memory\n\n' +
-              'User instructions\n\n' +
-              'Git snapshot',
+              'User instructions',
           }),
           contents,
         }),

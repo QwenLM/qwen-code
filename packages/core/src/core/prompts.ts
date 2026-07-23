@@ -519,6 +519,7 @@ export async function buildSystemPromptParts(
       buildMcpServerInstructionsPrompt(toolRegistry),
       skills ? await buildAvailableSkillsPrompt(config) : null,
       environmentParts[0]?.text,
+      getRecentGitStatus(config.getWorkingDir()),
     ]),
     context: joinSystemPromptTier([
       systemMessage,
@@ -526,7 +527,6 @@ export async function buildSystemPromptParts(
     ]),
     volatile: joinSystemPromptTier([
       config.getSystemPromptVolatileMemory(),
-      getRecentGitStatus(config.getWorkingDir()),
       (options.includeDeferredTools ?? true)
         ? buildDeferredToolsPrompt(toolRegistry)
         : null,
