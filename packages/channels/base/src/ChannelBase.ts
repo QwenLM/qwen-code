@@ -3131,6 +3131,7 @@ export abstract class ChannelBase {
   private async handleChannelMemoryIntent(
     envelope: Envelope,
     intent: ResolvedChannelMemoryIntent,
+    options: { suppressSaveConfirmation?: boolean } = {},
   ): Promise<void> {
     if (intent.kind === 'no_match') {
       await this.sendMessage(
@@ -3343,6 +3344,13 @@ export abstract class ChannelBase {
       }
       if (result.changed) {
         this.invalidateUnattendedMemory(envelope);
+      }
+      // When the save is a side-effect of a message that continues to the
+      // agent, skip the confirmation: the agent's reply is the single
+      // response, and a bot-injected "memory saved" message would read as a
+      // separate turn. Failures above still surface unconditionally.
+      if (options.suppressSaveConfirmation) {
+        return;
       }
       if (result.added.length > 0) {
         const ids = result.added.map((entry) => entry.id);
@@ -4256,6 +4264,7 @@ export abstract class ChannelBase {
 
     let memoryIntent: ResolvedChannelMemoryIntent | null =
       parseChannelMemoryIntent(envelope.text);
+    let memoryIntentFromClassifier = false;
     if (memoryIntent?.kind === 'update' || memoryIntent?.kind === 'remove') {
       this.deletePendingChannelMemoryMutation(envelope);
     }
@@ -4264,10 +4273,24 @@ export abstract class ChannelBase {
       this.shouldClassifyChannelMemoryIntent(envelope.text)
     ) {
       memoryIntent = await this.classifyChannelMemoryIntent(envelope);
+      memoryIntentFromClassifier = memoryIntent !== null;
     }
     if (memoryIntent) {
-      await this.handleChannelMemoryIntent(envelope, memoryIntent);
-      return;
+      // A classifier-detected `remember` rides inside a free-form message
+      // that may carry other tasks; the save is a side-effect, so the rest
+      // of the message must still reach the agent (with the confirmation
+      // suppressed — the agent's reply is the single response). Explicit
+      // memory phrases and every management intent (list/inspect/update/
+      // remove/clear and their confirmations) consume the whole message by
+      // design and keep the early return.
+      const memorySaveIsSideEffect =
+        memoryIntentFromClassifier && memoryIntent.kind === 'remember';
+      await this.handleChannelMemoryIntent(envelope, memoryIntent, {
+        suppressSaveConfirmation: memorySaveIsSideEffect,
+      });
+      if (!memorySaveIsSideEffect) {
+        return;
+      }
     }
 
     // 3. Slash command handling — before session/agent routing
