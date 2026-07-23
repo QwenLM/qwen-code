@@ -17,6 +17,7 @@ import {
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 
 // Mock cleanup module before importing anything else
 const { mockRunExitCleanup } = vi.hoisted(() => ({
@@ -824,6 +825,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import type {
+  Agent,
   LoadSessionResponse,
   McpServer,
   ResumeSessionResponse,
@@ -1570,6 +1572,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     initialize: (args: Record<string, unknown>) => Promise<unknown>;
     newSession: (args: Record<string, unknown>) => Promise<unknown>;
     prompt: (args: Record<string, unknown>) => Promise<unknown>;
+    cancel: (args: { sessionId: string }) => Promise<void>;
     extMethod: (
       method: string,
       args: Record<string, unknown>,
@@ -1587,6 +1590,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         clearTodoStopGuardTrust: ReturnType<typeof vi.fn>;
         releaseTodoStopGuardQueuedPromptWait: ReturnType<typeof vi.fn>;
         prompt: ReturnType<typeof vi.fn>;
+        cancelPendingPrompt: ReturnType<typeof vi.fn>;
       }
     | undefined;
   let processExitSpy: MockInstance<typeof process.exit>;
@@ -2772,6 +2776,93 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     }) as AgentLike;
     return { agent, agentPromise };
   }
+
+  it('treats an idle session cancellation as a no-op', async () => {
+    await setupSessionMocks('session-idle-cancel');
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.cancelPendingPrompt.mockRejectedValueOnce(
+      new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE),
+    );
+
+    await expect(
+      agent.cancel({ sessionId: 'session-idle-cancel' }),
+    ).resolves.toBeUndefined();
+
+    expect(lastSessionMock!.cancelPendingPrompt).toHaveBeenCalledOnce();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('does not log an idle cancellation through the real ACP notification path', async () => {
+    await setupSessionMocks('session-idle-cancel');
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.cancelPendingPrompt.mockRejectedValueOnce(
+      new Error(NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE),
+    );
+
+    const sdk = await vi.importActual<
+      typeof import('@agentclientprotocol/sdk')
+    >('@agentclientprotocol/sdk');
+    const clientToAgent = new TransformStream<Uint8Array, Uint8Array>();
+    const agentToClient = new TransformStream<Uint8Array, Uint8Array>();
+    const clientStream = sdk.ndJsonStream(
+      clientToAgent.writable,
+      agentToClient.readable,
+    );
+    const agentStream = sdk.ndJsonStream(
+      agentToClient.writable,
+      clientToAgent.readable,
+    );
+    new sdk.AgentSideConnection(() => agent as unknown as Agent, agentStream);
+    const client = new sdk.ClientSideConnection(
+      () => ({
+        sessionUpdate: async () => {},
+        requestPermission: async () => ({
+          outcome: { outcome: 'cancelled' as const },
+        }),
+      }),
+      clientStream,
+    );
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    try {
+      await expect(
+        client.cancel({ sessionId: 'session-idle-cancel' }),
+      ).resolves.toBeUndefined();
+      await vi.waitFor(() =>
+        expect(lastSessionMock!.cancelPendingPrompt).toHaveBeenCalledOnce(),
+      );
+      expect(consoleError).not.toHaveBeenCalled();
+    } finally {
+      await Promise.allSettled([
+        clientToAgent.writable.abort(),
+        agentToClient.writable.abort(),
+      ]);
+      mockConnectionState.resolve();
+      await agentPromise;
+      consoleError.mockRestore();
+    }
+  });
+
+  it('propagates a non-idle session cancellation error', async () => {
+    await setupSessionMocks('session-cancel-error');
+    const { agent, agentPromise } = await bootAcpAgent();
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    lastSessionMock!.cancelPendingPrompt.mockRejectedValueOnce(
+      new Error('Session cancellation failed'),
+    );
+
+    await expect(
+      agent.cancel({ sessionId: 'session-cancel-error' }),
+    ).rejects.toThrow('Session cancellation failed');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 
   it('applies MCP management changes to an already-running session', async () => {
     const server = {

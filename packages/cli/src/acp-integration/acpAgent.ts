@@ -120,6 +120,7 @@ import {
   RequestError,
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
+import { isNotCurrentlyGeneratingCancelError } from '@qwen-code/acp-bridge/bridgeErrors';
 import type { Content } from '@google/genai';
 import type {
   Agent,
@@ -4479,7 +4480,13 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${params.sessionId}`);
     }
-    await session.cancelPendingPrompt();
+    try {
+      await session.cancelPendingPrompt();
+    } catch (error) {
+      if (!isNotCurrentlyGeneratingCancelError(error)) {
+        throw error;
+      }
+    }
   }
 
   private loadPermissionSettings(cwd: string): LoadedSettings {
