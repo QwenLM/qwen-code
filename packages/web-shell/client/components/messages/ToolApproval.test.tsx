@@ -147,6 +147,29 @@ describe('ToolApproval accessibility', () => {
     expect(container!.textContent).toContain('Review the change');
   });
 
+  it('does not apply approval shortcuts to a focused workflow node', () => {
+    render(undefined, planRequest, [
+      { id: 'review', content: 'Review the change', status: 'pending' },
+    ]);
+    const node = container!.querySelector<HTMLButtonElement>(
+      '[data-plan-node-id="review"]',
+    )!;
+    node.focus();
+
+    pressKey(node, 'j');
+    expect(document.activeElement).toBe(node);
+    pressKey(node, '2');
+    expect(onConfirm).not.toHaveBeenCalled();
+
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => node.dispatchEvent(enter));
+    expect(enter.defaultPrevented).toBe(false);
+  });
+
   it('does not show a stale workflow for another switch-mode tool', () => {
     render(undefined, { ...planRequest, toolName: 'enter_plan_mode' }, [
       { id: 'old', content: 'Old plan', status: 'pending' },

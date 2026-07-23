@@ -13,6 +13,10 @@ panel so a user can review the dependency graph before execution starts.
    session panes.
 3. Preserve the ACP plan body as the text-only fallback when no Todo snapshot
    exists and leave non-Plan-Mode approvals unchanged.
+4. Make workflow nodes selectable and show the selected Todo's full content,
+   status, dependencies, and linked Agent executions below the graph.
+5. Reuse the existing subagent detail panel for live progress and final output;
+   do not add execution output to Todo snapshots or task polling.
 
 ## Verification
 
@@ -21,4 +25,6 @@ panel so a user can review the dependency graph before execution starts.
 - Adapter test: ACP exit-plan content reaches the approval request.
 - Wiring tests: main and split session approvals receive their own active Todo
   snapshot.
+- Workflow test: selecting a node exposes its details and linked subagent opens
+  the existing detail callback.
 - Run the focused Web Shell tests, typecheck, and build.

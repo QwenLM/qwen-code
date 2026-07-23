@@ -279,6 +279,13 @@ export function ToolApproval({
   // the focused option natively; digits confirm by position; Escape rejects.
   const handleKeyDown = useCallback(
     (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (
+        e.key !== 'Escape' &&
+        e.target instanceof Element &&
+        e.target.closest('[data-plan-interactive]')
+      ) {
+        return;
+      }
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();

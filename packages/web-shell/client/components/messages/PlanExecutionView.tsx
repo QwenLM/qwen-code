@@ -1,4 +1,4 @@
-import { useId, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import type { DaemonSessionTaskStatus } from '@qwen-code/sdk/daemon';
 import type { ACPToolCall, TodoItem } from '../../adapters/types';
 import { useI18n } from '../../i18n';
@@ -245,6 +245,13 @@ export function PlanExecutionView({
   layerByTodoRef.current = layerByTodo;
   const graphSignatureRef = useRef('');
   const [graph, setGraph] = useState(EMPTY_GRAPH_LAYOUT);
+  const [selectedTodoId, setSelectedTodoId] = useState<string>();
+
+  useEffect(() => {
+    if (selectedTodoId && !todos.some((todo) => todo.id === selectedTodoId)) {
+      setSelectedTodoId(undefined);
+    }
+  }, [selectedTodoId, todos]);
 
   useLayoutEffect(() => {
     if (!drawsDependencyEdges) return;
@@ -335,6 +342,15 @@ export function PlanExecutionView({
 
   if (todos.length === 0) return null;
 
+  const selectedTodo = todosById.get(selectedTodoId ?? '');
+  const selectedExecutions = selectedTodo
+    ? (toolsByTodo.get(selectedTodo.id) ?? [])
+    : [];
+  const selectedState = selectedTodo
+    ? getPlanNodeState(selectedTodo, todosById, selectedExecutions, tasks)
+    : undefined;
+  const detailsId = `plan-step-details-${graphId}`;
+
   const renderExecution = (tool: ACPToolCall) => {
     const status = executionStatus(tool, tasks);
     const label = tool.title || String(tool.args?.description ?? tool.toolName);
@@ -344,6 +360,7 @@ export function PlanExecutionView({
         <button
           type="button"
           className={styles.execution}
+          data-plan-interactive
           onClick={() => onOpenSubagent?.(tool)}
           disabled={!onOpenSubagent}
           title={t('planExecution.openDetails')}
@@ -433,32 +450,54 @@ export function PlanExecutionView({
                   <article
                     className={styles.node}
                     data-status={state.status}
+                    data-selected={selectedTodoId === todo.id || undefined}
                     key={todo.id}
                     ref={(node) => {
                       if (node) nodeRefs.current.set(todo.id, node);
                       else nodeRefs.current.delete(todo.id);
                     }}
                   >
-                    <div className={styles.nodeTop}>
-                      <span className={styles.nodeId}>{todo.id}</span>
-                      <span
-                        className={`${styles.nodeStatus} ${styles[state.status]}`}
-                      >
-                        {t(statusKey(state.status))}
-                      </span>
-                      {state.attention && (
-                        <span className={styles.attention}>
-                          {t('planExecution.attention')}
+                    <button
+                      type="button"
+                      className={styles.nodeSummary}
+                      data-plan-interactive
+                      data-plan-node-id={todo.id}
+                      aria-expanded={selectedTodoId === todo.id}
+                      aria-controls={
+                        selectedTodoId === todo.id ? detailsId : undefined
+                      }
+                      title={`${t(
+                        selectedTodoId === todo.id
+                          ? 'todo.detail.hide'
+                          : 'todo.detail.show',
+                      )}: ${todo.content}`}
+                      onClick={() =>
+                        setSelectedTodoId((current) =>
+                          current === todo.id ? undefined : todo.id,
+                        )
+                      }
+                    >
+                      <div className={styles.nodeTop}>
+                        <span className={styles.nodeId}>{todo.id}</span>
+                        <span
+                          className={`${styles.nodeStatus} ${styles[state.status]}`}
+                        >
+                          {t(statusKey(state.status))}
                         </span>
-                      )}
-                    </div>
-                    <div className={styles.nodeContent}>{todo.content}</div>
-                    {(todo.blockedBy?.length ?? 0) > 0 && (
-                      <div className={styles.dependencies}>
-                        {t('planExecution.dependsOn')}{' '}
-                        {todo.blockedBy!.join(', ')}
+                        {state.attention && (
+                          <span className={styles.attention}>
+                            {t('planExecution.attention')}
+                          </span>
+                        )}
                       </div>
-                    )}
+                      <div className={styles.nodeContent}>{todo.content}</div>
+                      {(todo.blockedBy?.length ?? 0) > 0 && (
+                        <div className={styles.dependencies}>
+                          {t('planExecution.dependsOn')}{' '}
+                          {todo.blockedBy!.join(', ')}
+                        </div>
+                      )}
+                    </button>
                     {executions.length > 0 && (
                       <div className={styles.executions}>
                         {executions.map(renderExecution)}
@@ -471,6 +510,46 @@ export function PlanExecutionView({
           ))}
         </div>
       </div>
+      {selectedTodo && selectedState && (
+        <section
+          className={styles.stepDetails}
+          data-plan-step-details
+          id={detailsId}
+          aria-label={`${t('planExecution.stepDetails')}: ${selectedTodo.id}`}
+        >
+          <div className={styles.stepDetailsHeading}>
+            <span>{t('planExecution.stepDetails')}</span>
+            <span className={styles.nodeId}>{selectedTodo.id}</span>
+            <span
+              className={`${styles.nodeStatus} ${styles[selectedState.status]}`}
+            >
+              {t(statusKey(selectedState.status))}
+            </span>
+            {selectedState.attention && (
+              <span className={styles.attention}>
+                {t('planExecution.attention')}
+              </span>
+            )}
+          </div>
+          <div className={styles.nodeContent}>{selectedTodo.content}</div>
+          {(selectedTodo.blockedBy?.length ?? 0) > 0 && (
+            <div className={styles.dependencies}>
+              {t('planExecution.dependsOn')}{' '}
+              {selectedTodo.blockedBy!.join(', ')}
+            </div>
+          )}
+          {selectedExecutions.length > 0 && (
+            <div className={styles.stepExecutions}>
+              <div className={styles.stepExecutionsTitle}>
+                {t('planExecution.subagents')}
+              </div>
+              <div className={styles.executions}>
+                {selectedExecutions.map(renderExecution)}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
       {unassigned.length > 0 && (
         <div className={styles.unassigned}>
           <div className={styles.unassignedTitle}>

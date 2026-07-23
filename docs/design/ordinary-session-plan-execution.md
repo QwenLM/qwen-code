@@ -44,8 +44,11 @@ adds a native CSS plan-execution section above the existing task tree:
 2. Group top-level Agent tool calls by `args.todo_id`.
 3. Join live task rows through `task.toolUseId === tool.callId`.
 4. Keep nested Agent rows under the root via `parentAgentId`.
-5. Open the existing subagent detail panel with the Agent tool call.
-6. Put missing or unknown `todo_id` bindings in an Unassigned group.
+5. Select a workflow node to inspect its full Todo content, status,
+   dependencies, and linked Agent executions below the graph.
+6. Open the existing live subagent detail panel from a linked Agent execution;
+   it remains the source for streamed progress, tool calls, and final output.
+7. Put missing or unknown `todo_id` bindings in an Unassigned group.
 
 No graph library is added. Plans without dependency metadata keep list-style
 presentation.
@@ -87,5 +90,7 @@ the Todo status.
 - Agent calls without `todo_id` remain valid.
 - Empty Todo snapshots must clear active state immediately.
 - Full subagent results stay out of the three-second task polling response.
+- Todo nodes do not invent step output; execution detail comes from linked
+  Agent tool calls and the existing subagent detail session.
 - Strict plan-first enforcement for every session remains out of scope because
   a session-level existence check could accept a stale plan.

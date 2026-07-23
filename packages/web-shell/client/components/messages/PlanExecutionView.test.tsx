@@ -202,7 +202,18 @@ describe('PlanExecutionView', () => {
     expect(container.textContent).toContain('Depends on: research');
     expect(container.textContent).toContain('Child agent');
     expect(container.textContent).toContain('Unassigned executions');
-    const button = Array.from(container.querySelectorAll('button')).find(
+    const step = container.querySelector<HTMLButtonElement>(
+      '[data-plan-node-id="build"]',
+    );
+    expect(step?.getAttribute('aria-expanded')).toBe('false');
+    act(() => step?.click());
+    expect(step?.getAttribute('aria-expanded')).toBe('true');
+    const details = container.querySelector('[data-plan-step-details]');
+    expect(details?.textContent).toContain('Step details');
+    expect(details?.textContent).toContain('Build');
+    expect(details?.textContent).toContain('Depends on: research');
+    expect(details?.textContent).toContain('Subagents');
+    const button = Array.from(details?.querySelectorAll('button') ?? []).find(
       (candidate) => candidate.textContent?.includes('Agent build'),
     );
     act(() => button?.click());
@@ -449,6 +460,38 @@ describe('PlanExecutionView', () => {
       );
     });
     expect(container.querySelector('[data-plan-workflow]')).not.toBeNull();
+
+    act(() => root.unmount());
+    container.remove();
+  });
+
+  it('clears the selected step when the active plan is cleared', () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderTodos = (nextTodos: readonly TodoItem[]) => {
+      act(() => {
+        root.render(
+          <I18nProvider language="en">
+            <PlanExecutionView todos={nextTodos} tools={[]} tasks={[]} />
+          </I18nProvider>,
+        );
+      });
+    };
+
+    renderTodos(todos);
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('[data-plan-node-id="build"]')
+        ?.click(),
+    );
+    expect(container.querySelector('[data-plan-step-details]')).not.toBeNull();
+
+    renderTodos([]);
+    renderTodos([
+      { id: 'build', content: 'Unrelated new plan', status: 'pending' },
+    ]);
+    expect(container.querySelector('[data-plan-step-details]')).toBeNull();
 
     act(() => root.unmount());
     container.remove();

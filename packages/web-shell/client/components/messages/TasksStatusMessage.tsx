@@ -407,6 +407,14 @@ export function TasksStatusMessage({
     (event: KeyboardEvent) => {
       if (!isOpen) return;
 
+      if (
+        event.key !== 'Escape' &&
+        event.target instanceof Element &&
+        event.target.closest('[data-plan-interactive]')
+      ) {
+        return;
+      }
+
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
