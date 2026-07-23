@@ -162,6 +162,10 @@ import {
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from '../agents/runtime/agent-context.js';
+import {
+  getInvocationContext,
+  runWithInvocationContext,
+} from '../utils/invocation-context.js';
 
 const debugLogger = createDebugLogger('TOOL_SCHEDULER');
 
@@ -3011,6 +3015,7 @@ export class CoreToolScheduler {
             }
 
             const originalOnConfirm = confirmationDetails.onConfirm;
+            const invocationContext = getInvocationContext();
             let planShellResponseClaimed = false;
             const wrappedConfirmationDetails: ToolCallConfirmationDetails = {
               ...confirmationDetails,
@@ -3023,45 +3028,46 @@ export class CoreToolScheduler {
               onConfirm: async (
                 outcome: ToolConfirmationOutcome,
                 payload?: ToolConfirmationPayload,
-              ) => {
-                if (planShellDecision.classification !== 'not-applicable') {
-                  if (planShellResponseClaimed) return;
-                  planShellResponseClaimed = true;
-                  const currentCall = this.toolCalls.find(
-                    (call) =>
-                      call.request.callId === reqInfo.callId &&
-                      call.status === 'awaiting_approval',
-                  ) as WaitingToolCall | undefined;
-                  if (!currentCall) return;
-                  const approval = await validatePlanModeShellApproval({
-                    config: this.config,
-                    decision: planShellDecision,
-                    requestArgs: currentCall.request.args,
-                    invocationParams: currentCall.invocation.params as Record<
-                      string,
-                      unknown
-                    >,
-                    signal,
-                    outcome,
-                    payload,
-                  });
+              ) =>
+                runWithInvocationContext(invocationContext, async () => {
+                  if (planShellDecision.classification !== 'not-applicable') {
+                    if (planShellResponseClaimed) return;
+                    planShellResponseClaimed = true;
+                    const currentCall = this.toolCalls.find(
+                      (call) =>
+                        call.request.callId === reqInfo.callId &&
+                        call.status === 'awaiting_approval',
+                    ) as WaitingToolCall | undefined;
+                    if (!currentCall) return;
+                    const approval = await validatePlanModeShellApproval({
+                      config: this.config,
+                      decision: planShellDecision,
+                      requestArgs: currentCall.request.args,
+                      invocationParams: currentCall.invocation.params as Record<
+                        string,
+                        unknown
+                      >,
+                      signal,
+                      outcome,
+                      payload,
+                    });
+                    await this.handleConfirmationResponse(
+                      reqInfo.callId,
+                      originalOnConfirm,
+                      approval.outcome,
+                      signal,
+                      approval.payload,
+                    );
+                    return;
+                  }
                   await this.handleConfirmationResponse(
                     reqInfo.callId,
                     originalOnConfirm,
-                    approval.outcome,
+                    outcome,
                     signal,
-                    approval.payload,
+                    payload,
                   );
-                  return;
-                }
-                await this.handleConfirmationResponse(
-                  reqInfo.callId,
-                  originalOnConfirm,
-                  outcome,
-                  signal,
-                  payload,
-                );
-              },
+                }),
             };
             this.setStatusInternal(
               reqInfo.callId,

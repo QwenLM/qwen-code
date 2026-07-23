@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import * as path from 'node:path';
 import {
   ClientSideConnection,
@@ -25,10 +25,14 @@ import type {
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
+  INVOCATION_CONTEXT_META_KEY,
+  PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_PARENT_CAPABILITY_META_KEY,
   SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TrustGateError,
   normalizeSnapshotPayload,
   ShellExecutionService,
+  type InvocationContextV1,
   type ShellOutputEvent,
 } from '@qwen-code/qwen-code-core';
 import type { ShellCommandResult } from './bridgeTypes.js';
@@ -126,6 +130,7 @@ import type {
   BridgeSessionTranscriptPage,
   BridgeSessionTranscriptPageRequest,
   BridgeGenerationStreamEvent,
+  BridgeWorkspaceGenerationStreamEvent,
 } from './bridgeTypes.js';
 import type {
   BridgeFreshSessionAdmissionContext,
@@ -1804,6 +1809,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       settled: boolean;
     }
   >();
+  const workspaceGenerationRequests = new Map<
+    string,
+    {
+      connection?: ClientSideConnection;
+      queue: GenerationStreamQueue<BridgeWorkspaceGenerationStreamEvent>;
+      settled: boolean;
+    }
+  >();
   const inFlightExtensionRefreshes = new Map<
     string,
     { connection: ClientSideConnection; promise: Promise<void> }
@@ -2074,6 +2087,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     if (inFlightChannelSpawn) return await inFlightChannelSpawn;
 
     const promise = (async () => {
+      const privateParentCapability = randomBytes(32).toString('base64url');
       const acpChannelId = randomUUID();
       const channel = await telemetry.withSpan(
         'channel.spawn',
@@ -2082,7 +2096,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           'qwen-code.daemon.channel.reused': false,
           'qwen-code.daemon.acp_channel.id': acpChannelId,
         },
-        async () => await channelFactory(boundWorkspace, childEnvOverrides),
+        async () =>
+          await channelFactory(boundWorkspace, {
+            ...childEnvOverrides,
+            [PRIVATE_ACP_CAPABILITY_ENV]: privateParentCapability,
+          }),
       );
       const sessionIds = new Set<string>();
       const client = new BridgeClient(
@@ -2166,6 +2184,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           void request.connection
             .extMethod(SERVE_CONTROL_EXT_METHODS.sessionGenerationCancel, {
               sessionId,
+              requestId: event.requestId,
+            })
+            .catch(() => undefined);
+        },
+        (event) => {
+          const request = workspaceGenerationRequests.get(event.requestId);
+          if (!request) return;
+          if (request.queue.push(event)) return;
+          request.settled = true;
+          workspaceGenerationRequests.delete(event.requestId);
+          request.queue.fail(new Error('Generation stream consumer too slow'));
+          void request.connection
+            ?.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationCancel, {
               requestId: event.requestId,
             })
             .catch(() => undefined);
@@ -2352,6 +2383,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   [CHANNEL_STARTUP_PROFILE_META_KEY]: {
                     v: CHANNEL_STARTUP_PROFILE_VERSION,
                   },
+                  [PRIVATE_PARENT_CAPABILITY_META_KEY]: privateParentCapability,
                 },
                 clientCapabilities: {
                   fs: { readTextFile: true, writeTextFile: true },
@@ -5090,6 +5122,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // the first prompt on an idle session starts immediately and
       // doesn't need a queue event.
       const promptId = context?.promptId ?? randomUUID();
+      const invocationContext: InvocationContextV1 = Object.freeze({
+        version: 1,
+        sessionId,
+        promptId,
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
       const isQueued = entry.pendingPromptCount > 1;
       const pendingAbort = new AbortController();
       if (signal) {
@@ -5282,6 +5320,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                       ? { ...copy._meta }
                       : {};
                   delete meta[DAEMON_RETRY_META_KEY];
+                  delete meta[INVOCATION_CONTEXT_META_KEY];
+                  delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
                   // External prompt callers cannot self-trigger a continuation;
                   // only `continueSession` (via the trusted `isContinue` flag
                   // below) re-arms it after this strip.
@@ -5292,6 +5332,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                   if (isContinue) {
                     meta[DAEMON_CONTINUE_META_KEY] = true;
                   }
+                  meta[INVOCATION_CONTEXT_META_KEY] = invocationContext;
                   if (Object.keys(meta).length > 0) {
                     copy._meta = meta;
                   } else {
@@ -7796,6 +7837,100 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         description: string;
         systemPrompt: string;
       };
+    },
+
+    generateWorkspaceContent(prompt, signal, _originatorClientId) {
+      const requestId = randomUUID();
+      const queue =
+        new GenerationStreamQueue<BridgeWorkspaceGenerationStreamEvent>(
+          GENERATION_STREAM_QUEUE_CAPACITY,
+        );
+      const request = {
+        connection: undefined as ClientSideConnection | undefined,
+        queue,
+        settled: false,
+      };
+
+      const cancel = () => {
+        if (request.settled) return;
+        request.settled = true;
+        workspaceGenerationRequests.delete(requestId);
+        queue.close();
+        void request.connection
+          ?.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceGenerationCancel, {
+            requestId,
+          })
+          .catch(() => undefined);
+      };
+      signal.addEventListener('abort', cancel, { once: true });
+
+      if (signal.aborted) {
+        cancel();
+        return queue;
+      }
+
+      void (async () => {
+        let info: ChannelInfo | undefined;
+        try {
+          const channelInfo = await ensureChannel();
+          info = channelInfo;
+          request.connection = channelInfo.connection;
+          await withWorkspaceControl(channelInfo, async () => {
+            if (request.settled) return;
+            workspaceGenerationRequests.set(requestId, request);
+            const raw = await Promise.race([
+              withTimeout(
+                channelInfo.connection.extMethod(
+                  SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart,
+                  {
+                    requestId,
+                    prompt,
+                    purpose: 'text',
+                  },
+                ),
+                SESSION_GENERATION_TIMEOUT_MS,
+                SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart,
+              ),
+              getChannelClosedReject(channelInfo),
+            ]);
+            if (request.settled) return;
+            const response = raw as Record<string, unknown>;
+            const model = response['model'];
+            const modelSource = response['modelSource'];
+            if (
+              typeof model !== 'string' ||
+              (modelSource !== 'fast' && modelSource !== 'main')
+            ) {
+              throw new Error('Malformed workspace generation completion');
+            }
+            const accepted = queue.push({
+              type: 'done',
+              requestId,
+              model,
+              modelSource,
+              ...(typeof response['inputTokens'] === 'number'
+                ? { inputTokens: response['inputTokens'] }
+                : {}),
+              ...(typeof response['outputTokens'] === 'number'
+                ? { outputTokens: response['outputTokens'] }
+                : {}),
+            });
+            if (accepted) queue.close();
+            else queue.fail(new Error('Generation stream consumer too slow'));
+          });
+        } catch (error: unknown) {
+          if (!request.settled) queue.fail(error);
+        } finally {
+          request.settled = true;
+          signal.removeEventListener('abort', cancel);
+          workspaceGenerationRequests.delete(requestId);
+          if (info && hasNoChannelWork(info) && !info.isDying) {
+            await startIdleTimer(info, 'workspace generation');
+          }
+        }
+      })().catch(() => undefined);
+
+      return queue;
     },
 
     async addRuntimeMcpServer(name, config, originatorClientId) {
