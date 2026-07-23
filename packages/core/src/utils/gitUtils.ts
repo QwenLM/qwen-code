@@ -164,12 +164,9 @@ function formatGitPromptValue(value: string): string {
  * Gets the recent git status including the last 5 commits.
  * Mirrors claude-code's getGitStatus() in context.ts.
  *
- * Injected as context at conversation start so the main agent can reason about
- * version history (e.g. "regressed in 2.1" + "Recent commits: 2.1.8" triggers
- * Explore with git log). Critical for SWE-bench regression tasks.
- *
- * NOTE: Do NOT pass this to Explore/read-only subagents - they run their own
- * git log. The snapshot here is dead weight (and potentially stale) for them.
+ * Injected in the volatile system-prompt tier so each main or non-fork agent
+ * can reason about version history from its own working directory. Forks
+ * inherit the parent's rendered prompt verbatim.
  */
 export function getRecentGitStatus(cwd: string): string | null {
   if (!isGitRepository(cwd)) return null;

@@ -124,7 +124,7 @@ describe('session-start-profiler', () => {
     });
 
     await expect(
-      profiler.time('initial_chat_history', async () => 'history'),
+      profiler.time('system_prompt_parts', async () => 'history'),
     ).resolves.toBe('history');
     expect(profiler.timeSync('system_instruction', () => 'system')).toBe(
       'system',
@@ -145,7 +145,7 @@ describe('session-start-profiler', () => {
         sessionId: 'session-123',
         totalMs: 20,
         stages: {
-          initial_chat_history: 3,
+          system_prompt_parts: 3,
           system_instruction: 5,
         },
         extraHistoryLength: 3,
@@ -169,7 +169,7 @@ describe('session-start-profiler', () => {
       getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
     });
 
-    await profiler.time('initial_chat_history', async () => undefined);
+    await profiler.time('system_prompt_parts', async () => undefined);
     profiler.timeSync('system_instruction', () => undefined);
     profiler.finish({ ok: true });
 
@@ -177,7 +177,7 @@ describe('session-start-profiler', () => {
       ok: true,
       totalMs: 2.68,
       stages: {
-        initial_chat_history: 0.46,
+        system_prompt_parts: 0.46,
         system_instruction: 1.23,
       },
     });

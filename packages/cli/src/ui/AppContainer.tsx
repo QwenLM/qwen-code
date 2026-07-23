@@ -47,7 +47,6 @@ import {
   getAllGeminiMdFilenames,
   ShellExecutionService,
   Storage,
-  createInstructionsLoadedCallback,
   SessionEndReason,
   generatePromptSuggestion,
   logPromptSuggestion,
@@ -62,7 +61,6 @@ import {
   type SpeculationState,
   IDLE_SPECULATION,
   ApprovalMode,
-  ConditionalRulesRegistry,
   MCPDiscoveryState,
   ToolConfirmationOutcome,
   type WaitingToolCall,
@@ -86,7 +84,6 @@ import {
   getStickyTodosRenderKey,
 } from './utils/todoSnapshot.js';
 import type { TodoItem } from './components/TodoDisplay.js';
-import { loadHierarchicalGeminiMemory } from '../config/config.js';
 import {
   profileCheckpoint,
   finalizeStartupProfile,
@@ -1787,11 +1784,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const performMemoryRefresh = useCallback(async () => {
     // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
     if (config.isSafeMode()) {
-      config.setUserMemory('');
-      config.setGeminiMdFileCount(0);
-      config.setConditionalRulesRegistry(
-        new ConditionalRulesRegistry([], config.getWorkingDir()),
-      );
+      await config.refreshHierarchicalMemory();
       setGeminiMdFileCount(0);
       historyManager.addItem(
         {
@@ -1811,30 +1804,9 @@ export const AppContainer = (props: AppContainerProps) => {
       Date.now(),
     );
     try {
-      const { memoryContent, fileCount, conditionalRules, projectRoot } =
-        await loadHierarchicalGeminiMemory(
-          process.cwd(),
-          settings.merged.context?.loadFromIncludeDirectories
-            ? config.getWorkspaceContext().getDirectories()
-            : [],
-          config.getFileService(),
-          config.getExtensionContextFilePaths(),
-          config.isTrustedFolder(),
-          settings.merged.context?.importFormat || 'tree', // Use setting or default to 'tree'
-          config.getContextRuleExcludes(),
-          {
-            loadReason: 'refresh',
-            onInstructionsLoaded: createInstructionsLoadedCallback(() =>
-              config.getHookSystem(),
-            ),
-          },
-        );
-
-      config.setUserMemory(memoryContent);
-      config.setGeminiMdFileCount(fileCount);
-      config.setConditionalRulesRegistry(
-        new ConditionalRulesRegistry(conditionalRules, projectRoot),
-      );
+      await config.refreshHierarchicalMemory();
+      const memoryContent = config.getUserMemory();
+      const fileCount = config.getGeminiMdFileCount();
       setGeminiMdFileCount(fileCount);
 
       historyManager.addItem(
@@ -1865,7 +1837,7 @@ export const AppContainer = (props: AppContainerProps) => {
       );
       debugLogger.error('Error refreshing memory:', error);
     }
-  }, [config, historyManager, settings.merged]);
+  }, [config, historyManager]);
 
   const cancelHandlerRef = useRef<(info?: CancelSubmitInfo) => void>(() => {});
   const midTurnDrainRef = useRef<(() => string[]) | null>(null);

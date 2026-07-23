@@ -9,11 +9,18 @@ import fs from 'node:fs';
 import os from 'node:os';
 import { ToolNames } from '../tools/tool-names.js';
 import process from 'node:process';
-import { isGitRepository } from '../utils/gitUtils.js';
+import { getRecentGitStatus, isGitRepository } from '../utils/gitUtils.js';
 import { QWEN_DIR } from '../config/storage.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { InputFormat } from '../output/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import type { Config } from '../config/config.js';
+import {
+  buildAvailableSkillsPrompt,
+  buildDeferredToolsPrompt,
+  buildMcpServerInstructionsPrompt,
+  getEnvironmentContext,
+} from '../utils/environmentContext.js';
 
 const debugLogger = createDebugLogger('PROMPTS');
 
@@ -27,14 +34,13 @@ export interface SystemPromptTiers {
 
 function joinSystemPromptTier(parts: readonly SystemPromptText[]): string {
   return parts
-    .filter((part): part is string => Boolean(part?.trim()))
+    .map((part) => part?.trim())
+    .filter((part): part is string => Boolean(part))
     .join('\n\n');
 }
 
 export function joinSystemPrompt(tiers: SystemPromptTiers): string {
-  return [tiers.stable, tiers.context, tiers.volatile]
-    .filter((tier): tier is string => Boolean(tier?.trim()))
-    .join('\n\n---\n\n');
+  return joinSystemPromptTier([tiers.stable, tiers.context, tiers.volatile]);
 }
 
 export type SystemPromptInteractionMode = 'interactive' | 'headless' | 'acp';
@@ -221,7 +227,6 @@ export function getCustomSystemPrompt(
   customInstruction: GenerateContentConfig['systemInstruction'],
   volatileMemory?: string,
   appendInstruction?: string,
-  additionalTiers: Partial<Omit<SystemPromptTiers, 'stable'>> = {},
 ): string {
   // Extract text from custom instruction
   let instructionText = '';
@@ -246,14 +251,8 @@ export function getCustomSystemPrompt(
 
   return joinSystemPrompt({
     stable: instructionText,
-    context: joinSystemPromptTier([
-      additionalTiers.context,
-      appendInstruction?.trim(),
-    ]),
-    volatile: joinSystemPromptTier([
-      volatileMemory?.trim(),
-      additionalTiers.volatile,
-    ]),
+    context: joinSystemPromptTier([appendInstruction?.trim()]),
+    volatile: joinSystemPromptTier([volatileMemory?.trim()]),
   });
 }
 
@@ -262,7 +261,6 @@ export function getCoreSystemPrompt(
   model?: string,
   appendInstruction?: string,
   interactionMode: SystemPromptInteractionMode = 'interactive',
-  additionalTiers: Partial<Omit<SystemPromptTiers, 'stable'>> = {},
 ): string {
   // if QWEN_SYSTEM_MD is set (and not 0|false), override system prompt from file
   // default path is .qwen/system.md (project-level), can be overridden via QWEN_SYSTEM_MD
@@ -473,15 +471,68 @@ Interaction mode reminder: ${interaction.questions}
 
   return joinSystemPrompt({
     stable: basePrompt,
+    context: joinSystemPromptTier([appendInstruction?.trim()]),
+    volatile: joinSystemPromptTier([volatileMemory?.trim()]),
+  });
+}
+
+export interface BuildSystemPromptPartsOptions {
+  stablePrompt?: GenerateContentConfig['systemInstruction'];
+  includeDeferredTools?: boolean;
+  includeAvailableSkills?: boolean;
+}
+
+/**
+ * Assemble the complete system prompt as three ordered strings.
+ *
+ * The caller joins and caches the result once for the session. It must not
+ * rebuild individual tiers during normal turns; context compression starts a
+ * new prompt build.
+ */
+export async function buildSystemPromptParts(
+  config: Config,
+  systemMessage?: string,
+  options: BuildSystemPromptPartsOptions = {},
+): Promise<SystemPromptTiers> {
+  const toolRegistry = config.getToolRegistry();
+
+  const configuredPrompt = config.getSystemPrompt();
+  const basePrompt =
+    options.stablePrompt !== undefined
+      ? getCustomSystemPrompt(options.stablePrompt)
+      : configuredPrompt
+        ? getCustomSystemPrompt(configuredPrompt)
+        : getCoreSystemPrompt(
+            undefined,
+            config.getModel(),
+            undefined,
+            resolveInteractionMode(config),
+          );
+  const skills = options.includeAvailableSkills ?? true;
+  const environmentParts = config.getSkipStartupContext()
+    ? []
+    : await getEnvironmentContext(config);
+
+  return {
+    stable: joinSystemPromptTier([
+      basePrompt,
+      buildMcpServerInstructionsPrompt(toolRegistry),
+      (options.includeDeferredTools ?? true)
+        ? buildDeferredToolsPrompt(toolRegistry)
+        : null,
+      skills ? await buildAvailableSkillsPrompt(config) : null,
+      environmentParts[0]?.text,
+    ]),
     context: joinSystemPromptTier([
-      additionalTiers.context,
-      appendInstruction?.trim(),
+      systemMessage,
+      config.getSystemPromptContext(),
     ]),
     volatile: joinSystemPromptTier([
-      volatileMemory?.trim(),
-      additionalTiers.volatile,
+      config.getSystemPromptVolatileMemory(),
+      getRecentGitStatus(config.getWorkingDir()),
+      environmentParts[1]?.text,
     ]),
-  });
+  };
 }
 
 /**

@@ -92,12 +92,12 @@ export function clearCollectedSkillEntriesCache(
  * commands — applying the same filtering/dedup rules `SkillTool.refreshSkills`
  * used to apply inline. Stateful/async (reads `SkillManager` + `Config`). The
  * returned validation fields and the `entries` list are always consistent, so
- * the Skill tool, the startup snapshot, and activation reminders share identical
- * bytes from one source.
+ * the Skill tool, the stable prompt snapshot, and activation reminders share
+ * identical bytes from one source.
  *
  * Results are memoized for up to 2 s per `SkillManager` instance so that
  * near-simultaneous startup callers (SkillTool, drainSkillAndCommandReminders,
- * buildAvailableSkillsReminder, coreToolScheduler) share a single scan.
+ * buildAvailableSkillsPrompt, coreToolScheduler) share a single scan.
  */
 export async function collectAvailableSkillEntries(
   skillManager: SkillManager,

@@ -3902,6 +3902,25 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  it('marks the output-language file as user profile context', async () => {
+    const outputLanguageFilePath = '/tmp/.qwen/output-language.md';
+    const config = new Config({
+      ...baseParams,
+      enableManagedAutoMemory: false,
+      outputLanguageFilePath,
+    });
+
+    await config.refreshHierarchicalMemory();
+
+    expect(
+      vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1)?.[7],
+    ).toEqual(
+      expect.objectContaining({
+        userProfileContextFilePaths: [outputLanguageFilePath],
+      }),
+    );
+  });
+
   it('Config constructor should enable runtime sleep prevention by default', () => {
     const config = new Config(baseParams);
 
@@ -3921,8 +3940,9 @@ describe('Server Config (config.ts)', () => {
     const config = new Config(baseParams);
 
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValue({
-      memoryContent: '--- Context from: QWEN.md ---\nProject rules',
-      userInstructions: '',
+      memoryContent:
+        'Global rules\n\n--- Context from: QWEN.md ---\nProject rules',
+      userInstructions: 'Global rules',
       workspaceInstructions: '--- Context from: QWEN.md ---\nProject rules',
       fileCount: 1,
       ruleCount: 0,
@@ -3943,6 +3963,11 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPromptVolatileMemory()).toContain('# auto memory');
     expect(config.getSystemPromptVolatileMemory()).toContain(
       '[Project Memory](project.md)',
+    );
+    expect(
+      config.getSystemPromptVolatileMemory().indexOf('# auto memory'),
+    ).toBeLessThan(
+      config.getSystemPromptVolatileMemory().indexOf('Global rules'),
     );
   });
 

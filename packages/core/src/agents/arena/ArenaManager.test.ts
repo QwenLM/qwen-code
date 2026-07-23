@@ -430,6 +430,27 @@ describe('ArenaManager', () => {
         );
       }
     });
+
+    it('leaves memory for the worker volatile tier instead of its stable base', async () => {
+      mockBackend.type = 'in-process';
+      const manager = new ArenaManager({
+        ...mockConfig,
+        getUserMemory: () => 'volatile memory marker',
+      } as never);
+
+      await manager.start(createValidStartOptions());
+
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: {
+            runtimeConfig?: { promptConfig?: { systemPrompt?: string } };
+          };
+        };
+        expect(
+          spawnConfig.inProcess?.runtimeConfig?.promptConfig?.systemPrompt,
+        ).not.toContain('volatile memory marker');
+      }
+    });
   });
 
   describe('active session lifecycle', () => {

@@ -498,6 +498,27 @@ describe('loadServerHierarchicalMemory', () => {
     });
   });
 
+  it('classifies an explicit user profile path as user instructions', async () => {
+    const userProfilePath = await createTestFile(
+      path.join(projectRoot, '.qwen/output-language.md'),
+      'Respond in Chinese.',
+    );
+
+    const result = await loadServerHierarchicalMemory(
+      cwd,
+      [],
+      new FileDiscoveryService(projectRoot),
+      [userProfilePath],
+      DEFAULT_FOLDER_TRUST,
+      'tree',
+      [],
+      { userProfileContextFilePaths: [userProfilePath] },
+    );
+
+    expect(result.userInstructions).toContain('Respond in Chinese.');
+    expect(result.workspaceInstructions).not.toContain('Respond in Chinese.');
+  });
+
   it('notifies when startup instruction files are loaded', async () => {
     const globalFile = await createTestFile(
       path.join(homedir, QWEN_DIR, DEFAULT_CONTEXT_FILENAME),

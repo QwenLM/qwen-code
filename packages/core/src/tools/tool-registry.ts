@@ -789,7 +789,7 @@ export class ToolRegistry {
   /**
    * Returns a lightweight summary of tools that are
    * deferred from the initial function-declaration list. Used to describe the
-   * set of on-demand tools in the startup reminder so the model knows what is
+   * set of on-demand tools in the system prompt so the model knows what is
    * reachable via ToolSearch. `alwaysLoad` tools and tools listed in
    * {@link Config.getVisibleTools} are excluded.
    */
@@ -810,7 +810,7 @@ export class ToolRegistry {
         });
       }
     });
-    // Stable order so the startup reminder text is deterministic across runs.
+    // Stable order so the system-prompt text is deterministic across runs.
     summary.sort((a, b) => a.name.localeCompare(b.name));
     return summary;
   }

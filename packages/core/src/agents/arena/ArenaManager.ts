@@ -1076,7 +1076,7 @@ export class ArenaManager {
         runtimeConfig: {
           promptConfig: {
             systemPrompt: getCoreSystemPrompt(
-              this.config.getUserMemory(),
+              undefined,
               model.modelId,
               undefined,
               'headless',

@@ -568,16 +568,12 @@ describe('languageCommand', () => {
       });
     });
 
-    it('should apply the new output language to the running session without requiring a restart', async () => {
+    it('stages the new output language for the next prompt rebuild', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
       }
 
       const refreshHierarchicalMemory = vi.fn().mockResolvedValue(undefined);
-      const refreshSystemInstruction = vi.fn().mockResolvedValue(undefined);
-      const getGeminiClient = vi
-        .fn()
-        .mockReturnValue({ refreshSystemInstruction });
       (
         mockContext.services as unknown as {
           config: Record<string, unknown>;
@@ -587,7 +583,6 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        getGeminiClient,
       };
 
       const result = await languageCommand.action(
@@ -596,16 +591,6 @@ describe('languageCommand', () => {
       );
 
       expect(refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
-      expect(getGeminiClient).toHaveBeenCalledTimes(1);
-      expect(refreshSystemInstruction).toHaveBeenCalledTimes(1);
-      // Memory MUST be refreshed before the system instruction is rebuilt;
-      // otherwise the new instruction would be built from stale userMemory
-      // and the language switch would silently fail to take effect.
-      const memoryOrder = refreshHierarchicalMemory.mock.invocationCallOrder[0];
-      const instructionOrder =
-        refreshSystemInstruction.mock.invocationCallOrder[0];
-      expect(memoryOrder).toBeLessThan(instructionOrder);
-      // The success message no longer asks the user to restart.
       expect(result).toEqual({
         type: 'message',
         messageType: 'info',
@@ -613,7 +598,7 @@ describe('languageCommand', () => {
       });
     });
 
-    it('should still report success when applying to the running session fails', async () => {
+    it('should still report success when refreshing the profile fails', async () => {
       if (!languageCommand.action) {
         throw new Error('The language command must have an action.');
       }
@@ -630,13 +615,12 @@ describe('languageCommand', () => {
         getOutputLanguageFilePath: vi.fn().mockReturnValue(undefined),
         setOutputLanguageFilePath: vi.fn(),
         refreshHierarchicalMemory,
-        // No getGeminiClient — refreshSystemInstruction must not be reached.
       };
 
       const result = await languageCommand.action(mockContext, 'output Korean');
 
       // The setting was still persisted; the user-facing message reports
-      // success and does not surface the in-session refresh failure.
+      // success and does not surface the profile refresh failure.
       expect(mockContext.services.settings?.setValue).toHaveBeenCalledWith(
         expect.anything(),
         'general.outputLanguage',

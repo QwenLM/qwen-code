@@ -29,7 +29,7 @@ import {
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
-import { getInitialChatHistory } from '../utils/environmentContext.js';
+import { stripStartupContext } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
@@ -55,8 +55,6 @@ import {
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
-import { EXCLUDED_TOOLS_FOR_SUBAGENTS } from './runtime/agent-core.js';
-import { ToolNames } from '../tools/tool-names.js';
 import type {
   AgentExternalInput,
   PromptConfig,
@@ -90,21 +88,6 @@ const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
   'Background task isolation metadata is incompatible.';
 
 type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
-
-/**
- * Returns true when the subagent's effective tool surface will include the
- * Skill tool. Mirrors `AgentCore.willHaveSkillTool()` for the resume path
- * where no AgentCore instance exists yet.
- */
-function subagentWillHaveSkillTool(
-  subagentConfig: SubagentConfig | undefined,
-): boolean {
-  const tools = subagentConfig?.tools;
-  if (!tools || tools.length === 0 || tools.includes('*')) {
-    return !EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.SKILL);
-  }
-  return tools.includes(ToolNames.SKILL);
-}
 
 interface TranscriptRecovery {
   history: Content[];
@@ -911,17 +894,7 @@ export class BackgroundAgentResumeService {
             },
             ...(recovery.forkBootstrap?.runtimeHistory ?? []),
           ]
-        : [
-            ...(
-              await getInitialChatHistory(bgConfig as Config, undefined, {
-                includeDeferredToolsReminder: false,
-                includeAvailableSkillsReminder: subagentWillHaveSkillTool(
-                  target.subagentConfig,
-                ),
-              })
-            )[0],
-            ...recovery.history,
-          ];
+        : stripStartupContext(recovery.history);
       const promptMessages = [...operation.continuationMessages];
       const continuationPrompt =
         promptMessages.join('\n\n').trim() ||

@@ -646,7 +646,7 @@
           "default": 100
         },
         "skipStartupContext": {
-          "description": "Avoid sending the workspace startup context at the beginning of each session.",
+          "description": "Omit OS, working-directory, directory-tree, and startup-date context from the session system prompt.",
           "type": "boolean",
           "default": false
         },

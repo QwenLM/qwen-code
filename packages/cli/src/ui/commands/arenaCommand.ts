@@ -189,9 +189,8 @@ function executeArenaCommand(
   input: ArenaExecutionInput,
 ): void {
   // Capture the main session's chat history so arena agents start with
-  // conversational context. Strip the leading startup context (env info
-  // user message + model ack) because each agent generates its own for
-  // its worktree directory — keeping the parent's would duplicate it.
+  // conversational context. Strip saved legacy startup context because each
+  // agent builds current environment context for its worktree.
   let chatHistory;
   try {
     const fullHistory = config.getGeminiClient().getChat().getHistoryShallow();

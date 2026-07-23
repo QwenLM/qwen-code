@@ -22,7 +22,8 @@ export interface PromptConfig {
   /**
    * A single system prompt string that defines the agent's persona and instructions.
    * Templated via ${var} substitution, optionally suffixed with non-interactive
-   * rules and user memory. Mutually exclusive with `renderedSystemPrompt`.
+   * rules, then used as the stable base of the three-tier system prompt.
+   * Mutually exclusive with `renderedSystemPrompt`.
    */
   systemPrompt?: string;
 
@@ -35,9 +36,8 @@ export interface PromptConfig {
   renderedSystemPrompt?: string | Content;
 
   /**
-   * Seed chat history. When set, fully replaces the default env bootstrap
-   * (the caller owns the full prior context, e.g. fork inheriting parent
-   * history). Can coexist with `systemPrompt` / `renderedSystemPrompt`.
+   * Seed chat history, such as the parent history inherited by a fork.
+   * Can coexist with `systemPrompt` / `renderedSystemPrompt`.
    */
   initialMessages?: Content[];
 }

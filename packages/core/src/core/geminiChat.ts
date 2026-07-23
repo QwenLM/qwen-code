@@ -1858,7 +1858,8 @@ export class GeminiChat {
       baseInstruction = getCustomSystemPrompt(current);
       baseInstruction = stripTrailingSessionStartContextBlock(baseInstruction);
     }
-    this.generationConfig.systemInstruction = `${baseInstruction}${buildSessionStartContextBlock(trimmed)}`;
+    const contextBlock = buildSessionStartContextBlock(trimmed);
+    this.generationConfig.systemInstruction = `${baseInstruction}${contextBlock}`;
   }
 
   applySessionStartContext(
@@ -3598,7 +3599,7 @@ export class GeminiChat {
       this.history[this.history.length - 1]!.role === 'user'
     ) {
       // Never pop a *pure* system-reminder user entry. These are structural,
-      // not orphaned turns: the startup-context prelude (history[0]) and
+      // not orphaned turns: a saved legacy startup-context prelude and
       // mid-history MCP added-tool reminders injected by
       // drainPendingAddedMcpToolsReminder. Popping the latter would lose the
       // announcement permanently — pendingAddedMcpTools is already cleared and

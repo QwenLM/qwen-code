@@ -11,15 +11,18 @@ import {
   getPlanModeSystemReminder,
   resolvePathFromEnv,
   getCompressionPrompt,
+  buildSystemPromptParts,
   joinSystemPrompt,
   resolveInteractionMode,
 } from './prompts.js';
 import { InputFormat } from '../output/types.js';
-import { isGitRepository } from '../utils/gitUtils.js';
+import { getRecentGitStatus, isGitRepository } from '../utils/gitUtils.js';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { QWEN_DIR } from '../config/storage.js';
+import type { Config } from '../config/config.js';
+import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 
 // Mock tool names if they are dynamically generated or complex
 vi.mock('../tools/ls', () => ({ LSTool: { Name: 'list_directory' } }));
@@ -38,7 +41,19 @@ vi.mock('../tools/write-file', () => ({
 }));
 vi.mock('../utils/gitUtils', () => ({
   isGitRepository: vi.fn(),
+  getRecentGitStatus: vi.fn().mockReturnValue(null),
 }));
+vi.mock('../utils/getFolderStructure.js', () => ({
+  getFolderStructure: vi.fn().mockResolvedValue('src/\n  index.ts'),
+}));
+vi.mock('../tools/skill-utils.js', async (importOriginal) => {
+  const actual =
+    await importOriginal<typeof import('../tools/skill-utils.js')>();
+  return {
+    ...actual,
+    collectAvailableSkillEntries: vi.fn(),
+  };
+});
 vi.mock('node:fs');
 
 describe('Core System Prompt (prompts.ts)', () => {
@@ -206,10 +221,10 @@ describe('Core System Prompt (prompts.ts)', () => {
     expect(prompt).toMatchSnapshot();
   });
 
-  it('should append userMemory with separator when provided', () => {
+  it('should append userMemory when provided', () => {
     vi.stubEnv('SANDBOX', undefined);
     const memory = 'This is custom user memory.\nBe extra polite.';
-    const expectedSuffix = `\n\n---\n\n${memory}`;
+    const expectedSuffix = `\n\n${memory}`;
     const prompt = getCoreSystemPrompt(memory);
 
     expect(prompt.endsWith(expectedSuffix)).toBe(true);
@@ -223,8 +238,8 @@ describe('Core System Prompt (prompts.ts)', () => {
     const appendInstruction = 'Always answer in exactly one sentence.';
     const prompt = getCoreSystemPrompt(memory, undefined, appendInstruction);
 
-    expect(prompt).toContain(`\n\n---\n\n${memory}`);
-    expect(prompt).toContain(`\n\n---\n\n${appendInstruction}`);
+    expect(prompt).toContain(`\n\n${memory}`);
+    expect(prompt).toContain(`\n\n${appendInstruction}`);
     expect(prompt.indexOf(appendInstruction)).toBeLessThan(
       prompt.indexOf(memory),
     );
@@ -242,33 +257,89 @@ describe('Core System Prompt (prompts.ts)', () => {
     );
 
     expect(result).toBe(
-      [customInstruction, appendInstruction, userMemory].join('\n\n---\n\n'),
-    );
-  });
-
-  it('assembles the three Hermes-style system prompt tiers', () => {
-    const result = getCustomSystemPrompt('Base', 'User', 'Append', {
-      context: 'Workspace',
-      volatile: ['Managed memory', 'Git'].join('\n\n'),
-    });
-
-    expect(result).toBe(
-      [
-        'Base',
-        ['Workspace', 'Append'].join('\n\n'),
-        ['User', 'Managed memory', 'Git'].join('\n\n'),
-      ].join('\n\n---\n\n'),
+      [customInstruction, appendInstruction, userMemory].join('\n\n'),
     );
   });
 
   it('omits blank system prompt tiers without changing order', () => {
     expect(
       joinSystemPrompt({
-        stable: 'Base',
+        stable: '  Base  ',
         context: '',
-        volatile: 'Git',
+        volatile: '\nGit\n',
       }),
-    ).toBe(['Base', 'Git'].join('\n\n---\n\n'));
+    ).toBe(['Base', 'Git'].join('\n\n'));
+  });
+
+  it('builds the complete Hermes tiers and returns only three keys', async () => {
+    vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+      availableSkills: [],
+      pendingConditionalSkillNames: new Set(),
+      modelInvocableCommands: [],
+      entries: [
+        {
+          name: 'review',
+          description: 'Review code',
+          level: 'project',
+        },
+      ],
+    });
+    const toolRegistry = {
+      warmAll: vi.fn().mockResolvedValue(undefined),
+      getMcpServerInstructions: vi
+        .fn()
+        .mockReturnValue(new Map([['docs', 'Use the docs index.']])),
+      getDeferredToolSummary: vi
+        .fn()
+        .mockReturnValue([
+          { name: 'search_docs', description: 'Search documentation.' },
+        ]),
+      isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+    };
+    const config = {
+      getToolRegistry: vi.fn().mockReturnValue(toolRegistry),
+      getSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+      getWorkingDir: vi.fn().mockReturnValue('/workspace'),
+      getSkipStartupContext: vi.fn().mockReturnValue(false),
+      getWorkspaceContext: vi.fn().mockReturnValue({
+        getDirectories: vi.fn().mockReturnValue(['/workspace']),
+      }),
+      getFileService: vi.fn(),
+      getSkillManager: vi.fn().mockReturnValue({}),
+      getSystemPromptContext: vi.fn().mockReturnValue('Project instructions'),
+      getSystemPromptVolatileMemory: vi
+        .fn()
+        .mockReturnValue('Memory snapshot\n\nUser profile'),
+    } as unknown as Config;
+
+    vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot');
+    const parts = await buildSystemPromptParts(config, 'Caller message', {
+      stablePrompt: 'Identity',
+    });
+
+    expect(Object.keys(parts)).toEqual(['stable', 'context', 'volatile']);
+    const stableMarkers = [
+      'Identity',
+      'Use the docs index.',
+      'search_docs',
+      '<available_skills>',
+      `My operating system is: ${process.platform}`,
+      "I'm currently working in the directory: /workspace",
+    ];
+    for (const marker of stableMarkers) {
+      expect(parts.stable).toContain(marker);
+    }
+    for (let index = 1; index < stableMarkers.length; index++) {
+      expect(parts.stable.indexOf(stableMarkers[index - 1]!)).toBeLessThan(
+        parts.stable.indexOf(stableMarkers[index]!),
+      );
+    }
+    expect(parts.context).toBe('Caller message\n\nProject instructions');
+    expect(parts.volatile).toMatch(
+      /^Memory snapshot\n\nUser profile\n\nGit snapshot\n\nToday's date is .+\.$/,
+    );
+    expect(getRecentGitStatus).toHaveBeenCalledWith('/workspace');
   });
 
   it('should include sandbox-specific instructions when SANDBOX env var is set', () => {
@@ -676,8 +747,6 @@ describe('Model-specific tool call formats', () => {
     expect(prompt).toContain('<tool_call>');
     expect(prompt).toContain('<function=run_shell_command>');
 
-    // Should contain user memory with separator
-    expect(prompt).toContain('---');
     expect(prompt).toContain('User prefers concise responses.');
 
     expect(prompt).toMatchSnapshot();
@@ -752,9 +821,8 @@ describe('getCustomSystemPrompt', () => {
     const result = getCustomSystemPrompt(customInstruction, userMemory);
 
     expect(result).toBe(
-      'You are a helpful assistant specialized in code review.\n\n---\n\nRemember to be extra thorough.\nFocus on security issues.',
+      'You are a helpful assistant specialized in code review.\n\nRemember to be extra thorough.\nFocus on security issues.',
     );
-    expect(result).toContain('---');
   });
 
   it('should handle Content object with parts array and user memory', () => {
@@ -768,9 +836,8 @@ describe('getCustomSystemPrompt', () => {
     const result = getCustomSystemPrompt(customInstruction, userMemory);
 
     expect(result).toBe(
-      'You are a code assistant. Always provide examples.\n\n---\n\nUser prefers TypeScript examples.',
+      'You are a code assistant. Always provide examples.\n\nUser prefers TypeScript examples.',
     );
-    expect(result).toContain('---');
   });
 });
 

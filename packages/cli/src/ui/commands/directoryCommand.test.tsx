@@ -76,6 +76,8 @@ describe('directoryCommand', () => {
       getFileService: () => ({}),
       getExtensionContextFilePaths: () => [],
       getFileFilteringOptions: () => ({ ignore: [], include: [] }),
+      refreshHierarchicalMemory: vi.fn().mockResolvedValue(undefined),
+      getGeminiMdFileCount: vi.fn().mockReturnValue(0),
       setUserMemory: vi.fn(),
       setGeminiMdFileCount: vi.fn(),
     } as unknown as Config;
@@ -218,6 +220,23 @@ describe('directoryCommand', () => {
         'context.includeDirectories',
         [existingPath, newPath],
       );
+    });
+
+    it('refreshes classified instructions through Config after adding a directory', async () => {
+      const newPath = path.normalize('/home/user/new-project');
+      vi.spyOn(
+        mockConfig,
+        'shouldLoadMemoryFromIncludeDirectories',
+      ).mockReturnValue(true);
+      vi.mocked(mockConfig.getGeminiMdFileCount).mockReturnValue(3);
+      mockContext.ui.setGeminiMdFileCount = vi.fn();
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, newPath);
+
+      expect(mockConfig.refreshHierarchicalMemory).toHaveBeenCalledTimes(1);
+      expect(mockConfig.setUserMemory).not.toHaveBeenCalled();
+      expect(mockContext.ui.setGeminiMdFileCount).toHaveBeenCalledWith(3);
     });
 
     it('should not duplicate existing workspace settings when persisting', async () => {

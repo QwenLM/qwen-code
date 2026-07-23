@@ -32,7 +32,6 @@ import {
 import { GeminiChat } from '../../core/geminiChat.js';
 import { normalizeModelToolCallIds } from '../../core/toolCallIdUtils.js';
 import { executeToolCall } from '../../core/nonInteractiveToolExecutor.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import type { ToolRegistry } from '../../tools/tool-registry.js';
 import { type AnyDeclarativeTool } from '../../tools/tools.js';
 import {
@@ -55,6 +54,7 @@ import type {
 } from './agent-types.js';
 import { AgentTerminateMode } from './agent-types.js';
 import { WriteFileTool } from '../../tools/write-file.js';
+import { getEnvironmentContext } from '../../utils/environmentContext.js';
 
 vi.mock('../../core/geminiChat.js');
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
@@ -87,16 +87,9 @@ vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
 vi.mock('../../utils/environmentContext.js', () => ({
   SYSTEM_REMINDER_OPEN: '<system-reminder>',
   getEnvironmentContext: vi.fn().mockResolvedValue([{ text: 'Env Context' }]),
-  getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-    [
-      {
-        role: 'user',
-        parts: [{ text: '<system-reminder>\nEnv Context\n</system-reminder>' }],
-      },
-      ...(extraHistory ?? []),
-    ],
-    [],
-  ]),
+  buildMcpServerInstructionsPrompt: vi.fn().mockReturnValue(null),
+  buildDeferredToolsPrompt: vi.fn().mockReturnValue(null),
+  buildAvailableSkillsPrompt: vi.fn().mockResolvedValue(null),
 }));
 vi.mock('../../core/nonInteractiveToolExecutor.js');
 vi.mock('../../ide/ide-client.js');
@@ -157,6 +150,9 @@ async function createMockConfig(
     getFunctionDeclarations: vi.fn().mockReturnValue([]),
     getFunctionDeclarationsFiltered: vi.fn().mockReturnValue([]),
     getAllToolNames: vi.fn().mockReturnValue([]),
+    getDeferredToolSummary: vi.fn().mockReturnValue([]),
+    isDeferredToolRevealed: vi.fn().mockReturnValue(false),
+    getMcpServerInstructions: vi.fn().mockReturnValue(new Map()),
   };
   const mockToolRegistry = {
     ...mockToolRegistryBase,
@@ -320,6 +316,9 @@ describe('subagent.ts', () => {
 
     beforeEach(async () => {
       vi.clearAllMocks();
+      vi.mocked(getEnvironmentContext).mockResolvedValue([
+        { text: 'Env Context' },
+      ]);
 
       vi.mocked(createContentGenerator).mockResolvedValue({
         getGenerativeModel: vi.fn(),
@@ -527,20 +526,10 @@ describe('subagent.ts', () => {
           'Important Rules:',
         );
 
-        // Check History (should include environment context)
+        // Environment context is part of the cached system prompt.
         const history = callArgs[2];
-        expect(getInitialChatHistory).toHaveBeenCalledWith(config, undefined, {
-          includeDeferredToolsReminder: false,
-          includeAvailableSkillsReminder: true,
-        });
-        expect(history).toEqual([
-          {
-            role: 'user',
-            parts: [
-              { text: '<system-reminder>\nEnv Context\n</system-reminder>' },
-            ],
-          },
-        ]);
+        expect(generationConfig.systemInstruction).toContain('Env Context');
+        expect(history).toEqual([]);
       });
 
       it('should reuse chat and tools for sequential follow-up turns', async () => {
@@ -573,7 +562,7 @@ describe('subagent.ts', () => {
         await scope.execute(followUpContext);
 
         expect(GeminiChat).toHaveBeenCalledTimes(1);
-        expect(toolRegistry.warmAll).toHaveBeenCalledTimes(1);
+        expect(toolRegistry.warmAll).toHaveBeenCalledTimes(2);
         expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
         expect(mockSendMessageStream.mock.calls[0][1].message).toEqual([
           { text: 'Initial task' },
@@ -774,7 +763,9 @@ describe('subagent.ts', () => {
         const { config } = await createMockConfig();
         const userMemoryContent =
           '# Output language preference: English\nRespond in English.';
-        vi.spyOn(config, 'getUserMemory').mockReturnValue(userMemoryContent);
+        vi.spyOn(config, 'getSystemPromptVolatileMemory').mockReturnValue(
+          userMemoryContent,
+        );
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -810,9 +801,9 @@ describe('subagent.ts', () => {
         );
       });
 
-      it('should not append userMemory separator when userMemory is empty', async () => {
+      it('should not append volatile memory when it is empty', async () => {
         const { config } = await createMockConfig();
-        vi.spyOn(config, 'getUserMemory').mockReturnValue('');
+        vi.spyOn(config, 'getSystemPromptVolatileMemory').mockReturnValue('');
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -836,12 +827,13 @@ describe('subagent.ts', () => {
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
         expect(sysPrompt).toContain('You are a test agent.');
-        expect(sysPrompt).not.toContain('---');
       });
 
-      it('should not append userMemory separator when userMemory is whitespace-only', async () => {
+      it('should not append volatile memory when it is whitespace-only', async () => {
         const { config } = await createMockConfig();
-        vi.spyOn(config, 'getUserMemory').mockReturnValue('   \n\n  ');
+        vi.spyOn(config, 'getSystemPromptVolatileMemory').mockReturnValue(
+          '   \n\n  ',
+        );
 
         vi.mocked(GeminiChat).mockClear();
 
@@ -864,7 +856,7 @@ describe('subagent.ts', () => {
 
         const generationConfig = getGenerationConfigFromMock();
         const sysPrompt = generationConfig.systemInstruction as string;
-        expect(sysPrompt).not.toContain('---');
+        expect(sysPrompt).not.toContain('   \n\n  ');
       });
 
       it('should replace env history with initialMessages when both initialMessages and systemPrompt are set', async () => {
@@ -911,7 +903,6 @@ describe('subagent.ts', () => {
       it('should skip env history when initialMessages is an empty array', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();
-        vi.mocked(getInitialChatHistory).mockClear();
 
         const promptConfig: PromptConfig = {
           systemPrompt: 'System ${name}.',
@@ -936,8 +927,8 @@ describe('subagent.ts', () => {
         const generationConfig = getGenerationConfigFromMock();
 
         expect(generationConfig.systemInstruction).toContain('System Agent.');
+        expect(generationConfig.systemInstruction).toContain('Env Context');
         expect(callArgs[2]).toEqual([]);
-        expect(getInitialChatHistory).not.toHaveBeenCalled();
       });
 
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {

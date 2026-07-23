@@ -353,6 +353,7 @@ export interface LoadServerHierarchicalMemoryResponse {
 export interface LoadServerHierarchicalMemoryOptions {
   explicitOnly?: boolean;
   loadReason?: Exclude<InstructionLoadReason, 'include'>;
+  userProfileContextFilePaths?: string[];
   onInstructionsLoaded?: (
     notification: InstructionsLoadedNotification,
   ) => void | Promise<void>;
@@ -362,6 +363,7 @@ function createMemoryTypeClassifier(
   userHomePath: string,
   foundRoot: string | null,
   extensionContextFilePaths: string[],
+  userProfileContextFilePaths: string[],
 ): (filePath: string) => InstructionMemoryType {
   const resolvedHome = path.resolve(userHomePath);
   const globalQwenDir = path.resolve(Storage.getGlobalQwenDir());
@@ -372,9 +374,16 @@ function createMemoryTypeClassifier(
   const extensionRoots = extensionContextFilePaths.map((filePath) =>
     path.dirname(path.resolve(filePath)),
   );
+  const userProfilePaths = new Set(
+    userProfileContextFilePaths.map((filePath) => path.resolve(filePath)),
+  );
 
   return (filePath) => {
     const resolvedPath = path.resolve(filePath);
+
+    if (userProfilePaths.has(resolvedPath)) {
+      return 'user';
+    }
 
     if (
       extensionPaths.has(resolvedPath) ||
@@ -492,6 +501,7 @@ export async function loadServerHierarchicalMemory(
         userHomePath,
         foundRoot,
         extensionContextFilePaths,
+        options.userProfileContextFilePaths ?? [],
       ),
       options.onInstructionsLoaded,
       loadReason,

@@ -140,10 +140,8 @@ async function setUiLanguage(
  * Handles the /language output command, updating both the setting and the rule file.
  * 'auto' is preserved in settings and written as a dynamic same-language rule.
  *
- * After persisting the change, hierarchical memory is reloaded so `output-language.md`
- * flows back into `userMemory`, and the live chat's system instruction is rebuilt
- * in place. The new language therefore takes effect on the next turn without
- * restarting the session and without losing conversation history.
+ * After persisting the change, hierarchical memory is reloaded so the next
+ * session or context-compression boundary includes the updated user profile.
  */
 async function setOutputLanguage(
   context: CommandContext,
@@ -169,19 +167,14 @@ async function setOutputLanguage(
       }
     }
 
-    // Apply the new rule to the running session: refresh hierarchical memory
-    // so output-language.md is re-read into userMemory, then rebuild and
-    // re-bind the system instruction on the live chat.
+    // Refresh the profile snapshot used by the next complete system-prompt
+    // build. The current session keeps its cached prompt until compression.
     const config = context.services.config;
     if (config) {
       try {
         await config.refreshHierarchicalMemory();
-        await config.getGeminiClient().refreshSystemInstruction();
       } catch (error) {
-        debugLogger.warn(
-          'Failed to apply output language to running session:',
-          error,
-        );
+        debugLogger.warn('Failed to refresh output language profile:', error);
       }
     }
 

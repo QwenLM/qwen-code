@@ -73,12 +73,7 @@ vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
   isUnattendedMode: vi.fn(() => false),
 }));
-import {
-  getCoreSystemPrompt,
-  getCustomSystemPrompt,
-  getPlanModeSystemReminder,
-  joinSystemPrompt,
-} from './prompts.js';
+import { getCoreSystemPrompt, getPlanModeSystemReminder } from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -89,7 +84,6 @@ import {
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
-  getInitialChatHistory,
 } from '../utils/environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
 import type { AvailableSkillEntry } from '../tools/skill-utils.js';
@@ -227,20 +221,6 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
     getDirectoryContextString: vi
       .fn()
       .mockResolvedValue('Mocked directory context'),
-    getInitialChatHistory: vi.fn(async (_config, extraHistory) => [
-      [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nMocked env context\n</system-reminder>',
-            },
-          ],
-        },
-        ...(extraHistory ?? []),
-      ],
-      [],
-    ]),
     buildChangedMcpToolsReminder: vi.fn(
       (
         tools: Array<{ name: string }>,
@@ -555,6 +535,7 @@ describe('Gemini Client (client.ts)', () => {
       getSystemPromptVolatileMemory: vi.fn(() => mockConfig.getUserMemory()),
       getSystemPrompt: vi.fn().mockReturnValue(undefined),
       getAppendSystemPrompt: vi.fn().mockReturnValue(undefined),
+      getSkipStartupContext: vi.fn().mockReturnValue(true),
       getFullContext: vi.fn().mockReturnValue(false),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getProxy: vi.fn().mockReturnValue(undefined),
@@ -1023,14 +1004,14 @@ describe('Gemini Client (client.ts)', () => {
         expect.objectContaining({
           ok: true,
           extraHistoryLength: 0,
-          historyLength: 1,
+          historyLength: 0,
           snapshotEntryCount: 0,
           deferredReminderCount: 0,
         }),
       );
       expect(profiler.time.mock.calls.map(([stage]) => stage)).toEqual([
         'tool_registry_warm',
-        'initial_chat_history',
+        'system_prompt_parts',
         'agent_reminder_seed',
         'session_start_hook',
         'set_tools',
@@ -1059,18 +1040,16 @@ describe('Gemini Client (client.ts)', () => {
       toolRegistry.getTool.mockImplementation((name: string) =>
         name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
       );
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
-        [
-          {
-            role: 'user',
-            parts: [{ text: '<system-reminder>context</system-reminder>' }],
-          },
-        ],
-        [
+      vi.mocked(mockConfig.getSkillManager).mockReturnValue({} as never);
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [
           { name: 'skill-one', description: 'first skill' },
           { name: 'skill-two', description: 'second skill' },
         ],
-      ]);
+      });
 
       await client.startChat();
 
@@ -1094,12 +1073,17 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('finalizes failed startChat profiles without changing the thrown error', async () => {
-      vi.mocked(getInitialChatHistory).mockRejectedValueOnce(
-        new Error('history failed'),
-      );
+      vi.spyOn(
+        client as unknown as {
+          rebuildMainSessionSystemInstruction: () => Promise<
+            AvailableSkillEntry[]
+          >;
+        },
+        'rebuildMainSessionSystemInstruction',
+      ).mockRejectedValueOnce(new Error('prompt failed'));
 
       await expect(client.startChat()).rejects.toThrow(
-        'Failed to initialize chat: history failed',
+        'Failed to initialize chat: prompt failed',
       );
 
       const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
@@ -1161,7 +1145,7 @@ describe('Gemini Client (client.ts)', () => {
         expect.objectContaining({
           ok: false,
           extraHistoryLength: 0,
-          historyLength: 1,
+          historyLength: 0,
           snapshotEntryCount: 0,
           deferredReminderCount: 0,
         }),
@@ -1181,15 +1165,13 @@ describe('Gemini Client (client.ts)', () => {
       toolRegistry.getTool.mockImplementation((name: string) =>
         name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
       );
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
-        [
-          {
-            role: 'user',
-            parts: [{ text: '<system-reminder>context</system-reminder>' }],
-          },
-        ],
-        [{ name: 'skill-one', description: 'first skill' }],
-      ]);
+      vi.mocked(mockConfig.getSkillManager).mockReturnValue({} as never);
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [{ name: 'skill-one', description: 'first skill' }],
+      });
       vi.spyOn(client, 'setTools').mockRejectedValueOnce(
         new Error('set tools failed'),
       );
@@ -1203,7 +1185,7 @@ describe('Gemini Client (client.ts)', () => {
         expect.objectContaining({
           ok: false,
           extraHistoryLength: 0,
-          historyLength: 1,
+          historyLength: 0,
           snapshotEntryCount: 1,
           deferredReminderCount: 1,
         }),
@@ -1414,7 +1396,7 @@ describe('Gemini Client (client.ts)', () => {
     });
 
     it('preserves existing system prompt suffixes when SessionStart additionalContext is applied', async () => {
-      vi.mocked(getCoreSystemPrompt).mockReturnValue(
+      vi.mocked(mockConfig.getSystemPrompt).mockReturnValue(
         'Base instruction\n\n---\n\nUser memory\n\n---\n\nAppended rule',
       );
       const hookSystem = {
@@ -1439,12 +1421,8 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
-    it('re-applies SessionStart additionalContext after refreshing the system instruction', async () => {
-      // startChat() calls getCoreSystemPrompt for the initial GeminiChat
-      // construction. The second call is refreshSystemInstruction under test.
-      vi.mocked(getCoreSystemPrompt)
-        .mockReturnValueOnce('Base instruction')
-        .mockReturnValueOnce('Updated instruction');
+    it('does not rebuild SessionStart context during a normal-turn refresh', async () => {
+      vi.mocked(mockConfig.getSystemPrompt).mockReturnValue('Base instruction');
       const hookSystem = {
         fireSessionStartEvent: vi.fn().mockResolvedValue(
           createHookOutput('SessionStart', {
@@ -1461,10 +1439,13 @@ describe('Gemini Client (client.ts)', () => {
       );
 
       await client.startChat(undefined, SessionStartSource.Startup);
+      vi.mocked(mockConfig.getSystemPrompt).mockReturnValue(
+        'Updated instruction',
+      );
       await client.refreshSystemInstruction();
 
       expect(client.getChat()['generationConfig'].systemInstruction).toBe(
-        'Updated instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx1\n</qwen:session-start-context>',
+        'Base instruction\n\n<qwen:session-start-context hidden="true">\nSessionStart additional context:\nCtx1\n</qwen:session-start-context>',
       );
     });
 
@@ -1491,75 +1472,18 @@ describe('Gemini Client (client.ts)', () => {
     });
   });
 
-  describe('refreshStartupContextReminder', () => {
-    it('removes the startup entry when rebuilding produces no reminder parts', async () => {
-      const currentHistory: Content[] = [
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nold deferred reminder\n</system-reminder>',
-            },
-          ],
-        },
-        { role: 'user', parts: [{ text: 'hello' }] },
-        { role: 'model', parts: [{ text: 'hi' }] },
-      ];
-      const mockChat: Partial<GeminiChat> = {
-        getHistory: vi.fn().mockReturnValue(currentHistory),
-        setHistory: vi.fn(),
-      };
-      client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([[], []]);
+  describe('refreshSystemInstruction', () => {
+    it('keeps the session-cached system prompt unchanged', async () => {
+      const before = client.getChat()['generationConfig'].systemInstruction;
+      vi.mocked(mockConfig.getSystemPromptVolatileMemory).mockReturnValue(
+        'New memory',
+      );
 
-      await client.refreshStartupContextReminder();
+      await client.refreshSystemInstruction();
 
-      expect(mockChat.setHistory).toHaveBeenCalledWith(currentHistory.slice(1));
-    });
-
-    it('removes the full legacy 2-entry prelude, not just the first entry', async () => {
-      // Restored pre-PR sessions store startup context as a
-      // [user(env), model("Got it. Thanks for the context!")] pair, so
-      // getStartupContextLength returns 2. A hardcoded slice(1) would leave
-      // the orphaned model ack behind; slicing by the detected length removes
-      // both legacy entries before re-prepending the fresh prelude.
-      const legacyEnv: Content = {
-        role: 'user',
-        parts: [{ text: 'This is the environment context.' }],
-      };
-      const legacyAck: Content = {
-        role: 'model',
-        parts: [{ text: 'Got it. Thanks for the context!' }],
-      };
-      const currentHistory: Content[] = [
-        legacyEnv,
-        legacyAck,
-        { role: 'user', parts: [{ text: 'hello' }] },
-        { role: 'model', parts: [{ text: 'hi' }] },
-      ];
-      const newPrelude: Content = {
-        role: 'user',
-        parts: [
-          { text: '<system-reminder>\nfresh prelude\n</system-reminder>' },
-        ],
-      };
-      const mockChat: Partial<GeminiChat> = {
-        getHistory: vi.fn().mockReturnValue(currentHistory),
-        setHistory: vi.fn(),
-      };
-      client['chat'] = mockChat as GeminiChat;
-      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
-        [newPrelude],
-        [],
-      ]);
-
-      await client.refreshStartupContextReminder();
-
-      // slice(2) drops BOTH legacy entries; slice(1) would have left legacyAck.
-      expect(mockChat.setHistory).toHaveBeenCalledWith([
-        newPrelude,
-        ...currentHistory.slice(2),
-      ]);
+      expect(client.getChat()['generationConfig'].systemInstruction).toBe(
+        before,
+      );
     });
   });
 
@@ -1596,11 +1520,10 @@ describe('Gemini Client (client.ts)', () => {
       ]);
 
       const history = client.getHistory();
-      // startChat prepends a mocked env-context user/model pair, then
-      // appends the supplied extraHistory; the repair pass must then
-      // splice a synthetic user[functionResponse] AFTER the dangling
-      // model[fc]. Locate the dangling model entry by its callId and
-      // verify the immediately-following entry carries the synthetic.
+      // startChat preserves the supplied history; the repair pass must splice
+      // a synthetic user[functionResponse] AFTER the dangling model[fc].
+      // Locate the dangling model entry by its callId and verify the
+      // immediately-following entry carries the synthetic.
       const danglingIdx = history.findIndex(
         (h) =>
           h.role === 'model' &&
@@ -2045,16 +1968,11 @@ describe('Gemini Client (client.ts)', () => {
   });
 
   describe('resetChat', () => {
-    it('refreshes the live system instruction after the working directory changes', async () => {
+    it('keeps the cached system instruction after the working directory changes', async () => {
       vi.mocked(getRecentGitStatus)
         .mockReturnValueOnce('Git snapshot A')
         .mockReturnValueOnce('Git snapshot B');
       vi.mocked(getRecentGitStatus).mockClear();
-      vi.mocked(getCoreSystemPrompt).mockImplementation(
-        (_memory, _model, _append, _mode, tiers = {}) =>
-          [tiers.context, tiers.volatile].filter(Boolean).join('\n') ||
-          'Base instruction',
-      );
 
       await client.startChat();
       expect(client.getChat()['generationConfig'].systemInstruction).toContain(
@@ -2068,9 +1986,9 @@ describe('Gemini Client (client.ts)', () => {
 
       const systemInstruction = client.getChat()['generationConfig']
         .systemInstruction as string;
-      expect(systemInstruction).not.toContain('Git snapshot A');
-      expect(systemInstruction).toContain('Git snapshot B');
-      expect(getRecentGitStatus).toHaveBeenCalledTimes(2);
+      expect(systemInstruction).toContain('Git snapshot A');
+      expect(systemInstruction).not.toContain('Git snapshot B');
+      expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
     });
 
     it('clears cached git status so it can be recomputed for the next session', async () => {
@@ -2078,11 +1996,7 @@ describe('Gemini Client (client.ts)', () => {
         .mockReturnValueOnce('Git snapshot A')
         .mockReturnValueOnce('Git snapshot B');
       vi.mocked(getRecentGitStatus).mockClear();
-      vi.mocked(getCoreSystemPrompt).mockImplementation(
-        (_memory, _model, _append, _mode, tiers = {}) =>
-          [tiers.context, tiers.volatile].filter(Boolean).join('\n') ||
-          'Base instruction',
-      );
+      await client.startChat();
 
       const instructionBeforeReset = (
         client as unknown as {
@@ -3614,7 +3528,7 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
-    it('re-prepends startup context and seeds the new chat after compression', async () => {
+    it('rebuilds the system prompt without changing compressed history', async () => {
       const compressedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
@@ -3633,17 +3547,7 @@ describe('Gemini Client (client.ts)', () => {
       await client.tryCompressChat('p4');
 
       expect(client.getChat()).not.toBe(originalChat);
-      expect(client.getHistory()).toEqual([
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nMocked env context\n</system-reminder>',
-            },
-          ],
-        },
-        ...compressedHistory,
-      ]);
+      expect(client.getHistory()).toEqual(compressedHistory);
       expect(client.getChat().getLastPromptTokenCount()).toBe(200);
       expect(client['forceFullIdeContext']).toBe(true);
     });
@@ -4052,16 +3956,13 @@ describe('Gemini Client (client.ts)', () => {
       expect(client['forceFullIdeContext']).toBe(true);
     });
 
-    it('re-prepends the startup prelude after an auto-compaction ChatCompressed event', async () => {
-      // Auto-compaction replaces history in place inside
-      // chat.sendMessageStream and never routes through startChat, so the
-      // startup prelude consumed into the summary must be rebuilt here or
-      // env/tool/MCP context is lost for the rest of the session.
+    it('rebuilds the cached system prompt after an auto-compaction event', async () => {
       const compactedHistory: Content[] = [
         { role: 'user', parts: [{ text: 'summary' }] },
         { role: 'model', parts: [{ text: 'ok' }] },
       ];
       const setHistory = vi.fn();
+      const setSystemInstruction = vi.fn();
       vi.spyOn(client, 'tryCompressChat').mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -4083,7 +3984,11 @@ describe('Gemini Client (client.ts)', () => {
         addHistory: vi.fn(),
         getHistory: vi.fn().mockReturnValue(compactedHistory),
         setHistory,
+        setSystemInstruction,
+        applySessionStartContext: vi.fn(),
       } as unknown as GeminiChat;
+      const warmAll = vi.mocked(mockConfig.getToolRegistry().warmAll);
+      warmAll.mockClear();
 
       const stream = client.sendMessageStream(
         [{ text: 'hi' }],
@@ -4095,17 +4000,11 @@ describe('Gemini Client (client.ts)', () => {
         /* drain */
       }
 
-      expect(setHistory).toHaveBeenCalledWith([
-        {
-          role: 'user',
-          parts: [
-            {
-              text: '<system-reminder>\nMocked env context\n</system-reminder>',
-            },
-          ],
-        },
-        ...compactedHistory,
-      ]);
+      expect(setSystemInstruction).toHaveBeenCalledWith(
+        client['cachedSystemPrompt'],
+      );
+      expect(warmAll).toHaveBeenCalledTimes(1);
+      expect(setHistory).not.toHaveBeenCalled();
     });
   });
 
@@ -9838,7 +9737,7 @@ Other open files:
           model: DEFAULT_QWEN_FLASH_MODEL,
           config: expect.objectContaining({
             abortSignal,
-            systemInstruction: getCoreSystemPrompt(''),
+            systemInstruction: client['cachedSystemPrompt'],
             temperature: 0.5,
           }),
           contents,
@@ -9955,9 +9854,7 @@ Other open files:
         client['config'],
         'getSystemPromptVolatileMemory',
       ).mockReturnValue('Saved memory');
-      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
-        'Override prompt with memory',
-      );
+      await client.startChat();
 
       await client.generateContent(
         contents,
@@ -9966,19 +9863,11 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
-        'Override prompt',
-        'Saved memory',
-        undefined,
-        { context: '', volatile: '' },
-      );
-      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          config: expect.objectContaining({
-            systemInstruction: 'Override prompt with memory',
-          }),
-        }),
-        'test-session-id',
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      expect(request?.config?.systemInstruction).toBe(
+        'Override prompt\n\nSaved memory',
       );
     });
 
@@ -9990,6 +9879,7 @@ Other open files:
       vi.spyOn(client['config'], 'getAppendSystemPrompt').mockReturnValue(
         'Be extra concise.',
       );
+      await client.startChat();
 
       await client.generateContent(
         contents,
@@ -9998,40 +9888,27 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      expect(getCoreSystemPrompt).toHaveBeenCalledWith(
-        '',
-        'test-model',
-        'Be extra concise.',
-        'headless',
-        { context: '', volatile: '' },
-      );
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      expect(request?.config?.systemInstruction).toContain('Be extra concise.');
     });
 
     it('assembles the three tiers in the final system instruction', async () => {
       const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
       const abortSignal = new AbortController().signal;
+      vi.mocked(mockConfig.getSystemPrompt).mockReturnValue('Stable identity');
       vi.mocked(mockConfig.getSystemPromptContext).mockReturnValue(
         'Project instructions',
       );
       vi.mocked(mockConfig.getSystemPromptVolatileMemory).mockReturnValue(
-        'User instructions\n\nManaged memory',
+        'Managed memory\n\nUser instructions',
       );
       vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot');
       vi.mocked(mockConfig.getAppendSystemPrompt).mockReturnValue(
         'Caller system message',
       );
-      vi.mocked(getCoreSystemPrompt).mockImplementation(
-        (volatileMemory, _model, appendInstruction, _mode, tiers = {}) =>
-          joinSystemPrompt({
-            stable: 'Base prompt',
-            context: [tiers.context, appendInstruction]
-              .filter(Boolean)
-              .join('\n\n'),
-            volatile: [volatileMemory, tiers.volatile]
-              .filter(Boolean)
-              .join('\n\n'),
-          }),
-      );
+      await client.startChat();
 
       await client.generateContent(
         contents,
@@ -10040,19 +9917,22 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      expect(request).toEqual(
         expect.objectContaining({
           config: expect.objectContaining({
-            systemInstruction: [
-              'Base prompt',
-              ['Project instructions', 'Caller system message'].join('\n\n'),
-              ['User instructions', 'Managed memory', 'Git snapshot'].join(
-                '\n\n',
-              ),
-            ].join('\n\n---\n\n'),
+            systemInstruction:
+              'Stable identity\n\n' +
+              'Caller system message\n\n' +
+              'Project instructions\n\n' +
+              'Managed memory\n\n' +
+              'User instructions\n\n' +
+              'Git snapshot',
           }),
+          contents,
         }),
-        'test-session-id',
       );
     });
 
@@ -10063,7 +9943,7 @@ Other open files:
         'Project instructions',
       );
       vi.mocked(mockConfig.getSystemPromptVolatileMemory).mockReturnValue(
-        'User instructions\n\nManaged memory',
+        'Managed memory\n\nUser instructions',
       );
 
       await client.generateContent(
@@ -10073,14 +9953,11 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
-        'Request instructions',
-        'User instructions\n\nManaged memory',
-        undefined,
-        {
-          context: 'Project instructions',
-          volatile: '',
-        },
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      expect(request?.config?.systemInstruction).toBe(
+        'Request instructions\n\nProject instructions\n\nManaged memory\n\nUser instructions',
       );
     });
 
@@ -10094,11 +9971,11 @@ Other open files:
         const contents = [{ role: 'user', parts: [{ text: 'hello' }] }];
         const abortSignal = new AbortController().signal;
 
-        vi.mocked(getCoreSystemPrompt).mockClear();
         vi.mocked(client['config'].isInteractive).mockReturnValue(interactive);
         vi.mocked(
           client['config'].getExperimentalZedIntegration,
         ).mockReturnValue(acp);
+        await client.startChat();
 
         await client.generateContent(
           contents,
@@ -10107,12 +9984,16 @@ Other open files:
           DEFAULT_QWEN_FLASH_MODEL,
         );
 
-        expect(getCoreSystemPrompt).toHaveBeenCalledWith(
-          '',
-          'test-model',
-          undefined,
-          mode,
-          { context: '', volatile: '' },
+        const request = vi
+          .mocked(mockContentGenerator.generateContent)
+          .mock.calls.at(-1)?.[0];
+        const instruction = request?.config?.systemInstruction as string;
+        expect(instruction).toContain(
+          mode === 'interactive'
+            ? 'an interactive CLI agent'
+            : mode === 'acp'
+              ? 'a CLI agent operating through an ACP host'
+              : 'a non-interactive CLI agent',
         );
       },
     );
@@ -10131,9 +10012,7 @@ Other open files:
         client['config'],
         'getSystemPromptVolatileMemory',
       ).mockReturnValue('Saved memory');
-      vi.mocked(getCustomSystemPrompt).mockReturnValueOnce(
-        'Override prompt with memory and append',
-      );
+      await client.startChat();
 
       await client.generateContent(
         contents,
@@ -10142,19 +10021,11 @@ Other open files:
         DEFAULT_QWEN_FLASH_MODEL,
       );
 
-      expect(getCustomSystemPrompt).toHaveBeenCalledWith(
-        'Override prompt',
-        'Saved memory',
-        'Focus on findings only.',
-        { context: '', volatile: '' },
-      );
-      expect(mockContentGenerator.generateContent).toHaveBeenCalledWith(
-        expect.objectContaining({
-          config: expect.objectContaining({
-            systemInstruction: 'Override prompt with memory and append',
-          }),
-        }),
-        'test-session-id',
+      const request = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.at(-1)?.[0];
+      expect(request?.config?.systemInstruction).toBe(
+        'Override prompt\n\nFocus on findings only.\n\nSaved memory',
       );
     });
 
@@ -10164,10 +10035,7 @@ Other open files:
 
       vi.mocked(getRecentGitStatus).mockReturnValue('Git snapshot cached');
       vi.mocked(getRecentGitStatus).mockClear();
-      vi.mocked(getCoreSystemPrompt).mockImplementation(
-        (_memory, _model, _append, _mode, tiers = {}) =>
-          `Core prompt\n\n${[tiers.context, tiers.volatile].filter(Boolean).join('\n\n')}`,
-      );
+      await client.startChat();
 
       await client.generateContent(
         contents,
@@ -10183,24 +10051,12 @@ Other open files:
       );
 
       expect(getRecentGitStatus).toHaveBeenCalledTimes(1);
-      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
-        1,
-        expect.objectContaining({
-          config: expect.objectContaining({
-            systemInstruction: 'Core prompt\n\nGit snapshot cached',
-          }),
-        }),
-        'test-session-id',
-      );
-      expect(mockContentGenerator.generateContent).toHaveBeenNthCalledWith(
-        2,
-        expect.objectContaining({
-          config: expect.objectContaining({
-            systemInstruction: 'Core prompt\n\nGit snapshot cached',
-          }),
-        }),
-        'test-session-id',
-      );
+      const requests = vi
+        .mocked(mockContentGenerator.generateContent)
+        .mock.calls.slice(-2)
+        .map(([request]) => request.config?.systemInstruction as string);
+      expect(requests[0]).toContain('Git snapshot cached');
+      expect(requests[1]).toBe(requests[0]);
     });
 
     it('sets a generic span status when content generation fails', async () => {

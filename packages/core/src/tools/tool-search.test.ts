@@ -800,7 +800,7 @@ describe('ToolSearchTool', () => {
   });
 
   it('select: tolerates JSON-quoted tool names (model often pastes them back verbatim)', async () => {
-    // Pin: deferred-tools startup reminder renders names as JSON string
+    // Pin: deferred-tools system-prompt section renders names as JSON string
     // literals ("cron_create"); models often paste them
     // back as `select:"cron_create"`. Without quote-stripping the
     // lookup searches for a tool literally named `"cron_create"`
@@ -997,7 +997,6 @@ describe('ToolSearchTool', () => {
     vi.spyOn(visibleConfig, 'getToolRegistry').mockReturnValue(visibleRegistry);
     vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
       setTools: vi.fn().mockResolvedValue(undefined),
-      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     const tool = new ToolSearchTool(visibleConfig);
@@ -1025,7 +1024,6 @@ describe('ToolSearchTool', () => {
     const mockSetTools = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
       setTools: mockSetTools,
-      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     const tool = new ToolSearchTool(visibleConfig);
@@ -1074,7 +1072,6 @@ describe('ToolSearchTool', () => {
     const mockSetTools = vi.fn().mockResolvedValue(undefined);
     vi.spyOn(visibleConfig, 'getGeminiClient').mockReturnValue({
       setTools: mockSetTools,
-      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
     } as never);
 
     const tool = new ToolSearchTool(visibleConfig);

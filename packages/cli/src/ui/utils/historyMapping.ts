@@ -48,12 +48,12 @@ function isUserTextContent(content: Content): boolean {
   );
   if (hasFunctionResponse) return false;
 
-  // Exclude pure <system-reminder> entries (the startup prelude and the
+  // Exclude pure <system-reminder> entries (a saved legacy startup prelude and
   // mid-history MCP added-tool reminders). They are structural, not real user
   // prompts; counting them here would shift the rewind truncation index and
-  // silently drop a real turn's context. A genuine user turn that merely has
-  // a per-turn reminder prepended still has a non-reminder prompt part, so it
-  // is NOT excluded.
+  // silently drop a real turn's context. A genuine user turn that merely has a
+  // per-turn reminder prepended still has a non-reminder prompt part, so it is
+  // NOT excluded.
   if (isSystemReminderContent(content)) return false;
 
   return content.parts.some((part) => 'text' in part && part.text);
@@ -72,13 +72,13 @@ function findLastSuccessfulCompressionIndex(history: HistoryItem[]): number {
  * to a specific user turn in the UI history.
  *
  * The API history may include:
- * - A startup context entry at the beginning
+ * - A saved legacy startup context entry at the beginning
  * - User text prompts (corresponding to UI user turns)
  * - Model responses (with optional functionCall parts)
  * - Tool result entries: user(functionResponse) + model(response)
  *
  * This function counts user text Content entries (skipping tool results
- * and the startup context entry) to find the API boundary corresponding
+ * and any legacy startup context entry) to find the API boundary corresponding
  * to the target UI user turn.
  *
  * Note: In IDE mode, additional user Content entries may be injected for
@@ -118,17 +118,17 @@ export function computeApiTruncationIndex(
     }
   }
 
-  // Determine the starting index in the API history (skip startup context)
+  // Determine the starting index in the API history (skip legacy startup context)
   const startIndex = getStartupContextLength(apiHistory, {
     includeCompressed: true,
   });
 
   if (uiUserTurnCount === 0) {
-    // Rewinding to the first user turn: keep only startup context (if any)
+    // Rewinding to the first user turn: keep only legacy startup context (if any)
     return startIndex;
   }
 
-  // Walk the API history from after the startup context, counting
+  // Walk the API history from after any legacy startup context, counting
   // user text prompts to find the one corresponding to the target turn.
   let realUserPromptCount = 0;
 

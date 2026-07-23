@@ -42,7 +42,7 @@ import {
 /**
  * Static description for the Skill tool. The live list of available skills is
  * deliberately NOT embedded here — it is injected as an `<available_skills>`
- * `<system-reminder>` in the startup prelude (see `environmentContext`) and
+ * stable system prompt tier (see `buildSystemPromptParts`) and
  * refreshed via per-turn deltas. Keeping this description constant for the whole
  * session means skill changes never mutate the tools block, which sits at the
  * front of the tools → system → messages prompt-cache prefix. Mirrors Claude

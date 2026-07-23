@@ -226,6 +226,7 @@ import {
 import { syncTeamMemory } from '../memory/team-memory-sync.js';
 import { getTeamMemoryShareabilityWarning } from '../memory/team-memory-git-status.js';
 import { MemoryManager } from '../memory/manager.js';
+import { buildManagedAutoMemoryPrompt } from '../memory/prompt.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
 import { isSafeModeEnv } from '../utils/safe-mode.js';
 
@@ -3071,6 +3072,9 @@ export class Config {
       {
         explicitOnly: this.getBareMode(),
         loadReason,
+        userProfileContextFilePaths: this.outputLanguageFilePath
+          ? [this.outputLanguageFilePath]
+          : [],
         onInstructionsLoaded: createInstructionsLoadedCallback(
           () => this.hookSystem,
         ),
@@ -3172,7 +3176,7 @@ export class Config {
       // there. When empty the prompt builder emits a "MEMORY.md is currently
       // empty" placeholder — the same shape the per-project layer has used
       // since day one — so the cost is one extra index header.
-      const managedMemory = this.memoryManager.buildManagedPrompt(
+      const managedMemory = buildManagedAutoMemoryPrompt(
         getAutoMemoryRoot(this.getProjectRoot()),
         managedAutoMemoryIndex,
         {
@@ -3251,9 +3255,8 @@ export class Config {
   }
 
   /**
-   * Update the conditional rules registry. Called after external refresh
-   * paths (e.g. /memory refresh or /directory add) that bypass
-   * refreshHierarchicalMemory().
+   * Update the conditional rules registry for integrations that supply a
+   * prebuilt registry.
    */
   setConditionalRulesRegistry(
     registry: ConditionalRulesRegistry | undefined,
@@ -5212,14 +5215,18 @@ export class Config {
   ): void {
     this.systemPromptContext = workspaceInstructions;
     this.systemPromptVolatileMemory = [
-      userInstructions.trim(),
       managedMemory.trim(),
+      userInstructions.trim(),
     ]
       .filter(Boolean)
       .join('\n\n');
-    this.userMemory = [memoryContent.trim(), managedMemory.trim()]
-      .filter(Boolean)
-      .join('\n\n---\n\n');
+    const trimmedManagedMemory = managedMemory.trim();
+    const trimmedMemoryContent = memoryContent.trim();
+    this.userMemory = !trimmedManagedMemory
+      ? memoryContent
+      : !trimmedMemoryContent
+        ? trimmedManagedMemory
+        : `${trimmedMemoryContent}\n\n---\n\n${trimmedManagedMemory}`;
   }
 
   getGeminiMdFileCount(): number {
@@ -6693,7 +6700,7 @@ export class Config {
   /**
    * Registers a provider that returns model-invocable commands (e.g., bundled
    * skills, user/project file commands, MCP prompts). Called by the CLI's
-   * CommandService after initialisation so that the startup snapshot and
+   * CommandService after initialisation so that the stable prompt snapshot and
    * per-turn drain can include these in the `<available_skills>` listing.
    */
   setModelInvocableCommandsProvider(

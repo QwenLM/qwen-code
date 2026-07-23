@@ -1484,7 +1484,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: true,
         default: false,
         description:
-          'Avoid sending the workspace startup context at the beginning of each session.',
+          'Omit OS, working-directory, directory-tree, and startup-date context from the session system prompt.',
         showInDialog: false,
       },
       enableOpenAILogging: {

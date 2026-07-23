@@ -543,8 +543,8 @@ export class ChatRecordingService {
    *
    * Index `i` holds the active tail UUID observed before the (i+1)th user
    * message was queued. For example, `turnParentUuids[0]` is the UUID right
-   * before the very first user message (often `null` or the startup context
-   * record).
+   * before the very first user message (often `null` or a saved legacy startup
+   * context record).
    */
   private turnParentUuids: Array<string | null> = [];
   private chatsDirEnsured = false;

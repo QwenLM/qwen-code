@@ -1536,12 +1536,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     if (geminiClient) {
       // The `all` and numeric paths curate history differently on purpose.
       // `all` takes curated history directly. The numeric path reads
-      // *uncurated* history so the startup context can be sliced off on its own
-      // (getStartupContextLength) before curation coalesces it with the first
-      // real user turn; the startup prefix is then reattached to the bounded
-      // window from getHistoryForForkWindow (which curates *after* stripping
-      // startup). Sharing the curated `all` source here would drop the startup
-      // reminder into the first turn and break bounded selection.
+      // *uncurated* history so saved legacy startup context can be sliced off
+      // on its own (getStartupContextLength) before curation coalesces it with
+      // the first real user turn; the prefix is then reattached to the bounded
+      // window from getHistoryForForkWindow (which curates after stripping it).
+      // Sharing the curated `all` source here would fold the reminder into the
+      // first turn and break bounded selection.
       if (forkTurns === 'all') {
         rawHistory = selectForkHistory(
           geminiClient.getHistoryShallow?.(true) ??
@@ -1559,12 +1559,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           ...structuredClone(startupContext),
           ...selectForkHistory(
             // Fallback uses *uncurated* history, not getHistory(true). Curation
-            // (extractCuratedHistory) coalesces the leading startup reminder
+            // (extractCuratedHistory) coalesces a leading legacy startup reminder
             // into the first real user turn, so getStartupContextLength can no
             // longer detect it as a pure prefix — selectForkHistory would then
             // leave the startup text embedded in the first turn while the
             // startupContext above prepends it again, duplicating startup.
-            // Uncurated history keeps the startup reminder as its own pure
+            // Uncurated history keeps a legacy startup reminder as its own pure
             // entry, which selectForkHistory strips cleanly.
             geminiClient.getHistoryForForkWindow?.() ??
               geminiClient.getHistory(),

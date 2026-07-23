@@ -12,11 +12,7 @@ import type {
 import { CommandKind } from './types.js';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import {
-  loadServerHierarchicalMemory,
-  ConditionalRulesRegistry,
-  expandHomeDir,
-} from '@qwen-code/qwen-code-core';
+import { expandHomeDir } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 import { SettingScope } from '../../config/settings.js';
 
@@ -241,27 +237,8 @@ export const directoryCommand: SlashCommand = {
                   ),
                 );
               } else if (config.shouldLoadMemoryFromIncludeDirectories()) {
-                const {
-                  memoryContent,
-                  fileCount,
-                  conditionalRules,
-                  projectRoot,
-                } = await loadServerHierarchicalMemory(
-                  config.getWorkingDir(),
-                  [...config.getWorkspaceContext().getDirectories(), ...added],
-                  config.getFileService(),
-                  config.getExtensionContextFilePaths(),
-                  config.getFolderTrust(),
-                  context.services.settings.merged.context?.importFormat ||
-                    'tree',
-                  config.getContextRuleExcludes(),
-                );
-                config.setUserMemory(memoryContent);
-                config.setGeminiMdFileCount(fileCount);
-                config.setConditionalRulesRegistry(
-                  new ConditionalRulesRegistry(conditionalRules, projectRoot),
-                );
-                context.ui.setGeminiMdFileCount(fileCount);
+                await config.refreshHierarchicalMemory();
+                context.ui.setGeminiMdFileCount(config.getGeminiMdFileCount());
                 messages.push(
                   t(
                     'Successfully added QWEN.md files from the following directories if there are:\n- {{directories}}',

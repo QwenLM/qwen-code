@@ -720,9 +720,9 @@ export const useSlashCommandProcessor = (
         if (controller.signal.aborted) {
           return;
         }
-        // Register model-invocable commands provider so the startup snapshot
-        // and per-turn drain include bundled skills, file commands, and MCP
-        // prompts in the <available_skills> listing.
+        // Register model-invocable commands provider so the stable prompt
+        // snapshot and per-turn drain include bundled skills, file commands,
+        // and MCP prompts in the <available_skills> listing.
         if (config) {
           config.setModelInvocableCommandsProvider(() =>
             commandService.getModelInvocableCommands().map((cmd) => ({

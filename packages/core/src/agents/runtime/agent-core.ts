@@ -52,7 +52,6 @@ import type {
   ToolResultDisplay,
 } from '../../tools/tools.js';
 import { isShellProgressData } from '../../tools/tools.js';
-import { getInitialChatHistory } from '../../utils/environmentContext.js';
 import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
@@ -67,6 +66,10 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { GeminiChat } from '../../core/geminiChat.js';
+import {
+  buildSystemPromptParts,
+  joinSystemPrompt,
+} from '../../core/prompts.js';
 import {
   dedupeToolCallsById,
   getProviderToolCallId,
@@ -426,23 +429,9 @@ export class AgentCore {
       );
     }
 
-    // When initialMessages is set, the caller owns the full prior history
-    // (including any env bootstrap it wants). Fork relies on this to inherit
-    // the parent conversation verbatim without duplicating env messages.
-    const hasInitialMessages = this.promptConfig.initialMessages !== undefined;
     const hasSkillTool = this.willHaveSkillTool();
-    const [envHistory] = hasInitialMessages
-      ? [[]]
-      : await getInitialChatHistory(this.runtimeContext, undefined, {
-          includeDeferredToolsReminder: false,
-          includeAvailableSkillsReminder: hasSkillTool,
-        });
-
-    const startHistory = [
-      ...envHistory,
-      ...(options?.extraHistory ?? []),
-      ...(this.promptConfig.initialMessages ?? []),
-    ];
+    const initialMessages = this.promptConfig.initialMessages ?? [];
+    const startHistory = [...(options?.extraHistory ?? []), ...initialMessages];
 
     // Build generationConfig. For fork subagents, `renderedSystemPrompt`
     // carries the parent's exact rendered systemInstruction so the fork
@@ -455,11 +444,21 @@ export class AgentCore {
     if (this.promptConfig.renderedSystemPrompt !== undefined) {
       generationConfig.systemInstruction =
         this.promptConfig.renderedSystemPrompt;
-    } else if (this.promptConfig.systemPrompt) {
-      const systemInstruction = this.buildChatSystemPrompt(context, options);
-      if (systemInstruction) {
+    } else {
+      await this.runtimeContext.getToolRegistry().warmAll();
+      const stablePrompt = this.buildChatSystemPrompt(context, options);
+      const tiers = await buildSystemPromptParts(
+        this.runtimeContext,
+        undefined,
+        {
+          stablePrompt,
+          includeDeferredTools: false,
+          includeAvailableSkills: hasSkillTool,
+        },
+      );
+      const systemInstruction = joinSystemPrompt(tiers);
+      if (systemInstruction)
         generationConfig.systemInstruction = systemInstruction;
-      }
     }
 
     try {
@@ -2143,12 +2142,6 @@ Important Rules:
  - You operate in non-interactive mode: do not ask the user questions; proceed with available context.
  - Use tools only when necessary to obtain facts or make changes.
  - When the task is complete, return the final result as a normal model response (not a tool call) and stop.`;
-    }
-
-    // Append user memory (QWEN.md + output-language.md) to ensure subagent respects project conventions
-    const userMemory = this.runtimeContext.getUserMemory();
-    if (userMemory && userMemory.trim().length > 0) {
-      finalPrompt += `\n\n---\n\n${userMemory.trim()}`;
     }
 
     return finalPrompt;

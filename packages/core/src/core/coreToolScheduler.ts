@@ -4416,10 +4416,10 @@ export class CoreToolScheduler {
           // matchAndActivateByPaths resolves only after the listener chain
           // settles, so by the time we append the reminder below the runtime sets
           // already accept the newly activated skill (validateToolParams).
-          // Visibility comes from THIS tail reminder (and the startup snapshot),
-          // NOT from the tool description — which is now static and never
-          // re-rendered. refreshSkills no longer calls setTools(), so activation
-          // does not mutate the prompt-cache prefix.
+          // Visibility comes from THIS tail reminder (and the stable prompt
+          // snapshot), NOT from the tool description — which is now static and
+          // never re-rendered. refreshSkills no longer calls setTools(), so
+          // activation does not mutate the prompt-cache prefix.
           const activatedSkills =
             await skillManager?.matchAndActivateByPaths(candidatePaths);
           if (activatedSkills && activatedSkills.length > 0 && skillManager) {

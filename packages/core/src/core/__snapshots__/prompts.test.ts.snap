@@ -1,6 +1,6 @@
 // Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
 
-exports[`Core System Prompt (prompts.ts) > should append userMemory with separator when provided 1`] = `
+exports[`Core System Prompt (prompts.ts) > should append userMemory when provided 1`] = `
 "You are Qwen Code, an interactive CLI agent developed by Alibaba Group, specializing in software engineering tasks. Your primary goal is to help users safely and efficiently, adhering strictly to the following instructions and utilizing your available tools.
 
 # Core Mandates
@@ -188,8 +188,6 @@ To help you check their settings, I can read their contents. Which one would you
 Your core function is efficient and safe assistance. Balance conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use 'read_file' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
 
 Interaction mode reminder: Use 'ask_user_question' when you need clarification or want to validate assumptions. Never include time estimates in options.
-
----
 
 This is custom user memory.
 Be extra polite."
@@ -2222,8 +2220,6 @@ To help you check their settings, I can read their contents. Which one would you
 Your core function is efficient and safe assistance. Balance conciseness with the crucial need for clarity, especially regarding safety and potential system modifications. Always prioritize user control and project conventions. Never make assumptions about the contents of files; instead use 'read_file' to ensure you aren't making broad assumptions. Finally, you are an agent - please keep going until the user's query is completely resolved.
 
 Interaction mode reminder: Use 'ask_user_question' when you need clarification or want to validate assumptions. Never include time estimates in options.
-
----
 
 User prefers concise responses."
 `;

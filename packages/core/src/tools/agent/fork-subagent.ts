@@ -127,7 +127,7 @@ export function buildFunctionResponseParts(
  *
  * A turn is a real user prompt, not a function response or a pure structural
  * reminder. A bounded selection omits synthetic prefixes; the caller can
- * reattach startup context that the fork still needs.
+ * reattach any saved legacy startup context that the fork still needs.
  */
 export function selectForkHistory(
   history: Content[],
@@ -137,7 +137,7 @@ export function selectForkHistory(
 
   if (typeof forkTurns === 'number') {
     // includeCompressed is load-bearing here. getHistoryForForkWindow strips
-    // the startup reminder with includeCompressed:false, so a post-compression
+    // legacy startup context with includeCompressed:false, so a post-compression
     // summary prefix can still lead this history. Detecting it here keeps that
     // synthetic summary from being counted as a real user turn — which would
     // consume one of the requested turns and seed the fork with a prefix it
