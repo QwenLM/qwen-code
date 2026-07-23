@@ -244,7 +244,7 @@ export function WorkspaceSessionProvider({
         historyPageSize={historyPageSize}
         restartSseOnPrompt={restartSseOnPrompt}
         initialSelectedWorkspaceCwd={
-          effectiveWorkspaceId ? targetWorkspace?.cwd : undefined
+          !lockWorkspaceCwd && targetWorkspace ? targetWorkspace.cwd : undefined
         }
         lockedWorkspaceCwd={lockWorkspaceCwd ? targetWorkspace?.cwd : undefined}
         lockedWorkspaceCapability={
