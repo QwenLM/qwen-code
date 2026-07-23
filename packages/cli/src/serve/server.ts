@@ -954,7 +954,7 @@ export function createServeApp(
     deps.workspace ??
     createDaemonWorkspaceService({
       boundWorkspace,
-      isWorkspaceTrusted: () => deps.primaryWorkspaceTrusted ?? true,
+      isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
       contextFilename: deps.contextFilename ?? 'QWEN.md',
       statusProvider,
       workspaceProvidersStatusProvider: createWorkspaceProvidersStatusProvider({

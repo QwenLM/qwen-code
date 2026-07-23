@@ -649,6 +649,40 @@ describe('scheduled-tasks routes', () => {
     expect(t.lastFiredAt).toBe(1_700_000_000_000);
   });
 
+  it('preserves a no-write legacy rejection when the generation closes', async () => {
+    await teardown(h);
+    let checks = 0;
+    h = await makeHarness(true, {
+      closed: false,
+      assertOpen() {
+        checks += 1;
+        if (checks > 1) {
+          throw Object.assign(new Error('generation closed'), {
+            code: 'workspace_generation_closed',
+          });
+        }
+      },
+      close() {},
+    });
+    await seedTask({
+      id: 'legacy-run',
+      cron: '0 9 * * *',
+      prompt: 'p',
+      recurring: true,
+      createdAt: 1_700_000_000_000,
+      lastFiredAt: 1_700_000_000_000,
+      enabled: true,
+      sessionId: 'sess-legacy-run',
+      condition: 'only when files changed',
+    });
+
+    const res = await request(h.app).post('/scheduled-tasks/legacy-run/run');
+
+    expect(res.status).toBe(409);
+    expect(res.body.code).toBe('task_legacy_unsupported');
+    expect(checks).toBe(1);
+  });
+
   it('refuses to enable a legacy guarded task via PATCH (409 task_legacy_unsupported)', async () => {
     // `toView` reports the task disabled, so the only PATCH the UI sends is the
     // Enable toggle. Accepting it (200) would read back disabled again — an

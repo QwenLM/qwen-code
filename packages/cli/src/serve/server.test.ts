@@ -15636,6 +15636,26 @@ describe('createServeApp', () => {
       }
     });
 
+    it('loads fallback workspace settings fail-closed during trust hot reload', async () => {
+      const settingsRuntime = await import('../config/settings.js');
+      const loadSettings = vi.spyOn(settingsRuntime, 'loadSettings');
+      const app = createServeApp(tokenOpts, undefined, {
+        bridge: fakeBridge(),
+        workspaceTrustHotReloadAvailable: true,
+      });
+
+      const res = await auth(request(app).get('/workspace/trust'));
+
+      expect(res.status).toBe(200);
+      expect(loadSettings).toHaveBeenCalledWith(
+        (app.locals as { boundWorkspace: string }).boundWorkspace,
+        expect.objectContaining({
+          skipWorkspaceSettings: true,
+          workspaceTrusted: false,
+        }),
+      );
+    });
+
     it('passes client identity into the bridge', async () => {
       // #4282 fold-in 1 (gpt-5.5 C2): see /workspace/init test above.
       // The workspace service receives the originator via the request

@@ -5127,29 +5127,45 @@ async function runQwenServeImpl(
           acpHandle()?.beginWorkspaceDrain(runtimeToDrain.workspaceId);
         },
         disposeRuntime: async (runtimeToDispose, reason) => {
-          await workspaceRuntimeRemoval.disposeRuntime(
-            runtimeToDispose,
-            reason,
-          );
-          const handle = acpHandle();
-          if (!runtimeToDispose.primary) {
-            handle?.commitWorkspaceRemoval(runtimeToDispose.workspaceId);
+          const errors: unknown[] = [];
+          try {
+            await workspaceRuntimeRemoval.disposeRuntime(
+              runtimeToDispose,
+              reason,
+            );
+          } catch (error) {
+            errors.push(error);
           }
-          handle?.disposeWorkspace(runtimeToDispose.workspaceId);
-          const deadline = Date.now() + 1000;
-          while (
-            (handle?.getWorkspaceActivity(runtimeToDispose.workspaceId)
-              .memoryTasks ?? 0) > 0 &&
-            Date.now() < deadline
-          ) {
-            await new Promise((resolve) => setTimeout(resolve, 25));
+          try {
+            const handle = acpHandle();
+            if (!runtimeToDispose.primary) {
+              handle?.commitWorkspaceRemoval(runtimeToDispose.workspaceId);
+            }
+            handle?.disposeWorkspace(runtimeToDispose.workspaceId);
+            const deadline = Date.now() + 1000;
+            while (
+              (handle?.getWorkspaceActivity(runtimeToDispose.workspaceId)
+                .memoryTasks ?? 0) > 0 &&
+              Date.now() < deadline
+            ) {
+              await new Promise((resolve) => setTimeout(resolve, 25));
+            }
+            if (
+              (handle?.getWorkspaceActivity(runtimeToDispose.workspaceId)
+                .memoryTasks ?? 0) > 0
+            ) {
+              throw new Error(
+                'Workspace memory tasks did not stop after runtime disposal.',
+              );
+            }
+          } catch (error) {
+            errors.push(error);
           }
-          if (
-            (handle?.getWorkspaceActivity(runtimeToDispose.workspaceId)
-              .memoryTasks ?? 0) > 0
-          ) {
-            throw new Error(
-              'Workspace memory tasks did not stop after runtime disposal.',
+          if (errors.length === 1) throw errors[0];
+          if (errors.length > 1) {
+            throw new AggregateError(
+              errors,
+              'Workspace runtime and ACP cleanup failed.',
             );
           }
         },
