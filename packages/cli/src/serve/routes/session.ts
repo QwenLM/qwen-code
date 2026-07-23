@@ -1275,7 +1275,7 @@ export function registerSessionRoutes(
       }
       // Validate git branch name characters and reserved names.
       if (
-        /[^a-zA-Z0-9._/-]/.test(branchName) ||
+        /[^\p{L}\p{N}._/-]/u.test(branchName) ||
         branchName.includes('..') ||
         branchName.includes('//') ||
         branchName.startsWith('.') ||

@@ -18,7 +18,7 @@ export type SessionGitIntent =
 function validateBranchName(name: string): boolean {
   if (!name) return false;
   return !(
-    /[^a-zA-Z0-9._/-]/.test(name) ||
+    /[^\p{L}\p{N}._/-]/u.test(name) ||
     name.includes('..') ||
     name.includes('//') ||
     name.startsWith('.') ||
