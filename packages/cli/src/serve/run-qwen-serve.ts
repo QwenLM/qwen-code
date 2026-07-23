@@ -188,7 +188,7 @@ export function createBoundChannelDeliveryHandler(
   authorizations: ChannelDeliveryAuthorizationStore,
   daemonLog?: Pick<DaemonLogger, 'warn'>,
   diagnosticRedaction: WorkerDiagnosticRedactionOptions = {
-    workerEnv: process.env,
+    workerEnv: {},
   },
 ): ChannelDeliveryHandler {
   return async (info): Promise<ChannelDeliveryHostResult> => {
