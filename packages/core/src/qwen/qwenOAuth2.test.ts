@@ -2517,8 +2517,10 @@ describe('showFallbackMessage', () => {
 
     const output = getOutput();
     expect(output).toContain('\x1b]8;;');
-    // Must use DCS passthrough wrapping for tmux
-    expect(output).toContain('\x1bPtmux;');
+    // Must use DCS passthrough wrapping for tmux, with ESC bytes doubled so
+    // tmux forwards the literal sequence instead of interpreting it. The
+    // exact doubled-ESC prefix fails if the doubling is accidentally removed.
+    expect(output).toContain('\x1bPtmux;\x1b\x1b]8;;');
     expect(output).toContain('\x1b\\');
   });
 
@@ -2640,6 +2642,7 @@ describe('showFallbackMessage', () => {
       configurable: true,
     });
     process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
 
     showFallbackMessage('https://chat.qwen.ai/device?code=\x07ABC\x1b123');
 
@@ -2728,6 +2731,7 @@ describe('showFallbackMessage', () => {
       configurable: true,
     });
     process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
 
     showFallbackMessage('https://chat.qwen.ai/device?code=ABC\u202e123');
 
@@ -2744,6 +2748,7 @@ describe('showFallbackMessage', () => {
       configurable: true,
     });
     process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
 
     const url = 'https://chat.qwen.ai/device?code=ABC123';
     showFallbackMessage(url);
@@ -2777,5 +2782,119 @@ describe('showFallbackMessage', () => {
     expect(output).not.toContain('\x07');
     expect(output).not.toContain('\x1b');
     expect(output).toContain('https://chat.qwen.ai/device?code=ABC123');
+  });
+
+  it('refuses OSC 8 for VTE 0.50.0 (packed 5000, segfaults)', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['VTE_VERSION'] = '5000';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    expect(getOutput()).not.toContain('\x1b]8;;');
+  });
+
+  it('emits OSC 8 for VTE 0.78.0 (packed 7800)', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['VTE_VERSION'] = '7800';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    expect(getOutput()).toContain('\x1b]8;;');
+  });
+
+  it('emits OSC 8 for VTE dot-format version 0.60.0', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['VTE_VERSION'] = '0.60.0';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    expect(getOutput()).toContain('\x1b]8;;');
+  });
+
+  it('refuses OSC 8 for VTE dot-format version 0.50.0 (segfaults)', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['VTE_VERSION'] = '0.50.0';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    expect(getOutput()).not.toContain('\x1b]8;;');
+  });
+
+  it('refuses OSC 8 for iTerm.app < 3.1', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.0.10';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    expect(getOutput()).not.toContain('\x1b]8;;');
+  });
+
+  it('refuses OSC 8 for VS Code < 1.72', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'vscode';
+    process.env['TERM_PROGRAM_VERSION'] = '1.71.0';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC123');
+
+    expect(getOutput()).not.toContain('\x1b]8;;');
+  });
+
+  it('falls back to plain text for a non-allowlisted URL scheme', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+
+    showFallbackMessage('javascript:alert(1)');
+
+    const output = getOutput();
+    expect(output).not.toContain('\x1b]8;;');
+    expect(output).toContain('javascript:alert(1)');
+  });
+
+  it('widens the box for URLs longer than the default width in OSC 8 mode', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+    process.env['TERM_PROGRAM_VERSION'] = '3.5.0';
+
+    const url = 'https://chat.qwen.ai/device?code=' + 'A'.repeat(70);
+    showFallbackMessage(url);
+
+    const output = getOutput();
+    const lines = output.split('\n');
+    const osc8Line = lines.find((l: string) => l.includes('\x1b]8;;'));
+    expect(osc8Line).toBeDefined();
+    // Strip the OSC 8 envelope to measure only the visible characters.
+    // eslint-disable-next-line no-control-regex
+    const visible = osc8Line!.replace(/\x1b\]8;;[^\x07]*\x07/g, '');
+    // The URL stays on one clickable line and the row stays aligned: it ends
+    // with the closing border and matches the box border width.
+    expect(visible.endsWith(' |')).toBe(true);
+    const border = lines.find((l: string) => l.startsWith('+'));
+    expect(visible.length).toBe(border!.length);
   });
 });
