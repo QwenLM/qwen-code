@@ -168,13 +168,16 @@ export class SessionReferenceService {
   private deriveTitle(records: ChatRecord[]): string | undefined {
     // Prefer the user's explicitly set session title (custom_title system
     // record) over the first user message, so a renamed session shows its
-    // chosen name rather than the original prompt.
+    // chosen name rather than the original prompt. Last-write-wins: each
+    // rename appends a new record, so the last one is the current title.
+    let customTitle: string | undefined;
     for (const rec of records) {
       if (rec.type === 'system' && rec.subtype === 'custom_title') {
         const payload = rec.systemPayload as CustomTitlePayload | undefined;
-        if (payload?.customTitle) return payload.customTitle;
+        if (payload?.customTitle) customTitle = payload.customTitle;
       }
     }
+    if (customTitle) return customTitle;
     for (const rec of records) {
       if (rec.type !== 'user') continue;
       const text = this.visibleText(rec.message);

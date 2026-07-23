@@ -337,6 +337,32 @@ describe('title derivation', () => {
     expect(res.meta.title).toBe('Auth bug investigation');
   });
 
+  it('uses the last custom_title when a session has been renamed', async () => {
+    const svc = makeSvc(
+      fakeResumed([
+        {
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'Fix the auth bug' },
+          message: undefined,
+        },
+        {
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'hello' }] },
+        },
+        {
+          type: 'system',
+          subtype: 'custom_title',
+          systemPayload: { customTitle: 'Auth investigation' },
+          message: undefined,
+        },
+      ]),
+    );
+    const res = await svc.resolve('s1');
+    if ('notFound' in res) throw new Error('unexpected');
+    expect(res.meta.title).toBe('Auth investigation');
+  });
+
   it('truncates a long first user message to 80 chars', async () => {
     const long = 'A'.repeat(120);
     const svc = makeSvc(

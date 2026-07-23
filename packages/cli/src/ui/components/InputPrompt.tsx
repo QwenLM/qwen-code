@@ -2247,10 +2247,18 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
             expandedIndex={expandedSuggestionIndex}
             mouseEnabled={mouseInteractionsEnabled}
             activeCategory={
-              suggestionsFromExport ? undefined : completion.activeCategory
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : completion.activeCategory
             }
             availableCategories={
-              suggestionsFromExport ? undefined : completion.availableCategories
+              suggestionsFromExport ||
+              commandSearchActive ||
+              reverseSearchActive
+                ? undefined
+                : completion.availableCategories
             }
             onHoverIndex={
               suggestionsFromExport ? undefined : handleSuggestionHover

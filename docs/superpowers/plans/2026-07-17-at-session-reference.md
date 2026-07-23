@@ -513,24 +513,28 @@ const sessionRef = parseSessionRef(pathName);
 if (sessionRef) {
   let sessionId = sessionRef.id;
   if (!sessionId && sessionRef.title) {
-    const matches = await new SessionService(
-      config.getWorkingDir(),
-    ).findSessionsByTitle(sessionRef.title);
-    if (matches.length === 1) {
-      sessionId = matches[0].sessionId;
-    } else {
-      // 0 or >1: leave literal, warn, skip injection
-      addItem(
-        {
-          type: MessageType.INFO,
-          text:
-            matches.length === 0
-              ? `No session matches "@session:${sessionRef.title}".`
-              : `"@session:${sessionRef.title}" is ambiguous (${matches.length} matches); use the picker.`,
-        },
-        userMessageTimestamp,
-      );
-      continue; // token already retained as literal text
+    try {
+      const matches = await new SessionService(
+        config.getWorkingDir(),
+      ).findSessionsByTitle(sessionRef.title);
+      if (matches.length === 1) {
+        sessionId = matches[0].sessionId;
+      } else {
+        // 0 or >1: leave literal, warn, skip injection
+        addItem(
+          {
+            type: MessageType.INFO,
+            text:
+              matches.length === 0
+                ? `No session matches "@session:${sessionRef.title}".`
+                : `"@session:${sessionRef.title}" is ambiguous (${matches.length} matches); use the picker.`,
+          },
+          userMessageTimestamp,
+        );
+        continue; // token already retained as literal text
+      }
+    } catch {
+      // emit error card and continue
     }
   }
   try {
@@ -701,7 +705,12 @@ export async function getSessionSuggestions(
   } catch {
     return []; // I/O failure → session tab simply empty
   }
-  const needle = pattern.trim().toLowerCase();
+  const stripped = pattern.startsWith(SESSION_MENTION_PREFIX)
+    ? pattern.slice(SESSION_MENTION_PREFIX.length)
+    : pattern.toLowerCase() === 'session'
+      ? ''
+      : pattern;
+  const needle = stripped.trim().toLowerCase();
   return items
     .map((s) => {
       const label = s.customTitle?.trim() || s.prompt || s.sessionId;
