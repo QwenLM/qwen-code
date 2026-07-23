@@ -68,26 +68,43 @@ describe('recoverGoalFromRecords', () => {
     ).toEqual({ kind: 'v2', payload: newer });
   });
 
-  it('surfaces an invalid newest lifecycle record without using older state', () => {
-    expect(
-      recoverGoalFromRecords([
-        record('state-1', {
-          subtype: 'goal_state',
-          systemPayload: ACTIVE_PAYLOAD,
-        }),
-        record('state-2', {
-          subtype: 'goal_state',
-          systemPayload: {
-            v: 3,
-            snapshot: ACTIVE_PAYLOAD.snapshot,
-          } as unknown as GoalStateRecordPayloadV2,
-        }),
-      ]),
-    ).toEqual({
-      kind: 'unsupported',
-      reason: expect.stringContaining('state-2'),
-    });
-  });
+  it.each<{
+    label: string;
+    overrides: Partial<GoalRecoveryRecord>;
+  }>([
+    {
+      label: 'malformed',
+      overrides: {
+        systemPayload: {
+          v: 3,
+          snapshot: ACTIVE_PAYLOAD.snapshot,
+        } as unknown as GoalStateRecordPayloadV2,
+      },
+    },
+    {
+      label: 'non-system',
+      overrides: {
+        type: 'user',
+        systemPayload: ACTIVE_PAYLOAD,
+      },
+    },
+  ])(
+    'uses the newest valid lifecycle record when a newer record is $label',
+    ({ overrides }) => {
+      expect(
+        recoverGoalFromRecords([
+          record('state-1', {
+            subtype: 'goal_state',
+            systemPayload: ACTIVE_PAYLOAD,
+          }),
+          record('state-2', {
+            subtype: 'goal_state',
+            ...overrides,
+          }),
+        ]),
+      ).toEqual({ kind: 'v2', payload: ACTIVE_PAYLOAD });
+    },
+  );
 
   it('rejects a goal_state payload stored on a non-system record', () => {
     expect(

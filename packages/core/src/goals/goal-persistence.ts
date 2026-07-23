@@ -37,6 +37,7 @@ const LEGACY_STOPPED_KINDS = new Set([
 export function recoverGoalFromRecords(
   records: readonly GoalRecoveryRecord[],
 ): GoalRecovery {
+  let unsupported: GoalRecovery | undefined;
   for (let index = records.length - 1; index >= 0; index -= 1) {
     const record = records[index];
     if (record?.subtype !== 'goal_state') continue;
@@ -44,15 +45,14 @@ export function recoverGoalFromRecords(
       record.type === 'system'
         ? parseGoalStateRecordPayloadV2(record.systemPayload)
         : undefined;
-    return payload
-      ? { kind: 'v2', payload }
-      : {
-          kind: 'unsupported',
-          reason: `Goal lifecycle record ${record.uuid} is malformed or uses an unsupported version`,
-        };
+    if (payload) return { kind: 'v2', payload };
+    unsupported ??= {
+      kind: 'unsupported',
+      reason: `Goal lifecycle record ${record.uuid} is malformed or uses an unsupported version`,
+    };
   }
 
-  return recoverLegacyGoal(records);
+  return unsupported ?? recoverLegacyGoal(records);
 }
 
 function recoverLegacyGoal(
