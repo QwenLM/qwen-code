@@ -401,6 +401,101 @@ describe('qwen-autofix workflow', () => {
     expect(run([{ ...llm, name: 'resolve-pr' }])).toBe('true');
   });
 
+  it('auto-updates a PR red only from a stale base, gated on the check being green on main', () => {
+    // A PR can be red purely because it merged a main that was broken then and
+    // is fixed now (a web-shell TS break, an agent-registry test — both stranded
+    // healthy PRs today). The one safety gate is: the SAME failing check passes
+    // on current main. That proves the red is base-inherited AND main is healthy
+    // on it, so merging main in cannot import a fresh breakage.
+    const block = reviewScanJob.match(
+      /( {12}STALE_BASE_REDS="\$\(jq[\s\S]*?\n {12}fi\n)\n {12}# startedAt is the only staleness/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+
+    const run = ({ prChecks, mainGreen, cmp = 'behind', updateOk = true }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'ub-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+          'for a in "$@"; do case "$a" in',
+          `  */compare/*) printf '${cmp}'; exit 0;;`,
+          `  */update-branch) exit ${updateOk ? 0 : 1};;`,
+          'esac; done',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      // Wrap in a for-loop so the block's `continue` is legal; a sentinel after
+      // the loop body tells us whether `continue` fired (stale-base path) or the
+      // block fell through (no update).
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            REPO: 'o/r',
+            PR: '1',
+            MAIN_HEAD: 'mainhead999',
+            MAIN_GREEN_CHECKS: JSON.stringify(mainGreen),
+            CHECKS_JSON: JSON.stringify(prChecks),
+            PR_META: JSON.stringify({ headRefOid: 'prhead123' }),
+            PATH: `${bin}:${process.env.PATH}`,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const calls = existsSync(join(dir, 'calls.log'))
+        ? readFileSync(join(dir, 'calls.log'), 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      return {
+        updated: /pulls\/1\/update-branch/.test(calls),
+        continued: !out.includes('FELL_THROUGH'),
+      };
+    };
+    const FAIL = (name) => ({ name, conclusion: 'FAILURE' });
+    const OK = (name) => ({ name, conclusion: 'SUCCESS' });
+
+    // Base-inherited red (fails here, passes on main) + behind → update & skip.
+    expect(run({ prChecks: [FAIL('Test')], mainGreen: ['Test'] })).toEqual({
+      updated: true,
+      continued: true,
+    });
+    // Red on the PR AND on main (not base-inherited — the PR's own bug) → never
+    // touch it. This is the gate that stops churning a genuinely-broken PR.
+    expect(run({ prChecks: [FAIL('Test')], mainGreen: [] })).toEqual({
+      updated: false,
+      continued: false,
+    });
+    // Base-inherited red but the PR already contains main (ahead) → no-op skip.
+    expect(
+      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], cmp: 'ahead' }),
+    ).toEqual({ updated: false, continued: false });
+    // Diverged also counts as behind (has commits main lacks AND vice versa).
+    expect(
+      run({ prChecks: [FAIL('Lint')], mainGreen: ['Lint'], cmp: 'diverged' }),
+    ).toEqual({ updated: true, continued: true });
+    // No red at all → nothing to do.
+    expect(run({ prChecks: [OK('Test')], mainGreen: ['Test'] })).toEqual({
+      updated: false,
+      continued: false,
+    });
+    // update-branch fails (a merge conflict): still attempted, logged, and the
+    // PR is skipped this scan rather than crashing the loop.
+    expect(
+      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], updateOk: false }),
+    ).toEqual({ updated: true, continued: true });
+  });
+
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
     // "failed since the watermark" made a still-failing PR invisible the

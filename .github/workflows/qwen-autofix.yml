@@ -1713,6 +1713,26 @@ jobs:
           PENDING_STALE_MIN=240
           PENDING_CUTOFF="$(date -u -d "${PENDING_STALE_MIN} minutes ago" +%Y-%m-%dT%H:%M:%SZ)"
 
+          # Base of the auto-update-stale-base decision below. A PR can be red
+          # purely because it merged a main that was BROKEN at the time and has
+          # since been FIXED — observed repeatedly (a web-shell TS break, an
+          # agent-registry test) stranding healthy PRs on a failure that has
+          # nothing to do with them. GitHub's "Update branch" merges current
+          # main in and re-runs CI, which clears it. We do that automatically,
+          # but ONLY when the specific failing check is GREEN on current main —
+          # that is the single safety gate: it proves the red is base-inherited
+          # (not the PR's own bug) AND that main is healthy on that check right
+          # now (so the update cannot pull a NEW breakage in). Fetch main's head
+          # and the set of check names currently passing on it, ONCE per scan.
+          DEFAULT_BRANCH="${DEFAULT_BRANCH:-main}"
+          MAIN_HEAD="$(gh api "repos/${REPO}/commits/${DEFAULT_BRANCH}" --jq '.sha' 2> /dev/null || echo '')"
+          MAIN_GREEN_CHECKS='[]'
+          if [[ -n "${MAIN_HEAD}" ]]; then
+            MAIN_GREEN_CHECKS="$(gh api --paginate "repos/${REPO}/commits/${MAIN_HEAD}/check-runs" \
+              --jq '[.check_runs[] | select(.conclusion == "success") | .name]' 2> /dev/null \
+              | jq -c -s 'add // []' || echo '[]')"
+          fi
+
           # PRs whose review-address is already RUNNING OR QUEUED in any live
           # autofix run must not be re-targeted. Schedule/dispatch runs execute
           # against main's SHA, so their matrix jobs never appear in the PR's
@@ -1809,6 +1829,40 @@ jobs:
               ISSUE="${PR}"
             fi
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
+
+            # Auto-update a PR that is red ONLY because of a stale base (see the
+            # MAIN_GREEN_CHECKS rationale above). Act only when a check that is
+            # FAILING on this PR is passing on current main by the SAME name —
+            # that gate proves it is base-inherited and main is healthy on it, so
+            # the merge cannot import a fresh breakage. Runs before the feedback
+            # logic because a stuck-on-stale-base PR often has no NEW feedback at
+            # all (it just sits red), which is exactly #7490's case.
+            STALE_BASE_REDS="$(jq -c -n \
+              --argjson checks "${CHECKS_JSON}" --argjson green "${MAIN_GREEN_CHECKS}" '
+              [ $checks[]
+                | select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED"))
+                | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
+                | (.name // .workflowName // "")
+                | select(. != "" and (. as $n | $green | index($n))) ]')"
+            PR_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            if [[ "${STALE_BASE_REDS}" != '[]' && -n "${MAIN_HEAD}" && -n "${PR_HEAD_OID}" ]]; then
+              # Only when the PR does not already contain main's head — else the
+              # update is a no-op (422) and the red is NOT stale-base after all.
+              # Compare by SHA so a fork head needs no owner:branch qualifier.
+              CMP_STATUS="$(gh api "repos/${REPO}/compare/${MAIN_HEAD}...${PR_HEAD_OID}" --jq '.status' 2> /dev/null || echo '')"
+              if [[ "${CMP_STATUS}" == 'behind' || "${CMP_STATUS}" == 'diverged' ]]; then
+                RED_NAMES="$(jq -r 'join(", ")' <<< "${STALE_BASE_REDS}")"
+                if gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" > /dev/null 2>&1; then
+                  echo "🔀 #${PR}: red check(s) [${RED_NAMES}] pass on current main ${MAIN_HEAD:0:9} but fail here on a stale base — merged main in via update-branch; CI will re-run"
+                  fleet_row "${PR}" 'base-updated' "stale-base red [${RED_NAMES}] — merged current main, CI re-running"
+                else
+                  echo "⚠️ #${PR}: wanted to update the stale base (red [${RED_NAMES}] green on main) but update-branch failed (likely a merge conflict) — leaving for a human"
+                  fleet_row "${PR}" 'base-update-failed' "stale-base red [${RED_NAMES}] but update-branch failed (conflict?)"
+                fi
+                continue
+              fi
+            fi
+
             # startedAt is the only staleness clock: a check blocks only if it
             # started within the bound; one with no startedAt (queued, not yet
             # running) is not blocking (the next scan re-checks once it starts).
