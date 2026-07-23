@@ -232,6 +232,19 @@ export interface BridgeRestoredSession extends BridgeSession {
   historyHasMore?: boolean;
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
+  /**
+   * Epoch token of the session's event bus. Clients echo it (with
+   * `lastEventId`) on SSE subscribe so a daemon restart between this
+   * response and the subscribe is detected deterministically instead of
+   * via the numeric heuristic.
+   */
+  eventEpoch?: string;
+  /**
+   * True when the compaction engine failed at some point, so
+   * `compactedReplay`/`liveJournal` may silently miss events. Clients
+   * should prefer the full transcript over this replay.
+   */
+  replayDegraded?: boolean;
 }
 
 export interface BridgeSessionTranscriptPageRequest {
@@ -870,6 +883,13 @@ export interface AcpSessionBridge {
   getSessionLastEventId(sessionId: string): number;
 
   /**
+   * Return the epoch token of this session's event bus. Regenerated on
+   * every bus construction (daemon restart), never persisted. Throws
+   * `SessionNotFoundError` when the id is unknown.
+   */
+  getSessionEventEpoch(sessionId: string): string;
+
+  /**
    * Return the current compacted replay snapshot for a loaded session, when
    * the bridge has a compaction engine configured.
    */
@@ -1151,6 +1171,13 @@ export interface AcpSessionBridge {
      */
     promptId?: string;
     lastEventId?: number;
+    /**
+     * Epoch token of the event bus that produced `lastEventId`, mirroring
+     * the `POST /session/:id/prompt` 202 envelope: a client seeding its SSE
+     * resume position from an accepted continuation must also learn the bus
+     * epoch so a daemon restart in between is detected (DAEMON-001).
+     */
+    eventEpoch?: string;
   }>;
 
   /** Read structured session usage stats (tokens, tools, files). */
