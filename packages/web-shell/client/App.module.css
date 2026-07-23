@@ -908,6 +908,10 @@
   margin-bottom: 8px;
 }
 
+.chatHeader {
+  flex-shrink: 0;
+}
+
 .customFooter {
   flex-shrink: 0;
 }
