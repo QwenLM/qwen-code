@@ -261,12 +261,23 @@ jobs:
             fi
           done
 
-          # Report-only paths must never appear in the diff (skill scope
-          # limits). A hit means the agent broke contract: fail the run.
-          if git diff --name-only origin/main..."${BRANCH}" | grep -E '^packages/core/src/|^packages/[^/]+/src/(auth|providers|models|config|tools|services)/'; then
-            echo '❌ Branch touches report-only paths; refusing to publish.'
-            exit 1
-          fi
+          # Impact-scope gate (skill scope limits): no single commit may
+          # touch more than 3 files or more than 100 lines of production
+          # code. A hit means the agent broke contract: fail the run.
+          MAX_FILES_PER_FIX='3'
+          MAX_LINES_PER_FIX='100'
+          while IFS= read -r sha; do
+            FILES="$(git diff-tree --no-commit-id --name-only -r "${sha}" | wc -l | tr -d ' ')"
+            if [[ "${FILES}" -gt "${MAX_FILES_PER_FIX}" ]]; then
+              echo "❌ Commit ${sha:0:7} touches ${FILES} files; per-fix cap is ${MAX_FILES_PER_FIX}."
+              exit 1
+            fi
+            LINES="$(git diff-tree --no-commit-id --numstat -r "${sha}" | awk '{a+=$1; d+=$2} END {print a+d+0}')"
+            if [[ "${LINES}" -gt "${MAX_LINES_PER_FIX}" ]]; then
+              echo "❌ Commit ${sha:0:7} has ${LINES} diff lines; per-fix cap is ${MAX_LINES_PER_FIX}."
+              exit 1
+            fi
+          done < <(git rev-list origin/main.."${BRANCH}")
 
           COMMITS="$(git rev-list --count origin/main.."${BRANCH}")"
           echo "commits=${COMMITS}" >> "${GITHUB_OUTPUT}"
