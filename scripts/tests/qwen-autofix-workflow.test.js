@@ -712,6 +712,12 @@ describe('qwen-autofix workflow', () => {
       unparked: false,
       idle: true,
     });
+    // Both heads empty (API failures on both sides) → the -n guard must
+    // short-circuit; without this, "" == "" would enter the unpark block.
+    expect(run({ handoffHead: '', liveHead: '' })).toEqual({
+      unparked: false,
+      idle: true,
+    });
   }, 20000);
 
   it('marks a gate-rejection parking with a head-scoped handoff marker', () => {
