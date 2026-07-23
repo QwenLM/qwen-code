@@ -300,6 +300,18 @@ npm run preflight  → clean → install → format → lint → build → typec
 
 **模式：** 当函数有多个提前返回路径（loop 检测、API 错误、正常完成）时，每条路径都必须触发适当的 hook 事件。模式：识别所有提前返回，在每个 `return` 前添加 hook 触发，使用 fire-and-forget（`.catch()`）防止 hook 失败影响主控制流。
 
+### 5.18 单一流水线 + 可插拔后端
+
+- **PR #7587**：触屏设备用 textarea 替代 CodeMirror，但复用同一提交流水线——`mobileText` 镜像到 `mobileTextRef`，`submitComposerText`/`getText`/`hasInput` 无需修改
+
+**模式：** 添加设备特定 UI 变体时，复用提交/状态流水线，仅切换输入后端。将替代输入的状态镜像到流水线读取的同一 ref 结构，使所有操作无需修改。避免并行路径的状态漂移风险。
+
+### 5.19 关注点分离：设备检测 vs 行为门控
+
+- **PR #7587**：`useIsTouchComposer()`（冻结于 mount，含 URL 覆盖）选择编辑器后端；`isCoarsePointerDevice()`（非响应式，忽略覆盖）控制 focus 行为
+
+**模式：** 设备检测有两种用途——选择 UI 后端和控制设备特定行为（如 focus）。分离为两个独立函数：一个响应配置覆盖（用于 UI 选择），一个忽略覆盖（用于物理行为门控）。即使强制使用某后端，物理行为仍按设备类型执行。
+
 ## 六、架构演进方向
 
 基于当前 PR 趋势的观察：
