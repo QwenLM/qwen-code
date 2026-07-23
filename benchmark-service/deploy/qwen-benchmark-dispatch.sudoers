@@ -1,1 +1,1 @@
-ecs-user ALL=(root) NOPASSWD: /usr/local/sbin/qwen-benchmark-dispatch
+qwen-runner ALL=(root) NOPASSWD: /usr/local/sbin/qwen-benchmark-dispatch

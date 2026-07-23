@@ -337,6 +337,10 @@ sudo systemctl enable --now qwen-benchmark-worker.service
 
 安装 self-hosted runner dispatcher：
 
+这里的 `qwen-runner` 是 GitHub Actions runner 的系统用户；dispatcher
+再将实际入队操作降权为 `ecs-user`。如果 runner 使用其他系统用户，需要同步修改
+`deploy/qwen-benchmark-dispatch.sudoers`，worker 用户仍保持 `ecs-user`。
+
 ```bash
 sudo install -o root -g root -m 0750 \
   deploy/qwen-benchmark-dispatch \
