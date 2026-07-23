@@ -108,12 +108,18 @@ rules:
     const hit = evaluate(policy, {
       tool: 'edit_file',
       args: { path: 'src/auth/login.ts' },
+      paths: ['/proj/src/auth/login.ts'],
+      projectRoot: '/proj',
+      cwd: '/proj',
     });
     expect(hit.action).toBe('deny');
 
     const miss = evaluate(policy, {
       tool: 'edit_file',
       args: { path: 'src/util/x.ts' },
+      paths: ['/proj/src/util/x.ts'],
+      projectRoot: '/proj',
+      cwd: '/proj',
     });
     expect(miss.action).toBe('prompt');
   });
@@ -502,5 +508,54 @@ rules:
     expect(d.action).toBe('prompt'); // downgraded (maxPerWindow still deferred)
     expect(d.usedDeferredField).toBe(true);
     expect(d.source).toBe('policy'); // a rule was the cause
+  });
+
+  const denyEnv: Policy = {
+    defaults: { action: 'prompt' as const },
+    rules: [
+      {
+        id: 'deny-env',
+        match: { pathGlob: ['**/.env*'] },
+        action: 'deny' as const,
+      },
+    ],
+  };
+
+  it('matches pathGlob against ctx.paths (not args scraping)', () => {
+    const d = evaluate(denyEnv, {
+      tool: 'edit',
+      args: {},
+      paths: ['/proj/.env'],
+      projectRoot: '/proj',
+      cwd: '/proj',
+    });
+    expect(d.action).toBe('deny');
+    expect(d.ruleId).toBe('deny-env');
+  });
+
+  it.each(['/proj/./.env', '/proj/sub/../.env'])(
+    'normalizes equivalent path spellings (traversal cannot bypass): %s',
+    (p) => {
+      const d = evaluate(denyEnv, {
+        tool: 'edit',
+        args: {},
+        paths: [p],
+        projectRoot: '/proj',
+        cwd: '/proj',
+      });
+      expect(d.action).toBe('deny');
+    },
+  );
+
+  it('still reports no-path-candidates when a pathGlob rule has no paths', () => {
+    const d = evaluate(denyEnv, {
+      tool: 'edit',
+      args: {},
+      paths: [],
+      projectRoot: '/proj',
+      cwd: '/proj',
+    });
+    expect(d.action).toBe('prompt'); // falls through to the default
+    expect(d.source).toBe('default');
   });
 });

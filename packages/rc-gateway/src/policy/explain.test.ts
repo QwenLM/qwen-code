@@ -171,7 +171,13 @@ describe('explainPolicy — skipped reason tokens', () => {
     {
       name: 'path-mismatch',
       rule: { match: { tool: 'read', pathGlob: '*.env' }, action: 'deny' },
-      ctx: { tool: 'read', args: { path: '/src/app.ts' } },
+      ctx: {
+        tool: 'read',
+        args: { path: '/src/app.ts' },
+        paths: ['/src/app.ts'],
+        projectRoot: '/src',
+        cwd: '/src',
+      },
       reason: 'path-mismatch',
     },
     {

@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import type { Policy, PolicyAction, PolicyRule } from './loader.js';
 import { globMatch, matchesAny } from './glob.js';
+import { matchesPathPattern } from '@qwen-code/qwen-code-core';
 import {
   parseTimeOfDay,
   isWithinTimeOfDay,
@@ -15,8 +17,18 @@ import {
 
 export interface ToolCallContext {
   tool: string;
-  /** Canonicalized internally for argsGlob/pathGlob matching. */
+  /** Canonicalized internally for argsGlob matching. */
   args?: unknown;
+  /**
+   * Every path the call touches. Supplied by `frameToContext` in production and
+   * by the explain CLI from `--path`. Absent → pathGlob rules cannot match.
+   */
+  paths?: string[];
+  /** Operations the call implies (see Task 4's `match.operation`). */
+  operations?: string[];
+  /** Anchors picomatch path matching; default to `process.cwd()` when absent. */
+  projectRoot?: string;
+  cwd?: string;
   originScope?: string;
   sessionTag?: string;
 }
@@ -66,19 +78,32 @@ function canonicalArgString(args: unknown): string {
   return raw.replace(/\s+/g, ' ').trim();
 }
 
-/** Collect candidate path strings from object args (path, cwd, files[]). */
-function candidatePaths(args: unknown): string[] {
-  if (typeof args !== 'object' || args === null) return [];
-  const obj = args as Record<string, unknown>;
-  const out: string[] = [];
-  if (typeof obj['path'] === 'string') out.push(obj['path']);
-  if (typeof obj['cwd'] === 'string') out.push(obj['cwd']);
-  if (Array.isArray(obj['files'])) {
-    for (const f of obj['files']) {
-      if (typeof f === 'string') out.push(f);
+/**
+ * Path matching via core's picomatch-backed matcher: real `**` depth semantics
+ * and path normalization, so an equivalent spelling (`./x`, `a/../x`) cannot
+ * bypass a deny that the old hand-rolled glob would have missed. `filePath` is
+ * resolved against `cwd` first — `matchesPathPattern` normalizes the PATTERN
+ * (via `path.join` internally) but only forward-slashes the candidate, never
+ * collapsing `.`/`..` segments in it — so that collapsing must happen here.
+ * A pattern picomatch rejects yields `false` — never an accidental match.
+ */
+function pathMatchesAny(
+  spec: string | string[] | undefined,
+  filePath: string,
+  projectRoot: string,
+  cwd: string,
+): boolean {
+  if (spec === undefined) return true;
+  const resolved = path.resolve(cwd, filePath);
+  const patterns = Array.isArray(spec) ? spec : [spec];
+  for (const pattern of patterns) {
+    try {
+      if (matchesPathPattern(pattern, resolved, projectRoot, cwd)) return true;
+    } catch {
+      // Unusable pattern → not a match.
     }
   }
-  return out;
+  return false;
 }
 
 /** Specificity weight per the design's table (Decisions §5). */
@@ -120,7 +145,11 @@ function matchReason(
   // pathGlob: present but zero candidate paths → no match.
   if (m.pathGlob !== undefined) {
     if (paths.length === 0) return 'no-path-candidates';
-    if (!paths.some((p) => matchesAny(m.pathGlob, p))) return 'path-mismatch';
+    const root = ctx.projectRoot ?? process.cwd();
+    const cwd = ctx.cwd ?? root;
+    if (!paths.some((p) => pathMatchesAny(m.pathGlob, p, root, cwd))) {
+      return 'path-mismatch';
+    }
   }
   // originScope / sessionTag exact (absent → no constraint).
   if (m.originScope !== undefined && m.originScope !== ctx.originScope) {
@@ -277,7 +306,7 @@ export function evaluate(
   quota?: QuotaOracle,
 ): PolicyDecision {
   const argString = canonicalArgString(ctx.args);
-  const paths = candidatePaths(ctx.args);
+  const paths = ctx.paths ?? [];
 
   for (const idx of orderedRuleIndices(policy)) {
     const rule = policy.rules[idx];
@@ -375,7 +404,7 @@ export function explainPolicy(
   quota?: QuotaOracle,
 ): PolicyExplanation {
   const argString = canonicalArgString(ctx.args);
-  const paths = candidatePaths(ctx.args);
+  const paths = ctx.paths ?? [];
   const trace: RuleTrace[] = [];
   let winnerFound = false;
 
