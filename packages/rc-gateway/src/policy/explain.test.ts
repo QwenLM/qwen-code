@@ -141,21 +141,16 @@ describe('explainPolicy — trace structure', () => {
     expect(trace.some((t) => t.status === 'matched')).toBe(false);
     expect(decision.source).toBe('default');
   });
-});
 
-describe('explains a pathGlob rule from --path', () => {
   it('explains a pathGlob rule from --path', () => {
-    const policy = {
-      defaults: { action: 'prompt' as const },
-      rules: [
-        {
-          id: 'deny-env',
-          match: { pathGlob: ['**/.env*'] },
-          action: 'deny' as const,
-        },
-      ],
-    };
-    const ex = explainPolicy(policy, {
+    const p = policy([
+      {
+        id: 'deny-env',
+        match: { pathGlob: ['**/.env*'] },
+        action: 'deny',
+      },
+    ]);
+    const ex = explainPolicy(p, {
       tool: 'edit',
       args: {},
       paths: ['/proj/.env'],

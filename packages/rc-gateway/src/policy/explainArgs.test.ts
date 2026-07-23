@@ -82,6 +82,13 @@ describe('parseExplainArgs', () => {
     expect(tool).toBe('bash');
     expect(ctx.args).toBeUndefined();
   });
+
+  it('--path populates ctx.paths for pathGlob rule evaluation', () => {
+    const { ctx } = parseExplainArgs(['edit', '--path=/proj/.env']);
+    expect(ctx.paths).toEqual(['/proj/.env']);
+    expect(ctx.projectRoot).toBe(process.cwd());
+    expect(ctx.cwd).toBe(process.cwd());
+  });
 });
 
 function policy(rules: Policy['rules']): Policy {
