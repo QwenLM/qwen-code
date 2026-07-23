@@ -596,4 +596,71 @@ rules:
     expect(d.action).toBe('deny');
     expect(d.ruleId).toBe('deny-auth');
   });
+
+  const denyEnvWrites = {
+    defaults: { action: 'prompt' as const },
+    rules: [
+      {
+        id: 'deny-env-writes',
+        match: { pathGlob: ['**/.env*'], operation: 'write' },
+        action: 'deny' as const,
+      },
+    ],
+  };
+
+  it('matches only the named operation', () => {
+    const write = evaluate(denyEnvWrites, {
+      tool: 'edit',
+      args: {},
+      paths: ['/proj/.env'],
+      operations: ['write'],
+      projectRoot: '/proj',
+      cwd: '/proj',
+    });
+    expect(write.action).toBe('deny');
+
+    const read = evaluate(denyEnvWrites, {
+      tool: 'read',
+      args: {},
+      paths: ['/proj/.env'],
+      operations: ['read'],
+      projectRoot: '/proj',
+      cwd: '/proj',
+    });
+    expect(read.action).toBe('prompt');
+    expect(read.source).toBe('default');
+  });
+
+  it('accepts a list of operations', () => {
+    const rule = {
+      defaults: { action: 'prompt' as const },
+      rules: [
+        {
+          id: 'r',
+          match: { operation: ['write', 'execute'] },
+          action: 'deny' as const,
+        },
+      ],
+    };
+    expect(
+      evaluate(rule, { tool: 'execute', args: {}, operations: ['execute'] })
+        .action,
+    ).toBe('deny');
+    expect(
+      evaluate(rule, { tool: 'read', args: {}, operations: ['read'] }).action,
+    ).toBe('prompt');
+  });
+
+  it('does not match when the call reports no operations', () => {
+    expect(
+      evaluate(denyEnvWrites, {
+        tool: 'other',
+        args: {},
+        paths: ['/proj/.env'],
+        operations: [],
+        projectRoot: '/proj',
+        cwd: '/proj',
+      }).action,
+    ).toBe('prompt');
+  });
 });

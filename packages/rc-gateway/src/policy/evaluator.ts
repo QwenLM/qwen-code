@@ -140,6 +140,7 @@ function specificity(rule: PolicyRule): number {
   }
   if (m.argsGlob !== undefined) w += 30;
   if (m.pathGlob !== undefined) w += 30;
+  if (m.operation !== undefined) w += 30;
   if (m.originScope !== undefined) w += 20;
   if (m.timeOfDay !== undefined && m.timeOfDay !== null) w += 20;
   if (m.sessionTag !== undefined) w += 20;
@@ -173,6 +174,13 @@ function matchReason(
     if (!paths.some((p) => pathMatchesAny(m.pathGlob, p, root, cwd))) {
       return 'path-mismatch';
     }
+  }
+  // operation (absent → no constraint). Pure AND, like every other dimension:
+  // it can only ever NARROW a rule.
+  if (m.operation !== undefined) {
+    const want = Array.isArray(m.operation) ? m.operation : [m.operation];
+    const have = ctx.operations ?? [];
+    if (!want.some((o) => have.includes(o))) return 'operation-mismatch';
   }
   // originScope / sessionTag exact (absent → no constraint).
   if (m.originScope !== undefined && m.originScope !== ctx.originScope) {

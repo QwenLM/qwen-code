@@ -14,6 +14,7 @@ export interface PolicyRuleMatch {
   tool?: string;
   argsGlob?: string | string[];
   pathGlob?: string | string[];
+  operation?: string | string[];
   originScope?: string;
   sessionTag?: string;
   // Deferred (parsed, not evaluated this cycle):
