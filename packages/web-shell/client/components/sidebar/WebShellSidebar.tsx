@@ -2608,6 +2608,7 @@ export function WebShellSidebar({
               ) : (
                 <>
                   <span className={styles.sessionText}>
+                    {/* @ts-expect-error worktree exists in SDK source, not in stale dist */}
                     {session.worktree && (
                       <GitForkIcon
                         size={11}

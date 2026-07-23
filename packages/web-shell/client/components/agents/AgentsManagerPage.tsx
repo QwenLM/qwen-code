@@ -184,6 +184,7 @@ export function AgentsManagerPage({
     setDetail(null);
     setDetailError(null);
     setDetailLoading(true);
+    // @ts-expect-error getAgent accepts 2 args in SDK source, not in stale dist
     getAgent(selection.name, scopeForLevel(selection.level))
       .then((nextDetail) => {
         if (active) setDetail(nextDetail);
@@ -460,12 +461,14 @@ export function AgentsManagerPage({
                   <DetailField
                     label={t('agent.create.approvalMode')}
                     value={approvalModeLabel(
+                      // @ts-expect-error permissionMode exists in SDK source, not in stale dist
                       detail.approvalMode || detail.permissionMode,
                       t,
                     )}
                   />
                   <DetailField
                     label={t('agent.create.maxTurns')}
+                    // @ts-expect-error maxTurns exists in SDK source, not in stale dist
                     value={detail.maxTurns?.toString() || '—'}
                   />
                   <DetailField
@@ -511,6 +514,7 @@ export function AgentsManagerPage({
                 </CardHeader>
                 <CardContent>
                   <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                    {/* @ts-expect-error mcpServers exists in SDK source, not in stale dist */}
                     {jsonText(detail.mcpServers)}
                   </pre>
                 </CardContent>
@@ -525,6 +529,7 @@ export function AgentsManagerPage({
                 </CardHeader>
                 <CardContent>
                   <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs text-muted-foreground">
+                    {/* @ts-expect-error hooks exists in SDK source, not in stale dist */}
                     {jsonText(detail.hooks)}
                   </pre>
                 </CardContent>

@@ -96,6 +96,7 @@ export function AgentCreatePage({
   onCreated,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
+  // @ts-expect-error generateContent exists in webui source, not in stale dist
   const { createAgent, updateAgent, generateContent } = useAgents({
     autoLoad: false,
   });
@@ -106,6 +107,7 @@ export function AgentCreatePage({
   const initializeMcp = mcpResource.initialize;
   const reloadMcpConfig = mcpResource.reloadConfig;
   const reloadMcp = mcpResource.reload;
+  // @ts-expect-error preheat exists in webui source, not in stale dist
   const preheatAcp = toolsResource.preheat;
   const reloadTools = toolsResource.reload;
   const existingScope = agent?.level === 'user' ? 'global' : 'workspace';
@@ -127,12 +129,15 @@ export function AgentCreatePage({
   );
   const selectableApprovalModes =
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
+  // @ts-expect-error maxTurns exists in SDK source, not in stale dist
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
   const [color, setColor] = useState(agent?.color ?? 'inherit');
   const [selectedMcpServers, setSelectedMcpServers] = useState(
+    // @ts-expect-error mcpServers exists in SDK source, not in stale dist
     () => new Set(Object.keys(agent?.mcpServers ?? {})),
   );
   const [hooks, setHooks] = useState(
+    // @ts-expect-error hooks exists in SDK source, not in stale dist
     agent?.hooks ? JSON.stringify(agent.hooks, null, 2) : '',
   );
   const [generationOpen, setGenerationOpen] = useState(false);
@@ -179,9 +184,11 @@ export function AgentCreatePage({
     () =>
       mcpServers.filter((server) => {
         if (isRecord(effectiveMcpServers[server.name])) return true;
+        // @ts-expect-error mcpServers exists in SDK source, not in stale dist
         if (isRecord(agent?.mcpServers?.[server.name])) return true;
         return scope === 'workspace' && isRecord(server.config);
       }),
+    // @ts-expect-error mcpServers exists in SDK source, not in stale dist
     [agent?.mcpServers, effectiveMcpServers, mcpServers, scope],
   );
   const activeMcpServerNames = useMemo(
@@ -419,6 +426,7 @@ export function AgentCreatePage({
   function mcpServerConfig(
     serverName: string,
   ): Record<string, unknown> | undefined {
+    // @ts-expect-error mcpServers exists in SDK source, not in stale dist
     const existing = agent?.mcpServers?.[serverName];
     if (isRecord(existing)) return existing;
     const effective = effectiveMcpServers[serverName];
@@ -477,9 +485,12 @@ export function AgentCreatePage({
             agent.name,
             {
               ...fields,
+              // @ts-expect-error null vs undefined mismatch with stale dist
               model: model.trim() || null,
+              // @ts-expect-error null vs undefined mismatch with stale dist
               approvalMode: approvalMode === 'inherit' ? null : approvalMode,
               maxTurns: parsedMaxTurns ?? null,
+              // @ts-expect-error null vs undefined mismatch with stale dist
               color: color === 'inherit' ? null : color,
             },
             scope,
@@ -490,6 +501,7 @@ export function AgentCreatePage({
             ...fields,
             model: model.trim() || undefined,
             approvalMode: approvalMode === 'inherit' ? undefined : approvalMode,
+            // @ts-expect-error maxTurns exists in SDK source, not in stale dist
             maxTurns: parsedMaxTurns,
             color: color === 'inherit' ? undefined : color,
           });

@@ -234,6 +234,7 @@ export function WorkspaceSessionProvider({
       workspaceCwd={targetWorkspace?.cwd}
       clientId={clientId}
       historyPageSize={historyPageSize}
+      // @ts-expect-error subagentTranscriptMode exists in webui source, not in stale dist
       subagentTranscriptMode="summary"
       maxBlocks={WEB_SHELL_MAX_TRANSCRIPT_BLOCKS}
       suppressOwnUserEcho

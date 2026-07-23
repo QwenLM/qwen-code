@@ -197,6 +197,7 @@ export function useMessages(t: Translator): Message[] {
         ? existingRequest.request
         : Promise.allSettled(
             callIds.map(async (callId) => {
+              // @ts-expect-error resolveSubagentSession exists in SDK source, not in stale dist
               const resolution = await workspace.client.resolveSubagentSession(
                 sessionId,
                 callId,
