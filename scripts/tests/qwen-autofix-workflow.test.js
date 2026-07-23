@@ -413,7 +413,13 @@ describe('qwen-autofix workflow', () => {
     expect(block).toBeTruthy();
     const script = block.replace(/^ {12}/gm, '');
 
-    const run = ({ prChecks, mainGreen, cmp = 'behind', updateOk = true }) => {
+    const run = ({
+      prChecks,
+      mainGreen,
+      cmp = 'behind',
+      updateOk = true,
+      mainHead = 'mainhead999',
+    }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ub-'));
       const bin = join(dir, 'bin');
       mkdirSync(bin);
@@ -444,7 +450,7 @@ describe('qwen-autofix workflow', () => {
             ...process.env,
             REPO: 'o/r',
             PR: '1',
-            MAIN_HEAD: 'mainhead999',
+            MAIN_HEAD: mainHead,
             MAIN_GREEN_CHECKS: JSON.stringify(mainGreen),
             CHECKS_JSON: JSON.stringify(prChecks),
             PR_META: JSON.stringify({ headRefOid: 'prhead123' }),
@@ -524,6 +530,18 @@ describe('qwen-autofix workflow', () => {
         mainGreen: ['review-address (1)'],
       }),
     ).toEqual({ updated: true, continued: true });
+    // MAIN_HEAD empty (initial gh api failure): the -n guard prevents any
+    // update-branch call — a future refactor removing that guard would silently
+    // allow updates with a null compare baseline.
+    expect(
+      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], mainHead: '' }),
+    ).toEqual({ updated: false, continued: false });
+    // CMP_STATUS empty (compare API failure): empty falls through today (no
+    // update), but a future change treating empty as "assume behind" would
+    // auto-merge main into PRs blindly.
+    expect(
+      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], cmp: '' }),
+    ).toEqual({ updated: false, continued: false });
   });
 
   it('keeps a still-red check visible, but only once per head', () => {
