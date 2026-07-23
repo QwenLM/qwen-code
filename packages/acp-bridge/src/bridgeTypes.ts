@@ -232,6 +232,19 @@ export interface BridgeRestoredSession extends BridgeSession {
   historyHasMore?: boolean;
   /** High-water mark event ID — client uses this as initial SSE cursor. */
   lastEventId?: number;
+  /**
+   * Epoch token of the session's event bus. Clients echo it (with
+   * `lastEventId`) on SSE subscribe so a daemon restart between this
+   * response and the subscribe is detected deterministically instead of
+   * via the numeric heuristic.
+   */
+  eventEpoch?: string;
+  /**
+   * True when the compaction engine failed at some point, so
+   * `compactedReplay`/`liveJournal` may silently miss events. Clients
+   * should prefer the full transcript over this replay.
+   */
+  replayDegraded?: boolean;
 }
 
 export interface BridgeSessionTranscriptPageRequest {
@@ -545,6 +558,9 @@ export const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
 export const TODO_STOP_GUARD_QUEUE_RELEASE_METHOD =
   'craft/todoStopGuardQueueReleased';
 
+/** Parent-to-agent request that acknowledges prompt cancellation handling. */
+export const PROMPT_CANCEL_METHOD = 'craft/cancelPendingPrompt';
+
 /**
  * Reverse tool channel marker (issue #5626, Phase 2). The parent serve process
  * stamps this boolean on a client-hosted (extension) MCP server's
@@ -601,6 +617,14 @@ export interface PendingPromptEntry {
    * later publish attempts for the same prompt are suppressed.
    */
   terminalPublished?: boolean;
+  /** Cancellation handshake; duplicate callers await rather than resend it. */
+  cancelForwardInitial?: Promise<void>;
+  /** Full cancellation handshake, used to fence the next FIFO dispatch. */
+  cancelForwardDrain?: Promise<void>;
+  /** Releases the cancellation fence when the prompt deadline expires. */
+  cancelForwardDeadline?: Promise<void>;
+  /** True after the prompt request has been handed to the ACP connection. */
+  dispatched?: boolean;
   /**
    * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
    * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until
@@ -704,6 +728,37 @@ export type BridgeGenerationStreamEvent =
 
 export type BridgeGenerationNotificationEvent = Exclude<
   BridgeGenerationStreamEvent,
+  { type: 'done' }
+>;
+
+export type BridgeWorkspaceGenerationStreamEvent =
+  | {
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+    }
+  | {
+      type: 'thinking';
+      requestId: string;
+    }
+  | {
+      type: 'delta';
+      requestId: string;
+      seq: number;
+      text: string;
+    }
+  | {
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
+  BridgeWorkspaceGenerationStreamEvent,
   { type: 'done' }
 >;
 
@@ -837,6 +892,13 @@ export interface AcpSessionBridge {
    * start SSE replay so no events are missed.
    */
   getSessionLastEventId(sessionId: string): number;
+
+  /**
+   * Return the epoch token of this session's event bus. Regenerated on
+   * every bus construction (daemon restart), never persisted. Throws
+   * `SessionNotFoundError` when the id is unknown.
+   */
+  getSessionEventEpoch(sessionId: string): string;
 
   /**
    * Return the current compacted replay snapshot for a loaded session, when
@@ -1018,7 +1080,10 @@ export interface AcpSessionBridge {
   initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
 
   /** Reload persisted MCP settings into workspace and active session configs. */
-  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+  reloadWorkspaceMcp(options?: {
+    forceReconnectAll?: boolean;
+    forceReconnectWhich?: string[];
+  }): Promise<{ accepted: boolean }>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.
@@ -1117,6 +1182,13 @@ export interface AcpSessionBridge {
      */
     promptId?: string;
     lastEventId?: number;
+    /**
+     * Epoch token of the event bus that produced `lastEventId`, mirroring
+     * the `POST /session/:id/prompt` 202 envelope: a client seeding its SSE
+     * resume position from an accepted continuation must also learn the bus
+     * epoch so a daemon restart in between is detected (DAEMON-001).
+     */
+    eventEpoch?: string;
   }>;
 
   /** Read structured session usage stats (tokens, tools, files). */
@@ -1367,6 +1439,13 @@ export interface AcpSessionBridge {
     description: string;
     systemPrompt: string;
   }>;
+
+  /** Run stateless, tool-free generation in the resolved workspace runtime. */
+  generateWorkspaceContent?(
+    prompt: string,
+    signal: AbortSignal,
+    originatorClientId: string | undefined,
+  ): AsyncIterable<BridgeWorkspaceGenerationStreamEvent>;
 
   /**
    * Tear down a session — kill the child, drop from maps, publish

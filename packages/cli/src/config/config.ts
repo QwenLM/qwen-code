@@ -2065,6 +2065,17 @@ export async function loadCliConfig(
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
     disabledSkillNamesProvider:
       bareMode || safeMode ? undefined : disabledSkillNamesProvider,
+    customSkillDirs:
+      bareMode || safeMode
+        ? undefined
+        : (Array.isArray(settings.skills?.directories)
+            ? settings.skills.directories
+            : []
+          )
+            .filter(
+              (d): d is string => typeof d === 'string' && d.trim().length > 0,
+            )
+            .map((d) => d.trim()),
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     visibleTools: visibleTools.length > 0 ? visibleTools : undefined,
     // New unified permissions (PermissionManager source of truth).
@@ -2118,12 +2129,11 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
-    // Ordinary interactive TUI defers telemetry until after first paint. Auth
-    // events emitted before the deferred init are an accepted startup-latency
-    // tradeoff. This intentionally differs from IDE deferral: `qwen -i
-    // "prompt"` must await IDE context before auto-submit, but telemetry can
-    // still initialize after render unless an initial prompt is present.
-    deferTelemetryInitialization: interactive && !isAcpMode && !question,
+    // Ordinary interactive TUI defers telemetry until after first paint; ACP
+    // defers it until after the initialize response is written. Events emitted
+    // before deferred init are an accepted startup-latency tradeoff. `qwen -i
+    // "prompt"` still initializes eagerly because it auto-submits after render.
+    deferTelemetryInitialization: isAcpMode || (interactive && !question),
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,

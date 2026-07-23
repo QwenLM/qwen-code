@@ -26,6 +26,7 @@ import type { BridgeEvent, EventBus } from './eventBus.js';
 import { MID_TURN_MESSAGE_INJECTED_EVENT } from './daemonEventTypes.js';
 import { MID_TURN_QUEUE_DRAIN_METHOD } from './bridgeTypes.js';
 import type {
+  BridgeWorkspaceGenerationNotificationEvent,
   BridgeGenerationNotificationEvent,
   BridgePendingInteraction,
   MidTurnQueueEntry,
@@ -629,6 +630,11 @@ export class BridgeClient implements Client {
     private readonly onGenerationEvent?: (
       sessionId: string,
       event: BridgeGenerationNotificationEvent,
+    ) => void,
+    /** Workspace generation events are session-less and routed to a
+     * private bridge queue keyed by requestId. */
+    private readonly onWorkspaceGenerationEvent?: (
+      event: BridgeWorkspaceGenerationNotificationEvent,
     ) => void,
   ) {}
 
@@ -1279,6 +1285,62 @@ export class BridgeClient implements Client {
           return;
         }
         this.onGenerationEvent?.(sessionId, {
+          type: 'delta',
+          requestId,
+          seq,
+          text,
+        });
+        return;
+      }
+      return;
+    }
+    if (method === 'qwen/notify/workspace/generation/event') {
+      const requestId = params['requestId'];
+      const event = params['event'];
+      if (
+        params['v'] !== 1 ||
+        typeof requestId !== 'string' ||
+        !event ||
+        typeof event !== 'object' ||
+        Array.isArray(event)
+      ) {
+        return;
+      }
+      const record = event as Record<string, unknown>;
+      if (record['type'] === 'started') {
+        const model = record['model'];
+        const modelSource = record['modelSource'];
+        if (
+          typeof model !== 'string' ||
+          (modelSource !== 'fast' && modelSource !== 'main')
+        ) {
+          return;
+        }
+        this.onWorkspaceGenerationEvent?.({
+          type: 'started',
+          requestId,
+          model,
+          modelSource,
+        });
+        return;
+      }
+      if (record['type'] === 'thinking') {
+        this.onWorkspaceGenerationEvent?.({ type: 'thinking', requestId });
+        return;
+      }
+      if (record['type'] === 'delta') {
+        const seq = record['seq'];
+        const text = record['text'];
+        if (
+          typeof seq !== 'number' ||
+          !Number.isSafeInteger(seq) ||
+          seq < 0 ||
+          typeof text !== 'string' ||
+          text.length === 0
+        ) {
+          return;
+        }
+        this.onWorkspaceGenerationEvent?.({
           type: 'delta',
           requestId,
           seq,

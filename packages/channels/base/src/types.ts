@@ -301,6 +301,27 @@ export interface ChannelMemoryIntentClassifier {
   ): Promise<ChannelMemoryIntentClassifierResult>;
 }
 
+export type ChannelConfigFieldKind =
+  | 'string'
+  | 'secret'
+  | 'boolean'
+  | 'number'
+  | 'enum';
+
+export interface ChannelConfigFieldDescriptor {
+  key: string;
+  label: string;
+  kind: ChannelConfigFieldKind;
+  required?: boolean;
+  envResolvable?: boolean;
+  options?: ReadonlyArray<{ value: string; label: string }>;
+  description?: string;
+}
+
+export interface ChannelManagementDescriptor {
+  fields: readonly ChannelConfigFieldDescriptor[];
+}
+
 /**
  * A channel plugin registers a channel type and provides a factory
  * to create adapter instances. Both built-in adapters and external
@@ -321,6 +342,9 @@ export interface ChannelPlugin {
 
   /** Optional config fields whose string values may reference environment vars. */
   envResolvableConfigFields?: string[];
+
+  /** Serializable metadata for safe configuration management. */
+  management?: ChannelManagementDescriptor;
 
   /** Create a channel adapter instance. */
   createChannel(
