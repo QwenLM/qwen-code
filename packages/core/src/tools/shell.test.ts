@@ -185,6 +185,8 @@ describe('ShellTool', () => {
       end: vi.fn(),
       on: vi.fn(),
     } as unknown as fs.WriteStream);
+    vi.mocked(fs.writeFileSync).mockReturnValue(undefined);
+    vi.mocked(fs.unlinkSync).mockReturnValue(undefined);
 
     vi.mocked(os.platform).mockReturnValue('linux');
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
@@ -1162,6 +1164,48 @@ describe('ShellTool', () => {
       // Returns immediately with id + output path; agent's turn isn't blocked.
       expect(result.llmContent).toContain(entry.shellId);
       expect(result.llmContent).toContain(entry.outputPath);
+      expect(result.llmContent).toContain('Status: running');
+      expect(result.llmContent).toContain('status file:');
+      expect(result.llmContent).toContain(
+        'A quiet or empty output file does not mean the process exited',
+      );
+      expect(result.llmContent).toContain(
+        'Do not relaunch solely because captured output is empty',
+      );
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.stringContaining(`shell-${entry.shellId}.status`),
+        expect.stringContaining('status: RUNNING'),
+        'utf8',
+      );
+      expect(fs.writeFileSync).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.stringContaining('pid: 12345'),
+        'utf8',
+      );
+    });
+
+    it('refreshes the running status while a quiet background command is alive', async () => {
+      vi.useFakeTimers();
+      try {
+        const invocation = shellTool.build({
+          command: 'quiet-server',
+          is_background: true,
+        });
+
+        await invocation.execute(mockAbortSignal);
+        expect(fs.writeFileSync).toHaveBeenCalledTimes(1);
+
+        await vi.advanceTimersByTimeAsync(5_000);
+
+        expect(fs.writeFileSync).toHaveBeenCalledTimes(2);
+        expect(fs.writeFileSync).toHaveBeenLastCalledWith(
+          expect.stringContaining('.status'),
+          expect.stringContaining('status: RUNNING'),
+          'utf8',
+        );
+      } finally {
+        vi.useRealTimers();
+      }
     });
 
     it('settles a background entry as completed when the process exits cleanly', async () => {
@@ -1193,6 +1237,9 @@ describe('ShellTool', () => {
       );
       expect(registry.fail).not.toHaveBeenCalled();
       expect(registry.cancel).not.toHaveBeenCalled();
+      expect(fs.unlinkSync).toHaveBeenCalledWith(
+        expect.stringContaining(`shell-${entry.shellId}.status`),
+      );
     });
 
     it('settles a background entry as failed when ShellExecutionService reports error', async () => {
