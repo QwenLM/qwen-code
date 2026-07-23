@@ -1298,15 +1298,19 @@ export function useComposerCore(
   const mobileTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [mobileText, setMobileTextState] = useState('');
   const mobileTextRef = useRef('');
-  const setMobileText = useCallback((text: string) => {
-    mobileTextRef.current = text;
-    setMobileTextState(text);
-  }, []);
   const tooltipPortalRef = useRef<HTMLDivElement | null>(null);
   const onSubmitRef = useRef(onSubmit);
   onSubmitRef.current = onSubmit;
   const onInputTextChangeRef = useRef(onInputTextChange);
   onInputTextChangeRef.current = onInputTextChange;
+  // Mirrors the CodeMirror updateListener contract: every draft change —
+  // typing or programmatic (setText, clear, history restore, post-submit
+  // clear) — notifies onInputTextChange, so parent trackers never go stale.
+  const setMobileText = useCallback((text: string) => {
+    mobileTextRef.current = text;
+    setMobileTextState(text);
+    onInputTextChangeRef.current?.(text);
+  }, []);
   const onCycleModeRef = useRef(onCycleMode);
   onCycleModeRef.current = onCycleMode;
   const onToggleShortcutsRef = useRef(onToggleShortcuts);
@@ -1900,13 +1904,29 @@ export function useComposerCore(
 
   const handleMobileChange = useCallback(
     (event: React.ChangeEvent<HTMLTextAreaElement>) => {
-      const text = event.target.value;
-      mobileTextRef.current = text;
-      setMobileTextState(text);
-      onInputTextChangeRef.current?.(text);
+      setMobileText(event.target.value);
     },
-    [],
+    [setMobileText],
   );
+
+  // Auto-grow the mobile textarea with its content, capped by the CSS
+  // max-height (the cap is read from the computed style so a deployment
+  // overriding --chat-editor-input-max-height stays authoritative). Without
+  // this the rows={1} textarea would show ~1.5 lines with inner scrolling.
+  useEffect(() => {
+    if (!isTouchComposer) return;
+    const el = mobileTextareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    if (el.scrollHeight > 0) {
+      const cap = parseFloat(getComputedStyle(el).maxHeight);
+      const next =
+        Number.isFinite(cap) && cap > 0
+          ? Math.min(el.scrollHeight, cap)
+          : el.scrollHeight;
+      el.style.height = `${next}px`;
+    }
+  }, [isTouchComposer, mobileText]);
 
   const handleMobilePaste = useCallback(
     (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -2915,7 +2935,19 @@ export function useComposerCore(
             const current = mobileTextRef.current;
             const start = el ? el.selectionStart : current.length;
             const end = el ? el.selectionEnd : current.length;
+            const caret = start + text.length;
             setMobileText(current.slice(0, start) + text + current.slice(end));
+            // A controlled textarea resets the caret to the end when its
+            // value changes; put it back after React re-renders, matching
+            // the CodeMirror path's explicit selection anchor.
+            const restoreCaret = () => {
+              mobileTextareaRef.current?.setSelectionRange(caret, caret);
+            };
+            if (typeof requestAnimationFrame === 'function') {
+              requestAnimationFrame(restoreCaret);
+            } else {
+              window.setTimeout(restoreCaret, 0);
+            }
           }
         }
         mobileTextareaRef.current?.focus();

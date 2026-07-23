@@ -228,6 +228,11 @@ describe('useComposerCore mobile textarea backend', () => {
     textarea.selectionEnd = 5;
     act(() => latest!.insertText(' '));
     expect(latest!.mobileComposer!.value).toBe('hello world');
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    expect(textarea.selectionStart).toBe(6);
+    expect(textarea.selectionEnd).toBe(6);
 
     act(() => latest!.clear());
     expect(latest!.mobileComposer!.value).toBe('');
@@ -265,6 +270,36 @@ describe('useComposerCore mobile textarea backend', () => {
     act(() => latest!.searchState.openHistorySearch());
     expect(latest!.searchState.searchMode).toBe(true);
     expect(latest!.searchState.searchMatches).toContain('first message');
+  });
+
+  it('submits a selected history-search match through the pipeline', async () => {
+    mockTouchDevice();
+    const { onSubmit } = await mount();
+    typeText('first message');
+    act(() => latest!.submitText());
+    onSubmit.mockClear();
+
+    act(() => latest!.searchState.openHistorySearch());
+    expect(latest!.searchState.searchMatches).toContain('first message');
+    act(() => latest!.searchState.submitSearchMatch('first message'));
+
+    expect(onSubmit).toHaveBeenCalledTimes(1);
+    expect(onSubmit.mock.calls[0][0]).toBe('first message');
+    expect(latest!.searchState.searchMode).toBe(false);
+    expect(latest!.mobileComposer!.value).toBe('');
+  });
+
+  it('notifies onInputTextChange on programmatic draft changes', async () => {
+    // The CodeMirror updateListener fires for programmatic dispatches too;
+    // the textarea backend must match, or parent trackers go stale after
+    // setText / history restore / post-submit clear.
+    mockTouchDevice();
+    const onInputTextChange = vi.fn();
+    await mount({ onInputTextChange });
+    act(() => latest!.setText('seeded'));
+    expect(onInputTextChange).toHaveBeenLastCalledWith('seeded');
+    act(() => latest!.submitText());
+    expect(onInputTextChange).toHaveBeenLastCalledWith('');
   });
 
   it('suppresses programmatic mount focus on the CodeMirror path for touch devices', async () => {

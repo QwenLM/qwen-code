@@ -74,11 +74,19 @@ test('Enter inserts a newline and does not submit', async ({
   const textarea = page.locator(COMPOSER_TEXTAREA);
   await textarea.tap();
   await page.keyboard.type('line one');
+  const singleLineHeight = (await textarea.boundingBox())!.height;
   await page.keyboard.press('Enter');
   await page.keyboard.type('line two');
+  await page.keyboard.press('Enter');
+  await page.keyboard.type('line three');
 
-  await expect(textarea).toHaveValue('line one\nline two');
+  await expect(textarea).toHaveValue('line one\nline two\nline three');
   expect(daemon.promptRequests()).toHaveLength(0);
+  // The textarea auto-grows with its content instead of scrolling inside a
+  // single visible line.
+  await expect
+    .poll(async () => (await textarea.boundingBox())!.height)
+    .toBeGreaterThan(singleLineHeight);
 });
 
 test('slash commands typed as text still execute as commands', async ({
