@@ -207,7 +207,7 @@ export function serializedBridgeEventByteLength(
   }
 }
 
-function logEventSizingFailed(type: string): void {
+export function logEventSizingFailed(type: string): void {
   try {
     process.stderr.write(
       `qwen serve: EventBus event sizing failed ${JSON.stringify({ type })}\n`,
