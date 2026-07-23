@@ -1006,6 +1006,7 @@ function currentServeFeaturesForRunQwenServe(
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
+    workspaceGenerationAvailable: true,
     rateLimit: opts.rateLimit === true,
     reloadAvailable: true,
     channelReloadAvailable: opts.channelSelection !== undefined,
@@ -4716,7 +4717,11 @@ async function runQwenServeImpl(
     // `server.maxConnections`, `server.address()`, `attachServer(server)`,
     // graceful close — is unchanged). Otherwise `app.listen()` keeps the
     // existing plain-HTTP path bit-for-bit.
-    const onListening = () => {
+    const onListening = (error?: Error) => {
+      // Error handling (retry/reject) is owned by tryListen's
+      // server.once('error') handler.
+      if (error) return;
+
       startup.listenerReadyAt = new Date().toISOString();
       startup.processToListenMs = Math.round(process.uptime() * 1000);
       startup.runQwenServeToListenMs = Math.round(

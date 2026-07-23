@@ -57,10 +57,16 @@ export function isSyntheticHistoryItem(
     case 'stop_hook_system_message':
       return true;
 
+    // Steer messages (mid-turn user injections) are typed 'user' but
+    // carry sentToModel === false; treat them as synthetic so the
+    // cancel handler can still do a full rewind when only a steer
+    // follows the real prompt.
+    case 'user':
+      return item.sentToModel === false;
+
     // Meaningful: user input, model text, tool runs, slash-command
     // results the user explicitly asked for. Auto-restore must bail
     // when any of these appear after the candidate user prompt.
-    case 'user':
     case 'user_shell':
     case 'gemini':
     case 'gemini_content':
@@ -122,9 +128,23 @@ export function itemsAfterAreOnlySynthetic(
 /** Index of the last `user` (real prompt) item, or -1. */
 export function findLastUserItemIndex(history: readonly HistoryItem[]): number {
   for (let i = history.length - 1; i >= 0; i--) {
-    if (history[i].type === 'user') return i;
+    const item = history[i];
+    if (item.type === 'user' && item.sentToModel !== false) return i;
   }
   return -1;
+}
+
+/** Texts of real (non-steer) user prompts in `history`, oldest-first. */
+export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
+  return history
+    .filter(
+      (item): item is HistoryItem & { type: 'user'; text: string } =>
+        item.type === 'user' &&
+        item.sentToModel !== false &&
+        typeof item.text === 'string' &&
+        item.text.trim() !== '',
+    )
+    .map((item) => item.text);
 }
 
 /**

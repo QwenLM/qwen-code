@@ -18,16 +18,20 @@ import {
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import {
+  getAgentJsonlPath,
+  getAgentMetaPath,
   getSubagentSessionDir,
   normalizeResumedAgentDepth,
   readAgentMeta,
   patchAgentMeta,
   attachJsonlTranscriptWriter,
+  type AgentMeta,
 } from './agent-transcript.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 import { buildOrderedUuidChain } from '../utils/conversation-chain.js';
 import { getInitialChatHistory } from '../utils/environmentContext.js';
 import { getGitBranch } from '../utils/gitUtils.js';
+import { runWithInvocationContext } from '../utils/invocation-context.js';
 import { PermissionMode, type StopHookOutput } from '../hooks/types.js';
 import {
   appendStopHookBlockingCapWarning,
@@ -43,11 +47,12 @@ import {
   FORK_SUBAGENT_TYPE,
   runInForkContext,
 } from '../tools/agent/fork-subagent.js';
-import type {
-  AgentCompletionStats,
-  AgentTask,
-  AgentTaskRegistration,
-  ResidentBackgroundAgent,
+import {
+  MAX_RETAINED_TERMINAL_AGENTS,
+  type AgentCompletionStats,
+  type AgentTask,
+  type AgentTaskRegistration,
+  type ResidentBackgroundAgent,
 } from './background-tasks.js';
 import type { SubagentConfig } from '../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../subagents/types.js';
@@ -74,6 +79,16 @@ const LEGACY_FORK_RESUME_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its bootstrap transcript is missing.';
 const LEGACY_FORK_CAPABILITIES_BLOCKED_REASON =
   'Fork background task cannot be safely resumed because its launch-time runtime constraints are missing.';
+const MISSING_TRANSCRIPT_BLOCKED_REASON =
+  'Background task transcript is missing or unreadable.';
+const TRANSCRIPT_IDENTITY_BLOCKED_REASON =
+  'Background task transcript does not match its retained identity.';
+const WORKING_DIRECTORY_BLOCKED_REASON =
+  'Background task working directory does not match the restored session.';
+const WORKTREE_ISOLATION_BLOCKED_REASON =
+  'Background task worktree isolation cannot be reconstructed after session restore.';
+const INCOMPATIBLE_ISOLATION_BLOCKED_REASON =
+  'Background task isolation metadata is incompatible.';
 
 type ApprovalModeValue = 'plan' | 'default' | 'auto-edit' | 'auto' | 'yolo';
 
@@ -370,8 +385,27 @@ function getCompletionStats(
 
 function buildRecoveredNotice(count: number): string {
   return count === 1
-    ? 'Recovered 1 interrupted background agent. Open Background tasks and press r to resume.'
-    : `Recovered ${count} interrupted background agents. Open Background tasks and press r to resume.`;
+    ? 'Restored 1 background agent from this session. Open Background tasks to inspect it.'
+    : `Restored ${count} background agents from this session. Open Background tasks to inspect them.`;
+}
+
+function buildRecoveredModelNotice(count: number): string {
+  return (
+    `${count} background agent${count === 1 ? ' was' : 's were'} restored ` +
+    `from this session. Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
+    'and send_message with a task_id to continue one.'
+  );
+}
+
+interface RecoverableAgentSidecar {
+  fileName: string;
+  metaPath: string;
+  meta: AgentMeta;
+}
+
+function recoveryTimestamp(meta: AgentMeta): number {
+  const parsed = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
+  return Number.isFinite(parsed) ? parsed : 0;
 }
 
 export class BackgroundAgentResumeService {
@@ -394,29 +428,106 @@ export class BackgroundAgentResumeService {
       throw error;
     }
 
-    const registry = this.config.getBackgroundTaskRegistry();
-    const recovered: AgentTask[] = [];
-
+    const sidecars: RecoverableAgentSidecar[] = [];
     for (const fileName of files) {
       if (!fileName.endsWith(META_FILE_SUFFIX)) continue;
       const metaPath = path.join(dir, fileName);
       try {
         const meta = readAgentMeta(metaPath);
-        if (!meta || meta.status !== 'running') continue;
+        if (
+          !meta ||
+          typeof meta.agentId !== 'string' ||
+          meta.agentId.length === 0 ||
+          meta.parentSessionId !== sessionId ||
+          path.basename(
+            getAgentMetaPath(projectDir, sessionId, meta.agentId),
+          ) !== fileName ||
+          (meta.status !== 'running' && meta.status !== 'completed') ||
+          (meta.isBackgrounded !== undefined &&
+            typeof meta.isBackgrounded !== 'boolean') ||
+          meta.isBackgrounded === false ||
+          (meta.status === 'completed' && meta.isBackgrounded !== true)
+        ) {
+          continue;
+        }
+        sidecars.push({ fileName, metaPath, meta });
+      } catch (error) {
+        debugLogger.warn(
+          `[BackgroundAgentResume] Failed to read background agent metadata from ${metaPath}:`,
+          error,
+        );
+      }
+    }
+
+    sidecars.sort((a, b) => {
+      if (a.meta.status !== b.meta.status) {
+        return a.meta.status === 'running' ? -1 : 1;
+      }
+      if (a.meta.status === 'completed') {
+        return recoveryTimestamp(b.meta) - recoveryTimestamp(a.meta);
+      }
+      return a.fileName.localeCompare(b.fileName);
+    });
+
+    const registry = this.config.getBackgroundTaskRegistry();
+    const recovered: AgentTask[] = [];
+    let completedCount = registry
+      .getAll()
+      .filter((entry) => entry.notified === true).length;
+
+    for (const { metaPath, meta } of sidecars) {
+      if (
+        meta.status === 'completed' &&
+        completedCount >= MAX_RETAINED_TERMINAL_AGENTS
+      ) {
+        continue;
+      }
+      try {
         if (registry.get(meta.agentId)) continue;
         const subagentName = meta.subagentName ?? meta.agentType;
-        if (!subagentName) continue;
+        if (typeof subagentName !== 'string' || !subagentName) continue;
         const target = await this.resolveResumeTarget(subagentName);
 
-        const outputFile = path.join(
-          dir,
-          fileName.slice(0, -META_FILE_SUFFIX.length) + '.jsonl',
+        const outputFile = getAgentJsonlPath(
+          projectDir,
+          sessionId,
+          meta.agentId,
         );
         const records = await jsonl.read<ChatRecord>(outputFile);
         const recovery = recoverTranscript(records);
         const parsedStartTime = Date.parse(meta.createdAt);
+        const parsedEndTime = Date.parse(meta.lastUpdatedAt ?? meta.createdAt);
+        const projectRoot = path.resolve(this.config.getProjectRoot());
+        let retainedStateBlockedReason: string | undefined;
+        if (records.length === 0) {
+          retainedStateBlockedReason = MISSING_TRANSCRIPT_BLOCKED_REASON;
+        } else if (
+          records.some(
+            (record) =>
+              record.sessionId !== sessionId ||
+              (record.agentId !== undefined && record.agentId !== meta.agentId),
+          )
+        ) {
+          retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
+        } else if (
+          meta.isolation !== undefined &&
+          meta.isolation !== 'worktree'
+        ) {
+          retainedStateBlockedReason = INCOMPATIBLE_ISOLATION_BLOCKED_REASON;
+        } else if (meta.isolation === 'worktree') {
+          retainedStateBlockedReason = WORKTREE_ISOLATION_BLOCKED_REASON;
+        } else if (
+          records.some(
+            (record) =>
+              typeof record.cwd === 'string' &&
+              path.resolve(record.cwd) !== projectRoot,
+          )
+        ) {
+          retainedStateBlockedReason = WORKING_DIRECTORY_BLOCKED_REASON;
+        }
 
         const resumeBlockedReason =
+          retainedStateBlockedReason ||
           target.unavailableReason ||
           (target.isFork && !recovery.forkBootstrap
             ? LEGACY_FORK_RESUME_BLOCKED_REASON
@@ -431,10 +542,17 @@ export class BackgroundAgentResumeService {
           description: meta.description,
           subagentType: target.agentName,
           isBackgrounded: true,
-          status: 'paused',
+          status: meta.status === 'running' ? 'paused' : 'completed',
           startTime: Number.isFinite(parsedStartTime)
             ? parsedStartTime
             : Date.now(),
+          ...(meta.status === 'completed'
+            ? {
+                endTime: Number.isFinite(parsedEndTime)
+                  ? parsedEndTime
+                  : Date.now(),
+              }
+            : {}),
           abortController: new AbortController(),
           prompt: recovery.initialPrompt,
           toolUseId: meta.toolUseId,
@@ -449,9 +567,19 @@ export class BackgroundAgentResumeService {
           // UI falls back to its generic orphan annotation.
           parentAgentId: meta.parentAgentId,
           depth: meta.depth,
-          model: meta.model,
+          model: meta.model ?? meta.persistedCliFlags?.model,
         };
-        const entry = registry.register(registration);
+        if (meta.status === 'completed') {
+          (registration as AgentTask).notified = true;
+          (registration as AgentTask).outputOffset = 0;
+        }
+        const entry = registry.register(registration, {
+          suppressRegisterCallback: meta.status === 'completed',
+          preserveNotificationState: meta.status === 'completed',
+        });
+        if (meta.status === 'completed') {
+          completedCount += 1;
+        }
         recovered.push(entry);
       } catch (error) {
         debugLogger.warn(
@@ -503,8 +631,8 @@ export class BackgroundAgentResumeService {
    *
    * Returns `undefined` (and logs why) when the agent can't be revived: not an
    * in-registry, finished background agent with a persisted transcript, or the
-   * background-agent concurrency cap is full. Cross-session / evicted completed
-   * agents are out of scope (see QwenLM/qwen-code#5540).
+   * background-agent concurrency cap is full. Completed agents restored from
+   * the same parent session use this path after process restart.
    */
   async reviveCompletedBackgroundAgent(
     agentId: string,
@@ -523,7 +651,8 @@ export class BackgroundAgentResumeService {
       !entry.isBackgrounded ||
       entry.status !== 'completed' ||
       !entry.metaPath ||
-      !entry.outputFile
+      !entry.outputFile ||
+      entry.resumeBlockedReason
     ) {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": not a completed ` +
@@ -602,7 +731,34 @@ export class BackgroundAgentResumeService {
     this.restorePausedEntry(agentId, { suppressRegisterCallback: true });
     const revived = await this.resumeBackgroundAgent(agentId, initialMessage);
     if (!revived) {
-      this.restoreCompletedEntry(completedEntry);
+      const failedEntry = registry.get(agentId);
+      // `??` only falls back on null/undefined, so a failed revive that left
+      // the entry with an *empty* array would clobber the pre-revive snapshot
+      // (e.g. the UI Progress section would render empty instead of the
+      // retained activities). Prefer the failed entry's state only when it
+      // actually carries items; otherwise fall back to the completed snapshot.
+      const preferNonEmpty = <T>(
+        next: readonly T[] | undefined,
+        fallback: readonly T[],
+      ): T[] => (next && next.length > 0 ? [...next] : [...fallback]);
+      this.restoreCompletedEntry({
+        ...completedEntry,
+        resumeBlockedReason:
+          failedEntry?.resumeBlockedReason ??
+          completedEntry.resumeBlockedReason,
+        pendingMessages: preferNonEmpty(
+          failedEntry?.pendingMessages,
+          completedEntry.pendingMessages,
+        ),
+        recentActivities: preferNonEmpty(
+          failedEntry?.recentActivities,
+          completedEntry.recentActivities,
+        ),
+        pendingApprovals: preferNonEmpty(
+          failedEntry?.pendingApprovals,
+          completedEntry.pendingApprovals,
+        ),
+      });
     }
     return revived;
   }
@@ -615,6 +771,9 @@ export class BackgroundAgentResumeService {
     const existing = registry.get(agentId);
     if (!existing || existing.status !== 'paused') {
       return existing;
+    }
+    if (existing.resumeBlockedReason) {
+      return undefined;
     }
 
     const metaPath = existing.metaPath;
@@ -1176,9 +1335,11 @@ export class BackgroundAgentResumeService {
             () => runBody(turnContextState, turnAbortController, fireStartHook),
             normalizeResumedAgentDepth(meta.depth),
           );
+        const invocationRunBody = () =>
+          runWithInvocationContext(undefined, framedRunBody);
         return target.isFork
-          ? runInForkContext(framedRunBody)
-          : framedRunBody();
+          ? runInForkContext(invocationRunBody)
+          : invocationRunBody();
       };
 
       const reportUnexpectedBackgroundError = (error: unknown) => {
@@ -1307,6 +1468,10 @@ export class BackgroundAgentResumeService {
 
   buildRecoveredBackgroundAgentsNotice(count: number): string {
     return buildRecoveredNotice(count);
+  }
+
+  buildRecoveredBackgroundAgentsModelNotice(count: number): string {
+    return buildRecoveredModelNotice(count);
   }
 
   private async resolveResumeTarget(

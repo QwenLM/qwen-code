@@ -44,6 +44,7 @@ describe('Core System Prompt (prompts.ts)', () => {
   beforeEach(() => {
     vi.resetAllMocks();
     vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+    vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
     vi.stubEnv('QWEN_WRITE_SYSTEM_MD', undefined);
   });
 
@@ -360,6 +361,132 @@ describe('Core System Prompt (prompts.ts)', () => {
       );
       expect(prompt).toBe('custom system prompt');
     });
+  });
+
+  describe('QWEN_SYSTEM_IDENTITY_MD environment variable', () => {
+    const customIdentity =
+      'You are Acme Code, an interactive CLI agent for Acme Corp.';
+
+    /** Sample the default identity from the live prompt to avoid drift. */
+    const sampleDefaultIdentity = (): string => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+      vi.stubEnv('QWEN_SYSTEM_MD', undefined);
+      return getCoreSystemPrompt().split('\n\n', 1)[0];
+    };
+
+    it('should keep default prompt byte-identical when identity env is unset', () => {
+      const defaultIdentity = sampleDefaultIdentity();
+      const prompt = getCoreSystemPrompt();
+      expect(prompt.startsWith(defaultIdentity)).toBe(true);
+      expect(fs.readFileSync).not.toHaveBeenCalled();
+    });
+
+    it('should replace only the identity sentence when identity env points to a file', () => {
+      const defaultIdentity = sampleDefaultIdentity();
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockImplementation(
+        (p) => path.resolve(String(p)) === identityPath,
+      );
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === identityPath) {
+          return `${customIdentity}  \n\n`;
+        }
+        throw new Error(`unexpected read: ${String(p)}`);
+      });
+
+      const withOverride = getCoreSystemPrompt();
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', undefined);
+      const baseline = getCoreSystemPrompt();
+
+      expect(withOverride.startsWith(customIdentity)).toBe(true);
+      expect(withOverride).not.toContain('You are Qwen Code');
+      // trimEnd() strips trailing spaces/newlines from the identity file.
+      expect(withOverride.slice(customIdentity.length)).toBe(
+        baseline.slice(defaultIdentity.length),
+      );
+    });
+
+    it('should ignore identity env when QWEN_SYSTEM_MD is set', () => {
+      const systemPath = path.resolve('/custom/system.md');
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_MD', systemPath);
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === systemPath) {
+          return 'full system override';
+        }
+        throw new Error(`identity file should not be read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt();
+      expect(prompt).toBe('full system override');
+      expect(fs.readFileSync).toHaveBeenCalledTimes(1);
+      expect(fs.readFileSync).toHaveBeenCalledWith(systemPath, 'utf8');
+    });
+
+    it('should not inject identity when QWEN_SYSTEM_MD points to an empty file', () => {
+      const systemPath = path.resolve('/custom/empty-system.md');
+      const identityPath = path.resolve('/custom/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_MD', systemPath);
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockImplementation((p) => {
+        if (path.resolve(String(p)) === systemPath) {
+          return '';
+        }
+        throw new Error(`identity file should not be read: ${String(p)}`);
+      });
+
+      const prompt = getCoreSystemPrompt();
+      expect(prompt).toBe('');
+      expect(prompt).not.toContain(customIdentity);
+      expect(prompt).not.toContain('You are Qwen Code');
+    });
+
+    it('should throw when identity env points to a missing file', () => {
+      const identityPath = path.resolve('/missing/identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(false);
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `missing system identity file '${identityPath}'`,
+      );
+    });
+
+    it('should throw when identity env points to an empty or whitespace-only file', () => {
+      const identityPath = path.resolve('/custom/blank-identity.md');
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', identityPath);
+      vi.mocked(fs.existsSync).mockReturnValue(true);
+      vi.mocked(fs.readFileSync).mockReturnValue('  \n\t  ');
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `empty system identity file '${identityPath}'`,
+      );
+    });
+
+    it('should throw when a ~/ identity path cannot resolve the home directory', () => {
+      vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', '~/identity.md');
+      vi.spyOn(os, 'homedir').mockImplementation(() => {
+        throw new Error('homedir unavailable');
+      });
+
+      expect(() => getCoreSystemPrompt()).toThrow(
+        `failed to resolve system identity path '~/identity.md'`,
+      );
+    });
+
+    it.each(['0', 'false', '1', 'true'] as const)(
+      'should not override identity when env is switch value %s',
+      (switchValue) => {
+        const defaultIdentity = sampleDefaultIdentity();
+        vi.stubEnv('QWEN_SYSTEM_IDENTITY_MD', switchValue);
+        const prompt = getCoreSystemPrompt();
+        expect(prompt.startsWith(defaultIdentity)).toBe(true);
+        expect(fs.readFileSync).not.toHaveBeenCalled();
+      },
+    );
   });
 
   describe('QWEN_WRITE_SYSTEM_MD environment variable', () => {
