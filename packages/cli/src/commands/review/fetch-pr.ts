@@ -61,6 +61,8 @@ interface PrMetadata {
   deletions: number;
   changedFiles: number;
   isCrossRepository: boolean;
+  /** The PR description, fetched only to detect the author's language. */
+  body?: string;
 }
 
 interface FetchPrArgs {
@@ -91,6 +93,14 @@ type FetchPrResult = PlanReport & {
   diffPath: string | null;
   /** Absolute path — `read_file` rejects relative paths. Agents use this. */
   diffPathAbsolute: string | null;
+  /**
+   * True when the PR description contains Han characters — the author writes
+   * Chinese. `compose-review` reads it from this report (its `planPath`) and
+   * renders the posted body bilingually, English first with the full Chinese
+   * version collapsed; the skill mirrors the format on inline comments. A
+   * local review's plan has no such field: nothing is posted there.
+   */
+  prDescriptionHasHan: boolean;
 };
 
 /** Count lines of `<ref>:<path>`, or 0 if it does not exist there. */
@@ -176,7 +186,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       '--repo',
       ownerRepo,
       '--json',
-      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository',
+      'headRefName,headRefOid,baseRefName,additions,deletions,changedFiles,isCrossRepository,body',
     );
     meta = JSON.parse(json) as PrMetadata;
   } catch (err) {
@@ -286,6 +296,7 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
     baseFetchFailed,
     diffPath,
     diffPathAbsolute,
+    prDescriptionHasHan: /\p{Script=Han}/u.test(meta.body ?? ''),
     ...buildPlanReport(plan, (path) => fileLineCount(fetchedSha, path)),
   };
 

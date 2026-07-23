@@ -8,25 +8,30 @@ on:
         required: false
         default: ''
         type: 'string'
+  repository_dispatch:
+    types: ['npm-published']
 
 permissions:
   contents: 'read'
 
-concurrency:
-  group: 'update-ecs-runner-qwen-sg'
-  cancel-in-progress: false
-
 jobs:
   update:
-    name: 'Update Qwen on Singapore ECS runner'
+    name: 'Update Qwen on ${{ matrix.runner }}'
     if: "${{ github.repository == 'QwenLM/qwen-code' }}"
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    strategy:
+      matrix:
+        runner: ['ecs-update-sg', 'ecs-update-64c']
+      fail-fast: false
+    runs-on: ['self-hosted', 'linux', 'x64', '${{ matrix.runner }}']
+    concurrency:
+      group: 'update-ecs-runner-qwen-${{ matrix.runner }}'
+      cancel-in-progress: false
     timeout-minutes: 10
     steps:
       - name: 'Resolve version'
         id: 'version'
         env:
-          INPUT_VERSION: '${{ inputs.version }}'
+          INPUT_VERSION: '${{ inputs.version || github.event.client_payload.version }}'
         run: |-
           set -euo pipefail
           specifier="@qwen-code/qwen-code@${INPUT_VERSION#v}"
@@ -46,16 +51,11 @@ jobs:
           VERSION: '${{ steps.version.outputs.version }}'
         run: |-
           set -euo pipefail
-          global_root="$(npm root -g)"
-          global_bin="$(npm prefix -g)/bin"
-          if [[ -w "${global_root}" && -w "${global_bin}" ]]; then
-            npm install -g "@qwen-code/qwen-code@${VERSION}"
-          elif command -v sudo >/dev/null 2>&1 && sudo -n true; then
-            sudo npm install -g "@qwen-code/qwen-code@${VERSION}"
-          else
-            echo "::error::Global npm install directories are not writable and passwordless sudo is unavailable."
-            exit 1
-          fi
+          # Always use sudo so the package lands in /usr/local (the system-wide
+          # global prefix that every user's PATH resolves first).  Without sudo
+          # the runner user (github-runner) installs into its own home directory
+          # which is shadowed by the older root-installed binary in /usr/local/bin.
+          sudo npm install -g "@qwen-code/qwen-code@${VERSION}"
 
       - name: 'Verify version'
         env:

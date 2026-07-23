@@ -129,6 +129,18 @@ env:
   # invisible to the scan even when it already had unaddressed feedback.
   # Names must match job ids in qwen-code-pr-review.yml; a test pins that.
   NON_BLOCKING_CHECKS: '["review-pr"]'
+  # Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the
+  # code — a self-hosted runner losing the server, the disk filling, a runner
+  # shutdown, or a git fetch/clone dying mid-transfer. Such a check is red for a
+  # reason unrelated to the PR and clears on a re-run (observed: #7490's E2E
+  # "runner lost communication"; #6506's checkout "RPC failed; curl 92" /
+  # "fetch-pack: invalid index-pack output" — both green on the rerun). The scan
+  # auto-reruns those failed jobs ONCE, guarded by run_attempt so a persistent
+  # infra problem cannot loop. Deliberately conservative — only unambiguous
+  # machine/transport failures, never a bare test-level timeout, which could be
+  # a real regression (a co-present timeout does not block a match — one
+  # matching line classifies the run). Case-insensitive, vs the annotations.
+  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
@@ -1871,6 +1883,55 @@ jobs:
               fi
             fi
 
+            # Auto-rerun a check that died on INFRASTRUCTURE, not the code (see
+            # INFRA_FAILURE_SIGNATURES). Only reached when the PR has a FAILED
+            # check; then, for each, we read its annotations and — if they carry
+            # a machine-death signature — rerun that run's failed jobs ONCE. The
+            # once is enforced by run_attempt: a run already retried to attempt 2
+            # and still infra-failing is persistent, so we stop and leave it. No
+            # marker needed; the attempt counter is the guard, and after a rerun
+            # the attempt increments so the next scan skips it. Any API failure
+            # here is fail-safe: it just means no rerun.
+            PR_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            if [[ -n "${PR_HEAD_OID}" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
+              RERAN_INFRA=false
+              # Failed check-runs on this head, with their run id and annotation
+              # count — fetched once. External statuses (no check-run) are absent
+              # here, which is fine: only Actions runs can be reran.
+              FAILED_CRS="$(gh api --paginate "repos/${REPO}/commits/${PR_HEAD_OID}/check-runs" \
+                --jq '.check_runs[] | select(.conclusion == "failure")
+                  | select(((.output.annotations_count // 0) > 0))
+                  | [(.id | tostring), (.details_url // ""), (.name // "")] | @tsv' 2> /dev/null | sort -u || true)"
+              while IFS=$'\t' read -r CR_ID DETAILS_URL CR_NAME; do
+                [[ -n "${CR_ID}" && "${DETAILS_URL}" == *"/actions/runs/"* ]] || continue
+                RUN_ID="${DETAILS_URL#*/actions/runs/}"
+                RUN_ID="${RUN_ID%%/*}"
+                [[ "${RUN_ID}" =~ ^[0-9]+$ ]] || continue
+                ANNS="$(gh api --paginate "repos/${REPO}/check-runs/${CR_ID}/annotations" \
+                  --jq '[.[].message] | join("\n")' 2> /dev/null || true)"
+                grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${ANNS}" || continue
+                RUN_META="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '[(.run_attempt // 0), (.name // "")] | @tsv' 2> /dev/null || printf '0\t')"
+                ATTEMPT="${RUN_META%%$'\t'*}"
+                WF_NAME="${RUN_META#*$'\t'}"
+                # Mirror the gate's self-trigger guard: skip Qwen Autofix runs
+                # unless the check is a review-address job.
+                if [[ "${WF_NAME}" == "Qwen Autofix" && "${CR_NAME}" != review-address* ]]; then
+                  continue
+                fi
+                if [[ "${ATTEMPT}" == '1' ]]; then
+                  if gh api -X POST "repos/${REPO}/actions/runs/${RUN_ID}/rerun-failed-jobs" > /dev/null 2>&1; then
+                    echo "♻️ #${PR}: a check died on infrastructure (run ${RUN_ID}, attempt 1) — reran its failed jobs; not the PR's code"
+                    fleet_row "${PR}" 'infra-reran' "infra failure (run ${RUN_ID}) reran once"
+                    RERAN_INFRA=true
+                    break
+                  fi
+                else
+                  echo "⚠️ #${PR}: infra failure persisted after a rerun (run ${RUN_ID}, attempt ${ATTEMPT}) — leaving for a human"
+                fi
+              done <<< "${FAILED_CRS}"
+              [[ "${RERAN_INFRA}" == 'true' ]] && continue
+            fi
+
             # startedAt is the only staleness clock: a check blocks only if it
             # started within the bound; one with no startedAt (queued, not yet
             # running) is not blocking (the next scan re-checks once it starts).
@@ -3024,7 +3085,7 @@ jobs:
           if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1; then
             git diff "origin/main...${BRANCH}" > "${WORKDIR}/pr.diff" || true
           fi
-          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind resolved-comments.txt pr.diff; do
+          for f in feedback.md address-summary.md no-action.md failure.md handoff.md gate-rejection.md agent-api-error agent-api-error-kind agent-timeout resolved-comments.txt pr.diff; do
             if [[ -f "${WORKDIR}/${f}" ]]; then
               echo "=============== ${f} ==============="
               cat "${WORKDIR}/${f}"
@@ -3150,7 +3211,7 @@ jobs:
               echo "🧵 resolved ${RESOLVED_N} review thread(s) the agent implemented"
             fi
             {
-              echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
+              echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on: · 已处理最新评审反馈（第 ${NEXT_ROUND}/${MAX_ROUNDS} 轮）。改动内容与我反驳保留之处如下："
               echo
               # Neutralize the comment-opening token itself: model output
               # posted verbatim under the bot identity could smuggle a forged
@@ -3161,9 +3222,9 @@ jobs:
               # render away in markdown, so the visible text is unchanged.
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/address-summary.md"
               echo
-              echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push.' || echo 'no conflict with main.')"
+              echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicted with main — resolved in this push. · 与 main 有冲突——已在本次推送中解决。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo
-              echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human."
+              echo "Re-review when you have a moment. After round ${MAX_ROUNDS} this bot stops and leaves the PR for a human. · 有空请复审；第 ${MAX_ROUNDS} 轮后本 bot 停止并将 PR 交给人工。"
               echo
               echo "---"
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
@@ -3176,11 +3237,11 @@ jobs:
             # noop: evaluated, nothing worth doing. Report once and advance the
             # watermark so the next scan does not re-evaluate the same feedback.
             {
-              echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point:"
+              echo "🤖 Reviewed the latest feedback — no changes needed. Why, point by point: · 已审阅最新反馈——无需改动。逐点说明原因如下："
               echo
               sed 's/<!--/<!\\-\\-/g' "${WORKDIR}/no-action.md"
               echo
-              echo "Base-conflict check: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge).' || echo 'no conflict with main.')"
+              echo "Base-conflict check · 基分支冲突检查: $([[ "${CONFLICT}" == "true" ]] && echo 'conflicts with main (no review fix needed, but a rebase/merge is required before merge). · 与 main 有冲突（无需评审修复，但合并前需 rebase/merge）。' || echo 'no conflict with main. · 与 main 无冲突。')"
               echo
               echo "---"
               echo "🧠 Handled by **Qwen Code** · model/模型 \`${MODEL_DISPLAY}\`"
@@ -3218,6 +3279,11 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           NEWEST: '${{ steps.prepare.outputs.newest }}'
           JOB_STATUS: '${{ job.status }}'
+          # 'skipped' when an EARLIER step failed before Prepare ran (base
+          # install/build) — an infra/base failure, not the agent.
+          # 'success'/'failure' when Prepare itself ran. Distinguishes a
+          # transient pre-agent crash (retry) from a genuine agent crash.
+          PREPARE_OUTCOME: '${{ steps.prepare.outcome }}'
           STALE: '${{ steps.prepare.outputs.stale }}'
           EFFECTIVE_ROUND: '${{ steps.prepare.outputs.effective_round }}'
           MODEL: '${{ vars.QWEN_AUTOFIX_MODEL || vars.QWEN_PR_REVIEW_MODEL }}'
@@ -3321,6 +3387,16 @@ jobs:
             if [[ -s "${WORKDIR}/agent-api-error-kind" ]]; then
               API_ERROR_KIND="$(head -n 1 "${WORKDIR}/agent-api-error-kind" | tr -cd 'a-z')"
             fi
+            # A timeout means the agent evaluated NOTHING before its budget ran
+            # out (run-agent.mjs writes this signal). Routed to retry, not an
+            # evaluated advance — same as a pre-verdict crash. Bounded by the
+            # round cap and the consecutive-failure cap, so a PR that keeps
+            # timing out still stops; a one-off (usually followed by a good
+            # round) recovers on the next scan instead of stranding its feedback.
+            AGENT_TIMEOUT=''
+            if [[ -s "${WORKDIR}/agent-timeout" ]]; then
+              AGENT_TIMEOUT="$(head -n 1 "${WORKDIR}/agent-timeout" | cut -c1-120 | iconv -f utf-8 -t utf-8 -c || true)"
+            fi
             # If feedback was actually read (prepare ran), stamp its newest ts so
             # the watermark advances and the same feedback is not re-selected next
             # scan. If the crash happened before prepare, NEWEST is empty and the
@@ -3348,13 +3424,14 @@ jobs:
             MARK_TS="${NEWEST:-${WATERMARK:-9999-12-31T23:59:59Z}}"
             if [[ -n "${NEWEST:-}" ]]; then
               MARK_ROUND="$(( ROUND + 1 ))"
-              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || "${GATE_CRASHED}" == 'true' ]]; then
-                # Prepare ran (NEWEST is set) but no verdict was reached. Three
-                # ways that happens, and in ALL of them the agent evaluated
-                # NOTHING: it produced no output at all (crashed before any
-                # verdict — a staged runner that fails to boot), it died on a
-                # model [API Error] (access/quota/5xx/transport), or the gate
-                # crashed after the agent wrote its summary. So the watermark
+              if [[ -z "${DETAIL_FILE}" || -n "${API_ERROR_DETAIL}" || -n "${AGENT_TIMEOUT}" || "${GATE_CRASHED}" == 'true' ]]; then
+                # Prepare ran (NEWEST is set) but no verdict was reached. Ways
+                # that happens, and in ALL of them the agent evaluated NOTHING:
+                # it produced no output at all (crashed before any verdict — a
+                # staged runner that fails to boot), it died on a model
+                # [API Error] (access/quota/5xx/transport), it TIMED OUT before
+                # finishing, or the gate crashed after the agent wrote its
+                # summary. So the watermark
                 # must NOT advance past this feedback: an advance makes the next
                 # scan see "nothing new" and never retry, stranding the PR on a
                 # transient failure (an infra blip, a quota reset minutes away, a
@@ -3376,6 +3453,13 @@ jobs:
                 if [[ -n "${API_ERROR_DETAIL}" ]]; then
                   CAUSE="could not reach the model — ${API_ERROR_DETAIL}"
                   LAST_FIX="a maintainer should check the autofix model key/access, then re-arm"
+                elif [[ -n "${AGENT_TIMEOUT}" ]]; then
+                  # A timeout evaluated nothing, so the feedback is unaddressed
+                  # and stays live for the retry. On a big / heavily-reviewed PR
+                  # this is usually a one-off; the last automatic attempt names
+                  # the real fix (split the PR or raise the budget).
+                  CAUSE="ran out of time before finishing (${AGENT_TIMEOUT})"
+                  LAST_FIX="a human should split the PR or raise the agent time budget, then re-arm"
                 elif [[ -z "${DETAIL_FILE}" ]]; then
                   CAUSE="crashed before it could evaluate the feedback"
                   LAST_FIX="a human should take over this PR"
@@ -3417,14 +3501,41 @@ jobs:
               else
                 HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
               fi
+            elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
+              # NEWEST is empty because Prepare never RAN TO A VERDICT — an
+              # earlier step failed or the job stopped before the agent started:
+              # installing/building the trusted base, node setup. That
+              # is infra or a broken base, NOT the agent, and it is usually
+              # transient (a base build fixed minutes later, an ENOSPC runner).
+              # Match on "not a real Prepare run" rather than 'skipped' alone, so
+              # this also covers a CANCELLED job (outcome 'cancelled') and a job
+              # that stopped before Prepare even entered the step context
+              # (outcome ''): a concurrency/manual cancel is not the agent's
+              # fault either, and 'cancelled' is a DISTINCT value from 'skipped'
+              # — matching only 'skipped' would send a cancel to the terminal
+              # branch below. Terminal here is wrong: a web-shell TS break on
+              # main failed the base build across a whole scan batch and stranded
+              # SIX healthy PRs terminally, including ones at round 11. Retry
+              # instead — sentinel ts keeps the feedback live — but still
+              # increment the round so a PERSISTENTLY broken base is bounded and
+              # cannot loop forever.
+              MARK_ROUND="$(( ROUND + 1 ))"
+              MARK_TS='9999-12-31T23:59:59Z'
+              if [[ "${MARK_ROUND}" -lt "${MAX_ROUNDS}" ]]; then
+                HEADLINE="🤖 AutoFix could not start — a setup step failed (or the run was cancelled) before the agent ran, so no fix was attempted. This is normally a transient infra issue, a broken base build, or a cancelled run — not this PR. It will retry on the next scan."
+              else
+                MARK_ROUND="${MAX_ROUNDS}"
+                HEADLINE="🤖 AutoFix could not start — reached the round cap (${MAX_ROUNDS}) because a setup step (base install/build) kept failing before the agent ran. This is infra or a persistently broken base, not this PR. Fix the base build, then comment \`${RETRY_COMMAND}\` to re-arm."
+              fi
             else
-              # Crashed/timed out before reading the feedback: mark terminal so the
-              # scan skips (it can't advance the watermark without a read), but say
-              # so plainly — do NOT imply MAX_ROUNDS attempts were made when zero
-              # rounds happened. Because the marker is terminal, the max-round guard
-              # skips this PR on EVERY future scan, including a forced dispatch, so
-              # the headline must state the real recovery (delete the marker) rather
-              # than promise a re-trigger that the guard would ignore.
+              # Prepare RAN (outcome success/failure) but produced no feedback to
+              # read — prepare itself crashed or timed out before emitting a
+              # verdict. Mark
+              # terminal so the scan skips (it can't advance the watermark
+              # without a read); do NOT imply MAX_ROUNDS attempts were made when
+              # zero rounds happened. The headline states the real recovery
+              # (delete the marker) rather than promise a re-trigger the
+              # max-round guard would ignore.
               MARK_ROUND="${MAX_ROUNDS}"
               HEADLINE="🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback, so no fix was attempted. This PR is now marked terminal and future scans (including forced dispatch) will skip it. To recover: delete this bot's terminal \`autofix-eval\` marker comment, then re-trigger if the failure looked transient."
             fi
@@ -3436,7 +3547,8 @@ jobs:
             # the bot's prior eval markers in API order (oldest-first, pinned
             # by sort_by so a stray reorder cannot corrupt the streak) and
             # reset the streak at each push ("Addressed the latest review
-            # feedback") or deliberate no-op ("no changes needed"). After the
+            # feedback"), deliberate no-op ("no changes needed"), or pre-agent
+            # infra-failure marker ("AutoFix could not start"). After the
             # full walk, CONSEC_FAIL holds failures since the last progress
             # point plus one for this round. If the unbroken
             # streak (this round included) reaches the cap, stop retrying even
@@ -3451,7 +3563,13 @@ jobs:
             # that would mark every in-flight PR terminal at once during a
             # provider outage — the failures are not the PR's fault and DO
             # self-heal. Auth errors are NOT exempt (they never self-heal).
-            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
+            # Pre-agent infra failures (skipped/cancelled/empty Prepare outcome)
+            # are exempt for the same reason: a broken base build or a runner
+            # crash is not the PR's fault, self-heals, and hits the whole scan
+            # batch at once — the exact scenario the retry path above exists to
+            # prevent. The round cap + sentinel-ts /retry recovery already
+            # bounds a persistently broken base.
+            if [[ "${MARK_ROUND}" != "${MAX_ROUNDS}" ]] && [[ "${PREPARE_OUTCOME}" == 'success' || "${PREPARE_OUTCOME}" == 'failure' ]] && { [[ -z "${API_ERROR_DETAIL}" ]] || [[ "${API_ERROR_KIND}" == 'auth' ]]; }; then
               CONSEC_FAIL=1
               if [[ -f "${WORKDIR}/ic.json" ]]; then
                 COMMENTS_JSON="$(cat "${WORKDIR}/ic.json")"
@@ -3468,7 +3586,7 @@ jobs:
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
-                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* ]]; then
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* ]]; then
                   CONSEC_FAIL=1
                 else
                   CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))
