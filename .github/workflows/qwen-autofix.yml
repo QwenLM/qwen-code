@@ -3405,7 +3405,8 @@ jobs:
             # the bot's prior eval markers in API order (oldest-first, pinned
             # by sort_by so a stray reorder cannot corrupt the streak) and
             # reset the streak at each push ("Addressed the latest review
-            # feedback") or deliberate no-op ("no changes needed"). After the
+            # feedback"), deliberate no-op ("no changes needed"), or pre-agent
+            # infra-failure marker ("AutoFix could not start"). After the
             # full walk, CONSEC_FAIL holds failures since the last progress
             # point plus one for this round. If the unbroken
             # streak (this round included) reaches the cap, stop retrying even
@@ -3443,7 +3444,7 @@ jobs:
                 | (.body | gsub("\r"; "") | split("\n")[0])' <<< "${COMMENTS_JSON}" 2> /dev/null || true)"
               while IFS= read -r H; do
                 [[ -n "${H}" ]] || continue
-                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* ]]; then
+                if [[ "${H}" == *"Addressed the latest review feedback"* || "${H}" == *"no changes needed"* || "${H}" == *"AutoFix could not start —"* || "${H}" == *"AutoFix could not start for"* ]]; then
                   CONSEC_FAIL=1
                 else
                   CONSEC_FAIL=$(( CONSEC_FAIL + 1 ))

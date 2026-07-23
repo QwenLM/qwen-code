@@ -4181,6 +4181,12 @@ describe('qwen-autofix workflow', () => {
     const FAIL_TIMEOUT = '🤖 AutoFix could not reach the model (attempt 2/3)';
     const PUSH = '🤖 Addressed the latest review feedback (round 2/100).';
     const NOOP = '🤖 Reviewed the latest feedback — no changes needed.';
+    const INFRA_FAIL =
+      '🤖 AutoFix could not start — a setup step (installing/building the base) failed before the agent ran.';
+    const INFRA_FAIL_CAP =
+      '🤖 AutoFix could not start for 100 rounds — a setup step (base install/build) keeps failing.';
+    const CRASH_TERMINAL =
+      '🤖 AutoFix could not start evaluation — it crashed or timed out before reading the feedback.';
 
     const run = (
       priorHeadlines,
@@ -4291,6 +4297,25 @@ describe('qwen-autofix workflow', () => {
     expect(
       run(Array(cap - 1).fill(FAIL), { prepareOutcome: '' }),
     ).toMatchObject({ terminal: false, headline: 'orig' });
+    // Prior infra-failure headlines reset the streak too — a broken base
+    // build is not the PR's fault, same class as the current-round exemption
+    // above. Without this, 3 real failures + 3 infra rounds + 1 more real
+    // failure would trip the cap-5 breaker even though only 4 rounds were the
+    // PR's fault.
+    expect(run([FAIL, FAIL, INFRA_FAIL, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    expect(run([FAIL, FAIL, INFRA_FAIL_CAP, FAIL, FAIL])).toMatchObject({
+      consec: 3,
+      terminal: false,
+    });
+    // The genuine agent-crash headline must NOT reset the streak — it is a
+    // real failure, not infra.
+    expect(run([FAIL, FAIL, CRASH_TERMINAL, FAIL])).toMatchObject({
+      consec: cap,
+      terminal: true,
+    });
     // Already-terminal rounds skip the circuit breaker entirely.
     expect(run(Array(cap).fill(FAIL), { markRound: 100 })).toMatchObject({
       terminal: true,
@@ -4309,6 +4334,26 @@ describe('qwen-autofix workflow', () => {
     );
     expect(noopEmit).toBeTruthy();
     expect(noopEmit[1]).toContain('no changes needed');
+    // The infra-failure reset strings must match the actual retry/cap
+    // headlines emitted in this same step, so a reword breaks this test,
+    // not silently the streak reset.
+    const infraRetryEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start — [^"]*)"/,
+    );
+    expect(infraRetryEmit).toBeTruthy();
+    expect(infraRetryEmit[1]).toContain('AutoFix could not start —');
+    const infraCapEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start for [^"]*)"/,
+    );
+    expect(infraCapEmit).toBeTruthy();
+    expect(infraCapEmit[1]).toContain('AutoFix could not start for');
+    // The crash headline must NOT match the infra reset patterns.
+    const crashEmit = reviewAddressReportStep.match(
+      /HEADLINE="(🤖 AutoFix could not start evaluation[^"]*)"/,
+    );
+    expect(crashEmit).toBeTruthy();
+    expect(crashEmit[1]).not.toContain('AutoFix could not start —');
+    expect(crashEmit[1]).not.toContain('AutoFix could not start for');
     // Window filtering: pre-re-arm failures don't count after a re-arm.
     expect(
       run(
