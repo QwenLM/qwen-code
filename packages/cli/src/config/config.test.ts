@@ -1871,6 +1871,19 @@ describe('loadCliConfig telemetry', () => {
     );
   });
 
+  it('should defer telemetry for ACP startup', async () => {
+    process.argv = ['node', 'script.js', '--acp', '--telemetry'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        deferTelemetryInitialization: true,
+      }),
+    );
+  });
+
   it('should set telemetry to false when --no-telemetry flag is present', async () => {
     process.argv = ['node', 'script.js', '--no-telemetry'];
     const argv = await parseArguments();

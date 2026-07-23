@@ -39,6 +39,7 @@ import type {
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
+  DaemonWorkspaceAcpPreheatResult,
   DaemonWorkspaceEnvStatus,
   DaemonWorkspaceExtensionsStatus,
   DaemonWorkspaceFile,
@@ -398,6 +399,7 @@ export interface DaemonWorkspaceActions {
   loadExtensionsStatus(): Promise<DaemonWorkspaceExtensionsStatus>;
 
   // Tools
+  preheatAcp(timeoutMs?: number): Promise<DaemonWorkspaceAcpPreheatResult>;
   loadToolsStatus(): Promise<DaemonWorkspaceToolsStatus>;
   setWorkspaceToolEnabled(toolName: string, enabled: boolean): Promise<unknown>;
 
@@ -424,7 +426,10 @@ export interface DaemonWorkspaceActions {
 
   // Agents (CRUD)
   listAgents(): Promise<DaemonWorkspaceAgentsStatus>;
-  getAgent(agentType: string): Promise<DaemonWorkspaceAgentDetail>;
+  getAgent(
+    agentType: string,
+    scope?: 'workspace' | 'global',
+  ): Promise<DaemonWorkspaceAgentDetail>;
   createAgent(
     req: DaemonCreateAgentRequest,
   ): Promise<DaemonAgentMutationResult>;

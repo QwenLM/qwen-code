@@ -212,6 +212,199 @@ describe('workspace agents routes', () => {
     expect(reviewerEntry?.systemPrompt).toBeUndefined();
   });
 
+  it('round-trips complete frontmatter metadata through create, list, and detail', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const config = {
+      name: 'complete-agent',
+      description: 'Exercises the complete daemon Agent contract',
+      systemPrompt: 'You are a complete test agent.',
+      scope: 'workspace',
+      tools: ['read_file', 'mcp__github__search'],
+      disallowedTools: ['run_shell_command', 'mcp__slack'],
+      model: 'fast',
+      approvalMode: 'bubble',
+      maxTurns: 12,
+      color: 'cyan',
+      mcpServers: {
+        filesystem: { type: 'stdio', command: 'node', args: ['server.js'] },
+      },
+      hooks: {
+        PreToolUse: [
+          {
+            matcher: 'run_shell_command',
+            hooks: [{ type: 'command', command: 'echo checking' }],
+          },
+        ],
+      },
+    };
+
+    const create = await request(app).post('/workspace/agents').send(config);
+    expect(create.status).toBe(201);
+    const { scope: _scope, ...persistedConfig } = config;
+    expect(create.body.agent).toMatchObject({
+      ...persistedConfig,
+      level: 'project',
+    });
+
+    const list = await request(app).get('/workspace/agents');
+    const summary = list.body.agents.find(
+      (agent: { name: string }) => agent.name === config.name,
+    );
+    expect(summary).toMatchObject({
+      name: config.name,
+      tools: config.tools,
+      disallowedTools: config.disallowedTools,
+      model: config.model,
+      approvalMode: config.approvalMode,
+      maxTurns: config.maxTurns,
+      color: config.color,
+      mcpServerNames: ['filesystem'],
+      hookEvents: ['PreToolUse'],
+    });
+    expect(summary.systemPrompt).toBeUndefined();
+
+    const detail = await request(app).get(`/workspace/agents/${config.name}`);
+    expect(detail.status).toBe(200);
+    expect(detail.body).toMatchObject({
+      ...persistedConfig,
+      level: 'project',
+    });
+  });
+
+  it('restores selected MCP server secrets before writing an agent', async () => {
+    const settingsDir = path.join(workspace, QWEN_DIR);
+    await fs.mkdir(settingsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(settingsDir, 'settings.json'),
+      JSON.stringify({
+        mcpServers: {
+          private: {
+            command: 'private-server',
+            env: { PRIVATE_TOKEN: 'secret-value' },
+          },
+        },
+      }),
+      'utf8',
+    );
+    const app = buildApp({
+      bridge: buildBridgeStub(),
+      boundWorkspace: workspace,
+    });
+
+    const create = await request(app)
+      .post('/workspace/agents')
+      .send({
+        name: 'private-agent',
+        description: 'Uses a selected private MCP server',
+        systemPrompt: 'Use the private MCP server.',
+        scope: 'workspace',
+        mcpServers: {
+          private: {
+            command: 'private-server',
+            env: { PRIVATE_TOKEN: '__redacted__' },
+          },
+        },
+      });
+
+    expect(create.status).toBe(201);
+    expect(create.body.agent.mcpServers.private.env).toEqual({
+      PRIVATE_TOKEN: '__redacted__',
+    });
+    const onDisk = await fs.readFile(
+      path.join(workspace, QWEN_DIR, 'agents', 'private-agent.md'),
+      'utf8',
+    );
+    expect(onDisk).toContain('PRIVATE_TOKEN: secret-value');
+    expect(onDisk).not.toContain('__redacted__');
+  });
+
+  it('keeps the existing structured agent generation route unchanged', async () => {
+    const bridge = buildBridgeStub();
+    const generateWorkspaceAgent = vi.fn().mockResolvedValue({
+      name: 'generated-agent',
+      description: 'generated description',
+      systemPrompt: 'generated prompt',
+    });
+    bridge.generateWorkspaceAgent = generateWorkspaceAgent;
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+
+    const res = await request(app)
+      .post('/workspace/agents/generate')
+      .send({ description: 'generate an agent' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      name: 'generated-agent',
+      description: 'generated description',
+      systemPrompt: 'generated prompt',
+    });
+    expect(generateWorkspaceAgent).toHaveBeenCalledWith(
+      'generate an agent',
+      undefined,
+    );
+  });
+
+  it('updates advanced agent metadata', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'editable-agent',
+      description: 'before',
+      systemPrompt: 'before prompt',
+      scope: 'workspace',
+    });
+
+    const update = await request(app)
+      .post('/workspace/agents/editable-agent')
+      .send({
+        description: 'after',
+        systemPrompt: 'after prompt',
+        tools: ['read_file', 'mcp__github__search'],
+        disallowedTools: ['run_shell_command'],
+        model: 'fast',
+        approvalMode: 'bubble',
+        maxTurns: 8,
+        color: 'purple',
+        mcpServers: { github: { type: 'http', url: 'https://example.com' } },
+        hooks: { PreToolUse: [] },
+      });
+
+    expect(update.status).toBe(200);
+    expect(update.body.agent).toMatchObject({
+      description: 'after',
+      systemPrompt: 'after prompt',
+      tools: ['read_file', 'mcp__github__search'],
+      disallowedTools: ['run_shell_command'],
+      model: 'fast',
+      approvalMode: 'bubble',
+      maxTurns: 8,
+      color: 'purple',
+      mcpServers: { github: { type: 'http', url: 'https://example.com' } },
+      hooks: { PreToolUse: [] },
+    });
+
+    const clear = await request(app)
+      .post('/workspace/agents/editable-agent')
+      .send({
+        model: null,
+        approvalMode: null,
+        maxTurns: null,
+        color: null,
+        tools: [],
+        disallowedTools: [],
+        mcpServers: {},
+        hooks: {},
+      });
+    expect(clear.status).toBe(200);
+    expect(clear.body.agent).not.toHaveProperty('model');
+    expect(clear.body.agent).not.toHaveProperty('approvalMode');
+    expect(clear.body.agent).not.toHaveProperty('maxTurns');
+    expect(clear.body.agent).not.toHaveProperty('color');
+    expect(clear.body.agent).not.toHaveProperty('mcpServers');
+    expect(clear.body.agent).not.toHaveProperty('hooks');
+  });
+
   it('GET /workspace/agents reflects out-of-band agent file changes', async () => {
     const bridge = buildBridgeStub();
     const app = buildApp({ bridge, boundWorkspace: workspace });
@@ -286,6 +479,31 @@ describe('workspace agents routes', () => {
     expect(res.body.systemPrompt).toBe('you are the detail agent');
     expect(res.body.isBuiltin).toBe(false);
     expect(res.body.level).toBe('project');
+  });
+
+  it('returns a shadowed user agent when GET specifies global scope', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    await request(app).post('/workspace/agents').send({
+      name: 'shadowed-agent',
+      description: 'project description',
+      systemPrompt: 'project prompt',
+      scope: 'workspace',
+    });
+    await request(app).post('/workspace/agents').send({
+      name: 'shadowed-agent',
+      description: 'user description',
+      systemPrompt: 'user prompt',
+      scope: 'global',
+    });
+
+    const res = await request(app).get(
+      '/workspace/agents/shadowed-agent?scope=global',
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.level).toBe('user');
+    expect(res.body.systemPrompt).toBe('user prompt');
   });
 
   it('returns 404 agent_not_found for unknown agent', async () => {
@@ -616,6 +834,43 @@ describe('workspace agents routes', () => {
     expect(res.status).toBe(422);
     expect(res.body.code).toBe('invalid_config');
     expect(res.body.error).toMatch(/approvalMode/);
+  });
+
+  it('returns 422 invalid_config for unknown permissionMode', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const res = await request(app).post('/workspace/agents').send({
+      name: 'bad-permission-mode',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a bad permission mode test agent',
+      scope: 'workspace',
+      permissionMode: 'invalid',
+    });
+    expect(res.status).toBe(422);
+    expect(res.body.code).toBe('invalid_config');
+    expect(res.body.error).toMatch(/permissionMode/);
+  });
+
+  it('round-trips and clears permissionMode without approvalMode', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const create = await request(app).post('/workspace/agents').send({
+      name: 'permission-mode-agent',
+      description: 'an agent using the compatibility permission mode',
+      systemPrompt: 'you are a permission mode test agent',
+      scope: 'workspace',
+      permissionMode: 'plan',
+    });
+
+    expect(create.status).toBe(201);
+    expect(create.body.agent.permissionMode).toBe('plan');
+
+    const clear = await request(app)
+      .post('/workspace/agents/permission-mode-agent')
+      .send({ permissionMode: null });
+
+    expect(clear.status).toBe(200);
+    expect(clear.body.agent).not.toHaveProperty('permissionMode');
   });
 
   it('strips unknown runConfig keys and rejects malformed values', async () => {
@@ -1008,6 +1263,36 @@ describe('workspace agents routes', () => {
       max_time_minutes: 45,
       max_turns: 10,
     });
+  });
+
+  it('detects unchanged MCP servers and hooks as a no-op', async () => {
+    const bridge = buildBridgeStub();
+    const app = buildApp({ bridge, boundWorkspace: workspace });
+    const mcpServers = {
+      filesystem: { type: 'stdio', command: 'node', args: ['server.js'] },
+    };
+    const hooks = {
+      PreToolUse: [{ matcher: 'read_file', hooks: [] }],
+    };
+    await request(app).post('/workspace/agents').send({
+      name: 'record-noop',
+      description: 'a description longer than ten chars',
+      systemPrompt: 'you are a record-noop agent',
+      scope: 'workspace',
+      mcpServers,
+      hooks,
+    });
+    const eventsBefore = (bridge as unknown as { events: RecordedEvent[] })
+      .events.length;
+
+    const res = await request(app)
+      .post('/workspace/agents/record-noop')
+      .send({ mcpServers, hooks });
+
+    expect(res.status).toBe(200);
+    expect(res.body.changed).toBe(false);
+    const events = (bridge as unknown as { events: RecordedEvent[] }).events;
+    expect(events.length).toBe(eventsBefore);
   });
 
   it('short-circuits no-op updates with changed: false and no event', async () => {
