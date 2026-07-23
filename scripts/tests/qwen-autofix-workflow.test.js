@@ -419,6 +419,7 @@ describe('qwen-autofix workflow', () => {
       cmp = 'behind',
       updateOk = true,
       mainHead = 'mainhead999',
+      dryRun = false,
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ub-'));
       const bin = join(dir, 'bin');
@@ -454,6 +455,7 @@ describe('qwen-autofix workflow', () => {
             MAIN_GREEN_CHECKS: JSON.stringify(mainGreen),
             CHECKS_JSON: JSON.stringify(prChecks),
             PR_META: JSON.stringify({ headRefOid: 'prhead123' }),
+            DRY_RUN: dryRun ? 'true' : 'false',
             PATH: `${bin}:${process.env.PATH}`,
           },
           encoding: 'utf8',
@@ -500,6 +502,10 @@ describe('qwen-autofix workflow', () => {
     expect(
       run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], updateOk: false }),
     ).toEqual({ updated: true, continued: true });
+    // DRY_RUN: the scan must NOT call update-branch — it logs and skips.
+    expect(
+      run({ prChecks: [FAIL('Test')], mainGreen: ['Test'], dryRun: true }),
+    ).toEqual({ updated: false, continued: true });
     // A Qwen Autofix check (not review-address) that fails on the PR and passes
     // on main must NOT be treated as stale-base red — the exclusion filter keeps
     // the workflow's own failing checks from triggering an update-branch. A logic

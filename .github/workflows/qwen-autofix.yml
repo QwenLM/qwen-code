@@ -1852,6 +1852,11 @@ jobs:
               CMP_STATUS="$(gh api "repos/${REPO}/compare/${MAIN_HEAD}...${PR_HEAD_OID}" --jq '.status' 2> /dev/null || echo '')"
               if [[ "${CMP_STATUS}" == 'behind' || "${CMP_STATUS}" == 'diverged' ]]; then
                 RED_NAMES="$(jq -r 'join(", ")' <<< "${STALE_BASE_REDS}")"
+                if [[ "${DRY_RUN}" == "true" ]]; then
+                  echo "🧪 DRY-RUN: would update stale base on #${PR} (red [${RED_NAMES}] green on main ${MAIN_HEAD:0:9})"
+                  fleet_row "${PR}" 'dry-run-base' "would merge main (stale-base red [${RED_NAMES}])"
+                  continue
+                fi
                 # expected_head_sha makes this a compare-and-swap: if the author
                 # pushed between our compare read and this call, GitHub rejects it
                 # rather than merging main into an unverified head.
