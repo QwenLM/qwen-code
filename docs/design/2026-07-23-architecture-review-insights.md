@@ -282,6 +282,18 @@ npm run preflight  → clean → install → format → lint → build → typec
 
 **模式：** 添加新的环境变量覆盖时，复用 `parseBooleanEnvFlag()` 工具和三级优先级链（env > setting > default）。不要发明新的解析逻辑。
 
+### 5.15 空操作的优雅降级
+
+- **PR #7598**：ACP `conn.cancel()` 在 agent 空闲时返回 "Not currently generating"——视为成功而非报错
+
+**模式：** 尝试取消/停止已完成的内容时，视为成功而非报错。用错误消息匹配（而非错误码）检测空操作状态——当协议没有专用错误码时，string match 是正确粒度。
+
+### 5.16 AsyncLocalStorage 跨回调边界隔离
+
+- **PR #7576**：teammate 的 agent/model 上下文通过回调泄漏到 leader——`runOutsideAgentContext()` 清除上下文
+
+**模式：** 回调在异步上下文 A（teammate）中注册，在上下文 B（leader）中调用时，AsyncLocalStorage 上下文可能泄漏。修复：在回调注册处包裹上下文清除。当消费者是 React effect 时，需要第二条边界（React batching 可恢复外层 frame）。
+
 ## 六、架构演进方向
 
 基于当前 PR 趋势的观察：
