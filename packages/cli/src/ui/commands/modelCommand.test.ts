@@ -46,8 +46,30 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
+  });
+
+  it('should complete image models across providers', async () => {
+    mockContext.services.config = {
+      getAvailableModels: vi.fn().mockReturnValue([
+        {
+          id: 'current-chat-model',
+          authType: AuthType.QWEN_OAUTH,
+        },
+      ]),
+      getAllConfiguredModels: vi.fn().mockReturnValue([
+        {
+          id: 'qwen-image-2.0',
+          authType: AuthType.USE_OPENAI,
+          imageOnly: true,
+        },
+      ]),
+    } as unknown as Config;
+
+    const result = await modelCommand.completion!(mockContext, '--image q');
+
+    expect(result).toEqual(['qwen-image-2.0']);
   });
 
   it('should return error when config is not available', async () => {
@@ -1305,6 +1327,131 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should open the image model dialog for /model --image', async () => {
+    const mockConfig = createMockConfig({
+      model: 'qwen-plus',
+      authType: AuthType.USE_OPENAI,
+    });
+    mockContext.services.config = mockConfig as Config;
+
+    const result = await modelCommand.action!(mockContext, '--image');
+
+    expect(result).toEqual({
+      type: 'dialog',
+      dialog: 'image-model',
+    });
+  });
+
+  it('should return the current image model outside interactive mode', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--image' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: {
+            imageModel:
+              'openai:qwen-image-2.0\0https://images.example.com/api/v1',
+          } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--image');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current image model: openai:qwen-image-2.0 (https://images.example.com/api/v1)\nUse "/model --image <model-id>" to set the image generation model.',
+    });
+  });
+
+  it('should set an imageOnly model and hot-register its tool', async () => {
+    const setValue = vi.fn();
+    const setImageModel = vi.fn().mockResolvedValue(undefined);
+    const baseUrl = 'https://images.example.com/api/v1';
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --image qwen-image-2.0',
+        name: 'model',
+        args: '--image qwen-image-2.0',
+      },
+      services: {
+        config: {
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-image-2.0',
+              label: 'Qwen Image 2.0',
+              authType: AuthType.USE_OPENAI,
+              baseUrl,
+              registryBaseUrl: baseUrl,
+              envKey: 'IMAGE_API_KEY',
+              imageOnly: true,
+            },
+          ]),
+          resolveImageGenerationModel: vi.fn().mockReturnValue({
+            model: 'qwen-image-2.0',
+            baseUrl,
+            apiKeyEnv: 'IMAGE_API_KEY',
+          }),
+          setImageModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--image qwen-image-2.0',
+    );
+
+    const persisted = `openai:qwen-image-2.0\0${baseUrl}`;
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'imageModel',
+      persisted,
+    );
+    expect(setImageModel).toHaveBeenCalledWith(persisted);
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Image Model: qwen-image-2.0',
+    });
+  });
+
+  it('should reject a chat model from /model --image', async () => {
+    const setValue = vi.fn();
+    mockContext = createMockCommandContext({
+      services: {
+        config: {
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-plus',
+              label: 'Qwen Plus',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--image qwen-plus');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining(
+        "Image model 'qwen-plus' is not configured",
+      ),
+    });
+  });
+
   it('should open the voice model dialog for /model --voice in interactive mode', async () => {
     const mockConfig = createMockConfig({
       model: 'qwen-plus',
@@ -1748,7 +1895,7 @@ describe('modelCommand', () => {
     });
   });
 
-  describe('fastOnly/voiceOnly filtering', () => {
+  describe('selector-only model filtering', () => {
     it('should reject fastOnly models from normal /model selection', async () => {
       mockContext = createMockCommandContext({
         invocation: {
@@ -1806,6 +1953,40 @@ describe('modelCommand', () => {
         type: 'message',
         messageType: 'error',
         content: expect.stringContaining('voice-model'),
+      });
+    });
+
+    it('should reject image-generation-only models from normal /model selection', async () => {
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model qwen-image-2.0',
+          name: 'model',
+          args: 'qwen-image-2.0',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'main-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+              { id: 'main-model', label: 'Main' },
+              {
+                id: 'qwen-image-2.0',
+                label: 'Image',
+                imageOnly: true,
+              },
+            ]),
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(mockContext, 'qwen-image-2.0');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('qwen-image-2.0'),
       });
     });
 
@@ -2087,6 +2268,16 @@ describe('modelCommand', () => {
         type: 'dialog',
         dialog: 'vision-model',
         persistScope: 'workspace',
+      });
+    });
+
+    it('should include persistScope for /model --global --image dialog', async () => {
+      const ctx = setupContext();
+      const result = await modelCommand.action!(ctx, '--global --image');
+      expect(result).toEqual({
+        type: 'dialog',
+        dialog: 'image-model',
+        persistScope: 'user',
       });
     });
 

@@ -1304,6 +1304,24 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it('should propagate the image model selection', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig(
+      {
+        imageModel: 'openai:qwen-image-2.0\0https://images.example.com/api/v1',
+      },
+      argv,
+    );
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        imageModel: 'openai:qwen-image-2.0\0https://images.example.com/api/v1',
+      }),
+    );
+  });
+
   it('places session-injected (ACP/IDE) MCP servers at the top precedence tier', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

@@ -2273,6 +2273,7 @@ export async function loadCliConfig(
     webSearch:
       bareMode || safeMode ? undefined : resolveWebSearchSettings(settings),
     visionModel: settings.visionModel || undefined,
+    imageModel: settings.imageModel || undefined,
     visionBridgeTimeoutMs: settings.visionBridgeTimeoutMs,
     modelFallbacks: resolveModelFallbacks(
       argv.fallbackModel,

@@ -53,6 +53,24 @@ describe('useModelCommand', () => {
     expect(result.current.isVoiceModelMode).toBe(false);
   });
 
+  it('should open the model dialog in image model mode exclusively', () => {
+    const { result } = renderHook(() => useModelCommand());
+
+    act(() => {
+      result.current.openModelDialog({
+        imageModelMode: true,
+        voiceModelMode: true,
+        visionModelMode: true,
+        fastModelMode: true,
+      });
+    });
+
+    expect(result.current.isImageModelMode).toBe(true);
+    expect(result.current.isVisionModelMode).toBe(false);
+    expect(result.current.isVoiceModelMode).toBe(false);
+    expect(result.current.isFastModelMode).toBe(false);
+  });
+
   it('should close the model dialog when closeModelDialog is called', () => {
     const { result } = renderHook(() => useModelCommand());
 
@@ -84,5 +102,19 @@ describe('useModelCommand', () => {
     });
     expect(result.current.isModelDialogOpen).toBe(false);
     expect(result.current.isVisionModelMode).toBe(false);
+  });
+
+  it('should reset isImageModelMode on close', () => {
+    const { result } = renderHook(() => useModelCommand());
+
+    act(() => {
+      result.current.openModelDialog({ imageModelMode: true });
+    });
+    expect(result.current.isImageModelMode).toBe(true);
+
+    act(() => {
+      result.current.closeModelDialog();
+    });
+    expect(result.current.isImageModelMode).toBe(false);
   });
 });

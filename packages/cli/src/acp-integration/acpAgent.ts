@@ -5848,7 +5848,9 @@ class QwenAgent implements Agent {
 
   private buildProvidersPreflightCell(config: Config): ServePreflightCell {
     try {
-      const models = config.getAllConfiguredModels();
+      const models = config
+        .getAllConfiguredModels()
+        .filter((model) => !model.imageOnly);
       const authType = config.getAuthType?.();
       if (models.length === 0) {
         // `authType` set but zero models = the next `POST /session` will
