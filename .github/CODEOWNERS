@@ -5,10 +5,16 @@
 # core-review-router workflow, which assigns reviewers based
 # on diff size and affected sub-modules instead of requesting
 # all four maintainers on every PR.
+# The CODEOWNERS entry below is retained so the repository
+# ruleset's require_code_owner_review gate stays enforced;
+# the workflow trims the auto-assigned set to 1–2 reviewers.
 # Maintainer PRs to core are not auto-assigned; request reviewers manually.
 
 # --- CODEOWNERS file itself ---
 /.github/CODEOWNERS    @pomelo-nwu
+
+# --- Core package ---
+/packages/core/        @wenshao @tanzhenxin @yiliang114 @LaZzyMan
 
 # --- CUA Driver & Mobile MCP ---
 /packages/cua-driver/  @LaZzyMan

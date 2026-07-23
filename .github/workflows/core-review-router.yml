@@ -53,8 +53,10 @@ jobs:
           result="$(node .github/scripts/core-review-router.mjs --files "$FILES" --author "$AUTHOR" --pr "$PR_NUMBER")"
           reviewers="$(echo "$result" | jq -r '.reviewers | join(",")')"
           reason="$(echo "$result" | jq -r '.reason')"
+          maintainers="$(echo "$result" | jq -r '.maintainers | join(",")')"
           echo "reviewers=$reviewers" >> "$GITHUB_OUTPUT"
           echo "reason=$reason" >> "$GITHUB_OUTPUT"
+          echo "maintainers=$maintainers" >> "$GITHUB_OUTPUT"
           echo "Routing decision: reviewers=[$reviewers] reason=$reason"
 
       - name: 'Apply review requests'
@@ -63,6 +65,7 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
           REVIEWERS: '${{ steps.classify.outputs.reviewers }}'
           REASON: '${{ steps.classify.outputs.reason }}'
+          MAINTAINERS: '${{ steps.classify.outputs.maintainers }}'
         run: |-
           set -euo pipefail
           api="repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/requested_reviewers"
@@ -89,10 +92,8 @@ jobs:
           # gh api does not support --arg, so pipe to jq separately.
           comments="$(gh api --paginate "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments?per_page=100" --jq '.[]' | jq -sc '.')" || comments='[]'
 
-          # Only treat reviewers as router-managed if this workflow
-          # previously requested them (recorded in a marker comment).
-          # CODEOWNERS-assigned or manually-added maintainers are never
-          # removed by the reconciliation below.
+          # Read the previous desired set from the marker comment so we
+          # can detect manually-dismissed reviewers and avoid re-adding them.
           prev_desired="$(echo "$comments" | jq -c --arg marker "$marker" \
             '[.[] | select(.body | startswith($marker))] | last | .body // "" | split($marker)[1] // "" | split(" -->")[0] // "" | ltrimstr(" ") | fromjson? // {} | .desired // []' \
             2>/dev/null)" || prev_desired='[]'
@@ -104,11 +105,15 @@ jobs:
             '$p - $c - $r')"
           desired="$(jq -cn --argjson d "$desired" --argjson drift "$drift" '$d - $drift | sort')"
 
-          managed="$(echo "$current" | jq -c --argjson p "$prev_desired" \
-            '[.[] | select(. as $l | $p | index($l))] | sort')"
+          # Manage all maintainer reviewers — including CODEOWNERS-assigned
+          # ones — so the router can trim the auto-assigned set to the
+          # desired subset.  Non-maintainer reviewers are never touched.
+          maintainer_list="$(echo "$MAINTAINERS" | tr ',' '\n' | jq -R . | jq -sc '.')"
+          managed="$(echo "$current" | jq -c --argjson m "$maintainer_list" \
+            '[.[] | select(. as $l | $m | index($l))] | sort')"
 
-          # Reconcile the router-managed set toward `desired`. Non-managed
-          # reviewers (CODEOWNERS-assigned, manually added) are untouched.
+          # Reconcile the maintainer set toward `desired`.  Non-maintainer
+          # reviewers are untouched.
           #
           # Diff guard: skip reviewer API calls when the set is unchanged so
           # a stable synchronize push does not re-notify reviewers.
@@ -135,9 +140,9 @@ jobs:
           fi
 
           # Persist the desired set in a marker comment so the next run
-          # can distinguish router-added reviewers from CODEOWNERS or
-          # manually-added ones.  The JSON is embedded in the marker
-          # line itself so parsing does not depend on line positions.
+          # can detect manually-dismissed reviewers.  The JSON is embedded
+          # in the marker line itself so parsing does not depend on line
+          # positions.
           marker_body="${marker} {\"desired\":${desired}} -->"
           comment_id="$(echo "$comments" | jq -r --arg marker "$marker" \
             '[.[] | select(.body | startswith($marker))] | last | .id // empty' \
