@@ -318,6 +318,24 @@ npm run preflight  → clean → install → format → lint → build → typec
 
 **模式：** 当进程全局服务跨多 workspace 管理资源时，在两个层级验证所有权：(1) 目标解析——资源是否解析到唯一 workspace？(2) 已提交状态——资源是否当前被唯一 worker 拥有？用专用 lane 序列化变更，与读取分离。防止跨 workspace 干扰。
 
+### 5.21 执行证据 vs. 完成权威
+
+- **PR #7580**：Todo 计划节点拥有完成状态；Agent 执行是证据而非完成触发器——失败/取消的执行不会错误完成 Todo
+
+**模式：** 将"应做什么"（计划/Todo）与"正在做什么"（代理执行）分离。计划节点拥有完成权威；执行提供证据。防止失败的执行错误完成计划项，允许独立重试而不解锁依赖项。
+
+### 5.22 长时间 CI 作业的持久入队
+
+- **PR #7584**：GitHub Release 触发 → SQLite 入队 → GitHub job 结束 → systemd worker 异步执行——不占用 runner
+
+**模式：** CI 触发多分钟/多小时的作业时不占用 runner。验证 + 持久入队（SQLite），返回"已接受"而非"已完成"，让独立 worker 负责执行、心跳、重试和完成。将触发可靠性与执行可靠性分离。
+
+### 5.23 管理员拥有的安全选择器
+
+- **PR #7586**：`context_search` 工具的 tenant/user/repository/namespace 由管理员配置固定——模型只能选 `query` 和 `limit`
+
+**模式：** 工具暴露的授权边界参数（tenant、user、namespace）由管理员配置固定，不让模型选择。将工具参数面变为非授权边界，保持信任模型简单。模型可选择的参数不能是安全边界。
+
 ## 六、架构演进方向
 
 基于当前 PR 趋势的观察：
