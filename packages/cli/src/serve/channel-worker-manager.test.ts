@@ -19,11 +19,47 @@ import type { ChannelWorkspaceGroup } from './channel-workspace-grouping.js';
 import type { ServeChannelSelection } from './types.js';
 
 const PRIMARY = '/ws/primary';
+const SECONDARY = '/ws/secondary';
 
 function workspaceGroups(
   selection: ServeChannelSelection,
 ): ChannelWorkspaceGroup[] {
   return [{ workspaceCwd: PRIMARY, selection }];
+}
+
+function splitWorkspaceGroups(
+  selection: ServeChannelSelection,
+): ChannelWorkspaceGroup[] {
+  if (selection.mode === 'all') {
+    return [
+      { workspaceCwd: PRIMARY, selection },
+      { workspaceCwd: SECONDARY, selection },
+    ];
+  }
+  const primary = selection.names.filter(
+    (name) => !name.startsWith('secondary-'),
+  );
+  const secondary = selection.names.filter((name) =>
+    name.startsWith('secondary-'),
+  );
+  return [
+    ...(primary.length > 0
+      ? [
+          {
+            workspaceCwd: PRIMARY,
+            selection: { mode: 'names' as const, names: primary },
+          },
+        ]
+      : []),
+    ...(secondary.length > 0
+      ? [
+          {
+            workspaceCwd: SECONDARY,
+            selection: { mode: 'names' as const, names: secondary },
+          },
+        ]
+      : []),
+  ];
 }
 
 function workerSnapshot(
@@ -96,6 +132,73 @@ function setup(group = fakeGroup()) {
 }
 
 describe('createChannelWorkerManager', () => {
+  it('exposes committed channel names in selection order', async () => {
+    const test = setup();
+    const selection: ServeChannelSelection = {
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    };
+
+    expect(test.manager.committedChannelNames()).toEqual([]);
+    await test.manager.setSelection(selection);
+
+    const names = test.manager.committedChannelNames();
+    expect(names).toEqual(['telegram', 'feishu']);
+    names.reverse();
+    expect(test.manager.committedChannelNames()).toEqual([
+      'telegram',
+      'feishu',
+    ]);
+  });
+
+  it('serializes concurrent owner-scoped channel starts', async () => {
+    const test = setup();
+    const manager = test.manager;
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    await Promise.all([
+      manager.setChannelEnabled(
+        { name: 'primary-bot', workspaceCwd: PRIMARY },
+        true,
+      ),
+      manager.setChannelEnabled(
+        { name: 'secondary-bot', workspaceCwd: SECONDARY },
+        true,
+      ),
+    ]);
+
+    expect(manager.committedChannelNames()).toEqual([
+      'telegram',
+      'primary-bot',
+      'secondary-bot',
+    ]);
+  });
+
+  it('serializes an owner-scoped start with a concurrent stop', async () => {
+    const test = setup();
+    const manager = test.manager;
+    test.resolveGroups.mockImplementation(async (selection) =>
+      splitWorkspaceGroups(selection),
+    );
+    await manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    await Promise.all([
+      manager.setChannelEnabled(
+        { name: 'secondary-bot', workspaceCwd: SECONDARY },
+        true,
+      ),
+      manager.setChannelEnabled(
+        { name: 'telegram', workspaceCwd: PRIMARY },
+        false,
+      ),
+    ]);
+
+    expect(manager.committedChannelNames()).toEqual(['secondary-bot']);
+  });
+
   it('enables a disabled manager and makes an equal healthy PUT idempotent', async () => {
     const test = setup();
     const selection: ServeChannelSelection = {
@@ -397,6 +500,138 @@ describe('createChannelWorkerManager', () => {
       workspaceGroups(selection),
       { force: true, onRollingBack: expect.any(Function) },
     );
+  });
+
+  it('reloads only the requested workspace worker', async () => {
+    const primary = workerSnapshot();
+    const secondary = workerSnapshot({
+      workspaceId: 'secondary',
+      workspaceCwd: '/ws/secondary',
+      primary: false,
+    });
+    const initialGroups: ChannelWorkspaceGroup[] = [
+      {
+        workspaceCwd: PRIMARY,
+        selection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['feishu'] },
+      },
+    ];
+    const targetGroups: ChannelWorkspaceGroup[] = [
+      initialGroups[0]!,
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['changed-elsewhere'] },
+      },
+    ];
+    const group = fakeGroup({ snapshots: vi.fn(() => [primary, secondary]) });
+    const test = setup(group);
+    test.resolveGroups
+      .mockResolvedValueOnce(initialGroups)
+      .mockResolvedValueOnce(targetGroups);
+    await test.manager.setSelection({
+      mode: 'names',
+      names: ['telegram', 'feishu'],
+    });
+
+    await expect(
+      test.manager.reloadWorkspace(PRIMARY, 'telegram'),
+    ).resolves.toEqual(primary);
+
+    expect(group.reconcile).toHaveBeenLastCalledWith(targetGroups, {
+      forceWorkspaceCwd: PRIMARY,
+      onRollingBack: expect.any(Function),
+    });
+    expect(test.onCommittedSelection).toHaveBeenLastCalledWith(
+      { mode: 'names', names: ['telegram', 'feishu'] },
+      initialGroups,
+    );
+  });
+
+  it.each([
+    {
+      label: 'moves to another workspace',
+      targetGroups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names' as const, names: ['other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names' as const, names: ['feishu', 'bot'] },
+        },
+      ],
+    },
+    {
+      label: 'becomes ownerless',
+      targetGroups: [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names' as const, names: ['other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names' as const, names: ['feishu'] },
+        },
+      ],
+    },
+  ])(
+    'rejects targeted reload when the edited channel $label',
+    async ({ targetGroups }) => {
+      const initialGroups: ChannelWorkspaceGroup[] = [
+        {
+          workspaceCwd: PRIMARY,
+          selection: { mode: 'names', names: ['bot', 'other'] },
+        },
+        {
+          workspaceCwd: '/ws/secondary',
+          selection: { mode: 'names', names: ['feishu'] },
+        },
+      ];
+      const test = setup();
+      test.resolveGroups
+        .mockResolvedValueOnce(initialGroups)
+        .mockResolvedValueOnce(targetGroups);
+      await test.manager.setSelection({
+        mode: 'names',
+        names: ['bot', 'other', 'feishu'],
+      });
+      vi.mocked(test.group.reconcile).mockClear();
+
+      await expect(
+        test.manager.reloadWorkspace(PRIMARY, 'bot'),
+      ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+      expect(test.group.reconcile).not.toHaveBeenCalled();
+      expect(test.onCommittedSelection).toHaveBeenLastCalledWith(
+        { mode: 'names', names: ['bot', 'other', 'feishu'] },
+        initialGroups,
+      );
+    },
+  );
+
+  it('rejects a required owner mismatch before reconciling selection', async () => {
+    const test = setup();
+    test.resolveGroups.mockResolvedValueOnce([
+      {
+        workspaceCwd: '/ws/secondary',
+        selection: { mode: 'names', names: ['bot'] },
+      },
+    ]);
+
+    await expect(
+      test.manager.setSelection(
+        { mode: 'names', names: ['bot'] },
+        { name: 'bot', workspaceCwd: PRIMARY },
+      ),
+    ).rejects.toMatchObject({ code: 'channel_runtime_owner_mismatch' });
+
+    expect(test.createGroup).not.toHaveBeenCalled();
+    expect(test.group.reconcile).not.toHaveBeenCalled();
+    expect(test.reserveLease).not.toHaveBeenCalled();
+    expect(test.onStateChange).not.toHaveBeenCalled();
   });
 
   it('preserves workspace-attributed startup failures from reload', async () => {
