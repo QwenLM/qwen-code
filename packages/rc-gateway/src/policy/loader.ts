@@ -424,8 +424,68 @@ export interface PolicyLintResult {
    * empty — kept as a forward-compat hook for any field a future cycle defers.
    */
   deferred?: string[];
+  /**
+   * Advisory-only messages from {@link policyAdvisories} (valid files only):
+   * ALLOW rules whose tool-name alias widens beyond what was written, plus a
+   * once-per-load note that every ALLOW rule is newly effective this release.
+   * Never affects `ok`/load outcome — advisory, not validation.
+   */
+  warnings?: string[];
   /** Human-readable reason (invalid files only). */
   error?: string;
+}
+
+/** Kinds reachable from more than one tool name — aliasing to them widens. */
+function kindsWithMultipleTools(): Set<string> {
+  const counts = new Map<string, number>();
+  for (const kind of Object.values(TOOL_ALIAS_TO_KIND)) {
+    counts.set(kind, (counts.get(kind) ?? 0) + 1);
+  }
+  return new Set([...counts].filter(([, n]) => n > 1).map(([k]) => k));
+}
+
+/**
+ * Advisory warnings, not errors:
+ * 1. An `allow` rule written with a tool-name alias whose kind covers other
+ *    tools grants MORE than it says (e.g. `allow write_file` also allows
+ *    `edit`) — the one unsafe corner of accepting aliases.
+ * 2. Matching is being fixed in this release, so every `allow` rule becomes
+ *    effective for the first time. Say so once, with a count.
+ *
+ * Advisory only: never throws, never changes a load outcome, never alters an
+ * evaluation decision. A file that loads today still loads.
+ */
+export function policyAdvisories(policy: Policy): string[] {
+  const out: string[] = [];
+  const shared = kindsWithMultipleTools();
+
+  for (const rule of policy.rules) {
+    if (rule.action !== 'allow') continue;
+    // `aliasedTool` is set by the loader ONLY when this rule was written as a
+    // tool name (Task 5) — precise, unlike scanning the raw file text.
+    const written = rule.aliasedTool;
+    if (written === undefined) continue;
+    const kind = rule.match.tool;
+    if (kind === undefined || !shared.has(kind)) continue;
+    const siblings = Object.keys(TOOL_ALIAS_TO_KIND).filter(
+      (n) => TOOL_ALIAS_TO_KIND[n] === kind && n !== written,
+    );
+    out.push(
+      `rule '${rule.id ?? '(unnamed)'}': allow on '${written}' maps to kind ` +
+        `'${kind}', which also matches ${siblings.join(', ')} — this allows ` +
+        `more than written.`,
+    );
+  }
+
+  const allowCount = policy.rules.filter((r) => r.action === 'allow').length;
+  if (allowCount > 0) {
+    out.push(
+      `${allowCount} allow rule(s) are newly effective: rule matching was ` +
+        `previously broken against real permission frames, so these have never ` +
+        `auto-approved before. Verify them before relying on this policy.`,
+    );
+  }
+  return out;
 }
 
 /**
@@ -459,7 +519,8 @@ export async function lintPolicyFile(path: string): Promise<PolicyLintResult> {
   // No policy field is currently deferred (maxPerWindow is honored as of cycle 43),
   // so a valid file lints clean. Left as a hook for any future deferred field.
   const deferred: string[] = [];
-  return { ok: true, ruleCount: policy.rules.length, deferred };
+  const warnings = policyAdvisories(policy);
+  return { ok: true, ruleCount: policy.rules.length, deferred, warnings };
 }
 
 /** Render a {@link PolicyLintResult} as a one/two-line human summary. */
@@ -471,6 +532,11 @@ export function formatPolicyLint(path: string, r: PolicyLintResult): string {
       `  note: ${r.deferred.length} rule(s) use a not-yet-evaluated field ` +
         `(will downgrade to prompt): ${r.deferred.join(', ')}`,
     );
+  }
+  if (r.warnings && r.warnings.length > 0) {
+    for (const w of r.warnings) {
+      lines.push(`  warning: ${w}`);
+    }
   }
   return lines.join('\n');
 }

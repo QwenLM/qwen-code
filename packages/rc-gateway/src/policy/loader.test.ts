@@ -12,9 +12,12 @@ import {
   loadPolicy,
   loadPolicyFile,
   loadLayeredPolicy,
+  policyAdvisories,
   POLICY_PERMISSIONS_WARNING_KEYWORD,
   PolicyError,
 } from './loader.js';
+
+const lintWarningsFor = (yaml: string) => policyAdvisories(loadPolicy(yaml));
 
 describe('loadPolicy', () => {
   it('parses valid YAML and fills in defaults', () => {
@@ -180,6 +183,81 @@ rules:
 defaults: { action: prompt }
 `);
     expect(p.rules[0].match.tool).toBe('*');
+  });
+});
+
+describe('loadPolicy — aliasedTool contract', () => {
+  it('sets aliasedTool to the original name when tool was written as a tool-name alias', () => {
+    const p = loadPolicy(`
+rules:
+  - id: r1
+    match: { tool: run_shell_command }
+    action: allow
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].aliasedTool).toBe('run_shell_command');
+    expect(p.rules[0].match.tool).toBe('execute');
+  });
+
+  it('leaves aliasedTool undefined when tool was already written as a kind', () => {
+    const p = loadPolicy(`
+rules:
+  - id: r1
+    match: { tool: execute }
+    action: allow
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].aliasedTool).toBeUndefined();
+  });
+
+  it('leaves aliasedTool undefined for a wildcard tool', () => {
+    const p = loadPolicy(`
+rules:
+  - id: r1
+    match: { tool: "*" }
+    action: allow
+defaults: { action: prompt }
+`);
+    expect(p.rules[0].aliasedTool).toBeUndefined();
+  });
+});
+
+describe('policyAdvisories', () => {
+  it('warns when an allow rule uses a widening tool alias', async () => {
+    const warnings = lintWarningsFor(`
+rules:
+  - id: a
+    match: { tool: write_file }
+    action: allow
+defaults: { action: prompt }
+`);
+    expect(warnings.join('\n')).toMatch(/write_file/);
+    expect(warnings.join('\n')).toMatch(/also matches/i);
+  });
+
+  it('does not warn for a deny rule using the same alias', () => {
+    const warnings = lintWarningsFor(`
+rules:
+  - id: a
+    match: { tool: write_file }
+    action: deny
+defaults: { action: prompt }
+`);
+    expect(warnings.join('\n')).not.toMatch(/also matches/i);
+  });
+
+  it('reports how many allow rules are newly effective', () => {
+    const warnings = lintWarningsFor(`
+rules:
+  - id: a
+    match: { tool: read_file }
+    action: allow
+  - id: b
+    match: { tool: execute }
+    action: allow
+defaults: { action: prompt }
+`);
+    expect(warnings.join('\n')).toMatch(/2 allow rule/);
   });
 });
 

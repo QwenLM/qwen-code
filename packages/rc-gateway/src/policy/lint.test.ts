@@ -90,6 +90,18 @@ describe('lintPolicyFile', () => {
     expect(r.ok).toBe(false);
     expect(r.error).toMatch(/maxPerWindow must be a mapping/);
   });
+
+  it('surfaces alias-widening + newly-live warnings through formatPolicyLint', async () => {
+    const p = await write(
+      'warn.yaml',
+      `rules:\n  - id: a\n    match: { tool: write_file }\n    action: allow\n`,
+    );
+    const r = await lintPolicyFile(p);
+    expect(r.warnings?.length).toBeGreaterThan(0);
+    const out = formatPolicyLint(p, r);
+    expect(out).toContain('warning:');
+    expect(out).toMatch(/also matches/i);
+  });
 });
 
 describe('formatPolicyLint', () => {

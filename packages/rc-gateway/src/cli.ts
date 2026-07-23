@@ -108,6 +108,7 @@ import {
   loadLayeredPolicy,
   lintPolicyFile,
   formatPolicyLint,
+  policyAdvisories,
   type Policy,
 } from './policy/loader.js';
 import { explainPolicy } from './policy/evaluator.js';
@@ -678,12 +679,15 @@ export async function runServe(opts: ServeOptions = {}): Promise<void> {
   // throws (cycle-14 boot-fail, unchanged — do NOT wrap in a swallowing catch); a
   // malformed workspace file is logged + ignored (fail-closed: keep user policy).
   const userPolicyPath = join(homedir(), '.qwen', 'rc', 'policy.yaml');
-  const policy = await loadLayeredPolicy(
-    userPolicyPath,
-    workspaceCwd,
-    // eslint-disable-next-line no-console
-    (msg) => console.warn(msg),
-  );
+  // eslint-disable-next-line no-console
+  const warn = (msg: string) => console.warn(msg);
+  const policy = await loadLayeredPolicy(userPolicyPath, workspaceCwd, warn);
+  // Advisory-only lint warnings (Task 6): alias-widened `allow` rules and the
+  // newly-live-allow-rules note from policyAdvisories. Emitted ONCE at boot on
+  // the merged policy — never on hot-reload (cycle 45's reloader), which fires
+  // on every file change and would spam the same notes repeatedly. Reuses the
+  // same warn sink as loadLayeredPolicy rather than a new logging mechanism.
+  for (const w of policyAdvisories(policy)) warn(w);
   // Boot hygiene (cycle 48): warn if either policy file is group/world-writable
   // (design threat model — a non-owner could rewrite the tool-permission policy).
   // Advisory only: the policy still loads. The check never throws (best-effort).
