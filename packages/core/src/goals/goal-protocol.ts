@@ -61,13 +61,29 @@ export function goalRequiresExactPermit(snapshot: GoalSnapshotV2): boolean {
 export type GoalControlRequest =
   | { action: 'create'; objective: string }
   | {
-      action: 'replace' | 'edit';
+      action: 'replace';
       objective: string;
       expectedGoalId: string;
       expectedRevision: number;
     }
   | {
-      action: 'pause' | 'resume' | 'clear';
+      action: 'edit';
+      objective: string;
+      expectedGoalId: string;
+      expectedRevision: number;
+    }
+  | {
+      action: 'pause';
+      expectedGoalId: string;
+      expectedRevision: number;
+    }
+  | {
+      action: 'resume';
+      expectedGoalId: string;
+      expectedRevision: number;
+    }
+  | {
+      action: 'clear';
       expectedGoalId: string;
       expectedRevision: number;
     };

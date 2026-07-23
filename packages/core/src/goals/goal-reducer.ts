@@ -119,6 +119,9 @@ export function reduceGoalControl(
       snapshotOf(current),
     );
   }
+  if (request.action !== 'resume') {
+    return assertNever(request, snapshotOf(current));
+  }
   return transitionGoal(current, transition.now, { status: 'active' });
 }
 
@@ -470,4 +473,11 @@ function isNonNegativeNumber(value: unknown): value is number {
 
 function isFiniteNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
+}
+
+function assertNever(value: never, snapshot: GoalSnapshotV2): never {
+  throw new GoalInvalidTransitionError(
+    `Unsupported Goal control action: ${String(value)}`,
+    snapshot,
+  );
 }

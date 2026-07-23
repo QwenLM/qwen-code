@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   goalRequiresExactPermit,
+  type GoalControlRequest,
   type GoalRecord,
   type GoalSnapshotV2,
 } from './goal-protocol.js';
@@ -191,6 +192,21 @@ describe('goal reducer', () => {
           expectedGoalId: 'g-1',
           expectedRevision: 1,
         },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      }),
+    ).toThrow(GoalInvalidTransitionError);
+  });
+
+  it('rejects an unsupported control action instead of resuming', () => {
+    expect(() =>
+      reduceGoalControl(goalRecord({ status: 'paused' }), {
+        request: {
+          action: 'archive',
+          expectedGoalId: 'g-1',
+          expectedRevision: 1,
+        } as unknown as GoalControlRequest,
         now: 200,
         nextGoalId: 'unused',
         cursor: { recordId: 'r-200' },
