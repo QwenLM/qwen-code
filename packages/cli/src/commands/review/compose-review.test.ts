@@ -1126,9 +1126,11 @@ describe('coverage is recomputed, never accepted', () => {
         'a subject only the caller noticed — the auditor returned nothing twice',
       ],
     });
-    // One clause for the shared subject — and it is the machine's sentence,
-    // not the caller's paraphrase.
-    expect(r.body.split(label)).toHaveLength(2);
+    // One clause for the shared subject — the machine's sentence, not the
+    // caller's paraphrase, and in the author's register: the internal
+    // codename stays off the posted body (it is the stderr selector).
+    expect(r.body.split('the whole-diff test-coverage check')).toHaveLength(2);
+    expect(r.body).not.toContain(label);
     expect(r.body).toContain('no record shows its brief reaching an agent');
     expect(r.body).not.toContain('described this gap in its own words');
     // A subject the coverage recomputation cannot see survives untouched.
@@ -1250,7 +1252,10 @@ describe('coverage is recomputed, never accepted', () => {
       ],
       modelId: MODEL,
     });
-    expect(r.body.split(label)).toHaveLength(2);
+    // The caller's echo (internal label) dedupes against the internal
+    // subject; the one surviving sentence prints the author's phrase.
+    expect(r.body).not.toContain(label);
+    expect(r.body.split('the whole-diff test-coverage check')).toHaveLength(2);
     expect(
       r.body.match(/no record shows its brief reaching an agent/g) ?? [],
     ).toHaveLength(1);
@@ -1510,8 +1515,12 @@ describe('coverage is recomputed, never accepted', () => {
     expect(fixes).toMatch(/rewritten launches: re-run/);
     expect(fixes).toMatch(/unread briefs: relaunch/);
     expect(fixes).toMatch(/agents that never opened the diff: relaunch/);
-    // And none of the three disclosures drags a command into the body.
+    // And none of the three disclosures drags a command into the body —
+    // nor the unread brief's filesystem path: the path names the file an
+    // OPERATOR makes the agent open, and it stays on stderr with the fix.
     expect(r.body).not.toMatch(/agent-prompt|--roster|--chunk/);
+    expect(r.body).not.toContain('.brief.md');
+    expect(r.body).toContain('never opened its brief, so it reviewed without');
   });
 
   it('the handler prints every FIX to stderr, before the verdict, never to stdout', () => {
@@ -1628,6 +1637,29 @@ describe('the Step 4/5 gate — verify and reverse audit must have run (high eff
     expect(r.body).toMatch(
       /reverse audit — no auditor was launched with a prompt this skill builds/,
     );
+  });
+
+  it('says one sentence when verify and the reverse audit failed the same way', () => {
+    // #7268's posted body carried the two `rewritten` sentences back to back,
+    // near-identical but for the tail. Both steps down the same way is one
+    // failure with two subjects — while the stderr remediation keeps BOTH
+    // rebuild commands, which differ.
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 1,
+      planPath: coveredPlan([]), // neither verify nor reverse audit on record
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).toMatch(
+      /Not reviewed: verification and reverse audit — neither the verifier nor the reverse auditor was launched with a prompt this skill builds/,
+    );
+    expect(r.body).not.toMatch(/reverse audit — no auditor/);
+    expect(r.body).not.toMatch(/verification — the review posts findings/);
+    const fixes = r.remediation.join(' ');
+    expect(fixes).toContain('--role reverse-audit');
+    expect(fixes).toContain('--role verify');
   });
 
   it('softens an unverified Request changes to Comment — no verifier, no blocker', () => {
