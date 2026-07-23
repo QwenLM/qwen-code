@@ -199,6 +199,28 @@ describe('goal reducer', () => {
     ).toThrow(GoalInvalidTransitionError);
   });
 
+  it.each(['blocked', 'usage_limited'] as const)(
+    'resumes a %s goal without changing revision or evidence cursor',
+    (status) => {
+      const resumed = reduceGoalControl(goalRecord({ status, revision: 4 }), {
+        request: {
+          action: 'resume',
+          expectedGoalId: 'g-1',
+          expectedRevision: 4,
+        },
+        now: 200,
+        nextGoalId: 'unused',
+        cursor: { recordId: 'r-200' },
+      });
+
+      expect(resumed).toMatchObject({
+        status: 'active',
+        revision: 4,
+        evidenceCursor: { recordId: 'r-100' },
+      });
+    },
+  );
+
   it('rejects an unsupported control action instead of resuming', () => {
     expect(() =>
       reduceGoalControl(goalRecord({ status: 'paused' }), {

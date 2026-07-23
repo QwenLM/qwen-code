@@ -15,6 +15,8 @@ import {
   type TranscriptCursor,
 } from './goal-protocol.js';
 
+const MAX_BLOCKED_AUDIT_COUNT = 3;
+
 export interface GoalControlTransition {
   request: GoalControlRequest;
   now: number;
@@ -446,7 +448,7 @@ function isBlockedAudit(
       value['fingerprint'].length > 0 &&
       isNonNegativeInteger(value['count']) &&
       value['count'] > 0 &&
-      value['count'] <= 3 &&
+      value['count'] <= MAX_BLOCKED_AUDIT_COUNT &&
       Array.isArray(value['turnIds']) &&
       value['turnIds'].length === value['count'] &&
       value['turnIds'].every(
