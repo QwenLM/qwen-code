@@ -89,6 +89,46 @@ test('Enter inserts a newline and does not submit', async ({
     .toBeGreaterThan(singleLineHeight);
 });
 
+test('keeps the textarea scrollable once content exceeds the height cap', async ({
+  page,
+}, testInfo) => {
+  // Regression: the textarea is .editorArea's last child and used to inherit
+  // `overflow: clip`, which pinned scrollTop to 0 once auto-grow hit the
+  // CSS max-height — content beyond the cap became unreachable.
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+
+  await gotoSession(page, scenario, daemon);
+  const textarea = page.locator(COMPOSER_TEXTAREA);
+  await textarea.tap();
+  const lines = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join(
+    '\n',
+  );
+  await textarea.fill(lines);
+
+  // Auto-grow stops at the cap…
+  await expect
+    .poll(async () => (await textarea.boundingBox())!.height)
+    .toBeGreaterThan(250);
+  const metrics = await textarea.evaluate((el) => {
+    el.scrollTop = 10_000;
+    return {
+      clientHeight: el.clientHeight,
+      scrollHeight: el.scrollHeight,
+      scrollTop: el.scrollTop,
+      maxHeight: getComputedStyle(el).maxHeight,
+    };
+  });
+  expect(metrics.maxHeight).toBe('300px');
+  expect((await textarea.boundingBox())!.height).toBeLessThanOrEqual(304);
+  // …and the overflowing content stays reachable by scrolling.
+  expect(metrics.scrollHeight).toBeGreaterThan(metrics.clientHeight);
+  expect(metrics.scrollTop).toBeGreaterThan(0);
+  expect(metrics.scrollTop).toBeGreaterThanOrEqual(
+    metrics.scrollHeight - metrics.clientHeight - 2,
+  );
+});
+
 test('slash commands typed as text still execute as commands', async ({
   page,
 }, testInfo) => {

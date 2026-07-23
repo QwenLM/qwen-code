@@ -882,6 +882,14 @@
   color: var(--chat-editor-text-dimmed, #666);
 }
 
+/* As .editorArea's last child the textarea would inherit `overflow: clip`
+   from the rule above, pinning scrollTop to 0 — content beyond the height
+   cap would become unreachable. The extra `textarea` type wins that
+   specificity. */
+.editorArea > textarea.mobileTextarea {
+  overflow-y: auto;
+}
+
 .editorArea .cm-scroller {
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
