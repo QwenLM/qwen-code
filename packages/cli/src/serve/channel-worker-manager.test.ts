@@ -746,6 +746,39 @@ describe('createChannelWorkerManager', () => {
     expect(group.enqueueWebhookTask).not.toHaveBeenCalled();
   });
 
+  it('rejects delivery while shutdown is draining workers', async () => {
+    let releaseStop!: () => void;
+    const group = fakeGroup({
+      stop: vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseStop = resolve;
+          }),
+      ),
+    });
+    const test = setup(group);
+    await test.manager.setSelection({ mode: 'names', names: ['telegram'] });
+
+    const shutdown = test.manager.shutdown();
+    await vi.waitFor(() => expect(group.stop).toHaveBeenCalled());
+
+    await expect(
+      test.manager.deliverChannelMessage(PRIMARY, {
+        deliveryId: 'task-1:1000',
+        channelName: 'telegram',
+        target: { type: 'chat', id: 'group-42' },
+        text: 'daily result',
+      }),
+    ).rejects.toMatchObject({
+      code: 'channel_worker_unavailable',
+      message: 'Daemon is shutting down.',
+    });
+    expect(group.deliverChannelMessage).not.toHaveBeenCalled();
+
+    releaseStop();
+    await shutdown;
+  });
+
   it('routes delivery through the committed group and exact workspace', async () => {
     const group = fakeGroup();
     const test = setup(group);

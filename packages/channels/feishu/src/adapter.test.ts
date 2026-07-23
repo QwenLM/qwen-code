@@ -1298,6 +1298,30 @@ describe('FeishuChannel', () => {
       stderrSpy.mockRestore();
     });
 
+    it('classifies non-retryable proactive HTTP failures as permanent', async () => {
+      const channel = createTestableChannel();
+      (channel as unknown as Record<string, unknown>)['tokenCache'] = {
+        token: 'tenant-token',
+        expiresAt: Date.now() + 3600_000,
+      };
+      vi.spyOn(global, 'fetch').mockResolvedValue(
+        new Response('permission denied', { status: 403 }),
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      await expect(
+        channel.deliverProactive(
+          { channelName: 'test', type: 'user', id: 'ou_user' },
+          'direct result',
+        ),
+      ).rejects.toEqual(
+        expect.objectContaining<Partial<ChannelProactiveDeliveryError>>({
+          disposition: 'permanent',
+          message: 'Feishu sendMessage failed: HTTP 403',
+        }),
+      );
+    });
+
     it('sends proactive loop output to direct chats', async () => {
       const channel = createTestableChannel();
       (channel as unknown as Record<string, unknown>)['tokenCache'] = {
