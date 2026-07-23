@@ -196,8 +196,17 @@ Rules:
   asymmetry is intentional and free — it is not a reason to add a
   daemon field.
 
-- `originScope`/`sessionTag` are supplied by the enforcer from gateway
-  session/token context — closing the two dead dimensions.
+- `originScope`/`sessionTag` are **passed through** if a caller supplies
+  them, but this arc does **not** populate them, and they remain dead in
+  production. Correcting an earlier overreach in this design: there is no
+  source wired for either. A `permission_request` originates from the
+  local model, not a remote token, so `originScope` has no meaning to
+  read; `sessionTag` could plausibly resolve to the session name (the
+  precedent is routing, which matches its own `sessionTag` against
+  `ev.sessionName`, `routing/rules.ts:659`), but that needs new
+  session-name plumbing through the pump for a dimension nobody has
+  asked for. Both move to Follow-ups; the finding that they are dead is
+  recorded above as a defect, not silently fixed here.
 
 ### `policy/evaluator.ts` (modified)
 
@@ -274,8 +283,10 @@ discrimination test that fails against the current code:
   `**/secrets/**` deny (fails today — no normalization).
 - operation: `{pathGlob:['**/.env*'], operation:'write'}` denies a write
   but not a read of the same path.
-- dead dimensions: an `originScope` rule matches in production (fails
-  today — never populated).
+- dead dimensions: a regression test **pins** that `originScope`/
+  `sessionTag` remain unpopulated by the enforcer, so the limitation is
+  asserted rather than assumed (they are out of scope here — see
+  `frameContext.ts` above and Follow-ups).
 - alias: `tool: run_shell_command` matches an execute frame; lint warns
   for an `allow` alias with a shared kind.
 
@@ -342,6 +353,13 @@ discrimination test that fails against the current code:
   in the gateway, and upgrades remote-review auto-approve from assisted to
   hands-off. One additive line in the daemon bridge; three independent
   justifications.
+- **Revive `originScope` / `sessionTag`** — currently dead match
+  dimensions. `sessionTag` can resolve to the session name (routing
+  already does this against `ev.sessionName`), which needs session-name
+  plumbing to the enforcer; `originScope` needs a per-session record of
+  the origin that started or prompted the session, which nothing tracks
+  today. Either lands them, or they should be removed from the schema
+  rather than left as silently-inert fields.
 - **P3 — remote approval-mode / plan-mode surface**: gateway routes to
   view and set a session's approval mode (the daemon route and SDK method
   already exist; only the gateway surface is missing).
