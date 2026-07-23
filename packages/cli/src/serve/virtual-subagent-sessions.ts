@@ -128,6 +128,25 @@ function normalizeTaskStatus(status: unknown): string | undefined {
   return status;
 }
 
+function isTerminalTaskStatus(status: string | undefined): boolean {
+  return (
+    status === 'completed' ||
+    status === 'failed' ||
+    status === 'cancelled' ||
+    status === 'canceled'
+  );
+}
+
+export function preferTerminalTaskStatus(
+  metricsStatus: string | undefined,
+  selectedStatus: string,
+): string {
+  return !isTerminalTaskStatus(metricsStatus) &&
+    isTerminalTaskStatus(selectedStatus)
+    ? selectedStatus
+    : (metricsStatus ?? selectedStatus);
+}
+
 function durationBetween(start: string, end?: string): number | undefined {
   if (!end) return undefined;
   const startTime = Date.parse(start);
@@ -849,10 +868,7 @@ export class VirtualSubagentSessions {
     const metrics = findToolCallMetrics(parentRecords, toolCallId);
     return {
       ...selected,
-      status:
-        metrics.status === 'running' && selected.status !== 'running'
-          ? selected.status
-          : (metrics.status ?? selected.status),
+      status: preferTerminalTaskStatus(metrics.status, selected.status),
       durationMs: metrics.durationMs ?? selected.durationMs,
       totalTokens: metrics.totalTokens ?? selected.totalTokens,
       inputTokens: metrics.inputTokens ?? selected.inputTokens,

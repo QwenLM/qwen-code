@@ -17,10 +17,20 @@ import type { WorkspaceRuntime } from './workspace-registry.js';
 import {
   createVirtualSubagentSessionId,
   parseVirtualSubagentSessionId,
+  preferTerminalTaskStatus,
   VirtualSubagentSessions,
 } from './virtual-subagent-sessions.js';
 
 const tempDirs: string[] = [];
+
+it.each(['running', 'paused'])(
+  'keeps a terminal task status over non-terminal %s metrics',
+  (metricsStatus) => {
+    expect(preferTerminalTaskStatus(metricsStatus, 'completed')).toBe(
+      'completed',
+    );
+  },
+);
 
 afterEach(async () => {
   await Promise.all(

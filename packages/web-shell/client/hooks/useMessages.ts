@@ -57,21 +57,22 @@ function getRecord(value: unknown): Record<string, unknown> | undefined {
 export function getBackgroundAgentNotificationKey(
   blocks: readonly DaemonTranscriptBlock[],
 ): string {
-  return blocks
-    .flatMap((block) => {
-      if (block.kind !== 'assistant') return [];
-      const meta = getRecord(block.meta);
-      const task = getRecord(meta?.['backgroundTask']);
-      const status = task?.['status'];
-      return meta?.['source'] === 'background_notification' &&
-        task?.['kind'] === 'agent' &&
-        typeof status === 'string' &&
-        status !== 'running' &&
-        status !== 'paused'
-        ? [`${block.id}:${status}`]
-        : [];
-    })
-    .join('|');
+  for (let index = blocks.length - 1; index >= 0; index -= 1) {
+    const block = blocks[index];
+    if (block.kind !== 'assistant') continue;
+    const meta = getRecord(block.meta);
+    const task = getRecord(meta?.['backgroundTask']);
+    const status = task?.['status'];
+    if (
+      meta?.['source'] === 'background_notification' &&
+      task?.['kind'] === 'agent' &&
+      typeof status === 'string' &&
+      isTerminalBackgroundAgentStatus(status)
+    ) {
+      return `${block.id}:${status}`;
+    }
+  }
+  return '';
 }
 
 export function getPendingBackgroundAgentKey(

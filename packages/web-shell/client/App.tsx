@@ -945,7 +945,9 @@ function isBackgroundShellToolCall(tool: ACPToolCall): boolean {
   );
 }
 
-function getBackgroundTaskActivityKey(messages: readonly Message[]): string {
+export function getBackgroundTaskActivityKey(
+  messages: readonly Message[],
+): string {
   const parts: string[] = [];
   for (const message of messages) {
     if (message.role !== 'tool_group') continue;

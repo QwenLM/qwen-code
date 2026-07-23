@@ -155,6 +155,31 @@ describe('background agent task reconciliation', () => {
     ).toBe('notification:completed');
   });
 
+  it('uses only the latest terminal agent notification in the trigger key', () => {
+    expect(
+      getBackgroundAgentNotificationKey([
+        baseBlock({
+          id: 'older',
+          kind: 'assistant',
+          text: '',
+          meta: {
+            source: 'background_notification',
+            backgroundTask: { kind: 'agent', status: 'completed' },
+          },
+        }),
+        baseBlock({
+          id: 'latest',
+          kind: 'assistant',
+          text: '',
+          meta: {
+            source: 'background_notification',
+            backgroundTask: { kind: 'agent', status: 'failed' },
+          },
+        }),
+      ]),
+    ).toBe('latest:failed');
+  });
+
   it('only requests reconciliation for an active background agent', () => {
     expect(getPendingBackgroundAgentKey([backgroundAgentMessage()])).toBe(
       'agent-call',
