@@ -1764,6 +1764,8 @@ jobs:
           MAIN_HEAD="$(gh api "repos/${REPO}/commits/main" --jq '.sha' 2> /dev/null || echo '')"
           MAIN_GREEN_CHECKS='[]'
           if [[ -n "${MAIN_HEAD}" ]]; then
+            # .[0]: array order is not API-guaranteed; fine for a squash/merge
+            # commit (single associated PR) and fail-safe to "" on a direct push.
             MAIN_PR_HEAD="$(gh api "repos/${REPO}/commits/${MAIN_HEAD}/pulls" \
               --jq '.[0].head.sha // ""' 2> /dev/null || echo '')"
             if [[ -n "${MAIN_PR_HEAD}" ]]; then
@@ -2694,7 +2696,7 @@ jobs:
             + (.[2] | map(select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not) | .created_at))
             + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
               | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -2779,7 +2781,7 @@ jobs:
               + (.[2] | map(select((.created_at // "") > $wm)
                 | select((.user.login // "") != $ab)
                 | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+                | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)) | length)
               + (.[3] | map(select((.conclusion // .state // "") | IN("FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "CANCELLED"))
                 | select(((.workflowName // "") != "Qwen Autofix") or (((.name // "") | startswith("review-address"))))
@@ -2856,7 +2858,7 @@ jobs:
               | select((.created_at // "") > $wm)
               | select((.user.login // "") != $ab)
               | select(((.author_association // "") | IN($trust[])) or (.user.login // "") == $rb)
-              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
+              | select((.body // "") | test("<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|qwen-review-suggestion-summary|pr-force-push|qwen-review-ack) ") | not)
                 | select((.body // "") | test("^\\s*@qwen-code /") | not)
               | "- @\(.user.login): \(.body // "" | gsub("\r"; ""))"' \
               "${WORKDIR}/ic.json"

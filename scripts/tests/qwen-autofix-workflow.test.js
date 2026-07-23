@@ -434,6 +434,7 @@ describe('qwen-autofix workflow', () => {
       prHeadOid = 'prhead123',
       dryRun = false,
       hasMarker = false,
+      markerAgeMin = 30,
       actor = 'autofix-bot',
     }) => {
       const dir = mkdtempSync(join(tmpdir(), 'ub-'));
@@ -454,14 +455,17 @@ describe('qwen-autofix workflow', () => {
       );
       chmodSync(join(bin, 'gh'), 0o755);
       // ic.json: the marker check reads this file for a recent base-updated
-      // marker. An empty array means no marker; a populated one simulates a
-      // recent update.
+      // marker. An empty array means no marker; a populated one simulates
+      // an update markerAgeMin minutes ago (default 30 — within the 2h
+      // BASE_UPDATE_CUTOFF window).
       const icJson = hasMarker
         ? JSON.stringify([
             {
               user: { login: 'autofix-bot' },
               body: '<!-- autofix-base-updated -->',
-              created_at: new Date().toISOString(),
+              created_at: new Date(
+                Date.now() - markerAgeMin * 60_000,
+              ).toISOString(),
             },
           ])
         : '[]';
@@ -486,6 +490,9 @@ describe('qwen-autofix workflow', () => {
             PR_HEAD_OID: prHeadOid,
             DRY_RUN: dryRun ? 'true' : 'false',
             AUTOFIX_BOT: 'autofix-bot',
+            BASE_UPDATE_CUTOFF: new Date(
+              Date.now() - 120 * 60_000,
+            ).toISOString(),
             WORKDIR: dir,
             PATH: `${bin}:${process.env.PATH}`,
           },
@@ -688,6 +695,21 @@ describe('qwen-autofix workflow', () => {
       cas: false,
       continued: false,
       markerPosted: false,
+    });
+    // Repetition guard expiry: a marker OLDER than the 2h cutoff does NOT
+    // block — the window has passed and the PR may be re-updated.
+    expect(
+      run({
+        prChecks: [FAIL('Test')],
+        mainGreen: ['Test'],
+        hasMarker: true,
+        markerAgeMin: 180,
+      }),
+    ).toEqual({
+      updated: true,
+      cas: true,
+      continued: true,
+      markerPosted: true,
     });
     // PR_HEAD_OID empty (headRefOid missing from PR metadata): the -n guard
     // prevents any update-branch call.
@@ -5300,11 +5322,11 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '<!-- (autofix-eval|autofix-rearm|autofix-base-updated|qwen-triage|',
     );
-    // Verify all four filter sites (scan + 3 address) include autofix-rearm;
-    // the scan site also carries autofix-base-updated.
+    // Verify all four filter sites (scan + 3 address) include both
+    // autofix-rearm and autofix-base-updated.
     const filterMatches = [
       ...workflow.matchAll(
-        /autofix-eval\|autofix-rearm\|(autofix-base-updated\|)?qwen-triage/g,
+        /autofix-eval\|autofix-rearm\|autofix-base-updated\|qwen-triage/g,
       ),
     ];
     expect(filterMatches.length).toBeGreaterThanOrEqual(4);
