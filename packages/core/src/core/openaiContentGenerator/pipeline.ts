@@ -1131,7 +1131,10 @@ export class ContentGenerationPipeline {
         isRequiredThinkingError(error)
       ) {
         this.requiredThinkingModels.add(model);
-        debugLogger.warn('Retrying with required thinking enabled', { model });
+        debugLogger.warn('Retrying with required thinking enabled', {
+          model,
+          originalError: getErrorMessage(error),
+        });
         try {
           return await executeAttempt();
         } catch (retryError) {

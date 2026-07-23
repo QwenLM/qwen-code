@@ -905,70 +905,100 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
-    it('retries without provider-configured thinking opt-outs on non-DashScope endpoints', async () => {
-      mockContentGeneratorConfig = {
-        ...mockContentGeneratorConfig,
-        baseUrl: 'https://llm.example.com/v1',
-        model: 'Qwen3.6-27B',
-        extra_body: {
+    it.each([
+      {
+        name: 'preserving unrelated chat_template_kwargs',
+        extraBody: {
           enable_thinking: false,
           chat_template_kwargs: {
             apply_chat_template: true,
             enable_thinking: false,
           },
         },
-      } as ContentGeneratorConfig;
-      const provider = new DefaultOpenAICompatibleProvider(
-        mockContentGeneratorConfig,
-        mockCliConfig,
-      );
-      vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
-      pipeline = new ContentGenerationPipeline({
-        ...mockConfig,
-        provider,
-        contentGeneratorConfig: mockContentGeneratorConfig,
-      });
-
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
-        { role: 'user', content: 'What is 2+2?' },
-      ]);
-      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
-        new GenerateContentResponse(),
-      );
-
-      const requiredThinkingError = Object.assign(
-        new Error('enable_thinking must be true for this model'),
-        { status: 400 },
-      );
-      (mockClient.chat.completions.create as Mock)
-        .mockRejectedValueOnce(requiredThinkingError)
-        .mockResolvedValue({
-          id: 'r',
-          choices: [{ message: { content: '4' }, finish_reason: 'stop' }],
-        } as OpenAI.Chat.ChatCompletion);
-
-      await pipeline.execute(
-        {
-          model: 'Qwen3.6-27B',
-          contents: [{ parts: [{ text: 'What is 2+2?' }], role: 'user' }],
-          config: { thinkingConfig: { includeThoughts: false } },
+        initialChatTemplateKwargs: {
+          apply_chat_template: true,
+          enable_thinking: false,
         },
-        'forked_query',
-      );
+        retryChatTemplateKwargs: { apply_chat_template: true },
+      },
+      {
+        name: 'removing empty chat_template_kwargs',
+        extraBody: {
+          chat_template_kwargs: {
+            enable_thinking: false,
+          },
+        },
+        initialChatTemplateKwargs: { enable_thinking: false },
+        retryChatTemplateKwargs: undefined,
+      },
+    ])(
+      'retries without provider-configured thinking opt-outs on non-DashScope endpoints: $name',
+      async ({
+        extraBody,
+        initialChatTemplateKwargs,
+        retryChatTemplateKwargs,
+      }) => {
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          baseUrl: 'https://llm.example.com/v1',
+          model: 'Qwen3.6-27B',
+          extra_body: extraBody,
+        } as ContentGeneratorConfig;
+        const provider = new DefaultOpenAICompatibleProvider(
+          mockContentGeneratorConfig,
+          mockCliConfig,
+        );
+        vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
+        pipeline = new ContentGenerationPipeline({
+          ...mockConfig,
+          provider,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        });
 
-      const calls = (mockClient.chat.completions.create as Mock).mock.calls;
-      expect(calls).toHaveLength(2);
-      expect(calls[0][0].chat_template_kwargs).toEqual({
-        apply_chat_template: true,
-        enable_thinking: false,
-      });
-      expect(calls[0][0].enable_thinking).toBeUndefined();
-      expect(calls[1][0].chat_template_kwargs).toEqual({
-        apply_chat_template: true,
-      });
-      expect(calls[1][0].enable_thinking).toBeUndefined();
-      expect(mockErrorHandler.handle).not.toHaveBeenCalled();
-    });
+        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'What is 2+2?' },
+        ]);
+        (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+          new GenerateContentResponse(),
+        );
+
+        const requiredThinkingError = Object.assign(
+          new Error('enable_thinking must be true for this model'),
+          { status: 400 },
+        );
+        (mockClient.chat.completions.create as Mock)
+          .mockRejectedValueOnce(requiredThinkingError)
+          .mockResolvedValue({
+            id: 'r',
+            choices: [{ message: { content: '4' }, finish_reason: 'stop' }],
+          } as OpenAI.Chat.ChatCompletion);
+
+        await pipeline.execute(
+          {
+            model: 'Qwen3.6-27B',
+            contents: [{ parts: [{ text: 'What is 2+2?' }], role: 'user' }],
+            config: { thinkingConfig: { includeThoughts: false } },
+          },
+          'forked_query',
+        );
+
+        const calls = (mockClient.chat.completions.create as Mock).mock.calls;
+        expect(calls).toHaveLength(2);
+        expect(calls[0][0].chat_template_kwargs).toEqual(
+          initialChatTemplateKwargs,
+        );
+        expect(calls[0][0].enable_thinking).toBeUndefined();
+        if (retryChatTemplateKwargs === undefined) {
+          expect(calls[1][0].chat_template_kwargs).toBeUndefined();
+        } else {
+          expect(calls[1][0].chat_template_kwargs).toEqual(
+            retryChatTemplateKwargs,
+          );
+        }
+        expect(calls[1][0].enable_thinking).toBeUndefined();
+        expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+      },
+    );
 
     it('handles the retry error when required-thinking retry fails', async () => {
       mockContentGeneratorConfig = {
@@ -1059,39 +1089,45 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
-    it('does not retry an unrelated 400 error', async () => {
-      mockContentGeneratorConfig = {
-        ...mockContentGeneratorConfig,
-        baseUrl:
-          'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
-        model: 'qwen3.8-max-preview',
-      } as ContentGeneratorConfig;
-      mockConfig = {
-        ...mockConfig,
-        contentGeneratorConfig: mockContentGeneratorConfig,
-      };
-      pipeline = new ContentGenerationPipeline(mockConfig);
+    it.each([
+      'Invalid request parameter.',
+      'enable_thinking is not supported for this model',
+    ])(
+      'does not retry a non-required-thinking 400 error: %s',
+      async (message) => {
+        mockContentGeneratorConfig = {
+          ...mockContentGeneratorConfig,
+          baseUrl:
+            'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          model: 'qwen3.8-max-preview',
+        } as ContentGeneratorConfig;
+        mockConfig = {
+          ...mockConfig,
+          contentGeneratorConfig: mockContentGeneratorConfig,
+        };
+        pipeline = new ContentGenerationPipeline(mockConfig);
 
-      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
-        { role: 'user', content: 'Hello' },
-      ]);
-      const error = Object.assign(new Error('Invalid request parameter.'), {
-        status: 400,
-      });
-      (mockClient.chat.completions.create as Mock).mockRejectedValue(error);
+        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+          { role: 'user', content: 'Hello' },
+        ]);
+        const error = Object.assign(new Error(message), {
+          status: 400,
+        });
+        (mockClient.chat.completions.create as Mock).mockRejectedValue(error);
 
-      await expect(
-        pipeline.execute(
-          {
-            model: 'qwen3.8-max-preview',
-            contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
-            config: { thinkingConfig: { includeThoughts: false } },
-          },
-          'forked_query',
-        ),
-      ).rejects.toBe(error);
-      expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(1);
-    });
+        await expect(
+          pipeline.execute(
+            {
+              model: 'qwen3.8-max-preview',
+              contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+              config: { thinkingConfig: { includeThoughts: false } },
+            },
+            'forked_query',
+          ),
+        ).rejects.toBe(error);
+        expect(mockClient.chat.completions.create).toHaveBeenCalledTimes(1);
+      },
+    );
 
     it('should strip reasoning key from extra_body when thinking is disabled', async () => {
       // Arrange — provider injects reasoning via extra_body
