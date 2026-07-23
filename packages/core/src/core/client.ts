@@ -2611,6 +2611,31 @@ export class GeminiClient {
             if (isTopLevelInteraction)
               endInteractionSpan('error', { errorMessage: 'loop detected' });
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            // Fire StopFailure hook so cleanup/notification hooks run even
+            // when loop detection terminates the turn early (#7588).
+            if (
+              hooksEnabled &&
+              messageBus &&
+              this.config.hasHooksForEvent('StopFailure')
+            ) {
+              await messageBus.request<
+                HookExecutionRequest,
+                HookExecutionResponse
+              >(
+                {
+                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  eventName: 'StopFailure',
+                  input: {
+                    error: 'loop_detected',
+                    error_details: loopType ?? undefined,
+                    last_assistant_message:
+                      this.getLastModelMessageText() || undefined,
+                  },
+                  signal,
+                },
+                MessageBusType.HOOK_EXECUTION_RESPONSE,
+              );
+            }
             return turn;
           }
 
@@ -2642,6 +2667,31 @@ export class GeminiClient {
             // finally cleanup catches this, but cancel explicitly to match
             // the cleanup pattern at other early-return sites.
             this.cancelPendingMemoryPrefetch('no_safe_delivery_point');
+            // Fire StopFailure hook so cleanup/notification hooks run even
+            // when heuristic loop detection terminates the turn early (#7588).
+            if (
+              hooksEnabled &&
+              messageBus &&
+              this.config.hasHooksForEvent('StopFailure')
+            ) {
+              await messageBus.request<
+                HookExecutionRequest,
+                HookExecutionResponse
+              >(
+                {
+                  type: MessageBusType.HOOK_EXECUTION_REQUEST,
+                  eventName: 'StopFailure',
+                  input: {
+                    error: 'loop_detected',
+                    error_details: loopType ?? undefined,
+                    last_assistant_message:
+                      this.getLastModelMessageText() || undefined,
+                  },
+                  signal,
+                },
+                MessageBusType.HOOK_EXECUTION_RESPONSE,
+              );
+            }
             return turn;
           }
           // Update arena status on Finished events — stats are derived
