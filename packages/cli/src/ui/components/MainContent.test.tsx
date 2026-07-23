@@ -362,6 +362,52 @@ describe('<MainContent />', () => {
     ).toBe(1);
   });
 
+  it('does not reset source copy numbering on a mid-turn steer item', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    const mathBlock = ['$$', '\\alpha', '$$'].join('\n');
+
+    renderMainContent(
+      createUIState({
+        history: [
+          { id: 1, type: 'gemini_content', text: mathBlock },
+          // Steer injection: typed 'user' but not a real turn boundary.
+          { id: 2, type: 'user', text: 'steer', sentToModel: false },
+          { id: 3, type: 'gemini_content', text: mathBlock },
+        ],
+      }),
+    );
+
+    const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+    const item3 = calls.find((c) => c?.item?.id === 3);
+    expect(item3).toBeDefined();
+    // The steer must NOT reset the counter: item 3's math block continues
+    // numbering from item 1 (offset 1) rather than restarting at 0.
+    expect(item3.sourceCopyIndexOffsets?.mathBlockCount).toBe(1);
+  });
+
+  it('still resets source copy numbering on a real user turn', () => {
+    historyItemDisplayPropsSpy.mockClear();
+
+    const mathBlock = ['$$', '\\alpha', '$$'].join('\n');
+
+    renderMainContent(
+      createUIState({
+        history: [
+          { id: 1, type: 'gemini_content', text: mathBlock },
+          { id: 2, type: 'user', text: 'real prompt', sentToModel: true },
+          { id: 3, type: 'gemini_content', text: mathBlock },
+        ],
+      }),
+    );
+
+    const calls = historyItemDisplayPropsSpy.mock.calls.map((c) => c[0]);
+    const item3 = calls.find((c) => c?.item?.id === 3);
+    expect(item3).toBeDefined();
+    // A real user turn resets the counter: item 3 starts fresh (offset 0).
+    expect(item3.sourceCopyIndexOffsets?.mathBlockCount).toBe(0);
+  });
+
   it('passes the full history to Static in one render when below the progressive replay threshold', () => {
     staticItemsSpy.mockClear();
     const history = Array.from({ length: 50 }, (_, i) => ({

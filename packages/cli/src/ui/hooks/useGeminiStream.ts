@@ -87,6 +87,7 @@ import {
   isBtwCommand,
   isSlashCommand,
 } from '../utils/commandUtils.js';
+import { findLastUserItemIndex } from '../utils/historyUtils.js';
 import { useShellCommandProcessor } from './shellCommandProcessor.js';
 import {
   handleAtCommand,
@@ -751,9 +752,7 @@ export const useGeminiStream = (
       config.getApprovalMode() === ApprovalMode.YOLO &&
       streamingState === StreamingState.Idle
     ) {
-      const lastUserMessageIndex = history.findLastIndex(
-        (item: HistoryItem) => item.type === MessageType.USER,
-      );
+      const lastUserMessageIndex = findLastUserItemIndex(history);
 
       const turnCount =
         lastUserMessageIndex === -1 ? 0 : history.length - lastUserMessageIndex;
@@ -2549,7 +2548,12 @@ export const useGeminiStream = (
               .getChatRecordingService?.()
               ?.recordMidTurnUserMessage(parts, message);
             addItem(
-              { type: MessageType.NOTIFICATION, text: message },
+              {
+                type: MessageType.USER,
+                text: message,
+                // Intentionally false: preserves isRealUserTurn/rewind semantics (steer is not a standalone user turn).
+                sentToModel: false,
+              },
               Date.now(),
             );
           }
