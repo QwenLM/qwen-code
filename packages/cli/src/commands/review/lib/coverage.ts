@@ -151,12 +151,28 @@ export interface CoverageFromTranscripts {
    * prose garbles exactly the entries it matters for.
    */
   disclosures: Array<{ subject: string; reason: string }>;
+  /**
+   * Every planned chunk with the source files it covers, in plan order — the
+   * body renderer's translation table. A chunk id is the run's own
+   * bookkeeping: it selects a rebuild command on stderr, and nothing on the PR
+   * page maps it to code, so the POSTED body names files (the author's units)
+   * or counts against this list's length instead. The ids themselves stay in
+   * the structural entries — the caps, the dedup and the remediation
+   * selectors all still key on them. `files` is empty for a plan written
+   * before chunks carried them.
+   */
+  plannedChunks: Array<{ id: number; files: string[] }>;
 }
 
 /** The plan, as far as coverage needs it. The roster reads more of it — see RosterPlan. */
 interface Plan {
   diffPathAbsolute: string;
-  chunks: Array<{ id: number; startLine: number; endLine: number }>;
+  chunks: Array<{
+    id: number;
+    startLine: number;
+    endLine: number;
+    files?: Array<{ path: string }>;
+  }>;
 }
 
 function readPlan(path: string): { plan: Plan; mtimeMs: number } {
@@ -670,6 +686,12 @@ export function coverageFromTranscripts(
     missingChunks,
     uncoverableChunks: [...uncoverable].sort((a, b) => a - b),
     coveredChunks: [...covered].sort((a, b) => a - b),
+    plannedChunks: plan.chunks.map((c) => ({
+      id: c.id,
+      files: (c.files ?? [])
+        .map((f) => f?.path)
+        .filter((p): p is string => typeof p === 'string' && p !== ''),
+    })),
   };
 }
 
