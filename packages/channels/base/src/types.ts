@@ -3,7 +3,7 @@ import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelWebhookConfig } from './ChannelWebhookTask.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
-export type SessionScope = 'user' | 'thread' | 'single';
+export type SessionScope = 'user' | 'thread' | 'chat_thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
 export type DmPolicy = 'disabled' | 'open';
@@ -116,6 +116,12 @@ export interface Envelope {
   imageMimeType?: string;
   /** Structured attachments (images, files, audio, video). */
   attachments?: Attachment[];
+  /**
+   * Contextual metadata (e.g. issue type, title, URL) kept separate from `text`
+   * so slash-command parsing operates on the comment body alone. Appended to the
+   * prompt after command parsing, sanitized via sanitizePromptText.
+   */
+  metadata?: string;
   /**
    * Marks an envelope whose `text` ALREADY carries its `[sender]` attribution, so
    * handleInbound must NOT re-prefix it. Set in two places: on a synthetic

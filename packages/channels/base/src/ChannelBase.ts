@@ -612,6 +612,20 @@ export abstract class ChannelBase {
   abstract disconnect(): void;
 
   /**
+   * Thread-targeted delivery. Polling adapters (GitHub, Gitea, GitLab) override
+   * this to post comments on a specific issue/PR. The default falls through to
+   * sendMessage(chatId, text), ignoring threadId — existing IM adapters are
+   * behaviorally unchanged.
+   */
+  protected async sendThreadMessage(
+    chatId: string,
+    _threadId: string | undefined,
+    text: string,
+  ): Promise<void> {
+    await this.sendMessage(chatId, text);
+  }
+
+  /**
    * Adapter hook for task lifecycle events — the canonical way to track task
    * state (onPromptStart/onPromptEnd are retained for back-compat). The prompt
    * flow never awaits this hook; an async override's rejection is caught and
@@ -1881,9 +1895,12 @@ export abstract class ChannelBase {
   protected async sendResponseMessage(
     chatId: string,
     text: string,
-    _sessionId: string,
+    sessionId: string,
   ): Promise<void> {
-    await this.sendMessage(chatId, text);
+    const active = this.activePrompts.get(sessionId);
+    const target = this.router.getTarget(sessionId);
+    const threadId = active?.threadId ?? target?.threadId;
+    await this.sendThreadMessage(chatId, threadId, text);
   }
 
   /**
@@ -4445,6 +4462,10 @@ export abstract class ChannelBase {
       if (filePaths.length > 0) {
         promptText = promptText + '\n\n' + filePaths.join('\n');
       }
+    }
+
+    if (envelope.metadata) {
+      promptText = promptText + '\n\n' + sanitizePromptText(envelope.metadata);
     }
 
     // Resolve dispatch mode: per-group override → channel config → default

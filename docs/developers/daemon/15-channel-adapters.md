@@ -188,14 +188,14 @@ Adapter `connect()` failures are reported separately from worker lifecycle error
 
 `ChannelConfig` (from `packages/channels/base/src/types.ts`):
 
-| Knob                                     | Effect                                                                                                    |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------- |
-| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), or `'single'` (one shared session per channel). |
-| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                         |
-| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                       |
-| `denylist?: string[]`                    | Sender ids denied.                                                                                        |
-| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                        |
-| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                               |
+| Knob                                     | Effect                                                                                                                                                                         |
+| ---------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `sessionScope`                           | `'user'` (sender + chat), `'thread'` (thread id or chat), `'chat_thread'` (channel + chatId + threadId, for polling adapters), or `'single'` (one shared session per channel). |
+| `approvalMode`                           | `'auto'` (auto-respond) / `'prompt'` (render UI).                                                                                                                              |
+| `allowlist?: string[]`                   | Sender ids allowed; missing = open.                                                                                                                                            |
+| `denylist?: string[]`                    | Sender ids denied.                                                                                                                                                             |
+| `chunkSize`, `chunkIntervalMs`           | Outbound block streaming settings.                                                                                                                                             |
+| `daemon: { baseUrl, token?, clientId? }` | Forwarded to `DaemonChannelSessionFactory`.                                                                                                                                    |
 
 Channel-specific keys layer on top (DingTalk: `streamCredentials`; WeChat: `ilinkUrl`, `botId`; Telegram: `botToken`; Feishu: `clientId` (appId), `clientSecret` (appSecret), `verificationToken`, `encryptKey` (webhook mode)).
 
