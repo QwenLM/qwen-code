@@ -9,14 +9,14 @@ import { Box, Text } from 'ink';
 import { getTipHistory } from '../../services/tips/index.js';
 import { t } from '../../i18n/index.js';
 import { theme } from '../semantic-colors.js';
-import { whatsNewByVersion } from './whats-new-content.js';
+import { getWhatsNewHighlights } from './whats-new-content.js';
 
 interface WhatsNewProps {
   version: string;
 }
 
 export const WhatsNew: React.FC<WhatsNewProps> = ({ version }) => {
-  const highlights = whatsNewByVersion[version];
+  const highlights = getWhatsNewHighlights(version);
   const [shouldShow] = useState(
     () => highlights !== undefined && !getTipHistory().hasSeenVersion(version),
   );

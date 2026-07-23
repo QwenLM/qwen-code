@@ -4,10 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-export const whatsNewByVersion: Record<string, readonly string[]> = {
-  '0.20.1': [
-    'Fork subagents with the context of the current conversation.',
-    'Plan mode now routes shell commands based on safety.',
-    'Inspect saved conversation branches.',
-  ],
-};
+import highlights from './whats-new-content.json' with { type: 'json' };
+
+export const whatsNewByVersion: Record<string, readonly string[]> = highlights;
+
+export function getWhatsNewHighlights(
+  version: string,
+): readonly string[] | undefined {
+  return whatsNewByVersion[version.replace(/-preview\.\d+$/, '')];
+}

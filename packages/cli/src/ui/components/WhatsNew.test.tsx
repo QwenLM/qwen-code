@@ -68,6 +68,21 @@ describe('<WhatsNew />', () => {
     expect(history.markVersionSeen).not.toHaveBeenCalled();
   });
 
+  it('renders the matching stable highlights for a preview version', async () => {
+    history.hasSeenVersion.mockReturnValue(false);
+
+    const { lastFrame } = render(<WhatsNew version="0.20.1-preview.0" />);
+
+    await vi.waitFor(() => {
+      expect(history.hasSeenVersion).toHaveBeenCalledWith('0.20.1-preview.0');
+      expect(history.markVersionSeen).toHaveBeenCalledWith('0.20.1-preview.0');
+    });
+    expect(lastFrame()).toContain("What's new in v0.20.1-preview.0");
+    expect(lastFrame()).toContain(
+      'Fork subagents with the context of the current conversation.',
+    );
+  });
+
   it('does not read or mark an unknown version', () => {
     const { lastFrame } = render(<WhatsNew version="0.20.2" />);
 
