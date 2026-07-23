@@ -28,12 +28,12 @@ const DESTRUCTIVE_GIT_PATTERNS: readonly RegExp[] = Object.freeze([
   // above. The lookahead rejects what could continue a filename rather than
   // enumerating shell metacharacters, so it cannot be outrun by an operator
   // nobody listed: `.>/dev/null`, `.<in`, `$(git checkout .)` and `.;rm -rf /`
-  // are all caught, as is a directory pathspec like `./src` (which the `-- .`
-  // pattern already blocks). Single files stay out — `.gitignore`, `.env.local`
-  // and `.github/workflows/ci.yml` all continue with a word character — and so
-  // does the parent-directory form `..`, matching the `-- ..` pattern's
-  // behavior rather than making the bare spelling stricter than it.
-  /\bgit\s+checkout\s+\.(?![\w.-])/,
+  // are all caught, as are directory pathspecs — `./src`, and the parent forms
+  // `..` and `../src`, which discard a whole tree from a subdirectory and are
+  // blocked by the `-- .` pattern in their `--` spelling. Single files stay
+  // out: `.gitignore`, `.env.local` and `.github/workflows/ci.yml` all
+  // continue with a word character.
+  /\bgit\s+checkout\s+\.(?![\w-])/,
   // The force flag must be matched wherever it appears in the argument list,
   // not only as the first token: `git clean -d -f` and `git clean -d --force`
   // delete exactly what `git clean -fd` does. `--force` is the long spelling

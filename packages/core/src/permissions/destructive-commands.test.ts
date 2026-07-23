@@ -169,6 +169,12 @@ describe('isDestructiveCommand — git patterns', () => {
       // spelling is already blocked by the sibling pattern.
       'git checkout ./src',
       'git checkout ./packages/core',
+      // The parent forms discard a whole tree from a subdirectory — strictly
+      // more than `.` does — and the `--` spelling of both is already blocked
+      // by the sibling pattern, so the bare spelling cannot be the lenient one.
+      'git checkout ..',
+      'git checkout ../',
+      'git checkout ../src',
       // Redirects bind to the command, not the pathspec: bash tokenizes `.>`
       // as the word `.` plus a redirect, so the checkout still runs.
       'git checkout .>/dev/null',
@@ -233,13 +239,6 @@ describe('isDestructiveCommand — git patterns', () => {
       'git checkout .gitignore',
       'git checkout .github/workflows/ci.yml',
       'git checkout .env.local',
-      // `..` is the parent directory, not the current one, so the bare form
-      // leaves it alone. The sibling `-- .` pattern is not this precise: its
-      // trailing `\.` matches the first dot of `..` and the leading dot of a
-      // single file, so `git checkout -- ..` and `-- .gitignore` are blocked
-      // while their bare spellings are not. That asymmetry predates this
-      // change and errs toward blocking, so it is left as-is here.
-      'git checkout ..',
       // `--force` only counts on `git clean`; these are unrelated commands.
       'git push --force-with-lease',
       'git fetch --force',
