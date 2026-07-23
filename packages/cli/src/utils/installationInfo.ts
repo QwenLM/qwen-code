@@ -41,20 +41,28 @@ export function getNpmCliPath(
   // instead of throwing synchronously — getNpmCliPath is called from a
   // non-async site (handleAutoUpdate), and a returned best-effort path lets the
   // downstream spawn surface any failure through its 'error' handler.
+  //
+  // Some Node version managers (mise, asdf, proto) replace bin/npm with a
+  // non-JS wrapper script (e.g. a bash shim). fs.realpathSync succeeds on
+  // these (the file exists), but spawning `node /path/to/bash-wrapper` fails
+  // with a SyntaxError. Validate the resolved path ends with ".js" before
+  // returning it; otherwise fall back to the conventional path.
   const adjacentNpm = path.join(path.dirname(nodePath), 'npm');
   try {
-    return fs.realpathSync(adjacentNpm);
+    const resolved = fs.realpathSync(adjacentNpm);
+    if (resolved.endsWith('.js')) return resolved;
   } catch {
-    return path.join(
-      path.dirname(nodePath),
-      '..',
-      'lib',
-      'node_modules',
-      'npm',
-      'bin',
-      'npm-cli.js',
-    );
+    // Fall through to the conventional path below.
   }
+  return path.join(
+    path.dirname(nodePath),
+    '..',
+    'lib',
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
 }
 
 const debugLogger = createDebugLogger('INSTALLATION_INFO');
