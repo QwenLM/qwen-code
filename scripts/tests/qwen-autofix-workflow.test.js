@@ -621,6 +621,116 @@ describe('qwen-autofix workflow', () => {
     // budget is tight for this many cases, so give it a comfortable margin.
   }, 20000);
 
+  it('auto-recovers a PR parked on a stale base: handoff head matches + behind main → update-branch + re-arm', () => {
+    const block = reviewScanJob.match(
+      /( {12}if \[\[ "\$\{N_REVIEWS\}" -eq 0[\s\S]*?\n {12}fi)\n\n {12}echo "🔎/,
+    )?.[1];
+    expect(block).toBeTruthy();
+    const script = block.replace(/^ {12}/gm, '');
+
+    const run = ({
+      handoffHead = 'live1',
+      liveHead = 'live1',
+      cmp = 'behind',
+      updateOk = true,
+    }) => {
+      const dir = mkdtempSync(join(tmpdir(), 'unpark-'));
+      const bin = join(dir, 'bin');
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          `echo "$*" >> ${JSON.stringify(join(dir, 'calls.log'))}`,
+          'for a in "$@"; do case "$a" in',
+          `  */compare/*) printf '%s' '${cmp}'; exit 0;;`,
+          `  */update-branch) exit ${updateOk ? 0 : 1};;`,
+          'esac; done',
+          'exit 0',
+        ].join('\n'),
+      );
+      chmodSync(join(bin, 'gh'), 0o755);
+      const out = execFileSync(
+        'bash',
+        [
+          '-c',
+          `set -uo pipefail\nfleet_row(){ :; }\nfor _ in x; do\n${script}\nprintf 'FELL_THROUGH'\ndone`,
+        ],
+        {
+          env: {
+            ...process.env,
+            PATH: `${bin}:${process.env.PATH}`,
+            REPO: 'o/r',
+            PR: '1',
+            N_REVIEWS: '0',
+            N_COMMENTS: '0',
+            N_ISSUE_COMMENTS: '0',
+            N_FAILED_CHECKS: '0',
+            N_RED_NOW: '0',
+            HAS_CONFLICT: 'false',
+            LIVE_HEAD: liveHead,
+            HANDOFF_HEAD: handoffHead,
+            EFF_WM: 'wm',
+            ROUND: '1',
+            EFF_MAX_ROUNDS: '100',
+          },
+          encoding: 'utf8',
+        },
+      );
+      const calls = existsSync(join(dir, 'calls.log'))
+        ? readFileSync(join(dir, 'calls.log'), 'utf8')
+        : '';
+      rmSync(dir, { recursive: true, force: true });
+      return {
+        unparked: /update-branch/.test(calls) && /autofix-rearm/.test(calls),
+        idle: out.includes('nothing new'),
+      };
+    };
+
+    // Parked on the CURRENT head (handoff head == live) and behind main → merge
+    // current main in and re-arm; the loop re-reads the feedback next scan.
+    expect(run({ cmp: 'behind' })).toEqual({ unparked: true, idle: false });
+    // 'diverged' (ahead AND behind) also merges main in.
+    expect(run({ cmp: 'diverged' })).toEqual({ unparked: true, idle: false });
+    // Up to date ('ahead') → not a stale base; a genuine parking stays for a
+    // human, no update, no re-arm.
+    expect(run({ cmp: 'ahead' })).toEqual({ unparked: false, idle: true });
+    // Handoff head != live head (a push landed after the parking) → the parking
+    // is cleared; do nothing (no compare-driven update).
+    expect(run({ handoffHead: 'old0', liveHead: 'live1' })).toEqual({
+      unparked: false,
+      idle: true,
+    });
+    // No handoff marker at all (a healthy "no changes needed" idle) → idle.
+    expect(run({ handoffHead: '', liveHead: 'live1' })).toEqual({
+      unparked: false,
+      idle: true,
+    });
+    // Behind but update-branch FAILS (PAT scope, or a race) → fail-safe: fall
+    // through to idle, never re-arm on an un-updated base.
+    expect(run({ cmp: 'behind', updateOk: false })).toEqual({
+      unparked: false,
+      idle: true,
+    });
+  }, 20000);
+
+  it('marks a gate-rejection parking with a head-scoped handoff marker', () => {
+    // The could-not-address branch (a real fix rejected, PR up to date now) sets
+    // the flag; a crash/timeout handoff (no fix produced) must not.
+    expect(reviewAddressReportStep).toMatch(
+      /A human should take over this PR\."\n[\s\S]{0,500}?PARKED_STALE_CANDIDATE=true/,
+    );
+    // The report emits the head-scoped marker ONLY under that flag, so a
+    // crash/timeout parking is never treated as a stale-base candidate.
+    expect(reviewAddressReportStep).toMatch(
+      /if \[\[ "\$\{PARKED_STALE_CANDIDATE:-false\}" == 'true' \]\]; then\n\s*echo "<!-- autofix-handoff head=\$\{REPORT_HEAD\} -->"/,
+    );
+    // The scan parses HANDOFF_HEAD head-scoped, exactly like RED_HEAD.
+    expect(reviewScanJob).toContain(
+      'scan("<!-- autofix-handoff head=([0-9a-f]+) -->")',
+    );
+  });
+
   it('keeps a still-red check visible, but only once per head', () => {
     // A red check is a STATE, not the instant it turned red. Counting only
     // "failed since the watermark" made a still-failing PR invisible the

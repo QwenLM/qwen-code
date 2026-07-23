@@ -1996,6 +1996,16 @@ jobs:
                 | [ scan("<!-- autofix-redcheck head=([0-9a-f]+) -->") ] | .[]
                 | {sha: .[0], at: ($c.created_at // "")} ]
               | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
+            # The head a gate-rejection handoff last parked this PR on (mirror of
+            # RED_HEAD). While it equals LIVE_HEAD the PR is parked on the CURRENT
+            # head: a later push writes a newer eval comment WITHOUT this marker,
+            # so the latest handoff head stops matching and the parking clears.
+            # Used only to auto-recover a stale-base parking (see the idle path).
+            HANDOFF_HEAD="$(jq -r --arg ab "${AUTOFIX_BOT}" '
+              [ .[] | select((.user.login // "") == $ab) | . as $c | ($c.body // "")
+                | [ scan("<!-- autofix-handoff head=([0-9a-f]+) -->") ] | .[]
+                | {sha: .[0], at: ($c.created_at // "")} ]
+              | sort_by(.at) | last | .sha // ""' "${WORKDIR}/ic.json")"
             # A maintainer '@qwen-code /retry' posts that marker to say
             # "evaluate this feedback again": markers written BEFORE it stop
             # holding the watermark down. This is the sanctioned exception to
@@ -2168,6 +2178,27 @@ jobs:
             if [[ "${MERGEABLE}" == "CONFLICTING" ]]; then HAS_CONFLICT='true'; fi
 
             if [[ "${N_REVIEWS}" -eq 0 && "${N_COMMENTS}" -eq 0 && "${N_ISSUE_COMMENTS}" -eq 0 && "${N_FAILED_CHECKS}" -eq 0 && "${N_RED_NOW}" -eq 0 && "${HAS_CONFLICT}" != "true" ]]; then
+              # Nothing new — but is this a stale-base PARKING? A gate-rejection
+              # handoff left an autofix-handoff marker on the head it parked on.
+              # While that still matches LIVE_HEAD (no push since) and the head is
+              # now BEHIND main, the build that failed may have failed on a
+              # since-changed dependency (#7471), not the fix. Merge main in and
+              # re-arm so the loop re-reads the feedback against fresh main. The
+              # forward case is handled in-round by the report step; this recovers
+              # a PR that was ALREADY parked when the base moved under it. Guarded
+              # by head-match (a push clears it) and behind-main (self-limiting:
+              # the update makes it current, so it cannot re-fire), and every API
+              # call is fail-safe — any failure just falls through to idle.
+              if [[ -n "${LIVE_HEAD}" && "${HANDOFF_HEAD}" == "${LIVE_HEAD}" ]]; then
+                UNPARK_CMP="$(gh api "repos/${REPO}/compare/${DEFAULT_BRANCH:-main}...${LIVE_HEAD}" --jq '.status' 2> /dev/null || echo '')"
+                if [[ "${UNPARK_CMP}" == 'behind' || "${UNPARK_CMP}" == 'diverged' ]] \
+                  && gh api -X PUT "repos/${REPO}/pulls/${PR}/update-branch" -f expected_head_sha="${LIVE_HEAD}" > /dev/null 2>&1; then
+                  gh pr comment "${PR}" --repo "${REPO}" --body "$(printf '♻️ AutoFix auto-recovered a stale base: this PR was parked after a fix failed to build, but its head was behind `%s`, so current main was merged in via update-branch and the next scan will re-read the feedback against it. A stale base can fail the build without being the fix at fault; if it still fails once current, it hands off to a human again.\n\n<details>\n<summary>中文说明</summary>\n\n♻️ AutoFix 自动恢复了陈旧 base:本 PR 因修复构建失败而被搁置,但其 head 落后于 `%s`,故已将当前 main 合入,下次扫描会对它重读反馈。陈旧 base 可能使构建失败而并非修复之过;若更新后仍失败,将再次交人。\n\n</details>\n\n<!-- autofix-rearm -->' "${DEFAULT_BRANCH:-main}" "${DEFAULT_BRANCH:-main}")"
+                  echo "♻️ #${PR}: parked on a stale base (behind ${DEFAULT_BRANCH:-main}) — merged main + re-armed"
+                  fleet_row "${PR}" 'unparked' "stale-base parking recovered — merged ${DEFAULT_BRANCH:-main} + re-armed"
+                  continue
+                fi
+              fi
               echo "✅ #${PR}: nothing new since ${EFF_WM} (conflict=${HAS_CONFLICT})"
               fleet_row "${PR}" 'idle' "nothing new since ${EFF_WM} (round ${ROUND}/${EFF_MAX_ROUNDS}, conflict=${HAS_CONFLICT})"
               continue
@@ -3470,6 +3501,12 @@ jobs:
                   HEADLINE="🤖 AutoFix updated a stale base — the fix did not pass verification, but this PR was behind \`${DEFAULT_BRANCH:-main}\`, so it merged current main in via update-branch and will retry on the next scan. A stale base (a dependency or symbol main already changed) can fail the build without being the fix's fault; if it still fails once current, it hands off to a human."
                 else
                   HEADLINE="🤖 Could not address the latest feedback automatically (round ${MARK_ROUND}/${MAX_ROUNDS}). A human should take over this PR."
+                  # The gate rejected a real fix and the PR is up to date now, so
+                  # this is a genuine parking. Flag it head-scoped so a LATER
+                  # scan can auto-recover it if the base goes stale under it
+                  # (behind main → the build may have failed on a since-changed
+                  # dependency, not the fix). See the autofix-handoff marker.
+                  PARKED_STALE_CANDIDATE=true
                 fi
               fi
             elif [[ "${PREPARE_OUTCOME}" != 'success' && "${PREPARE_OUTCOME}" != 'failure' ]]; then
@@ -3629,6 +3666,18 @@ jobs:
               # promising a retry.
               if [[ "${MARK_TS}" != '9999-12-31T23:59:59Z' ]]; then
                 echo "<!-- autofix-redcheck head=${REPORT_HEAD} -->"
+              fi
+              # A gate-REJECTION handoff (the agent produced a fix that failed
+              # verification, so the PR is now parked with the watermark
+              # advanced) is a stale-base recovery candidate: if this head later
+              # falls behind main, the build may have failed on something main
+              # has since changed (#7471's update-notifier), not the fix. The
+              # scan reads this head-scoped marker and, only while it still
+              # matches LIVE_HEAD (a later push clears it), auto-updates the base
+              # and re-arms. Head-scoped like autofix-redcheck, and only on this
+              # branch — a crash/timeout handoff produced no fix to re-verify.
+              if [[ "${PARKED_STALE_CANDIDATE:-false}" == 'true' ]]; then
+                echo "<!-- autofix-handoff head=${REPORT_HEAD} -->"
               fi
             } > "${WORKDIR}/report.md"
             gh pr comment "${PR}" --repo "${REPO}" --body-file "${WORKDIR}/report.md" || echo "::warning::Failed to post handoff comment on PR #${PR}"
