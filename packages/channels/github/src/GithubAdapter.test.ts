@@ -33,8 +33,6 @@ vi.mock('@qwen-code/channel-base', async (importOriginal) => {
     await importOriginal<typeof import('@qwen-code/channel-base')>();
   return {
     ...actual,
-    loadPollCursor: vi.fn(() => '2026-07-01T00:00:00.000Z'),
-    savePollCursor: vi.fn(),
   };
 });
 
@@ -316,6 +314,7 @@ describe('GithubChannel', () => {
       });
 
       await initWithoutLoop();
+      channel.cursor = { lastProcessedAt: '2026-07-01T00:00:00.000Z' };
       await pollOnce();
 
       expect(channel.inboundEnvelopes).toHaveLength(1);

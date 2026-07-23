@@ -6,19 +6,11 @@ import type {
   ChannelConfig,
   Envelope,
 } from '@qwen-code/channel-base';
-import {
-  ChannelBase,
-  loadPollCursor,
-  savePollCursor,
-  testBotMention,
-  stripBotMention,
-  abortableSleep,
-} from '@qwen-code/channel-base';
+import { PollingChannelBase } from '@qwen-code/channel-base';
+import { testBotMention, stripBotMention } from './mention.js';
 
 const MIN_POLL_INTERVAL = 60_000;
 const DEFAULT_POLL_INTERVAL = 60_000;
-const MAX_BACKOFF = 30_000;
-const INITIAL_BACKOFF = 2_000;
 
 interface GithubConfig extends ChannelConfig {
   pollInterval?: number;
@@ -26,13 +18,13 @@ interface GithubConfig extends ChannelConfig {
   requireMention?: boolean;
 }
 
-export class GithubChannel extends ChannelBase {
+interface GithubCursor {
+  lastProcessedAt: string;
+}
+
+export class GithubChannel extends PollingChannelBase<GithubCursor> {
   private octokit!: Octokit;
   private botUsername: string | null = null;
-  private lastProcessedAt: string;
-  private abortController = new AbortController();
-  private pollLoopRunning = false;
-  private consecutiveErrors = 0;
   private recentlyProcessed = new Set<string>();
 
   constructor(
@@ -42,14 +34,13 @@ export class GithubChannel extends ChannelBase {
     options?: ChannelBaseOptions,
   ) {
     super(name, { ...config, sessionScope: 'chat_thread' }, bridge, options);
-    const cursor = loadPollCursor(name);
-    this.lastProcessedAt = cursor || new Date().toISOString();
-    if (!cursor) {
-      savePollCursor(name, this.lastProcessedAt);
-    }
   }
 
-  private get pollInterval(): number {
+  protected createInitialCursor(): GithubCursor {
+    return { lastProcessedAt: new Date().toISOString() };
+  }
+
+  protected override get pollInterval(): number {
     const configured = (this.config as GithubConfig).pollInterval;
     if (configured && configured >= MIN_POLL_INTERVAL) return configured;
     return DEFAULT_POLL_INTERVAL;
@@ -74,13 +65,11 @@ export class GithubChannel extends ChannelBase {
       );
       this.botUsername = null;
     }
-    this.pollLoopRunning = true;
-    this.runPollLoop();
+    this.startPollLoop();
   }
 
   disconnect(): void {
-    this.pollLoopRunning = false;
-    this.abortController.abort();
+    this.stopPollLoop();
   }
 
   async sendMessage(_chatId: string, _text: string): Promise<void> {
@@ -116,30 +105,9 @@ export class GithubChannel extends ChannelBase {
     });
   }
 
-  private async runPollLoop(): Promise<void> {
-    while (this.pollLoopRunning && !this.abortController.signal.aborted) {
-      try {
-        await this.pollOnce();
-        this.consecutiveErrors = 0;
-      } catch (err) {
-        this.consecutiveErrors++;
-        const backoff = Math.min(
-          INITIAL_BACKOFF * 2 ** (this.consecutiveErrors - 1),
-          MAX_BACKOFF,
-        );
-        process.stderr.write(
-          `[Channel:${this.name}] poll error (attempt ${this.consecutiveErrors}), backing off ${backoff}ms: ${err}\n`,
-        );
-        await abortableSleep(backoff, this.abortController.signal);
-        continue;
-      }
-      await abortableSleep(this.pollInterval, this.abortController.signal);
-    }
-  }
-
-  private async pollOnce(): Promise<void> {
+  protected async pollOnce(): Promise<void> {
     const since = new Date(
-      new Date(this.lastProcessedAt).getTime() - 1000,
+      new Date(this.cursor.lastProcessedAt).getTime() - 1000,
     ).toISOString();
 
     const notifications = await this.octokit.paginate(
@@ -147,7 +115,7 @@ export class GithubChannel extends ChannelBase {
       { since, per_page: 100 },
     );
 
-    let maxUpdatedAt = this.lastProcessedAt;
+    let maxUpdatedAt = this.cursor.lastProcessedAt;
 
     for (const notification of notifications) {
       const updatedAt = notification.updated_at;
@@ -237,9 +205,8 @@ export class GithubChannel extends ChannelBase {
       }
     }
 
-    if (maxUpdatedAt > this.lastProcessedAt) {
-      this.lastProcessedAt = maxUpdatedAt;
-      savePollCursor(this.name, this.lastProcessedAt);
+    if (maxUpdatedAt > this.cursor.lastProcessedAt) {
+      this.cursor.lastProcessedAt = maxUpdatedAt;
     }
   }
 
@@ -258,7 +225,7 @@ export class GithubChannel extends ChannelBase {
 
       const body = issue.body || '';
       const createdAt = issue.created_at;
-      if (createdAt <= this.lastProcessedAt) return;
+      if (createdAt <= this.cursor.lastProcessedAt) return;
 
       const isMentioned = this.botUsername
         ? testBotMention(body, this.botUsername)

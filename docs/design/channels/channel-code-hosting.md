@@ -40,6 +40,21 @@ Correctness comes from `unread` filtering + `last_read_at` watermark. The global
 | markThreadAsRead fails            | Thread stays unread → re-enumerated next poll → in-memory dedup prevents duplicate dispatch |
 | New issue with @bot in body       | No comments → body contains mention → feed body as trigger                                  |
 
+## PollingChannelBase
+
+`PollingChannelBase<Cursor>` (in `packages/channels/base/`) extends `ChannelBase` and provides the poll loop infrastructure:
+
+- **Poll loop**: start/stop via `startPollLoop()`/`stopPollLoop()`, called from `connect()`/`disconnect()`
+- **Cursor persistence**: JSON cursor saved atomically after each successful `pollOnce()`; loaded on construction (corrupt → fallback to `createInitialCursor()`)
+- **Backoff**: exponential 2s → 30s on poll errors, reset on success
+
+Subclasses implement only:
+
+- `pollOnce()` — do the work, mutate `this.cursor`
+- `createInitialCursor()` — first-run default value
+
+The `Cursor` generic is any JSON-serializable object. GitHub uses `{ lastProcessedAt: string }`.
+
 ## Mention Detection
 
 Body-based, case-insensitive regex. Separate functions for detection (`testBotMention`) and stripping (`stripBotMention`):
