@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createHash } from 'node:crypto';
 import path from 'node:path';
 import type {
   ToolArtifact,
@@ -32,6 +33,22 @@ const DESCRIPTION = `Registers a session artifact so clients can show it in an a
 
 This tool only records metadata. It does not publish, upload, read, write, or verify the referenced resource. Provide exactly one locator: workspacePath, managedId, or url. Use the Artifact tool, not record_artifact, for published interactive HTML artifacts.`;
 
+/**
+ * Mints a stable, opaque managed id for a workspace-stored artifact so clients
+ * that track "managed" artifacts by `managedId` (e.g. the managed-artifact
+ * consumer / Web Shell) can open and update it across turns — the same role
+ * `published.id` plays for artifacts from the Artifact tool. qwen-code is the
+ * manager of workspace files, so it assigns the id itself when the caller did
+ * not supply one. Derived from the stored workspace path (normalized, NOT
+ * cwd-resolved, so it is stable across processes) so re-recording the same file
+ * yields the same id and updates match. The result is opaque (no path
+ * separators) and conforms to `validateManagedId`.
+ */
+function managedIdForWorkspaceArtifact(workspacePath: string): string {
+  const normalized = workspacePath.trim().replace(/\\/g, '/');
+  return createHash('sha1').update(normalized).digest('hex').slice(0, 16);
+}
+
 class RecordArtifactInvocation extends BaseToolInvocation<
   RecordArtifactParams,
   ToolResult
@@ -41,13 +58,23 @@ class RecordArtifactInvocation extends BaseToolInvocation<
   }
 
   execute(_signal: AbortSignal): Promise<ToolResult> {
+    const workspacePath = trimOptional(this.params.workspacePath);
+    const callerManagedId = trimOptional(this.params.managedId);
+    // Workspace-stored artifacts are managed by qwen-code itself: mint a stable
+    // managed id when the caller did not supply one so managed-artifact clients
+    // can track them. A caller-provided managedId always wins. (Issue #7599.)
+    const managedId =
+      callerManagedId ??
+      (workspacePath
+        ? managedIdForWorkspaceArtifact(workspacePath)
+        : undefined);
     const artifact: ToolArtifact = {
       title: this.params.title.trim(),
       kind: this.params.kind,
       storage: this.params.storage ?? inferStorage(this.params),
       description: trimOptional(this.params.description),
-      workspacePath: trimOptional(this.params.workspacePath),
-      managedId: trimOptional(this.params.managedId),
+      workspacePath,
+      managedId,
       url: trimOptional(this.params.url),
       mimeType: trimOptional(this.params.mimeType),
       sizeBytes: this.params.sizeBytes,

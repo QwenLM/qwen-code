@@ -69,6 +69,57 @@ describe('RecordArtifactTool', () => {
     });
   });
 
+  it('mints a stable managedId for workspace artifacts without one', async () => {
+    const tool = new RecordArtifactTool();
+
+    const result = await tool
+      .build({
+        title: 'Workspace report',
+        workspacePath: 'reports/summary.html',
+      })
+      .execute(signal);
+
+    const artifact = result.artifacts?.[0];
+    // Opaque, fixed-length hex id (conforms to validateManagedId).
+    expect(artifact?.managedId).toMatch(/^[0-9a-f]{16}$/);
+    expect(artifact?.managedId).not.toMatch(/[/\\]|\.\./);
+
+    // Stable: re-recording the same path yields the same id so updates match.
+    const again = await tool
+      .build({
+        title: 'Workspace report',
+        workspacePath: 'reports/summary.html',
+      })
+      .execute(signal);
+    expect(again.artifacts?.[0]?.managedId).toBe(artifact?.managedId);
+
+    // A backslash path normalizes to the same id as the POSIX form.
+    const win = await tool
+      .build({
+        title: 'Workspace report',
+        workspacePath: 'reports\\summary.html',
+      })
+      .execute(signal);
+    expect(win.artifacts?.[0]?.managedId).toBe(artifact?.managedId);
+  });
+
+  it('keeps a caller-provided managedId and mints none for url artifacts', async () => {
+    const tool = new RecordArtifactTool();
+
+    const managed = await tool
+      .build({ title: 'Managed preview', managedId: 'ext-123' })
+      .execute(signal);
+    expect(managed.artifacts?.[0]?.managedId).toBe('ext-123');
+
+    const url = await tool
+      .build({
+        title: 'Table details',
+        url: 'https://example.com/tables/orders',
+      })
+      .execute(signal);
+    expect(url.artifacts?.[0]?.managedId).toBeUndefined();
+  });
+
   it('rejects published storage', () => {
     const tool = new RecordArtifactTool();
 
