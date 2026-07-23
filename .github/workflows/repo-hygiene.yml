@@ -38,7 +38,7 @@ env:
 jobs:
   patrol:
     name: 'Scan and fix'
-    if: "${{ github.repository == 'QwenLM/qwen-code' }}"
+    if: "${{ github.repository == 'ZijianZhang989/qwen-code' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 150
     permissions:
