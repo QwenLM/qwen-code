@@ -2180,6 +2180,59 @@ describe('DaemonClient', () => {
       expect(calls.filter((c) => c.url.endsWith('/prompt'))).toHaveLength(2);
     });
 
+    it('passes the 202 envelope eventEpoch to the turn-completion subscription (DAEMON-001)', async () => {
+      // A daemon restart between the 202 accept and the follow-up
+      // subscription must surface as an epoch mismatch, so the cursor
+      // and the epoch from the same envelope have to travel together.
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(202, {
+            promptId: 'p-1',
+            lastEventId: 5,
+            eventEpoch: 'epoch-202',
+          });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return sseResponse(
+            'id: 6\nevent: turn_complete\ndata: {"id":6,"v":1,"type":"turn_complete","data":{"promptId":"p-1","stopReason":"end_turn"}}\n\n',
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'hi' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      const eventsCall = calls.find((c) => c.url.endsWith('/events'));
+      expect(eventsCall?.headers['last-event-id']).toBe('5');
+      expect(eventsCall?.headers['x-qwen-event-epoch']).toBe('epoch-202');
+    });
+
+    it('omits the epoch header when the 202 envelope has no eventEpoch (older daemon)', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.url.endsWith('/session/s-1/prompt')) {
+          return jsonResponse(202, { promptId: 'p-1', lastEventId: 5 });
+        }
+        if (req.url.endsWith('/session/s-1/events')) {
+          return sseResponse(
+            'id: 6\nevent: turn_complete\ndata: {"id":6,"v":1,"type":"turn_complete","data":{"promptId":"p-1","stopReason":"end_turn"}}\n\n',
+          );
+        }
+        return jsonResponse(500, { error: `unexpected ${req.url}` });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.prompt('s-1', { prompt: [{ type: 'text', text: 'hi' }] }),
+      ).resolves.toEqual({ stopReason: 'end_turn' });
+
+      const eventsCall = calls.find((c) => c.url.endsWith('/events'));
+      expect(eventsCall?.headers['last-event-id']).toBe('5');
+      expect(eventsCall?.headers['x-qwen-event-epoch']).toBeUndefined();
+    });
+
     it('releases the local pending prompt slot after turn_error', async () => {
       let nextPromptId = 0;
       const { fetch, calls } = recordingFetch((req) => {
@@ -2742,6 +2795,26 @@ describe('DaemonClient', () => {
         /* unreachable */
       }
       expect(calls[0]?.headers['last-event-id']).toBe('42');
+    });
+
+    it('forwards epoch with the cursor and reports the response epoch via onEpoch (DAEMON-001)', async () => {
+      const { fetch, calls } = recordingFetch(() => {
+        const res = sseResponse('');
+        res.headers.set('x-qwen-event-epoch', 'epoch-new');
+        return res;
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const seen: string[] = [];
+      for await (const _ of client.subscribeEvents('s-1', {
+        lastEventId: 42,
+        epoch: 'epoch-old',
+        onEpoch: (e) => seen.push(e),
+      })) {
+        /* unreachable */
+      }
+      expect(calls[0]?.headers['last-event-id']).toBe('42');
+      expect(calls[0]?.headers['x-qwen-event-epoch']).toBe('epoch-old');
+      expect(seen).toEqual(['epoch-new']);
     });
 
     it('throws DaemonHttpError when the daemon returns a non-2xx for events', async () => {
@@ -5809,6 +5882,84 @@ describe('DaemonClient', () => {
         client.getWorkspaceAgent('with/slash'),
       ).rejects.toBeInstanceOf(DaemonHttpError);
       expect(calls[0]?.url).toBe('http://daemon/workspace/agents/with%2Fslash');
+    });
+
+    it('getWorkspaceAgent forwards the optional scope query', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          name: 'reviewer',
+          description: 'user reviewer',
+          level: 'user',
+          systemPrompt: 'review globally',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.getWorkspaceAgent('reviewer', { scope: 'global' });
+
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/agents/reviewer?scope=global',
+      );
+    });
+
+    it('streams stateless workspace generation with the session envelope', async () => {
+      const { fetch } = recordingFetch(() =>
+        sseResponse(
+          `data: ${JSON.stringify({ v: 1, type: 'started', requestId: 'request-1', model: 'qwen-plus', modelSource: 'fast' })}\n\n` +
+            `data: ${JSON.stringify({ v: 1, type: 'delta', requestId: 'request-1', seq: 0, text: 'hello' })}\n\n` +
+            `data: ${JSON.stringify({ v: 1, type: 'done', requestId: 'request-1', model: 'qwen-plus', modelSource: 'fast' })}\n\n`,
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const events = [];
+
+      for await (const event of client.generateWorkspaceContent('say hello')) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          v: 1,
+          type: 'started',
+          requestId: 'request-1',
+          model: 'qwen-plus',
+          modelSource: 'fast',
+        },
+        {
+          v: 1,
+          type: 'delta',
+          requestId: 'request-1',
+          seq: 0,
+          text: 'hello',
+        },
+        {
+          v: 1,
+          type: 'done',
+          requestId: 'request-1',
+          model: 'qwen-plus',
+          modelSource: 'fast',
+        },
+      ]);
+    });
+
+    it('keeps structured workspace agent generation compatible', async () => {
+      const generated = {
+        name: 'generated-agent',
+        description: 'generated description',
+        systemPrompt: 'generated prompt',
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, generated),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.generateWorkspaceAgent('generate an agent'),
+      ).resolves.toEqual(generated);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/agents/generate');
+      expect(calls[0]?.body).toBe(
+        JSON.stringify({ description: 'generate an agent' }),
+      );
     });
 
     it('createWorkspaceAgent POSTs the body with the client id', async () => {

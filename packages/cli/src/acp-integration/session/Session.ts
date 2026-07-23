@@ -41,6 +41,7 @@ import type {
   ToolArtifact,
   VisionBridgeResult,
   MemoryWriteCandidate,
+  InvocationContextV1,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -153,6 +154,7 @@ import {
   splitImageParts,
   approxBase64Bytes,
   runWithRuntimeContentGenerator,
+  runWithInvocationContext,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -1197,6 +1199,9 @@ export class Session implements SessionContext {
    */
   pendingWorktreeNotice: string | null = null;
 
+  /** One-shot model notice for background agents restored with the session. */
+  pendingRecoveredAgentsNotice: string | null = null;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -1977,7 +1982,10 @@ export class Session implements SessionContext {
     }
   }
 
-  async prompt(params: PromptRequest): Promise<PromptResponse> {
+  async prompt(
+    params: PromptRequest,
+    invocationContext?: InvocationContextV1,
+  ): Promise<PromptResponse> {
     if (this.closing) {
       throw RequestError.invalidParams(undefined, 'Session is closing');
     }
@@ -2062,7 +2070,11 @@ export class Session implements SessionContext {
     });
 
     try {
-      const result = await this.#executePrompt(params, pendingSend);
+      const result = await this.#executePrompt(
+        params,
+        pendingSend,
+        invocationContext,
+      );
       this.pendingPrompt = null;
       // Drain any cron prompts that queued while the prompt was active
       void this.#drainCronQueue();
@@ -2261,13 +2273,26 @@ export class Session implements SessionContext {
   async #executePrompt(
     params: PromptRequest,
     pendingSend: AbortController,
+    invocationContext?: InvocationContextV1,
   ): Promise<PromptResponse> {
+    const sessionId = this.config.getSessionId();
+    if (
+      invocationContext !== undefined &&
+      invocationContext.sessionId !== sessionId
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invocation context session does not match the active session',
+      );
+    }
     // Bind this turn to the session's ID via AsyncLocalStorage so shell
     // subprocesses (and hooks) read the CURRENT session's ID instead of
     // the process-global env slot, which in daemon mode only ever holds
     // the first session created in this process.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executePromptInner(params, pendingSend),
+    return runWithInvocationContext(invocationContext, () =>
+      sessionIdContext.run(sessionId, () =>
+        this.#executePromptInner(params, pendingSend),
+      ),
     );
   }
 
@@ -2398,6 +2423,7 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
+            const isSlashInput = !isContinue && isSlashCommand(inputText);
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
@@ -2413,7 +2439,7 @@ export class Session implements SessionContext {
               // Non-null here: the `none` case returned early above, and both
               // interruption branches assign a concrete part list.
               parts = continuationParts!;
-            } else if (isSlashCommand(inputText)) {
+            } else if (isSlashInput) {
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -2556,6 +2582,18 @@ export class Session implements SessionContext {
               };
               parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingWorktreeNotice = null;
+            }
+
+            if (
+              this.pendingRecoveredAgentsNotice &&
+              !isContinue &&
+              !isSlashInput
+            ) {
+              const noticePart = {
+                text: `<system-reminder>\n${this.pendingRecoveredAgentsNotice}\n</system-reminder>\n\n`,
+              };
+              parts = insertAfterFunctionResponses(parts, [noticePart]);
+              this.pendingRecoveredAgentsNotice = null;
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
@@ -4399,8 +4437,10 @@ export class Session implements SessionContext {
    */
   async #executeCronPrompt(item: CronQueueItem): Promise<void> {
     // Same session-ID binding rationale as #executePrompt.
-    return sessionIdContext.run(this.config.getSessionId(), () =>
-      this.#executeCronPromptInner(item),
+    return runWithInvocationContext(undefined, () =>
+      sessionIdContext.run(this.config.getSessionId(), () =>
+        this.#executeCronPromptInner(item),
+      ),
     );
   }
 
@@ -4956,8 +4996,10 @@ export class Session implements SessionContext {
         if (nextIndex < 0) break;
         const [item] = this.notificationQueue.splice(nextIndex, 1);
         if (!item) break;
-        await sessionIdContext.run(this.config.getSessionId(), () =>
-          this.#executeBackgroundNotificationPromptInner(item),
+        await runWithInvocationContext(undefined, () =>
+          sessionIdContext.run(this.config.getSessionId(), () =>
+            this.#executeBackgroundNotificationPromptInner(item),
+          ),
         );
       }
     } finally {
@@ -6319,6 +6361,7 @@ export class Session implements SessionContext {
 
     const toolSpan = startToolSpan(policyToolName, {
       'tool.call_id': callId,
+      'gen_ai.tool.call.id': getProviderToolCallId(fc) ?? callId,
       // Dual-emit the legacy call_id/tool_name aliases like CoreToolScheduler
       // (coreToolScheduler.ts) so pre-Phase-2 dashboards keyed off call_id keep
       // matching daemon/ACP tool spans during the migration window.

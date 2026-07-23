@@ -38,10 +38,15 @@ import {
   tokenLimit,
   getMCPDiscoveryState,
   getMCPServerStatus,
+  initializeTelemetry,
   MCPDiscoveryState,
   MCPServerStatus,
   McpTransportPool,
   POOLED_TRANSPORTS_DEFAULT,
+  INVOCATION_CONTEXT_META_KEY,
+  PRIVATE_ACP_CAPABILITY_ENV,
+  PRIVATE_PARENT_CAPABILITY_META_KEY,
+  parseInvocationContext,
   findExistingProviderModels,
   ExtensionManager,
   ExtensionSettingScope,
@@ -107,7 +112,7 @@ import {
   type WorkspaceRememberContextMode,
   type ChatRecord,
 } from '@qwen-code/qwen-code-core';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -319,6 +324,7 @@ import {
   executeGeneration,
   GENERATION_MAX_PROMPT_BYTES,
   GENERATION_TIMEOUT_MS,
+  type GenerationEvent,
 } from './generation.js';
 
 const debugLogger = createDebugLogger('ACP_AGENT');
@@ -2640,7 +2646,14 @@ export async function runAcpAgent(
   config: Config,
   settings: LoadedSettings,
   argv: CliArgs,
+  options?: { privateParentCapability?: string },
 ) {
+  const privateParentCapability =
+    options === undefined
+      ? process.env[PRIVATE_ACP_CAPABILITY_ENV]
+      : options.privateParentCapability;
+  delete process.env[PRIVATE_ACP_CAPABILITY_ENV];
+
   // Reverse tool channel (issue #5626, Phase 2). Runtime-MCP-add targets the
   // BOOTSTRAP (workspace-level) config's `McpClientManager` — `this.config` in
   // the `workspaceMcpRuntimeAdd` handler — so a client-hosted MCP server's SDK
@@ -2697,10 +2710,44 @@ export async function runAcpAgent(
     console.info = console.error;
     console.debug = console.error;
 
-    const stream = ndJsonStream(stdout, stdin);
+    let initializeRequestId: string | number | null | undefined;
+    const stream = ndJsonStream(stdout, stdin, {
+      onMessageObserved: ({ direction, message }) => {
+        if (
+          direction === 'received' &&
+          'id' in message &&
+          'method' in message &&
+          message.method === 'initialize'
+        ) {
+          initializeRequestId = message.id;
+          return;
+        }
+        if (
+          direction !== 'sent' ||
+          initializeRequestId === undefined ||
+          !('id' in message) ||
+          'method' in message ||
+          message.id !== initializeRequestId
+        ) {
+          return;
+        }
+        initializeRequestId = undefined;
+        if ('result' in message) {
+          void initializeTelemetry(config).then(() => {
+            registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
+          });
+        }
+      },
+    });
     connection = new AgentSideConnection((conn) => {
       acpConnection = conn;
-      agentInstance = new QwenAgent(config, settings, argv, conn);
+      agentInstance = new QwenAgent(
+        config,
+        settings,
+        argv,
+        conn,
+        privateParentCapability,
+      );
       return agentInstance;
     }, stream);
     markAcpStartup('transportSetupEnd');
@@ -2708,7 +2755,6 @@ export async function runAcpAgent(
     eventLoopMonitor.dispose();
     throw err;
   }
-  registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
 
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
@@ -3002,12 +3048,21 @@ class QwenAgent implements Agent {
     string,
     { sessionId: string; controller: AbortController }
   >();
+  private readonly workspaceGenerationControllers = new Map<
+    string,
+    AbortController
+  >();
   private readonly transcriptReplayConfigCache = new Map<
     string,
     TranscriptReplayConfigCacheEntry
   >();
   private readonly pendingConfigCleanup = new Map<string, Set<Config>>();
   private clientCapabilities: ClientCapabilities | undefined;
+  private privateParentState:
+    | 'uninitialized'
+    | 'trusted'
+    | 'untrusted'
+    | 'rejected' = 'uninitialized';
   // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
   // (Daemon Status child-resource chart). The daemon polls this at a fixed
   // cadence, so successive calls form a clean delta window independent of tool
@@ -3595,6 +3650,10 @@ class QwenAgent implements Agent {
       generation.controller.abort();
     }
     this.generationControllers.clear();
+    for (const controller of this.workspaceGenerationControllers.values()) {
+      controller.abort();
+    }
+    this.workspaceGenerationControllers.clear();
     await Promise.allSettled(
       [...this.sessions.entries()].map(([sessionId, session]) =>
         this.discardStoredSessionIfCurrent(sessionId, session, {
@@ -3615,6 +3674,7 @@ class QwenAgent implements Agent {
     private settings: LoadedSettings,
     private argv: CliArgs,
     private connection: AgentSideConnection,
+    private readonly expectedPrivateParentCapability?: string,
   ) {
     // Pool kill switch via env var so operators can A/B compare or
     // roll back without rebuilding. `run-qwen-serve.ts` sets this when
@@ -3723,6 +3783,39 @@ class QwenAgent implements Agent {
 
   async initialize(args: InitializeRequest): Promise<InitializeResponse> {
     markAcpStartup('initializeHandlerStart');
+    if (this.privateParentState === 'rejected') {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid private ACP parent capability',
+      );
+    }
+    if (this.privateParentState === 'uninitialized') {
+      const expectedCapability = this.expectedPrivateParentCapability;
+      if (expectedCapability === undefined) {
+        this.privateParentState = 'untrusted';
+      } else {
+        const suppliedCapability =
+          args._meta?.[PRIVATE_PARENT_CAPABILITY_META_KEY];
+        const suppliedBuffer =
+          typeof suppliedCapability === 'string'
+            ? Buffer.from(suppliedCapability)
+            : undefined;
+        const expectedBuffer = Buffer.from(expectedCapability);
+        if (
+          suppliedBuffer !== undefined &&
+          suppliedBuffer.length === expectedBuffer.length &&
+          timingSafeEqual(suppliedBuffer, expectedBuffer)
+        ) {
+          this.privateParentState = 'trusted';
+        } else {
+          this.privateParentState = 'rejected';
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid private ACP parent capability',
+          );
+        }
+      }
+    }
     this.clientCapabilities = args.clientCapabilities;
     const authMethods = buildAuthMethods();
     const version = process.env['CLI_VERSION'] || process.version;
@@ -4040,6 +4133,7 @@ class QwenAgent implements Agent {
     }
 
     await this.#restoreWorktreeOnResume(config, session);
+    await this.#restoreBackgroundAgentsOnResume(config, session);
     this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
@@ -4127,6 +4221,7 @@ class QwenAgent implements Agent {
     }
 
     await this.#restoreWorktreeOnResume(config, session);
+    await this.#restoreBackgroundAgentsOnResume(config, session);
     this.#restoreGoalOnResume(config, session);
 
     const modesData = this.buildModesData(config);
@@ -4165,6 +4260,15 @@ class QwenAgent implements Agent {
     } catch (error) {
       debugLogger.warn(`ACP worktree restore failed: ${error}`);
     }
+  }
+
+  async #restoreBackgroundAgentsOnResume(
+    config: Config,
+    session: Session,
+  ): Promise<void> {
+    await config.loadPausedBackgroundAgents(config.getSessionId());
+    session.pendingRecoveredAgentsNotice =
+      config.consumePendingRecoveredAgentsNotice();
   }
 
   /**
@@ -4339,7 +4443,35 @@ class QwenAgent implements Agent {
     if (!session) {
       throw new Error(`Session not found: ${params.sessionId}`);
     }
-    return session.prompt(params);
+    const sanitizedParams = { ...params };
+    const meta =
+      params._meta && typeof params._meta === 'object'
+        ? { ...params._meta }
+        : {};
+    const suppliedContext = meta[INVOCATION_CONTEXT_META_KEY];
+    delete meta[INVOCATION_CONTEXT_META_KEY];
+    delete meta[PRIVATE_PARENT_CAPABILITY_META_KEY];
+    if (Object.keys(meta).length > 0) {
+      sanitizedParams._meta = meta;
+    } else {
+      delete sanitizedParams._meta;
+    }
+
+    const invocationContext =
+      this.privateParentState === 'trusted' && suppliedContext !== undefined
+        ? parseInvocationContext(suppliedContext)
+        : undefined;
+    if (
+      this.privateParentState === 'trusted' &&
+      suppliedContext !== undefined &&
+      invocationContext === undefined
+    ) {
+      throw RequestError.invalidParams(
+        undefined,
+        'Invalid trusted ACP invocation context',
+      );
+    }
+    return session.prompt(sanitizedParams, invocationContext);
   }
 
   async cancel(params: CancelNotification): Promise<void> {
@@ -7899,6 +8031,57 @@ class QwenAgent implements Agent {
           authUrl,
         };
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceGenerationStart: {
+        const requestId = params['requestId'];
+        const prompt = params['prompt'];
+        if (typeof requestId !== 'string' || requestId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing requestId',
+          );
+        }
+        if (
+          typeof prompt !== 'string' ||
+          !prompt.trim() ||
+          Buffer.byteLength(prompt, 'utf8') > GENERATION_MAX_PROMPT_BYTES ||
+          params['purpose'] !== 'text'
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid workspace generation request',
+          );
+        }
+        if (this.workspaceGenerationControllers.has(requestId)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Duplicate workspace generation requestId',
+          );
+        }
+        const controller = new AbortController();
+        this.workspaceGenerationControllers.set(requestId, controller);
+        const signal = AbortSignal.any([
+          controller.signal,
+          AbortSignal.timeout(GENERATION_TIMEOUT_MS),
+        ]);
+        try {
+          const emit = async (event: GenerationEvent) => {
+            await this.connection.extNotification(
+              'qwen/notify/workspace/generation/event',
+              { v: 1, requestId, event },
+            );
+          };
+          const result = await executeGeneration(
+            this.config,
+            requestId,
+            prompt.trim(),
+            signal,
+            emit,
+          );
+          return { requestId, ...result };
+        } finally {
+          this.workspaceGenerationControllers.delete(requestId);
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceAgentGenerate: {
         const description = params['description'];
         if (
@@ -7921,6 +8104,22 @@ class QwenAgent implements Agent {
           this.config,
           AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceGenerationCancel: {
+        const requestId = params['requestId'];
+        if (typeof requestId !== 'string' || requestId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing requestId',
+          );
+        }
+        const controller = this.workspaceGenerationControllers.get(requestId);
+        const cancelled = controller !== undefined;
+        if (cancelled) {
+          controller.abort();
+          this.workspaceGenerationControllers.delete(requestId);
+        }
+        return { requestId, cancelled };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist: {
         const sessionId = params['sessionId'];

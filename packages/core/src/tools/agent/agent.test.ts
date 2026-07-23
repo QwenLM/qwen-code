@@ -132,6 +132,13 @@ describe('AgentTool', () => {
     // paths, which now register/unregister in the BackgroundTaskRegistry
     // to surface the run in the pill+dialog. A no-op stub registry is
     // enough for these tests — they don't assert on registry behavior.
+    //
+    // It must still stub every registry method `agent.ts` reaches, though.
+    // The background body wraps its work in a try/catch that routes any
+    // throw to `registry.fail()`, so a method missing here does not surface
+    // as "not a function" — it silently turns a successful run into a
+    // failed one. Keep this list in sync with the `registry.*` calls in
+    // agent.ts.
     const stubRegistry = {
       assertCanStartBackgroundAgent: vi.fn(),
       canStartBackgroundAgent: vi.fn().mockReturnValue(true),
@@ -142,8 +149,15 @@ describe('AgentTool', () => {
         .fn()
         .mockResolvedValue({ id: Symbol('background-slot') }),
       releaseBackgroundSlot: vi.fn(),
+      getQueuedCount: vi.fn().mockReturnValue(0),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
+      registerResidentAgent: vi.fn(),
+      // Returns boolean on the real registry; the GOAL completion path calls
+      // this immediately before registry.complete().
+      unregisterResidentAgent: vi.fn().mockReturnValue(true),
+      // AgentTask | undefined — undefined means "nothing to restart".
+      restartCompletedAgent: vi.fn(),
       complete: vi.fn(),
       fail: vi.fn(),
       finalizeCancelled: vi.fn(),
@@ -152,11 +166,15 @@ describe('AgentTool', () => {
       get: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       drainMessages: vi.fn().mockReturnValue([]),
+      waitForMessages: vi.fn().mockResolvedValue([]),
       beginFinishing: vi.fn().mockReturnValue(true),
       queueMessage: vi.fn(),
       queueExternalInput: vi.fn(),
       wakeExternalInputWaiters: vi.fn(),
       appendActivity: vi.fn(),
+      // Real signature returns the unsubscribe callback, which agent.ts
+      // stores and later invokes — a bare vi.fn() would throw on cleanup.
+      bridgeApprovalEvents: vi.fn().mockReturnValue(vi.fn()),
     };
     const stubMonitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
@@ -317,6 +335,15 @@ describe('AgentTool', () => {
       expect(interactiveTool.description).toContain("Don't race");
       expect(interactiveTool.description).toContain('Writing a fork prompt');
       expect(interactiveTool.description).toContain(
+        'result arrives through a completion notification',
+      );
+      expect(interactiveTool.description).not.toContain(
+        'does NOT come back to you',
+      );
+      expect(interactiveTool.description).not.toContain(
+        "won't need the result back",
+      );
+      expect(interactiveTool.description).toContain(
         'forks inherit all or the selected recent window',
       );
     });
@@ -364,6 +391,9 @@ describe('AgentTool', () => {
 
       expect(tool.description).toContain('background by default');
       expect(tool.description).toContain('run_in_background: false');
+      expect(tool.description).toContain(
+        'foreground regular agent returns its result inline',
+      );
     });
 
     it('explains how to continue reusable background agents', async () => {
@@ -374,8 +404,9 @@ describe('AgentTool', () => {
         'Reuse an existing background agent for related follow-up work',
       );
       expect(tool.description).toContain(
-        'send_message with the `agentId` from its launch result as its `task_id`',
+        'list_agents to inspect the current roster',
       );
+      expect(tool.description).toContain('send_message with its `task_id`');
       expect(tool.description).toContain('next tool-round boundary');
       expect(tool.description).toContain(
         'paused agents resume with it as their first continuation instruction',
@@ -413,19 +444,22 @@ describe('AgentTool', () => {
   });
 
   describe('schema generation', () => {
-    it('should generate schema with subagent names as enum', () => {
+    it('keeps subagent_type open when named subagents are available', () => {
       const schema = agentTool.schema;
       const properties = schema.parametersJsonSchema as {
         properties: {
           subagent_type: {
+            type?: string;
+            description?: string;
             enum?: string[];
           };
         };
       };
-      expect(properties.properties.subagent_type.enum).toEqual([
-        'file-search',
-        'code-review',
-      ]);
+      expect(properties.properties.subagent_type.type).toBe('string');
+      expect(properties.properties.subagent_type.description).toContain(
+        '"fork" to inherit',
+      );
+      expect(properties.properties.subagent_type.enum).toBeUndefined();
     });
 
     it('declares the background default and foreground opt-out', () => {
@@ -441,6 +475,9 @@ describe('AgentTool', () => {
       expect(properties.properties.run_in_background.default).toBe(true);
       expect(properties.properties.run_in_background.description).toContain(
         'Set to false',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'interactive fork',
       );
     });
 
@@ -480,30 +517,6 @@ describe('AgentTool', () => {
       expect(properties.properties.working_dir.description).not.toContain(
         'Mutually exclusive',
       );
-    });
-
-    it('does not advertise "fork" in the enum, even when interactive', async () => {
-      // `fork` is intentionally omitted from the enum so the model is not
-      // steered to fork result-bearing work; it stays valid via validation.
-      (config as unknown as Record<string, unknown>)['isInteractive'] = vi
-        .fn()
-        .mockReturnValue(true);
-      const interactiveTool = new AgentTool(config);
-      await vi.runAllTimersAsync();
-
-      const schema = interactiveTool.schema;
-      const properties = schema.parametersJsonSchema as {
-        properties: {
-          subagent_type: {
-            enum?: string[];
-          };
-        };
-      };
-      expect(properties.properties.subagent_type.enum).toEqual([
-        'file-search',
-        'code-review',
-      ]);
-      expect(properties.properties.subagent_type.enum).not.toContain('fork');
     });
 
     it('does not expose teammate name when teams are disabled', () => {
@@ -751,22 +764,46 @@ describe('AgentTool', () => {
       ).toBeNull();
     });
 
-    it('rejects an empty working_dir', () => {
-      expect(
-        agentTool.validateToolParams({
-          ...validParams,
-          working_dir: '',
-        }),
-      ).toMatch(/working_dir/i);
+    it('treats an empty working_dir as unset', () => {
+      const params = {
+        ...validParams,
+        working_dir: '',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
     });
 
-    it('rejects a whitespace-only working_dir', () => {
-      expect(
-        agentTool.validateToolParams({
-          ...validParams,
-          working_dir: '   ',
-        }),
-      ).toMatch(/working_dir/i);
+    it('treats a whitespace-only working_dir as unset', () => {
+      const params = {
+        ...validParams,
+        working_dir: '   ',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
+    });
+
+    it('treats an empty working_dir as unset when isolation is set', () => {
+      const params = {
+        ...validParams,
+        isolation: 'worktree' as const,
+        working_dir: '',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
+    });
+
+    it('treats a whitespace-only working_dir as unset when isolation is set', () => {
+      const params = {
+        ...validParams,
+        isolation: 'worktree' as const,
+        working_dir: '   ',
+      };
+
+      expect(agentTool.validateToolParams(params)).toBeNull();
+      expect(params.working_dir).toBeUndefined();
     });
 
     it('accepts an empty working_dir with worktree isolation', () => {
@@ -2475,11 +2512,13 @@ describe('AgentTool', () => {
       function lastStartSpec(): {
         depth?: number;
         parentAgentId?: string;
+        agentDescription?: string;
       } {
         const calls = mockStartSubagentSpan.mock.calls;
         return calls[calls.length - 1][0] as {
           depth?: number;
           parentAgentId?: string;
+          agentDescription?: string;
         };
       }
 
@@ -2624,6 +2663,9 @@ describe('AgentTool', () => {
         const spec = lastStartSpec();
         expect(spec.depth).toBe(0);
         expect(spec.parentAgentId).toBeUndefined();
+        expect(spec.agentDescription).toBe(
+          'Specialized agent for searching and analyzing files',
+        );
       });
 
       it('startSubagentSpan receives depth=parentDepth+1 when invoked inside an outer agent frame', async () => {
@@ -3064,6 +3106,7 @@ describe('AgentTool', () => {
       vi.mocked(
         config.isInteractive as ReturnType<typeof vi.fn>,
       ).mockReturnValue(false);
+      vi.mocked(mockAgent.getFinalText).mockReturnValue('headless fork result');
       (mockAgent as unknown as Record<string, unknown>)['getCore'] = vi
         .fn()
         .mockReturnValue({
@@ -3095,6 +3138,8 @@ describe('AgentTool', () => {
         config as unknown as {
           getBackgroundTaskRegistry: () => {
             register: ReturnType<typeof vi.fn>;
+            complete: ReturnType<typeof vi.fn>;
+            fail: ReturnType<typeof vi.fn>;
           };
         }
       ).getBackgroundTaskRegistry();
@@ -3133,6 +3178,16 @@ describe('AgentTool', () => {
       );
 
       await vi.runAllTimersAsync();
+      // Checked before the completion assertion on purpose: the background
+      // body funnels any throw into registry.fail(), so an incomplete stub
+      // shows up here as the actual error message rather than as an
+      // inscrutable "complete: 0 calls" further down.
+      expect(stubRegistry.fail).not.toHaveBeenCalled();
+      expect(stubRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        'headless fork result',
+        expect.anything(),
+      );
       expect(mockStartSubagentSpan).toHaveBeenCalledWith(
         expect.objectContaining({
           invocationKind: 'fork',
@@ -4466,7 +4521,7 @@ describe('AgentTool', () => {
       expect(llmText).toContain(
         `Use ${ToolNames.SEND_MESSAGE} to continue this agent`,
       );
-      expect(llmText).toContain('agentId: monitor-');
+      expect(llmText).toContain('task_id: monitor-');
       expect(llmText).toContain(`or ${ToolNames.TASK_STOP} to cancel.`);
       expect(llmText).not.toContain('with to:');
       expect(llmText).not.toContain('Use send_message with task_id:');

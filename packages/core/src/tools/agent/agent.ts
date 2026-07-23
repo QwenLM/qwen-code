@@ -770,7 +770,8 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         },
         subagent_type: {
           type: 'string',
-          description: 'The type of specialized agent to use for this task',
+          description:
+            'The named agent type to use, or "fork" to inherit the parent conversation context',
         },
         fork_turns: {
           oneOf: [
@@ -790,7 +791,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
           type: 'boolean',
           default: true,
           description:
-            'Defaults to true for top-level regular subagents. Set to false to run in the foreground and return the result inline. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
+            'Defaults to true for top-level regular subagents. Set to false to run a regular agent in the foreground and return its result inline. Set to true for an interactive fork to receive its completion notification; headless forks always run in the background. Nested agents run in the foreground. Caller-owned working_dir launches default to foreground and cannot run in the background.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -885,7 +886,7 @@ The Agent tool launches specialized agents (subprocesses) that autonomously hand
 Available agent types and the tools they have access to:
 ${subagentDescriptions}
 
-When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need the result inline before continuing. A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget — its result does NOT come back to you, so use it ONLY for work whose output you won't need. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns. When you need the agent's findings back (review, audit, aggregation, verification), use a regular subagent, never a fork.
+When using the Agent tool, specify a subagent_type to select which agent type to use. If omitted, the general-purpose agent is used. Top-level regular subagents run in the background by default and report their results through a completion notification; set \`run_in_background: false\` when you need a regular subagent's result inline before continuing. A fork (\`subagent_type: "fork"\`) inherits the parent conversation context. A background fork's result arrives through a completion notification. Forks inherit the full parent conversation by default; set \`fork_turns\` to a positive integer string to limit inheritance to that many recent real user turns.
 
 When NOT to use the Agent tool:
 - If you want to read a specific file path, use the ${ToolNames.READ_FILE} tool or the ${ToolNames.GLOB} tool instead of the ${ToolNames.AGENT} tool, to find the match more quickly
@@ -901,9 +902,9 @@ Usage notes:
 - Keep immediate critical-path work local when your next action depends on it.
 - Do not duplicate work between the parent and subagents.
 - Run agents concurrently only when their tasks are independent. For code changes, give concurrent agents disjoint write scopes; launch them in a single message with multiple tool uses.
-- A background agent reports its result through a completion notification in a later turn. A foreground agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
+- A background agent reports its result through a completion notification in a later turn. A foreground regular agent returns its result inline. Agent results are not visible to the user, so relay the relevant outcome in your response.
 - While background agents run, continue meaningful non-overlapping work. Wait for an agent only when its result blocks the next required step.
-- Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.SEND_MESSAGE} with the \`agentId\` from its launch result as its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
+- Reuse an existing background agent for related follow-up work instead of launching a duplicate: call ${ToolNames.LIST_AGENTS} to inspect the current roster, then call ${ToolNames.SEND_MESSAGE} with its \`task_id\`. Running agents receive the message at the next tool-round boundary; paused agents resume with it as their first continuation instruction; completed agents continue on their resident runtime when available and otherwise revive from their retained transcript. If the task is no longer retained or cannot be resumed or revived, launch a new agent.
 - Provide clear, detailed prompts so the agent can work autonomously and return exactly the information you need.
 - Regular subagents and named teammates start without parent conversation history. Only fork agents accept \`fork_turns\`; omit it for the full conversation or use a positive integer string such as \`"3"\` for a bounded recent window.
 - Treat the agent's output as evidence, not as automatically correct. Verify factual claims, review code changes, and run relevant checks before integrating or relaying the result.
@@ -914,15 +915,15 @@ Usage notes:
 - You can optionally set \`isolation: "worktree"\` to run the agent in a temporary git worktree, giving it an isolated copy of the repository. The worktree is automatically cleaned up if the agent makes no changes; if changes are made, the worktree path and branch are returned in the result so you can review or merge them.
 ## When to fork
 
-A fork (\`subagent_type: "fork"\`) runs detached and fire-and-forget: it inherits your full context by default, but its findings do NOT come back to you in a form you can act on. Set \`fork_turns\` to a positive integer string only when a bounded recent window is sufficient. **Never fork work whose output you need** — reviews, audits, parallel investigations you must aggregate, verification, anything where you have to read or combine the results. For all of that, launch regular subagents instead (omit \`subagent_type\` for general-purpose, or name a specific type). Regular top-level subagents report through background completion notifications by default; set \`run_in_background: false\` when you need the result inline in the current turn. Omitting \`subagent_type\` does NOT fork.
+A fork (\`subagent_type: "fork"\`) inherits your full context by default. Set \`fork_turns\` to a positive integer string only when a bounded recent window is sufficient. A background fork reports its result through a completion notification; set \`run_in_background: true\` in interactive sessions when you need that result. Headless forks always use this background path. Omitting \`subagent_type\` does NOT fork.
 
-Fork only when you genuinely won't need the result back — a detached background chore the user asked you to kick off and move on from. The criterion is qualitative: "will I need to read this output?" If yes, don't fork.
+Choose a fork when the task needs substantial context from the parent conversation. Use a regular subagent when a fresh prompt provides enough context.
 
 Forks are cheap because they share your prompt cache. Don't set \`model\` on a fork — a different model can't reuse the parent's cache. Pass a short \`name\` (one or two words, lowercase) so the user can track the fork.
 
-**Don't peek.** The tool result includes an output — do not read or tail it unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.
+**Don't peek.** For a background fork, do not read or tail its output unless the user explicitly asks for a progress check. You get a completion notification; trust it. Reading the transcript mid-flight pulls the fork's tool noise into your context, which defeats the point of forking.
 
-**Don't race.** After launching, you know nothing about what the fork found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
+**Don't race.** After launching a background fork, you know nothing about what it found. Never fabricate or predict fork results in any format — not as prose, summary, or structured output. The notification arrives as a user-role message in a later turn; it is never something you write yourself. If the user asks a follow-up before the notification lands, tell them the fork is still running — give status, not a guess.
 
 **Writing a fork prompt.** With the default full history, the prompt is a *directive* — what to do, not what the situation is. When \`fork_turns\` limits history, include any older context the fork still needs. Be specific about scope: what's in, what's out, what another agent is handling.
 
@@ -969,32 +970,13 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     // Update description using object property assignment since it's readonly
     (this as { description: string }).description = baseDescription;
 
-    // Generate dynamic schema with enum of available subagent names
-    const subagentNames = this.availableSubagents.map((s) => s.name);
-
     // Update the parameter schema by modifying the existing object
     const schema = this.parameterSchema as {
       properties?: {
-        subagent_type?: {
-          enum?: string[];
-        };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
         plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       };
     };
-    if (schema.properties && schema.properties.subagent_type) {
-      // Only real, loadable subagents are advertised in the enum. `fork` is a
-      // deliberate pseudo-type, NOT listed here: dangling it as a casual option
-      // led the model to fork result-bearing work (e.g. review agents), whose
-      // findings a fork never returns. Forking stays reachable for intentional
-      // use — validation accepts `subagent_type: "fork"` and `/fork` passes it
-      // directly — it just isn't offered as a default pick.
-      if (subagentNames.length > 0) {
-        schema.properties.subagent_type.enum = subagentNames;
-      } else {
-        delete schema.properties.subagent_type.enum;
-      }
-    }
     if (schema.properties) {
       if (this.config.isAgentTeamEnabled()) {
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
@@ -1050,6 +1032,15 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
           void this.refreshSubagents();
         }
       }
+    }
+    // Some models emit an empty placeholder for the unused optional field.
+    // With isolation selected, normalize it away before downstream routing.
+    if (
+      (typeof params.working_dir === 'string' &&
+        params.working_dir.trim().length === 0) ||
+      params.working_dir === null
+    ) {
+      params.working_dir = undefined;
     }
 
     if (params.fork_turns !== undefined) {
@@ -1795,6 +1786,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     spec: {
       agentId: string;
       subagentName: string;
+      agentDescription?: string;
       invocationKind: SubagentInvocationKind;
       isBuiltIn: boolean;
       modelOverride?: string;
@@ -1892,6 +1884,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): {
     agentId: string;
     subagentName: string;
+    agentDescription?: string;
     invocationKind: SubagentInvocationKind;
     isBuiltIn: boolean;
     modelOverride?: string;
@@ -1899,6 +1892,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     return {
       agentId: hookOpts.agentId,
       subagentName: hookOpts.agentType,
+      agentDescription: subagentConfig.description,
       invocationKind,
       isBuiltIn: subagentConfig.level === 'builtin',
       modelOverride: subagentConfig.model,
@@ -3074,6 +3068,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',
+          isBackgrounded: true,
           isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
@@ -3606,7 +3601,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         return {
           llmContent:
             `Background agent launched successfully.\n` +
-            `agentId: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
+            `task_id: ${hookOpts.agentId} (internal ID — do not mention to the user. Use ${ToolNames.SEND_MESSAGE} to continue this agent, or ${ToolNames.TASK_STOP} to cancel.)\n` +
             `The agent is working in the background. You will be notified automatically when it completes.\n` +
             `Do not duplicate this agent's work — avoid working with the same files or topics it is using. Work on non-overlapping tasks, or briefly tell the user what you launched and end your response.\n` +
             `output_file: ${jsonlPath}\n` +
@@ -3863,6 +3858,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           parentAgentId: getCurrentAgentId(),
           createdAt: new Date().toISOString(),
           status: 'running',
+          isBackgrounded: false,
+          isolation: this.params.isolation,
           lastUpdatedAt: new Date().toISOString(),
           resolvedApprovalMode,
           persistedCliFlags: capturePersistedCliFlags(

@@ -1,6 +1,7 @@
 import { useCallback, useMemo, useState, type Ref } from 'react';
 import { SearchIcon, ServerIcon } from 'lucide-react';
 import type { SerializedMcpStatusMessage } from '../messages/McpStatusMessage';
+import { AgentsManagerPage } from '../agents/AgentsManagerPage';
 import { ExtensionsManagerPage } from '../extensions/ExtensionsManagerPage';
 import { McpManagerPage } from '../mcp/McpManagerPage';
 import { SkillsManagerPage } from '../skills/SkillsManagerPage';
@@ -18,7 +19,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '../ui/tabs';
 import { useI18n } from '../../i18n';
 import type { EmbeddedManagerPage } from './manager-page';
 
-type PluginTab = 'extensions' | 'mcp' | 'skills';
+type PluginTab = 'extensions' | 'mcp' | 'skills' | 'agents';
 
 interface PluginManagerPageProps {
   mcpMessage: SerializedMcpStatusMessage | null;
@@ -81,6 +82,7 @@ export function PluginManagerPage({
             </TabsTrigger>
             <TabsTrigger value="mcp">{t('plugins.mcp')}</TabsTrigger>
             <TabsTrigger value="skills">{t('plugins.skills')}</TabsTrigger>
+            <TabsTrigger value="agents">{t('plugins.agents')}</TabsTrigger>
           </TabsList>
         </div>
       ) : null}
@@ -97,6 +99,12 @@ export function PluginManagerPage({
             key={`skills-${pageRevision}`}
             onClose={onClose}
             onUseSkill={onUseSkill}
+            embedded={embedded}
+          />
+        ) : activeTab === 'agents' ? (
+          <AgentsManagerPage
+            key={`agents-${pageRevision}`}
+            onClose={onClose}
             embedded={embedded}
           />
         ) : mcpLoadError ? (
