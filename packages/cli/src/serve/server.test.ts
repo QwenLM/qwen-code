@@ -8962,6 +8962,102 @@ describe('createServeApp', () => {
         mockBranchOps.getHeadCommit = undefined;
       }
     });
+
+    it('409 on concurrent branch creation race (reserve re-checks activeBranchSessions)', async () => {
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId: string) => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          attached: true,
+          clientId: 'client-0',
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+
+      // A blocks in createBranch; B blocks in getHeadCommit (after
+      // passing the early guard). A completes and registers; B
+      // resumes and the reserve re-check rejects it.
+      let releaseCreate!: () => void;
+      let signalCreate!: () => void;
+      const createEntered = new Promise<void>((r) => {
+        signalCreate = r;
+      });
+      const createGate = new Promise<void>((r) => {
+        releaseCreate = r;
+      });
+      let createCalls = 0;
+      mockBranchOps.createBranch = () => {
+        createCalls++;
+        if (createCalls === 1) {
+          signalCreate();
+          return createGate;
+        }
+        return Promise.resolve();
+      };
+
+      let releaseHead!: () => void;
+      let signalHead!: () => void;
+      const headEntered = new Promise<void>((r) => {
+        signalHead = r;
+      });
+      const headGate = new Promise<string | undefined>((r) => {
+        releaseHead = () => r('abc123');
+      });
+      let headCalls = 0;
+      mockBranchOps.getHeadCommit = () => {
+        headCalls++;
+        if (headCalls === 1) return Promise.resolve('abc123');
+        signalHead();
+        return headGate;
+      };
+
+      try {
+        // supertest lazily sends the request on .then()/.end(), so
+        // wrap in a real promise that starts the request immediately.
+        const firstPromise = new Promise<request.Response>(
+          (resolve, reject) => {
+            request(app)
+              .post('/session')
+              .set('Host', `127.0.0.1:${baseOpts.port}`)
+              .send({ branch: { name: 'feat/first' } })
+              .end((err, res) => (err ? reject(err) : resolve(res)));
+          },
+        );
+        await createEntered;
+
+        const secondPromise = new Promise<request.Response>(
+          (resolve, reject) => {
+            request(app)
+              .post('/session')
+              .set('Host', `127.0.0.1:${baseOpts.port}`)
+              .send({ branch: { name: 'feat/second' } })
+              .end((err, res) => (err ? reject(err) : resolve(res)));
+          },
+        );
+        await headEntered;
+
+        releaseCreate();
+        const first = await firstPromise;
+        expect(first.status).toBe(200);
+
+        releaseHead();
+        const second = await secondPromise;
+        expect(second.status).toBe(409);
+        expect(second.body.code).toBe('branch_session_conflict');
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.createBranch = undefined;
+      }
+    });
   });
 
   describe('POST /session/:id/load and /resume', () => {

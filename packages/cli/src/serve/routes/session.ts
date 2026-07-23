@@ -1323,8 +1323,10 @@ export function registerSessionRoutes(
         });
         return;
       }
-      // Check for dirty working tree. `--untracked-files=no` because untracked
-      // files survive a checkout, so only tracked changes make the tree dirty.
+      // Gate on a dirty tree as surprise-prevention: `git checkout -b` carries
+      // uncommitted tracked changes onto the new branch, which would silently
+      // mix the user's WIP with a fresh branch. Untracked files are excluded
+      // (`--untracked-files=no`) because they survive any checkout unchanged.
       let dirty: boolean;
       try {
         dirty = await isDirtyTree(workspaceCwd);
@@ -1349,8 +1351,14 @@ export function registerSessionRoutes(
       // concurrent `POST /session { branch }` can both pass it and race on
       // `git checkout -b`. This synchronous check-and-add (no await between)
       // serializes the checkout; every exit path below clears the reservation
-      // (transferred to `activeBranchSessions` on success).
-      if (inFlightBranchWorkspaces.has(workspaceCwd)) {
+      // (transferred to `activeBranchSessions` on success). Re-check
+      // `activeBranchSessions` here too: a request that passed the early guard
+      // before a concurrent request registered can still be in flight while
+      // the first request has already completed and populated the map.
+      if (
+        inFlightBranchWorkspaces.has(workspaceCwd) ||
+        activeBranchSessions.has(workspaceCwd)
+      ) {
         res.status(409).json({
           error: 'A branch session is already being created for this workspace',
           code: 'branch_session_conflict',
