@@ -31,7 +31,7 @@ import {
 } from './test-helper.js';
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
-const TEST_TIMEOUT = 60000;
+const TEST_TIMEOUT = process.env['CI'] ? 120_000 : 60_000;
 const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
 const IS_CONTAINER_SANDBOX =
   SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
