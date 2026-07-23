@@ -129,6 +129,18 @@ env:
   # invisible to the scan even when it already had unaddressed feedback.
   # Names must match job ids in qwen-code-pr-review.yml; a test pins that.
   NON_BLOCKING_CHECKS: '["review-pr"]'
+  # Failed-check annotation patterns that mean the INFRASTRUCTURE died, not the
+  # code — a self-hosted runner losing the server, the disk filling, a runner
+  # shutdown, or a git fetch/clone dying mid-transfer. Such a check is red for a
+  # reason unrelated to the PR and clears on a re-run (observed: #7490's E2E
+  # "runner lost communication"; #6506's checkout "RPC failed; curl 92" /
+  # "fetch-pack: invalid index-pack output" — both green on the rerun). The scan
+  # auto-reruns those failed jobs ONCE, guarded by run_attempt so a persistent
+  # infra problem cannot loop. Deliberately conservative — only unambiguous
+  # machine/transport failures, never a bare test-level timeout, which could be
+  # a real regression (a co-present timeout does not block a match — one
+  # matching line classifies the run). Case-insensitive, vs the annotations.
+  INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed'
   # Upper bound on review targets emitted per scan (fan-out defense-in-depth;
   # excess is logged and deferred to the next scan).
   MAX_TARGETS_PER_SCAN: '10'
@@ -1809,6 +1821,56 @@ jobs:
               ISSUE="${PR}"
             fi
             CHECKS_JSON="$(jq -c '.statusCheckRollup // []' <<< "${PR_META}")"
+
+            # Auto-rerun a check that died on INFRASTRUCTURE, not the code (see
+            # INFRA_FAILURE_SIGNATURES). Only reached when the PR has a FAILED
+            # check; then, for each, we read its annotations and — if they carry
+            # a machine-death signature — rerun that run's failed jobs ONCE. The
+            # once is enforced by run_attempt: a run already retried to attempt 2
+            # and still infra-failing is persistent, so we stop and leave it. No
+            # marker needed; the attempt counter is the guard, and after a rerun
+            # the attempt increments so the next scan skips it. Any API failure
+            # here is fail-safe: it just means no rerun.
+            PR_HEAD_OID="$(jq -r '.headRefOid // ""' <<< "${PR_META}")"
+            if [[ -n "${PR_HEAD_OID}" ]] && jq -e 'any(.[]; ((.conclusion // .state // "") | IN("FAILURE","FAILED","ERROR","TIMED_OUT","ACTION_REQUIRED")) and (((.workflowName // "") != "Qwen Autofix") or ((.name // "") | startswith("review-address"))))' <<< "${CHECKS_JSON}" > /dev/null 2>&1; then
+              RERAN_INFRA=false
+              # Failed check-runs on this head, with their run id and annotation
+              # count — fetched once. External statuses (no check-run) are absent
+              # here, which is fine: only Actions runs can be reran.
+              FAILED_CRS="$(gh api --paginate "repos/${REPO}/commits/${PR_HEAD_OID}/check-runs" \
+                --jq '.check_runs[] | select(.conclusion == "failure")
+                  | select(((.output.annotations_count // 0) > 0))
+                  | [(.id | tostring), (.details_url // ""), (.name // "")] | @tsv' 2> /dev/null | sort -u || true)"
+              while IFS=$'\t' read -r CR_ID DETAILS_URL CR_NAME; do
+                [[ -n "${CR_ID}" && "${DETAILS_URL}" == *"/actions/runs/"* ]] || continue
+                RUN_ID="${DETAILS_URL#*/actions/runs/}"
+                RUN_ID="${RUN_ID%%/*}"
+                [[ "${RUN_ID}" =~ ^[0-9]+$ ]] || continue
+                ANNS="$(gh api --paginate "repos/${REPO}/check-runs/${CR_ID}/annotations" \
+                  --jq '[.[].message] | join("\n")' 2> /dev/null || true)"
+                grep -qiE "${INFRA_FAILURE_SIGNATURES}" <<< "${ANNS}" || continue
+                RUN_META="$(gh api "repos/${REPO}/actions/runs/${RUN_ID}" --jq '[(.run_attempt // 0), (.name // "")] | @tsv' 2> /dev/null || printf '0\t')"
+                ATTEMPT="${RUN_META%%$'\t'*}"
+                WF_NAME="${RUN_META#*$'\t'}"
+                # Mirror the gate's self-trigger guard: skip Qwen Autofix runs
+                # unless the check is a review-address job.
+                if [[ "${WF_NAME}" == "Qwen Autofix" && "${CR_NAME}" != review-address* ]]; then
+                  continue
+                fi
+                if [[ "${ATTEMPT}" == '1' ]]; then
+                  if gh api -X POST "repos/${REPO}/actions/runs/${RUN_ID}/rerun-failed-jobs" > /dev/null 2>&1; then
+                    echo "♻️ #${PR}: a check died on infrastructure (run ${RUN_ID}, attempt 1) — reran its failed jobs; not the PR's code"
+                    fleet_row "${PR}" 'infra-reran' "infra failure (run ${RUN_ID}) reran once"
+                    RERAN_INFRA=true
+                    break
+                  fi
+                else
+                  echo "⚠️ #${PR}: infra failure persisted after a rerun (run ${RUN_ID}, attempt ${ATTEMPT}) — leaving for a human"
+                fi
+              done <<< "${FAILED_CRS}"
+              [[ "${RERAN_INFRA}" == 'true' ]] && continue
+            fi
+
             # startedAt is the only staleness clock: a check blocks only if it
             # started within the bound; one with no startedAt (queued, not yet
             # running) is not blocking (the next scan re-checks once it starts).
