@@ -132,6 +132,16 @@ class DaemonSessionClientTest {
     }
 
     @Test
+    void rejectsCredentialsInBaseUri() {
+        IllegalArgumentException failure = assertThrows(
+                IllegalArgumentException.class,
+                () -> DaemonClient.builder()
+                        .baseUri(URI.create("http://user:password@127.0.0.1:4170"))
+                        .build());
+        assertTrue(failure.getMessage().contains("without credentials"));
+    }
+
+    @Test
     void rejectsMissingCapabilitiesTransports() {
         server.removeContext("/capabilities");
         server.createContext("/capabilities", exchange -> sendJson(exchange, 200,

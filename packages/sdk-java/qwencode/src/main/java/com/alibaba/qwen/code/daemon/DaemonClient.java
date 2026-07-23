@@ -563,9 +563,11 @@ public final class DaemonClient implements AutoCloseable {
         if (!("http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme))) {
             throw new IllegalArgumentException("baseUri must use http or https");
         }
-        if (baseUri.getHost() == null || baseUri.getQuery() != null
+        if (baseUri.getHost() == null || baseUri.getUserInfo() != null
+                || baseUri.getQuery() != null
                 || baseUri.getFragment() != null) {
-            throw new IllegalArgumentException("baseUri must be an absolute HTTP origin or path");
+            throw new IllegalArgumentException(
+                    "baseUri must be an absolute HTTP origin or path without credentials");
         }
         String value = baseUri.toString();
         while (value.endsWith("/")) {
