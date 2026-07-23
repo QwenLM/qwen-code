@@ -432,6 +432,7 @@ operator diagnostic snapshot documented below.
 | `session_shell_command`             | session shell execution is explicitly enabled.                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | `session_artifacts_persistence`     | session artifact persistence is wired for the runtime.                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `session_generation`                | session generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `workspace_generation`              | workspace-scoped generation helpers are available.                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | `rate_limit`                        | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1` / `ServeOptions.rateLimit` is enabled.                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | `workspace_reload`                  | workspace reload support is available in the embedded route configuration.                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | `channel_reload`                    | a daemon-managed channel worker manager is enabled and can reload its current selection.                                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -2473,6 +2474,29 @@ Errors:
 - `409 {code: 'workspace_init_conflict', path, existingSize}` — file exists with non-whitespace content and `force` is omitted/false. Body carries the absolute path and size (bytes) so SDK clients can render an "overwrite N bytes?" prompt without re-stat'ing.
 
 SSE event (workspace-scoped): `workspace_initialized` with `{path, action, originatorClientId?}`.
+
+#### `POST /workspace/mcp/reload`
+
+Reload persisted MCP settings into the workspace discovery config and every
+active session. The workspace-qualified form is
+`POST /workspaces/:workspace/mcp/reload`.
+
+Request body:
+
+```json
+{ "forceReconnectAll": true }
+```
+
+`forceReconnectAll` is optional and defaults to `false`, preserving
+incremental reconciliation. When true, the daemon reconnects every eligible
+configured MCP server after the settings reconciliation. Alternatively, pass
+`forceReconnectWhich: ["server-a", "server-b"]` to reconnect only named
+servers. The options are mutually exclusive. A forced reconnect causes each
+transport to read credentials that another local Qwen Code process may have
+written to token storage; it does not start an OAuth authorization flow.
+
+The route returns `202 { "accepted": true }`; poll `GET /workspace/mcp` for
+the final connection status. Invalid option values return 400.
 
 #### `POST /workspace/mcp/:server/restart`
 

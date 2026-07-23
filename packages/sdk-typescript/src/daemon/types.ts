@@ -1305,6 +1305,11 @@ export interface DaemonWorkspaceMcpInitializeResult {
   accepted: boolean;
 }
 
+export interface DaemonWorkspaceMcpReloadOptions {
+  forceReconnectAll?: boolean;
+  forceReconnectWhich?: string[];
+}
+
 export interface DaemonWorkspaceMcpToolStatus {
   name: string;
   serverToolName?: string;
@@ -1763,6 +1768,9 @@ export interface DaemonGeneratedAgentContent {
   description: string;
   systemPrompt: string;
 }
+
+/** Stateless generation events emitted by the resolved workspace runtime. */
+export type DaemonWorkspaceGenerationEvent = DaemonSessionGenerationEvent;
 
 /**
  * Body of `POST /workspace/agents/:agentType`. `name` / `level` /

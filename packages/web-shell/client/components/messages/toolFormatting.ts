@@ -34,6 +34,7 @@ export const TOOL_DISPLAY_NAMES: Record<string, string> = {
   loop_wakeup: 'LoopWakeup',
   create_sub_session: 'CreateSubSession',
   task_stop: 'TaskStop',
+  list_agents: 'ListAgents',
   send_message: 'SendMessage',
   structured_output: 'StructuredOutput',
   monitor: 'Monitor',

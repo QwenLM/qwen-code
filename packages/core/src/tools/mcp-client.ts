@@ -45,7 +45,6 @@ export {
 } from './mcp-status.js';
 
 import type { FunctionDeclaration } from '@google/genai';
-import { mcpToTool } from '@google/genai';
 import { existsSync } from 'node:fs';
 import { basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -59,6 +58,7 @@ import { getErrorMessage, getErrorStatus } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
+import { sanitizeChildEnv } from '../utils/sanitize-child-env.js';
 import type {
   Unsubscribe,
   WorkspaceContext,
@@ -1240,6 +1240,7 @@ export async function discoverTools(
   opts?: { applyConfigFilters?: boolean },
 ): Promise<DiscoveredMCPTool[]> {
   try {
+    const { mcpToTool } = await import('@google/genai');
     const mcpCallableTool = mcpToTool(mcpClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
@@ -2148,7 +2149,7 @@ export async function createTransport(
     // config providing its own PATH fully replaces the parent value instead of
     // being merged with a stale case-variant.
     const env = {
-      ...normalizePathEnvForWindows({ ...process.env }),
+      ...normalizePathEnvForWindows(sanitizeChildEnv(process.env)),
       ...(mcpServerConfig.env || {}),
     };
 

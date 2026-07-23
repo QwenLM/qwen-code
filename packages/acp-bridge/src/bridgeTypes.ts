@@ -614,6 +614,13 @@ export interface PendingPromptEntry {
    * later publish attempts for the same prompt are suppressed.
    */
   terminalPublished?: boolean;
+  /**
+   * Set when `removePendingPrompt` cancels a RUNNING prompt. The entry
+   * stays on `pendingPromptList` (hidden from `getPendingPrompts`) until
+   * the prompt settles, so the teardown flush can still publish its
+   * terminal if the session closes before the agent cooperates.
+   */
+  removed?: boolean;
 }
 
 /**
@@ -710,6 +717,37 @@ export type BridgeGenerationStreamEvent =
 
 export type BridgeGenerationNotificationEvent = Exclude<
   BridgeGenerationStreamEvent,
+  { type: 'done' }
+>;
+
+export type BridgeWorkspaceGenerationStreamEvent =
+  | {
+      type: 'started';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+    }
+  | {
+      type: 'thinking';
+      requestId: string;
+    }
+  | {
+      type: 'delta';
+      requestId: string;
+      seq: number;
+      text: string;
+    }
+  | {
+      type: 'done';
+      requestId: string;
+      model: string;
+      modelSource: BridgeGenerationModelSource;
+      inputTokens?: number;
+      outputTokens?: number;
+    };
+
+export type BridgeWorkspaceGenerationNotificationEvent = Exclude<
+  BridgeWorkspaceGenerationStreamEvent,
   { type: 'done' }
 >;
 
@@ -1031,7 +1069,10 @@ export interface AcpSessionBridge {
   initializeWorkspaceMcp(): Promise<{ accepted: boolean }>;
 
   /** Reload persisted MCP settings into workspace and active session configs. */
-  reloadWorkspaceMcp(): Promise<{ accepted: boolean }>;
+  reloadWorkspaceMcp(options?: {
+    forceReconnectAll?: boolean;
+    forceReconnectWhich?: string[];
+  }): Promise<{ accepted: boolean }>;
 
   /**
    * Read discovered MCP tools for one server from the live ACP registry.
@@ -1387,6 +1428,13 @@ export interface AcpSessionBridge {
     description: string;
     systemPrompt: string;
   }>;
+
+  /** Run stateless, tool-free generation in the resolved workspace runtime. */
+  generateWorkspaceContent?(
+    prompt: string,
+    signal: AbortSignal,
+    originatorClientId: string | undefined,
+  ): AsyncIterable<BridgeWorkspaceGenerationStreamEvent>;
 
   /**
    * Tear down a session — kill the child, drop from maps, publish

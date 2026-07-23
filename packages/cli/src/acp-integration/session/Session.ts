@@ -1197,6 +1197,9 @@ export class Session implements SessionContext {
    */
   pendingWorktreeNotice: string | null = null;
 
+  /** One-shot model notice for background agents restored with the session. */
+  pendingRecoveredAgentsNotice: string | null = null;
+
   // Implement SessionContext interface
   readonly sessionId: string;
 
@@ -1679,6 +1682,7 @@ export class Session implements SessionContext {
       this.#stopCronSchedulerInRuntime();
     }
 
+    this.config.getBackgroundTaskRegistry().abortAll({ notify: false });
     this.config.getBackgroundTaskRegistry().setNotificationCallback(undefined);
     this.config.getMonitorRegistry().setNotificationCallback(undefined);
     this.config.getBackgroundShellRegistry().setNotificationCallback(undefined);
@@ -2397,6 +2401,7 @@ export class Session implements SessionContext {
               (block) => block.type === 'text',
             );
             const inputText = firstTextBlock?.text || '';
+            const isSlashInput = !isContinue && isSlashCommand(inputText);
 
             let parts: Part[] | null;
             let fullTurnModelOverride: string | undefined;
@@ -2412,7 +2417,7 @@ export class Session implements SessionContext {
               // Non-null here: the `none` case returned early above, and both
               // interruption branches assign a concrete part list.
               parts = continuationParts!;
-            } else if (isSlashCommand(inputText)) {
+            } else if (isSlashInput) {
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -2555,6 +2560,18 @@ export class Session implements SessionContext {
               };
               parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingWorktreeNotice = null;
+            }
+
+            if (
+              this.pendingRecoveredAgentsNotice &&
+              !isContinue &&
+              !isSlashInput
+            ) {
+              const noticePart = {
+                text: `<system-reminder>\n${this.pendingRecoveredAgentsNotice}\n</system-reminder>\n\n`,
+              };
+              parts = insertAfterFunctionResponses(parts, [noticePart]);
+              this.pendingRecoveredAgentsNotice = null;
             }
 
             let nextMessage: Content | null = { role: 'user', parts };

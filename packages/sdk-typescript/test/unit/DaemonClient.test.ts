@@ -742,9 +742,18 @@ describe('DaemonClient', () => {
       await expect(
         client.workspaceById('workspace/id').reloadWorkspaceMcp(),
       ).resolves.toEqual(result);
+      await expect(
+        client.reloadWorkspaceMcp({ forceReconnectWhich: ['docs'] }),
+      ).resolves.toEqual(result);
       expect(calls.map((c) => [c.method, c.url])).toEqual([
         ['POST', 'http://daemon/workspace/mcp/reload'],
         ['POST', 'http://daemon/workspaces/workspace%2Fid/mcp/reload'],
+        ['POST', 'http://daemon/workspace/mcp/reload'],
+      ]);
+      expect(calls.map((call) => call.body)).toEqual([
+        '{}',
+        '{}',
+        '{"forceReconnectWhich":["docs"]}',
       ]);
     });
 
@@ -5873,6 +5882,66 @@ describe('DaemonClient', () => {
         client.getWorkspaceAgent('with/slash'),
       ).rejects.toBeInstanceOf(DaemonHttpError);
       expect(calls[0]?.url).toBe('http://daemon/workspace/agents/with%2Fslash');
+    });
+
+    it('streams stateless workspace generation with the session envelope', async () => {
+      const { fetch } = recordingFetch(() =>
+        sseResponse(
+          `data: ${JSON.stringify({ v: 1, type: 'started', requestId: 'request-1', model: 'qwen-plus', modelSource: 'fast' })}\n\n` +
+            `data: ${JSON.stringify({ v: 1, type: 'delta', requestId: 'request-1', seq: 0, text: 'hello' })}\n\n` +
+            `data: ${JSON.stringify({ v: 1, type: 'done', requestId: 'request-1', model: 'qwen-plus', modelSource: 'fast' })}\n\n`,
+        ),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const events = [];
+
+      for await (const event of client.generateWorkspaceContent('say hello')) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          v: 1,
+          type: 'started',
+          requestId: 'request-1',
+          model: 'qwen-plus',
+          modelSource: 'fast',
+        },
+        {
+          v: 1,
+          type: 'delta',
+          requestId: 'request-1',
+          seq: 0,
+          text: 'hello',
+        },
+        {
+          v: 1,
+          type: 'done',
+          requestId: 'request-1',
+          model: 'qwen-plus',
+          modelSource: 'fast',
+        },
+      ]);
+    });
+
+    it('keeps structured workspace agent generation compatible', async () => {
+      const generated = {
+        name: 'generated-agent',
+        description: 'generated description',
+        systemPrompt: 'generated prompt',
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, generated),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.generateWorkspaceAgent('generate an agent'),
+      ).resolves.toEqual(generated);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/agents/generate');
+      expect(calls[0]?.body).toBe(
+        JSON.stringify({ description: 'generate an agent' }),
+      );
     });
 
     it('createWorkspaceAgent POSTs the body with the client id', async () => {

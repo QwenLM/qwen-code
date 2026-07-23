@@ -1333,6 +1333,22 @@ export class SessionService {
     return removed;
   }
 
+  /**
+   * Usage salvage wrapper enforcing the "never blocks deletion" contract at
+   * the call site: persistUsageBeforeTranscriptDeletion catches its own
+   * errors, but this second layer keeps the guarantee structural rather
+   * than an implementation detail of another module.
+   */
+  private async salvageUsageBestEffort(transcriptPath: string): Promise<void> {
+    try {
+      await persistUsageBeforeTranscriptDeletion(transcriptPath);
+    } catch (error) {
+      this.warn(
+        `usage salvage failed for ${transcriptPath}: ${error}; deleting anyway`,
+      );
+    }
+  }
+
   private async removeSessionFiles(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
@@ -1345,10 +1361,16 @@ export class SessionService {
         // #7384: the usage-history rebuild reads transcripts, so salvage
         // the session's usage summary before the file is gone. Never
         // blocks deletion (the salvage swallows its own errors).
-        await persistUsageBeforeTranscriptDeletion(activePath);
+        await this.salvageUsageBestEffort(activePath);
         this.removeFileIfExists(activePath);
         const archivedPath = this.getSessionFilePath(sessionId, 'archived');
         if (fs.existsSync(archivedPath)) {
+          // When both copies co-exist (e.g. an interrupted archive), the
+          // active transcript may hold no telemetry while the archived one
+          // carries the session's history — salvage it too. The dedup
+          // guard inside the salvage makes this a no-op whenever the
+          // active copy already produced a record.
+          await this.salvageUsageBestEffort(archivedPath);
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
@@ -1363,7 +1385,7 @@ export class SessionService {
       if (!archived) {
         return false;
       }
-      await persistUsageBeforeTranscriptDeletion(archivedPath);
+      await this.salvageUsageBestEffort(archivedPath);
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
       this.removeFileHistoryBackups(sessionId);

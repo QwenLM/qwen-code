@@ -428,6 +428,7 @@ const EXPECTED_REGISTERED_FEATURES = [
       f !== 'workspace_mcp_restart' &&
       f !== 'session_recap' &&
       f !== 'session_generation' &&
+      f !== 'workspace_generation' &&
       f !== 'session_btw' &&
       f !== 'auth_device_flow' &&
       f !== 'permission_mediation' &&
@@ -457,6 +458,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_mcp_restart',
   'session_recap',
   'session_generation',
+  'workspace_generation',
   'session_btw',
   'session_shell_command',
   'mcp_workspace_pool',
@@ -837,6 +839,13 @@ interface FakeBridge extends AcpSessionBridge {
   workspaceMcpResourcesCalls: string[];
   workspaceMcpInitializeCalls: number;
   workspaceMcpReloadCalls: number;
+  workspaceMcpReloadOptions: Array<
+    | {
+        forceReconnectAll?: boolean;
+        forceReconnectWhich?: string[];
+      }
+    | undefined
+  >;
   workspaceSkillsCalls: number;
   workspaceToolsCalls: number;
   workspaceProvidersCalls: number;
@@ -1006,6 +1015,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const workspaceMcpResourcesCalls: string[] = [];
   let workspaceMcpInitializeCalls = 0;
   let workspaceMcpReloadCalls = 0;
+  const workspaceMcpReloadOptions: FakeBridge['workspaceMcpReloadOptions'] = [];
   let workspaceSkillsCalls = 0;
   let workspaceToolsCalls = 0;
   let workspaceProvidersCalls = 0;
@@ -1602,6 +1612,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     get workspaceMcpReloadCalls() {
       return workspaceMcpReloadCalls;
     },
+    get workspaceMcpReloadOptions() {
+      return workspaceMcpReloadOptions;
+    },
     get workspaceMemoryDreamCalls() {
       return workspaceMemoryDreamCalls;
     },
@@ -1763,8 +1776,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       workspaceMcpInitializeCalls += 1;
       return initializeWorkspaceMcpImpl();
     },
-    async reloadWorkspaceMcp() {
+    async reloadWorkspaceMcp(options) {
       workspaceMcpReloadCalls += 1;
+      workspaceMcpReloadOptions.push(options);
       return reloadWorkspaceMcpImpl();
     },
     async getWorkspaceSkillsStatus() {
@@ -2395,6 +2409,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               sessionGenerationAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'workspace_generation') {
+          expect(predicate({ workspaceGenerationAvailable: true })).toBe(true);
+          expect(predicate({ workspaceGenerationAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              workspaceGenerationAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -3068,6 +3098,25 @@ describe('createServeApp', () => {
       expect(unsupported.body.features).not.toContain('session_generation');
     });
 
+    it('advertises workspace generation only when the primary bridge supports it', async () => {
+      const supportedBridge = fakeBridge();
+      supportedBridge.generateWorkspaceContent = async function* () {};
+      const supported = await request(
+        createServeApp(baseOpts, undefined, { bridge: supportedBridge }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(supported.body.features).toContain('workspace_generation');
+
+      delete supportedBridge.generateWorkspaceContent;
+      const unsupported = await request(
+        createServeApp(baseOpts, undefined, { bridge: supportedBridge }),
+      )
+        .get('/capabilities')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+      expect(unsupported.body.features).not.toContain('workspace_generation');
+    });
+
     it('returns the v1 envelope', async () => {
       const previousQwenHome = process.env['QWEN_HOME'];
       const tempHome = await fsp.mkdtemp(
@@ -3096,6 +3145,7 @@ describe('createServeApp', () => {
             mcpPoolActive: true,
             sessionArtifactsPersistenceAvailable: true,
             sessionGenerationAvailable: true,
+            workspaceGenerationAvailable: true,
           }),
         );
         expect(res.body.modelServices).toEqual([]);
@@ -14202,6 +14252,67 @@ describe('createServeApp', () => {
       expect(res.status).toBe(202);
       expect(res.body).toEqual({ accepted: true });
       expect(bridge.workspaceMcpReloadCalls).toBe(1);
+      expect(bridge.workspaceMcpReloadOptions).toEqual([
+        {
+          forceReconnectAll: undefined,
+          forceReconnectWhich: undefined,
+        },
+      ]);
+    });
+
+    it('forwards reconnect options and rejects invalid values', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const enabled = await request(app)
+        .post('/workspace/mcp/reload')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ forceReconnectAll: true });
+      expect(enabled.status).toBe(202);
+      expect(bridge.workspaceMcpReloadOptions).toEqual([
+        {
+          forceReconnectAll: true,
+          forceReconnectWhich: undefined,
+        },
+      ]);
+
+      const selected = await request(app)
+        .post('/workspace/mcp/reload')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ forceReconnectWhich: ['docs'] });
+      expect(selected.status).toBe(202);
+      expect(bridge.workspaceMcpReloadOptions).toHaveLength(2);
+      expect(bridge.workspaceMcpReloadOptions[1]).toEqual({
+        forceReconnectAll: undefined,
+        forceReconnectWhich: ['docs'],
+      });
+
+      const invalid = await request(app)
+        .post('/workspace/mcp/reload')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ forceReconnectWhich: ['docs', 1] });
+      expect(invalid.status).toBe(400);
+      expect(invalid.body).toMatchObject({
+        code: 'invalid_force_reconnect_which',
+      });
+      expect(bridge.workspaceMcpReloadCalls).toBe(2);
+
+      const conflicting = await request(app)
+        .post('/workspace/mcp/reload')
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({
+          forceReconnectAll: true,
+          forceReconnectWhich: ['docs'],
+        });
+      expect(conflicting.status).toBe(400);
+      expect(conflicting.body).toMatchObject({
+        code: 'conflicting_force_reconnect_options',
+      });
+      expect(bridge.workspaceMcpReloadCalls).toBe(2);
     });
   });
 

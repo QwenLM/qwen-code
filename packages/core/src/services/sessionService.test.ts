@@ -68,6 +68,9 @@ describe('SessionService', () => {
     });
 
     sessionService = new SessionService('/test/project/root');
+    // Module mocks are not reset by restoreAllMocks; clear the salvage spy
+    // so per-test call/order assertions never read stale invocations.
+    vi.mocked(persistUsageBeforeTranscriptDeletion).mockClear();
 
     readdirSyncSpy = vi.spyOn(fs, 'readdirSync').mockReturnValue([]);
     statSyncSpy = vi.spyOn(fs, 'statSync').mockImplementation(
@@ -1456,6 +1459,19 @@ describe('SessionService', () => {
         expect.stringContaining(`file-history/${sessionIdA}`),
         { recursive: true, force: true },
       );
+    });
+
+    it('still deletes the session when the usage salvage fails', async () => {
+      // Contract: the salvage must never block deletion.
+      vi.mocked(persistUsageBeforeTranscriptDeletion).mockRejectedValueOnce(
+        new Error('salvage exploded'),
+      );
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      await expect(sessionService.removeSession(sessionIdA)).resolves.toBe(
+        true,
+      );
+      expect(unlinkSyncSpy).toHaveBeenCalled();
     });
 
     it('should clear session organization when removing a session', async () => {

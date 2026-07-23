@@ -333,6 +333,7 @@ describe('Session', () => {
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
+    abortAll: ReturnType<typeof vi.fn>;
     setNotificationCallback: ReturnType<typeof vi.fn>;
     hasUnfinalizedTasks: ReturnType<typeof vi.fn>;
     getAll: ReturnType<typeof vi.fn>;
@@ -476,6 +477,7 @@ describe('Session', () => {
       }),
     };
     mockBackgroundTaskRegistry = {
+      abortAll: vi.fn(),
       setNotificationCallback: vi.fn(),
       hasUnfinalizedTasks: vi.fn().mockReturnValue(false),
       getAll: vi.fn().mockReturnValue([]),
@@ -16105,6 +16107,9 @@ describe('Session', () => {
       expect(internals.notificationQueue).toHaveLength(0);
       expect(internals.cronQueue).toHaveLength(0);
       expect(internals.notificationProcessing).toBe(false);
+      expect(mockBackgroundTaskRegistry.abortAll).toHaveBeenCalledWith({
+        notify: false,
+      });
       expect(
         mockBackgroundTaskRegistry.setNotificationCallback,
       ).toHaveBeenLastCalledWith(undefined);

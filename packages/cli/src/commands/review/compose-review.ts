@@ -207,7 +207,15 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // The coverage-derived disclosures, kept STRUCTURAL ({subject, reason})
   // from the site that knows the boundary — reparsing the rendered prose for
   // it was the bug. `unreviewed` above stays what the caller wrote, verbatim.
-  const coverageEntries: Array<{ subject: string; reason: string }> = [];
+  // The `public*` fields are the body's register (`Brief.publicLabel`, a
+  // path-free reason); `subject`/`reason` stay the internal keys every dedup
+  // and certification check below matches on.
+  const coverageEntries: Array<{
+    subject: string;
+    reason: string;
+    publicSubject?: string;
+    publicReason?: string;
+  }> = [];
   // The fixes for the gaps above, for stderr — never for the body. The gap says
   // what the review cannot certify, to the PR author; the remediation names the
   // command that repairs it, to the orchestrator. #7012's public body was fourteen
@@ -231,6 +239,13 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // and a fabrication about a chunk nobody receipted. The public body would give
   // the author a false cause.
   const missingReceipts: number[] = [];
+
+  // The plan's chunk→files table and the chunks somebody demonstrably read,
+  // for the body renderer and the opener. Empty when no plan could be used —
+  // `describeChunkGap` then counts against nothing, and the opener's
+  // zero-certified test falls to the `coverage` disclosure instead.
+  let plannedChunks: Array<{ id: number; files: string[] }> = [];
+  let coveredChunks: number[] = [];
 
   // The Criticals a verifier must have ruled on before this review may post
   // them as blockers. Deterministic `[build]`/`[test]` body findings are
@@ -272,6 +287,8 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   } else {
     try {
       const cov = coverageFromTranscripts(input.planPath, input.env);
+      plannedChunks = cov.plannedChunks;
+      coveredChunks = cov.coveredChunks;
       for (const id of cov.missingChunks) missingReceipts.push(id);
       for (const id of cov.uncoverableChunks) {
         // The caller may already have named this chunk, but in a richer form:
@@ -590,16 +607,34 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       (id) => !disclosedSubjects.has(`chunk ${id}`),
     );
     if (unexplainedReceipts.length > 0) {
+      const gap = describeChunkGap(unexplainedReceipts, plannedChunks);
+      const pron = gap.plural ? 'them' : 'it';
       notReviewedParts.push(
-        `Not reviewed: ${unexplainedReceipts
-          .map((id) => `chunk ${id}`)
-          .join(', ')} — no agent reported covering these; nobody read them.`,
+        `Not reviewed: ${gap.phrase} — no agent reported covering ${pron}; nobody read ${pron}.`,
       );
     }
   }
   if (uncoverable.length > 0) {
+    // The CLI's own entries are bare `chunk <id>` (pushed above, from the
+    // report) and render through the same translation as every other chunk
+    // gap; a caller's entry may already carry the file (`chunk 5
+    // (src/big.min.js)`) and renders verbatim — its structure is not ours to
+    // reparse.
+    const bareIds: number[] = [];
+    const callerNamed: string[] = [];
+    for (const e of uncoverable) {
+      const m = /^chunk (\d+)$/.exec(e);
+      if (m) bareIds.push(Number(m[1]));
+      else callerNamed.push(e);
+    }
+    const shown = [
+      ...(bareIds.length > 0
+        ? [describeChunkGap(bareIds, plannedChunks).phrase]
+        : []),
+      ...callerNamed,
+    ];
     notReviewedParts.push(
-      `Not reviewed: ${uncoverable.join(', ')} — a line there exceeds the read limit.`,
+      `Not reviewed: ${shown.join(', ')} — a line there exceeds the read limit.`,
     );
   }
   // One disclosure per subject, one sentence per cause — structurally, not by
@@ -651,19 +686,49 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
   // cause would tell the author "no agent was launched" about an agent that
   // demonstrably ran.
   const seenSubjects = new Set<string>();
-  const byReason = new Map<string, string[]>();
-  for (const { subject, reason } of covEntries) {
-    if (seenSubjects.has(subject)) continue;
-    seenSubjects.add(subject);
-    const subjects = byReason.get(reason) ?? [];
-    subjects.push(subject);
-    byReason.set(reason, subjects);
+  const byReason = new Map<
+    string,
+    Array<{ subject: string; publicSubject?: string }>
+  >();
+  for (const e of covEntries) {
+    if (seenSubjects.has(e.subject)) continue;
+    seenSubjects.add(e.subject);
+    // Keyed on the reason the body will PRINT — public over internal. Two
+    // unread briefs differ internally only by their brief paths; grouped on
+    // those, the path-free public sentence would render once per role, which
+    // is the per-subject repetition this map exists to kill.
+    const key = e.publicReason ?? e.reason;
+    const group = byReason.get(key) ?? [];
+    group.push({ subject: e.subject, publicSubject: e.publicSubject });
+    byReason.set(key, group);
   }
-  for (const [reason, subjects] of byReason) {
+  for (const [reason, entries] of byReason) {
+    // Chunk subjects leave in the author's units, not the run's. `chunk 28`
+    // is bookkeeping — the id selects a rebuild command on stderr, and
+    // nothing on the PR page maps it to code. #7268's posted body enumerated
+    // all 49 of them, unsorted, across two of these sentences; the author's
+    // units are their files and, at the limit, the diff itself, which is what
+    // `describeChunkGap` renders. Role subjects ride their `publicSubject`
+    // (`Brief.publicLabel`) — the codename stays on stderr, where it is the
+    // selector — and the partition below keys on the INTERNAL subject, so a
+    // public phrase can never shadow a chunk id out of the chunk collapse.
+    const chunkIds: number[] = [];
+    const named: string[] = [];
+    for (const e of entries) {
+      const m = /^chunk (\d+)$/.exec(e.subject);
+      if (m) chunkIds.push(Number(m[1]));
+      else named.push(e.publicSubject ?? e.subject);
+    }
+    const shown = [
+      ...(chunkIds.length > 0
+        ? [describeChunkGap(chunkIds, plannedChunks).phrase]
+        : []),
+      ...named,
+    ];
     notReviewedParts.push(
       reason
-        ? `Not reviewed: ${subjects.join(', ')} — ${reason}.`
-        : `Not reviewed: ${subjects.join(', ')}.`,
+        ? `Not reviewed: ${shown.join(', ')} — ${reason}.`
+        : `Not reviewed: ${shown.join(', ')}.`,
     );
   }
 
@@ -753,7 +818,32 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
       // body could open "Reviewed — no blockers." two lines above "nobody read
       // them." Nothing nobody read can be certified blocker-free.
       missingReceipts.length === 0;
-    clauses.push(canCertify ? 'Reviewed — no blockers.' : 'Reviewed.');
+    // The opener may not say "Reviewed." over a disclosure set that denies it.
+    // #7268's posted body opened exactly that way — "Reviewed. Suggestions are
+    // inline." above two sentences disclosing all 49 chunks — and the author's
+    // first sentence certified the thing every following one took back. A
+    // chunk counts as certified only when an agent read it AND no disclosure
+    // names it: the rewritten launches on that run had demonstrably read their
+    // chunks, which is why `coveredChunks` alone is not the test. The
+    // `coverage` subject is the no-plan/unreadable-transcripts family — there
+    // is no chunk universe to count, and what cannot be counted cannot be
+    // certified.
+    const disclosedChunkIds = new Set<number>();
+    for (const e of coverageEntries) {
+      const m = /^chunk (\d+)$/.exec(e.subject);
+      if (m) disclosedChunkIds.add(Number(m[1]));
+    }
+    const nothingCertified =
+      coverageEntries.some((e) => e.subject === 'coverage') ||
+      (plannedChunks.length > 0 &&
+        coveredChunks.every((id) => disclosedChunkIds.has(id)));
+    clauses.push(
+      nothingCertified
+        ? '⚠️ This run could not certify that any of this diff was reviewed.'
+        : canCertify
+          ? 'Reviewed — no blockers.'
+          : 'Reviewed.',
+    );
   }
 
   // 4. Suggestions clause — keyed off the POSTED count, not `s`: an
@@ -796,6 +886,65 @@ export function composeReview(input: ComposeReviewInput): ComposeReviewResult {
     downgraded,
     downgradedFrom,
     remediation,
+  };
+}
+
+/**
+ * A set of unreviewed chunk ids, said in the PR author's units.
+ *
+ * `chunk 28` is the run's own bookkeeping: the id selects a rebuild command
+ * on stderr, and nothing on the PR page maps it to code. #7268's posted body
+ * was two sentences enumerating all 49 of them — unsorted, because the first
+ * group rode transcript order — and the one fact they carried (nothing was
+ * certified) is the opener's job, not an enumeration's. The author's units
+ * are their files and, at the limit, the diff itself, so the ids collapse to
+ * whichever of those fits:
+ *
+ * - every planned chunk → `the entire diff`;
+ * - a gap whose files are known and few → the files, named;
+ * - anything wider (or a plan whose chunks carry no files) → a count against
+ *   the plan's total.
+ *
+ * The ids never render. They stay in the structural entries — the caps, the
+ * caller-echo dedup and the certification test all key on `chunk <id>` — and
+ * in the stderr remediation, where the id is the selector a reader can act
+ * on. `plural` is the phrase's grammatical number, for the one caller whose
+ * sentence carries a pronoun.
+ */
+export function describeChunkGap(
+  ids: readonly number[],
+  planned: ReadonlyArray<{ id: number; files: string[] }>,
+): { phrase: string; plural: boolean } {
+  const uniq = [...new Set(ids)].sort((a, b) => a - b);
+  const inGap = new Set(uniq);
+  if (planned.length > 0 && planned.every((p) => inGap.has(p.id))) {
+    return { phrase: 'the entire diff', plural: false };
+  }
+  // The union of the gap's files, in plan order. One unknown chunk poisons
+  // the list: naming three files over a gap that also covers a fourth,
+  // unnameable one would tell the author the rest of their diff was read.
+  const byId = new Map(planned.map((p) => [p.id, p.files]));
+  const files: string[] = [];
+  let allKnown = planned.length > 0;
+  for (const id of uniq) {
+    const f = byId.get(id) ?? [];
+    if (f.length === 0) allKnown = false;
+    for (const p of f) {
+      if (!files.includes(p)) files.push(p);
+    }
+  }
+  if (allKnown && files.length <= 4) {
+    return {
+      phrase: `the diff ${uniq.length === 1 ? 'section' : 'sections'} covering ${files.join(', ')}`,
+      plural: uniq.length > 1,
+    };
+  }
+  return {
+    phrase:
+      planned.length > 0
+        ? `${uniq.length} of the diff's ${planned.length} sections`
+        : `${uniq.length} ${uniq.length === 1 ? 'section' : 'sections'} of the diff`,
+    plural: uniq.length > 1,
   };
 }
 
