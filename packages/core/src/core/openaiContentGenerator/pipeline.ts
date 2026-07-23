@@ -921,13 +921,25 @@ export class ContentGenerationPipeline {
       }
     }
 
-    if (thinkingMandatory && isDashScope) {
+    if (thinkingMandatory) {
       const typed = providerRequest as unknown as Record<string, unknown>;
-      // DashScope rejects forced tool selection while thinking is enabled.
       if (typed['enable_thinking'] === false) {
         delete typed['enable_thinking'];
       }
-      if (typed['tool_choice'] === 'required') {
+      const chatTemplateKwargs = typed['chat_template_kwargs'] as
+        | Record<string, unknown>
+        | undefined;
+      if (chatTemplateKwargs?.['enable_thinking'] === false) {
+        const remaining = { ...chatTemplateKwargs };
+        delete remaining['enable_thinking'];
+        if (Object.keys(remaining).length > 0) {
+          typed['chat_template_kwargs'] = remaining;
+        } else {
+          delete typed['chat_template_kwargs'];
+        }
+      }
+      // DashScope rejects forced tool selection while thinking is enabled.
+      if (isDashScope && typed['tool_choice'] === 'required') {
         delete typed['tool_choice'];
       }
     }

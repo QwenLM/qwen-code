@@ -27,6 +27,7 @@ import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
+import { DefaultOpenAICompatibleProvider } from './provider/default.js';
 import {
   DEFAULT_STREAM_IDLE_TIMEOUT_MS,
   MAX_STREAM_IDLE_TIMEOUT_MS,
@@ -904,19 +905,30 @@ describe('ContentGenerationPipeline', () => {
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
 
-    it('retries when non-DashScope chat_template_kwargs disables required thinking', async () => {
+    it('retries without provider-configured thinking opt-outs on non-DashScope endpoints', async () => {
       mockContentGeneratorConfig = {
         ...mockContentGeneratorConfig,
         baseUrl: 'https://llm.example.com/v1',
         model: 'Qwen3.6-27B',
+        extra_body: {
+          enable_thinking: false,
+          chat_template_kwargs: {
+            apply_chat_template: true,
+            enable_thinking: false,
+          },
+        },
       } as ContentGeneratorConfig;
-      mockConfig = {
+      const provider = new DefaultOpenAICompatibleProvider(
+        mockContentGeneratorConfig,
+        mockCliConfig,
+      );
+      vi.spyOn(provider, 'buildClient').mockReturnValue(mockClient);
+      pipeline = new ContentGenerationPipeline({
         ...mockConfig,
+        provider,
         contentGeneratorConfig: mockContentGeneratorConfig,
-      };
-      pipeline = new ContentGenerationPipeline(mockConfig);
+      });
 
-      (mockProvider.buildRequest as Mock).mockImplementation((req) => req);
       (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
         { role: 'user', content: 'What is 2+2?' },
       ]);
@@ -947,10 +959,13 @@ describe('ContentGenerationPipeline', () => {
       const calls = (mockClient.chat.completions.create as Mock).mock.calls;
       expect(calls).toHaveLength(2);
       expect(calls[0][0].chat_template_kwargs).toEqual({
+        apply_chat_template: true,
         enable_thinking: false,
       });
       expect(calls[0][0].enable_thinking).toBeUndefined();
-      expect(calls[1][0].chat_template_kwargs).toBeUndefined();
+      expect(calls[1][0].chat_template_kwargs).toEqual({
+        apply_chat_template: true,
+      });
       expect(calls[1][0].enable_thinking).toBeUndefined();
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
     });
