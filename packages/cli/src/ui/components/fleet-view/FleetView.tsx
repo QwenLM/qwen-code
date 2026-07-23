@@ -228,8 +228,8 @@ export const FleetView: React.FC<FleetViewProps> = ({
       if (deletePendingIdRef.current === entry.sessionId) {
         if (deleteTimerRef.current) clearTimeout(deleteTimerRef.current);
         setDeletePendingId(null);
-        if (fromPeek) setViewMode('list');
         const deleted = onDeleteRef.current(entry.sessionId);
+        if (deleted && fromPeek) setViewMode('list');
         showStatus(
           deleted ? 'Session deleted' : 'Cannot delete the active session',
         );
@@ -395,7 +395,10 @@ export const FleetView: React.FC<FleetViewProps> = ({
         return;
       }
 
-      if (key.name === 'backspace' && inputValue.length > 0) {
+      if (
+        (key.name === 'backspace' || key.name === 'delete') &&
+        inputValue.length > 0
+      ) {
         setInputValue((prev) => prev.slice(0, -1));
         return;
       }
@@ -476,7 +479,11 @@ export const FleetView: React.FC<FleetViewProps> = ({
   const showInputArea = renaming || !!onDispatch;
   const maxVisibleRows = Math.max(
     3,
-    rows - 5 - (showInputArea ? 3 : 0) - (viewMode === 'peek' ? 6 : 0),
+    rows -
+      5 -
+      (error ? 1 : 0) -
+      (showInputArea ? 3 : 0) -
+      (viewMode === 'peek' ? 6 : 0),
   );
   const scrollOffset = useMemo(() => {
     if (selectedArrayIndex < maxVisibleRows) return 0;

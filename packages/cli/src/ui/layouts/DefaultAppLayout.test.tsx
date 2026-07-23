@@ -6,7 +6,9 @@
 
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { render } from 'ink-testing-library';
+import { act } from '@testing-library/react';
 import { Text } from 'ink';
+import type { FleetViewProps } from '../components/fleet-view/FleetView.js';
 import { DefaultAppLayout } from './DefaultAppLayout.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
 import {
@@ -77,8 +79,54 @@ vi.mock('../contexts/AgentViewContext.js', () => ({
 
 const mockedUseAgentViewState = useAgentViewState as Mock;
 
+const fleetViewProps = vi.hoisted(() => ({
+  current: null as unknown as FleetViewProps,
+}));
+
+vi.mock('../components/fleet-view/FleetView.js', () => ({
+  FleetView: (props: FleetViewProps) => {
+    fleetViewProps.current = props;
+    return null;
+  },
+}));
+
+const mockRemoveSession = vi.hoisted(() => vi.fn());
+const mockConfig = vi.hoisted(() => ({
+  getSessionId: vi.fn(() => 'current-session'),
+  getSessionService: vi.fn(() => ({ removeSession: mockRemoveSession })),
+  getWorkingDir: vi.fn(() => '/work'),
+}));
+
+vi.mock('../contexts/ConfigContext.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../contexts/ConfigContext.js')>()),
+  useConfig: () => mockConfig,
+}));
+
+vi.mock('../contexts/SettingsContext.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../contexts/SettingsContext.js')>()),
+  useSettings: () => ({ merged: { ui: {} } }),
+}));
+
+const fleetSessionsState = vi.hoisted(() => ({
+  sessions: [] as unknown[],
+  loading: false,
+  error: null as string | null,
+  refresh: vi.fn(),
+}));
+
+vi.mock('../hooks/use-fleet-view-sessions.js', async (importOriginal) => ({
+  ...(await importOriginal<
+    typeof import('../hooks/use-fleet-view-sessions.js')
+  >()),
+  useFleetViewSessions: () => fleetSessionsState,
+}));
+
 const mockUIActions = {
   refreshStatic: vi.fn(),
+  setFleetDoubleTapPending: vi.fn(),
+  closeFleetView: vi.fn(),
+  handleResume: vi.fn(),
+  handleFinalSubmit: vi.fn(),
 } as unknown as UIActions;
 
 const baseUIState: Partial<UIState> = {
@@ -314,5 +362,71 @@ describe('DefaultAppLayout', () => {
     expect(output.indexOf('UpdateNotification')).toBeLessThan(
       output.indexOf('AgentComposer'),
     );
+  });
+
+  describe('FleetViewContainer', () => {
+    const renderFleet = () => {
+      mockedUseAgentViewState.mockReturnValue({
+        activeView: 'main',
+        agents: new Map(),
+      });
+      return renderLayout({ ...baseUIState, isFleetViewOpen: true });
+    };
+
+    beforeEach(() => {
+      vi.clearAllMocks();
+      fleetSessionsState.sessions = [];
+      fleetSessionsState.loading = false;
+      fleetSessionsState.error = null;
+    });
+
+    it('does not resume when attaching to the current session', () => {
+      renderFleet();
+      act(() => {
+        fleetViewProps.current.onAttach('current-session');
+      });
+      expect(mockUIActions.closeFleetView).toHaveBeenCalled();
+      expect(mockUIActions.handleResume).not.toHaveBeenCalled();
+    });
+
+    it('resumes a different session on attach', () => {
+      renderFleet();
+      act(() => {
+        fleetViewProps.current.onAttach('other-session');
+      });
+      expect(mockUIActions.handleResume).toHaveBeenCalledWith('other-session');
+    });
+
+    it('refuses to delete the current session', () => {
+      renderFleet();
+      let result = true;
+      act(() => {
+        result = fleetViewProps.current.onDelete('current-session');
+      });
+      expect(result).toBe(false);
+      expect(mockRemoveSession).not.toHaveBeenCalled();
+    });
+
+    it('deletes and refreshes a non-current session', () => {
+      mockRemoveSession.mockResolvedValue(undefined);
+      renderFleet();
+      let result = false;
+      act(() => {
+        result = fleetViewProps.current.onDelete('other-session');
+      });
+      expect(result).toBe(true);
+      expect(mockRemoveSession).toHaveBeenCalledWith('other-session');
+    });
+
+    it('dispatches the typed prompt and closes', () => {
+      renderFleet();
+      act(() => {
+        fleetViewProps.current.onDispatch!('fix the bug');
+      });
+      expect(mockUIActions.closeFleetView).toHaveBeenCalled();
+      expect(mockUIActions.handleFinalSubmit).toHaveBeenCalledWith(
+        'fix the bug',
+      );
+    });
   });
 });

@@ -393,4 +393,86 @@ describe('<FleetView />', () => {
     const { lastFrame } = renderFleetView(props);
     expect(lastFrame()!).toContain('No sessions found');
   });
+
+  describe('selection clamping and scrolling', () => {
+    it('clamps selection when the entry list shrinks below selectedIndex', () => {
+      const props = makeProps({ selectedIndex: 2 });
+      const { rerender } = renderFleetView(props);
+
+      rerender(
+        <FleetView
+          {...makeProps({
+            sessions: [makeEntry({ sessionId: 'sess-1', status: 'current' })],
+            selectedIndex: 2,
+            onSelect: props.onSelect,
+          })}
+        />,
+      );
+
+      expect(props.onSelect).toHaveBeenCalledWith(0);
+    });
+
+    it('does not select anything when the list becomes empty', () => {
+      const props = makeProps({ selectedIndex: 2 });
+      const { rerender } = renderFleetView(props);
+
+      rerender(
+        <FleetView
+          {...makeProps({
+            sessions: [],
+            selectedIndex: 2,
+            onSelect: props.onSelect,
+          })}
+        />,
+      );
+
+      expect(props.onSelect).not.toHaveBeenCalled();
+    });
+
+    it('scrolls the window so a far-down selection stays visible', () => {
+      const sessions = Array.from({ length: 30 }, (_, i) =>
+        makeEntry({
+          sessionId: `sess-${i}`,
+          displayName: `Session ${i}`,
+          prompt: `Prompt ${i}`,
+          status: 'idle',
+        }),
+      );
+      const props = makeProps({ sessions, selectedIndex: 29 });
+      const { lastFrame } = renderFleetView(props);
+
+      expect(lastFrame()!).toContain('Session 29');
+      expect(lastFrame()!).not.toContain('Session 0');
+    });
+  });
+
+  describe('delete key in dispatch input', () => {
+    it('removes the last character on Delete', () => {
+      const onDispatch = vi.fn();
+      const props = makeProps({ onDispatch });
+      renderFleetView(props);
+
+      pressKey({ name: 'h', sequence: 'h' });
+      pressKey({ name: 'i', sequence: 'i' });
+      pressKey({ name: 'delete' });
+      pressKey({ name: 'return' });
+      expect(onDispatch).toHaveBeenCalledWith('h');
+    });
+  });
+
+  describe('peek-mode delete failure', () => {
+    it('stays in peek mode when the deletion is rejected', () => {
+      const props = makeProps({ onDelete: vi.fn(() => false) });
+      const { lastFrame } = renderFleetView(props);
+
+      pressKey({ name: 'space' });
+      expect(lastFrame()!).toContain('space to close');
+
+      pressKey({ name: 'x', ctrl: true });
+      pressKey({ name: 'x', ctrl: true });
+
+      expect(lastFrame()!).toContain('Cannot delete the active session');
+      expect(lastFrame()!).toContain('space to close');
+    });
+  });
 });
