@@ -2981,6 +2981,8 @@ export function App({
   const [gitModeIntent, setGitModeIntent] = useState<SessionGitIntent>({
     mode: 'current',
   });
+  const gitModeIntentRef = useRef(gitModeIntent);
+  gitModeIntentRef.current = gitModeIntent;
   const newSessionSuggestionSubmitTokenRef = useRef(0);
   const pendingNewSessionSuggestionSubmitRef = useRef<{
     token: number;
@@ -3049,12 +3051,12 @@ export function App({
         workspaceCwd:
           lockedWorkspaceCwd ?? acceptedWorkspaceCwd ?? primaryWorkspaceCwd,
         worktree:
-          gitModeIntent.mode === 'worktree'
-            ? { slug: gitModeIntent.slug }
+          gitModeIntentRef.current.mode === 'worktree'
+            ? { slug: gitModeIntentRef.current.slug }
             : undefined,
         branch:
-          gitModeIntent.mode === 'branch'
-            ? { name: gitModeIntent.name }
+          gitModeIntentRef.current.mode === 'branch'
+            ? { name: gitModeIntentRef.current.name }
             : undefined,
         onSessionCreated: onSessionCreatedRef.current,
         onSessionAllocated: (sessionId) => {
@@ -3087,7 +3089,7 @@ export function App({
     };
     void promise.then(clearPreparation, clearPreparation);
     return promise;
-  }, [lockedWorkspaceCwd, sessionActions, workspaces, gitModeIntent]);
+  }, [lockedWorkspaceCwd, sessionActions, workspaces]);
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const onSlashCommandRef = useRef(onSlashCommand);

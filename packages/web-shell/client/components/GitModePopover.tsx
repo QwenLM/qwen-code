@@ -298,6 +298,7 @@ export function GitModePopover({
           type="button"
           className={styles.clearBtn}
           onClick={handleClear}
+          aria-label={t('gitMode.resetToCurrent')}
           title={t('gitMode.resetToCurrent')}
           data-testid="git-mode-clear"
         >

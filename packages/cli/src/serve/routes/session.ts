@@ -399,6 +399,36 @@ export function registerSessionRoutes(
   // the guard before either populates `activeBranchSessions`.
   const inFlightBranchWorkspaces = new Set<string>();
 
+  /** Roll back a branch creation: restore the base ref and delete the branch. */
+  const rollbackBranchCreation = async (
+    cwd: string,
+    meta: { name: string; baseBranch: string },
+    baseCommit: string | undefined,
+    log: typeof daemonLog,
+  ): Promise<void> => {
+    activeBranchSessions.delete(cwd);
+    inFlightBranchWorkspaces.delete(cwd);
+    await execFileAsync(
+      'git',
+      [
+        'checkout',
+        meta.baseBranch === 'HEAD' && baseCommit ? baseCommit : meta.baseBranch,
+      ],
+      { cwd },
+    ).catch((rollbackErr) => {
+      log?.warn('branch rollback checkout failed', {
+        error: rollbackErr,
+      });
+    });
+    await execFileAsync('git', ['branch', '-D', meta.name], {
+      cwd,
+    }).catch((rollbackErr) => {
+      log?.warn('branch rollback delete failed', {
+        error: rollbackErr,
+      });
+    });
+  };
+
   const getTranscriptCursorCodec = (
     runtime: WorkspaceRuntime,
   ): SessionTranscriptCursorCodec => {
@@ -1490,31 +1520,12 @@ export function registerSessionRoutes(
               }
               // Roll back the branch if one was created for this session.
               if (branchMeta) {
-                activeBranchSessions.delete(workspaceCwd);
-                inFlightBranchWorkspaces.delete(workspaceCwd);
-                await execFileAsync(
-                  'git',
-                  [
-                    'checkout',
-                    branchMeta.baseBranch === 'HEAD' && branchBaseCommit
-                      ? branchBaseCommit
-                      : branchMeta.baseBranch,
-                  ],
-                  {
-                    cwd: workspaceCwd,
-                  },
-                ).catch((rollbackErr) => {
-                  daemonLog?.warn('branch rollback checkout failed', {
-                    error: rollbackErr,
-                  });
-                });
-                await execFileAsync('git', ['branch', '-D', branchMeta.name], {
-                  cwd: workspaceCwd,
-                }).catch((rollbackErr) => {
-                  daemonLog?.warn('branch rollback delete failed', {
-                    error: rollbackErr,
-                  });
-                });
+                await rollbackBranchCreation(
+                  workspaceCwd,
+                  branchMeta,
+                  branchBaseCommit,
+                  daemonLog,
+                );
               }
             } else if (branchMeta) {
               // Another client attached before we could reap — the session
@@ -1526,9 +1537,10 @@ export function registerSessionRoutes(
           } catch {
             // Best-effort cleanup; channel.exited will eventually reap the
             // session, but it has no awareness of this route-local in-flight
-            // reservation. Release it so a throwing killSession/removeSession
-            // doesn't permanently block the workspace from new branch sessions.
+            // reservation. Pessimistically track the session so the workspace
+            // stays blocked until the stale-entry detection self-heals.
             if (branchMeta) {
+              activeBranchSessions.set(workspaceCwd, session.sessionId);
               inFlightBranchWorkspaces.delete(workspaceCwd);
             }
           }
@@ -1656,31 +1668,12 @@ export function registerSessionRoutes(
       // Roll back the branch if spawn failed — switch back to the base
       // branch and delete the newly created one.
       if (branchMeta) {
-        activeBranchSessions.delete(workspaceCwd);
-        inFlightBranchWorkspaces.delete(workspaceCwd);
-        await execFileAsync(
-          'git',
-          [
-            'checkout',
-            branchMeta.baseBranch === 'HEAD' && branchBaseCommit
-              ? branchBaseCommit
-              : branchMeta.baseBranch,
-          ],
-          {
-            cwd: workspaceCwd,
-          },
-        ).catch((rollbackErr) => {
-          daemonLog?.warn('branch rollback checkout failed', {
-            error: rollbackErr,
-          });
-        });
-        await execFileAsync('git', ['branch', '-D', branchMeta.name], {
-          cwd: workspaceCwd,
-        }).catch((rollbackErr) => {
-          daemonLog?.warn('branch rollback delete failed', {
-            error: rollbackErr,
-          });
-        });
+        await rollbackBranchCreation(
+          workspaceCwd,
+          branchMeta,
+          branchBaseCommit,
+          daemonLog,
+        );
       }
       sendBridgeError(res, err, { route: 'POST /session' });
     }
