@@ -19,8 +19,8 @@ describe('normalizeServeChannelSelection', () => {
     });
   });
 
-  it('parses all as a dedicated selection mode', () => {
-    expect(normalizeServeChannelSelection(['all'])).toEqual({ mode: 'all' });
+  it('parses trimmed all as a dedicated selection mode', () => {
+    expect(normalizeServeChannelSelection([' all '])).toEqual({ mode: 'all' });
   });
 
   it('rejects empty channel values', () => {

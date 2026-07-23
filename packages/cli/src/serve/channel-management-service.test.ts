@@ -68,6 +68,14 @@ function setup(options: {
       });
       return persisted;
     }),
+    setStartupNames: vi.fn(async (startupNames) => {
+      persisted = settingsSnapshot({
+        revision: 'rev-2',
+        channels: persisted.channels,
+        startupNames: [...startupNames],
+      });
+      return persisted;
+    }),
   };
   let names = options.committedNames ?? [];
   const manager: ChannelManagementWorkerManager & {
@@ -144,6 +152,65 @@ describe('createChannelManagementService', () => {
     });
   });
 
+  it('projects the all startup sentinel onto configured instances', async () => {
+    const { service } = setup({
+      snapshot: settingsSnapshot({ startupNames: [' all '] }),
+    });
+
+    const result = await service.list();
+
+    expect(result.instances['bot']?.startsWithServe).toBe(true);
+  });
+
+  it('does not expose config fields from an unmanaged channel type', async () => {
+    const { service } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          legacy: {
+            type: 'telegram',
+            token: '$LEGACY_TOKEN',
+            senderPolicy: 'open',
+          },
+        },
+      }),
+    });
+
+    const result = await service.list();
+
+    expect(result.instances['legacy']).toMatchObject({
+      config: { type: 'telegram' },
+      secrets: {},
+    });
+    expect(JSON.stringify(result.instances['legacy'])).not.toContain(
+      'LEGACY_TOKEN',
+    );
+  });
+
+  it('redacts credentials from adapter runtime errors', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    const state = manager.state();
+    vi.mocked(manager.state).mockReturnValue({
+      ...state,
+      workers: state.workers.map((worker) => ({
+        ...worker,
+        adapters: [
+          {
+            name: 'bot',
+            state: 'error' as const,
+            error: 'connect failed clientSecret=top-secret',
+          },
+        ],
+      })),
+    });
+
+    const result = await service.list();
+
+    expect(result.instances['bot']?.runtime).toEqual({
+      state: 'error',
+      lastError: 'connect failed clientSecret=<redacted>',
+    });
+  });
+
   it('keeps a failed replacement config and reports the instance as error', async () => {
     const { service, store, manager, persisted } = setup({
       committedNames: ['other', 'bot'],
@@ -194,6 +261,18 @@ describe('createChannelManagementService', () => {
     expect(persisted().channels['bot']).toBeDefined();
   });
 
+  it('rejects stale removal before changing runtime state', async () => {
+    const { service, store, manager } = setup({ committedNames: ['bot'] });
+
+    await expect(
+      service.remove('bot', { expectedRevision: 'stale' }),
+    ).rejects.toMatchObject({ code: 'channel_settings_conflict' });
+
+    expect(store.remove).not.toHaveBeenCalled();
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    expect(manager.setSelection).not.toHaveBeenCalled();
+  });
+
   it('starts and stops from the manager committed order without persisting startup names', async () => {
     const { service, store, manager } = setup({
       committedNames: ['first', 'second'],
@@ -225,6 +304,87 @@ describe('createChannelManagementService', () => {
     expect(store.remove).not.toHaveBeenCalled();
   });
 
+  it('updates persisted startup selection without mutating runtime state', async () => {
+    const { service, store, manager } = setup({ committedNames: ['bot'] });
+
+    const result = await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: true,
+    });
+
+    expect(store.setStartupNames).toHaveBeenCalledWith(['bot'], {
+      expectedRevision: 'rev-1',
+    });
+    expect(result.instance.startsWithServe).toBe(true);
+    expect(result.instance.runtime.state).toBe('connected');
+    expect(manager.setSelection).not.toHaveBeenCalled();
+    expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('expands all to the other instances when disabling one startup', async () => {
+    const { service, store } = setup({
+      snapshot: settingsSnapshot({
+        channels: {
+          first: { type: 'dingtalk' },
+          bot: { type: 'dingtalk' },
+          last: { type: 'dingtalk' },
+        },
+        startupNames: [' all '],
+      }),
+    });
+
+    const result = await service.setStartup('bot', {
+      expectedRevision: 'rev-1',
+      enabled: false,
+    });
+
+    expect(store.setStartupNames).toHaveBeenCalledWith(['first', 'last'], {
+      expectedRevision: 'rev-1',
+    });
+    expect(result.instance.startsWithServe).toBe(false);
+    expect(result.snapshot.instances['first']?.startsWithServe).toBe(true);
+    expect(result.snapshot.instances['last']?.startsWithServe).toBe(true);
+  });
+
+  it.each(['all', ' all ', '\tall\n'])(
+    'rejects reserved channel name %j before lifecycle mutation',
+    async (name) => {
+      const { service, store, manager } = setup({ committedNames: [] });
+
+      await expect(service.start(name)).rejects.toMatchObject({
+        code: 'invalid_channel_instance_name',
+      });
+      await expect(
+        service.setStartup(name, {
+          expectedRevision: 'rev-1',
+          enabled: true,
+        }),
+      ).rejects.toMatchObject({ code: 'invalid_channel_instance_name' });
+
+      expect(store.setStartupNames).not.toHaveBeenCalled();
+      expect(manager.committedChannelNames).not.toHaveBeenCalled();
+      expect(manager.setSelection).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'rejects inherited instance name %s before start or stop reaches the manager',
+    async (name) => {
+      const { service, manager } = setup({ committedNames: [] });
+
+      await expect(service.start(name)).rejects.toMatchObject({
+        code: 'channel_instance_not_found',
+      });
+      await expect(service.stop(name)).rejects.toMatchObject({
+        code: 'channel_instance_not_found',
+      });
+
+      expect(manager.committedChannelNames).not.toHaveBeenCalled();
+      expect(manager.setSelection).not.toHaveBeenCalled();
+      expect(manager.stopSelection).not.toHaveBeenCalled();
+    },
+  );
+
   it('fails closed when an active instance belongs to another workspace', async () => {
     const { service, manager } = setup({
       committedNames: ['bot'],
@@ -255,5 +415,33 @@ describe('createChannelManagementService', () => {
     );
     expect(manager.reload).not.toHaveBeenCalled();
     expect(manager.reloadWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('serializes lifecycle mutations for one workspace service', async () => {
+    const { service, manager } = setup({ committedNames: ['bot'] });
+    let finishReload!: () => void;
+    manager.reloadWorkspace.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishReload = () =>
+            resolve({
+              enabled: true,
+              state: 'running' as const,
+              channels: ['bot'],
+            });
+        }),
+    );
+
+    const restarting = service.restart('bot');
+    await vi.waitFor(() => {
+      expect(manager.reloadWorkspace).toHaveBeenCalledOnce();
+    });
+    const stopping = service.stop('bot');
+
+    expect(manager.stopSelection).not.toHaveBeenCalled();
+    finishReload();
+    await restarting;
+    await stopping;
+    expect(manager.stopSelection).toHaveBeenCalledOnce();
   });
 });

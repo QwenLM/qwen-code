@@ -14,6 +14,7 @@ import type {
   ChannelSettingsUpsertOptions,
   WorkspaceChannelSettingsStore,
 } from './channel-settings-store.js';
+import { isAllChannelSelectionName } from './channel-selection.js';
 import { normalizeWorkerDiagnostic } from './channel-worker-diagnostics.js';
 import type {
   ChannelWorkerControlState,
@@ -54,6 +55,10 @@ export interface ChannelUpsertRequest {
 
 export type RevisionRequest = ChannelSettingsMutationOptions;
 
+export interface ChannelStartupRequest extends RevisionRequest {
+  enabled: boolean;
+}
+
 export interface ChannelMutationResult {
   snapshot: DaemonChannelsSnapshot;
   instance: ChannelInstanceSnapshot;
@@ -69,6 +74,10 @@ export interface ChannelManagementService {
     name: string,
     request: RevisionRequest,
   ): Promise<ChannelMutationResult>;
+  setStartup(
+    name: string,
+    request: ChannelStartupRequest,
+  ): Promise<ChannelMutationResult>;
   start(name: string): Promise<ChannelMutationResult>;
   stop(name: string): Promise<ChannelMutationResult>;
   restart(name: string): Promise<ChannelMutationResult>;
@@ -82,6 +91,10 @@ interface ChannelManagementSettingsStore {
   ): Promise<ChannelSettingsSnapshot>;
   remove(
     name: string,
+    options: ChannelSettingsMutationOptions,
+  ): Promise<ChannelSettingsSnapshot>;
+  setStartupNames(
+    names: readonly string[],
     options: ChannelSettingsMutationOptions,
   ): Promise<ChannelSettingsSnapshot>;
 }
@@ -126,15 +139,35 @@ function diagnostic(error: unknown): string {
 }
 
 function usesEnvironment(value: unknown): boolean {
-  return (
-    typeof value === 'string' && /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)
-  );
+  return typeof value === 'string' && /^\$[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }
 
 export function createChannelManagementService(
   opts: CreateChannelManagementServiceOptions,
 ): ChannelManagementService {
   const diagnostics = new Map<string, string>();
+  let mutationTail = Promise.resolve();
+
+  const inMutationLane = <T>(mutation: () => Promise<T>): Promise<T> => {
+    const result = mutationTail.then(mutation, mutation);
+    mutationTail = result.then(
+      () => undefined,
+      () => undefined,
+    );
+    return result;
+  };
+
+  const assertExpectedRevision = (
+    snapshot: ChannelSettingsSnapshot,
+    expectedRevision: string,
+  ): void => {
+    if (snapshot.revision !== expectedRevision) {
+      throw new ChannelManagementError(
+        'channel_settings_conflict',
+        'Channel settings changed; reload before trying again.',
+      );
+    }
+  };
 
   const workerFor = (name: string) => {
     const matches = opts.manager
@@ -184,7 +217,7 @@ export function createChannelManagementService(
     if (adapter?.state === 'error') {
       return {
         state: 'error',
-        ...(adapter.error ? { lastError: adapter.error } : {}),
+        ...(adapter.error ? { lastError: diagnostic(adapter.error) } : {}),
       };
     }
     if (
@@ -197,7 +230,7 @@ export function createChannelManagementService(
     if (worker.state === 'running') return { state: 'partial' };
     return {
       state: 'error',
-      ...(worker.error ? { lastError: worker.error } : {}),
+      ...(worker.error ? { lastError: diagnostic(worker.error) } : {}),
     };
   };
 
@@ -208,10 +241,21 @@ export function createChannelManagementService(
   ): Promise<ChannelInstanceSnapshot> => {
     const type = typeof rawConfig['type'] === 'string' ? rawConfig['type'] : '';
     const plugin = type ? await getPlugin(type) : undefined;
+    if (!plugin?.management) {
+      return {
+        name,
+        config: type ? { type } : {},
+        secrets: {},
+        startsWithServe:
+          startupNames.some(isAllChannelSelectionName) ||
+          startupNames.includes(name),
+        runtime: runtimeFor(name),
+      };
+    }
     const secretKeys = new Set(
-      plugin?.management?.fields
+      plugin.management.fields
         .filter((field) => field.kind === 'secret')
-        .map((field) => field.key) ?? [],
+        .map((field) => field.key),
     );
     const config: Record<string, unknown> = {};
     const secrets: Record<string, ChannelSecretState> = {};
@@ -234,7 +278,9 @@ export function createChannelManagementService(
       name,
       config,
       secrets,
-      startsWithServe: startupNames.includes(name),
+      startsWithServe:
+        startupNames.some(isAllChannelSelectionName) ||
+        startupNames.includes(name),
       runtime: runtimeFor(name),
     };
   };
@@ -262,15 +308,15 @@ export function createChannelManagementService(
     persisted = opts.store.snapshot(),
   ): Promise<ChannelMutationResult> => {
     const snapshot = await listFrom(persisted);
-    const instance =
-      snapshot.instances[name] ??
-      ({
-        name,
-        config: {},
-        secrets: {},
-        startsWithServe: false,
-        runtime: runtimeFor(name),
-      } satisfies ChannelInstanceSnapshot);
+    const instance = Object.hasOwn(snapshot.instances, name)
+      ? snapshot.instances[name]!
+      : ({
+          name,
+          config: {},
+          secrets: {},
+          startsWithServe: false,
+          runtime: runtimeFor(name),
+        } satisfies ChannelInstanceSnapshot);
     return { snapshot, instance };
   };
 
@@ -287,11 +333,21 @@ export function createChannelManagementService(
     }
   };
 
+  const assertManageableInstanceName = (name: string): void => {
+    if (isAllChannelSelectionName(name)) {
+      throw new ChannelManagementError(
+        'invalid_channel_instance_name',
+        'Channel instance name "all" is reserved for startup selection.',
+      );
+    }
+  };
+
   const service: ChannelManagementService = {
     async list() {
       return listFrom(opts.store.snapshot());
     },
     async upsert(name, request) {
+      assertManageableInstanceName(name);
       const committedNames = opts.manager.committedChannelNames();
       const active = committedNames.includes(name);
       if (active) assertOwnedRuntime(name);
@@ -308,18 +364,51 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async remove(name, request) {
-      const committedNames = opts.manager.committedChannelNames();
-      if (committedNames.includes(name)) {
-        assertOwnedRuntime(name);
-        await stopFromNames(name, committedNames);
+      const current = opts.store.snapshot();
+      assertExpectedRevision(current, request.expectedRevision);
+      if (!isAllChannelSelectionName(name)) {
+        const committedNames = opts.manager.committedChannelNames();
+        if (committedNames.includes(name)) {
+          assertOwnedRuntime(name);
+          await stopFromNames(name, committedNames);
+        }
       }
       const persisted = await opts.store.remove(name, request);
       diagnostics.delete(name);
       return resultFor(name, persisted);
     },
+    async setStartup(name, request) {
+      assertManageableInstanceName(name);
+      const current = opts.store.snapshot();
+      if (!Object.hasOwn(current.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
+      const startsAll = current.startupNames.some(isAllChannelSelectionName);
+      if (startsAll && request.enabled) {
+        assertExpectedRevision(current, request.expectedRevision);
+        return resultFor(name, current);
+      }
+      const startupNames = startsAll
+        ? Object.keys(current.channels).filter(
+            (item) => !isAllChannelSelectionName(item) && item !== name,
+          )
+        : request.enabled
+          ? current.startupNames.includes(name)
+            ? current.startupNames
+            : [...current.startupNames, name]
+          : current.startupNames.filter((item) => item !== name);
+      const persisted = await opts.store.setStartupNames(startupNames, {
+        expectedRevision: request.expectedRevision,
+      });
+      return resultFor(name, persisted);
+    },
     async start(name) {
+      assertManageableInstanceName(name);
       const persisted = opts.store.snapshot();
-      if (!persisted.channels[name]) {
+      if (!Object.hasOwn(persisted.channels, name)) {
         throw new ChannelManagementError(
           'channel_instance_not_found',
           `Channel "${name}" is not configured in this workspace.`,
@@ -341,7 +430,14 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async stop(name) {
+      assertManageableInstanceName(name);
       const persisted = opts.store.snapshot();
+      if (!Object.hasOwn(persisted.channels, name)) {
+        throw new ChannelManagementError(
+          'channel_instance_not_found',
+          `Channel "${name}" is not configured in this workspace.`,
+        );
+      }
       const committedNames = opts.manager.committedChannelNames();
       if (committedNames.includes(name)) assertOwnedRuntime(name);
       await stopFromNames(name, committedNames);
@@ -349,6 +445,7 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
     async restart(name) {
+      assertManageableInstanceName(name);
       const persisted = opts.store.snapshot();
       if (!opts.manager.committedChannelNames().includes(name)) {
         throw new ChannelManagementError(
@@ -367,5 +464,16 @@ export function createChannelManagementService(
       return resultFor(name, persisted);
     },
   };
-  return service;
+  return {
+    list: () => service.list(),
+    upsert: (name, request) =>
+      inMutationLane(() => service.upsert(name, request)),
+    remove: (name, request) =>
+      inMutationLane(() => service.remove(name, request)),
+    setStartup: (name, request) =>
+      inMutationLane(() => service.setStartup(name, request)),
+    start: (name) => inMutationLane(() => service.start(name)),
+    stop: (name) => inMutationLane(() => service.stop(name)),
+    restart: (name) => inMutationLane(() => service.restart(name)),
+  };
 }
