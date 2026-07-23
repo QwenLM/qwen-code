@@ -1606,6 +1606,15 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
       );
+      // #7425 review follow-up: the archived copy's usage must be salvaged
+      // before deletion too — with a telemetry-less fresh active copy it is
+      // the only holder of the session's history. Pin the call so removing
+      // the "redundant-looking" archived salvage fails this test.
+      expect(
+        vi.mocked(persistUsageBeforeTranscriptDeletion),
+      ).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+      );
     });
   });
 
