@@ -1484,6 +1484,8 @@ export default {
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --image for the image generation model, --project to persist to project settings, --global to persist to user settings, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
   "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
     "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
   "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
@@ -1497,17 +1499,23 @@ export default {
     'Set the model for voice transcription',
   'Set the image-capable model used to transcribe images for a text-only main model':
     'Set the image-capable model used to transcribe images for a text-only main model',
+  'Set the model used to generate images':
+    'Set the model used to generate images',
   'Persist the model selection to the project settings (workspace scope)':
     'Persist the model selection to the project settings (workspace scope)',
   'Persist the model selection to the user settings (global scope)':
     'Persist the model selection to the user settings (global scope)',
   'Select Fast Model': 'Select Fast Model',
   'Select Vision Model': 'Select Vision Model',
+  'Select Image Model': 'Select Image Model',
   'Select Voice Model': 'Select Voice Model',
   'Vision Model': 'Vision Model',
+  'Image Model': 'Image Model',
   'Voice Model': 'Voice Model',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
+  'Selected image model is unavailable.':
+    'Selected image model is unavailable.',
   "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.":
     "Voice model '{{model}}' is configured more than once. Remove duplicate model ids before selecting it for voice transcription.",
   'Voice dictation: {{status}} (mode: {{mode}}, {{modelText}}).':
@@ -1755,8 +1763,16 @@ export default {
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
   'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
     'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
+  'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.':
+    'Current image model: {{imageModel}}\nUse "/model --image <model-id>" to set the image generation model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
+  "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.":
+    "Image model '{{modelName}}' matches multiple configured endpoints. Run /model --image without an argument and choose the exact endpoint.",
+  "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "Image model '{{modelName}}' must declare a valid HTTPS baseUrl and credential environment variable.",
+  "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.":
+    "'{{model}}' must declare a valid HTTPS baseUrl and credential environment variable.",
   none: 'none',
   unknown: 'unknown',
   // ============================================================================
