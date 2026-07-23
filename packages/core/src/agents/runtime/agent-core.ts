@@ -184,6 +184,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
   ToolNames.TEAM_PLAN_APPROVAL,
+  ToolNames.TODO_WRITE,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
