@@ -787,8 +787,11 @@ function supportsOsc8Hyperlinks(): boolean {
  * envelope so the multiplexer forwards it to the host terminal.
  */
 function osc8Hyperlink(url: string): string {
-  // eslint-disable-next-line no-control-regex
-  const safeUrl = url.replace(/[\x00-\x1f\x7f\x80-\x9f]/g, '');
+  const safeUrl = url.replace(
+    // eslint-disable-next-line no-control-regex
+    /[\x00-\x1f\x7f\x80-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g,
+    '',
+  );
   let seq = `\x1b]8;;${safeUrl}\x07${safeUrl}\x1b]8;;\x07`;
   if (process.env['TMUX']) {
     const escaped = seq.replaceAll('\x1b', '\x1b\x1b');
@@ -813,7 +816,11 @@ function osc8Hyperlink(url: string): string {
  */
 export function showFallbackMessage(verificationUriComplete: string): void {
   const title = 'Qwen OAuth Device Authorization';
-  const url = verificationUriComplete;
+  const url = verificationUriComplete.replace(
+    // eslint-disable-next-line no-control-regex
+    /[\x00-\x1f\x7f\x80-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/g,
+    '',
+  );
   const useOsc8 = supportsOsc8Hyperlinks();
   const minWidth = 70;
   const maxWidth = 80;
@@ -893,7 +900,8 @@ export function showFallbackMessage(verificationUriComplete: string): void {
   // Write URL — as a single OSC 8 clickable hyperlink when supported,
   // or hard-wrapped across lines as a fallback.
   if (useOsc8) {
-    process.stderr.write('| ' + osc8Hyperlink(url) + ' |\n');
+    const osc8Padding = ' '.repeat(Math.max(0, contentWidth - url.length));
+    process.stderr.write('| ' + osc8Hyperlink(url) + osc8Padding + ' |\n');
   } else {
     for (const line of urlLines) {
       process.stderr.write(

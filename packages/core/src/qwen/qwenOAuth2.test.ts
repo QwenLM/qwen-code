@@ -2721,4 +2721,61 @@ describe('showFallbackMessage', () => {
     const output = getOutput();
     expect(output).not.toContain('\x1b]8;;');
   });
+
+  it('strips bidi override characters from URL', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=ABC\u202e123');
+
+    const output = getOutput();
+    expect(output).not.toContain('\u202e');
+    expect(output).toContain(
+      '\x1b]8;;https://chat.qwen.ai/device?code=ABC123\x07',
+    );
+  });
+
+  it('right-pads OSC 8 URL line to align the box border', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
+    process.env['TERM_PROGRAM'] = 'iTerm.app';
+
+    const url = 'https://chat.qwen.ai/device?code=ABC123';
+    showFallbackMessage(url);
+
+    const output = getOutput();
+    const lines = output.split('\n');
+    // Find the line containing the OSC 8 hyperlink
+    const osc8Line = lines.find((l: string) => l.includes('\x1b]8;;'));
+    expect(osc8Line).toBeDefined();
+    // The visible content is: "| " + url + padding + " |"
+    // Strip ANSI/OSC sequences to get visible text
+    // eslint-disable-next-line no-control-regex
+    const visible = osc8Line!.replace(/\x1b\]8;;[^\x07]*\x07/g, '');
+    // boxWidth is 70 for this title; visible line should be 70 chars
+    expect(visible.length).toBe(70);
+    expect(visible.endsWith(' |')).toBe(true);
+  });
+
+  it('sanitizes control characters in plain-text fallback path', () => {
+    Object.defineProperty(process.stderr, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    delete process.env['TERM_PROGRAM'];
+    delete process.env['FORCE_HYPERLINK'];
+
+    showFallbackMessage('https://chat.qwen.ai/device?code=\x07ABC\x1b123');
+
+    const output = getOutput();
+    // Control chars must not appear in the plain-text output
+    expect(output).not.toContain('\x07');
+    expect(output).not.toContain('\x1b');
+    expect(output).toContain('https://chat.qwen.ai/device?code=ABC123');
+  });
 });
