@@ -394,6 +394,9 @@ describe('AgentTool', () => {
       expect(tool.description).toContain(
         'foreground regular agent returns its result inline',
       );
+      expect(tool.description).toContain(
+        'explicitly setting `run_in_background: true` from a nested agent is rejected',
+      );
     });
 
     it('explains how to continue reusable background agents', async () => {
@@ -478,6 +481,9 @@ describe('AgentTool', () => {
       );
       expect(properties.properties.run_in_background.description).toContain(
         'interactive fork',
+      );
+      expect(properties.properties.run_in_background.description).toContain(
+        'explicit true is rejected',
       );
     });
 
@@ -893,6 +899,16 @@ describe('AgentTool', () => {
           working_dir: '.qwen/tmp/review-pr-1',
         }),
       ).toMatch(/fork/i);
+    });
+
+    it('rejects a non-boolean run_in_background value', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          // @ts-expect-error: raw model parameters are untrusted
+          run_in_background: 'true',
+        }),
+      ).toMatch(/run_in_background.*boolean/i);
     });
 
     it('rejects working_dir combined with run_in_background', () => {
@@ -5058,12 +5074,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
-      // Background delegation is top-level-only in v1: a nested launcher
-      // cannot honor the background completion contract (send_message /
-      // task_stop are excluded from its toolset, and completion
-      // notifications go to the top-level session). The run must complete
-      // inline instead of orphaning the child's results.
+    it('rejects an explicit background request from a nested sub-agent', async () => {
       vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
       const params: AgentParams = {
         description: 'Start monitor from a nested sub-agent',
@@ -5080,11 +5091,15 @@ describe('AgentTool', () => {
       );
 
       const llmText = partToString(result.llmContent);
-      expect(llmText).not.toContain('Background agent launched');
-      expect(llmText).toContain('Monitor done');
-      expect(mockRegistry.register).toHaveBeenCalledWith(
-        expect.objectContaining({ isBackgrounded: false }),
-      );
+      expect(llmText).toMatch(/run_in_background.*nested sub-agent/i);
+      expect(result.error?.message).toBe(llmText);
+      expect(result.returnDisplay).toMatchObject({
+        type: 'task_execution',
+        status: 'failed',
+        terminateReason: 'Nested background agents are not supported',
+      });
+      expect(mockSubagentManager.createAgentHeadless).not.toHaveBeenCalled();
+      expect(mockRegistry.register).not.toHaveBeenCalled();
     });
 
     it('keeps an omitted background flag in the foreground for nested sub-agents', async () => {
