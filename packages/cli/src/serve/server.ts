@@ -75,6 +75,7 @@ import {
   mountWorkspaceAgentsRoutes,
   mountWorkspaceQualifiedAgentsRoutes,
 } from './workspace-agents.js';
+import { mountWorkspaceGenerationRoutes } from './workspace-generation.js';
 import { registerDaemonStatusRoutes } from './routes/daemon-status.js';
 import { createHealthDemoRoutes } from './routes/health-demo.js';
 import { registerWorkspaceAuthRoutes } from './routes/workspace-auth.js';
@@ -707,6 +708,8 @@ export function createServeApp(
           )
         );
       },
+      workspaceGenerationAvailable: () =>
+        primaryBridge.generateWorkspaceContent !== undefined,
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
@@ -1233,6 +1236,12 @@ export function createServeApp(
   mountWorkspaceAgentsRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,
+    mutate,
+    parseClientId: parseClientIdHeader,
+    safeBody,
+  });
+  mountWorkspaceGenerationRoutes(app, {
+    bridge: primaryBridge,
     mutate,
     parseClientId: parseClientIdHeader,
     safeBody,
