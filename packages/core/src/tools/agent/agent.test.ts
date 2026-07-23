@@ -132,6 +132,13 @@ describe('AgentTool', () => {
     // paths, which now register/unregister in the BackgroundTaskRegistry
     // to surface the run in the pill+dialog. A no-op stub registry is
     // enough for these tests — they don't assert on registry behavior.
+    //
+    // It must still stub every registry method `agent.ts` reaches, though.
+    // The background body wraps its work in a try/catch that routes any
+    // throw to `registry.fail()`, so a method missing here does not surface
+    // as "not a function" — it silently turns a successful run into a
+    // failed one. Keep this list in sync with the `registry.*` calls in
+    // agent.ts.
     const stubRegistry = {
       assertCanStartBackgroundAgent: vi.fn(),
       canStartBackgroundAgent: vi.fn().mockReturnValue(true),
@@ -142,8 +149,15 @@ describe('AgentTool', () => {
         .fn()
         .mockResolvedValue({ id: Symbol('background-slot') }),
       releaseBackgroundSlot: vi.fn(),
+      getQueuedCount: vi.fn().mockReturnValue(0),
       register: vi.fn(),
       unregisterForeground: vi.fn(),
+      registerResidentAgent: vi.fn(),
+      // Returns boolean on the real registry; the GOAL completion path calls
+      // this immediately before registry.complete().
+      unregisterResidentAgent: vi.fn().mockReturnValue(true),
+      // AgentTask | undefined — undefined means "nothing to restart".
+      restartCompletedAgent: vi.fn(),
       complete: vi.fn(),
       fail: vi.fn(),
       finalizeCancelled: vi.fn(),
@@ -152,11 +166,15 @@ describe('AgentTool', () => {
       get: vi.fn(),
       getAll: vi.fn().mockReturnValue([]),
       drainMessages: vi.fn().mockReturnValue([]),
+      waitForMessages: vi.fn().mockResolvedValue([]),
       beginFinishing: vi.fn().mockReturnValue(true),
       queueMessage: vi.fn(),
       queueExternalInput: vi.fn(),
       wakeExternalInputWaiters: vi.fn(),
       appendActivity: vi.fn(),
+      // Real signature returns the unsubscribe callback, which agent.ts
+      // stores and later invokes — a bare vi.fn() would throw on cleanup.
+      bridgeApprovalEvents: vi.fn().mockReturnValue(vi.fn()),
     };
     const stubMonitorRegistry = {
       setAgentNotificationCallback: vi.fn(),
@@ -3121,6 +3139,7 @@ describe('AgentTool', () => {
           getBackgroundTaskRegistry: () => {
             register: ReturnType<typeof vi.fn>;
             complete: ReturnType<typeof vi.fn>;
+            fail: ReturnType<typeof vi.fn>;
           };
         }
       ).getBackgroundTaskRegistry();
@@ -3159,6 +3178,11 @@ describe('AgentTool', () => {
       );
 
       await vi.runAllTimersAsync();
+      // Checked before the completion assertion on purpose: the background
+      // body funnels any throw into registry.fail(), so an incomplete stub
+      // shows up here as the actual error message rather than as an
+      // inscrutable "complete: 0 calls" further down.
+      expect(stubRegistry.fail).not.toHaveBeenCalled();
       expect(stubRegistry.complete).toHaveBeenCalledWith(
         expect.any(String),
         'headless fork result',
