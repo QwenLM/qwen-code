@@ -38,7 +38,10 @@ fixing is a valid, silent outcome.
   changed (see the generated-artifact rule below). Do **not** batch multiple
   fixes without intermediate verification. If any command fails after a fix,
   do **not** commit that fix — discard the working-tree change, record it as
-  report-only in `findings.json`, and continue with the next finding.
+  report-only in `findings.json`, and move on to the next finding.
+  **Do not retry a failed fix.** If typecheck fails for a finding, accept it
+  as report-only and continue. Repeated retries waste the turn budget and
+  trigger loop detection.
 - Regenerate committed generated artifacts when you change their source. If
   you edit `packages/cli/src/config/settingsSchema.ts` (or `settings.ts`), run
   `npm run generate:settings-schema` and commit the regenerated
