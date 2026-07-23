@@ -636,6 +636,7 @@ describe('TurnBoundaryCompactionEngine', () => {
         truncatedEvents: 2,
         retainedEvents: 3,
         maxBytes: 2 * 1024 * 1024,
+        maxEvents: 3,
         fullTranscriptAvailable: true,
       });
       expect(snap.liveJournal[0]).toBe(marker);

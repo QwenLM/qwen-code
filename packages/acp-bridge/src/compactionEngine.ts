@@ -111,9 +111,9 @@ export interface TurnBoundaryCompactionEngineOptions {
    * boundaries, so a single long-running streaming turn grew it — and the
    * cost of every `snapshot()` — without bound. When either cap is hit the
    * oldest journal entries are dropped and `snapshot()` prepends a
-   * `history_truncated` marker (`reason: 'live_journal_exceeded'`) to the
-   * live journal. Turn compaction is unaffected: it folds from the `slots`
-   * working set, not the journal.
+   * `history_truncated` marker (`reason: 'replay_window_exceeded'`,
+   * `scope: 'live_journal'`) to the live journal. Turn compaction is
+   * unaffected: it folds from the `slots` working set, not the journal.
    */
   maxJournalEvents?: number;
   maxJournalBytes?: number;
@@ -257,6 +257,7 @@ export class TurnBoundaryCompactionEngine implements CompactionEngine {
           truncatedEvents: this.journalTruncatedEvents,
           retainedEvents: this.liveJournal.length,
           maxBytes: this.maxJournalBytes,
+          maxEvents: this.maxJournalEvents,
           fullTranscriptAvailable: true,
         },
       });
