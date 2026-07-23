@@ -30,7 +30,6 @@ concurrency:
 env:
   # The hygiene PR is authored by this bot, same identity as Qwen Autofix.
   AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
-  HYGIENE_LABEL: 'autofix/repo-hygiene'
   WORKDIR: '/tmp/hygiene'
 
 jobs:
@@ -92,9 +91,9 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
-          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --label "${HYGIENE_LABEL}" --json number --jq 'map(.number) | join(", ")')"
+          OPEN_PRS="$(gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" --search 'repo-hygiene in:title' --json number --jq 'map(.number) | join(", ")')"
           if [[ -n "${OPEN_PRS}" ]]; then
-            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still carry ${HYGIENE_LABEL}; skipping this run."
+            echo "::notice::Open hygiene PR(s) ${OPEN_PRS} still open; skipping this run."
             echo 'open_prs_present=true' >> "${GITHUB_OUTPUT}"
           else
             echo 'open_prs_present=false' >> "${GITHUB_OUTPUT}"
@@ -375,10 +374,6 @@ jobs:
             exit 1
           fi
 
-          gh label create "${HYGIENE_LABEL}" --repo "${REPO}" \
-            --description 'Automated weekly repo-hygiene batch PR' \
-            --color '1d76db' 2>/dev/null || true
-
           BRANCH="${{ steps.branch.outputs.name }}"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
@@ -388,8 +383,7 @@ jobs:
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
             --title "$(cat "${WORKDIR}/pr-title.txt")" \
-            --body-file "${WORKDIR}/pr-body.md" \
-            --label "${HYGIENE_LABEL}")"
+            --body-file "${WORKDIR}/pr-body.md")"
           echo "🚀 Opened ${PR_URL}"
 
           # Report-only findings (high-risk paths the agent must not touch)
@@ -418,14 +412,12 @@ jobs:
             exit 0
           fi
 
-          # Deduplicate: skip if an open issue with the hygiene label and
-          # the exact same finding id already exists.
+          # Deduplicate: skip if an open issue with matching title already exists.
           ISSUE_TITLE="[repo-hygiene] $(date -u '+%Y-W%V') report-only findings (${COUNT} items)"
           EXISTING="$(GH_TOKEN="${GITHUB_TOKEN}" gh issue list \
             --repo "${REPO}" \
-            --label "${HYGIENE_LABEL}" \
             --state open \
-            --search "repo-hygiene report-only" \
+            --search "repo-hygiene report-only in:title" \
             --json number --jq 'length')"
           if [[ "${EXISTING}" -gt 0 ]]; then
             echo "Open report-only issue already exists; skipping (deduplicate manually)."
@@ -449,7 +441,7 @@ jobs:
             --repo "${REPO}" \
             --title "${ISSUE_TITLE}" \
             --body "${FULL_BODY}" \
-            --label "${HYGIENE_LABEL},bug"
+            --label "bug"
           echo "📋 Filed ${COUNT} report-only findings as issue."
 
       - name: 'Collect run artifacts'
