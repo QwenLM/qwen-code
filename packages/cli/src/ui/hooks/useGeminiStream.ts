@@ -4090,20 +4090,23 @@ export const useGeminiStream = (
       !isSubmittingQueryRef.current &&
       teammateQueueRef.current.length > 0
     ) {
-      const batch = teammateQueueRef.current.splice(0);
-      // Render one compact `● …` line per teammate report; the full
-      // envelope goes only to the model (the USER bubble is suppressed
-      // for SendMessageType.Teammate in prepareQueryForGemini).
-      for (const entry of batch) {
-        addItem(
-          { type: 'notification' as const, text: entry.display },
-          Date.now(),
-        );
-      }
-      const modelText = batch.map((e) => e.modelText).join('\n\n');
-      const display = batch.map((e) => e.display).join('; ');
-      submitQuery(modelText, SendMessageType.Teammate, undefined, {
-        notificationDisplayText: display,
+      // React can flush this effect after restoring the teammate frame.
+      runOutsideAgentContext(() => {
+        const batch = teammateQueueRef.current.splice(0);
+        // Render one compact `● …` line per teammate report; the full
+        // envelope goes only to the model (the USER bubble is suppressed
+        // for SendMessageType.Teammate in prepareQueryForGemini).
+        for (const entry of batch) {
+          addItem(
+            { type: 'notification' as const, text: entry.display },
+            Date.now(),
+          );
+        }
+        const modelText = batch.map((e) => e.modelText).join('\n\n');
+        const display = batch.map((e) => e.display).join('; ');
+        submitQuery(modelText, SendMessageType.Teammate, undefined, {
+          notificationDisplayText: display,
+        });
       });
     }
   }, [streamingState, submitQuery, teammateTrigger, addItem]);

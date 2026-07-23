@@ -8,6 +8,7 @@ import { vi, describe, it, expect, beforeEach, afterEach } from 'vitest';
 import {
   formatUpdateInstructions,
   getInstallationInfo,
+  getNpmCliPath,
   PackageManager,
   resolveUpdateCommand,
 } from './installationInfo.js';
@@ -738,5 +739,65 @@ describe('formatUpdateInstructions', () => {
         '1.2.3',
       ),
     ).toEqual(['Running via npx, update not applicable.']);
+  });
+});
+
+describe('getNpmCliPath', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('returns the resolved path when adjacent npm is a .js file', () => {
+    const nodePath = '/usr/local/bin/node';
+    mockedRealPathSync.mockReturnValue(
+      '/usr/local/lib/node_modules/npm/bin/npm-cli.js',
+    );
+
+    const result = getNpmCliPath(nodePath, 'linux');
+
+    expect(mockedRealPathSync).toHaveBeenCalledWith('/usr/local/bin/npm');
+    expect(result).toBe('/usr/local/lib/node_modules/npm/bin/npm-cli.js');
+  });
+
+  it('falls back to npm-cli.js when adjacent npm is a non-.js wrapper (e.g. mise bash shim)', () => {
+    // mise installs node to ~/.local/share/mise/installs/node/<version>/ on
+    // both Intel and Apple Silicon Macs (and Linux). Its npm shim is a bash
+    // script, not a symlink to npm-cli.js.
+    const nodePath =
+      '/Users/dev/.local/share/mise/installs/node/26.5.0/bin/node';
+    mockedRealPathSync.mockReturnValue(
+      '/Users/dev/.local/share/mise/installs/node/26.5.0/bin/npm',
+    );
+
+    const result = getNpmCliPath(nodePath, 'darwin');
+
+    expect(mockedRealPathSync).toHaveBeenCalledWith(
+      '/Users/dev/.local/share/mise/installs/node/26.5.0/bin/npm',
+    );
+    expect(result).toBe(
+      '/Users/dev/.local/share/mise/installs/node/26.5.0/lib/node_modules/npm/bin/npm-cli.js',
+    );
+  });
+
+  it('falls back to npm-cli.js when adjacent npm does not exist', () => {
+    const nodePath = '/usr/local/bin/node';
+    mockedRealPathSync.mockImplementation(() => {
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+
+    const result = getNpmCliPath(nodePath, 'linux');
+
+    expect(result).toBe('/usr/local/lib/node_modules/npm/bin/npm-cli.js');
+  });
+
+  it('returns win32 npm-cli.js path on Windows', () => {
+    const nodePath = 'C:\\Program Files\\nodejs\\node.exe';
+
+    const result = getNpmCliPath(nodePath, 'win32');
+
+    expect(result).toBe(
+      'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
+    );
+    expect(mockedRealPathSync).not.toHaveBeenCalled();
   });
 });

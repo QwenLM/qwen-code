@@ -27,9 +27,13 @@ The shared timer only dispatches watchdog actions. Potentially blocking SSE
 stream closure runs on a separate bounded pool sized to the prompt concurrency
 limit, so one stalled close cannot delay another session's deadline or idle
 watchdog. Each admitted prompt reserves bounded stream-cleanup capacity until
-its final close task finishes. A stalled close can therefore cause a later
-`startPrompt` call to fail with `DaemonClientCapacityException`, but it cannot
-silently discard a deadline-triggered close or grow cleanup work without bound.
+its final close task finishes. A prompt publishes its terminal once its prompt
+slot is released, while its own stream is still closing, so that capacity
+allows one draining cleanup per prompt slot; a terminal continuation can start
+the next prompt even at the concurrency limit. Closes that stay stalled beyond
+that headroom can still cause a later `startPrompt` call to fail with
+`DaemonClientCapacityException`, but they cannot silently discard a
+deadline-triggered close or grow cleanup work without bound.
 
 `DaemonSessionClient` owns one daemon session and admits at most one local
 prompt at a time. `startPrompt` returns a `PromptCall` immediately. Its
