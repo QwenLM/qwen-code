@@ -894,6 +894,14 @@ describe('fileUtils', () => {
       expect(await detectFileType('movie.mp4')).toBe('video');
     });
 
+    it('should detect .m4v as video even though mime/lite omits video/x-m4v', async () => {
+      // mime/lite's standard database has no .m4v entry, so the real lookup
+      // returns null; the override map must still classify it as video rather
+      // than letting it fall through to the binary content sampler.
+      mockMimeGetType.mockReturnValueOnce(null);
+      expect(await detectFileType('tutorial.m4v')).toBe('video');
+    });
+
     it('should detect known binary extensions as binary (e.g. .zip)', async () => {
       mockMimeGetType.mockReturnValueOnce('application/zip');
       expect(await detectFileType('archive.zip')).toBe('binary');
@@ -1275,6 +1283,26 @@ describe('fileUtils', () => {
       );
       expect(typeof result.llmContent).toBe('string');
       expect(result.llmContent).toContain('does not support audio input');
+    });
+
+    it('processes an .m4v video as inline data despite the mime/lite gap', async () => {
+      // Regression guard for the /learn local-video path: mime/lite returns
+      // null for .m4v, so without the detectFileType override the file fell
+      // through to the content sampler and was misclassified as binary,
+      // yielding a "Cannot display content of binary file" string instead of
+      // an inlineData Part.
+      const fakeVideo = Buffer.from('fake m4v data');
+      const testVideoPath = path.join(tempRootDir, 'tutorial.m4v');
+      actualNodeFs.writeFileSync(testVideoPath, fakeVideo);
+      mockMimeGetType.mockReturnValue(null);
+
+      const result = await processSingleFileContent(testVideoPath, mockConfig);
+
+      expect(typeof result.llmContent).toBe('object');
+      expect(
+        (result.llmContent as { inlineData: { data: string } }).inlineData.data,
+      ).toBe(fakeVideo.toString('base64'));
+      expect(result.returnDisplay).toContain('Read video file');
     });
 
     it('should fall back to pdftotext when model does not support PDF', async () => {
