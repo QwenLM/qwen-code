@@ -1430,7 +1430,12 @@ export async function processSingleFileContent(
           llmContent: {
             inlineData: {
               data: base64Data,
-              mimeType: mime.getType(filePath) || 'application/octet-stream',
+              mimeType:
+                mime.getType(filePath) ??
+                MIME_LITE_MISSING_VIDEO_TYPES.get(
+                  path.extname(filePath).toLowerCase(),
+                ) ??
+                'application/octet-stream',
               displayName,
             },
           },

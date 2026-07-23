@@ -194,7 +194,7 @@ describe('learnCommand', () => {
     });
   });
 
-  it('rejects a YouTube URL with the capability error on a text-only model', async () => {
+  it('rejects a YouTube URL with download guidance even on a text-only model', async () => {
     const ctx = createMockCommandContext({
       services: {
         config: {
@@ -212,7 +212,7 @@ describe('learnCommand', () => {
     expect(result).toMatchObject({
       type: 'message',
       messageType: 'error',
-      content: expect.stringMatching(/native video input/i),
+      content: expect.stringMatching(/download.*local video/i),
     });
   });
 

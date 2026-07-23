@@ -40,7 +40,7 @@ export const learnCommand: SlashCommand = {
         type: 'message',
         messageType: 'error',
         content: t(
-          'Usage: /learn <path|URL|text>\nExamples:\n  /learn https://docs.example.com/api\n  /learn ~/projects/acme-sdk\n  /learn Our deploy process: ssh to prod, run migrate, restart',
+          'Usage: /learn <path|URL|text> [focus]\nExamples:\n  /learn https://docs.example.com/api\n  /learn ~/projects/acme-sdk\n  /learn Our deploy process: ssh to prod, run migrate, restart',
         ),
       };
     }
@@ -58,7 +58,17 @@ export const learnCommand: SlashCommand = {
     const video = parseLearnVideoInput(rawInput);
 
     if (video) {
-      const authType = config.getContentGeneratorConfig().authType;
+      if (video.kind === 'youtube') {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t(
+            'YouTube page URLs cannot be sent as native video input. Download the video and pass a local video file to /learn.',
+          ),
+        };
+      }
+
+      const authType = config.getContentGeneratorConfig()?.authType;
       const supportsVideoTransport =
         authType === AuthType.USE_OPENAI || authType === AuthType.QWEN_OAUTH;
       if (
@@ -70,16 +80,6 @@ export const learnCommand: SlashCommand = {
           messageType: 'error',
           content: t(
             'The current model or provider does not support native video input for /learn. Switch to a video-capable model on an OpenAI-compatible provider and try again.',
-          ),
-        };
-      }
-
-      if (video.kind === 'youtube') {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t(
-            'YouTube page URLs cannot be sent as native video input. Download the video and pass a local video file to /learn.',
           ),
         };
       }

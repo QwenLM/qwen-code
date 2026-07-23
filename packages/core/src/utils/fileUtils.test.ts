@@ -1302,6 +1302,10 @@ describe('fileUtils', () => {
       expect(
         (result.llmContent as { inlineData: { data: string } }).inlineData.data,
       ).toBe(fakeVideo.toString('base64'));
+      expect(
+        (result.llmContent as { inlineData: { mimeType: string } }).inlineData
+          .mimeType,
+      ).toBe('video/x-m4v');
       expect(result.returnDisplay).toContain('Read video file');
     });
 
