@@ -3543,6 +3543,7 @@ describe('createServeApp', () => {
           'utf8',
         );
         const bridge = fakeBridge();
+        bridge.generateWorkspaceContent = async function* () {};
         const runtime: WorkspaceRuntime = {
           ...makeWorkspaceRuntimeForTest({
             workspaceId: 'primary-id',
@@ -3568,6 +3569,7 @@ describe('createServeApp', () => {
           .get('/capabilities')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
         expect(before.body.features).toContain('workspace_voice_transcription');
+        expect(before.body.features).toContain('workspace_generation');
 
         registry.beginReplacement(registry.primaryEntry, 'next');
         (
@@ -3577,9 +3579,11 @@ describe('createServeApp', () => {
           .get('/capabilities')
           .set('Host', `127.0.0.1:${baseOpts.port}`);
 
+        expect(applying.status).toBe(200);
         expect(applying.body.features).not.toContain(
           'workspace_voice_transcription',
         );
+        expect(applying.body.features).not.toContain('workspace_generation');
       } finally {
         await fsp.rm(tempHome, { recursive: true, force: true });
         restoreEnv('QWEN_HOME', previousQwenHome);

@@ -777,8 +777,12 @@ export function createServeApp(
           )
         );
       },
-      workspaceGenerationAvailable: () =>
-        primaryBridge.generateWorkspaceContent !== undefined,
+      workspaceGenerationAvailable: () => {
+        const entry = workspaceRegistry.primaryEntry;
+        const runtime =
+          entry.state === 'active' ? entry.current?.runtime : undefined;
+        return runtime?.bridge.generateWorkspaceContent !== undefined;
+      },
       // Registry injection supplies the primary workspace service through the
       // runtime, so it has the same reload surface as legacy deps.workspace.
       reloadAvailable:
