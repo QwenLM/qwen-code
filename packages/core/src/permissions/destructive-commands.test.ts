@@ -169,6 +169,14 @@ describe('isDestructiveCommand — git patterns', () => {
       // spelling is already blocked by the sibling pattern.
       'git checkout ./src',
       'git checkout ./packages/core',
+      // Redirects bind to the command, not the pathspec: bash tokenizes `.>`
+      // as the word `.` plus a redirect, so the checkout still runs.
+      'git checkout .>/dev/null',
+      'git checkout .>out.txt 2>&1',
+      'git checkout .<in.txt',
+      // Command substitution puts the closing delimiter right after the dot.
+      'echo $(git checkout .)',
+      'echo `git checkout .`',
     ]) {
       const result = isDestructiveCommand(cmd, 'fix the bug');
       expect(result).not.toBeNull();
@@ -224,6 +232,10 @@ describe('isDestructiveCommand — git patterns', () => {
       // it must not be caught by the `git checkout .` pattern.
       'git checkout .gitignore',
       'git checkout .github/workflows/ci.yml',
+      'git checkout .env.local',
+      // `..` is the parent directory, not the current one. The sibling
+      // `git checkout -- ..` is not blocked either; the two stay consistent.
+      'git checkout ..',
       // `--force` only counts on `git clean`; these are unrelated commands.
       'git push --force-with-lease',
       'git fetch --force',
