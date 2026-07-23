@@ -17,7 +17,7 @@ export type SessionGitIntent =
 
 // UX-only validation; the server re-validates in POST /session (session.ts).
 // Keep the two predicates in sync.
-function validateBranchName(name: string): boolean {
+export function validateBranchName(name: string): boolean {
   if (!name) return false;
   return !(
     /[^\p{L}\p{N}._/-]/u.test(name) ||

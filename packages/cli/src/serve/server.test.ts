@@ -202,6 +202,44 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   };
 });
 
+// ── Branch git-ops mock infrastructure ─────────────────────────────
+// The branch creation route delegates git mutations to
+// ../server/git-branch-ops.js. Mock the module so the git-mutation
+// paths (exists, dirty, checkout -b, rollback) are testable without a
+// real repository.
+const mockBranchOps = vi.hoisted(() => ({
+  branchExists: undefined as (() => Promise<boolean>) | undefined,
+  isDirtyTree: undefined as (() => Promise<boolean>) | undefined,
+  getHeadCommit: undefined as (() => Promise<string | undefined>) | undefined,
+  createBranch: undefined as (() => Promise<void>) | undefined,
+  checkoutRef: undefined as (() => Promise<void>) | undefined,
+  deleteBranch: undefined as (() => Promise<void>) | undefined,
+}));
+vi.mock('./server/git-branch-ops.js', () => ({
+  branchExists: () =>
+    mockBranchOps.branchExists
+      ? mockBranchOps.branchExists()
+      : Promise.resolve(false),
+  isDirtyTree: () =>
+    mockBranchOps.isDirtyTree
+      ? mockBranchOps.isDirtyTree()
+      : Promise.resolve(false),
+  getHeadCommit: () =>
+    mockBranchOps.getHeadCommit
+      ? mockBranchOps.getHeadCommit()
+      : Promise.resolve(undefined),
+  createBranch: () =>
+    mockBranchOps.createBranch
+      ? mockBranchOps.createBranch()
+      : Promise.resolve(),
+  checkoutRef: () =>
+    mockBranchOps.checkoutRef ? mockBranchOps.checkoutRef() : Promise.resolve(),
+  deleteBranch: () =>
+    mockBranchOps.deleteBranch
+      ? mockBranchOps.deleteBranch()
+      : Promise.resolve(),
+}));
+
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
   port: 4170,
@@ -8714,6 +8752,214 @@ describe('createServeApp', () => {
         expect(bridge.calls).toHaveLength(0);
       } finally {
         mockWt.impl = undefined;
+      }
+    });
+
+    // ── Branch git-mutation path tests ──────────────────────────────
+    // These exercise the paths that actually mutate git state
+    // (exists, dirty, checkout -b, rollback) by mocking
+    // ../server/git-branch-ops.js via mockBranchOps.
+
+    it('409 when branch already exists', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.branchExists = () => Promise.resolve(true);
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('branch_already_exists');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.branchExists = undefined;
+      }
+    });
+
+    it('409 when working tree is dirty', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.isDirtyTree = () => Promise.resolve(true);
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('branch_dirty_tree');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.isDirtyTree = undefined;
+      }
+    });
+
+    it('500 when git checkout -b fails', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+      mockBranchOps.createBranch = () =>
+        Promise.reject(new Error('fatal: cannot lock ref'));
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(500);
+        expect(res.body.code).toBe('branch_checkout_failed');
+        expect(bridge.calls).toHaveLength(0);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.createBranch = undefined;
+      }
+    });
+
+    it('200 with branch metadata on successful branch creation', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(200);
+        expect(bridge.calls).toHaveLength(1);
+        expect(bridge.calls[0].branch).toEqual({
+          name: 'feat/x',
+          baseBranch: 'main',
+        });
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+      }
+    });
+
+    it('rolls back the branch when spawn fails', async () => {
+      const rollbackCalls: string[] = [];
+      const bridge = fakeBridge({
+        spawnImpl: async () => {
+          throw new Error('spawn failed');
+        },
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+      mockBranchOps.checkoutRef = () => {
+        rollbackCalls.push('checkout');
+        return Promise.resolve();
+      };
+      mockBranchOps.deleteBranch = () => {
+        rollbackCalls.push('delete');
+        return Promise.resolve();
+      };
+
+      try {
+        const res = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/x' } });
+
+        expect(res.status).toBe(500);
+        expect(rollbackCalls).toContain('checkout');
+        expect(rollbackCalls).toContain('delete');
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
+        mockBranchOps.checkoutRef = undefined;
+        mockBranchOps.deleteBranch = undefined;
+      }
+    });
+
+    it('409 when a branch session is already active for the workspace', async () => {
+      const bridge = fakeBridge({
+        summaryImpl: (sessionId: string) => ({
+          sessionId,
+          workspaceCwd: WS_BOUND,
+          attached: true,
+          clientId: 'client-0',
+        }),
+      });
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge },
+      );
+      mockWt.impl = () => ({
+        isGitRepository: () => Promise.resolve(true),
+        getCurrentBranch: () => Promise.resolve('main'),
+      });
+      mockBranchOps.getHeadCommit = () => Promise.resolve('abc123');
+
+      try {
+        // First request succeeds and registers the branch session.
+        const first = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/first' } });
+        expect(first.status).toBe(200);
+
+        // Second request for the same workspace should conflict.
+        const second = await request(app)
+          .post('/session')
+          .set('Host', `127.0.0.1:${baseOpts.port}`)
+          .send({ branch: { name: 'feat/second' } });
+        expect(second.status).toBe(409);
+        expect(second.body.code).toBe('branch_session_conflict');
+        expect(second.body.existingSessionId).toBe(first.body.sessionId);
+      } finally {
+        mockWt.impl = undefined;
+        mockBranchOps.getHeadCommit = undefined;
       }
     });
   });

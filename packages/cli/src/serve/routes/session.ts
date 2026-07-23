@@ -5,8 +5,6 @@
  */
 
 import * as crypto from 'node:crypto';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import {
@@ -90,6 +88,14 @@ import {
 } from '../generation-sse.js';
 import { requireSessionRuntime } from './session-runtime.js';
 import {
+  branchExists,
+  isDirtyTree,
+  getHeadCommit,
+  createBranch,
+  checkoutRef,
+  deleteBranch,
+} from '../server/git-branch-ops.js';
+import {
   parseVirtualSubagentSessionId,
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
@@ -101,14 +107,6 @@ import type {
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
-
-const execFileAsync = promisify(execFile);
-
-// Hard timeout for branch git operations. `git checkout -b` takes the
-// repository lock; without a bound, a stuck lock or slow hook would hang the
-// request and leave the workspace permanently reserved in
-// `inFlightBranchWorkspaces`. Mirrors GitWorktreeService's 30s bound.
-const GIT_BRANCH_TIMEOUT_MS = 30_000;
 
 // `HEAD` is the most prominent ref name git rejects as a branch name.
 // The surrounding predicate covers the remaining reserved forms (`@`, `-`,
@@ -408,6 +406,15 @@ export function registerSessionRoutes(
   // the guard before either populates `activeBranchSessions`.
   const inFlightBranchWorkspaces = new Set<string>();
 
+  /** Remove the branch-session tracking entry when a session ends. */
+  const clearBranchSessionEntry = (sessionId: string): void => {
+    for (const [cwd, sid] of activeBranchSessions) {
+      if (sid === sessionId) {
+        activeBranchSessions.delete(cwd);
+      }
+    }
+  };
+
   /** Roll back a branch creation: restore the base ref and delete the branch. */
   const rollbackBranchCreation = async (
     cwd: string,
@@ -417,22 +424,15 @@ export function registerSessionRoutes(
   ): Promise<void> => {
     activeBranchSessions.delete(cwd);
     inFlightBranchWorkspaces.delete(cwd);
-    await execFileAsync(
-      'git',
-      [
-        'checkout',
-        meta.baseBranch === 'HEAD' && baseCommit ? baseCommit : meta.baseBranch,
-      ],
-      { cwd, timeout: GIT_BRANCH_TIMEOUT_MS },
+    await checkoutRef(
+      cwd,
+      meta.baseBranch === 'HEAD' && baseCommit ? baseCommit : meta.baseBranch,
     ).catch((rollbackErr) => {
       log?.warn('branch rollback checkout failed', {
         error: rollbackErr,
       });
     });
-    await execFileAsync('git', ['branch', '-D', meta.name], {
-      cwd,
-      timeout: GIT_BRANCH_TIMEOUT_MS,
-    }).catch((rollbackErr) => {
+    await deleteBranch(cwd, meta.name).catch((rollbackErr) => {
       log?.warn('branch rollback delete failed', {
         error: rollbackErr,
       });
@@ -1316,33 +1316,18 @@ export function registerSessionRoutes(
         return;
       }
       // Check the branch doesn't already exist.
-      try {
-        await execFileAsync(
-          'git',
-          ['rev-parse', '--verify', `refs/heads/${branchName}`],
-          { cwd: workspaceCwd, timeout: GIT_BRANCH_TIMEOUT_MS },
-        );
+      if (await branchExists(workspaceCwd, branchName)) {
         res.status(409).json({
           error: `Branch "${branchName}" already exists`,
           code: 'branch_already_exists',
         });
         return;
-      } catch {
-        // rev-parse fails → branch doesn't exist, good.
       }
       // Check for dirty working tree. `--untracked-files=no` because untracked
       // files survive a checkout, so only tracked changes make the tree dirty.
-      let statusOut: string;
+      let dirty: boolean;
       try {
-        ({ stdout: statusOut } = await execFileAsync(
-          'git',
-          ['status', '--porcelain', '--untracked-files=no'],
-          {
-            cwd: workspaceCwd,
-            maxBuffer: 10 * 1024 * 1024,
-            timeout: GIT_BRANCH_TIMEOUT_MS,
-          },
-        ));
+        dirty = await isDirtyTree(workspaceCwd);
       } catch {
         res.status(500).json({
           error: 'Failed to check working tree status',
@@ -1350,19 +1335,14 @@ export function registerSessionRoutes(
         });
         return;
       }
-      if (statusOut.trim().length > 0) {
+      if (dirty) {
         res.status(409).json({
           error: 'Uncommitted changes detected. Commit or stash first.',
           code: 'branch_dirty_tree',
         });
         return;
       }
-      const baseCommit = await execFileAsync('git', ['rev-parse', 'HEAD'], {
-        cwd: workspaceCwd,
-        timeout: GIT_BRANCH_TIMEOUT_MS,
-      })
-        .then(({ stdout }) => stdout.trim())
-        .catch(() => undefined);
+      const baseCommit = await getHeadCommit(workspaceCwd);
       const baseBranch = await wtService.getCurrentBranch().catch(() => 'HEAD');
       // Reserve the workspace before mutating HEAD. The conflict guard above
       // runs before several awaits (rev-parse, status, checkout), so two
@@ -1379,10 +1359,7 @@ export function registerSessionRoutes(
       }
       inFlightBranchWorkspaces.add(workspaceCwd);
       try {
-        await execFileAsync('git', ['checkout', '-b', branchName], {
-          cwd: workspaceCwd,
-          timeout: GIT_BRANCH_TIMEOUT_MS,
-        });
+        await createBranch(workspaceCwd, branchName);
       } catch (checkoutErr) {
         inFlightBranchWorkspaces.delete(workspaceCwd);
         res.status(500).json({
@@ -3092,6 +3069,7 @@ export function registerSessionRoutes(
           clientId !== undefined ? { clientId } : undefined,
         ),
       );
+      clearBranchSessionEntry(sessionId);
       res.status(204).end();
     } catch (err) {
       sendBridgeError(res, err, {
@@ -3119,6 +3097,9 @@ export function registerSessionRoutes(
           );
         },
       });
+      for (const removedId of result.removed) {
+        clearBranchSessionEntry(removedId);
+      }
       res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
@@ -3200,6 +3181,9 @@ export function registerSessionRoutes(
             );
           },
         });
+        for (const removedId of result.removed) {
+          clearBranchSessionEntry(removedId);
+        }
         res.status(200).json(result);
       } catch (err) {
         sendBridgeError(res, err, { route });
